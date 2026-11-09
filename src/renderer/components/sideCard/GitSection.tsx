@@ -13,7 +13,7 @@ import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullReque
 import { useTransientError } from '../../hooks/useTransientError'
 import { abortGitInProgress, initGitRepository, pullGit, pushGitBranch, type GitStatusView } from '../../stores/gitStatusStore'
 import { cancelGitOperation, useGitOperation } from '../../stores/gitOperationStore'
-import { forgetUpstreamCheck, useUpstreamCheck } from '../../stores/upstreamCheckStore'
+import { useUpstreamCheck } from '../../stores/upstreamCheckStore'
 import { isActive } from '../git/gitOperationLogic'
 import { pullResultNotice } from '../git/gitSyncLogic'
 import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
@@ -349,7 +349,6 @@ export function GitSectionView({
     } finally {
       setSyncing(null)
       end()
-      forgetUpstreamCheck(path)
     }
   }
   const push = async () => {
@@ -361,7 +360,6 @@ export function GitSectionView({
       if (!isGitCancelled(error)) setActionError(gitErrorMessage(error))
     } finally {
       end()
-      forgetUpstreamCheck(path)
     }
   }
   const abort = async (what: AbortableKind) => {

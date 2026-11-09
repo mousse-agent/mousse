@@ -27,6 +27,11 @@ interface UpstreamCheckState {
 export const useUpstreamCheckStore = create<UpstreamCheckState>(() => ({ entries: {} }))
 
 const flights = new Map<string, Promise<void>>()
+/**
+ * Bumped for a folder each time its look is forgotten. A look that was under way then answers about a remote a
+ * push or pull has since changed, so it is dropped instead of written back; the next look starts afresh.
+ */
+const generations = new Map<string, number>()
 
 /**
  * Asks the service how far the folder's branch is from its upstream, unless a look is under way or one was made
@@ -39,6 +44,7 @@ export function checkUpstream(key: string, scope: GitScope, options: { force?: b
   const now = options.now ?? Date.now()
   const entry = useUpstreamCheckStore.getState().entries[key]
   if (!options.force && entry && now - entry.askedAt < UPSTREAM_CHECK_INTERVAL_MS) return Promise.resolve()
+  const generation = generations.get(key) ?? 0
   const run = (async () => {
     let check: GitUpstreamCheck
     try {
@@ -46,14 +52,22 @@ export function checkUpstream(key: string, scope: GitScope, options: { force?: b
     } catch {
       check = { state: 'none' }
     }
+    if ((generations.get(key) ?? 0) !== generation) return
     useUpstreamCheckStore.setState((state) => ({ entries: { ...state.entries, [key]: { check, askedAt: now } } }))
-  })().finally(() => flights.delete(key))
+  })().finally(() => {
+    if (flights.get(key) === run) flights.delete(key)
+  })
   flights.set(key, run)
   return run
 }
 
-/** Forgets a folder's look, so the next one asks again at once: a pull or push has just changed what it would say. */
+/**
+ * Forgets a folder's look, so the next one asks again at once: a push, pull or fetch has just changed what it would
+ * say. A look still under way is dropped when it answers.
+ */
 export function forgetUpstreamCheck(key: string): void {
+  generations.set(key, (generations.get(key) ?? 0) + 1)
+  flights.delete(key)
   useUpstreamCheckStore.setState((state) => {
     if (!state.entries[key]) return state
     const { [key]: _gone, ...rest } = state.entries

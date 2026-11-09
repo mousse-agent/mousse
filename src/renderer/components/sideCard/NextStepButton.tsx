@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type MouseEvent } from 'react'
+import { FloatingPortal } from '../../lib/floatingLayer'
 import { AlertTriangle, ArrowDown, ArrowUp, ChevronDown, GitPullRequest, Loader2, Play } from '../../lib/icons'
 import type { GitPullStrategy } from '../../../shared/types'
-import { CardPopover } from './CardPopover'
 import { PULL_STRATEGY_LABELS, type AbortableKind, type NextStep } from './gitSectionLogic'
+import { useSideCardMenu } from './useSideCardMenu'
 
 /** What the button does once pressed; the section runs it under its one-action lock. */
 export type NextStepChoice =
@@ -68,11 +69,25 @@ function mainChoice(step: NextStep): NextStepChoice | null {
 export function NextStepButton({ step, busy, blockedReason, onChoose }: NextStepButtonProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const groupRef = useRef<HTMLDivElement>(null)
+  // The button that opened the menu gets focus back when it closes: the step itself, or ▾.
+  const invokerRef = useRef<HTMLButtonElement | null>(null)
   const items = menuItems(step)
   const main = mainChoice(step)
   const Icon = ICONS[step.kind]
   const tone = step.kind === 'resolve' || step.kind === 'finish' ? 'warn' : 'accent'
   const blocked = blockedReason !== null
+  const open = menuOpen && items.length > 0 && !busy
+  const { menuRef, menuId, menuStyle, closeAndFocus, menuKeyDown, triggerKeyDown } = useSideCardMenu({
+    open,
+    setOpen: setMenuOpen,
+    anchorRef: groupRef,
+    focusRef: invokerRef,
+    sizeKey: items.length
+  })
+  const toggleFrom = (event: MouseEvent<HTMLButtonElement>) => {
+    invokerRef.current = event.currentTarget
+    setMenuOpen((value) => !value)
+  }
 
   if (busy) {
     return (
@@ -91,8 +106,13 @@ export function NextStepButton({ step, busy, blockedReason, onChoose }: NextStep
   }
 
   const choose = (choice: NextStepChoice) => {
-    setMenuOpen(false)
+    closeAndFocus()
     onChoose(choice)
+  }
+  const menuTriggerKeys = (event: Parameters<typeof triggerKeyDown>[0]) => {
+    if (blocked) return
+    invokerRef.current = event.currentTarget as HTMLButtonElement
+    triggerKeyDown(event)
   }
 
   return (
@@ -104,12 +124,14 @@ export function NextStepButton({ step, busy, blockedReason, onChoose }: NextStep
           title={blockedReason ?? step.title}
           aria-disabled={blocked || undefined}
           aria-haspopup={main ? undefined : 'menu'}
-          aria-expanded={main ? undefined : menuOpen}
-          onClick={() => {
+          aria-expanded={main ? undefined : open}
+          aria-controls={!main && open ? menuId : undefined}
+          onClick={(event) => {
             if (blocked) return
             if (main) onChoose(main)
-            else setMenuOpen((open) => !open)
+            else toggleFrom(event)
           }}
+          onKeyDown={main ? undefined : menuTriggerKeys}
         >
           <Icon size={13} strokeWidth={2} aria-hidden="true" />
           <span className="side-card-git-next-label">{step.label}</span>
@@ -121,23 +143,27 @@ export function NextStepButton({ step, busy, blockedReason, onChoose }: NextStep
             title={blockedReason ?? 'More ways'}
             aria-label={`More ways to ${step.label.toLowerCase()}`}
             aria-haspopup="menu"
-            aria-expanded={menuOpen}
+            aria-expanded={open}
+            aria-controls={open ? menuId : undefined}
             aria-disabled={blocked || undefined}
-            onClick={() => { if (!blocked) setMenuOpen((open) => !open) }}
+            onClick={(event) => { if (!blocked) toggleFrom(event) }}
+            onKeyDown={menuTriggerKeys}
           >
             <ChevronDown size={12} aria-hidden="true" />
           </button>
         )}
       </div>
-      <CardPopover open={menuOpen && items.length > 0} anchorRef={groupRef} placement="below-start" label={step.label} onClose={() => setMenuOpen(false)}>
-        <div className="side-card-git-next-menu" role="menu" aria-label={step.label}>
-          {items.map((item) => (
-            <button key={item.label} type="button" role="menuitem" className="side-card-git-next-item" onClick={() => choose(item.choice)}>
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </CardPopover>
+      {open && (
+        <FloatingPortal>
+          <div ref={menuRef} id={menuId} className="side-card-device-menu" role="menu" aria-label={step.label} style={menuStyle} onKeyDown={menuKeyDown}>
+            {items.map((item) => (
+              <button key={item.label} type="button" role="menuitem" tabIndex={-1} className="side-card-device-item" onClick={() => choose(item.choice)}>
+                <span className="side-card-device-item-label">{item.label}</span>
+              </button>
+            ))}
+          </div>
+        </FloatingPortal>
+      )}
     </>
   )
 }

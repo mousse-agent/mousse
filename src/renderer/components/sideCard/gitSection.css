@@ -988,7 +988,6 @@
 .side-card-git-next-main,
 .side-card-git-next-split,
 .side-card-git-next-side,
-.side-card-git-next-item,
 .side-card-git-commit-open {
   border: 0;
   background: transparent;
@@ -1051,7 +1050,6 @@
 .side-card-git-next-main:focus-visible,
 .side-card-git-next-split:focus-visible,
 .side-card-git-next-side:focus-visible,
-.side-card-git-next-item:focus-visible,
 .side-card-git-commit-open:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -1068,23 +1066,8 @@
   }
 }
 
-.side-card-git-next-menu {
-  display: flex;
-  flex-direction: column;
-  min-width: 160px;
-}
 
-.side-card-git-next-item {
-  height: 28px;
-  padding: 0 8px;
-  border-radius: var(--ui-menu-row-radius, 6px);
-  font-size: 12px;
-  text-align: left;
-}
 
-.side-card-git-next-item:hover {
-  background: var(--ui-hover);
-}
 
 /* How many files changed (opens Changes), with Commit, which is written there. */
 .side-card-git-changes-row {

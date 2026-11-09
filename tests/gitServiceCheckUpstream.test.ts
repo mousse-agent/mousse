@@ -91,6 +91,19 @@ describe('GitService.checkUpstream', () => {
     expect(await new GitService().checkUpstream(cwd)).toMatchObject({ state: 'unreachable', branch: 'topic', reason: 'gone' })
   })
 
+  it('removes refs that earlier checks left behind once no check can still use them', async () => {
+    const { cwd } = fixture()
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    const stale = `refs/mousse/upstream-check/${Date.now() - 60 * 60_000}-left-by-a-crash`
+    const live = `refs/mousse/upstream-check/${Date.now()}-another-check`
+    git(cwd, 'update-ref', stale, head)
+    git(cwd, 'update-ref', live, head)
+
+    await new GitService().checkUpstream(cwd)
+
+    expect(git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse/')).toBe(live)
+  })
+
   it('has nothing to check without an upstream', async () => {
     const { cwd } = fixture()
     git(cwd, 'checkout', '-b', 'local-only')

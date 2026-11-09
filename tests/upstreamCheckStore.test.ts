@@ -37,6 +37,20 @@ describe('upstream check store', () => {
     expect(ask).toHaveBeenCalledTimes(3)
   })
 
+  it('drops a look that was under way when a push forgot it, so old counts never come back', async () => {
+    let answer!: (check: GitUpstreamCheck) => void
+    ask.mockImplementationOnce(() => new Promise<GitUpstreamCheck>((done) => { answer = done }))
+    const slow = checkUpstream('/repo/a', SCOPE, { now: 0 })
+    // The push lands while the look is on its way, then the card asks again.
+    forgetUpstreamCheck('/repo/a')
+    ask.mockResolvedValueOnce({ ...CHECKED, ahead: 0, behind: 0 })
+    await checkUpstream('/repo/a', SCOPE, { now: 1 })
+    answer({ ...CHECKED, ahead: 1, behind: 0 })
+    await slow
+    expect(ask).toHaveBeenCalledTimes(2)
+    expect(useUpstreamCheckStore.getState().entries['/repo/a']?.check).toMatchObject({ ahead: 0, behind: 0 })
+  })
+
   it('shares one look between callers asking at the same time', async () => {
     await Promise.all([checkUpstream('/repo/a', SCOPE), checkUpstream('/repo/a', SCOPE)])
     expect(ask).toHaveBeenCalledTimes(1)

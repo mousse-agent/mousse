@@ -138,6 +138,11 @@ const UPSTREAM_CHECK_REFS = 'refs/mousse/upstream-check/'
 /** An upstream check that has not finished by now gives up: the remote is too slow to say anything useful. */
 const UPSTREAM_CHECK_TIMEOUT_MS = 30_000
 /**
+ * A check's ref older than this belongs to no check still running (each gives up after 30 s): the service stopped
+ * part way, or a lock refused the delete. The next check of the repository removes it.
+ */
+const UPSTREAM_CHECK_STALE_MS = 10 * 60_000
+/**
  * The quiet fetch of an upstream check: nothing prompts, nothing is pruned or collected, no commit graph is
  * written and FETCH_HEAD is left alone, so the only thing it writes is the one private ref it names.
  */
@@ -1162,7 +1167,9 @@ export class GitService {
     const head = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])
     if (!branch || !target || !head) return { state: 'none' }
     if (await this.read(cwd, ['rev-parse', '--is-shallow-repository']) === 'true') return { state: 'none' }
-    const ref = `${UPSTREAM_CHECK_REFS}${randomUUID()}`
+    await this.sweepUpstreamCheckRefs(cwd)
+    // Named by when it started, so a later check can tell a leftover from a ref another check is using now.
+    const ref = `${UPSTREAM_CHECK_REFS}${Date.now()}-${randomUUID()}`
     try {
       const run = await this.runGit(cwd, [...UPSTREAM_CHECK_FETCH, '--', target.remote, `+refs/heads/${target.branch}:${ref}`], {
         env: nonInteractiveGitEnv(),
@@ -1177,7 +1184,19 @@ export class GitService {
       const [behind, ahead] = (counts ?? '').split(/\s+/).map((value) => Number(value) || 0)
       return { state: 'checked', branch, head, ahead: ahead ?? 0, behind: behind ?? 0, checkedAt: Date.now() }
     } finally {
+      // A delete a lock refuses leaves the ref for a later check's sweep.
       await this.runGit(cwd, ['update-ref', '-d', ref]).catch(() => undefined)
+    }
+  }
+
+  /** Removes refs of upstream checks that never cleaned up after themselves, once no check can still be using them. */
+  private async sweepUpstreamCheckRefs(cwd: string, now = Date.now()): Promise<void> {
+    const listed = await this.read(cwd, ['for-each-ref', '--format=%(refname)', UPSTREAM_CHECK_REFS])
+    for (const ref of listed ? listed.split(/\r?\n/) : []) {
+      const started = Number(/^refs\/mousse\/upstream-check\/(\d+)-/.exec(ref)?.[1])
+      if (Number.isFinite(started) && now - started > UPSTREAM_CHECK_STALE_MS) {
+        await this.runGit(cwd, ['update-ref', '-d', ref]).catch(() => undefined)
+      }
     }
   }
 
