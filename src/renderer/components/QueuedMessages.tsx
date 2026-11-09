@@ -6,33 +6,10 @@ import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
 import { UserMessage } from '../chat/components/agent-elements/user-message'
 import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
 import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue'
+import { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
 import '../styles/queued-messages.css'
 
-// Where the composer's markers start: attached files, voice messages, browser elements, references.
-// The composer writes what was typed first and these after it; the agent reads them, the bubble hides them.
-const MARKER_START = /\[(?:Attached files: |Voice message \(|Selected browser element\]|Mousse references data=")/
-
-/** A queued message's content split into the text a person typed and the composer markers after it. */
-export function splitQueuedContent(content: string): { text: string; markers: string } {
-  const at = content.search(MARKER_START)
-  if (at < 0) return { text: content.trim(), markers: '' }
-  return { text: content.slice(0, at).trim(), markers: content.slice(at).trim() }
-}
-
-/** `content` with its typed text replaced by `text`; the markers are kept as they are. */
-export function queuedContentWithText(content: string, text: string): string {
-  return [text.trim(), splitQueuedContent(content).markers].filter(Boolean).join('\n\n')
-}
-
-/** Whether the queue lets this item's text change: a pending message a person wrote. */
-export function canEditQueued(item: QueuedMessage): boolean {
-  return !isOptimisticQueueItem(item) &&
-    item.state === 'pending' &&
-    item.intent !== 'steer' &&
-    !item.subagentNotice?.length &&
-    !item.inboxIds?.length &&
-    !item.workflowInvocationId
-}
+export { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
 
 const isSteering = (item: QueuedMessage) => item.intent === 'steer' || item.state === 'steering'
 
@@ -56,14 +33,6 @@ const QueuedBubble = memo(function QueuedBubble({ item }: { item: QueuedMessage 
   if (item.subagentNotice?.length) return <SubagentNotice items={item.subagentNotice} />
   return message ? <UserMessage message={message} /> : null
 })
-
-/** An open edit: the draft, and the content it started from (`base`), which a save expects the message still has. */
-interface EditState {
-  id: string
-  width: number | null
-  base: string
-  draft: string
-}
 
 interface EditorProps {
   draft: string
@@ -167,8 +136,8 @@ function QueuedEditor({ draft, width, saving, canBeEmpty, changed, label, onDraf
  */
 export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
   const { items, busyIds, hold } = queue
-  const [editing, setEditing] = useState<EditState | null>(null)
-  const [savingId, setSavingId] = useState<string | null>(null)
+  // The open edit lives in the queue (by thread), so a switch to another thread and back keeps it.
+  const editing = queue.editDraft
   // Drag to reorder starts only from the grip (`armedId`), so the text stays selectable. While dragging
   // the list reorders live under the pointer (`dragOrder`); dropping on the list saves the order, and a drag
   // that ends anywhere else (Escape, let go outside) puts it back.
@@ -205,23 +174,6 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
     window.addEventListener('pointerup', disarm)
     return () => window.removeEventListener('pointerup', disarm)
   }, [armedId, dragId])
-
-  // The item being edited left the queue or started (it was sent, or removed elsewhere): nothing to edit, and a
-  // draft with changes of its own goes to the composer, so it is not lost. Its text changed elsewhere while the
-  // draft has no changes of its own: the draft follows it.
-  useEffect(() => {
-    if (!editing) return
-    const item = items.find((entry) => entry.id === editing.id)
-    if (!item || !canEditQueued(item)) {
-      const draft = editing.draft.trim()
-      if (draft && draft !== splitQueuedContent(editing.base).text) queue.moveDraftToComposer(draft)
-      setEditing(null)
-      return
-    }
-    if (item.content !== editing.base && editing.draft === splitQueuedContent(editing.base).text) {
-      setEditing({ ...editing, base: item.content, draft: splitQueuedContent(item.content).text })
-    }
-  }, [items, editing, queue])
 
   if (items.length === 0) return null
   const firstHeldId = shown.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending')?.id
@@ -273,17 +225,14 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
     const bubble = groupRef.current?.querySelector<HTMLElement>(`[data-queued-id="${CSS.escape(item.id)}"] .chat-user-bubble`)
     // A few pixels over the bubble's width, so a line that just fits it does not wrap in the field.
     const width = bubble?.getBoundingClientRect().width
-    setEditing({ id: item.id, width: width ? Math.ceil(width) + 8 : null, base: item.content, draft: splitQueuedContent(item.content).text })
+    queue.startEdit(item, width ? Math.ceil(width) + 8 : null)
   }
-  const updateEdit = (id: string, patch: Partial<EditState>) => setEditing((current) => (current?.id === id ? { ...current, ...patch } : current))
-  const saveEdit = async (item: QueuedMessage, base: string, text: string) => {
+  const saveEdit = (item: QueuedMessage, base: string, text: string) => {
     const content = queuedContentWithText(item.content, text)
-    if (content === item.content) { setEditing(null); return }
-    setSavingId(item.id)
+    if (content === item.content) { queue.closeEdit(); return }
     // Saved only if the message still has the text this edit started from; otherwise the line says it changed.
-    const outcome = await queue.edit(item.id, content, base)
-    setSavingId(null)
-    if (outcome === 'saved') setEditing((current) => (current?.id === item.id ? null : current))
+    // A save closes the edit; anything else keeps it open with the draft.
+    void queue.edit(item.id, content, base)
   }
 
   return (
@@ -302,7 +251,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         const steering = isSteering(item)
         const last = index === shown.length - 1
         const canDrag = ids.length > 1 && !optimistic && !busy
-        const edit = editing?.id === item.id ? editing : null
+        const edit = editing?.itemId === item.id ? editing : null
         // While a compaction holds the queue, the first message's Send now skips it.
         const skipsCompaction = hold !== null && item.id === firstHeldId
         const sendLabel = steering ? 'Sending now…' : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : 'Send now'
@@ -324,15 +273,15 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
               <QueuedEditor
                 draft={edit.draft}
                 width={edit.width}
-                saving={savingId === item.id}
+                saving={Boolean(edit.saving)}
                 canBeEmpty={Boolean(item.images?.length || splitQueuedContent(item.content).markers)}
-                changed={savingId !== item.id && item.content !== edit.base && edit.draft !== splitQueuedContent(edit.base).text}
+                changed={!edit.saving && item.content !== edit.base && edit.draft !== splitQueuedContent(edit.base).text}
                 label={label}
-                onDraftChange={(draft) => updateEdit(item.id, { draft })}
-                onLoadChanged={() => updateEdit(item.id, { base: item.content, draft: splitQueuedContent(item.content).text })}
-                onKeepDraft={() => updateEdit(item.id, { base: item.content })}
-                onSave={(text) => void saveEdit(item, edit.base, text)}
-                onCancel={() => setEditing(null)}
+                onDraftChange={(draft) => queue.updateEdit({ draft })}
+                onLoadChanged={() => queue.updateEdit({ base: item.content, draft: splitQueuedContent(item.content).text, images: item.images })}
+                onKeepDraft={() => queue.updateEdit({ base: item.content, images: item.images })}
+                onSave={(text) => saveEdit(item, edit.base, text)}
+                onCancel={queue.closeEdit}
               />
             ) : (
               <>

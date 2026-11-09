@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { QueuedMessage } from '../../shared/types'
+import type { ChatImageAttachment, QueuedMessage } from '../../shared/types'
 import { readableError } from '../lib/errorText'
+import { canEditQueued, isOptimisticQueueItem, splitQueuedContent } from '../lib/queuedContent'
+
+export { isOptimisticQueueItem }
 
 /** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
 export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
@@ -22,8 +25,36 @@ export interface UseThreadQueueOptions {
   onOptimisticItemReconciled?: (id: string) => void
   /** A compaction holds the queue until it ends; null when nothing does. */
   hold?: QueueHold | null
-  /** Puts text in the composer: an unsaved edit whose message left the queue. */
-  onDraftToComposer?: (text: string) => void
+  /**
+   * Puts an unsaved edit whose message left the queue in that thread's composer, with the message's attachments
+   * and references. The thread may not be the one shown.
+   */
+  onDraftToComposer?: (threadId: string, recovered: RecoveredQueueDraft) => void
+}
+
+/**
+ * An open edit of a queued message. It is kept by thread, outside the conversation drawn for one thread, so it
+ * is still open with its draft after a switch to another thread and back.
+ */
+export interface QueueEditDraft {
+  itemId: string
+  /** The editor's width, from the bubble it replaced. */
+  width: number | null
+  /** The content the edit started from (or was last brought up to); a save expects the message still has it. */
+  base: string
+  draft: string
+  /** The message's images, which the editor does not show; they go with a recovered draft. */
+  images?: ChatImageAttachment[]
+  /** A save is in flight: what the message leaving the queue means waits for its outcome. */
+  saving?: boolean
+}
+
+/** An unsaved edit whose message left the queue, as the composer takes it. */
+export interface RecoveredQueueDraft {
+  text: string
+  /** The message's composer markers: attached files, voice messages, browser elements, references. */
+  markers: string
+  images?: ChatImageAttachment[]
 }
 
 /** What holds the queue: a running compaction, and the size of the history it would replace. */
@@ -41,11 +72,14 @@ export interface ThreadQueue {
   /** The last failed change, for the composer's notice line; it stays until dismissed or a change succeeds. */
   error: string | null
   clearError: () => void
-  /** An unsaved edit went to the composer (its message had started), for the composer's notice line. */
+  /** An unsaved edit of this thread went to the composer (its message had started), for the composer's notice line. */
   draftMoved: boolean
   dismissDraftMoved: () => void
-  /** Hands an unsaved edit to the composer: its message left the queue (it started) before the edit was saved. */
-  moveDraftToComposer: (text: string) => void
+  /** This thread's open edit, if any. */
+  editDraft: QueueEditDraft | null
+  startEdit: (item: QueuedMessage, width: number | null) => void
+  updateEdit: (patch: Partial<Pick<QueueEditDraft, 'base' | 'draft' | 'images'>>) => void
+  closeEdit: () => void
   /** While a compaction runs, the queue waits for it; Send now then skips the compaction. */
   hold: QueueHold | null
   /** Sends the item into the running reply now; while a compaction holds the queue, stops it and sends the item first. */
@@ -55,14 +89,12 @@ export interface ThreadQueue {
   reorder: (orderedIds: string[]) => Promise<void>
   /**
    * Replaces the item's text in place. With `expectedContent` (the content the edit started from) it is not saved
-   * when the text changed meanwhile: `changed`, and the item shows the new text.
+   * when the text changed meanwhile: `changed`, and the item shows the new text. A save closes the open edit.
    */
   edit: (itemId: string, content: string, expectedContent?: string) => Promise<QueueEditOutcome>
 }
 
 export type QueueEditOutcome = 'saved' | 'changed' | 'failed'
-
-export const isOptimisticQueueItem = (item: QueuedMessage): boolean => item.id.startsWith('optimistic:')
 
 export function reorderByIds(items: QueuedMessage[], orderedIds: string[]): QueuedMessage[] {
   const byId = new Map(items.map((item) => [item.id, item]))
@@ -84,8 +116,14 @@ export function reorderByIds(items: QueuedMessage[], orderedIds: string[]): Queu
  */
 export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer }: UseThreadQueueOptions): ThreadQueue {
   const [items, setItems] = useState<QueuedMessage[]>([])
+  // The thread `items` were read for; null until the shown thread's list arrives.
+  const [itemsThread, setItemsThread] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [draftMoved, setDraftMoved] = useState(false)
+  // Open edits and "your edit is in the composer" notices, by thread.
+  const [edits, setEdits] = useState<Record<string, QueueEditDraft>>({})
+  const editsRef = useRef(edits)
+  editsRef.current = edits
+  const [movedDrafts, setMovedDrafts] = useState<Record<string, true>>({})
   const toComposer = useRef(onDraftToComposer)
   toComposer.current = onDraftToComposer
   const [busyIds, setBusyIds] = useState<Record<string, boolean>>({})
@@ -121,6 +159,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
         if (!current()) return
         loggedLoadFailure.current = false
         setItems(list)
+        setItemsThread(id)
         return
       } catch (err) {
         if (!current()) return
@@ -137,20 +176,58 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     }
   }, [])
 
+  const editFor = useCallback((thread: string, itemId: string, change: (draft: QueueEditDraft) => QueueEditDraft | null) => {
+    setEdits((current) => {
+      const draft = current[thread]
+      if (!draft || draft.itemId !== itemId) return current
+      const next = { ...current }
+      const changed = change(draft)
+      if (changed) next[thread] = changed
+      else delete next[thread]
+      return next
+    })
+  }, [])
+
+  // The message of an open edit left the queue or started (sent, or removed elsewhere), here or while its thread
+  // was not shown: the edit closes, and a draft with changes of its own goes to that thread's composer with the
+  // message's attachments, so it is not lost. While a save is in flight this waits for its outcome: a saved edit
+  // is not recovered. The message's text changed elsewhere while the draft has no changes: the draft follows it.
+  const reconcileEdit = useCallback((thread: string, list: QueuedMessage[]) => {
+    const draft = editsRef.current[thread]
+    if (!draft || draft.saving) return
+    const item = list.find((entry) => entry.id === draft.itemId)
+    const base = splitQueuedContent(draft.base)
+    if (item && canEditQueued(item)) {
+      if (item.content !== draft.base && draft.draft === base.text) {
+        editFor(thread, draft.itemId, (open) => ({ ...open, base: item.content, draft: splitQueuedContent(item.content).text, images: item.images }))
+      }
+      return
+    }
+    editFor(thread, draft.itemId, () => null)
+    const text = draft.draft.trim()
+    if (!text || text === base.text) return
+    toComposer.current?.(thread, { text, markers: base.markers, ...(draft.images?.length ? { images: draft.images } : {}) })
+    setMovedDrafts((current) => ({ ...current, [thread]: true }))
+    // The notice says what happened; an error about the same message (its edit refused) adds nothing.
+    if (thread === threadIdRef.current) setError(null)
+  }, [editFor])
+
   useEffect(() => {
     setItems([])
+    setItemsThread(null)
     setError(null)
-    setDraftMoved(false)
     setBusyIds({})
-    if (!threadId) return
-    // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list.
+    // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list. An update of
+    // another thread only matters to an edit open there.
     let settled = false
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
-      if (updatedId !== threadId) return
+      if (updatedId !== threadId) { reconcileEdit(updatedId, next); return }
       settled = true
       loadGeneration.current += 1
       setItems(next)
+      setItemsThread(updatedId)
     })
+    if (!threadId) return unsub
     const fallback = window.setTimeout(() => {
       if (!settled) void loadQueue(threadId)
     }, 120)
@@ -164,7 +241,12 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
       retryTimer.current = null
     }
-  }, [threadId, loadQueue])
+  }, [threadId, loadQueue, reconcileEdit])
+
+  const shownEdit = threadId ? edits[threadId] : undefined
+  useEffect(() => {
+    if (threadId && itemsThread === threadId) reconcileEdit(threadId, items)
+  }, [threadId, itemsThread, items, shownEdit, reconcileEdit])
 
   useEffect(() => {
     if (!onOptimisticItemReconciled) return
@@ -241,13 +323,18 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     }
   }, [threadId, loadQueue, markBusy, changeScope])
 
-  // The editor stays open until the edit answers, so the item keeps its text until then.
+  // The editor stays open until the edit answers, so the item keeps its text until then. Its open edit learns the
+  // outcome even when another thread is shown by then: saved closes it, anything else keeps the draft.
   const edit = useCallback(async (itemId: string, content: string, expectedContent?: string): Promise<QueueEditOutcome> => {
     if (!threadId) return 'failed'
+    const thread = threadId
     const live = changeScope(threadId)
     markBusy(itemId, true)
+    editFor(thread, itemId, (open) => ({ ...open, saving: true }))
+    let outcome: QueueEditOutcome = 'failed'
     try {
       const { item, changed } = await window.mousse.queue.edit(threadId, itemId, content, expectedContent)
+      outcome = changed ? 'changed' : 'saved'
       if (!live()) return 'failed'
       setItems((current) => current.map((entry) => (entry.id === item.id ? item : entry)))
       if (changed) return 'changed'
@@ -261,18 +348,38 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       void loadQueue(threadId)
       return 'failed'
     } finally {
+      editFor(thread, itemId, (open) => (outcome === 'saved' ? null : { ...open, saving: false }))
       if (live()) markBusy(itemId, false)
     }
-  }, [threadId, loadQueue, markBusy, changeScope])
+  }, [threadId, loadQueue, markBusy, changeScope, editFor])
 
   const clearError = useCallback(() => setError(null), [])
-  const dismissDraftMoved = useCallback(() => setDraftMoved(false), [])
-  const moveDraftToComposer = useCallback((text: string) => {
-    toComposer.current?.(text)
-    // The notice says what happened; an error about the same message (its edit refused) adds nothing.
-    setError(null)
-    setDraftMoved(true)
+  const draftMoved = Boolean(threadId && movedDrafts[threadId])
+  const dismissDraftMoved = useCallback(() => {
+    const thread = threadIdRef.current
+    if (thread) setMovedDrafts((current) => {
+      if (!current[thread]) return current
+      const next = { ...current }
+      delete next[thread]
+      return next
+    })
   }, [])
+  const editDraft = shownEdit ?? null
+  const startEdit = useCallback((item: QueuedMessage, width: number | null) => {
+    const thread = threadIdRef.current
+    if (!thread) return
+    setEdits((current) => ({ ...current, [thread]: { itemId: item.id, width, base: item.content, draft: splitQueuedContent(item.content).text, ...(item.images?.length ? { images: item.images } : {}) } }))
+  }, [])
+  const updateEdit = useCallback((patch: Partial<Pick<QueueEditDraft, 'base' | 'draft' | 'images'>>) => {
+    const thread = threadIdRef.current
+    const open = thread ? editsRef.current[thread] : undefined
+    if (thread && open) editFor(thread, open.itemId, (draft) => ({ ...draft, ...patch }))
+  }, [editFor])
+  const closeEdit = useCallback(() => {
+    const thread = threadIdRef.current
+    const open = thread ? editsRef.current[thread] : undefined
+    if (thread && open) editFor(thread, open.itemId, () => null)
+  }, [editFor])
 
   const shown = useMemo(() => [
     ...items,
@@ -280,7 +387,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   ].filter((item) => !item.internal), [items, optimisticItems, threadId])
 
   return useMemo(
-    () => ({ threadId, items: shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, moveDraftToComposer, hold, steer, remove, reorder, edit }),
-    [threadId, shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, moveDraftToComposer, hold, steer, remove, reorder, edit]
+    () => ({ threadId, items: shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit }),
+    [threadId, shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit]
   )
 }

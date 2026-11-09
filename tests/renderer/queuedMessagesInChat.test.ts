@@ -212,7 +212,7 @@ describe('queued messages in the conversation', () => {
     it('moves the unsaved edit to the composer when the message leaves the queue', async () => {
       await editA('one, but better')
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('one, but better')
+      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
       expect(host.querySelector('textarea')).toBeNull()
       expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
     })
@@ -220,7 +220,7 @@ describe('queued messages in the conversation', () => {
     it('moves it too when the message is still listed but already sending', async () => {
       await editA('one, but better')
       await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { state: 'steering' }), queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('one, but better')
+      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
       expect(host.querySelector('textarea')).toBeNull()
     })
 
@@ -238,10 +238,34 @@ describe('queued messages in the conversation', () => {
       await click(button('a', 'Save'))
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
       await act(async () => { answer.reject(new Error("Error invoking remote method 'queue:edit': Error: Queue item a already started and can no longer be edited.")) })
-      expect(toComposer).toHaveBeenCalledWith('one, but better')
+      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
       const notices = [...host.querySelectorAll('.composer-notice')].map((entry) => entry.textContent)
       expect(notices).toHaveLength(1)
       expect(notices[0]).toContain(QUEUE_DRAFT_MOVED_NOTICE)
+    })
+
+    it('waits for a save in flight, and recovers nothing when it went through', async () => {
+      const answer = deferred<{ item: QueuedMessage }>()
+      api.edit.mockReturnValueOnce(answer.promise)
+      await editA('one, but better')
+      await click(button('a', 'Save'))
+      // The daemon saved it and the message started before the answer came back.
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      expect(toComposer).not.toHaveBeenCalled()
+      await act(async () => { answer.resolve({ item: queued('a', 'one, but better') }) })
+      expect(toComposer).not.toHaveBeenCalled()
+      expect(host.querySelector('textarea')).toBeNull()
+      expect(host.querySelector('.composer-notice')).toBeNull()
+    })
+
+    it("keeps the message's attachments and references with the recovered draft", async () => {
+      const image = { name: 'shot.png', mimeType: 'image/png', data: btoa('png bytes') }
+      const markers = '[Attached files: notes.txt]'
+      await show([queued('a', `Look at this\n\n${markers}`, { images: [image] }), queued('b', 'two')])
+      await click(button('a', 'Edit'))
+      await type(row('a').querySelector('textarea')!, 'Look at that')
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'Look at that', markers, images: [image] })
     })
 
     it('puts the text in an empty composer, or on a new line after what it has', () => {
@@ -349,9 +373,10 @@ function deferred<T>() {
 describe('a change that answers after the thread changed', () => {
   /** The chat with a thread switch: the hook stays, the conversation (and its queue) is drawn per thread. */
   function SwitchingChat({ threadId }: { threadId: string }) {
-    const thread = useThreadQueue({ threadId })
+    const thread = useThreadQueue({ threadId, onDraftToComposer: toComposer })
     return createElement(Fragment, null,
       createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
+      createElement(ComposerNoticeSource, { notice: thread.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, onDismiss: thread.dismissDraftMoved } : null }),
       createElement(ComposerNoticeSlot),
       createElement(QueuedMessages, { key: threadId, queue: thread }))
   }
@@ -408,6 +433,42 @@ describe('a change that answers after the thread changed', () => {
     await act(async () => { answer.reject(new Error('nope')) })
     expect(ids()).toEqual(['x'])
     expect(host.querySelector('.composer-notice')).toBeNull()
+  })
+
+  it('keeps an unsaved edit open with its draft across a switch to another thread and back', async () => {
+    await open('t1', t1)
+    await click(button('a', 'Edit'))
+    await type(row('a').querySelector('textarea')!, 'one, still being written')
+    await open('t2', t2)
+    expect(host.querySelector('textarea')).toBeNull()
+    await open('t1', t1)
+    expect(row('a').querySelector('textarea')?.value).toBe('one, still being written')
+    expect(toComposer).not.toHaveBeenCalled()
+  })
+
+  it('recovers the draft into its own thread when the message starts while another thread is shown', async () => {
+    await open('t1', t1)
+    await click(button('a', 'Edit'))
+    await type(row('a').querySelector('textarea')!, 'one, edited')
+    await open('t2', t2)
+    await act(async () => { push!({ threadId: 't1', items: [t1[1]!] }) })
+    expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+    // The note belongs to that thread: it shows there, not here.
+    expect(host.querySelector('.composer-notice')).toBeNull()
+    await open('t1', [t1[1]!])
+    expect(host.querySelector('textarea')).toBeNull()
+    expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
+    expect(toComposer).toHaveBeenCalledTimes(1)
+  })
+
+  it('recovers the draft when the thread is shown again without the message', async () => {
+    await open('t1', t1)
+    await click(button('a', 'Edit'))
+    await type(row('a').querySelector('textarea')!, 'one, edited')
+    await open('t2', t2)
+    await open('t1', [t1[1]!])
+    expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+    expect(host.querySelector('textarea')).toBeNull()
   })
 
   it("does not reload the old thread over the new one's load", async () => {

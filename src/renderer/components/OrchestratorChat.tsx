@@ -27,7 +27,7 @@ import {
   type VoiceMessage,
   buildComposerMessageContent
 } from './ChatComposer'
-import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended } from '../hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
 import { contextTokens } from '../lib/promptCache'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
@@ -341,10 +341,12 @@ export function OrchestratorChat() {
   // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
   const historyTokens = contextTokens(contextUsage) || undefined
   const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
-  // An unsaved edit of a queued message that started meanwhile: the composer takes the text, after what it has.
-  const onQueueDraftToComposer = useCallback((text: string) => {
-    setInput((current) => withDraftAppended(current, text))
-  }, [setInput])
+  // An unsaved edit of a queued message that started meanwhile goes to its thread's composer (shown or not),
+  // after what it has.
+  const onQueueDraftToComposer = useCallback((threadId: string, recovered: RecoveredQueueDraft) => {
+    const store = useAppStore.getState()
+    store.setComposerDraft(threadId, withDraftAppended(store.composerDrafts[threadId] ?? '', recovered.text))
+  }, [])
   const queue = useThreadQueue({
     threadId: activeThreadId,
     optimisticItems: optimisticQueueItems,
