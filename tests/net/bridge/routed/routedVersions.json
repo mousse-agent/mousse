@@ -679,6 +679,11 @@
     "digest": "ae0ab127e121dfb9",
     "security": "926c4af141d1208d"
   },
+  "thread.changesSince": {
+    "version": 1,
+    "digest": "41a6af7bae317b8f",
+    "security": "04f7c680ffd36337"
+  },
   "thread.fork": {
     "version": 1,
     "digest": "97b6aa68346e085a",
@@ -695,8 +700,8 @@
     "security": "04f7c680ffd36337"
   },
   "thread.messages": {
-    "version": 1,
-    "digest": "e362d70d862a7cfc",
+    "version": 2,
+    "digest": "ca37845da10897d3",
     "security": "04f7c680ffd36337"
   },
   "thread.snapshot": {
