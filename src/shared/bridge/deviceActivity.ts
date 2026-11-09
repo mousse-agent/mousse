@@ -264,6 +264,7 @@ const PHRASES: Record<string, Phrase> = {
   'git.fetch': SYNC,
   'git.pull': SYNC,
   'git.abortInProgress': OPERATION,
+  'git.continueInProgress': OPERATION,
   'git.createBranch': BRANCH,
   'git.renameBranch': BRANCH,
   'git.deleteBranch': BRANCH,

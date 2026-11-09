@@ -440,6 +440,7 @@ export const PROTOCOL_METHODS = [
   'git.fetch',
   'git.pull',
   'git.abortInProgress',
+  'git.continueInProgress',
   'git.createBranch',
   'git.renameBranch',
   'git.deleteBranch',

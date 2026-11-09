@@ -939,7 +939,7 @@ export type AbortableKind = 'merge' | 'rebase'
 /** The one thing the side card offers to do next, most urgent first. Commit is not one: it lives on the changes row. */
 export type NextStep =
   | { kind: 'resolve'; label: string; title: string; abort: AbortableKind | null }
-  | { kind: 'finish'; label: string; title: string; abort: AbortableKind | null }
+  | { kind: 'continue'; label: string; title: string; what: GitInProgress; abort: AbortableKind | null }
   | { kind: 'pull'; label: string; title: string; strategies: GitPullStrategy[] }
   | { kind: 'push'; label: string; title: string }
   | { kind: 'pull-request'; label: string; title: string }
@@ -966,7 +966,7 @@ export function nextStep(input: {
     return { kind: 'resolve', label: `Resolve ${plural(counts.conflictedCount, 'conflict')}`, title: 'Open Changes to resolve them', abort: abortable(inProgress) }
   }
   if (inProgress) {
-    return { kind: 'finish', label: `Finish the ${IN_PROGRESS_NAMES[inProgress]}`, title: 'Open Changes to finish it', abort: abortable(inProgress) }
+    return { kind: 'continue', label: `Continue ${IN_PROGRESS_NAMES[inProgress]}`, title: `Carry on with the ${IN_PROGRESS_NAMES[inProgress]} now its conflicts are resolved`, what: inProgress, abort: abortable(inProgress) }
   }
   const tracked = status.tracking === 'tracked' && Boolean(status.branch)
   if (tracked && figures.behind > 0 && scope.workspaceThreadId === null) {
@@ -1021,6 +1021,12 @@ export function branchTag(status: GitStatusSnapshot | null, figures: UpstreamFig
     return { text: 'up to date', tone: 'quiet', title: `Same as ${status.upstream ?? 'the upstream branch'}${ago}` }
   }
   return null
+}
+
+/** What continuing came to, as the section's notice. */
+export function continueNotice(what: GitInProgress, result: 'done' | 'conflicted'): string {
+  const name = IN_PROGRESS_NAMES[what]
+  return result === 'done' ? `${name[0]!.toUpperCase()}${name.slice(1)} finished` : `The ${name} stopped on another conflict`
 }
 
 /** What a failed pull from the side card says: overlapping edits get a fixed line, everything else Git's own. */

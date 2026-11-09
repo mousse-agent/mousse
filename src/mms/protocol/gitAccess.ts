@@ -230,6 +230,7 @@ export const GIT_ACCESS = {
   'git.fetch': 'userRequested',
   'git.pull': 'userRequested',
   'git.abortInProgress': 'userRequested',
+  'git.continueInProgress': 'userRequested',
   'git.createBranch': 'userRequested',
   'git.renameBranch': 'userRequested',
   'git.deleteBranch': 'userRequested',

@@ -70,4 +70,15 @@ describe('NextStepButton menu', () => {
     act(() => host.querySelector<HTMLButtonElement>('.side-card-git-next-split')!.click())
     expect(menuItems()).toHaveLength(0)
   })
+
+  it('continues a stopped rebase at once, with Abort and the files behind ▾', () => {
+    const onChoose = vi.fn()
+    const step: NextStep = { kind: 'continue', label: 'Continue rebase', title: 'Carry on', what: 'rebase', abort: 'rebase' }
+    render(onChoose, step)
+    act(() => host.querySelector<HTMLButtonElement>('.side-card-git-next-main')!.click())
+    expect(onChoose).toHaveBeenCalledWith({ kind: 'continue', what: 'rebase' })
+    act(() => host.querySelector<HTMLButtonElement>('.side-card-git-next-split')!.click())
+    expect(menuItems().map((item) => item.textContent)).toEqual(['Abort rebase', 'Open Changes'])
+    expect(host.querySelector('.side-card-git-next')!.getAttribute('data-tone')).toBe('accent')
+  })
 })

@@ -488,6 +488,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'git.fetch': write('folder', [...FOLDER, 'operationId']),
   'git.pull': write('folder', [...FOLDER, 'operationId', 'strategy']),
   'git.abortInProgress': write('folder', [...FOLDER, 'kind'], { required: ['kind'] }),
+  'git.continueInProgress': write('folder', [...FOLDER, 'kind'], { required: ['kind'] }),
   'git.createBranch': write('folder', [...FOLDER, 'name', 'from', 'checkout'], {
     required: ['name']
   }),
