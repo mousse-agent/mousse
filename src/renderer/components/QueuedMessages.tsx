@@ -1,481 +1,330 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { ArrowTurnForward, GripVertical, MoreHorizontal, Pencil, Trash2 } from '../lib/icons'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type { QueuedMessage } from '../../shared/types'
-import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import { imagePayloadToDataUrl } from '../utils/imageAttachments'
-import { noticeSummary } from '../chat/adapters/subagentNotice'
-import { readableError } from '../lib/errorText'
-import { useComposerDockStrip, useComposerNotice } from './ComposerNotice'
+import { ArrowTurnForward, Check, GripVertical, Pencil, Trash2, X } from '../lib/icons'
+import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
+import { UserMessage } from '../chat/components/agent-elements/user-message'
+import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
+import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue'
+import '../styles/queued-messages.css'
 
-/** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
-export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
-export const QUEUE_LOAD_RETRY_CAP_MS = 5000
+// Where the composer's markers start: attached files, voice messages, browser elements, references.
+// The composer writes what was typed first and these after it; the agent reads them, the bubble hides them.
+const MARKER_START = /\[(?:Attached files: |Voice message \(|Selected browser element\]|Mousse references data=")/
 
-export interface QueuedMessagesProps {
-  threadId: string | null
-  optimisticItems?: QueuedMessage[]
-  onOptimisticItemReconciled?: (id: string) => void
-  /** Remove the item from the queue and load it into the composer for editing. */
-  onEditItem?: (item: QueuedMessage) => void
+/** A queued message's content split into the text a person typed and the composer markers after it. */
+export function splitQueuedContent(content: string): { text: string; markers: string } {
+  const at = content.search(MARKER_START)
+  if (at < 0) return { text: content.trim(), markers: '' }
+  return { text: content.slice(0, at).trim(), markers: content.slice(at).trim() }
 }
 
-/** Strip transport-only markers so queue UI never leaks paste filenames. */
-export function stripComposerTransportMarkers(content: string): string {
-  return content
-    .replace(/\s*\[Attached files:[^\]]*\]\s*/g, ' ')
-    .replace(/\s*\[Voice message[^\]]*\]\s*/gi, ' ')
-    .trim()
+/** `content` with its typed text replaced by `text`; the markers are kept as they are. */
+export function queuedContentWithText(content: string, text: string): string {
+  return [text.trim(), splitQueuedContent(content).markers].filter(Boolean).join('\n\n')
 }
 
-/** A queued steer that delivers subagent results shows what it reports, never the text the model reads. */
-export function previewText(item: QueuedMessage): string {
-  if (item.subagentNotice?.length) return noticeSummary(item.subagentNotice)
-  const raw =
-    stripComposerTransportMarkers(item.content) ||
-    (item.images?.length ? 'Image attachment' : 'Empty message')
-  const singleLine = raw.replace(/\s+/g, ' ')
-  return singleLine.length > 120 ? `${singleLine.slice(0, 117)}…` : singleLine
+/** Whether the queue lets this item's text change: a pending message a person wrote. */
+export function canEditQueued(item: QueuedMessage): boolean {
+  return !isOptimisticQueueItem(item) &&
+    item.state === 'pending' &&
+    item.intent !== 'steer' &&
+    !item.subagentNotice?.length &&
+    !item.inboxIds?.length &&
+    !item.workflowInvocationId
 }
 
-function reorderByIds(items: QueuedMessage[], orderedIds: string[]): QueuedMessage[] {
-  const byId = new Map(items.map((item) => [item.id, item]))
-  const next: QueuedMessage[] = []
-  for (const id of orderedIds) {
-    const item = byId.get(id)
-    if (item) next.push(item)
-  }
-  // Append any missing ids (race with remote updates) in prior order.
-  for (const item of items) {
-    if (!orderedIds.includes(item.id)) next.push(item)
-  }
+const isSteering = (item: QueuedMessage) => item.intent === 'steer' || item.state === 'steering'
+
+function moveId(ids: string[], id: string, to: number): string[] {
+  const next = ids.filter((entry) => entry !== id)
+  next.splice(to, 0, id)
   return next
 }
 
-function moveIndex(ids: string[], from: number, to: number): string[] {
-  if (from === to || from < 0 || to < 0 || from >= ids.length || to >= ids.length) return ids
-  const next = [...ids]
-  const [removed] = next.splice(from, 1)
-  next.splice(to, 0, removed)
-  return next
-}
-
-interface QueueMenuProps {
-  open: boolean
-  busy: boolean
-  canMoveUp: boolean
-  canMoveDown: boolean
-  onToggle: () => void
-  onCopy: () => void
-  onMoveUp: () => void
-  onMoveDown: () => void
-}
-
-function QueueMenu(props: QueueMenuProps) {
-  const anchorRef = useRef<HTMLDivElement>(null)
-  const panelRef = useRef<HTMLDivElement>(null)
-  const style = useFloatingPosition({
-    open: props.open,
-    anchorRef,
-    contentRef: panelRef,
-    placement: 'above-end',
-    gap: 4
-  })
-
-  return (
-    <div ref={anchorRef} className="queued-messages-menu" data-queue-menu-root>
-      <button
-        type="button"
-        className="queued-messages-btn queued-messages-btn-icon"
-        aria-haspopup="menu"
-        aria-expanded={props.open}
-        aria-label="More queue actions"
-        title="More actions"
-        disabled={props.busy}
-        onClick={props.onToggle}
-      >
-        <MoreHorizontal size={14} strokeWidth={2} />
-      </button>
-      {props.open && (
-        <FloatingPortal>
-          <div
-            ref={panelRef}
-            className="queued-messages-menu-panel"
-            role="menu"
-            style={{ ...style, right: 'auto', bottom: 'auto' }}
-            data-queue-menu-root
-          >
-            <button type="button" role="menuitem" className="queued-messages-menu-item" onClick={props.onCopy}>Copy text</button>
-            <button type="button" role="menuitem" className="queued-messages-menu-item" disabled={!props.canMoveUp} onClick={props.onMoveUp}>Move up</button>
-            <button type="button" role="menuitem" className="queued-messages-menu-item" disabled={!props.canMoveDown} onClick={props.onMoveDown}>Move down</button>
-          </div>
-        </FloatingPortal>
-      )}
-    </div>
+/** A queued message drawn as the prompt it will be, so it reads the same once it is sent. */
+const QueuedBubble = memo(function QueuedBubble({ item }: { item: QueuedMessage }) {
+  const message = useMemo(
+    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content: item.content, timestamp: item.enqueuedAt, images: item.images }])[0],
+    [item.id, item.content, item.enqueuedAt, item.images]
   )
+  if (item.subagentNotice?.length) return <SubagentNotice items={item.subagentNotice} />
+  return message ? <UserMessage message={message} /> : null
+})
+
+interface EditorProps {
+  initial: string
+  width: number | null
+  saving: boolean
+  canBeEmpty: boolean
+  /** The group's "Queued" label when this is the last item. */
+  label?: ReactNode
+  onSave: (text: string) => void
+  onCancel: () => void
 }
 
-export function QueuedMessages({
-  threadId,
-  optimisticItems = [],
-  onOptimisticItemReconciled,
-  onEditItem
-}: QueuedMessagesProps) {
-  const listId = useId()
-  const [items, setItems] = useState<QueuedMessage[]>([])
-  const [error, setError] = useState<string | null>(null)
-  const [dragId, setDragId] = useState<string | null>(null)
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null)
-  const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
-  const [busyIds, setBusyIds] = useState<Record<string, boolean>>({})
-  const itemsRef = useRef(items)
-  itemsRef.current = items
-  const dragFromIndexRef = useRef<number | null>(null)
-
-  const threadIdRef = useRef(threadId)
-  threadIdRef.current = threadId
-  // Bumped by every load, every queue update, and when the thread changes or the component unmounts,
-  // so a load that finishes or wakes late changes nothing and stops retrying.
-  const loadGeneration = useRef(0)
-  const retryTimer = useRef<number | null>(null)
-  const loggedLoadFailure = useRef(false)
-  // The ids of this thread's first list and every item shown since. An id not in it is a message just
-  // queued: it shows the queue for a moment even over a higher notice (a paused run). Null until the first list.
-  const knownIds = useRef<Set<string> | null>(null)
-  const receive = useCallback((next: QueuedMessage[]) => {
-    if (!knownIds.current) knownIds.current = new Set(next.map((item) => item.id))
-    setItems(next)
+/** Edit in place: a small editor where the bubble was. Enter saves, Shift+Enter adds a line, Escape cancels. */
+function QueuedEditor({ initial, width, saving, canBeEmpty, label, onSave, onCancel }: EditorProps) {
+  const [draft, setDraft] = useState(initial)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  const canSave = !saving && (canBeEmpty || draft.trim().length > 0)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    // Measured without a scrollbar, which would narrow the text while the field is one row high.
+    el.style.overflowY = 'hidden'
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+    el.style.overflowY = ''
+  }, [draft])
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
   }, [])
-
-  // A failed load is never shown: the last list stays, and the load keeps retrying quietly with
-  // backoff until it succeeds or is superseded. Only the first failure of a streak is logged.
-  const loadQueue = useCallback(async (id: string) => {
-    const generation = ++loadGeneration.current
-    const current = () => loadGeneration.current === generation && threadIdRef.current === id
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        const list = await window.mousse.queue.list(id)
-        if (!current()) return
-        loggedLoadFailure.current = false
-        receive(list)
-        setError(null)
-        return
-      } catch (err) {
-        if (!current()) return
-        if (!loggedLoadFailure.current) {
-          loggedLoadFailure.current = true
-          console.warn('Loading the queued messages failed; retrying in the background.', err)
-        }
-        const delay = QUEUE_LOAD_RETRY_DELAYS_MS[attempt] ?? QUEUE_LOAD_RETRY_CAP_MS
-        await new Promise<void>((resolve) => {
-          retryTimer.current = window.setTimeout(resolve, delay)
-        })
-        if (!current()) return
-      }
+  const save = () => { if (canSave) onSave(draft) }
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      onCancel()
+    } else if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault()
+      save()
     }
-  }, [receive])
-
-  useEffect(() => {
-    if (!threadId) {
-      setItems([])
-      setError(null)
-      setMenuOpenId(null)
-      return
-    }
-    // Clear stale queue from the previous thread, then prefer the select
-    // snapshot's queue:updated so we don't race thread.snapshot with queue.list.
-    setItems([])
-    setMenuOpenId(null)
-    knownIds.current = null
-    let settled = false
-    const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
-      if (updatedId !== threadId) return
-      settled = true
-      loadGeneration.current += 1
-      receive(next)
-      setError(null)
-    })
-    const fallback = window.setTimeout(() => {
-      if (!settled) void loadQueue(threadId)
-    }, 120)
-    return () => {
-      unsub()
-      window.clearTimeout(fallback)
-      // Stops a load that is retrying for this thread.
-      loadGeneration.current += 1
-      loggedLoadFailure.current = false
-      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
-      retryTimer.current = null
-    }
-  }, [threadId, loadQueue, receive])
-
-  useEffect(() => {
-    if (!onOptimisticItemReconciled) return
-    for (const optimistic of optimisticItems) {
-      if (items.some((item) => item.id === optimistic.id)) {
-        onOptimisticItemReconciled(optimistic.id)
-      }
-    }
-  }, [items, optimisticItems, onOptimisticItemReconciled])
-
-  useEffect(() => {
-    if (!menuOpenId) return
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as HTMLElement | null
-      if (target?.closest?.('[data-queue-menu-root]')) return
-      setMenuOpenId(null)
-    }
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setMenuOpenId(null)
-    }
-    window.addEventListener('pointerdown', onPointerDown)
-    window.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('keydown', onKeyDown)
-    }
-  }, [menuOpenId])
-
-  const applyReorder = useCallback(
-    async (orderedIds: string[]) => {
-      if (!threadId) return
-      const previous = itemsRef.current
-      setItems(reorderByIds(previous, orderedIds))
-      try {
-        const next = await window.mousse.queue.reorder(threadId, orderedIds)
-        setItems(next)
-        setError(null)
-      } catch (err) {
-        setItems(previous)
-        setError(readableError(err, 'Could not reorder the queue.'))
-        void loadQueue(threadId)
-      }
-    },
-    [threadId, loadQueue]
+  }
+  return (
+    <>
+      <div className="queued-message-editor" style={width ? { width } : undefined}>
+        <textarea
+          ref={ref}
+          rows={1}
+          value={draft}
+          aria-label="Edit queued message"
+          disabled={saving}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={onKeyDown}
+        />
+      </div>
+      <div className="queued-message-line is-editing">
+        <span className="queued-message-actions">
+          <button type="button" className="queued-message-btn" title="Cancel (Esc)" aria-label="Cancel" onClick={onCancel}>
+            <X size={14} strokeWidth={1.8} />
+          </button>
+          <button type="button" className="queued-message-btn" title="Save (Enter)" aria-label="Save" disabled={!canSave} onClick={save}>
+            <Check size={14} strokeWidth={1.8} />
+          </button>
+        </span>
+        {label}
+      </div>
+    </>
   )
+}
 
-  const handleRemove = async (itemId: string) => {
-    if (!threadId) return
-    setBusyIds((current) => ({ ...current, [itemId]: true }))
-    try {
-      await window.mousse.queue.remove(threadId, itemId)
-      setError(null)
-    } catch (err) {
-      setError(readableError(err, 'Could not remove the queued message.'))
-      void loadQueue(threadId)
-    } finally {
-      setBusyIds((current) => {
-        const next = { ...current }
-        delete next[itemId]
-        return next
-      })
-    }
+/**
+ * The thread's queued messages at the end of the conversation, after the last turn: each one dimmed in
+ * the place it will land, with its full text. Under each bubble, like under a sent prompt, a line whose
+ * buttons show on hover: reorder (drag the grip, or Alt+Up/Down on it), send now, edit in place, remove.
+ * One quiet "Queued" on the last line speaks for the group.
+ */
+export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
+  const { items, busyIds } = queue
+  const [editing, setEditing] = useState<{ id: string; width: number | null } | null>(null)
+  const [savingId, setSavingId] = useState<string | null>(null)
+  // Drag to reorder starts only from the grip (`armedId`), so the text stays selectable. While dragging
+  // the list reorders live under the pointer (`dragOrder`); letting go saves the order.
+  const [armedId, setArmedId] = useState<string | null>(null)
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragOrder, setDragOrder] = useState<string[] | null>(null)
+  const dragOrderRef = useRef<string[] | null>(null)
+  const groupRef = useRef<HTMLDivElement>(null)
+  // The grip to keep focused after a keyboard move re-renders the list.
+  const refocusId = useRef<string | null>(null)
+
+  // Only items the daemon lists can move; messages still on their way stay last.
+  const ids = useMemo(() => items.filter((item) => !isOptimisticQueueItem(item)).map((item) => item.id), [items])
+  const shown = useMemo(() => {
+    if (!dragOrder) return items
+    const byId = new Map(items.map((item) => [item.id, item]))
+    const ordered = dragOrder.flatMap((id) => byId.get(id) ?? [])
+    return [...ordered, ...items.filter((item) => !dragOrder.includes(item.id))]
+  }, [items, dragOrder])
+
+  useLayoutEffect(() => {
+    const id = refocusId.current
+    if (!id) return
+    refocusId.current = null
+    const grip = groupRef.current?.querySelector<HTMLElement>(`[data-queued-id="${CSS.escape(id)}"] .queued-message-grip`)
+    if (grip && document.activeElement !== grip) grip.focus()
+  }, [items])
+
+  // A press on the grip that ends without a drag (wherever the pointer is let go) disarms it, so the
+  // bubble's text never starts a drag.
+  useEffect(() => {
+    if (!armedId || dragId) return
+    const disarm = () => setArmedId(null)
+    window.addEventListener('pointerup', disarm)
+    return () => window.removeEventListener('pointerup', disarm)
+  }, [armedId, dragId])
+
+  // The item being edited left the queue (it was sent or removed elsewhere): nothing to edit.
+  useEffect(() => {
+    if (editing && !items.some((item) => item.id === editing.id)) setEditing(null)
+  }, [items, editing])
+
+  if (items.length === 0) return null
+
+  const updateDragOrder = (next: string[] | null) => {
+    dragOrderRef.current = next
+    setDragOrder(next)
   }
-
-  const handleSteer = async (itemId: string) => {
-    if (!threadId) return
-    setBusyIds((current) => ({ ...current, [itemId]: true }))
-    setError(null)
-    try {
-      const ok = await window.mousse.queue.promoteToSteer(threadId, itemId)
-      if (!ok) {
-        setError('Could not steer — the turn may have ended. The message remains in the queue.')
-        void loadQueue(threadId)
-      }
-    } catch (err) {
-      setError(readableError(err, 'Could not steer — the turn may have ended. The message remains in the queue.'))
-      void loadQueue(threadId)
-    } finally {
-      setBusyIds((current) => {
-        const next = { ...current }
-        delete next[itemId]
-        return next
-      })
-    }
+  const finishDrag = () => {
+    const order = dragOrderRef.current
+    updateDragOrder(null)
+    setDragId(null)
+    setArmedId(null)
+    if (order && order.join('\n') !== ids.join('\n')) void queue.reorder(order)
   }
-
-  const handleMove = async (itemId: string, direction: -1 | 1) => {
-    const ids = items.map((item) => item.id)
-    const index = ids.indexOf(itemId)
-    if (index === -1) return
-    const target = index + direction
-    if (target < 0 || target >= ids.length) return
-    setMenuOpenId(null)
-    await applyReorder(moveIndex(ids, index, target))
-  }
-
-  const handleCopy = async (content: string) => {
-    try {
-      await navigator.clipboard.writeText(content)
-      setMenuOpenId(null)
-    } catch {
-      setError('Could not copy to clipboard')
-    }
-  }
-
-  const onDragStart = (event: React.DragEvent, itemId: string, index: number) => {
-    dragFromIndexRef.current = index
-    setDragId(itemId)
-    setDropTargetId(itemId)
+  const onDragStart = (event: DragEvent<HTMLDivElement>, id: string) => {
+    if (armedId !== id) { event.preventDefault(); return }
+    setDragId(id)
+    updateDragOrder(ids)
     event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('text/plain', itemId)
-    // Improve drag image stability in Chromium.
-    if (event.currentTarget instanceof HTMLElement) {
-      event.dataTransfer.setDragImage(event.currentTarget, 16, 16)
-    }
+    event.dataTransfer.setData('text/plain', id)
+    const bubble = event.currentTarget.querySelector('.chat-user-bubble, .subagent-notice')
+    if (bubble instanceof HTMLElement) event.dataTransfer.setDragImage(bubble, Math.max(bubble.offsetWidth - 24, 0), 16)
   }
-
-  const onDragOver = (event: React.DragEvent, itemId: string) => {
+  const onDragOverItem = (event: DragEvent<HTMLDivElement>, overId: string) => {
+    const order = dragOrderRef.current
+    if (!dragId || !order) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
-    if (dropTargetId !== itemId) setDropTargetId(itemId)
+    const to = order.indexOf(overId)
+    if (overId === dragId || to < 0) return
+    const next = moveId(order, dragId, to)
+    if (next.join('\n') !== order.join('\n')) updateDragOrder(next)
   }
-
-  const onDrop = (event: React.DragEvent, targetId: string) => {
+  const onGripKeyDown = (event: KeyboardEvent<HTMLButtonElement>, id: string) => {
+    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
     event.preventDefault()
-    const sourceId = dragId ?? event.dataTransfer.getData('text/plain')
-    setDragId(null)
-    setDropTargetId(null)
-    dragFromIndexRef.current = null
-    if (!sourceId || sourceId === targetId) return
-    const ids = items.map((item) => item.id)
-    const from = ids.indexOf(sourceId)
-    const to = ids.indexOf(targetId)
-    if (from === -1 || to === -1) return
-    void applyReorder(moveIndex(ids, from, to))
+    const at = ids.indexOf(id)
+    const to = at + (event.key === 'ArrowUp' ? -1 : 1)
+    if (at < 0 || to < 0 || to >= ids.length) return
+    refocusId.current = id
+    void queue.reorder(moveId(ids, id, to))
   }
-
-  const onDragEnd = () => {
-    setDragId(null)
-    setDropTargetId(null)
-    dragFromIndexRef.current = null
+  const startEdit = (id: string) => {
+    const bubble = groupRef.current?.querySelector<HTMLElement>(`[data-queued-id="${CSS.escape(id)}"] .chat-user-bubble`)
+    // A few pixels over the bubble's width, so a line that just fits it does not wrap in the field.
+    const width = bubble?.getBoundingClientRect().width
+    setEditing({ id, width: width ? Math.ceil(width) + 8 : null })
   }
-
-  const displayedItems = [
-    ...items,
-    ...optimisticItems.filter((optimistic) =>
-      optimistic.threadId === threadId && !items.some((item) => item.id === optimistic.id)
-    )
-  ]
-
-  useComposerNotice(error ? { tone: 'error', title: error, onDismiss: () => setError(null) } : null)
-
-  // The queue is one entry of the dock above the composer: a higher notice (a paused run) hides it.
-  const present = Boolean(threadId) && displayedItems.length > 0
-  const { state: dock, reveal } = useComposerDockStrip(present)
-  const shownIds = displayedItems.map((item) => item.id).join('\n')
-  useEffect(() => {
-    const known = knownIds.current
-    if (!known || !shownIds) return
-    let added = false
-    for (const id of shownIds.split('\n')) {
-      if (known.has(id)) continue
-      known.add(id)
-      added = true
-    }
-    if (added) reveal()
-  }, [shownIds, reveal])
-
-  if (!present || dock === 'hidden') return null
+  const saveEdit = async (item: QueuedMessage, text: string) => {
+    const content = queuedContentWithText(item.content, text)
+    if (content === item.content) { setEditing(null); return }
+    setSavingId(item.id)
+    const saved = await queue.edit(item.id, content)
+    setSavingId(null)
+    if (saved) setEditing((current) => (current?.id === item.id ? null : current))
+  }
 
   return (
-    <div className={`queued-messages${dock === 'leaving' ? ' is-leaving' : ''}`} aria-label="Queued messages">
-      <ul id={listId} className="queued-messages-list" role="list">
-        {displayedItems.map((item, index) => {
-          const optimistic = item.id.startsWith('optimistic:')
-          const busy = optimistic || Boolean(busyIds[item.id])
-          const isSteering = item.intent === 'steer' || item.state === 'steering'
-          const isDragging = dragId === item.id
-          const isDropTarget = dropTargetId === item.id && dragId !== null && dragId !== item.id
-          return (
-            <li
-              key={item.id}
-              className={[
-                'queued-messages-row',
-                isDragging ? 'is-dragging' : '',
-                isDropTarget ? 'is-drop-target' : '',
-                isSteering ? 'is-steering' : ''
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              draggable={!busy}
-              onDragStart={(event) => onDragStart(event, item.id, index)}
-              onDragOver={(event) => onDragOver(event, item.id)}
-              onDrop={(event) => onDrop(event, item.id)}
-              onDragEnd={onDragEnd}
-              aria-grabbed={isDragging}
-            >
-              <span className="queued-messages-handle" aria-hidden="true" title="Drag to reorder">
-                <GripVertical size={14} strokeWidth={2} />
-              </span>
-              <div className="queued-messages-preview" title={previewText(item)}>
-                <div className="queued-messages-preview-main">
-                  {item.images && item.images.length > 0 && (
-                    <span className="queued-messages-thumbs" aria-label={`${item.images.length} image${item.images.length === 1 ? '' : 's'}`}>
-                      {item.images.slice(0, 3).map((image, imageIndex) => (
-                        <img
-                          key={`${item.id}-img-${imageIndex}`}
-                          className="queued-messages-thumb"
-                          src={imagePayloadToDataUrl(image)}
-                          alt=""
-                          draggable={false}
-                        />
-                      ))}
-                      {item.images.length > 3 && (
-                        <span className="queued-messages-thumb-more">+{item.images.length - 3}</span>
-                      )}
-                    </span>
-                  )}
-                  <span className="queued-messages-preview-text">{previewText(item)}</span>
+    <div
+      ref={groupRef}
+      className="queued-messages"
+      role="list"
+      aria-label="Queued messages"
+      data-find-ignore
+      onDragOver={(event) => { if (dragId) event.preventDefault() }}
+      onDrop={(event) => { if (!dragId) return; event.preventDefault(); finishDrag() }}
+    >
+      {shown.map((item, index) => {
+        const optimistic = isOptimisticQueueItem(item)
+        const busy = optimistic || Boolean(busyIds[item.id])
+        const steering = isSteering(item)
+        const last = index === shown.length - 1
+        const canDrag = ids.length > 1 && !optimistic && !busy
+        const isEditing = editing?.id === item.id
+        const sendLabel = steering ? 'Sending now…' : 'Send now'
+        const label = last ? <span className="queued-message-state" title="Sends when the current reply ends">Queued</span> : null
+        return (
+          <div
+            key={item.id}
+            role="listitem"
+            className={['queued-message', dragId === item.id ? 'is-dragging' : '', isEditing ? 'is-editing' : ''].filter(Boolean).join(' ')}
+            data-queued-id={item.id}
+            draggable={armedId === item.id}
+            onDragStart={(event) => onDragStart(event, item.id)}
+            onDragOver={(event) => onDragOverItem(event, item.id)}
+            onDragEnd={finishDrag}
+          >
+            {isEditing ? (
+              <QueuedEditor
+                initial={splitQueuedContent(item.content).text}
+                width={editing.width}
+                saving={savingId === item.id}
+                canBeEmpty={Boolean(item.images?.length || splitQueuedContent(item.content).markers)}
+                label={label}
+                onSave={(text) => void saveEdit(item, text)}
+                onCancel={() => setEditing(null)}
+              />
+            ) : (
+              <>
+                <div className="queued-message-bubble"><QueuedBubble item={item} /></div>
+                <div className="queued-message-line">
+                  <span className="queued-message-actions">
+                    {canDrag && (
+                      <button
+                        type="button"
+                        className="queued-message-btn queued-message-grip"
+                        title="Drag to reorder (Alt+Up/Down)"
+                        aria-label="Reorder queued message. Alt+Up or Alt+Down moves it."
+                        onPointerDown={() => setArmedId(item.id)}
+                        onKeyDown={(event) => onGripKeyDown(event, item.id)}
+                      >
+                        <GripVertical size={14} strokeWidth={1.8} />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="queued-message-btn queued-message-send"
+                      title={sendLabel}
+                      aria-label={steering ? 'Sending the queued message now' : 'Send the queued message now'}
+                      disabled={busy || steering}
+                      onClick={() => void queue.steer(item.id)}
+                    >
+                      <ArrowTurnForward size={14} strokeWidth={1.8} />
+                    </button>
+                    {canEditQueued(item) && (
+                      <button
+                        type="button"
+                        className="queued-message-btn"
+                        title="Edit"
+                        aria-label="Edit queued message"
+                        disabled={busy}
+                        onClick={() => startEdit(item.id)}
+                      >
+                        <Pencil size={14} strokeWidth={1.8} />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="queued-message-btn"
+                      title="Remove"
+                      aria-label="Remove queued message"
+                      disabled={busy}
+                      onClick={() => void queue.remove(item.id)}
+                    >
+                      <Trash2 size={14} strokeWidth={1.8} />
+                    </button>
+                  </span>
+                  {label}
                 </div>
-              </div>
-              <div className="queued-messages-actions">
-                <button
-                  type="button"
-                  className="queued-messages-btn queued-messages-btn-icon queued-messages-btn-steer"
-                  onClick={() => void handleSteer(item.id)}
-                  disabled={busy || isSteering}
-                  title={isSteering ? 'Steering…' : 'Send now (steer)'}
-                  aria-label={isSteering ? 'Steering…' : 'Send now (steer)'}
-                >
-                  <ArrowTurnForward size={14} strokeWidth={2} />
-                </button>
-                {onEditItem && !item.subagentNotice?.length && (
-                  <button
-                    type="button"
-                    className="queued-messages-btn queued-messages-btn-icon"
-                    onClick={() => onEditItem(item)}
-                    disabled={busy}
-                    title="Edit in composer"
-                    aria-label="Edit queued message in composer"
-                  >
-                    <Pencil size={14} strokeWidth={2} />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="queued-messages-btn queued-messages-btn-icon"
-                  onClick={() => void handleRemove(item.id)}
-                  disabled={busy}
-                  title="Remove from queue"
-                  aria-label="Remove queued message"
-                >
-                  <Trash2 size={14} strokeWidth={2} />
-                </button>
-                <QueueMenu
-                  open={menuOpenId === item.id}
-                  busy={busy}
-                  canMoveUp={index > 0}
-                  canMoveDown={!optimistic && index < displayedItems.length - 1}
-                  onToggle={() => setMenuOpenId((current) => (current === item.id ? null : item.id))}
-                  onCopy={() => void handleCopy(stripComposerTransportMarkers(item.content) || item.content)}
-                  onMoveUp={() => void handleMove(item.id, -1)}
-                  onMoveDown={() => void handleMove(item.id, 1)}
-                />
-              </div>
-            </li>
-          )
-        })}
-      </ul>
+              </>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

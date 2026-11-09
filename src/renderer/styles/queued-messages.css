@@ -1,0 +1,141 @@
+/* Queued messages at the end of the conversation (QueuedMessages): each one a sent prompt's bubble,
+   dimmed until it sends, with the same 28px line under it as a sent prompt. The line's buttons show on
+   hover or keyboard focus; the line itself is always there, so nothing moves when they appear. */
+.queued-messages {
+  display: flex;
+  flex-direction: column;
+  margin-top: 24px;
+}
+
+.queued-message {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.queued-message-bubble {
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+}
+
+.queued-message:is(:hover, :focus-within) .queued-message-bubble {
+  opacity: 0.75;
+}
+
+.queued-message-line {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  height: 28px;
+  padding-top: 4px;
+  font-size: 0.875rem;
+  color: color-mix(in oklab, var(--color-an-foreground-muted) 70%, transparent);
+}
+
+.queued-message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+}
+
+.queued-message:is(:hover, :focus-within, .is-dragging, .is-editing) .queued-message-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* The buttons of a sent prompt's line: 24px, half strength until hovered. */
+.queued-message-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-an-foreground-muted);
+  opacity: 0.5;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.queued-message-btn:enabled:hover {
+  opacity: 1;
+  background: color-mix(in oklab, var(--color-an-foreground) 10%, transparent);
+}
+
+.queued-message-btn:disabled {
+  cursor: not-allowed;
+}
+
+.queued-message-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 1px;
+}
+
+/* Send now is the line's one coloured action. */
+.queued-message-send {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+.queued-message-grip {
+  cursor: grab;
+}
+
+.queued-message-grip:active {
+  cursor: grabbing;
+}
+
+.queued-message-state {
+  padding: 0 2px;
+}
+
+/* Reordering: the dragged prompt is lifted (full strength, the specular light, a soft shadow) while the
+   others make room under the pointer. */
+.queued-message.is-dragging .queued-message-bubble {
+  opacity: 1;
+}
+
+.queued-message.is-dragging .chat-user-bubble {
+  box-shadow: var(--ui-specular), 0 10px 28px rgba(0, 0, 0, 0.32);
+}
+
+/* Edit in place: the bubble becomes a small editor of the same width, at full strength. */
+.queued-message-editor {
+  align-self: flex-end;
+  box-sizing: border-box;
+  min-width: min(320px, calc(95% - 40px));
+  max-width: calc(95% - 40px);
+  padding: 6px 14px;
+  border-radius: var(--radius-an-message);
+  background: var(--color-an-user-message-bg);
+  color: var(--color-an-user-message-text);
+  box-shadow: var(--ui-specular);
+}
+
+.queued-message-editor textarea {
+  display: block;
+  width: 100%;
+  max-height: 50vh;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+
+/* The editor draws its focus on its surface (the specular edge), not on the bare field. */
+.queued-message-editor textarea:focus {
+  background: transparent;
+  box-shadow: none;
+}

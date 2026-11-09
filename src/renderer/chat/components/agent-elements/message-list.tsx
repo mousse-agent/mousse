@@ -98,6 +98,11 @@ export type MessageListProps = {
   /** The composer should fold to one line: the reader is browsing earlier messages. */
   onComposerCompactChange?: (compact: boolean) => void;
   lastTurnNotice?: React.ReactNode;
+  /**
+   * Drawn after the last turn (the thread's queued messages). Outside the windowed rows, so it
+   * follows the end like the breathing space does.
+   */
+  afterTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
   suppressQuestionTool?: boolean;
   /**
@@ -901,6 +906,7 @@ export const MessageList = memo(function MessageList({
   className,
   showCopyToolbar = true,
   lastTurnNotice,
+  afterTurns,
   onAtBottomChange,
   onComposerCompactChange,
   suppressQuestionTool = false,
@@ -1916,6 +1922,7 @@ export const MessageList = memo(function MessageList({
             );
           })}
         </div>
+        {afterTurns}
         {showAssistantBreathingSpace && (
           <div
             aria-hidden="true"
