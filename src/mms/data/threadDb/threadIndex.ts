@@ -159,14 +159,10 @@ export class ThreadIndex {
   update(profileHome: string, targets: IndexTarget[], options: { verify?: boolean } = {}): number {
     return this.withIndex(profileHome, (db) => {
       let updated = 0
-      for (const target of targets) {
-        try {
-          if (this.updateThread(db, target, options.verify === true)) updated += 1
-        } catch (error) {
-          // A thread that cannot be read now (moved, being imported) is caught up later; a damaged index is not.
-          if (isDamage(error)) throw error
-        }
-      }
+      // Only a thread that cannot be read now (moved, being imported) is skipped, to be caught up later. Any error
+      // writing the index (busy, locked, damaged) stops the update, so the search falls back instead of answering
+      // from rows it could not bring up to date.
+      for (const target of targets) if (this.updateThread(db, target, options.verify === true)) updated += 1
       return updated
     })
   }
@@ -179,13 +175,21 @@ export class ThreadIndex {
     const stamp = stampOf(dir)
     const known = db.prepare('SELECT db_id, epoch, seq, stamp FROM indexed WHERE thread_id = ?').get(threadId) as { db_id: string; epoch: number; seq: number; stamp: string } | undefined
     if (known && known.stamp === stamp && !verify) return false
-    const info = this.engine.info(dir)
-    if (known && known.db_id === info.dbId && known.epoch === info.epoch && known.seq === info.seq) {
+    let changes: ReturnType<ThreadDbEngine['changes']> | undefined
+    try {
+      const info = this.engine.info(dir)
+      if (!(known && known.db_id === info.dbId && known.epoch === info.epoch && known.seq === info.seq)) {
+        const fresh = !known || known.db_id !== info.dbId
+        changes = fresh ? { ...this.engine.load(dir), removed: [], removedState: [], reset: true } : this.engine.changes(dir, known.seq, known.epoch)
+      }
+    } catch {
+      // The thread's own database cannot be read now; the index is left as it is for this thread.
+      return false
+    }
+    if (!changes) {
       db.prepare('UPDATE indexed SET stamp = ? WHERE thread_id = ?').run(stamp, threadId)
       return false
     }
-    const fresh = !known || known.db_id !== info.dbId
-    const changes = fresh ? { ...this.engine.load(dir), removed: [], reset: true } : this.engine.changes(dir, known.seq, known.epoch)
     const remove = db.prepare('DELETE FROM msg WHERE thread_id = ? AND rid = ?')
     const insert = db.prepare('INSERT INTO msg(thread_id, rid, ord, message_id, body, folded) VALUES (?, ?, ?, ?, ?, ?)')
     db.exec('BEGIN IMMEDIATE')

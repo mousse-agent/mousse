@@ -1859,10 +1859,17 @@ export class ThreadDataStore extends EventEmitter {
     } catch (error) {
       console.warn('thread search index could not answer; searching transcripts instead', { error: error instanceof Error ? error.message : String(error) })
       out.length = 0
+      distinct.clear()
+      // Each thread is read whole (a limit before removing repeats would lose results), and reading stops once
+      // enough distinct results are found.
       for (const thread of ordered) {
+        if (distinct.size >= limit) break
         try {
-          const found = await this.threadDb().client.call('searchTranscript', thread.dir, plan.normalized, limit)
-          out.push(...this.messageResults(byId.get(thread.id)!, plan, found))
+          const found = await this.threadDb().client.call('searchTranscript', thread.dir, plan.normalized, Number.MAX_SAFE_INTEGER)
+          for (const result of this.messageResults(byId.get(thread.id)!, plan, found)) {
+            out.push(result)
+            distinct.add(`${result.threadId}:${result.messageId}:${result.snippet}`)
+          }
         } catch {
           /* skip a thread that cannot be read now */
         }
@@ -1940,14 +1947,15 @@ export class ThreadDataStore extends EventEmitter {
   private readonly dirCache = new Map<string, string>()
 
   private listedThreadDir(id: string): string {
-    // Lifecycle state is checked every time (another process may have fenced or moved the thread); only the
-    // folder's resolution is cached.
-    if (!this.isLifecycleVisible(id)) {
+    // Lifecycle state is checked every time (another process may have fenced or moved the thread), with one read of
+    // the thread's record; only the folder's resolution is cached.
+    const record = this.lifecycleStore.get(id)
+    if ((record && record.state !== 'active') || (record?.parentTaskId && !this.isLifecycleVisible(record.parentTaskId))) {
       this.dirCache.delete(id)
       throw new Error(`Thread ${id} is not active`)
     }
     let dir = this.dirCache.get(id)
-    if (!dir || this.lifecycleStore.get(id)?.location !== dir) {
+    if (!dir || (record && record.location !== dir)) {
       dir = this.getThreadDir(id)
       this.dirCache.set(id, dir)
     }

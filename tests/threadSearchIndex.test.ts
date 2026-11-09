@@ -174,4 +174,32 @@ describe('thread search index', () => {
     expect(messageIds(await store.searchThreadsAsync('é'))).toEqual(['e'])
     expect(messageIds(await store.searchThreadsAsync('i\u0307x'))).toEqual(['i'])
   })
+
+  it('falls back instead of answering from rows a busy index could not bring up to date', async () => {
+    const path = home()
+    const store = open(path)
+    const id = thread(store, 'Busy', [message('m1', 'first')])
+    expect(messageIds(await store.searchThreadsAsync('first'))).toEqual(['m1'])
+    store.mutateThreadData(id, (current) => ({ messages: [...current.messages, message('m2', 'second')] }))
+    const holder = new DatabaseSync(join(path, INDEX_FILE))
+    holder.exec('BEGIN IMMEDIATE')
+    try {
+      expect(messageIds(await store.searchThreadsAsync('second'))).toEqual(['m2'])
+    } finally {
+      holder.exec('ROLLBACK')
+      holder.close()
+    }
+  }, 30_000)
+
+  it('fills the limit after removing repeats when it falls back too', async () => {
+    const path = home()
+    const store = open(path)
+    thread(store, 'Repeats', [...Array.from({ length: 60 }, () => message('dup', 'dup needle')), message('other', 'other needle')])
+    expect(messageIds(await store.searchThreadsAsync('needle', 2))).toEqual(['dup', 'other'])
+    const other = new DatabaseSync(join(path, INDEX_FILE))
+    other.exec('DROP TABLE msg_fts')
+    other.close()
+    expect(messageIds(await store.searchThreadsAsync('needle', 2))).toEqual(['dup', 'other'])
+  })
 })
+
