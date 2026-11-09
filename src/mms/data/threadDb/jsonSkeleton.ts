@@ -31,7 +31,8 @@ function serialized(value: unknown, key: string): unknown {
     if (typeof toJSON === 'function') value = toJSON.call(value, key)
   }
   if (value !== null && typeof value === 'object') {
-    if (boxed(value, Number.prototype)) return Number(value)
+    // ToNumber, as JSON does: unary plus throws on a BigInt where Number() would convert it.
+    if (boxed(value, Number.prototype)) return +(value as unknown as number)
     if (boxed(value, String.prototype)) return String(value)
     if (boxed(value, Boolean.prototype)) return Boolean.prototype.valueOf.call(value)
     if (boxed(value, BigInt.prototype)) throw new TypeError('Do not know how to serialize a BigInt')

@@ -5,7 +5,8 @@
  * - `m`: the transcript (`ChatMessage`, what people see);
  * - `c:a` / `c:r`: the model context's active and retired messages (`NativeLlmContext.messages` and
  *   `.retiredMessages`, what the model is sent; after compaction they differ from the transcript);
- * - `s:<n>:m`, `s:<n>:h`, `s:<n>:ca`, `s:<n>:cr`: the same three for Mousse subagent session `n`.
+ * - `s:<key>:m`, `s:<key>:h`, `s:<key>:ca`, `s:<key>:cr`: the same three for a Mousse subagent session, keyed by its
+ *   agent id (`#2`, `#3`… for a repeated id).
  *
  * State keys: `agents`, `tasks`, `context` (the context without its message arrays), `sessions` (the session
  * headers without theirs). A missing `context` state means the thread has no model context.
@@ -53,12 +54,19 @@ export function decompose(data: StoredThreadData): Decomposed {
   if (data.llmContext) state.set('context', contextHeader(data.llmContext as unknown as Loose, 'c:', collections))
   const sessions = data.mousseAgentSessions ?? []
   if (sessions.length) {
-    state.set('sessions', sessions.map((session, index) => {
+    // Each session's rows are keyed by its agent id, so removing or reordering sessions never moves one session's
+    // messages into another's.
+    const used = new Map<string, number>()
+    state.set('sessions', sessions.map((session) => {
       const { messages, history, nativeContext, ...header } = session as unknown as Loose
-      collections.set(`s:${index}:m`, Array.isArray(messages) ? messages : [])
-      if (Array.isArray(history)) collections.set(`s:${index}:h`, history)
-      const out: Loose = { ...header, $history: Array.isArray(history) }
-      if (isRecord(nativeContext)) out.$context = contextHeader(nativeContext, `s:${index}:c`, collections)
+      const agentId = typeof header.agentId === 'string' && header.agentId ? header.agentId : 'session'
+      const count = used.get(agentId) ?? 0
+      used.set(agentId, count + 1)
+      const key = count ? `${agentId}#${count}` : agentId
+      collections.set(`s:${key}:m`, Array.isArray(messages) ? messages : [])
+      if (Array.isArray(history)) collections.set(`s:${key}:h`, history)
+      const out: Loose = { ...header, $key: key, $history: Array.isArray(history) }
+      if (isRecord(nativeContext)) out.$context = contextHeader(nativeContext, `s:${key}:c`, collections)
       return out
     }))
   }
@@ -78,10 +86,11 @@ export function compose(collections: Map<string, unknown[]>, state: Map<string, 
   const sessions = state.get('sessions')
   if (Array.isArray(sessions)) {
     data.mousseAgentSessions = sessions.map((header, index) => {
-      const { $history, $context, ...rest } = header as Loose
-      const session: Loose = { ...rest, messages: collections.get(`s:${index}:m`) ?? [] }
-      if ($history === true) session.history = collections.get(`s:${index}:h`) ?? []
-      if (isRecord($context)) session.nativeContext = contextFrom($context, `s:${index}:c`, collections)
+      const { $key, $history, $context, ...rest } = header as Loose
+      const key = typeof $key === 'string' ? $key : String(index)
+      const session: Loose = { ...rest, messages: collections.get(`s:${key}:m`) ?? [] }
+      if ($history === true) session.history = collections.get(`s:${key}:h`) ?? []
+      if (isRecord($context)) session.nativeContext = contextFrom($context, `s:${key}:c`, collections)
       return session
     }) as unknown as ThreadData['mousseAgentSessions']
   }
@@ -90,7 +99,7 @@ export function compose(collections: Map<string, unknown[]>, state: Map<string, 
 
 /** The fields a transcript row is indexed by. */
 export function rowFields(collection: string, value: unknown): { msgId: string | null; role: string | null; kind: string | null; ts: string | null } {
-  if (collection !== TRANSCRIPT && !/^s:\d+:m$/.test(collection)) return { msgId: null, role: null, kind: null, ts: null }
+  if (collection !== TRANSCRIPT && !/^s:.+:m$/.test(collection)) return { msgId: null, role: null, kind: null, ts: null }
   const record = isRecord(value) ? value : {}
   const ts = record.timestamp
   return {

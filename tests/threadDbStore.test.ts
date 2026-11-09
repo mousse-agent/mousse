@@ -198,7 +198,7 @@ describe('ThreadDbStore keeps rows its caller never saw', () => {
     expect(ids()).toEqual(['a', 'peer', 'b'])
   })
 
-  it('in the model context, where rows have no id', () => {
+  it('the model context is the owner\'s: its save replaces it whole', () => {
     const context = (messages: unknown[]) => ({ version: 2, messages, fidelity: 'native', activeStartIndex: 0 }) as unknown as NativeLlmContext
     store.save(dir, { llmContext: context([{ role: 'user', content: 'a' }]) })
     const mine = store.load(dir).llmContext!
@@ -206,7 +206,7 @@ describe('ThreadDbStore keeps rows its caller never saw', () => {
     peer.save(dir, { llmContext: { ...theirs, messages: [...theirs.messages, { role: 'user', content: 'peer' }] } as NativeLlmContext })
     store.save(dir, { llmContext: { ...mine, messages: [...mine.messages, { role: 'user', content: 'owner' }] } as NativeLlmContext })
     const contents = new ThreadDbStore(client).load(dir).llmContext!.messages.map((m) => (m as { content: string }).content)
-    expect(contents).toEqual(['a', 'peer', 'owner'])
+    expect(contents).toEqual(['a', 'owner'])
   })
 
   it('but removes what it saw, even when it clears the list or replaces every message with a copy', () => {
@@ -306,15 +306,43 @@ describe('ThreadDbStore removes only rows a caller had', () => {
     expect(ids()).toContain('new')
   })
 
-  it('an empty session list is known too', () => {
-    const session = { version: 2, agentId: 'x', worktreePath: '/w', task: 't', assignment: {}, runState: 'idle', updatedAt: 'u', messages: [] }
-    store.save(dir, { mousseAgentSessions: [session] as never })
-    const first = store.load(dir).mousseAgentSessions!
-    const second = store.load(dir).mousseAgentSessions!
-    first[0]!.messages.push(message('local', 'l'))
-    store.save(dir, { mousseAgentSessions: first })
-    store.save(dir, { mousseAgentSessions: second })
-    expect(new ThreadDbStore(client).load(dir).mousseAgentSessions![0]!.messages.map((m) => m.id)).toEqual(['local'])
+  it('removing a session never moves its messages into another', () => {
+    const session = (agentId: string, ids: string[]) => ({ version: 2, agentId, worktreePath: '/w', task: 't', assignment: {}, runState: 'idle', updatedAt: 'u', messages: ids.map((id) => message(id, id)) })
+    store.save(dir, { mousseAgentSessions: [session('one', ['o1']), session('two', ['t1'])] as never })
+    const loaded = store.load(dir).mousseAgentSessions!
+    store.save(dir, { mousseAgentSessions: loaded.slice(1) })
+    const back = new ThreadDbStore(client).load(dir).mousseAgentSessions!
+    expect(back.map((entry) => [entry.agentId, entry.messages.map((m) => m.id)])).toEqual([['two', ['t1']]])
+  })
+
+  it('the orchestrator\'s own list: an appended message is replaced or removed like any other', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const live = store.load(dir).messages
+    live.push(message('b', 'b'))
+    store.save(dir, { messages: live })
+    live[1] = { ...live[1]!, content: 'updated' }
+    store.save(dir, { messages: live })
+    expect(new ThreadDbStore(client).load(dir).messages.map((m) => [m.id, m.content])).toEqual([['a', 'a'], ['b', 'updated']])
+    live.splice(1, 1)
+    expect(store.save(dir, { messages: live }).deleted).toBe(1)
+    expect(ids()).toEqual(['a'])
+  })
+
+  it('a save of other parts never marks an unseen transcript row as seen', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const copies = store.load(dir).messages.map((m) => structuredClone(m))
+    peer.save(dir, { messages: [...peer.load(dir).messages, message('peer', 'p')] })
+    store.save(dir, { agents: [] })
+    store.forget(dir)
+    store.save(dir, { messages: copies })
+    expect(ids()).toEqual(['a', 'peer'])
+  })
+
+  it('a store that never loaded the thread removes nothing', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const fresh = new ThreadDbStore(new ThreadDbClient({ script: null }))
+    fresh.save(dir, { messages: [] })
+    expect(ids()).toEqual(['a'])
   })
 })
 
@@ -381,6 +409,9 @@ describe('JSON fidelity of saved rows', () => {
     expect(skeletonOf({ fn, flag })).toEqual(JSON.parse(JSON.stringify({ fn, flag })))
     expect(() => JSON.stringify(Object(1n))).toThrow(TypeError)
     expect(() => skeletonOf(Object(1n))).toThrow(TypeError)
+    const sneaky = Object.assign(new Number(1), { [Symbol.toPrimitive]: () => 1n })
+    expect(() => JSON.stringify({ sneaky })).toThrow(TypeError)
+    expect(() => skeletonOf({ sneaky })).toThrow(TypeError)
     const cycle: Record<string, unknown> = {}
     cycle.self = cycle
     expect(() => skeletonOf(cycle)).toThrow(TypeError)

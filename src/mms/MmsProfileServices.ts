@@ -33,7 +33,7 @@ import { createCodexProviderService, findCodexBinary, type CodexProviderService 
 import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
-import type { ScheduledJob, Thread } from '../shared/types'
+import type { ChatMessage, ScheduledJob, Thread } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -2019,7 +2019,7 @@ export class MmsProfileServices {
         /* keep current */
       }
       return {
-        messages: this.orchestrator.getMessagesForPersistence(id),
+        messages: this.orchestrator.liveMessagesForSave(id) as ChatMessage[],
         agents,
         tasks,
         llmContext: this.orchestrator.getNativeContext(id)

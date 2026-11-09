@@ -68,7 +68,7 @@ export interface ThreadDataChange {
 export interface SaveStats { inserted: number; updated: number; deleted: number; state: number; bytes: number }
 
 function rowId(collection: string, value: unknown): string | null {
-  if (collection !== TRANSCRIPT && !/^s:\d+:m$/.test(collection)) return null
+  if (collection !== TRANSCRIPT && !/^s:.+:m$/.test(collection)) return null
   const id = (value as { id?: unknown } | null)?.id
   return typeof id === 'string' ? id : null
 }
@@ -94,7 +94,10 @@ export class ThreadDbStore {
     return existsSync(join(dir, THREAD_DB_FILE))
   }
 
-  /** A thread's rows from a load. Rows newer than anything this process saw of it (it left the cache) are unseen. */
+  /**
+   * A thread's rows from a load. Rows newer than anything this process saw of it (it left the cache), or every row
+   * when this process never saw it, are unseen until they are handed out.
+   */
   private entryFrom(dir: string, load: DbLoad): Entry {
     const seen = this.observed.get(dir)
     const horizon = seen && seen.dbId === load.info.dbId ? seen.seq : undefined
@@ -103,7 +106,7 @@ export class ThreadDbStore {
       const value = JSON.parse(row.payload) as unknown
       let rows = collections.get(row.coll)
       if (!rows) collections.set(row.coll, (rows = []))
-      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: horizon !== undefined && row.seq > horizon })
+      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: horizon === undefined || row.seq > horizon })
     }
     for (const rows of collections.values()) sortRows(rows)
     const state = new Map<string, Skeleton>(load.state.map((row) => [row.key, skeletonOf(JSON.parse(row.payload)) ?? null]))
@@ -359,8 +362,12 @@ export class ThreadDbStore {
     }
     note(items)
     const ridOf = items.map((item) => note(item)?.rid)
-    /** Rows the caller had: those it may remove, and the only ones a new message may take the place of. */
-    const seen = (row: Row): boolean => (stale ? false : tracked ? held.has(row.rid) : !row.unseen)
+    /**
+     * Rows the caller had: those it may remove, and the only ones a new message may take the place of. The model
+     * context and subagent sessions are written only by the thread's owner, so a save replaces them whole.
+     */
+    const wholeReplace = coll !== TRANSCRIPT
+    const seen = (row: Row): boolean => (wholeReplace ? true : stale ? false : tracked ? held.has(row.rid) : !row.unseen)
     const byRid = new Map<number, Row>(old.map((row) => [row.rid, row]))
     const visible = old.filter(seen)
     const byId = new Map<string, Row[]>()
@@ -372,7 +379,7 @@ export class ThreadDbStore {
     }
     const claimed = new Set<number>()
     const matches: Array<Row | undefined> = new Array(items.length)
-    const hasIds = coll === TRANSCRIPT || /^s:\d+:m$/.test(coll)
+    const hasIds = coll === TRANSCRIPT || /^s:.+:m$/.test(coll)
     for (let j = 0; j < items.length; j++) {
       const item = items[j]
       let row: Row | undefined
@@ -535,7 +542,7 @@ export class ThreadDbStore {
     entry.info = info
     this.registerObjects(entry, plan, rids)
     // A save that left nothing unseen in place means this process has seen the thread up to here.
-    const unseenLeft = [...plan.collections.values()].some(({ survivors }) => survivors.some((row) => row.unseen))
+    const unseenLeft = [...entry.collections.values()].some((rows) => rows.some((row) => row.unseen))
     if (!unseenLeft && entry.info.dbId === this.observed.get(dir)?.dbId) this.observed.set(dir, { dbId: entry.info.dbId, seq: info.seq })
   }
 }
