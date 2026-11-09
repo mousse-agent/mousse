@@ -204,10 +204,11 @@ describe('a reconnect to a long thread whose ids repeat', () => {
     const withId = (id: string, content: string) => ({ ...message(id), content })
     useAppStore.setState({
       activeThreadId: 't',
-      messages: [withId('a', 'a'), withId('d', 'first'), withId('x', 'x'), withId('d', 'second'), withId('y', 'y')],
-      earlierByThread: { t: { before: 'a', count: 1 } }
+      // The whole transcript is [a, d, x, d, y]; this window loaded back to x and keeps one message per id.
+      messages: [withId('x', 'x'), withId('d', 'second'), withId('y', 'y')],
+      earlierByThread: { t: { before: 'x', count: 2 } }
     })
-    useAppStore.getState().applyThreadView({ threadId: 't', messages: [withId('d', 'second'), withId('y', 'y')], earlier: { before: 'd\u001f1', count: 4 } } as never)
-    expect(useAppStore.getState().earlierByThread.t).toEqual({ before: 'a', count: 1 })
+    useAppStore.getState().applyThreadView({ threadId: 't', messages: [withId('d', 'second'), withId('y', 'y')], earlier: { before: 'd\u001f1', count: 3 } } as never)
+    expect(useAppStore.getState().earlierByThread.t).toEqual({ before: 'x', count: 2 })
   })
 })
