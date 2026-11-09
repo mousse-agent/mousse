@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { buildScheduleAddInput } from '../src/cli/commands/schedule'
+import { buildScheduleAddInput } from '../src/cli/commands/automation'
 import { parseArgs } from '../src/cli/parseArgs'
 import {
   asCreateScheduledJobInput,

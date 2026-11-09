@@ -941,8 +941,9 @@ const api = {
   scheduled: {
     list: (): Promise<ScheduledJob[]> => ipcRenderer.invoke('scheduled:list'),
     get: (id: string): Promise<ScheduledJob | undefined> => ipcRenderer.invoke('scheduled:get', id),
-    create: (input: CreateScheduledJobInput): Promise<ScheduledJob> =>
-      ipcRenderer.invoke('scheduled:create', input),
+    /** `node`: the other computer that owns and runs it; absent, this one. */
+    create: (input: CreateScheduledJobInput, node?: string): Promise<ScheduledJob> =>
+      ipcRenderer.invoke('scheduled:create', input, node),
     update: (id: string, patch: ScheduledJobPatch): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:update', id, patch),
     webhook: {
@@ -953,8 +954,9 @@ const api = {
         ipcRenderer.invoke('scheduled:webhook:deliveries', id)
     },
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('scheduled:delete', id),
-    pause: (id: string, reason?: string): Promise<ScheduledJob | null> =>
-      ipcRenderer.invoke('scheduled:pause', id, reason),
+    /** `until` (ISO): the pause ends by itself then; without it the job stays paused until resumed. */
+    pause: (id: string, reason?: string, until?: string): Promise<ScheduledJob | null> =>
+      ipcRenderer.invoke('scheduled:pause', id, reason, until),
     resume: (id: string): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:resume', id),
     run: (id: string): Promise<ScheduledJob | null> => ipcRenderer.invoke('scheduled:run', id),

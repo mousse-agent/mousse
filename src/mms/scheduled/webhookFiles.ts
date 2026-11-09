@@ -26,6 +26,12 @@ export const MAX_UNAUTHENTICATED_DELIVERY_ROWS = 20
 /** A payload file nothing references is removed after this long. */
 export const TRIGGER_PAYLOAD_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
+/**
+ * The newest accepted deliveries whose payload a job keeps after its run, so Resend can run it again. Each payload is
+ * capped at the listener's 1 MiB; older ones are removed as new ones arrive.
+ */
+export const MAX_KEPT_PAYLOADS = 20
+
 export function assertSafeSegment(value: string, what: string): string {
   if (!SAFE_SEGMENT.test(value)) throw new Error(`Unsafe ${what}`)
   return value
@@ -84,6 +90,41 @@ export function removeTriggerPayload(homeDir: string, jobId: string, occurrenceI
   } catch {
     /* already gone */
   }
+}
+
+/** Whether a delivery's payload is still stored (Resend needs it). */
+export function hasTriggerPayload(homeDir: string, jobId: string, occurrenceId: string): boolean {
+  try {
+    return existsSync(payloadPath(homeDir, jobId, occurrenceId))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Removes the job's stored payloads except those `keep` names (a delivery that is pending, running, or among the newest
+ * the job keeps for Resend). With no `keep`, every payload goes (the webhook was turned off). The logs stay.
+ */
+export function pruneTriggerPayloads(homeDir: string, jobId: string, keep: ReadonlySet<string> = new Set()): number {
+  let names: string[]
+  try {
+    names = readdirSync(jobTriggerDir(homeDir, jobId))
+  } catch {
+    return 0
+  }
+  let removed = 0
+  for (const name of names) {
+    if (name === DELIVERY_LOG || name === RECEIPT_LOG || !name.endsWith('.json')) continue
+    const occurrenceId = name.slice(0, -'.json'.length)
+    if (!SAFE_SEGMENT.test(occurrenceId) || keep.has(occurrenceId)) continue
+    try {
+      unlinkSync(join(jobTriggerDir(homeDir, jobId), name))
+      removed += 1
+    } catch {
+      /* gone or busy: the next prune retries */
+    }
+  }
+  return removed
 }
 
 /** Deletes everything a job's webhook stored (its job was removed). */
@@ -183,6 +224,12 @@ function writeLog(homeDir: string, jobId: string, log: DeliveryLog): void {
 export function readDeliveries(homeDir: string, jobId: string): ScheduledWebhookDelivery[] {
   const log = readLog(homeDir, jobId)
   return [...log.accepted, ...log.refused, ...log.unauthenticated].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+}
+
+/** The deliveries whose payload stays for Resend: the newest accepted ones, up to `MAX_KEPT_PAYLOADS`. */
+export function keptPayloadIds(homeDir: string, jobId: string): Set<string> {
+  const accepted = readLog(homeDir, jobId).accepted
+  return new Set(accepted.slice(-MAX_KEPT_PAYLOADS).flatMap((row) => (row.occurrenceId ? [row.occurrenceId] : [])))
 }
 
 export function appendDelivery(homeDir: string, jobId: string, row: ScheduledWebhookDelivery): void {

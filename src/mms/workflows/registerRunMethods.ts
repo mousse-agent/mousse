@@ -1,3 +1,4 @@
+import type { PermissionMode } from '../../shared/permissionMode'
 import { WORKFLOW_RUN_CAPABILITY, WORKFLOW_RUN_METHODS, type WorkflowRunListPage, type WorkflowRunStartParams, type WorkflowRunTracePage } from '../../shared/workflowRunPlatform'
 import type { WorkflowRunSnapshot, WorkflowRuntimePort } from '../../shared/workflows'
 import type { ApprovalService } from '../execution/ApprovalService'
@@ -14,6 +15,8 @@ export interface WorkflowRunDomainRuntime extends Pick<WorkflowRuntimePort, 'get
 export interface WorkflowRunAdmission {
   readonly connectionId: string
   readonly source: 'gui' | 'cli' | 'remote' | 'schedule'
+  /** The permission mode the host holds the run to; the profile default when absent. */
+  readonly permissionMode?: PermissionMode
 }
 export interface WorkflowRunDomainServices {
   readonly profileId: string

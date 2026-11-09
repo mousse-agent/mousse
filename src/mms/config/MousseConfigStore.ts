@@ -26,7 +26,7 @@ import type {
   ScheduledJobDefinition
 } from './types'
 import { MOUSSE_CONF_VERSION } from './types'
-import type { ScheduledJob } from '../../shared/types'
+import { parseTellMe, type ScheduledJob } from '../../shared/types'
 import { MOUSSE_CONF_PROFILE_KEYS } from '../../shared/profiles/settingsClassification'
 import { pathsEqual } from '../profiles/pathSafety'
 import {
@@ -132,6 +132,8 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     projectId: job.projectId,
     createThread: job.createThread,
     selection: job.selection,
+    ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
+    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.model ? { model: job.bot.model } : {}) } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,
@@ -139,7 +141,12 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     createdBy: job.createdBy,
     accessCap: job.accessCap,
     expiresAt: job.expiresAt,
+    // Only a chosen value is written: a job without one keeps reading as Worth a look.
+    ...(parseTellMe(job.tellMe) ? { tellMe: parseTellMe(job.tellMe) } : {}),
     trigger: job.trigger,
+    ...(job.keys?.length ? { keys: [...job.keys] } : {}),
+    ...(job.draft ? { draft: job.draft } : {}),
+    ...(job.cliName ? { cliName: job.cliName } : {}),
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
       : undefined,
@@ -313,7 +320,13 @@ export class MousseConfigStore {
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
         // A job's model with a level packed into it (written before #490) is upgraded.
-        jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => (job?.selection ? { ...job, selection: upgradeSelection(job.selection) } : job)),
+        // A Tell me saved before levels is read as its level; one this version does not know is dropped (Worth a look).
+        jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => {
+          if (!job) return job
+          const { tellMe, ...rest } = job.selection ? { ...job, selection: upgradeSelection(job.selection) } : job
+          const level = parseTellMe(tellMe)
+          return level ? { ...rest, tellMe: level } : rest
+        }),
         ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
         ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {}),
         ...savedAgentJobLimits(raw.scheduled)

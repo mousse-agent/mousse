@@ -89,6 +89,11 @@
     "digest": "402ff47a04e385f6",
     "security": "926c4af141d1208d"
   },
+  "automations.list": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469",
+    "security": "412a1de3adf5afef"
+  },
   "chatReferences.resolve": {
     "version": 1,
     "digest": "55286740fccc87da",
@@ -598,6 +603,36 @@
     "version": 1,
     "digest": "09a87e17128c1172",
     "security": "56bf730c16aa9cd1"
+  },
+  "scheduled.create": {
+    "version": 1,
+    "digest": "2e60c015cf6b49d7",
+    "security": "72e89bafebed915a"
+  },
+  "scheduled.delete": {
+    "version": 1,
+    "digest": "23ee4261bf80dd28",
+    "security": "6f4539c345ae2836"
+  },
+  "scheduled.pause": {
+    "version": 1,
+    "digest": "fd67e884be73e8e3",
+    "security": "6f4539c345ae2836"
+  },
+  "scheduled.resume": {
+    "version": 1,
+    "digest": "23ee4261bf80dd28",
+    "security": "6f4539c345ae2836"
+  },
+  "scheduled.run": {
+    "version": 1,
+    "digest": "23ee4261bf80dd28",
+    "security": "72e89bafebed915a"
+  },
+  "scheduled.update": {
+    "version": 1,
+    "digest": "b477a176fd68d228",
+    "security": "72e89bafebed915a"
   },
   "skills.list": {
     "version": 1,

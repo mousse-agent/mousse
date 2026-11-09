@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import type { NetDomainComposition, NetRuntime, NetService } from '../net/NetService'
 import type { BotRuntimeAdapter, Clock, SyncSession } from '../net/contracts'
@@ -31,6 +32,7 @@ import { OwnerRoutes } from './routed/OwnerRoutes'
 import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
+import { RemoteAutomations } from './routed/remoteAutomations'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
@@ -427,6 +429,20 @@ export class BridgeProfileService {
     })
     services.orchestrator.setRemoteComputers(computersPort)
     this.disposers.add(() => services.orchestrator.setRemoteComputers(undefined))
+    // The Automations page lists the other computers' automations too (each stays stored and run where it is).
+    const automations = new RemoteAutomations({
+      client: this.router.client,
+      computers: () => this.router.pairedComputers(),
+      online: (node) => this.router.isOnline(node),
+      enabled: () => this.router.enabled(),
+      self: () => rt.identity.self()?.node,
+      cacheFile: join(services.getProfileHomeDir(), 'automations', 'other-computers.json'),
+      clock: this.clock
+    })
+    services.remoteAutomations = automations
+    this.disposers.add(() => {
+      if (services.remoteAutomations === automations) services.remoteAutomations = undefined
+    })
     // This computer's own threads go to the front of a group in front of the other computers' rows too.
     const floor = (projectId: string | undefined): number | undefined => this.lists.frontFloor(projectId)
     services.threads.remoteFloor = floor

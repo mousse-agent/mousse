@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../shared/bots/personal/chat'
-import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition } from '../../../shared/bots/personal/definition'
+import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
-import { MAX_BOT_CHAT_PAGE, type BotChatAttachment } from '../../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotComputerChoice } from '../../../shared/bots/personal/methods'
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
@@ -15,6 +15,24 @@ import { grantedPermissions, permissionId, starterManifest, withoutPermission } 
  * chat with it, answer its asks, and manage it from its menu and About. Every result is built from
  * `bots.db` by the projection, so no model or instance id reaches a client.
  */
+
+export type BotAutomationRunStatus = 'queued' | 'running' | 'waiting_grant' | 'paused' | 'blocked' | 'done' | 'failed' | 'cancelled'
+
+/**
+ * What the Automations page shows of a bot beside one of its schedules (whose record is an ordinary automation in the
+ * shared store): the bot's name and face, its own pause, and the runs that schedule started. No model or instance id.
+ */
+export interface BotAutomationFacts {
+  botName: string
+  look: BotLook
+  /** The bot itself is paused (by its owner, after three failed runs, or until a usage limit resets). */
+  paused: boolean
+  pausedText?: string
+  /** Newest first. */
+  runs: Array<{ id: string; status: BotAutomationRunStatus; at: string; endedAt?: string; endReason?: string; threadId?: string }>
+  /** An open ask one of these runs raised; it is answered in the bot chat, or in place from Needs you (`askId`). */
+  ask?: { text: string; activationId: string; askId?: string }
+}
 
 /** How long naming a new bot may take before the description names it (§5.3.1). */
 export const BOT_NAMING_TIMEOUT_MS = 5_000
@@ -63,6 +81,12 @@ export class BotChatService {
     store: BotStore
     memory?: BotMemoryAdmin
     now(): number
+    /** The models the owner may pick by hand (#673): ready, and able to hold a bot here. */
+    modelChoices?(): Promise<Array<{ model: string; label: string }>>
+    /** This computer's name. */
+    computerName?(): string
+    /** The person's other computers, online or not. */
+    otherComputers?(): Array<{ node: string; name: string; online: boolean }>
   }) {}
 
   private get store(): BotStore {
@@ -265,7 +289,80 @@ export class BotChatService {
     return this.detailOf(botId)
   }
 
-  /** `bots.schedules.remove`: About → Runs → Remove. */
+  /**
+   * A bot beside one of its schedules, as the Automations page shows it: its name and face, its own pause, and the runs
+   * that schedule started, newest first, with any open ask such a run raised. Undefined for a bot that is gone or
+   * deleted (its schedules leave every list with it).
+   */
+  automationFacts(botId: string, scheduleId: string, runsPerSchedule = 10): BotAutomationFacts | undefined {
+    let definition: BotDefinition
+    try {
+      definition = this.engine.definitionOf(botId)
+    } catch {
+      return undefined
+    }
+    const summary = this.engine.chat.summary(definition, this.options.now())
+    const runs = this.store.all(
+      "SELECT * FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'schedule' AND json_extract(trigger_json, '$.scheduleId') = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+      botId, scheduleId, runsPerSchedule
+    ).map((row) => ({
+      id: row.id as string,
+      status: row.status as BotAutomationRunStatus,
+      at: row.created_at as string,
+      ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {}),
+      ...(typeof row.end_reason === 'string' ? { endReason: row.end_reason } : {}),
+      ...(typeof row.thread_id === 'string' ? { threadId: row.thread_id } : {})
+    }))
+    const ask = this.store.openAsks(botId).find((entry) => entry.messageId !== null && runs.some((run) => run.id === entry.activationId))
+    return {
+      botName: definition.name,
+      look: summary.look,
+      paused: summary.state === 'paused',
+      ...(summary.state === 'paused' ? { pausedText: summary.stateText } : {}),
+      runs,
+      ...(ask ? { ask: { text: this.engine.chat.card(ask).title, activationId: ask.activationId, askId: ask.id } } : {})
+    }
+  }
+
+  /** `bots.schedules.add`: the owner gives the bot a schedule from the Automations page, with a model by hand or by usage. */
+  addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): BotDetail {
+    this.engine.addSchedule(botId, { when, prompt, ...(model ? { model } : {}) }, 'owner')
+    return this.detailOf(botId)
+  }
+
+  /**
+   * `bots.model.get` (#673, by hand): the bot's model (null: by usage) and the computer it runs on, with what the owner
+   * may pick. Models are the ready ones that can hold a bot here. Computers are this one and the person's other
+   * computers, the same list the Automations page's Computer chip offers; a bot runs on the computer that holds it, so
+   * the others are listed but cannot be picked (`unavailable` says why), and an offline one says so.
+   */
+  async modelGet(botId: string): Promise<{ model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: BotComputerChoice[] }> {
+    this.engine.definitionOf(botId)
+    const models = await (this.options.modelChoices?.() ?? Promise.resolve([])).catch(() => [])
+    const computer = this.options.computerName?.() ?? 'This computer'
+    let others: Array<{ node: string; name: string; online: boolean }> = []
+    try {
+      others = this.options.otherComputers?.() ?? []
+    } catch {
+      // The device list cannot be read now: this computer is the one listed.
+    }
+    return {
+      model: this.engine.ownerModel(botId),
+      models,
+      computer: 'this_computer',
+      computers: [
+        { id: 'this_computer', name: computer },
+        ...others.map((other) => ({ id: other.node, name: other.name, ...(other.online ? {} : { offline: true as const }), unavailable: other.online ? 'A bot runs on the computer that holds it.' : `${other.name} is offline.` }))
+      ]
+    }
+  }
+
+  /** `bots.model.set`: the owner picks a model by hand, or by usage again (`null`). */
+  modelSet(botId: string, model: string | null): { bot: BotSummary } {
+    this.engine.setOwnerModel(botId, model)
+    return { bot: this.summaryOf(botId) }
+  }
+
   removeSchedule(botId: string, scheduleId: string): BotDetail {
     if (!this.engine.removeSchedule(botId, scheduleId)) throw new BotEngineError('schedule_not_found', 'This bot has no such schedule.')
     return this.detailOf(botId)

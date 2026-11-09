@@ -36,7 +36,8 @@ function indexById<T extends LineageThread>(threads: readonly T[]): Map<string, 
  */
 export function visibleThreads<T extends LineageThread>(threads: readonly T[], inventory: readonly LineageThread[] = threads): T[] {
   const known = new Set(inventory.map((thread) => thread.id))
-  return threads.filter((thread) => !isSubagentThread(thread) || !known.has(thread.lineage!.parentThreadId))
+  // The Automation manager's thread is opened from Automations ("Open conversation"), never listed.
+  return threads.filter((thread) => !(thread as Partial<Pick<Thread, 'automationManager'>>).automationManager && (!isSubagentThread(thread) || !known.has(thread.lineage!.parentThreadId)))
 }
 
 /**

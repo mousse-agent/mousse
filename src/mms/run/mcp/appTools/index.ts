@@ -11,6 +11,7 @@ import { projectGitTools } from './projectGit'
 import { quickActionTools } from './quickActions'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { scheduleTools } from './schedules'
+import { automationTools } from './automations'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
 import { lineageRelation, threadTools } from './thread'
@@ -23,6 +24,7 @@ export * from './turns'
 export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
 export type { BotAppToolDeps } from './bots'
+export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export type { BotMemoryToolHost } from './botMemory'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export {
@@ -103,7 +105,7 @@ export function createAppToolRegistry(input: {
   add('plans', planTools(host))
   add('tasks', taskTools(host))
   add('thread', engine ? threadTools(host, engine) : [])
-  add('schedules', engine ? scheduleTools(host, engine) : [])
+  add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
   add('quickActions', quickActionTools(host))
   add('devGui', devGuiTools(host))

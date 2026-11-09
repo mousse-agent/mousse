@@ -73,6 +73,8 @@ interface ThreadMeta {
   localOnly?: true
   /** See `Thread.botOwned`. */
   botOwned?: true
+  /** See `Thread.automationManager`. */
+  automationManager?: true
   /** See `Thread.expiresAt`. */
   expiresAt?: string
   expiryStopsRun?: true
@@ -480,7 +482,7 @@ export class ThreadDataStore extends EventEmitter {
    * Daemon-owned execution admission: retry/crash recovery keeps one thread and its data.
    * `botOwned` marks a personal bot's thread (`Thread.botOwned`), also one made before the mark existed.
    */
-  ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }, opts?: { localOnly?: boolean; botOwned?: boolean }): Thread {
+  ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }, opts?: { localOnly?: boolean; botOwned?: boolean; automationManager?: boolean }): Thread {
     const project = projectId ? this.projectManager.getProject(projectId) : undefined
     if (projectId && !project) throw new Error('Execution project is unavailable')
     const id = executionThreadId(executionKey)
@@ -491,6 +493,7 @@ export class ThreadDataStore extends EventEmitter {
     const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
     if (opts?.localOnly === true) initial.localOnly = true
     if (opts?.botOwned === true) initial.botOwned = true
+    if (opts?.automationManager === true) initial.automationManager = true
     const threadDir = this.resolveThreadDir(initial, project?.path)
     this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: ownership?.parentTaskId, creating: true })
     this.ensureThreadDir(threadDir)

@@ -1,3 +1,4 @@
+import type { PermissionMode } from '../permissionMode'
 import type {
   ArtifactReference,
   EffectClass,
@@ -96,6 +97,8 @@ export interface WorkflowJournalEvent {
 export interface WorkflowRunManifest {
   schemaVersion: 1
   runId: string
+  /** The permission mode the run is held to (`StartWorkflowRequest.permissionMode`). */
+  permissionMode?: PermissionMode
   /** Caller-stable admission identity used to make start idempotent. */
   requestId?: string
   requestDigest?: string
@@ -180,6 +183,12 @@ export interface StartWorkflowRequest {
   trigger?: WorkflowTriggerPayload
   installationPolicy: ExecutionPolicyLayer
   runPolicy?: ExecutionPolicyLayer
+  /**
+   * The permission mode the run is held to (#338): the thread's mode, or for a scheduled job the strictest of its
+   * mode, its ceiling and its thread's. Its steps ask or run by it (`workflowApprovalEffects`). Absent on runs admitted
+   * before workflows had a mode: they ask before every change, as `ask`.
+   */
+  permissionMode?: PermissionMode
   parentRunId?: string
   depth?: number
   parentInstanceKey?: string

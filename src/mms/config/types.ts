@@ -80,6 +80,8 @@ export interface ScheduledJobDefinition {
   projectId?: string
   createThread?: boolean
   selection?: ScheduledJob['selection']
+  agent?: ScheduledJob['agent']
+  bot?: ScheduledJob['bot']
   mode?: ScheduledJob['mode']
   workspace?: ScheduledJob['workspace']
   permissionMode?: ScheduledJob['permissionMode']
@@ -87,7 +89,11 @@ export interface ScheduledJobDefinition {
   createdBy?: ScheduledJob['createdBy']
   accessCap?: ScheduledJob['accessCap']
   expiresAt?: ScheduledJob['expiresAt']
+  tellMe?: ScheduledJob['tellMe']
   trigger?: ScheduledJob['trigger']
+  keys?: ScheduledJob['keys']
+  draft?: ScheduledJob['draft']
+  cliName?: ScheduledJob['cliName']
   repeat?: { times: number; completed?: number }
   createdAt: string
   updatedAt: string
@@ -101,11 +107,17 @@ export interface ScheduledJobRuntime {
   lastError?: string
   pausedAt?: string
   pausedReason?: string
+  resumeAt?: string
+  waitingBehind?: ScheduledJob['waitingBehind']
+  botSkip?: ScheduledJob['botSkip']
   runHistory?: ScheduledJob['runHistory']
   repeat?: { times: number; completed: number }
   runClaim?: ScheduledJob['runClaim']
   pendingOccurrence?: ScheduledJob['pendingOccurrence']
   pendingTrigger?: ScheduledJob['pendingTrigger']
+  pendingEvent?: ScheduledJob['pendingEvent']
+  lastEventRunAt?: ScheduledJob['lastEventRunAt']
+  eventLog?: ScheduledJob['eventLog']
 }
 
 export interface MousseConf {

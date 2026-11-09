@@ -202,6 +202,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const manifest: WorkflowRunManifest = {
       schemaVersion: 1,
       runId,
+      ...(request.permissionMode ? { permissionMode: request.permissionMode } : {}),
       requestId,
       requestDigest,
       executionBindings: request.executionBindings ? structuredClone(request.executionBindings) : undefined,
@@ -1828,6 +1829,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           requestId: deterministicChildRequestId(this.profileId, manifest.runId, inst.instanceKey),
           actor: manifest.actor,
           source: manifest.source,
+          ...(manifest.permissionMode ? { permissionMode: manifest.permissionMode } : {}),
           definitionId: childDefinitionId,
           revisionId: pinnedRevision,
           input: node.config.input ? evaluateConfigBinding(node.config.input, evalCtx) : {},

@@ -2,7 +2,10 @@ import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import type { SchedulerStatus, ScheduledJob, ScheduledOccurrenceResult, ScheduledWebhookDelivery } from '../../shared/types'
+import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery, type ThreadEventKind } from '../../shared/types'
+import { occurrenceOutcome, tellMeNotifies, type RunEndState, type ScheduledRunEnded } from '../../shared/automations'
+import type { InboxRunState, RunLevel } from '../../shared/automationInbox'
+import { missingKeyText } from '../../shared/automationKeys'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
 import { isSilentOutput } from './computeNextRun'
@@ -10,13 +13,18 @@ import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import {
   ScheduledJobStore,
+  MISSED_GRACE_MS,
   TICKER_INTERVAL_MS,
   recordTickerHeartbeat,
   readTickerHeartbeat,
-  type ScheduledRunDetails
+  type ScheduledRunDetails,
+  type SchedulerDowntime
 } from './ScheduledJobStore'
 import type { BackgroundWorkflowTurnResult, ScheduledJobIngress } from '../platform/MmsWorkflowChat'
 import { hasPlaceholders, renderPrompt } from './promptPlaceholders'
+import { requestRefusal } from '../../shared/requestTrigger'
+import { eventNouns, threadEventsOfOccurrence } from '../../shared/threadEvents'
+import { isWorkflowPrompt } from './jobPermission'
 
 /** Runs one tick starts at most; a catch-up after downtime follows over the next ticks instead of in one second. */
 const MAX_STARTS_PER_TICK = 3
@@ -25,6 +33,28 @@ const CATCH_UP_DELAY_MS = 10_000
 
 export interface ScheduledJobRunner {
   runIsolated(prompt: string, ingress?: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult>
+}
+
+/**
+ * Runs a bot's occurrence in the bot's run lane (`BotEngine.runScheduledOccurrence`): it starts the bot's run, or says
+ * why the occurrence is skipped (the bot is paused, its last run of this schedule still waits), or that the bots are not
+ * ready yet (the occurrence stays due).
+ */
+export interface ScheduledBotRunner {
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now: Date; model?: string }):
+    | { kind: 'started'; activationId: string }
+    | { kind: 'skipped'; reason: string }
+    | { kind: 'not_ready' }
+}
+
+/**
+ * The Automations inbox's record of runs (`AutomationRuns`): the scheduler says when an occurrence is claimed, what
+ * became known about it, and how it ended; the ledger says what the run's agent reported.
+ */
+export interface ScheduledRunLedger {
+  begin(input: { jobId: string; jobName: string; occurrenceKey: string; projectId?: string; botId?: string; activationId?: string; state?: 'queued' | 'running' }): unknown
+  update(jobId: string, occurrenceKey: string, patch: { threadId?: string; engineRunId?: string; state?: InboxRunState; until?: string }): void
+  finish(input: { jobId: string; occurrenceKey: string; jobName?: string; projectId?: string; botId?: string; failed: boolean; silent?: boolean; error?: string; threadId?: string }): { level?: RunLevel; summary?: string }
 }
 
 /** How often stored webhook payloads nothing references are swept. */
@@ -54,6 +84,21 @@ export function generateWebhookSecret(): string {
 }
 
 /** What the orchestrator reports when a scheduled turn's Run Engine run ends. */
+/**
+ * The saved agent a run used, marked `changed` when it was published again since the last run that used it (the
+ * person sees "agent changed since last run" on that run).
+ */
+export function ranAgent(job: Pick<ScheduledJob, 'runHistory'>, agent: ScheduledRunAgent): ScheduledRunAgent {
+  const history = job.runHistory ?? []
+  let previous: ScheduledRunAgent | undefined
+  for (let index = history.length - 1; index >= 0 && !previous; index -= 1) {
+    const used = history[index]!.agent
+    if (used?.definitionId === agent.definitionId) previous = used
+  }
+  const { changed: _ignored, ...plain } = agent
+  return previous && previous.revision !== agent.revision ? { ...plain, changed: true } : plain
+}
+
 export interface ScheduledOccurrenceSettled {
   jobId: string
   occurrenceKey: string
@@ -67,6 +112,12 @@ export interface ScheduledOccurrenceSettled {
   selection?: ScheduledRunDetails['selection']
   /** The permission mode the run's binding enforced. */
   permissionMode?: ScheduledRunDetails['permissionMode']
+}
+
+/** Why a bot's schedule is paused when every occurrence would be skipped the same way: no bots here, or its bot is deleted. */
+const LASTING_BOT_SKIPS: Record<string, string | undefined> = {
+  bots_unavailable: 'Bots could not be opened in this profile. Resume it once they are back.',
+  bot_deleted: 'Its bot was deleted.'
 }
 
 export class ScheduledJobService extends EventEmitter {
@@ -83,6 +134,8 @@ export class ScheduledJobService extends EventEmitter {
   private ownedRunClaims = new Map<string, string>()
   private lastTickError: string | null = null
   private lastHeartbeatAt: string | null = null
+  /** The scheduler's newest downtime, read from the heartbeat persisted before it; only runs due in it were missed. */
+  private downtime: SchedulerDowntime | undefined
   private lastSuccessAt: string | null = null
   private tickInProgress = false
   /** When true, future ticks are no-ops (stop does not wait for in-flight LLM). */
@@ -97,6 +150,16 @@ export class ScheduledJobService extends EventEmitter {
   /** Why the webhook listener is not up (a taken port), shown with the scheduler's errors. */
   private webhookListenerError: string | null = null
   private lastPayloadSweepAt = 0
+  /** The last occurrence whose end was announced, per job: the turn's return and the run's end both report it. */
+  private readonly announced = new Map<string, string>()
+  private botRunner: ScheduledBotRunner | null = null
+  /** Work that follows every tick in this process, lock or not (the bots' queue, their usage-limit resets). */
+  private tickHook: ((now: Date) => Promise<unknown> | unknown) | null = null
+  private clock: () => Date = () => new Date()
+  /** The profile's saved keys, by name; without it a job that names keys runs as if they were stored. */
+  private keyStore: { has(name: string): boolean } | null = null
+  /** The inbox's record of runs; without it runs are only in each job's history. */
+  private ledger: ScheduledRunLedger | null = null
 
   constructor(
     private runner: ScheduledJobRunner,
@@ -110,6 +173,72 @@ export class ScheduledJobService extends EventEmitter {
     // A job that is gone (deleted, or its repeat spent) takes its webhook secret with it.
     this.store.setJobRemovedHandler((job) => {
       if (job.trigger?.webhook) this.webhookSecrets?.delete(job.trigger.webhook.secretRef)
+      try {
+        this.emit('jobRemoved', job.id)
+      } catch {
+        /* a listener never breaks a delete */
+      }
+    })
+  }
+
+  /**
+   * Where bots' occurrences run; without it a bot's occurrence is skipped as "bots unavailable", and its schedule is
+   * paused for that reason. Once bots are back, the schedules paused only for that reason resume.
+   */
+  setBotRunner(runner: ScheduledBotRunner | null): void {
+    this.botRunner = runner
+    if (!runner) return
+    let resumed = false
+    for (const job of this.store.listJobs()) {
+      if (!job.bot || job.enabled || job.pausedReason !== LASTING_BOT_SKIPS.bots_unavailable) continue
+      try {
+        if (this.store.resumeJob(job.id)) resumed = true
+      } catch (error) {
+        console.warn('a bot schedule paused while bots were unavailable could not resume', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (resumed) this.emitUpdated()
+  }
+
+  /** Runs after every tick of this process (bot upkeep); its failure never stops the scheduler. */
+  setTickHook(hook: ((now: Date) => Promise<unknown> | unknown) | null): void {
+    this.tickHook = hook
+  }
+
+  /** The clock claims and bot occurrences read (tests set it). */
+  setClock(clock: () => Date): void {
+    this.clock = clock
+  }
+
+  /** Where each run is recorded for the Automations inbox (its report, its state, its Needs you items). */
+  setRunLedger(ledger: ScheduledRunLedger | null): void {
+    this.ledger = ledger
+  }
+
+  /** The ledger never stops a run: a failure to record is logged and the run goes on. */
+  private record(what: string, work: (ledger: ScheduledRunLedger) => void): void {
+    if (!this.ledger) return
+    try {
+      work(this.ledger)
+    } catch (error) {
+      console.warn('an automation run could not be recorded in the inbox', { what, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Where saved keys are looked up before a run that names them starts. */
+  setKeyStore(store: { has(name: string): boolean } | null): void {
+    this.keyStore = store
+  }
+
+  /** The first saved key the job names that is not stored, or undefined. A store that cannot be read counts as missing. */
+  private missingKey(job: Pick<ScheduledJob, 'keys'>): string | undefined {
+    if (!job.keys?.length || !this.keyStore) return undefined
+    return job.keys.find((name) => {
+      try {
+        return !this.keyStore!.has(name)
+      } catch {
+        return true
+      }
     })
   }
 
@@ -145,9 +274,10 @@ export class ScheduledJobService extends EventEmitter {
     const secrets = this.requireWebhookSecrets()
     const job = this.store.getJob(id)
     if (!job) throw new ScheduledWebhookError(`Job not found: ${id}`)
-    if (job.createdBy) throw new ScheduledWebhookError('Agent-created jobs cannot have a webhook trigger.')
-    if (job.schedule.kind === 'once') throw new ScheduledWebhookError('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
     if (job.trigger?.webhook) throw new ScheduledWebhookError('This job already has a webhook. Rotate its secret to get a new one.')
+    // An agent-added automation takes requests only once kept; a bot and a one-time job never do.
+    const refusal = requestRefusal(job)
+    if (refusal) throw new ScheduledWebhookError(refusal)
     const secretRef = webhookSecretRef(id)
     const secret = generateWebhookSecret()
     secrets.write(secretRef, secret)
@@ -197,6 +327,37 @@ export class ScheduledJobService extends EventEmitter {
   listWebhookDeliveries(id: string): ScheduledWebhookDelivery[] {
     if (!this.store.getJob(id)) throw new ScheduledWebhookError(`Job not found: ${id}`)
     return this.store.listWebhookDeliveries(id)
+  }
+
+  /** Resend: runs the job again with the payload an earlier delivery stored; it starts within seconds. */
+  resendWebhook(id: string, occurrenceId: string): { occurrenceId: string } {
+    this.lifecycle.assertAccepting()
+    let result: { occurrenceId: string }
+    try {
+      result = this.store.resendWebhook(id, occurrenceId)
+    } catch (error) {
+      throw error instanceof Error ? new ScheduledWebhookError(error.message) : error
+    }
+    this.emitUpdated()
+    this.wake()
+    return result
+  }
+
+  /**
+   * Pull request events for a thread-event job: they start a run within seconds, or wait for the rate limit; one its
+   * own run caused (`own`) is only logged. See `ScheduledJobStore.queueThreadEvent`.
+   */
+  queueThreadEvent(id: string, kinds: ThreadEventKind[], options: { own?: string } = {}): void {
+    if (this.lifecycle.stopping) return
+    const outcome = this.store.queueThreadEvent(id, kinds, { now: this.clock(), ...options })
+    if (outcome === 'unknown') return
+    this.emitUpdated()
+    if (outcome === 'started') this.wake()
+  }
+
+  /** Whether a delivery's payload is still stored (Resend). */
+  hasWebhookPayload(id: string, occurrenceId: string): boolean {
+    return this.store.hasWebhookPayload(id, occurrenceId)
   }
 
   private requireWebhookSecrets(): ScheduledWebhookSecrets {
@@ -310,9 +471,9 @@ export class ScheduledJobService extends EventEmitter {
     return { ...job, liveStatus: waiting ? 'needs_answer' : 'running', liveThreadId: threadId }
   }
 
-  createJob(input: Parameters<ScheduledJobStore['createJob']>[0]): ScheduledJob {
+  createJob(input: Parameters<ScheduledJobStore['createJob']>[0], options?: Parameters<ScheduledJobStore['createJob']>[1]): ScheduledJob {
     this.lifecycle.assertAccepting()
-    const job = this.store.createJob(input)
+    const job = this.store.createJob(input, options)
     this.emitUpdated()
     return job
   }
@@ -333,9 +494,9 @@ export class ScheduledJobService extends EventEmitter {
     return deleted
   }
 
-  pauseJob(id: string, reason?: string): ScheduledJob | null {
+  pauseJob(id: string, reason?: string, resumeAt?: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.pauseJob(id, reason)
+    const job = this.store.pauseJob(id, reason, resumeAt)
     if (job) this.emitUpdated()
     return job
   }
@@ -347,11 +508,12 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
-  /** "Agents may create jobs" was turned off: the jobs agents created stop until a person resumes them. */
-  pauseAgentJobs(): number {
-    const paused = this.store.pauseAgentJobs()
-    if (paused > 0) this.emitUpdated()
-    return paused
+  /** Keep: an agent-added automation loses only its end (`ScheduledJobStore.keepJob`). */
+  keepJob(id: string): ScheduledJob | null {
+    this.store.keepJob(id)
+    const job = this.store.getJob(id) ?? null
+    this.emitUpdated()
+    return job
   }
 
   extendJob(id: string, days?: number): ScheduledJob | null {
@@ -389,13 +551,16 @@ export class ScheduledJobService extends EventEmitter {
     try {
       const before = this.store.getJob(event.jobId)
       const threadId = before?.pendingOccurrence?.occurrenceKey === event.occurrenceKey ? before.pendingOccurrence.threadId : before?.runClaim?.threadId
-      const silent = event.status === 'ok' && typeof event.text === 'string' && event.text.trim().startsWith('[SILENT]')
+      const silent = event.status === 'ok' && typeof event.text === 'string' && isSilentOutput(event.text)
       const job = this.store.completeOccurrence(
         event.jobId,
         event.occurrenceKey,
         { status: event.status, text: event.text, error: event.error, silent, ...(event.retryAt ? { retryAt: event.retryAt } : {}) },
         { runId: event.runId, ...(event.selection ? { selection: event.selection } : {}), ...(event.permissionMode ? { permissionMode: event.permissionMode } : {}) }
       )
+      // A job whose last repeat this was is gone by now; its run still ended.
+      const ours = before?.pendingOccurrence?.occurrenceKey === event.occurrenceKey || before?.runClaim?.occurrenceKey === event.occurrenceKey
+      if (before && ours && (job || !this.store.getJob(event.jobId))) this.announceRunEnd(before, event.occurrenceKey, { status: event.status, silent, ...(event.error ? { error: event.error } : {}), ...(threadId ? { threadId } : {}), ...(event.retryAt ? { retryAt: event.retryAt } : {}) })
       // A finished run on the project's checkout leaves nothing to keep open: its reply is in the run record and
       // the thread stays reachable from it. A new-worktree thread holds the run's work, so it stays open.
       if (threadId && (silent || (event.status === 'ok' && before?.workspace?.kind !== 'newWorktree'))) this.settlePerRunThread(event.jobId, threadId)
@@ -516,10 +681,32 @@ export class ScheduledJobService extends EventEmitter {
     if (this.stopped || this.lifecycle.stopping || this.tickInProgress) return
     try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned()) }
     catch (error) { this.lastTickError = error instanceof Error ? error.message : String(error) }
+    await this.runTickHook()
   }
 
-  private async tickOwned(): Promise<void> {
-    if (this.stopped || this.tickInProgress) return
+  private async runTickHook(): Promise<void> {
+    if (!this.tickHook) return
+    try {
+      await this.tickHook(this.clock())
+    } catch (error) {
+      console.warn('scheduler upkeep failed; the next tick tries again', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * One tick now, started or not, and the runs it started, to their return (tests, and a check by hand). Nothing runs
+   * once the profile is shutting down.
+   */
+  async tickNow(): Promise<void> {
+    if (this.lifecycle.stopping || this.tickInProgress) return
+    try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned(true)) }
+    catch (error) { this.lastTickError = error instanceof Error ? error.message : String(error) }
+    await Promise.all([...this.inFlight.values()])
+    await this.runTickHook()
+  }
+
+  private async tickOwned(force = false): Promise<void> {
+    if ((this.stopped && !force) || this.tickInProgress) return
 
     const releaseTickLock = tryAcquireTickLock(join(this.store.homeDir, 'scheduled', '.tick.lock'))
     if (!releaseTickLock) return
@@ -527,15 +714,21 @@ export class ScheduledJobService extends EventEmitter {
     this.releaseTickLock = releaseTickLock
     this.tickInProgress = true
     try {
-      if (this.stopped) return
+      if (this.stopped && !force) return
 
-      this.lastHeartbeatAt = new Date().toISOString()
-      recordTickerHeartbeat(false, this.store.homeDir)
+      // The last tick before this one, by any process, read before it is overwritten: a gap means the scheduler was down.
+      const tickAt = this.clock()
+      const previousTick = readTickerHeartbeat(this.store.homeDir).heartbeatAt
+      if (previousTick && tickAt.getTime() - Date.parse(previousTick) > MISSED_GRACE_MS) {
+        this.downtime = { from: previousTick, to: tickAt.toISOString() }
+      }
+      this.lastHeartbeatAt = tickAt.toISOString()
+      recordTickerHeartbeat(false, this.store.homeDir, tickAt)
 
       // Jobs this process is already running are not claimed again, and a catch-up after downtime starts a few
       // runs per tick, not every overdue job in the same second; the rest stay due and follow shortly.
       this.sweepWebhookPayloadsIfDue()
-      const dueJobs = this.store.claimDueJobs(new Date(), { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()) })
+      const dueJobs = this.store.claimDueJobs(tickAt, { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()), ...(this.downtime ? { downtime: this.downtime } : {}) })
       if (dueJobs.length >= MAX_STARTS_PER_TICK) this.scheduleCatchUp()
       for (const job of dueJobs) {
         if (job.runClaim) this.ownedRunClaims.set(job.id, job.runClaim.token)
@@ -546,7 +739,7 @@ export class ScheduledJobService extends EventEmitter {
           if (job.runClaim) this.interruptOwnedRun(job.id, job.runClaim.token, 'Interrupted by profile shutdown before execution')
           continue
         }
-        if (this.stopped) {
+        if (this.stopped && !force) {
           if (job.runClaim) this.interruptOwnedRun(job.id, job.runClaim.token, 'Interrupted when scheduling stopped before execution')
           continue
         }
@@ -625,6 +818,10 @@ export class ScheduledJobService extends EventEmitter {
     job: ScheduledJob,
     claim: ScheduledJob['runClaim']
   ): { error?: undefined; prompt: string; missing: string[] } | { error: string; prompt?: undefined; missing?: undefined } {
+    // Pull request events say what woke the run, in the daemon's own words (nothing from the pull request's text).
+    const events = threadEventsOfOccurrence(claim?.occurrenceKey)
+    const wakesOn = job.trigger?.threadEvent
+    if (events?.length && wakesOn && !isWorkflowPrompt(job.prompt)) return { prompt: `${job.prompt}\n\n(Woke on pull request #${wakesOn.number}: ${eventNouns(events)}.)`, missing: [] }
     const occurrenceId = claim?.webhookOccurrenceId
     if (!occurrenceId || !hasPlaceholders(job.prompt)) return { prompt: job.prompt, missing: [] }
     if (job.prompt.trimStart().startsWith('/')) return { error: 'A workflow prompt cannot use webhook placeholders.' }
@@ -651,7 +848,47 @@ export class ScheduledJobService extends EventEmitter {
     return undefined
   }
 
+  /**
+   * A bot's occurrence: the bot engine starts it in the bot's run lane (a new child thread, a run report in its chat)
+   * under the bot's grant, or skips it. The claim ends at once either way; the bot's activation is the run.
+   */
+  private executeBotJob(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }): void {
+    const claim = job.runClaim
+    if (!claim) return
+    const now = this.clock()
+    let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
+    try {
+      outcome = this.botRunner
+        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt: claim.occurrenceKey, now, ...(job.bot.model ? { model: job.bot.model } : {}) })
+        : { kind: 'skipped', reason: 'bots_unavailable' }
+    } catch (error) {
+      outcome = { kind: 'skipped', reason: 'bot_unavailable' }
+      console.warn('a bot occurrence could not start', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
+    }
+    if (outcome.kind === 'not_ready') {
+      if (this.store.releaseClaim(job.id, claim.token)) this.ownedRunClaims.delete(job.id)
+      return
+    }
+    if (outcome.kind === 'skipped') console.warn('a bot schedule occurrence was skipped', { jobId: job.id, occurrenceAt: claim.occurrenceKey, reason: outcome.reason })
+    if (outcome.kind === 'started') {
+      const activationId = outcome.activationId
+      this.record('bot run', (ledger) => ledger.begin({ jobId: job.id, jobName: job.name, occurrenceKey: claim.occurrenceKey, botId: job.bot.botId, activationId, state: 'queued', ...(job.projectId ? { projectId: job.projectId } : {}) }))
+    }
+    if (this.store.finishBotClaim(job.id, claim.token, outcome.kind === 'skipped' ? { skipped: outcome.reason } : {}, now)) this.ownedRunClaims.delete(job.id)
+    // A skip that every later occurrence would repeat pauses it once, with why, instead of skipping it forever.
+    const lasting = outcome.kind === 'skipped' ? LASTING_BOT_SKIPS[outcome.reason] : undefined
+    if (lasting && this.store.pauseJob(job.id, lasting)) this.emitUpdated()
+  }
+
   private async executeJob(job: ScheduledJob): Promise<void> {
+    if (job.bot) {
+      try {
+        this.executeBotJob(job as ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> })
+      } finally {
+        this.emitUpdated()
+      }
+      return
+    }
     this.emitUpdated()
     const claim = job.runClaim
     const claimToken = claim?.token
@@ -660,10 +897,11 @@ export class ScheduledJobService extends EventEmitter {
       // `occurrenceKey` is `nextRunAt` for a timed claim; a legacy claim written before it existed falls back to that.
       const occurrenceKey = claim?.occurrenceKey ?? job.nextRunAt
       if (!occurrenceKey) throw new Error('Scheduled job occurrence is missing')
+      this.record('begin', (ledger) => ledger.begin({ jobId: job.id, jobName: job.name, occurrenceKey, ...(job.projectId ? { projectId: job.projectId } : {}) }))
       // An agent may not start a slash workflow, however the job reached the store.
       if (job.createdBy && job.prompt.trim().startsWith('/')) {
         if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
-          this.store.markJobRun(job.id, false, undefined, 'Agent-created jobs cannot run workflows', false, claimToken)
+          this.failRun(job, claimToken, 'Agent-created jobs cannot run workflows')
         }
         return
       }
@@ -672,17 +910,23 @@ export class ScheduledJobService extends EventEmitter {
       const gone = this.goneThread(job)
       if (gone) {
         if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
-          this.store.markJobRun(job.id, false, undefined, gone, false, claimToken)
+          this.failRun(job, claimToken, gone)
           this.store.pauseJob(job.id, gone)
           this.emitUpdated()
         }
+        return
+      }
+      // A saved key the job needs is not stored: the run does not start, ends Incomplete and asks for the key (Needs you).
+      const missingKey = this.missingKey(job)
+      if (missingKey) {
+        if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) this.incompleteRun(job, claimToken, missingKey)
         return
       }
       // A webhook delivery fills `{{body...}}` placeholders from its stored body; any other run leaves them as written.
       const rendered = this.promptFor(job, claim)
       if (rendered.error !== undefined) {
         if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
-          this.store.markJobRun(job.id, false, undefined, rendered.error, false, claimToken)
+          this.failRun(job, claimToken, rendered.error)
         }
         return
       }
@@ -696,6 +940,7 @@ export class ScheduledJobService extends EventEmitter {
         createThread: job.createThread,
         jobName: job.name,
         selection: job.selection,
+        ...(job.agent ? { agent: job.agent } : {}),
         mode: job.mode,
         workspace: job.workspace,
         permissionMode: job.permissionMode,
@@ -712,11 +957,14 @@ export class ScheduledJobService extends EventEmitter {
           if (!claimToken || !this.store.markClaimThread(job.id, claimToken, threadId)) {
             throw new Error('Scheduled claim was lost before its thread was chosen')
           }
+          // Known before the turn starts, so the run's own tools (run_report) find it.
+          this.record('thread', (ledger) => ledger.update(job.id, occurrenceKey, { threadId }))
         },
         onAdmitted: (runId) => {
           if (!claimToken || !this.store.markOccurrenceAdmitted(job.id, claimToken, runId)) {
             throw new Error('Scheduled claim was lost before its run was recorded')
           }
+          this.record('admitted', (ledger) => ledger.update(job.id, occurrenceKey, { engineRunId: runId }))
         }
       })
 
@@ -727,6 +975,15 @@ export class ScheduledJobService extends EventEmitter {
 
       if (this.lifecycle.stopping) {
         this.interruptOwnedRun(job.id, claimToken, 'Interrupted by profile shutdown; external effects may have occurred')
+        return
+      }
+
+      // Its thread is running a turn: the occurrence waits behind it, keeps its repeat and starts on a later tick (#404).
+      if (result.status === 'busy') {
+        this.record('busy', (ledger) => ledger.update(job.id, occurrenceKey, { state: 'queued' }))
+        if (this.store.deferBusyClaim(job.id, claimToken, result.threadId ?? job.threadId ?? '')) this.ownedRunClaims.delete(job.id)
+        // Look again soon rather than at the next minute, so it follows the running turn closely.
+        this.scheduleCatchUp()
         return
       }
 
@@ -741,11 +998,13 @@ export class ScheduledJobService extends EventEmitter {
             mode: job.mode ?? 'agent',
             ...(result.permissionMode ? { permissionMode: result.permissionMode } : {}),
             ...(job.workspace ? { workspace: job.workspace } : {}),
+            ...(result.agent ? { agent: ranAgent(job, result.agent) } : {}),
             ...missingDetails
           }
         : missingPlaceholders.length ? missingDetails : undefined
 
       if (result.status === 'queued' || result.status === 'replayed') {
+        if (result.status === 'queued') this.record('queued', (ledger) => ledger.update(job.id, occurrenceKey, { state: 'queued', ...(result.threadId ? { threadId: result.threadId } : {}), ...(result.runId ? { engineRunId: result.runId } : {}) }))
         // Admitted, not finished: the job is held until its run is terminal.
         if (!this.store.markQueuedOccurrence(job.id, claimToken, result.queueItemId, details)) {
           this.store.markJobRun(job.id, false, undefined, 'The scheduled run was admitted without a recorded run', false, claimToken, undefined, details)
@@ -791,7 +1050,8 @@ export class ScheduledJobService extends EventEmitter {
         }
       }
 
-      this.store.markJobRun(
+      const settled = this.store.getJob(job.id)?.runClaim?.settledResult
+      const recorded = this.store.markJobRun(
         job.id,
         !result.error && !result.waiting,
         result.text,
@@ -801,12 +1061,19 @@ export class ScheduledJobService extends EventEmitter {
         result.waiting ? 'waiting' : undefined,
         details
       )
+      if (recorded || !this.store.getJob(job.id)) {
+        // The engine's own end wins over the turn's return, as the record does.
+        const outcome = settled && settled.status !== 'ok'
+          ? settled
+          : { status: result.waiting ? 'waiting' as const : result.error ? 'error' as const : 'ok' as const, silent, ...(result.error ? { error: result.error } : {}) }
+        this.announceRunEnd(job, occurrenceKey, { ...outcome, ...(result.threadId ? { threadId: result.threadId } : {}) })
+      }
       if (silent && result.threadId) this.settlePerRunThread(job.id, result.threadId)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
         if (this.lifecycle.stopping) this.interruptOwnedRun(job.id, claimToken, `Interrupted by profile shutdown: ${message}`)
-        else this.store.markJobRun(job.id, false, undefined, message, false, claimToken)
+        else this.failRun(job, claimToken, message)
       }
     } finally {
       try {
@@ -820,8 +1087,73 @@ export class ScheduledJobService extends EventEmitter {
     }
   }
 
+  /** Records a run that stopped before its turn at a missing saved key (Incomplete, "Add key <name>"), and announces it. */
+  private incompleteRun(job: ScheduledJob, claimToken: string, key: string): void {
+    const occurrenceKey = job.runClaim?.occurrenceKey ?? job.nextRunAt ?? ''
+    const text = missingKeyText(key)
+    const recorded = this.store.markJobRun(job.id, false, undefined, text, false, claimToken, undefined, { missingKey: key })
+    if (recorded || !this.store.getJob(job.id)) this.announceRunEnd(job, occurrenceKey, { status: 'error', error: text }, 'incomplete')
+  }
+
+  /** Records a run that failed before or instead of its turn, and announces it. */
+  private failRun(job: ScheduledJob, claimToken: string, error: string): void {
+    const occurrenceKey = job.runClaim?.occurrenceKey ?? job.nextRunAt ?? ''
+    const recorded = this.store.markJobRun(job.id, false, undefined, error, false, claimToken)
+    if (recorded || !this.store.getJob(job.id)) this.announceRunEnd(job, occurrenceKey, { status: 'error', error })
+  }
+
+  /**
+   * Tells listeners how an occurrence ended (`runEnded`), once per occurrence: what the outcome is in the Run contract
+   * and whether the job's Tell me lets it notify. A wait (a usage limit, a workflow waiting) has not ended.
+   */
+  private announceRunEnd(
+    job: Pick<ScheduledJob, 'id' | 'name' | 'tellMe' | 'threadId'> & Partial<Pick<ScheduledJob, 'projectId'>>,
+    occurrenceKey: string,
+    result: { status: ScheduledOccurrenceResult['status']; silent?: boolean; error?: string; threadId?: string; retryAt?: string },
+    endedAs?: RunEndState
+  ): void {
+    const outcome = endedAs ?? occurrenceOutcome(result.status, result.silent)
+    // A usage limit holds the run until it resets; it has not ended.
+    if (!outcome && result.status === 'waiting') this.record('paused', (ledger) => ledger.update(job.id, occurrenceKey, { state: 'paused_usage', ...(result.retryAt ? { until: result.retryAt } : {}) }))
+    if (!outcome) return
+    if (this.announced.get(job.id) === occurrenceKey) return
+    this.announced.set(job.id, occurrenceKey)
+    const failed = outcome === 'failed' || outcome === 'incomplete'
+    const threadId = result.threadId ?? job.threadId
+    let report: { level?: RunLevel; summary?: string } = {}
+    this.record('finish', (ledger) => {
+      report = ledger.finish({
+        jobId: job.id,
+        occurrenceKey,
+        jobName: job.name,
+        failed,
+        silent: outcome === 'nothing_new',
+        ...(job.projectId ? { projectId: job.projectId } : {}),
+        ...(result.error ? { error: result.error } : {}),
+        ...(threadId ? { threadId } : {})
+      })
+    })
+    const event: ScheduledRunEnded = {
+      jobId: job.id,
+      jobName: job.name,
+      outcome,
+      notify: tellMeNotifies(tellMeOf(job), outcome, report.level),
+      ...(report.level ? { level: report.level } : {}),
+      ...(report.summary ? { summary: report.summary } : {}),
+      ...(threadId ? { threadId } : {}),
+      ...(result.error ? { error: result.error } : {})
+    }
+    try {
+      this.emit('runEnded', event)
+    } catch {
+      /* a listener never breaks the scheduler */
+    }
+  }
+
   private interruptOwnedRun(jobId: string, claimToken: string, reason: string): void {
+    const occurrenceKey = this.store.getJob(jobId)?.runClaim?.occurrenceKey
     const interrupted = this.store.interruptRun(jobId, claimToken, reason)
+    if (interrupted && occurrenceKey) this.record('interrupted', (ledger) => ledger.finish({ jobId, occurrenceKey, failed: true, error: reason }))
     if (interrupted || !this.store.isRunClaimCurrent(jobId, claimToken)) {
       this.ownedRunClaims.delete(jobId)
       return

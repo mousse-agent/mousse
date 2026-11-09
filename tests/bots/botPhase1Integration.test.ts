@@ -35,6 +35,10 @@ import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import { botScheduleLabel } from '../../src/shared/scheduleLabel'
 import type { ChatMessage } from '../../src/shared/types'
 import { appTurn } from '../run/appToolsFixture'
+import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
+import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
+import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
+import { BotScheduleBook } from '../../src/mms/scheduled/botJobs'
 
 const T0 = Date.parse('2026-11-07T09:00:00.000Z')
 const HOUR = 60 * 60_000
@@ -53,6 +57,8 @@ interface World {
   /** Process groups the fake runtime started, alive until their turn ends. */
   alive: Set<number>
   registry: ReturnType<typeof createBotProcessRegistry>
+  /** One tick of the shared scheduler, which hands bots' occurrences to the engine. */
+  tick(now: Date): Promise<void>
   close(): void
 }
 
@@ -75,12 +81,15 @@ function world(): World {
   const alive = new Set<number>()
   const journal = createBotJournal({ store: memory, readThread: (threadId) => ({ messages: threads.get(threadId) ?? [] }), listThreads: () => botThreadsForCatchUp(store.allThreads()) })
   let engine!: BotEngine
+  const scheduler = new ScheduledJobService({ runIsolated: async () => { throw new Error('no agent jobs here') } }, new ScheduledJobStore(MousseConfigStore.load(join(base, 'mousse-home'))))
+  scheduler.setClock(() => new Date(clock.now))
+  const book = new BotScheduleBook({ jobs: scheduler, label: (when) => botScheduleLabel(when), now: () => new Date(clock.now) })
   const context = createBotContextProvider({
     store: memory,
     journal,
     timeZone: () => 'UTC',
     situation: (botId) => ({ ownerName: 'Ada', schedules: engine.listSchedules(botId) }),
-    scheduleCreatedAt: (botId, scheduleId) => store.schedules(botId).find((schedule) => schedule.id === scheduleId)?.createdAt
+    scheduleCreatedAt: (botId, scheduleId) => book.get(botId, scheduleId)?.createdAt
   })
   const activity = createBotActivitySink({
     emit: (event) => engine.publishActivity(event),
@@ -132,9 +141,12 @@ function world(): World {
     clearContext: () => {},
     oneShot: async () => 'Dinner Helper',
     instructions: (bot) => botInstructions(bot),
-    scheduleLabel: (when) => botScheduleLabel(when)
+    scheduleLabel: (when) => botScheduleLabel(when),
+    schedules: book
   }
   engine = new BotEngine(host)
+  scheduler.setBotRunner({ runOccurrence: (input) => engine.runScheduledOccurrence(input) })
+  scheduler.setTickHook((now) => engine.maintain(now))
   const own = botTools(() => ({ host: engine.tools, activity }))
   const remembered = botMemoryTools(() => ({
     activationOf: (threadId) => engine.tools.activationOf(threadId),
@@ -144,7 +156,13 @@ function world(): World {
   const tools = new Map([...own, ...remembered].map((tool) => [tool.name, tool]))
   return {
     base, profile, clock, store, runs, outbox, engine, memory, threads, tools, alive, registry,
+    tick: async (now) => {
+      clock.now = now.getTime()
+      await scheduler.tickNow()
+      await flush()
+    },
     close: () => {
+      scheduler.beginShutdown()
       engine.close()
       store.close()
       runDb.close()
@@ -265,9 +283,9 @@ describe('Bot Phase 1, composed', () => {
     expect(turn3.preamble).not.toContain('What should I cook?')
 
     // The schedule's first run: its request ends with the report line; its report is a run_report row.
-    await w.engine.tickSchedules(new Date(w.clock.now))
+    await w.tick(new Date(w.clock.now))
     w.clock.now += HOUR + 1_000
-    await w.engine.tickSchedules(new Date(w.clock.now))
+    await w.tick(new Date(w.clock.now))
     const run1 = w.store.listActivations(botId).find((row) => row.lane === 'run')!
     const r1 = await dispatch(run1.id, () => {}, 'Tonight: lentil curry.')
     expect(r1.prompt.endsWith(BOT_RUN_REPORT_LINE)).toBe(true)
@@ -281,7 +299,7 @@ describe('Bot Phase 1, composed', () => {
     await w.engine.service.chatSend({ botId, text: 'Skip Fridays from now on.', clientRequestId: 'm3' })
     await dispatch(chatActivation(botId).id, () => {}, 'Got it.')
     w.clock.now += HOUR
-    await w.engine.tickSchedules(new Date(w.clock.now))
+    await w.tick(new Date(w.clock.now))
     const run2 = w.store.listActivations(botId).filter((row) => row.lane === 'run').find((row) => row.id !== run1.id)!
     // A run asks without waiting: the call is refused, one card is posted, and the run goes on to its report.
     const elsewhere = join(w.base, 'Recipes')

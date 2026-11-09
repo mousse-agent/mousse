@@ -107,7 +107,7 @@ describe('the transcript', () => {
     expect(chips!.querySelector('time')?.getAttribute('dateTime')).toBe('2026-11-07T09:00:00.000Z')
     expect([...chips!.querySelectorAll('.bot-chip')].map((chip) => chip.textContent)).toEqual(['read 2 pages example.com', 'remembered vegetarian'])
     expect(chips!.querySelector('.bot-chip b')?.textContent).toBe('example.com')
-    expect(ask!.querySelector('.bot-ask-title')?.textContent).toBe('Inbox helper wants to use files on this computer')
+    expect(ask!.querySelector('.ask-card-title')?.textContent).toBe('Inbox helper wants to use files on this computer')
     expect(error!.querySelector('.bot-error span')?.textContent).toBe('Set up a provider so I can work.')
     await click(button('Set up', error!))
     expect(useAppStore.getState().settingsOpen).toBe(true)

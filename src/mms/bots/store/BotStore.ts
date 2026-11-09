@@ -265,6 +265,16 @@ CREATE UNIQUE INDEX bot_escalations_open ON bot_escalations(bot_id, fingerprint)
 UPDATE bot_activations SET status = 'cancelled', end_reason = 'bots_upgraded', ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'waiting_grant';
 ${BOT_MEMORY_SCHEMA_SQL}
 `
+  },
+  {
+    // Path step 3 ("One scheduler"): a bot's schedules move to the shared scheduled-job store. Each row is copied
+    // there once and marked here with the job it became; nothing is deleted, so an older build's copy
+    // (`bots.db.pre-v5`) and `unmigrateBotSchedules` can undo the move.
+    version: 5,
+    sql: `
+ALTER TABLE bot_schedules ADD COLUMN migrated_at TEXT;
+ALTER TABLE bot_schedules ADD COLUMN migrated_job_id TEXT;
+`
   }
 ]
 
@@ -361,6 +371,9 @@ export interface BotScheduleRow {
   createdBy: 'owner' | 'bot'
   createdAt: string
   removedAt: string | null
+  /** When it was copied to the shared scheduled-job store, and the job it became (v5). */
+  migratedAt: string | null
+  migratedJobId: string | null
 }
 
 function scheduleOf(row: Row): BotScheduleRow {
@@ -372,7 +385,9 @@ function scheduleOf(row: Row): BotScheduleRow {
     label: row.label as string,
     createdBy: row.created_by as BotScheduleRow['createdBy'],
     createdAt: row.created_at as string,
-    removedAt: str(row.removed_at)
+    removedAt: str(row.removed_at),
+    migratedAt: str(row.migrated_at),
+    migratedJobId: str(row.migrated_job_id)
   }
 }
 
@@ -1104,8 +1119,9 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE status IN (${marks}) ORDER BY created_at, id`, ...statuses).map(activationOf)
   }
 
-  // -- Schedules (6d) -----------------------------------------------------------------------------
+  // -- Schedules (6d; moved to the shared store in v5) ---------------------------------------------
 
+  /** When each schedule ran next, as the old bot scheduler kept it: the move keeps these times. */
   scheduleStates(botId: string): Array<{ scheduleId: string; spec: string; nextRunAt: string | null; lastSkipAt: string | null; lastSkipReason: string | null }> {
     return this.all('SELECT * FROM bot_schedule_state WHERE bot_id = ? ORDER BY schedule_id', botId).map((row) => ({
       scheduleId: row.schedule_id as string,
@@ -1114,23 +1130,6 @@ export class BotStore {
       lastSkipAt: str(row.last_skip_at),
       lastSkipReason: str(row.last_skip_reason)
     }))
-  }
-
-  /** The occurrence a schedule last skipped and why; null once an occurrence runs again. */
-  setScheduleSkip(botId: string, scheduleId: string, reason: string | null, at: string | null): void {
-    this.run('UPDATE bot_schedule_state SET last_skip_reason = ?, last_skip_at = ? WHERE bot_id = ? AND schedule_id = ?', reason, at, botId, scheduleId)
-  }
-
-  putScheduleState(botId: string, scheduleId: string, spec: string, nextRunAt: string | null): void {
-    this.run(
-      'INSERT INTO bot_schedule_state(bot_id, schedule_id, spec_json, next_run_at) VALUES(?, ?, ?, ?) ON CONFLICT(bot_id, schedule_id) DO UPDATE SET spec_json = excluded.spec_json, next_run_at = excluded.next_run_at',
-      botId, scheduleId, spec, nextRunAt
-    )
-  }
-
-  dropScheduleState(botId: string, scheduleId?: string): void {
-    if (scheduleId === undefined) this.run('DELETE FROM bot_schedule_state WHERE bot_id = ?', botId)
-    else this.run('DELETE FROM bot_schedule_state WHERE bot_id = ? AND schedule_id = ?', botId, scheduleId)
   }
 
   /**
@@ -1233,28 +1232,44 @@ export class BotStore {
     this.run('DELETE FROM bot_messages WHERE bot_id = ?', botId)
   }
 
-  // -- Schedules (bot_schedules) ----------------------------------------------------------------
+  // -- Schedules (bot_schedules: where earlier builds kept them; the shared store holds them now) -------
 
-  /** A bot's schedules that are not removed, oldest first. */
+  /** A bot's schedules that are not removed, oldest first, moved or not. */
   schedules(botId: string): BotScheduleRow[] {
     return this.all('SELECT * FROM bot_schedules WHERE bot_id = ? AND removed_at IS NULL ORDER BY created_at, id', botId).map(scheduleOf)
   }
 
-  schedule(botId: string, id: string): BotScheduleRow | undefined {
-    const row = this.get('SELECT * FROM bot_schedules WHERE bot_id = ? AND id = ?', botId, id)
-    return row ? scheduleOf(row) : undefined
+  /** Every bot's schedules that are not removed and not moved to the shared store yet, oldest first. */
+  unmigratedSchedules(): BotScheduleRow[] {
+    return this.all('SELECT * FROM bot_schedules WHERE removed_at IS NULL AND migrated_at IS NULL ORDER BY bot_id, created_at, id').map(scheduleOf)
+  }
+
+  /** Every schedule removed, moved or not: one an older build removed after its move goes from the shared store too. */
+  removedSchedules(): BotScheduleRow[] {
+    return this.all('SELECT * FROM bot_schedules WHERE removed_at IS NOT NULL ORDER BY bot_id, created_at, id').map(scheduleOf)
+  }
+
+  /** Every schedule moved to the shared store, for `unmigrateBotSchedules`. */
+  migratedSchedules(): BotScheduleRow[] {
+    return this.all('SELECT * FROM bot_schedules WHERE migrated_at IS NOT NULL ORDER BY bot_id, created_at, id').map(scheduleOf)
+  }
+
+  /** Marks a schedule moved to the shared store, as `jobId`; the row itself stays. */
+  markScheduleMigrated(botId: string, id: string, jobId: string, at: string): boolean {
+    return this.run('UPDATE bot_schedules SET migrated_at = ?, migrated_job_id = ? WHERE bot_id = ? AND id = ? AND migrated_at IS NULL', at, jobId, botId, id) > 0
+  }
+
+  /** Undoes the mark (`unmigrateBotSchedules`): the row is a schedule of its bot again for a build that reads it. */
+  clearScheduleMigrated(botId: string, id: string): boolean {
+    return this.run('UPDATE bot_schedules SET migrated_at = NULL, migrated_job_id = NULL WHERE bot_id = ? AND id = ?', botId, id) > 0
   }
 
   /** Adds a schedule; false when its id exists already (a schedule moved by the v4 upgrade included). */
-  putSchedule(row: Omit<BotScheduleRow, 'removedAt'>): boolean {
+  putSchedule(row: Omit<BotScheduleRow, 'removedAt' | 'migratedAt' | 'migratedJobId'>): boolean {
     return this.run(
       'INSERT INTO bot_schedules(id, bot_id, when_json, prompt, label, created_by, created_at) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, JSON.stringify(row.when), row.prompt, row.label, row.createdBy, row.createdAt
     ) > 0
-  }
-
-  removeSchedule(botId: string, id: string): boolean {
-    return this.run('UPDATE bot_schedules SET removed_at = ? WHERE bot_id = ? AND id = ? AND removed_at IS NULL', this.now(), botId, id) > 0
   }
 
   deleteSchedules(botId: string): void {

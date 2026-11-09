@@ -36,6 +36,32 @@ import {
   type WatchState
 } from './pullRequestWatch'
 
+/** A review or comment a read reported, with who wrote it and when. */
+export interface WatchRemark {
+  kind: 'review' | 'comment'
+  author: string
+  at: number
+}
+
+/** `updated`: what changed on a watched pull request (`changes` are the change kinds, or `ended:<reason>`). */
+export interface PullRequestWatchUpdate {
+  threadId: string
+  number: number
+  changes: string[]
+  /** The head the read saw, the signed-in account it read as, and the remarks it reported (absent on an end). */
+  headSha?: string | null
+  viewer?: string | null
+  remarks?: WatchRemark[]
+}
+
+/** `read`: a watched pull request was read; `previousHead` is the head the read before it saw. */
+export interface PullRequestWatchRead {
+  threadId: string
+  headSha: string | null
+  previousHead: string | null
+  at: number
+}
+
 /** A refusal with a code the daemon turns into its own error type. */
 export class PullRequestWatchError extends Error {
   constructor(readonly code: string, message: string) {
@@ -207,7 +233,7 @@ export class PullRequestWatchService extends EventEmitter {
       this.writeLinkWatch(threadId, 'off')
       return this.status(threadId)
     }
-    if (mode !== 'notify') throw new PullRequestWatchError('invalid_params', 'Unknown watch mode')
+    if (mode !== 'notify' && mode !== 'event') throw new PullRequestWatchError('invalid_params', 'Unknown watch mode')
     if (!(previous && previous.mode !== 'off' && !previous.ended) && this.activeCount() >= MAX_WATCHED_THREADS) {
       throw new PullRequestWatchError('too_many_watches', `At most ${MAX_WATCHED_THREADS} threads can watch a pull request at once. Turn another watch off first.`)
     }
@@ -232,6 +258,21 @@ export class PullRequestWatchService extends EventEmitter {
     this.writeLinkWatch(threadId, mode)
     this.nudge()
     return this.status(threadId)
+  }
+
+  /**
+   * A thread-event automation needs this thread's pull request read: a watch that is on (Notify serves it too) stays as it
+   * is; otherwise one starts in `event` mode, which tells no one and only wakes the automation.
+   */
+  ensureEventWatch(threadId: string): PullRequestWatchStatus {
+    const current = this.status(threadId)
+    if ((current.mode === 'notify' || current.mode === 'event') && current.state !== 'ended' && current.state !== 'off') return current
+    return this.setMode(threadId, 'event')
+  }
+
+  /** No automation needs the thread's pull request any more: an `event` watch stops; a Notify watch stays. */
+  releaseEventWatch(threadId: string): void {
+    if (this.deps.threads.getThread(threadId)?.pullRequest?.watch === 'event') this.setMode(threadId, 'off')
   }
 
   /** What a thread's watch is doing, for the side card. */
@@ -388,10 +429,14 @@ export class PullRequestWatchService extends EventEmitter {
     let next = advanceWatchReads(evaluated.next, { incremental, reconcile }, now)
     next = { ...next, readFailures: 0, notFound: 0 }
     const changed = evaluated.changes.length > 0
+    // An `event` watch tells no one: what it reports is remembered as delivered, and only the automation wakes.
+    const silent = entry.mode === 'event'
+    if (silent && changed) next = { ...next, deliveredIds: [...next.deliveredIds, ...changeIds(evaluated.changes)] }
+    this.emit('read', { threadId: member.threadId, headSha: detail.headSha || null, previousHead: state.headSha, at: now })
     // The baseline only records, so it does not count as a quiet read.
     const intervalMs = changed || state.baseline ? this.minInterval : Math.min(entry.intervalMs * 2, this.maxInterval)
     // One notice for everything that changed.
-    const notices = changed ? [{ idPrefix: `pr-update:${member.threadId}:${entry.watchRevision}`, text: formatPullRequestNotice(evaluated.changes, detail), ids: changeIds(evaluated.changes) }] : []
+    const notices = changed && !silent ? [{ idPrefix: `pr-update:${member.threadId}:${entry.watchRevision}`, text: formatPullRequestNotice(evaluated.changes, detail), ids: changeIds(evaluated.changes) }] : []
     const prepared = prepareDeliveries(next, notices, now)
     // Step 1 must be on disk before the thread is written to: if it cannot be written, nothing is delivered and the read repeats.
     try {
@@ -401,7 +446,19 @@ export class PullRequestWatchService extends EventEmitter {
       return
     }
     if (!(await this.replay(member.threadId, revision))) return
-    if (changed) this.emit('updated', { threadId: member.threadId, number: detail.number, changes: changeKinds(evaluated.changes) })
+    if (changed) {
+      this.emit('updated', {
+        threadId: member.threadId,
+        number: detail.number,
+        changes: changeKinds(evaluated.changes),
+        headSha: detail.headSha || null,
+        viewer,
+        remarks: evaluated.changes.flatMap((change): WatchRemark[] =>
+          change.kind === 'review' ? [{ kind: 'review' as const, author: change.review.author, at: Date.parse(change.review.submittedAt ?? '') }]
+            : change.kind === 'comment' ? [{ kind: 'comment' as const, author: change.comment.author, at: Date.parse(change.comment.createdAt) }]
+              : [])
+      })
+    }
     if (evaluated.ended && this.current(member.threadId, revision)) this.end(member.threadId, evaluated.ended)
   }
 

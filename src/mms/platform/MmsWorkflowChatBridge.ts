@@ -1,3 +1,4 @@
+import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChatMode, OrchestratorSendRequest } from '../../shared/types'
@@ -23,11 +24,13 @@ interface Receipt {
   title: string
   source: WorkflowChatSource
   params: WorkflowRunStartParams
+  /** The mode the run is held to, worked out when the command was sent (#338). */
+  permissionMode?: PermissionMode
   cancelled?: boolean
   integrity: string
 }
 export interface WorkflowChatExecutor {
-  prepare(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource): Promise<OrchestratorSendRequest>
+  prepare(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource, permissionMode?: PermissionMode): Promise<OrchestratorSendRequest>
   execute(invocationId: string, threadId: string, original: string, signal: AbortSignal): Promise<WorkflowChatRun>
   observe(run: WorkflowChatRun, signal: AbortSignal, terminalOnly?: boolean): Promise<{ snapshot: WorkflowRunSnapshot; aborted: boolean }>
   abandon(invocationId: string, threadId: string): void
@@ -53,12 +56,12 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     this.canonicalRoot = realpathSync(this.root)
   }
 
-  prepare(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource): Promise<OrchestratorSendRequest> {
+  prepare(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource, permissionMode?: PermissionMode): Promise<OrchestratorSendRequest> {
     // The input reference is strictly host-owned and is never accepted from RPC.
     if (input.workflowInvocationId) throw new DomainRpcError('invalid_params', 'A workflow receipt cannot be supplied by a client')
     if (!WORKFLOW_CHAT_SOURCES.includes(source)) throw new DomainRpcError('invalid_params', 'Workflow source is not admitted by the host')
     if (!input.content.startsWith('/')) return Promise.resolve(input)
-    const task = this.preparing.then(() => this.prepareSerial(threadId, input, source))
+    const task = this.preparing.then(() => this.prepareSerial(threadId, input, source, permissionMode))
     this.preparing = task.catch(() => undefined)
     return task.catch((error: unknown) => {
       if (error instanceof WorkflowInvocationError) throw new DomainRpcError(error.code, error.message, error.details)
@@ -67,7 +70,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     })
   }
 
-  private async prepareSerial(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource): Promise<OrchestratorSendRequest> {
+  private async prepareSerial(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource, permissionMode?: PermissionMode): Promise<OrchestratorSendRequest> {
     this.thread(threadId)
     if (input.requestId && !WORKFLOW_UUID_PATTERN.test(input.requestId)) throw new DomainRpcError('invalid_params', 'Invalid workflow request identity')
     const digest = sha256Utf8(stableStringify({ profileId: this.options.profileId, threadId, content: input.content, mode: input.mode, images: input.images, source }))
@@ -94,7 +97,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     this.options.runs.validateStart(params)
     this.thread(threadId)
     const body: Omit<Receipt, 'integrity'> = { version: 2, profileId: this.options.profileId, threadId, original: input.content, digest,
-      title: invocation.record.compiled.name, source, params }
+      title: invocation.record.compiled.name, source, params, ...(permissionMode ? { permissionMode } : {}) }
     const receipt: Receipt = { ...body, integrity: sha256Utf8(stableStringify(body)) }
     atomicWriteJsonSync(this.path(input.requestId), receipt)
     return { ...input, workflowInvocationId: input.requestId }
@@ -107,7 +110,8 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow start cancelled before admission')
     const snapshot = await this.options.runs.start(receipt.params, {
       connectionId: (receipt.source === 'remote' || receipt.source === 'schedule' ? receipt.source : 'chat') + ':' + invocationId,
-      source: receipt.source
+      source: receipt.source,
+      ...(receipt.permissionMode ? { permissionMode: receipt.permissionMode } : {})
     })
     return { invocationId, profileId: receipt.profileId, threadId, definitionId: receipt.params.definitionId,
       revisionId: receipt.params.revisionId!, runId: snapshot.manifest.runId, title: receipt.title, state: snapshot.manifest.state }
@@ -199,7 +203,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     if (typeof integrity !== 'string' || !/^[a-f0-9]{64}$/.test(integrity) || sha256Utf8(stableStringify(body)) !== integrity) throw new DomainRpcError('invocation_unavailable', 'Workflow receipt integrity check failed')
     if (receipt.version !== 2 || receipt.profileId !== this.options.profileId || receipt.threadId !== threadId || receipt.params?.profileId !== this.options.profileId || receipt.params.threadId !== threadId || receipt.params.requestId !== id) throw new DomainRpcError('profile_mismatch', 'Workflow receipt does not belong to this thread/profile')
     validateWorkflowRunParams('workflowRuns.start', receipt.params)
-    if (!receipt.params.revisionId || receipt.params.draft || !WORKFLOW_CHAT_SOURCES.includes(receipt.source) || typeof receipt.title !== 'string' || receipt.title.length > 120 || !/^[a-f0-9]{64}$/.test(receipt.digest) || (receipt.cancelled !== undefined && typeof receipt.cancelled !== 'boolean')) throw new DomainRpcError('invocation_unavailable', 'Invalid workflow invocation receipt')
+    if (!receipt.params.revisionId || receipt.params.draft || !WORKFLOW_CHAT_SOURCES.includes(receipt.source) || typeof receipt.title !== 'string' || receipt.title.length > 120 || !/^[a-f0-9]{64}$/.test(receipt.digest) || (receipt.cancelled !== undefined && typeof receipt.cancelled !== 'boolean') || (receipt.permissionMode !== undefined && !isPermissionMode(receipt.permissionMode))) throw new DomainRpcError('invocation_unavailable', 'Invalid workflow invocation receipt')
     return receipt
   }
 }

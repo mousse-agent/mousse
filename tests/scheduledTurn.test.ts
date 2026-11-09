@@ -18,6 +18,7 @@ import { Reconciler } from '../src/mms/run/Reconciler'
 import { jobPermissionRequest } from '../src/mms/scheduled/jobPermission'
 import { AGENT_JOB_LIMIT_DEFAULTS, agentJobExpiry, isActiveAgentJob } from '../src/mms/scheduled/agentJobLimits'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
+import { SCHEDULED_SILENT_NOTICE } from '../src/mms/orchestrator/OrchestratorService'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { ScheduledJob, ScheduledJobRunRecord } from '../src/shared/types'
@@ -182,8 +183,11 @@ describe('scheduled jobs run as turns', () => {
       expect(messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['write the report'])
       expect(messages.filter((message) => message.role === 'assistant')).toHaveLength(1)
       // The stored prompt is marked as the job's, so it does not pass for something the person typed.
-      const prompt = w.orch.getOrCreateSession(thread.id).messages.find((message) => message.role === 'user')
+      const prompt = w.orch.getOrCreateSession(thread.id).messages.find((message) => message.role === 'user' && !message.hidden)
       expect(prompt?.scheduled).toEqual({ jobId: job.id, jobName: 'Report' })
+      // The agent alone is told how to say "nothing new"; the person never sees it.
+      const notice = w.orch.getOrCreateSession(thread.id).messages.find((message) => message.role === 'user' && message.hidden)
+      expect(notice?.content).toBe(SCHEDULED_SILENT_NOTICE)
     })
 
     it('does the same through the direct path when no effect worker is attached', async () => {
@@ -520,7 +524,7 @@ describe('scheduled jobs run as turns', () => {
       expect(claude.turns).toHaveLength(1)
       expect(w.store.getThread(thread.id)?.modelOverride).toMatchObject(PI)
       // The person's own message is not marked; the job's prompt is, after waiting in the queue too.
-      const users = w.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user')
+      const users = w.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden)
       expect(users.map((message) => message.scheduled?.jobName)).toEqual([undefined, 'Report'])
       // The repeat is spent and the next run is a full interval away.
       expect(new Date(w.jobs.getJob(job.id)!.nextRunAt!).getTime()).toBeGreaterThan(Date.now())
@@ -717,6 +721,40 @@ describe('scheduled jobs run as turns', () => {
       expect(first.threadId).toBe(chosen[0])
       expect(retry.threadId).toBe(chosen[0])
       expect(perRunThreads(w, job.id)).toHaveLength(1)
+    })
+
+    it('runs two jobs due on one thread in the same tick one after the other, and each keeps its repeat (#404)', async () => {
+      const release = gate()
+      let held = false
+      const pi = piAdapter(async (input) => {
+        // Whichever job reaches the thread first holds it until released.
+        if (!held) {
+          held = true
+          await release.promise
+        }
+        return `pi: ${input.prompt}`
+      })
+      const w = boot([pi])
+      const project = projectOf(w)
+      const thread = w.store.createThread('Shared', project.id, project.path)
+      w.orch.setThreadModelOverride(thread.id, PI)
+      const shared = { threadId: thread.id, projectId: project.id, schedule: { kind: 'interval' as const, minutes: 10 }, repeat: { times: 3 } }
+      const first = addJob(w, { name: 'First', prompt: 'first job', ...shared })
+      const second = addJob(w, { name: 'Second', prompt: 'second job', ...shared })
+      makeDue(w, first)
+      makeDue(w, second)
+
+      await w.tick()
+      await waitFor(() => pi.turns.length === 1, 'the first turn')
+      // The other one waits behind it on the thread's queue, without a failure.
+      await waitFor(() => [first, second].some((job) => w.jobs.getJob(job.id)?.pendingOccurrence?.state === 'queued'), 'the second occurrence to queue')
+      expect([first, second].flatMap((job) => w.jobs.getJob(job.id)?.runHistory ?? []).some((record) => record.status === 'error')).toBe(false)
+
+      release.resolve()
+      const records = [await finished(w, first.id), await finished(w, second.id)]
+      expect(records.map((record) => record.status)).toEqual(['ok', 'ok'])
+      expect(pi.turns).toHaveLength(2)
+      for (const job of [first, second]) expect(w.jobs.getJob(job.id)?.repeat).toMatchObject({ times: 3, completed: 1 })
     })
 
     it('runs due jobs at the same time, so a slow one does not hold the others', async () => {
@@ -1713,6 +1751,47 @@ describe('scheduled jobs run as turns', () => {
 
       expect(w.jobs.getJob(job.id)!.runHistory!.map((entry) => entry.status)).toEqual(['waiting', 'waiting', 'waiting', 'error'])
       expect(w.jobs.getJob(job.id)).toMatchObject({ lastStatus: 'error', lastError: expect.stringContaining('Usage limit reached 4 times in a row') })
+    })
+  })
+
+  describe('a job whose Who is a saved agent', () => {
+    it('runs the agent on the occurrence thread, records who ran it, and marks a run after the agent was published again', async () => {
+      const claude = claudeAdapter((input) => `claude: ${input.prompt}`)
+      const w = boot([claude])
+      const project = projectOf(w)
+      const calls: Array<{ definitionId: string; threadId: string; prompt: string; workspaceRoot: string }> = []
+      let revision = 'rev-1'
+      w.orch.setScheduledAgentRunner(async (input) => {
+        calls.push({ definitionId: input.definitionId, threadId: input.threadId, prompt: input.prompt, workspaceRoot: input.workspaceRoot })
+        return { status: 'completed', text: `reviewer: ${input.prompt}`, agent: { definitionId: input.definitionId, name: 'PR reviewer', revision } }
+      })
+      const job = addJob(w, { projectId: project.id, createThread: true, agent: { definitionId: 'agent-1' } })
+
+      await runNow(w, job)
+      const first = await finished(w, job.id)
+      expect(first).toMatchObject({ status: 'ok', agent: { definitionId: 'agent-1', name: 'PR reviewer', revision: 'rev-1' } })
+      expect(first.agent?.changed).toBeUndefined()
+      expect(calls).toEqual([{ definitionId: 'agent-1', threadId: first.threadId, prompt: 'write the report', workspaceRoot: expect.any(String) }])
+      // No model ran it: the saved agent did.
+      expect(claude.turns).toHaveLength(0)
+      // The prompt and the agent's reply are the thread's messages.
+      const messages = w.orch.getMessages(first.threadId!)
+      expect(messages.map((message) => [message.role, message.content])).toEqual([['user', 'write the report'], ['assistant', 'reviewer: write the report']])
+
+      revision = 'rev-2'
+      await runNow(w, w.jobs.getJob(job.id)!)
+      await waitFor(() => (w.jobs.getJob(job.id)!.runHistory?.length ?? 0) === 2 && !w.jobs.getJob(job.id)!.runClaim, 'the second run')
+      expect(w.jobs.getJob(job.id)!.runHistory!.at(-1)!.agent).toMatchObject({ revision: 'rev-2', changed: true })
+    })
+
+    it('fails the run with what to do when the agent cannot run', async () => {
+      const w = boot([claudeAdapter(() => 'unused')])
+      const project = projectOf(w)
+      w.orch.setScheduledAgentRunner(async () => { throw new Error('Publish PR reviewer before an automation runs it.') })
+      const job = addJob(w, { projectId: project.id, createThread: true, agent: { definitionId: 'agent-1' } })
+      await runNow(w, job)
+      const record = await finished(w, job.id)
+      expect(record).toMatchObject({ status: 'error', error: 'Publish PR reviewer before an automation runs it.' })
     })
   })
 })

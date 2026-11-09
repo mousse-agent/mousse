@@ -1,3 +1,4 @@
+import { RUN_LEVEL_LABELS, type RunLevel } from '../../shared/automationInbox'
 import {
   threadNotificationChannels,
   type MousseSettings,
@@ -5,6 +6,7 @@ import {
   type ThreadNotificationEvent
 } from '../../shared/settings'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
+import type { RunEndState } from '../../shared/automations'
 
 export type ThreadNotificationKind = ThreadNotificationEvent
 
@@ -19,6 +21,18 @@ const THREAD_NOTIFICATION_BODIES: Record<ThreadNotificationKind, string> = {
   completed: 'Agent finished',
   question: 'Agent has a question for you',
   idle: 'Agent paused'
+}
+
+/** The body of an automation run's notification: how it ended, with the error of a failed run. */
+export function automationRunBody(outcome: RunEndState, error?: string, report?: { level?: RunLevel; summary?: string }): string {
+  // A run that reported says so, with its level: the report is the news.
+  if (report?.summary && outcome !== 'failed' && outcome !== 'incomplete') return `${report.level ? `${RUN_LEVEL_LABELS[report.level]} · ` : ''}${report.summary.slice(0, 160)}`
+  switch (outcome) {
+    case 'done': return 'No report'
+    case 'nothing_new': return 'Nothing new'
+    case 'incomplete': return 'Incomplete · needs you'
+    case 'failed': return error ? `Failed · ${error.split(/\r?\n/)[0]!.slice(0, 120)}` : 'Failed'
+  }
 }
 
 /** Body of a subagent's question, announced under its parent's name. */

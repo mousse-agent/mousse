@@ -63,6 +63,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction', keywords: ['compaction', 'tokens', 'summarize'] },
   { title: 'When the cache expires', section: 'agents', anchor: 'agents-idle-compaction', keywords: ['cache', 'idle', 'compact', 'suggest'] },
   { title: 'Agent access', section: 'agents', anchor: 'agents-access', keywords: ['reach beyond their own threads', 'read other threads', 'manage threads', 'access level'] },
+  { title: 'Automations agents add', section: 'agents', anchor: 'agents-automations', keywords: ['automations', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },
   { title: 'Agents may answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions'] },
   { title: 'Let agents start subagents on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'create subagents on other devices'] },
   { title: 'Give each subagent its own worktree', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch'] },

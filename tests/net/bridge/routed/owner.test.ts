@@ -540,7 +540,9 @@ describe('a routed call runs as a person on another computer', () => {
     expect(prepare).toHaveBeenCalledWith(
       t.id,
       expect.objectContaining({ content: '/review' }),
-      'gui'
+      'gui',
+      // Prepared under the thread's mode, as every workflow typed on a thread is (#338).
+      expect.any(String)
     )
     expect(send).not.toHaveBeenCalled()
     expect(enqueue).not.toHaveBeenCalled()

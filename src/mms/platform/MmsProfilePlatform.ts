@@ -24,6 +24,8 @@ import { MmsWorkflowAgents } from './MmsWorkflowAgents'
 import { MmsWorkflowBrowser } from './MmsWorkflowBrowser'
 import { mergeWorkflowAgentPreparation } from '../../shared/workflows/agentExecutionBindings'
 import { MmsAgentExecutionService } from './MmsAgentExecutionService'
+import { createScheduledAgentRunner } from '../automations/scheduledAgent'
+import type { ScheduledAgentRunner } from '../orchestrator/OrchestratorService'
 import { join } from 'node:path'
 import { BrowserArtifactService } from '../browser/BrowserArtifactService'
 import { MmsBrowserService } from '../browser/MmsBrowserService'
@@ -51,6 +53,7 @@ export class MmsProfilePlatform {
   readonly chats: AgentChatService
   readonly chatResources: ChatResourceService
   readonly agentRuns: MmsAgentExecutionService
+  readonly scheduledAgentRunner: ScheduledAgentRunner
   readonly browserArtifacts: BrowserArtifactService
   readonly workerArtifactRoot: string
   private browserAssembly?: MmsBrowserService
@@ -74,6 +77,11 @@ export class MmsProfilePlatform {
     this.chats = new AgentChatService({ services, registry: this.agentDefinitions,
       resolverFor: async (runtimeKind, projectPath) => new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models,
         integrationLookup: await this.integrationLookup(runtimeKind, projectPath) }) })
+    // A scheduled job whose Who is a saved agent runs it through the same resolver the chats use. The profile hands
+    // it to the orchestrator once that exists.
+    this.scheduledAgentRunner = createScheduledAgentRunner({ services, registry: this.agentDefinitions,
+      resolverFor: async (runtimeKind, projectPath) => new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models,
+        integrationLookup: await this.integrationLookup(runtimeKind, projectPath) }) })
     this.chatResources = createMmsChatResourceService(services, (groupId) => this.chats.resourceBinding(groupId))
     this.chats.setBrowserRuntime(createChatBrowserRuntime(services, (execution) => this.chats.assertBrowserExecution(execution), this.chatResources))
     this.onDispose(() => this.chats.dispose())
@@ -90,6 +98,8 @@ export class MmsProfilePlatform {
     this.workflowBrowser = new MmsWorkflowBrowser(services, () => this.browser,
       async (context) => this.workflowRuns.runtime.get(context.runId!, { profileId }))
     this.workflowRuns = new MmsWorkflowCoordinator({ profileId, profileRoot, registry: this.workflowDefinitions,
+      // A run started from the Library or the CLI is held to its thread's mode, else the profile default (#338).
+      defaultPermissionMode: (threadId) => services.orchestrator.scheduledCreatorCeiling(threadId),
       threads: services.threads, projects: services.projects,
       adapters: { agent: this.workflowAgents.agent, tool: this.workflowTools.adapter, mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill, browser: this.workflowBrowser.adapter },
       prepareExecution: async (request, record) => {

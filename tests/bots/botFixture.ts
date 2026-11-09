@@ -21,6 +21,10 @@ import type { BotChip } from '../../src/shared/bots/personal/chat'
 import type { BotModelChoice } from '../../src/shared/bots/personal/definition'
 import type { ProviderSelection } from '../../src/shared/harness/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
+import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
+import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
+import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
+import { BotScheduleBook } from '../../src/mms/scheduled/botJobs'
 
 export const T0 = Date.parse('2026-11-07T09:00:00.000Z')
 export const PI: ProviderSelection = { instanceId: 'pi:openrouter', model: 'some/model' }
@@ -34,6 +38,12 @@ export interface BotFixture {
   outbox: EffectOutbox
   bots: BotEngine
   host: BotEngineHost
+  /** The one shared scheduler (a real `ScheduledJobService` over a temporary home), on the fixture's clock. */
+  scheduler: ScheduledJobService
+  /** Bots' schedules in the shared store. */
+  book: BotScheduleBook
+  /** One tick of the shared scheduler at `now` (the fixture's clock moves there), and the schedule activations it inserted. */
+  tickSchedules(now?: Date): Promise<{ inserted: string[] }>
   /** Candidates the fake resolver walks, in order; a limited one is skipped until its time. */
   candidates: ProviderSelection[]
   limited: Map<string, string>
@@ -159,9 +169,27 @@ export function botFixture(): BotFixture {
     scheduleLabel: (when) => (when.kind === 'cron' && when.expr === '0 9 * * 1-5' ? 'every weekday · 09:00' : when.kind === 'interval' ? `every ${when.minutes} minutes` : when.expr),
     providerLabel: (instanceId) => (instanceId.startsWith('claude') ? 'Claude' : 'OpenAI')
   }
+  // The one scheduler: bots' schedules are jobs in the shared store, handed to the engine's run lane.
+  const jobStore = new ScheduledJobStore(MousseConfigStore.load(join(base, 'mousse-home')))
+  const scheduler = new ScheduledJobService({ runIsolated: async () => { throw new Error('bot tests run no agent jobs') } }, jobStore)
+  scheduler.setClock(() => new Date(clock.now))
+  const book = new BotScheduleBook({ jobs: scheduler, label: (when) => host.scheduleLabel!(when), now: () => new Date(clock.now) })
+  host.schedules = book
+  fixture.scheduler = scheduler
+  fixture.book = book
   fixture.host = host
   fixture.bots = new BotEngine(host)
+  scheduler.setBotRunner({ runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
+  scheduler.setTickHook((now) => fixture.bots.maintain(now))
+  fixture.tickSchedules = async (now) => {
+    if (now) clock.now = now.getTime()
+    const before = new Set(store.listActivations().map((row) => row.id))
+    await scheduler.tickNow()
+    await flush()
+    return { inserted: store.listActivations().filter((row) => !before.has(row.id) && row.trigger.kind === 'schedule').map((row) => row.id) }
+  }
   fixture.close = () => {
+    scheduler.beginShutdown()
     fixture.bots.close()
     store.close()
     runDb.close()

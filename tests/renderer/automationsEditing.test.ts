@@ -8,7 +8,7 @@ import type { AgentEditorCatalogs, AgentLibraryItem } from '../../src/renderer/c
 import { isLibraryFiltered, uniqueLibraryRuntimes, EMPTY_LIBRARY_QUERY } from '../../src/renderer/components/agentDefinitions/libraryFilter'
 import { ArchiveDefinitionDialog } from '../../src/renderer/components/automations/EditorParts'
 import { RefreshToolsButton } from '../../src/renderer/components/automations/LibraryParts'
-import { definitionSaveState, fixIssuesLabel, publishBlockReason, SAVE_STATE_LABELS } from '../../src/renderer/components/automations/editorState'
+import { AUTOSAVE_DELAY_MS, definitionSaveState, fixIssuesLabel, publishBlockReason, publishImpactLine, SAVE_STATE_LABELS } from '../../src/renderer/components/automations/editorState'
 import type { WorkflowNode } from '../../src/shared/workflows'
 import { WorkflowEditor } from '../../src/renderer/components/workflows/WorkflowEditor'
 import { WorkflowInspector } from '../../src/renderer/components/workflows/WorkflowInspector'
@@ -52,6 +52,8 @@ afterEach(() => {
 const buttons = () => [...document.querySelectorAll<HTMLButtonElement>('button')]
 const button = (text: string) => buttons().find((item) => item.textContent?.trim() === text)
 const flush = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
+/** Waits out the autosave delay, then lets the save settle. */
+const autosaved = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, AUTOSAVE_DELAY_MS + 20)) }); await flush() }
 const escape = () => act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
 
 const catalogs: AgentEditorCatalogs = {
@@ -88,23 +90,27 @@ const agentClient = (items: AgentLibraryItem[]) => {
 }
 
 describe('editor state words', () => {
-  it('names the four states: unsaved edits win, then never published, then published or not', () => {
-    expect(definitionSaveState({ dirty: true, matchesPublished: true })).toBe('unsaved')
-    expect(definitionSaveState({ dirty: false, matchesPublished: null })).toBe('draft')
-    expect(definitionSaveState({ dirty: false, matchesPublished: false })).toBe('unpublished')
-    expect(definitionSaveState({ dirty: false, matchesPublished: true })).toBe('published')
-    expect(Object.values(SAVE_STATE_LABELS)).toEqual(['Unsaved edits', 'Draft saved', 'Unpublished changes', 'Published'])
+  it('names two states: Live when the saved draft is what was published, Changes not live otherwise', () => {
+    expect(definitionSaveState({ dirty: false, matchesPublished: true })).toBe('live')
+    // An edit still saving, a saved edit not published, and a draft never published are not live.
+    expect(definitionSaveState({ dirty: true, matchesPublished: true })).toBe('changes')
+    expect(definitionSaveState({ dirty: false, matchesPublished: false })).toBe('changes')
+    expect(definitionSaveState({ dirty: false, matchesPublished: null })).toBe('changes')
+    expect(Object.values(SAVE_STATE_LABELS)).toEqual(['Live', 'Changes not live'])
+    expect(publishImpactLine(3)).toBe('Used by 3 automations · they get this on their next run')
+    expect(publishImpactLine(1)).toBe('Used by 1 automation · it gets this on its next run')
   })
 
   it('gives one reason for a disabled Publish, and none while it can publish or is busy', () => {
     const issue = { message: 'Choose a model before publishing or running.' }
-    expect(publishBlockReason({ state: 'unsaved', blocking: [issue] })).toBe('Save the draft to publish it.')
-    expect(publishBlockReason({ state: 'draft', blocking: [issue] })).toBe(issue.message)
-    expect(publishBlockReason({ state: 'draft', blocking: [], checking: true })).toBe('Checking where it runs…')
-    expect(publishBlockReason({ state: 'draft', blocking: [], readOnly: true })).toBe('Open the draft to publish.')
-    expect(publishBlockReason({ state: 'draft', blocking: [], invalidSource: true })).toBe('Fix the source to publish.')
-    expect(publishBlockReason({ state: 'draft', blocking: [] })).toBeNull()
-    expect(publishBlockReason({ state: 'unsaved', blocking: [issue], busy: true })).toBeNull()
+    expect(publishBlockReason({ dirty: true, blocking: [issue] })).toBe('Saving your edits…')
+    expect(publishBlockReason({ saveFailed: true, dirty: true, blocking: [] })).toBe('Your edits did not save. Retry first.')
+    expect(publishBlockReason({ blocking: [issue] })).toBe(issue.message)
+    expect(publishBlockReason({ blocking: [], checking: true })).toBe('Checking where it runs…')
+    expect(publishBlockReason({ blocking: [], readOnly: true })).toBe('Open the draft to publish.')
+    expect(publishBlockReason({ blocking: [], invalidSource: true })).toBe('Fix the source to publish.')
+    expect(publishBlockReason({ blocking: [] })).toBeNull()
+    expect(publishBlockReason({ dirty: true, blocking: [issue], busy: true })).toBeNull()
     expect(fixIssuesLabel(1)).toBe('Fix 1 issue to publish')
     expect(fixIssuesLabel(3)).toBe('Fix 3 issues to publish')
   })
@@ -215,11 +221,11 @@ describe('agent editor header', () => {
     return onBack
   }
 
-  it('shows Draft saved, the blocking issue as a link, and keeps Duplicate, Export and Archive under "…"', async () => {
+  it('shows Changes not live, the blocking issue as a link, and keeps Duplicate, Export and Archive under "…"', async () => {
     const client = new IsolatedAgentDefinitionsClient()
     const created = await client.create({ profileId: 'p', settings: { identity: { name: 'Helper', slug: 'helper', purpose: '', tags: [] } } })
     await openEditor(client, created.id)
-    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Draft saved')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Changes not live')
     const publish = document.querySelector<HTMLButtonElement>('[data-action="publish"]')!
     expect(publish.disabled).toBe(true)
     expect(publish.title).toBe('Choose a model before publishing or running.')
@@ -238,24 +244,41 @@ describe('agent editor header', () => {
     expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(['Duplicate', 'Export', 'Archive'])
   })
 
-  it('an edit reads Unsaved edits, disables Export in the menu, and Save never publishes', async () => {
+  it('an edit saves itself, disables Export until it has, and never publishes', async () => {
     const client = new IsolatedAgentDefinitionsClient()
     const created = await client.create({ profileId: 'p', settings: { identity: { name: 'Helper', slug: 'helper', purpose: '', tags: [] } } })
     const publish = vi.spyOn(client, 'publish')
     await openEditor(client, created.id)
     await act(async () => document.querySelector<HTMLButtonElement>('[data-action="favorite"]')!.click())
-    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Unsaved edits')
-    expect(document.querySelector<HTMLButtonElement>('[data-action="publish"]')!.title).toBe('Save the draft to publish it.')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Changes not live')
+    expect(document.querySelector('[data-agent-editor]')?.getAttribute('data-dirty')).toBe('true')
+    expect(document.querySelector<HTMLButtonElement>('[data-action="publish"]')!.title).toBe('Saving your edits…')
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Agent actions"]')!.click())
     expect(document.querySelector<HTMLButtonElement>('[role="menu"] [data-action="export"]')!.disabled).toBe(true)
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Agent actions"]')!.click())
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click())
-    await flush()
-    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Draft saved')
+    expect(document.querySelector('[data-action="save-draft"]')).toBeNull()
+    await autosaved()
+    expect(document.querySelector('[data-agent-editor]')?.getAttribute('data-dirty')).toBe('false')
     expect(publish).not.toHaveBeenCalled()
   })
 
-  it('reads Published after publishing, then Unpublished changes after a saved edit', async () => {
+  it('says plainly when a save fails, and Retry saves', async () => {
+    const client = new IsolatedAgentDefinitionsClient()
+    const created = await client.create({ profileId: 'p', settings: { identity: { name: 'Helper', slug: 'helper', purpose: '', tags: [] } } })
+    const saveDraft = vi.spyOn(client, 'saveDraft').mockRejectedValueOnce({ code: 'UNAVAILABLE', message: 'daemon offline' })
+    await openEditor(client, created.id)
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="favorite"]')!.click())
+    await autosaved()
+    expect(document.querySelector('[data-testid="editor-save-error"]')?.textContent).toContain('Not saved: daemon offline')
+    expect(document.querySelector<HTMLButtonElement>('[data-action="publish"]')!.title).toBe('Your edits did not save. Retry first.')
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="retry-save"]')!.click())
+    await flush()
+    expect(saveDraft).toHaveBeenCalledTimes(2)
+    expect(document.querySelector('[data-testid="editor-save-error"]')).toBeNull()
+    expect(document.querySelector('[data-agent-editor]')?.getAttribute('data-dirty')).toBe('false')
+  })
+
+  it('reads Live after publishing, then Changes not live after an edit, and Publish names the automations that use it', async () => {
     const client = new IsolatedAgentDefinitionsClient()
     const created = await client.create({
       profileId: 'p',
@@ -263,16 +286,30 @@ describe('agent editor header', () => {
     })
     await client.publish({ profileId: 'p', id: created.id, expectedDraftHash: created.draftHash })
     await openEditor(client, created.id)
-    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Published · Runs on xAI')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Live · Runs on xAI')
     // A favorite is a library flag, not published content; a new name is.
     await act(async () => {
       const name = document.querySelector<HTMLInputElement>('[data-field="name"]')!
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(name, 'Helper two')
       name.dispatchEvent(new Event('input', { bubbles: true }))
     })
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click())
+    await autosaved()
+    expect(document.querySelector('[data-editor-status]')?.textContent).toContain('Changes not live')
+    // Two automations run this agent: Publish says so, with the list, before it publishes.
+    ;(window as unknown as { mousse: unknown }).mousse = { scheduled: { list: async () => [
+      { id: 'j1', name: 'Morning review', agent: { definitionId: created.id } },
+      { id: 'j2', name: 'Nightly review', agent: { definitionId: created.id } },
+      { id: 'j3', name: 'Someone else', agent: { definitionId: 'other' } }
+    ] } }
+    const publish = vi.spyOn(client, 'publish')
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="publish"]')!.click())
     await flush()
-    expect(document.querySelector('[data-editor-status]')?.textContent).toContain('Unpublished changes')
+    expect(document.querySelector('[data-testid="publish-impact"]')?.textContent).toBe('Used by 2 automations · they get this on their next runMorning reviewNightly review')
+    expect(publish).not.toHaveBeenCalled()
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="confirm-publish"]')!.click())
+    await flush()
+    expect(publish).toHaveBeenCalledTimes(1)
+    delete (window as unknown as { mousse?: unknown }).mousse
   })
 
   it('Archive asks first, even for a clean draft; Cancel keeps it and Archive archives it', async () => {
@@ -318,7 +355,7 @@ describe('agent editor header', () => {
     expect(archive).toHaveBeenCalledTimes(1)
     expect(onBack).not.toHaveBeenCalled()
     expect(name().value).toBe('Helper  edited ')
-    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Unsaved edits')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Changes not live')
     expect(document.querySelector('[data-agent-editor]')?.getAttribute('data-dirty')).toBe('true')
     expect(document.querySelector('.agent-banner--error')?.textContent).toBe("Couldn't archive: daemon offline")
     // The ordinary leave guard still asks about the kept edits.
@@ -376,7 +413,7 @@ describe('workflow editor archive', () => {
     expect(source().value).toBe(broken)
     expect(source().getAttribute('data-error')).toBe(sourceError)
     expect(document.querySelector('[data-workflow-editor]')?.getAttribute('data-dirty')).toBe('true')
-    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Unsaved edits · Invalid source')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Changes not live · Invalid source')
     expect(document.querySelector('.wf-banner--error')?.textContent).toBe("Couldn't archive: daemon offline")
     // The ordinary leave guard still asks about the kept edits.
     let left: boolean | undefined
@@ -417,7 +454,7 @@ describe('editor controls', () => {
 
     await pick('Remember', 'Off')
     expect(combo('Remember')!.getAttribute('data-value')).toBe('off')
-    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Unsaved edits')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Changes not live')
     // An unavailable choice stays visible but cannot be picked.
     await act(async () => combo('Where they run')!.click())
     const sandboxed = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent === 'Sandboxed (unavailable)')!
@@ -433,9 +470,8 @@ describe('editor controls', () => {
     await act(async () => document.querySelector<HTMLLabelElement>('label[for="include-thread"]')!.click())
     expect(thread.getAttribute('aria-checked')).toBe(before === 'true' ? 'false' : 'true')
 
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click())
-    await flush()
-    const saved = saveDraft.mock.calls[0][0]
+    await autosaved()
+    const saved = saveDraft.mock.calls.at(-1)![0]
     expect(saved.settings?.memory.scope).toBe('off')
     expect(saved.settings?.script.executionMode).toBe('workspace')
     expect(saved.settings?.context.includeCurrentThread).toBe(before !== 'true')
@@ -473,5 +509,37 @@ describe('editor controls', () => {
     await act(async () => render(true))
     expect(combo('Skill')!.disabled).toBe(true)
     expect(combo('Effect')!.disabled).toBe(true)
+  })
+})
+
+describe('the Library editors fold to what most people change', () => {
+  it('the workflow palette shows the common steps, and search finds every other step', async () => {
+    const { WorkflowPalette, COMMON_NODE_TYPES } = await import('../../src/renderer/components/workflows/WorkflowPalette')
+    const catalogs = { ...new IsolatedWorkflowDefinitionsClient().catalogs, models: [] }
+    await act(async () => root.render(createElement(WorkflowPalette, { catalogs, onAdd: vi.fn() })))
+    const shown = () => [...document.querySelectorAll<HTMLElement>('[data-palette-type]')].map((item) => item.dataset.paletteType)
+    expect(shown()).toEqual([...COMMON_NODE_TYPES])
+    expect(COMMON_NODE_TYPES).toHaveLength(8)
+    const search = document.querySelector<HTMLInputElement>('[data-palette] input')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, 'browser')
+      search.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(shown()).toContain('browser-task')
+    expect(shown()).not.toContain('agent')
+  })
+
+  it('the agent editor shows Name, Instructions, Model and What it may use, with the rest behind More', async () => {
+    const client = new IsolatedAgentDefinitionsClient()
+    const created = await client.create({ profileId: 'p', settings: { identity: { name: 'Helper', slug: 'helper', purpose: '', tags: [] } } })
+    await act(async () => root.render(createElement(AgentEditor, { profileId: 'p', definitionId: created.id, client, catalogs, onBack: vi.fn() })))
+    await flush()
+    const more = document.querySelector<HTMLElement>('[data-agent-more]')!
+    expect(more.hidden).toBe(true)
+    const visible = [...document.querySelectorAll<HTMLElement>('.agent-setting-group')].filter((group) => !group.closest('[data-agent-more]')).map((group) => group.querySelector('h3')?.textContent)
+    expect(visible).toEqual(['Name and purpose', 'Instructions', 'Model', 'Skills', 'MCP tools', 'Built-in tools'])
+    expect(document.querySelector('[data-agent-use] .agent-settings-use-title')?.textContent).toBe('What it may use')
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="agent-editor-more"]')!.click())
+    expect(more.hidden).toBe(false)
   })
 })

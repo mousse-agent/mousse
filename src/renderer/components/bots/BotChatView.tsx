@@ -6,7 +6,7 @@ import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { MarkdownPreview } from '../editors/MarkdownPreview'
 import { BotFace } from './face/BotFace'
 import { BotChips, BotChipView } from './BotChips'
-import { BotAskCard } from './BotAskCard'
+import { BotAsk } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
 import { BotAboutPanel } from './BotAboutPanel'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
@@ -65,7 +65,7 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser }:
       {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" />}
       <BotChips chips={message.chips} />
       {browser}
-      {message.ask && <BotAskCard botName={bot.name} ask={message.ask} fromRun={message.kind === 'notice'}
+      {message.ask && <BotAsk botName={bot.name} ask={message.ask} fromRun={message.kind === 'notice'}
         onAnswer={(answer) => store().answer(bot.id, message.ask!.askId, answer)}
         onExport={() => store().exportMemory(bot.id, message.ask!.askId)} />}
       {message.error && <BotErrorLine error={message.error} onAction={onAction} />}

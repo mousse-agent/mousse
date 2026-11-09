@@ -1,3 +1,5 @@
+import { workflowApprovalEffects } from '../../shared/workflows/permissionMode'
+import type { PermissionMode } from '../../shared/permissionMode'
 import { ResourceLifecycleError } from '../lifecycle/ResourceLifecycleStore'
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync } from 'node:fs'
 import { open } from 'node:fs/promises'
@@ -42,6 +44,8 @@ export interface MmsWorkflowCoordinatorOptions {
   registry: WorkflowRegistry
   adapters?: WorkflowExecutionAdapters
   installationPolicy?: (record: WorkflowRecordSnapshot, projectId?: string) => Promise<ExecutionPolicyLayer>
+  /** The mode a run started without one is held to: its thread's mode, else the mode new threads start in. */
+  defaultPermissionMode?: (threadId?: string) => PermissionMode
   prepareExecution?: (request: StartWorkflowRequest, record: WorkflowRecordSnapshot) => Promise<{
     bindings: WorkflowExecutionBindings
     installationPolicy: ExecutionPolicyLayer
@@ -197,7 +201,10 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       if (thread && thread.projectId !== projectId) throw new DomainRpcError('project_mismatch', 'Workflow project must match its thread')
       if (projectId && !this.options.projects.getProject(projectId)) throw new DomainRpcError('project_unavailable', 'The selected project is unavailable in this profile')
       const executionKey = thread ? undefined : this.profileId + '/workflow/' + params.requestId
-      const installationPolicy = this.options.installationPolicy ? await this.options.installationPolicy(definition, projectId) : this.defaultPolicy()
+      const permissionMode = admission.permissionMode ?? this.options.defaultPermissionMode?.(params.threadId)
+      const base = this.options.installationPolicy ? await this.options.installationPolicy(definition, projectId) : this.defaultPolicy()
+      // The run's steps ask or run by the mode it is held to (#338).
+      const installationPolicy = permissionMode ? { ...base, approvalEffects: workflowApprovalEffects(permissionMode) } : base
       this.assertActive()
       record = {
         version: 1, profileId: this.profileId, digest, executionKey, threadName: ('Workflow: ' + definition.compiled.name).slice(0, 120),
@@ -207,6 +214,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
           source: admission.source, definitionId: definition.definitionId,
           ...(params.draft ? { expectedDraftSemanticHash: definition.semanticHash } : { revisionId: definition.semanticHash }),
           input: structuredClone(params.input), installationPolicy,
+          ...(permissionMode ? { permissionMode } : {}),
           runPolicy: {
             allowedCapabilities: definition.compiled.permissions,
             maxElapsedMs: definition.compiled.limits.timeoutMs,
@@ -314,7 +322,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       allowedTools: ['workflow.node', 'workflow.script', 'workflow.approval', ...(this.adapters.agent ? ['workflow.agent'] : []), ...(this.adapters.browser ? ['workflow.browser'] : [])],
       allowedCapabilities: ['script.trusted-local', 'human.input', 'human.approval', 'workspace.read', 'artifact.write', ...(this.adapters.agent ? ['model.invoke'] : []), ...(this.adapters.skill ? ['skill.load'] : [])],
       allowedEffects: ['pure', 'read', 'write', 'external', 'unknown'],
-      approvalEffects: ['write', 'external', 'unknown']
+      approvalEffects: workflowApprovalEffects('ask')
     }
   }
 

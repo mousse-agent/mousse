@@ -8,6 +8,32 @@ export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' 
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
+/**
+ * When an automation tells the person about a run: the lowest report level that notifies (`run_report`). Failures
+ * always notify; a run with no report counts as worth a look. The default is Worth a look. The agent's `[SILENT]`
+ * stays internal and reads as quiet. Jobs saved before levels said `news` (now `look`) or `problems` (now `needs_you`).
+ */
+export type TellMe = 'needs_you' | 'look' | 'fyi' | 'every'
+export const TELL_ME_VALUES: readonly TellMe[] = ['needs_you', 'look', 'fyi', 'every']
+export const DEFAULT_TELL_ME: TellMe = 'look'
+
+export function isTellMe(value: unknown): value is TellMe {
+  return typeof value === 'string' && (TELL_ME_VALUES as readonly string[]).includes(value)
+}
+
+/** A Tell me in any form a job or a request may carry: the levels, or the words saved before them. */
+export function parseTellMe(value: unknown): TellMe | undefined {
+  if (isTellMe(value)) return value
+  if (value === 'news') return 'look'
+  if (value === 'problems') return 'needs_you'
+  return undefined
+}
+
+/** A job's Tell me; absent or unknown reads as Worth a look. */
+export function tellMeOf(job: { tellMe?: unknown }): TellMe {
+  return parseTellMe(job.tellMe) ?? DEFAULT_TELL_ME
+}
+
 /** `manual` has no clock: the job runs only when started (Run now, or a later trigger). */
 export type ScheduleKind = 'once' | 'interval' | 'cron' | 'manual'
 
@@ -48,6 +74,51 @@ export interface ScheduledJobRunRecord {
   usageLimitUntil?: string
   /** The job was created by an agent (`ScheduledJob.createdBy`); set when the record is saved. */
   agentCreated?: true
+  /** The saved agent that ran this occurrence, at the published revision it ran. */
+  agent?: ScheduledRunAgent
+  /** This run stands for repeats missed while the computer was off: they collapsed into it, and it ran once. */
+  missed?: ScheduledMissedRuns
+  /** When the occurrence was claimed and when it ended; a thread-event job reads them to know its own run's effects. */
+  startedAt?: string
+  endedAt?: string
+  /** The run did not start: a key the job names is not in the profile's secret store ("Add key <name>"). */
+  missingKey?: string
+}
+
+/** Repeats of a job that fell while its computer was off or asleep ("Missed while offline"). */
+export interface ScheduledMissedRuns {
+  /** How many occurrences fell from `since` until the run (at most 1000). */
+  count: number
+  /** The first of them: the occurrence that was due when the computer stopped running. */
+  since: string
+}
+
+/** A saved agent (an agent definition) as one run used it. */
+export interface ScheduledRunAgent {
+  definitionId: string
+  name: string
+  revision: string
+  /** The agent was published again since the run before it that used this agent. */
+  changed?: true
+}
+
+/**
+ * A bot's schedule kept as an automation whose Who is the bot (`ScheduledJob.bot`). Its runs are the bot's run lane:
+ * a fresh child thread, a run report in the bot chat, and the bot's grant as its May. `scheduleId` is the id the bot
+ * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
+ */
+export interface ScheduledJobBot {
+  botId: string
+  scheduleId: string
+  /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */
+  createdBy: 'owner' | 'bot'
+  /** A model the owner picked by hand for this automation's runs (#673); absent: the bot's own choice (by usage). */
+  model?: string
+}
+
+/** The saved agent a job's runs use (`ScheduledJob.agent`): its latest published revision at each run. */
+export interface ScheduledJobAgent {
+  definitionId: string
 }
 
 /**
@@ -74,6 +145,8 @@ export interface ScheduledJobRunClaim {
   settledResult?: ScheduledOccurrenceResult
   /** Set when a webhook delivery started this claim (`occurrenceKey` is `webhook:<id>`). */
   webhookOccurrenceId?: string
+  /** The claim runs late, for the repeats missed while the computer was off; its run record says so. */
+  missed?: ScheduledMissedRuns
 }
 
 /**
@@ -85,6 +158,42 @@ export interface ScheduledJobWebhookTrigger {
   secretRef: string
   createdAt: string
   rotatedAt?: string
+}
+
+/** What on a pull request wakes a thread-event automation: the watch's own change kinds. */
+export type ThreadEventKind = 'checks_failed' | 'checks_passed' | 'review' | 'comment'
+export const THREAD_EVENT_KINDS: readonly ThreadEventKind[] = ['checks_failed', 'checks_passed', 'review', 'comment']
+
+export function isThreadEventKind(value: unknown): value is ThreadEventKind {
+  return typeof value === 'string' && (THREAD_EVENT_KINDS as readonly string[]).includes(value)
+}
+
+/**
+ * A job that wakes on its pull request's activity (`PullRequestWatchService` reads it on the thread the PR is linked to).
+ * The job runs on demand otherwise; its runs go to its own thread (`ScheduledJob.threadId`, the PR's thread by default).
+ */
+export interface ScheduledThreadEventTrigger {
+  /** The thread the pull request is linked to. */
+  threadId: string
+  number: number
+  events: ThreadEventKind[]
+}
+
+/** Events that arrived and wait for their run: one at a time, held by the rate limit until `dueAt`. */
+export interface ScheduledPendingEvent {
+  kinds: ThreadEventKind[]
+  firstAt: string
+  dueAt: string
+}
+
+/** What became of one pull request event, for "(why?)": it ran, was held by the rate limit, or was ignored. */
+export interface ScheduledEventLogEntry {
+  at: string
+  kinds: ThreadEventKind[]
+  outcome: 'started' | 'held' | 'own' | 'paused'
+  /** With `held`: when the run may start. With `own`: what the run did that caused it. */
+  until?: string
+  reason?: string
 }
 
 /** A verified delivery waiting for the scheduler to start it; its payload is stored under the job's trigger folder. */
@@ -120,6 +229,8 @@ export interface ScheduledWebhookDelivery {
   error?: string
   missingPlaceholders?: string[]
   bodyBytes: number
+  /** Resend: the person started the job again with the payload this earlier delivery stored. */
+  resentFrom?: string
 }
 
 /** How an occurrence ended; `uncertain` keeps the engine's "effects may have occurred" text in `error`. */
@@ -161,11 +272,26 @@ export interface ScheduledJob {
   lastError?: string
   pausedAt?: string
   pausedReason?: string
+  /** A pause with an end: the scheduler resumes the job at this time. Absent: paused until a person resumes it. */
+  resumeAt?: string
   threadId?: string
   projectId?: string
   createThread?: boolean
+  /** The lowest run level the person hears about (absent reads as Worth a look; `tellMeOf`). */
+  tellMe?: TellMe
+  /**
+   * Set while a due occurrence waits for its bound thread's running turn to end: it keeps its place and its repeat,
+   * and starts once the thread is free. Cleared when the occurrence starts.
+   */
+  waitingBehind?: { threadId: string; since: string }
   /** Provider instance and model every run uses; absent = the thread's model (bound) or the profile default. */
   selection?: ModelOverride
+  /** A saved agent does the work instead of a model: each run takes its latest published revision. */
+  agent?: ScheduledJobAgent
+  /** A bot does the work, in its own run lane and under its own grant; set by the daemon only. */
+  bot?: ScheduledJobBot
+  /** A bot's occurrence that did not start, and why (the bot was paused, or its last run still waited). Cleared when one starts. */
+  botSkip?: { at: string; reason: string }
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   /** How much the job's runs may do without asking; never wider than `permissionCeiling`. Absent = the thread's mode. */
@@ -187,6 +313,8 @@ export interface ScheduledJob {
   accessCap?: import('./settings').AgentAccessLevel
   /** When the job ends: set on jobs agents create (7 days); only a person extends it. Absent: no end. */
   expiresAt?: string
+  /** Saved keys its runs need, by name (the values stay in the profile's secret store). */
+  keys?: string[]
   repeat?: ScheduledJobRepeat
   runHistory?: ScheduledJobRunRecord[]
   /** Present while state === 'running'; cleared on terminal transition. */
@@ -197,12 +325,46 @@ export interface ScheduledJob {
   liveStatus?: 'running' | 'needs_answer'
   /** The thread the current occurrence runs on, with `liveStatus`; derived when listed, never stored. */
   liveThreadId?: string
-  /** A signed request starts this job; absent when the job has no webhook. */
-  trigger?: { webhook: ScheduledJobWebhookTrigger }
+  /** A signed request starts this job (`webhook`), or its pull request's activity does (`threadEvent`). */
+  trigger?: { webhook?: ScheduledJobWebhookTrigger; threadEvent?: ScheduledThreadEventTrigger }
   /** A verified delivery that the next tick starts (one at a time). */
   pendingTrigger?: ScheduledJobPendingTrigger
+  /** Pull request events waiting for their run (a thread-event job). */
+  pendingEvent?: ScheduledPendingEvent
+  /** When a pull request event last started a run: the rate limit counts from it. */
+  lastEventRunAt?: string
+  /** The newest pull request events and what became of each (at most 10). */
+  eventLog?: ScheduledEventLogEntry[]
+  /**
+   * A draft a manager (the Automation manager or a bot) wrote: stored, never enabled, never run. Turn on makes it an
+   * ordinary automation the person created; Discard deletes it. Set and cleared by the daemon only.
+   */
+  draft?: AutomationDraftState
+  /** `mousse-cli automation run <cliName>` starts it (a CLI trigger: a manual job with a stable name). */
+  cliName?: string
   createdAt: string
   updatedAt: string
+}
+
+/** What a draft carries besides the job it will become. */
+export interface AutomationDraftState {
+  draft: true
+  /** The draft's id: the id of the job it is stored as, and keeps after Turn on. */
+  draftId: string
+  /** The hidden thread of the manager that wrote it, for "Open conversation". */
+  managerThreadId?: string
+  /** A bot wrote it (Built by a bot); absent: the Automation manager or a person. */
+  botId?: string
+  /** An agent wrote it in this ordinary chat (`automation_draft_save` there); the chat shows its card. */
+  originThreadId?: string
+  /** Who does it, as the person picked: a bot; absent: the default agent. */
+  who?: { kind: 'bot'; botId: string }
+  /** What still keeps Turn on off, in the manager's and the person's words. */
+  problems: string[]
+  /** The manager's open question, answered inline under the card. */
+  ask?: { question: string; options: string[]; at: string }
+  /** Turn on gives it one reusable thread for every run (Result: reuse). */
+  reuseThread?: true
 }
 
 /** Profile settings of the scheduler that people choose on the Scheduled page. */
@@ -240,16 +402,28 @@ export interface CreateScheduledJobInput {
   projectId?: string
   createThread?: boolean
   selection?: ModelOverride
+  agent?: ScheduledJobAgent
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   permissionMode?: PermissionMode
+  tellMe?: TellMe
   /** Daemon-only: the protocol refuses it, and the daemon sets it from the creator's mode. */
   permissionCeiling?: PermissionMode
   createdBy?: ScheduledJob['createdBy']
   accessCap?: import('./settings').AgentAccessLevel
   /** Daemon-only, like `accessCap`: the protocol refuses it. */
   expiresAt?: string
+  /** Daemon-only: a bot's schedule (`bots.schedules.add`, `bot_schedule_add`). The protocol refuses it. */
+  bot?: ScheduledJobBot
   repeat?: { times?: number }
+  /** It wakes on this pull request's activity; the protocol sends the thread and events, the daemon adds the number. */
+  threadEvent?: ScheduledThreadEventTrigger
+  /** Saved keys its runs need, by name. */
+  keys?: string[]
+  /** Daemon-only: a draft (`automation_draft_save`). The protocol refuses it. */
+  draft?: AutomationDraftState
+  /** Daemon-only: the CLI name of a CLI trigger. */
+  cliName?: string
 }
 
 /** The edits the Scheduled page sends; `null` clears a field so the job goes back to its default. */
@@ -261,10 +435,17 @@ export interface ScheduledJobPatch {
   projectId?: string | null
   createThread?: boolean
   selection?: ModelOverride | null
+  /** `null` clears it: a model (the selection, else the default agent) does the work again. */
+  agent?: ScheduledJobAgent | null
   mode?: 'agent' | 'plan' | null
   /** `null` clears it: the run follows its thread's mode again. The job's ceiling is not part of a patch. */
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
+  tellMe?: TellMe
+  /** A thread-event job: what on its pull request wakes it. */
+  threadEvent?: { events: ThreadEventKind[] }
+  /** Saved keys its runs need, by name; `null` names none. */
+  keys?: string[] | null
 }
 
 /**
@@ -1139,6 +1320,11 @@ export interface Thread {
    * owner sees them, so no client lists or searches them as threads.
    */
   botOwned?: true
+  /**
+   * Set on a profile's Automation manager thread: the hidden, reusable thread the Automations composer sends to. No
+   * list shows it; "Open conversation" on the Automations page opens it.
+   */
+  automationManager?: true
   /**
    * When the thread deletes itself (ISO time): it, its subagents, worktree, checkpoints and attachments are
    * deleted for good, not archived and not moved to Recently deleted. A subagent follows its root thread's.

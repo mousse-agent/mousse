@@ -1,12 +1,13 @@
 import type { IntegrationSecretAdapter } from '../integrations/secrets'
 import type { ScheduledJobStore } from './ScheduledJobStore'
+import { takesRequests } from '../../shared/requestTrigger'
 
 /**
  * The signing secrets of the jobs that have a webhook, held in memory so a request to the listener (signed or
  * not) never takes the jobs lock or reads a file. The table is rebuilt at most once per `ttlMs` and whenever the
  * scheduler reports a change (`invalidate`: enable, rotate, disable, delete), so a rotation applies at once.
  *
- * Jobs an agent created never have an entry. A rebuild that fails (the jobs lock is busy) keeps the last table;
+ * Jobs an agent created have an entry only once the person kept them. A rebuild that fails (the jobs lock is busy) keeps the last table;
  * the store re-checks the job's webhook under the lock before anything is accepted.
  */
 export class WebhookSecretCache {
@@ -36,7 +37,7 @@ export class WebhookSecretCache {
     try {
       const next = new Map<string, string>()
       for (const job of this.store.listJobs()) {
-        const webhook = !job.createdBy ? job.trigger?.webhook : undefined
+        const webhook = takesRequests(job) ? job.trigger?.webhook : undefined
         if (!webhook) continue
         const secret = this.secrets.resolveSecretRef?.(webhook.secretRef)
         if (secret) next.set(job.id, secret)

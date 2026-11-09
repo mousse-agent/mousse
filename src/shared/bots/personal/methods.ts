@@ -1,6 +1,16 @@
+import type { BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
 import type { BotMemoryForgetResult, BotMemoryListing } from './memory'
+
+/** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
+export interface BotComputerChoice {
+  id: string
+  name: string
+  offline?: true
+  /** Why it cannot be picked; absent for the computer that holds the bot. */
+  unavailable?: string
+}
 
 /**
  * The personal-bot methods (PR 6 §4): profile-bound, apart from the Space-bot `bots.*` set and
@@ -53,7 +63,10 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.chat.markRead',
   'bots.asks.answer',
   'bots.permissions.revoke',
+  'bots.schedules.add',
   'bots.schedules.remove',
+  'bots.model.get',
+  'bots.model.set',
   'bots.memory.list',
   'bots.memory.forget',
   'bots.memory.export'
@@ -98,6 +111,18 @@ export interface BotsPersonalV2Api {
   'bots.asks.answer': { params: { botId: string; askId: string; answer: 'allow' | 'not_now' }; result: { message: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
   'bots.permissions.revoke': { params: { botId: string; permissionId: string }; result: BotDetail }
+  /**
+   * The owner adds a schedule (the Automations page's create row, with the bot as Who). `model`: one picked by hand for
+   * its runs (#673); absent, the bot's own choice (by usage).
+   */
+  'bots.schedules.add': { params: { botId: string; when: BotSchedule['when']; prompt: string; model?: string }; result: BotDetail }
+  /**
+   * The bot's model and computer, by hand (#673): `model` null is by usage (the default). Model names appear here and on
+   * the pickers that use them only. `computers` are this one and the person's other computers; a bot runs on the computer
+   * that holds it, so the others carry `unavailable` (why they cannot be picked) and `offline`.
+   */
+  'bots.model.get': { params: { botId: string }; result: { model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: BotComputerChoice[] } }
+  'bots.model.set': { params: { botId: string; model: string | null }; result: { bot: BotSummary } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }

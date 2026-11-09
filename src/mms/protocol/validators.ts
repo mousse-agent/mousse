@@ -5,7 +5,8 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
  */
 
 import { isExpiryPreset } from '../../shared/threadExpiry'
-import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../../shared/types'
+import { isKeyName, MAX_KEYS_PER_AUTOMATION } from '../../shared/automationKeys'
+import { parseTellMe, isThreadEventKind, THREAD_EVENT_KINDS, type ChatImageAttachment, type ChatMode, type ScheduledJobAgent, type ScheduledJobWorkspace, type TellMe, type ThreadEventKind } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
 import { isAgentAccessLevel, MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
@@ -748,10 +749,44 @@ export type CreateScheduledJobInputValidated = {
   projectId?: string
   createThread?: boolean
   selection?: ModelOverride
+  agent?: ScheduledJobAgent
   mode?: 'agent' | 'plan'
   permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
   repeat?: { times?: number }
+  tellMe?: TellMe
+  threadEvent?: { threadId: string; events: ThreadEventKind[]; number?: number }
+  keys?: string[]
+}
+
+/** The saved keys a job names: up to 20 distinct key names (never values). */
+export function asJobKeys(v: unknown, name = 'keys'): string[] {
+  if (!Array.isArray(v) || v.length > MAX_KEYS_PER_AUTOMATION) throw new Error(`${name} must list at most ${MAX_KEYS_PER_AUTOMATION} key names`)
+  const keys: string[] = []
+  for (const entry of v) {
+    if (!isKeyName(entry)) throw new Error(`${name} must be names like GITHUB_TOKEN`)
+    if (!keys.includes(entry)) keys.push(entry)
+  }
+  return keys
+}
+
+/** What on a pull request wakes a thread-event job: one to four distinct event kinds. */
+export function asThreadEvents(v: unknown, name = 'threadEvent.events'): ThreadEventKind[] {
+  if (!Array.isArray(v) || v.length < 1 || v.length > THREAD_EVENT_KINDS.length) throw new Error(`${name} must list 1 to 4 events`)
+  const events: ThreadEventKind[] = []
+  for (const entry of v) {
+    if (!isThreadEventKind(entry)) throw new Error(`${name} must be checks_failed|checks_passed|review|comment`)
+    if (!events.includes(entry)) events.push(entry)
+  }
+  return events
+}
+
+/** A thread-event trigger as a request names it: the thread its pull request is linked to, and the events. */
+export function asThreadEventInput(v: unknown): { threadId: string; events: ThreadEventKind[]; number?: number } {
+  const o = asPlainObject(v, 'threadEvent')
+  for (const key of Object.keys(o)) if (key !== 'threadId' && key !== 'events' && key !== 'number') throw new Error(`threadEvent.${key} is not allowed`)
+  const number = asOptionalBoundedInt(o.number, 'threadEvent.number', { min: 1, max: 100_000_000 })
+  return { threadId: asString(o.threadId, 'threadEvent.threadId', 256), events: asThreadEvents(o.events), ...(number !== undefined ? { number } : {}) }
 }
 
 /** The provider instance and model a job runs on. The instance and model are checked against the profile later. */
@@ -785,6 +820,20 @@ export function asJobWorkspace(v: unknown, name = 'workspace'): ScheduledJobWork
   throw new Error(`${name}.kind must be project|newWorktree|worktree`)
 }
 
+/** A job's Tell me: the lowest report level that notifies (the words saved before levels are read too). */
+export function asTellMe(v: unknown, name = 'tellMe'): TellMe {
+  const level = parseTellMe(v)
+  if (!level) throw new Error(`${name} must be needs_you|look|fyi|every`)
+  return level
+}
+
+/** A job's saved agent: `{ definitionId }` and nothing else. */
+export function asJobAgent(v: unknown): ScheduledJobAgent {
+  const o = asPlainObject(v, 'agent')
+  for (const key of Object.keys(o)) if (key !== 'definitionId') throw new Error(`agent.${key} is not allowed`)
+  return { definitionId: asString(o.definitionId, 'agent.definitionId', 256) }
+}
+
 export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputValidated {
   const o = asPlainObject(v, 'input')
   const input: CreateScheduledJobInputValidated = {
@@ -798,9 +847,13 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   if (projectId) input.projectId = projectId
   if (o.createThread !== undefined) input.createThread = asBoolean(o.createThread, 'createThread')
   if (o.selection !== undefined) input.selection = asJobSelection(o.selection)
+  if (o.agent !== undefined) input.agent = asJobAgent(o.agent)
   if (o.mode !== undefined) input.mode = asJobMode(o.mode)
   if (o.permissionMode !== undefined) input.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace !== undefined) input.workspace = asJobWorkspace(o.workspace)
+  if (o.tellMe !== undefined) input.tellMe = asTellMe(o.tellMe)
+  if (o.threadEvent !== undefined) input.threadEvent = asThreadEventInput(o.threadEvent)
+  if (o.keys !== undefined) input.keys = asJobKeys(o.keys)
   if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
     const times = asOptionalBoundedInt(r.times, 'repeat.times', { min: 1, max: 10_000 })
@@ -815,10 +868,14 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
     'projectId',
     'createThread',
     'selection',
+    'agent',
     'mode',
     'permissionMode',
     'workspace',
-    'repeat'
+    'repeat',
+    'tellMe',
+    'threadEvent',
+    'keys'
   ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`input.${key} is not allowed`)
@@ -835,10 +892,14 @@ export function asScheduledJobPatch(v: unknown): {
   projectId?: string | null
   createThread?: boolean
   selection?: ModelOverride | null
+  agent?: ScheduledJobAgent | null
   mode?: 'agent' | 'plan' | null
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
   repeat?: { times?: number } | null
+  tellMe?: TellMe
+  threadEvent?: { events: ThreadEventKind[] }
+  keys?: string[] | null
 } {
   const o = asPlainObject(v, 'patch')
   const allowed = new Set([
@@ -850,10 +911,14 @@ export function asScheduledJobPatch(v: unknown): {
     'projectId',
     'createThread',
     'selection',
+    'agent',
     'mode',
     'permissionMode',
     'workspace',
-    'repeat'
+    'repeat',
+    'tellMe',
+    'threadEvent',
+    'keys'
   ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`patch.${key} is not allowed`)
@@ -877,6 +942,16 @@ export function asScheduledJobPatch(v: unknown): {
   else if (o.permissionMode !== undefined) patch.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace === null) patch.workspace = null
   else if (o.workspace !== undefined) patch.workspace = asJobWorkspace(o.workspace)
+  if (o.tellMe !== undefined) patch.tellMe = asTellMe(o.tellMe)
+  if (o.threadEvent !== undefined) {
+    const t = asPlainObject(o.threadEvent, 'threadEvent')
+    for (const key of Object.keys(t)) if (key !== 'events') throw new Error(`threadEvent.${key} is not allowed`)
+    patch.threadEvent = { events: asThreadEvents(t.events) }
+  }
+  if (o.keys === null) patch.keys = null
+  else if (o.keys !== undefined) patch.keys = asJobKeys(o.keys)
+  if (o.agent === null) patch.agent = null
+  else if (o.agent !== undefined) patch.agent = asJobAgent(o.agent)
   if (o.repeat === null) patch.repeat = null
   else if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')

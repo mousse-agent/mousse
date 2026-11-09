@@ -1,6 +1,7 @@
 import { isProtocolVersionMismatch, type LocalMmsClient } from '../../mms/protocol/client'
 import { MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
+import { AUTOMATIONS_METHODS } from '../../shared/automations'
 
 /** APIs used by the current task shell. Add required APIs when the shell adopts them. */
 export const GUI_REQUIRED_METHODS = [
@@ -31,7 +32,9 @@ export const GUI_REQUIRED_METHODS = [
   // The Changes tab reads hunks, includes or leaves them out, reverts and restores, and undoes the last commit.
   'git.changes', 'git.include', 'git.undoLastCommit', 'git.revert', 'git.restoreReverted', 'git.revertedList',
   // The Bots section (Bot UI): personal bots, profile-bound; an older service lacks them.
-  ...BOTS_PERSONAL_V2_METHODS
+  ...BOTS_PERSONAL_V2_METHODS,
+  // The Automations page's one list; an older service lacks it.
+  ...AUTOMATIONS_METHODS
 ] as const
 
 function recoveryText(homeDir: string): string {

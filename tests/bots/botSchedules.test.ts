@@ -1,269 +1,166 @@
 /**
- * PR 6 §6 unit 6d, Bot Phase 1 §5.5: bot schedules, kept in `bots.db` (`bot_schedules`). Each due occurrence is one activation under the key
- * `sched:<botId>:<scheduleId>:<occurrenceAt>`, inserted in the same transaction that moves the
- * schedule on, so a repeated tick or a tick after a crash inserts nothing. Occurrences missed while
- * Mousse was closed collapse into one; a busy bot queues the next one; nothing ticks before the
- * startup pass.
+ * Path step 3, "One scheduler": a bot's schedules are automations whose Who is the bot, in the shared scheduled-job
+ * store, and the one `ScheduledJobService` claims their occurrences. Each due occurrence is one run activation keyed
+ * `sched:<botId>:<scheduleId>:<occurrenceAt>`, so a repeated hand-over (after a crash) inserts nothing. The bot keeps
+ * its own rules: skipped while it is paused or its last run of the schedule still waits, at most 8, at most every
+ * 5 minutes, missed occurrences collapse into one, and nothing runs before the bot startup pass.
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
-import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import { botManifestDigest } from '../../src/mms/bots/grants/compile'
-import { BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
-import { BotScheduler, nextOccurrence, scheduleProblem } from '../../src/mms/bots/triggers/scheduler'
-import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
-import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
-import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
-import { RunEngine } from '../../src/mms/run/RunEngine'
-import { RunStore } from '../../src/mms/run/RunStore'
-import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
-import type { BotDefinition, BotSchedule } from '../../src/shared/bots/personal/definition'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
+import { botJobId, botScheduleProblem, scheduleProblem } from '../../src/mms/scheduled/botJobs'
+import { nextOccurrenceAfter } from '../../src/mms/scheduled/computeNextRun'
+import { botFixture, createBot, flush, runDispatch, T0, type BotFixture } from './botFixture'
 
-let base: string
-let profile: string
-let root: string
-let clock: number
-let store: BotStore
-let runDb: ProfileDatabase
-let runs: RunEngine
-let host: BotEngineHost
-let bots: BotEngine
-
-const T0 = Date.parse('2026-10-27T09:00:00.000Z')
 const MIN = 60_000
 const iso = (ms: number) => new Date(ms).toISOString()
-const tick = () => new Promise((resolve) => setImmediate(resolve))
 
-const every5: BotSchedule = { id: 'tidy', when: { kind: 'interval', minutes: 5 }, prompt: 'Tidy the site.' }
+let f: BotFixture
+let botId: string
 
-const definition = (id = 'site-editor', name = 'Site editor'): BotDefinition => ({
-  format: 2,
-  id,
-  name,
-  description: 'Keeps the site tidy.',
-  look: { colour: 'teal', accessory: 'cap' },
-  owner: { kind: 'person', id: 'self' },
-  placement: { kind: 'this_computer' },
-  role: 'You keep the site tidy.',
-  main: { key: 'main', title: 'Main', agent: { instructions: 'Answer briefly.' }, model: { mode: 'auto', depth: 'normal' } },
-  context: [],
-  permissions: { tools: ['read'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read' }, budget: { maxActiveMs: 10 * MIN }, audience: 'owner' },
-  triggers: { manual: true }
-})
-
-/** The bot's schedules, as `bot_schedules` holds them (the definition carries none). */
-const setSchedules = (schedules: BotSchedule[], botId = 'site-editor') => {
-  for (const row of store.schedules(botId)) if (!schedules.some((schedule) => schedule.id === row.id)) store.removeSchedule(botId, row.id)
-  for (const schedule of schedules) {
-    const current = store.schedule(botId, schedule.id)
-    if (current && JSON.stringify(current.when) !== JSON.stringify(schedule.when)) store.run('DELETE FROM bot_schedules WHERE bot_id = ? AND id = ?', botId, schedule.id)
-    if (current?.removedAt) store.run('DELETE FROM bot_schedules WHERE bot_id = ? AND id = ?', botId, schedule.id)
-    store.putSchedule({ id: schedule.id, botId, when: schedule.when, prompt: schedule.prompt, label: 'label', createdBy: 'owner', createdAt: iso(clock) })
-  }
-}
-
-const publish = (schedules: BotSchedule[] = [every5]) => {
-  const saved = bots.save(definition(), bots.list().find((bot) => bot.id === 'site-editor')?.draftHash)
-  const revision = bots.publish('site-editor', saved.draftHash)
-  setSchedules(schedules)
-  return revision
-}
-const approve = () => bots.approve('site-editor', botManifestDigest(bots.get('site-editor').published!.permissions))
-// Oldest occurrence first (the test clock does not move, so creation times tie).
-const activations = () => store.listActivations('site-editor').sort((a, b) => occurrence(a).localeCompare(occurrence(b)))
-const occurrence = (row: { trigger: { kind: string } }) => ('occurrenceAt' in row.trigger ? String(row.trigger.occurrenceAt) : '')
-const scheduleRow = () => store.scheduleStates('site-editor')[0]
-
-beforeEach(() => {
-  base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-schedules-')))
-  profile = join(base, 'profile')
-  root = join(base, 'site')
-  mkdirSync(profile, { recursive: true })
-  mkdirSync(root, { recursive: true })
-  clock = T0
-  store = new BotStore({ profileHome: profile, clock: () => clock })
-  runDb = new ProfileDatabase({ profileHome: profile, clock: () => clock })
-  const runStore = new RunStore(runDb)
-  const now = () => new Date(clock).toISOString()
-  const outbox = new EffectOutbox(runStore, { now })
-  runs = new RunEngine({ store: runStore, outbox, tools: new ToolInvocations(runStore), now, pid: 1 })
-  host = {
-    profileHome: profile,
-    store,
-    definitions: new BotDefinitionStore(store.directory, (botId) => store.registry(botId)?.revision ?? null),
-    threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }) },
-    runs: () => runs,
-    harness: {
-      checkPolicy: () => ({ ok: true }),
-      nativeToolNames: (_instanceId, tools) => ({ ok: true, names: tools.flatMap((tool) => [...(PI_NATIVE_TOOLS[tool] ?? [])]) })
-    },
-    notifyEffects: () => {},
-    models: { resolve: async () => ({ selection: { instanceId: 'pi:openrouter', model: 'some/model' } }), markLimited: () => {} },
-    stopThread: () => {},
-    clock: () => clock,
-    monotonic: () => clock,
-    setTimer: () => ({ clear: () => {} })
-  }
-  bots = new BotEngine(host)
+beforeEach(async () => {
+  f = botFixture()
+  ;({ botId } = await createBot(f, { name: 'Site editor', reply: 'Hi.' }))
 })
 
 afterEach(() => {
-  bots.close()
-  store.close()
-  runDb.close()
-  rmSync(base, { recursive: true, force: true })
+  vi.restoreAllMocks()
+  f.close()
 })
 
-/** Publishes and approves the bot, runs the startup pass, and lets the first tick start the schedule at T0. */
-async function scheduled(schedules?: BotSchedule[]) {
-  publish(schedules)
-  approve()
-  await bots.reconcileOnStartup()
-  await bots.tickSchedules(new Date(T0))
+/** A schedule every 5 minutes, after the startup pass. */
+async function scheduled(prompt = 'Tidy the site.', minutes = 5): Promise<string> {
+  const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes }, prompt }, 'owner')
+  await f.bots.reconcileOnStartup()
+  return scheduleId
 }
 
-/** Ends an activation's main run as completed and lets the engine move on. */
-async function complete(activationId: string) {
-  const runId = store.dispatch(activationId, 1)!.runId!
-  runs.markStarting(runId)
-  runs.markRunning(runId)
-  runs.markTerminal(runId, 'completed')
-  bots.settleRun(runId)
-  await tick()
-  await tick()
-}
+const runs = () => f.store.listActivations(botId).filter((row) => row.lane === 'run').sort((a, b) => occurrence(a).localeCompare(occurrence(b)))
+const occurrence = (row: { trigger: { kind: string } }) => ('occurrenceAt' in row.trigger ? String(row.trigger.occurrenceAt) : '')
+const entry = () => f.book.list(botId)[0]!
 
-describe('bot schedules', () => {
-  it('the tick does nothing before the startup pass, and a new schedule starts from now', async () => {
-    publish()
-    approve()
-    // Before the pass: no state, no activation, even far past any occurrence.
-    expect(await bots.tickSchedules(new Date(T0 + 60 * MIN))).toEqual({ inserted: [] })
-    expect(store.scheduleStates('site-editor')).toEqual([])
-    await bots.reconcileOnStartup()
-    expect(await bots.tickSchedules(new Date(T0))).toEqual({ inserted: [] })
-    expect(scheduleRow()).toMatchObject({ scheduleId: 'tidy', nextRunAt: iso(T0 + 5 * MIN) })
-    expect(activations()).toEqual([])
+describe('bot schedules in the shared scheduler', () => {
+  it('nothing runs before the startup pass, and a new schedule starts from now', async () => {
+    const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Tidy the site.' }, 'owner')
+    expect(entry()).toMatchObject({ scheduleId, nextAt: iso(T0 + 5 * MIN), createdBy: 'owner', tellMe: 'look' })
+    // The record is an ordinary job, whose Who is the bot.
+    expect(f.scheduler.getJob(botJobId(botId, scheduleId))).toMatchObject({ bot: { botId, scheduleId, createdBy: 'owner' }, prompt: 'Tidy the site.', schedule: { kind: 'interval', minutes: 5 } })
+    // Before the pass the occurrence stays due: nothing is inserted and the time does not move.
+    expect((await f.tickSchedules(new Date(T0 + 60 * MIN))).inserted).toEqual([])
+    expect(entry().nextAt).toBe(iso(T0 + 5 * MIN))
+    await f.bots.reconcileOnStartup()
+    expect((await f.tickSchedules(new Date(T0 + 60 * MIN))).inserted).toHaveLength(1)
   })
 
-  it('a due occurrence inserts one activation with its key, and the bot starts it', async () => {
-    await scheduled()
-    const { inserted } = await bots.tickSchedules(new Date(T0 + 5 * MIN))
+  it('a due occurrence inserts one activation with its key, and the bot starts it in its run lane', async () => {
+    const scheduleId = await scheduled()
+    const { inserted } = await f.tickSchedules(new Date(T0 + 5 * MIN))
     expect(inserted).toHaveLength(1)
-    const [row] = activations()
+    const [row] = runs()
     expect(row).toMatchObject({
       status: 'running',
-      idempotencyKey: `sched:site-editor:tidy:${iso(T0 + 5 * MIN)}`,
-      trigger: { kind: 'schedule', input: 'Tidy the site.', scheduleId: 'tidy', occurrenceAt: iso(T0 + 5 * MIN) }
+      lane: 'run',
+      threadId: `thread:bot:${botId}:act:${row!.id}`,
+      idempotencyKey: `sched:${botId}:${scheduleId}:${iso(T0 + 5 * MIN)}`,
+      trigger: { kind: 'schedule', input: 'Tidy the site.', scheduleId, occurrenceAt: iso(T0 + 5 * MIN) }
     })
-    expect(store.dispatch(row!.id, 1)).toMatchObject({ prompt: { text: `Tidy the site.\n\n${BOT_RUN_REPORT_LINE}` } })
-    expect(scheduleRow()!.nextRunAt).toBe(iso(T0 + 10 * MIN))
+    expect(f.store.dispatch(row!.id, 1)).toMatchObject({ prompt: { text: `Tidy the site.\n\n${BOT_RUN_REPORT_LINE}` } })
+    expect(entry().nextAt).toBe(iso(T0 + 10 * MIN))
+    // The job keeps no run record of its own: the bot's activations are its runs.
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ runHistory: [], state: 'scheduled' })
   })
 
-  it('while the bot waits for its owner, ticks insert nothing: each occurrence is skipped and the owner told once', async () => {
+  it('while the bot waits for its owner, occurrences are skipped and say why; the next one after the answer runs', async () => {
     await scheduled()
-    await bots.tickSchedules(new Date(T0 + 5 * MIN))
-    const [first] = activations()
-    bots.raiseWall(first!.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'I need to write.' })
-    expect(store.activation(first!.id)!.status).toBe('waiting_grant')
-    const changes: unknown[] = []
-    bots.events.on('changed', (event) => changes.push(event))
-    for (const at of [T0 + 5 * MIN, T0 + 6 * MIN, T0 + 10 * MIN, T0 + 15 * MIN, T0 + 20 * MIN])
-      expect((await bots.tickSchedules(new Date(at))).inserted).toEqual([])
-    expect(activations()).toHaveLength(1)
-    // The skip is shown on the bot, and announced once, not once per occurrence.
-    expect(bots.get('site-editor').summary.schedules).toEqual([{ id: 'tidy', nextRunAt: iso(T0 + 25 * MIN), skipped: { at: iso(T0 + 10 * MIN), reason: 'bot_waiting_for_owner' } }])
-    expect(changes).toEqual([{ botId: 'site-editor' }])
-    // Once the owner answered, the next occurrence runs again and the skip is cleared.
-    store.run("UPDATE bot_activations SET status = 'done' WHERE id = ?", first!.id)
-    expect((await bots.tickSchedules(new Date(T0 + 25 * MIN))).inserted).toHaveLength(1)
-    expect(bots.get('site-editor').summary.schedules![0]!.skipped).toBeNull()
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    const [first] = runs()
+    f.bots.raiseWall(first!.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'I need to write.' })
+    expect(f.store.activation(first!.id)!.status).toBe('waiting_grant')
+    for (const at of [T0 + 10 * MIN, T0 + 15 * MIN, T0 + 20 * MIN]) expect((await f.tickSchedules(new Date(at))).inserted).toEqual([])
+    expect(runs()).toHaveLength(1)
+    expect(f.bots.get(botId).summary.schedules).toEqual([{ id: entry().scheduleId, nextRunAt: iso(T0 + 25 * MIN), skipped: { at: iso(T0 + 20 * MIN), reason: 'bot_waiting_for_owner' } }])
+    f.store.run("UPDATE bot_activations SET status = 'done' WHERE id = ?", first!.id)
+    expect((await f.tickSchedules(new Date(T0 + 25 * MIN))).inserted).toHaveLength(1)
+    expect(f.bots.get(botId).summary.schedules![0]!.skipped).toBeNull()
   })
 
-  it('a schedule whose previous run still waits in the queue is skipped, never queued twice', async () => {
-    await scheduled()
-    setSchedules([every5, { id: 'other', when: { kind: 'interval', minutes: 5 }, prompt: 'Check links.' }])
-    await bots.tickSchedules(new Date(T0 + 1000))
-    await bots.tickSchedules(new Date(T0 + 5 * MIN))
-    // `tidy` runs; `other` starts from this tick.
-    await bots.tickSchedules(new Date(T0 + 10 * MIN))
-    expect(activations().map((row) => [row.trigger.kind === 'schedule' && row.trigger.scheduleId, row.status])).toEqual([['tidy', 'running'], ['other', 'queued'], ['tidy', 'queued']])
-    expect((await bots.tickSchedules(new Date(T0 + 15 * MIN))).inserted).toEqual([])
-    expect(store.scheduleStates('site-editor').map((state) => [state.scheduleId, state.lastSkipReason])).toEqual([['other', 'previous_run_still_queued'], ['tidy', 'previous_run_still_queued']])
+  it('a schedule whose last run still waits in the queue is skipped, never queued twice', async () => {
+    const tidy = await scheduled()
+    const other = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check links.' }, 'owner').scheduleId
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    await f.tickSchedules(new Date(T0 + 10 * MIN))
+    const ids = (rows: ReturnType<typeof runs>) => rows.map((row) => [row.trigger.kind === 'schedule' && row.trigger.scheduleId, row.status])
+    expect(ids(runs()).filter(([, status]) => status === 'queued')).toHaveLength(2)
+    expect((await f.tickSchedules(new Date(T0 + 15 * MIN))).inserted).toEqual([])
+    expect(f.book.list(botId).map((schedule) => [schedule.scheduleId, schedule.skip?.reason])).toEqual(expect.arrayContaining([[tidy, 'previous_run_still_queued'], [other, 'previous_run_still_queued']]))
   })
 
-  it('a crash after the insert: the next boot neither inserts it again nor dispatches it twice', async () => {
-    await scheduled()
-    await bots.tickSchedules(new Date(T0 + 5 * MIN))
-    const [row] = activations()
-    const runId = store.dispatch(row!.id, 1)!.runId!
-    // Crash: the process is gone; the next one opens the same bots.db.
-    bots.close()
-    bots = new BotEngine(host)
-    await bots.reconcileOnStartup()
-    await bots.tickSchedules(new Date(T0 + 5 * MIN))
-    // Even with the schedule's move lost, the same occurrence finds its activation and inserts nothing.
-    store.putScheduleState('site-editor', 'tidy', store.scheduleStates('site-editor')[0]!.spec, iso(T0 + 5 * MIN))
-    expect((await bots.tickSchedules(new Date(T0 + 5 * MIN + 1000))).inserted).toEqual([])
-    expect(activations()).toHaveLength(1)
-    expect(store.dispatches(row!.id)).toHaveLength(1)
-    expect(store.dispatch(row!.id, 1)!.runId).toBe(runId)
-    expect(scheduleRow()!.nextRunAt).toBe(iso(T0 + 10 * MIN))
+  it('a hand-over repeated after a crash inserts nothing and dispatches nothing twice', async () => {
+    const scheduleId = await scheduled()
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    const [row] = runs()
+    const runId = f.store.dispatch(row!.id, 1)!.runId!
+    // The scheduler's move was lost: the same occurrence comes again.
+    expect(f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: 'Tidy the site.', occurrenceAt: iso(T0 + 5 * MIN) })).toMatchObject({ kind: 'started' })
+    await flush()
+    expect(runs()).toHaveLength(1)
+    expect(f.store.dispatches(row!.id)).toHaveLength(1)
+    expect(f.store.dispatch(row!.id, 1)!.runId).toBe(runId)
   })
 
-  it('occurrences missed while Mousse was closed collapse into one catch-up occurrence', async () => {
+  it('occurrences missed while Mousse was closed collapse into one', async () => {
     await scheduled()
-    const { inserted } = await bots.tickSchedules(new Date(T0 + 120 * MIN + 7000))
+    const { inserted } = await f.tickSchedules(new Date(T0 + 120 * MIN + 7000))
     expect(inserted).toHaveLength(1)
-    expect(activations()[0]!.trigger).toMatchObject({ kind: 'schedule', occurrenceAt: iso(T0 + 5 * MIN) })
+    expect(runs()[0]!.trigger).toMatchObject({ kind: 'schedule', occurrenceAt: iso(T0 + 5 * MIN) })
     // The next occurrence is after now, not the next missed one.
-    expect(scheduleRow()!.nextRunAt).toBe(iso(T0 + 125 * MIN + 7000))
-    expect((await bots.tickSchedules(new Date(T0 + 121 * MIN))).inserted).toEqual([])
+    expect(entry().nextAt).toBe(iso(T0 + 125 * MIN + 7000))
+    expect((await f.tickSchedules(new Date(T0 + 121 * MIN))).inserted).toEqual([])
   })
 
   it('an occurrence while the bot runs waits in its queue and starts when the bot is free', async () => {
-    await scheduled()
-    await bots.tickSchedules(new Date(T0 + 5 * MIN))
-    await bots.tickSchedules(new Date(T0 + 10 * MIN))
-    const [first, second] = activations()
-    expect([first!.status, second!.status]).toEqual(['running', 'queued'])
-    await complete(first!.id)
-    expect(store.activation(first!.id)!.status).toBe('done')
-    expect(store.activation(second!.id)!.status).toBe('running')
+    await scheduled('Tidy.', 5)
+    f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Links.' }, 'owner')
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    const [first, second] = runs()
+    expect([first!.status, second!.status].sort()).toEqual(['queued', 'running'])
+    const running = first!.status === 'running' ? first! : second!
+    const queued = first!.status === 'running' ? second! : first!
+    await runDispatch(f, running.id, 1, { text: 'Tidied.' })
+    expect(f.store.activation(queued.id)!.status).toBe('running')
   })
 
-  it('a bot that needs approval skips the occurrence, and approving later runs no backlog', async () => {
-    publish()
-    await bots.reconcileOnStartup()
-    await bots.tickSchedules(new Date(T0))
-    expect((await bots.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
-    expect(scheduleRow()!.nextRunAt).toBe(iso(T0 + 10 * MIN))
-    approve()
-    expect((await bots.tickSchedules(new Date(T0 + 6 * MIN))).inserted).toEqual([])
-    expect((await bots.tickSchedules(new Date(T0 + 10 * MIN))).inserted).toHaveLength(1)
+  it('an edited schedule restarts from now; a removed one is gone', async () => {
+    const scheduleId = await scheduled()
+    const job = f.scheduler.getJob(entry().jobId)!
+    f.clock.now = T0 + 4 * MIN
+    f.book.update(job, { schedule: { kind: 'interval', minutes: 60 } })
+    expect(entry().nextAt).toBe(iso(T0 + 64 * MIN))
+    expect((await f.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
+    expect(f.bots.removeSchedule(botId, scheduleId)).toBe(true)
+    expect(f.book.list(botId)).toEqual([])
+    expect(f.scheduler.getJob(job.id)).toBeUndefined()
   })
 
-  it('an edited schedule restarts from now; a removed one forgets its state', async () => {
+  it('an edit from the Automations page keeps Who, Where and May the bot\'s', async () => {
     await scheduled()
-    setSchedules([{ ...every5, when: { kind: 'interval', minutes: 60 } }])
-    await bots.tickSchedules(new Date(T0 + 4 * MIN))
-    expect(scheduleRow()!.nextRunAt).toBe(iso(T0 + 64 * MIN))
-    expect((await bots.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
-    setSchedules([])
-    await bots.tickSchedules(new Date(T0 + 6 * MIN))
-    expect(store.scheduleStates('site-editor')).toEqual([])
+    const job = f.scheduler.getJob(entry().jobId)!
+    expect(() => f.book.update(job, { selection: { instanceId: 'claude', llmProvider: 'claude', model: 'opus' } })).toThrow(/stay the bot's/)
+    expect(() => f.book.update(job, { projectId: 'p1' })).toThrow(/stay the bot's/)
+    expect(() => f.book.update(job, { permissionMode: 'full' })).toThrow(/stay the bot's/)
+    expect(() => f.book.update(job, { prompt: '/release-notes' })).toThrow(/workflow/)
+    expect(() => f.book.update(job, { schedule: { kind: 'once', runAt: iso(T0 + MIN) } })).toThrow(/A bot repeats/)
+    expect(() => f.book.update(job, { schedule: { kind: 'interval', minutes: 2 } })).toThrow(/every 5 minutes/)
+    f.book.update(job, { name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'problems' })
+    expect(entry()).toMatchObject({ name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'needs_you' })
+    // The bot's own list shows the same record.
+    expect(f.bots.listSchedules(botId)).toEqual([{ scheduleId: entry().scheduleId, label: 'every 5 minutes', nextAt: iso(T0 + 5 * MIN) }])
   })
 
   it('a cron with a step of 0 or a value out of range is refused at once, never searched', () => {
     const started = Date.now()
     for (const expr of ['1-5/0 * * * *', '*/0 * * * *', '0 1-3/0 * * *', 'a b c d e', '60 * * * *', '0 24 * * *', '0 0 0 * *', '5-1 * * * *'])
       expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr }, prompt: 'p' }), expr).toMatch(/invalid/)
-    publish([])
-    expect(() => bots.addSchedule('site-editor', { when: { kind: 'cron', expr: '1-5/0 * * * *' }, prompt: 'p' }, 'bot')).toThrow(/invalid/)
+    expect(() => f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '1-5/0 * * * *' }, prompt: 'p' }, 'bot')).toThrow(/invalid/)
     expect(Date.now() - started).toBeLessThan(2000)
   })
 
@@ -272,150 +169,162 @@ describe('bot schedules', () => {
     expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr: '* * *' }, prompt: 'p' })).toMatch(/five fields/)
     expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: '' })).toMatch(/something to do/)
     expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: 'p' })).toBeUndefined()
-    publish([])
-    expect(() => bots.addSchedule('site-editor', { when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: '' }, 'bot')).toThrow(/something to do/)
+    expect(() => f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: '' }, 'bot')).toThrow(/something to do/)
   })
 
   it('a bot\'s own schedules: at most 8, at least 5 minutes apart, each with a label and no approval', () => {
-    publish([])
-    approve()
-    const revision = store.registry('site-editor')!.revision
-    expect(() => bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 4 }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
-    expect(() => bots.addSchedule('site-editor', { when: { kind: 'cron', expr: '* * * * *' }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
-    const added = bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 30 }, prompt: 'Check links.' }, 'bot')
-    expect(added).toEqual({ scheduleId: expect.stringMatching(/^s-[0-9a-f]{8}$/), label: 'every 30 minutes' })
-    expect(store.schedule('site-editor', added.scheduleId)).toMatchObject({ createdBy: 'bot', prompt: 'Check links.', label: 'every 30 minutes', removedAt: null })
-    for (let i = 1; i < 8; i += 1) bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 60 }, prompt: `p${i}` }, 'bot')
-    expect(() => bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 60 }, prompt: 'ninth' }, 'bot')).toThrow(expect.objectContaining({ code: 'schedule_limit' }))
+    const revision = f.store.registry(botId)!.revision
+    expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 4 }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
+    expect(() => f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '* * * * *' }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
+    expect(botScheduleProblem({ kind: 'cron', expr: '*/5 * * * *' }, 'p')).toBeUndefined()
+    const added = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Check links.' }, 'bot')
+    expect(added).toMatchObject({ scheduleId: expect.stringMatching(/^s-[0-9a-f]{8}$/), label: 'every 30 minutes', createdBy: 'bot', prompt: 'Check links.' })
+    for (let i = 1; i < 8; i += 1) f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: `p${i}` }, 'bot')
+    expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'ninth' }, 'bot')).toThrow(expect.objectContaining({ code: 'schedule_limit' }))
     // Schedules change no revision, so no approval is needed.
-    expect(store.registry('site-editor')!.revision).toBe(revision)
-    expect(bots.list()[0]!.needsApproval).toEqual([])
-    expect(bots.listSchedules('site-editor')).toHaveLength(8)
-    expect(bots.removeSchedule('site-editor', added.scheduleId)).toBe(true)
-    expect(bots.removeSchedule('site-editor', added.scheduleId)).toBe(false)
-    expect(bots.listSchedules('site-editor')).toHaveLength(7)
+    expect(f.store.registry(botId)!.revision).toBe(revision)
+    expect(f.bots.listSchedules(botId)).toHaveLength(8)
+    expect(f.bots.removeSchedule(botId, added.scheduleId)).toBe(true)
+    expect(f.bots.removeSchedule(botId, added.scheduleId)).toBe(false)
+    expect(f.bots.listSchedules(botId)).toHaveLength(7)
   })
 
   it('a paused bot skips its occurrences (chat is not affected); resuming runs the next one', async () => {
     await scheduled()
-    bots.pauseBot('site-editor')
-    expect((await bots.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
-    expect(scheduleRow()).toMatchObject({ lastSkipReason: 'paused', nextRunAt: iso(T0 + 10 * MIN) })
-    await bots.resumeBot('site-editor')
-    expect((await bots.tickSchedules(new Date(T0 + 10 * MIN))).inserted).toHaveLength(1)
-    expect(scheduleRow()!.lastSkipReason).toBeNull()
+    f.bots.pauseBot(botId)
+    expect((await f.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
+    expect(entry()).toMatchObject({ skip: { reason: 'paused' }, nextAt: iso(T0 + 10 * MIN) })
+    await f.bots.resumeBot(botId)
+    expect((await f.tickSchedules(new Date(T0 + 10 * MIN))).inserted).toHaveLength(1)
+    expect(entry().skip).toBeUndefined()
+  })
+
+  it('a schedule paused from the Automations page is not claimed; resuming starts it from now', async () => {
+    await scheduled()
+    f.scheduler.pauseJob(entry().jobId)
+    expect(entry().paused).toBe(true)
+    expect((await f.tickSchedules(new Date(T0 + 30 * MIN))).inserted).toEqual([])
+    f.scheduler.resumeJob(entry().jobId)
+    expect(entry()).toMatchObject({ paused: false })
   })
 
   it('a usage-limit pause skips occurrences until its reset, then ends by itself', async () => {
     await scheduled()
-    store.setPaused('site-editor', 'usage_limit', iso(T0 + 12 * MIN))
-    expect((await bots.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
-    expect(scheduleRow()!.lastSkipReason).toBe('usage_limited')
-    expect((await bots.tickSchedules(new Date(T0 + 15 * MIN))).inserted).toHaveLength(1)
-    expect(store.registry('site-editor')!.pausedReason).toBeNull()
+    f.store.setPaused(botId, 'usage_limit', iso(T0 + 12 * MIN))
+    expect((await f.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
+    expect(entry().skip?.reason).toBe('usage_limited')
+    expect((await f.tickSchedules(new Date(T0 + 15 * MIN))).inserted).toHaveLength(1)
+    expect(f.store.registry(botId)!.pausedReason).toBeNull()
   })
 
   it('one bot that cannot be read never stops the others\' schedules', async () => {
     await scheduled()
-    const other = bots.save(definition('reporter', 'Reporter'))
-    bots.publish('reporter', other.draftHash)
-    setSchedules([{ id: 'hourly', when: { kind: 'interval', minutes: 60 }, prompt: 'Report.' }], 'reporter')
-    bots.approve('reporter', botManifestDigest(bots.get('reporter').published!.permissions))
-    await bots.tickSchedules(new Date(T0))
-    const revision = host.definitions.revision.bind(host.definitions)
-    const schedulesOf = store.schedules.bind(store)
-    vi.spyOn(store, 'schedules').mockImplementation((botId) => {
-      if (botId === 'site-editor') throw new Error('Unexpected token in JSON')
-      return schedulesOf(botId)
+    const { botId: other } = await createBot(f, { name: 'Reporter', reply: 'Hi.' })
+    f.bots.addSchedule(other, { when: { kind: 'interval', minutes: 5 }, prompt: 'Report.' }, 'owner')
+    const run = f.bots.runScheduledOccurrence.bind(f.bots)
+    vi.spyOn(f.bots, 'runScheduledOccurrence').mockImplementation((input) => {
+      if (input.botId === botId) throw new Error('Unexpected token in JSON')
+      return run(input)
     })
-    vi.spyOn(host.definitions, 'revision').mockImplementation((botId, rev) => {
-      if (botId === 'site-editor') throw new Error('Unexpected token in JSON')
-      return revision(botId, rev)
-    })
-    const { inserted } = await bots.tickSchedules(new Date(T0 + 60 * MIN))
+    const { inserted } = await f.tickSchedules(new Date(T0 + 5 * MIN))
     expect(inserted).toHaveLength(1)
-    expect(store.activation(inserted[0]!)!.botId).toBe('reporter')
+    expect(f.store.activation(inserted[0]!)!.botId).toBe(other)
+    expect(entry()).toMatchObject({ skip: { reason: 'bot_unavailable' }, nextAt: iso(T0 + 10 * MIN) })
   })
 
-  it('a start that fails during a tick is tried again by the next tick, never left queued', async () => {
+  it('a start that fails is tried again by the next tick, never left queued', async () => {
     await scheduled()
-    const pump = vi.spyOn(bots as unknown as { pump(botId: string): Promise<void> }, 'pump').mockRejectedValueOnce(new Error('SQLITE_BUSY'))
-    const { inserted } = await bots.tickSchedules(new Date(T0 + 5 * MIN))
-    expect(store.activation(inserted[0]!)!.status).toBe('queued')
+    const pump = vi.spyOn(f.bots as unknown as { pump(botId: string): Promise<void> }, 'pump').mockRejectedValue(new Error('SQLITE_BUSY'))
+    const { inserted } = await f.tickSchedules(new Date(T0 + 5 * MIN))
+    expect(f.store.activation(inserted[0]!)!.status).toBe('queued')
     pump.mockRestore()
-    expect((await bots.tickSchedules(new Date(T0 + 6 * MIN))).inserted).toEqual([])
-    expect(store.activation(inserted[0]!)!.status).toBe('running')
+    expect((await f.tickSchedules(new Date(T0 + 6 * MIN))).inserted).toEqual([])
+    expect(f.store.activation(inserted[0]!)!.status).toBe('running')
   })
 
-  it('adding or removing a schedule tells the scheduler, so it is read at once', () => {
-    let told = 0
-    bots.close()
-    bots = new BotEngine({ ...host, schedulesChanged: () => { told += 1 } })
-    publish([])
-    const { scheduleId } = bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 10 }, prompt: 'p' }, 'owner')
-    expect(told).toBe(1)
-    bots.removeSchedule('site-editor', scheduleId)
-    expect(told).toBe(2)
+  it('adding or removing a schedule wakes the scheduler, so it is read at once', () => {
+    const wake = vi.spyOn(f.scheduler, 'wake')
+    const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 10 }, prompt: 'p' }, 'owner')
+    expect(wake).toHaveBeenCalledTimes(1)
+    f.bots.removeSchedule(botId, scheduleId)
+    expect(wake).toHaveBeenCalledTimes(2)
   })
 
-  it('nextOccurrence keeps the cadence when on time and collapses when late', () => {
-    expect(nextOccurrence(every5, iso(T0), new Date(T0 + 1000))).toBe(iso(T0 + 5 * MIN))
-    expect(nextOccurrence(every5, iso(T0), new Date(T0 + 30 * MIN))).toBe(iso(T0 + 35 * MIN))
+  it('a deleted bot\'s schedules start nothing and leave with its purge', async () => {
+    await scheduled()
+    await f.bots.remove(botId)
+    expect((await f.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
+    expect(entry().skip?.reason).toBe('bot_deleted')
+    // Paused once, with why, instead of skipping every occurrence until the purge.
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: 'Its bot was deleted.' })
   })
 
-  it('the scheduler ticks once started, and again on wake', async () => {
-    const seen: number[] = []
-    const scheduler = new BotScheduler({ tick: async (now) => { seen.push(now.getTime()) }, clock: () => clock, intervalMs: 60 * 60_000 })
-    await scheduler.wake()
-    expect(seen).toEqual([])
-    scheduler.start()
-    await tick()
-    clock += 1000
-    await scheduler.wake()
-    scheduler.stop()
-    expect(seen).toEqual([T0, T0 + 1000])
+  it('pauses a bot\'s schedule once in a profile where bots could not be opened, and resumes it once they open', async () => {
+    await scheduled()
+    const runner = (f.scheduler as unknown as { botRunner: Parameters<typeof f.scheduler.setBotRunner>[0] }).botRunner
+    f.scheduler.setBotRunner(null)
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: expect.stringMatching(/^Bots could not be opened/) })
+    // Bots open at the next start: the schedule paused only for that runs again.
+    f.scheduler.setBotRunner(runner)
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: true, state: 'scheduled' })
+    expect(f.scheduler.getJob(entry().jobId)!.pausedReason).toBeUndefined()
+    // One paused for any other reason stays paused.
+    f.scheduler.pauseJob(entry().jobId, 'Owner paused it')
+    f.scheduler.setBotRunner(runner)
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, pausedReason: 'Owner paused it' })
   })
-})
 
-describe('activation requests', () => {
-  it('two deliveries of one request at the same time give one activation, and no error', async () => {
-    publish([])
-    approve()
-    const input = { botId: 'site-editor', input: 'Fix it', clientRequestId: 'c2' }
-    // The second delivery reads no activation yet, then finds the first one's at its insert.
-    const byKey = store.activationByKey.bind(store)
-    let reads = 0
-    vi.spyOn(store, 'activationByKey').mockImplementation((key) => (++reads === 1 ? undefined : byKey(key)))
-    const [a, b] = await Promise.all([bots.activate(input), bots.activate(input)])
-    expect(a.id).toBe(b.id)
-    expect(store.listActivations('site-editor')).toHaveLength(1)
+  it('a run report of a schedule told Only problems is quiet; other rows notify as before', async () => {
+    await scheduled()
+    f.book.update(f.scheduler.getJob(entry().jobId)!, { tellMe: 'problems' })
+    const events: Array<{ message: { kind: string }; quiet?: true }> = []
+    f.bots.events.on('message', (event) => events.push(event))
+    const { inserted } = await f.tickSchedules(new Date(T0 + 5 * MIN))
+    await runDispatch(f, inserted[0]!, 1, { text: 'All tidy.' })
+    expect(events.find((event) => event.message.kind === 'run_report')).toMatchObject({ quiet: true })
+    f.book.update(f.scheduler.getJob(entry().jobId)!, { tellMe: 'every' })
+    const next = await f.tickSchedules(new Date(T0 + 10 * MIN))
+    await runDispatch(f, next.inserted[0]!, 1, { text: 'Tidy again.' })
+    expect(events.filter((event) => event.message.kind === 'run_report').at(-1)!.quiet).toBeUndefined()
   })
-})
 
-describe('bots.db v2 → v4', () => {
-  it('a populated v2 database migrates and keeps its activations; a wait on a withdrawn wall ends', () => {
-    const home = join(base, 'v2-profile')
-    mkdirSync(home, { recursive: true })
-    const v2 = new ProfileDatabase({ profileHome: home, name: 'bots', clock: () => clock })
-    v2.migrate(BOTS_MIGRATIONS.slice(0, 2))
-    v2.statement("INSERT INTO bot_registry(bot_id, revision, created_at) VALUES('site-editor', 'r1', 'x')").run()
-    for (const [id, status] of [['act_done', 'done'], ['act_wait', 'waiting_grant']])
-      v2.statement("INSERT INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at, result) VALUES(?, 'site-editor', 'r1', 'g', ?, ?, ?, 'x', 'Done.')")
-        .run(id, JSON.stringify({ kind: 'manual', input: 'Fix it' }), `manual:${id}`, status)
-    v2.statement("INSERT INTO bot_escalations(id, activation_id, dispatch_n, kind, permission_json, reason, status, created_at, expires_at) VALUES('esc_1', 'act_wait', 1, 'gate', '{}', 'r', 'open', 'x', 'y')").run()
-    v2.close()
-    const v4 = new BotStore({ profileHome: home, clock: () => clock })
-    try {
-      expect(v4.activation('act_done')).toMatchObject({ status: 'done', result: 'Done.', lane: 'run', trigger: { kind: 'manual', input: 'Fix it' } })
-      expect(v4.activation('act_wait')).toMatchObject({ status: 'cancelled', endReason: 'bots_upgraded' })
-      expect(v4.escalation('esc_1')).toMatchObject({ status: 'withdrawn', botId: 'site-editor', mode: 'wall', expiresAt: 'y' })
-      // `reply_status` stays in the schema (the removed Channels feature wrote it).
-      expect(v4.all("SELECT reply_status FROM bot_activations WHERE id = 'act_done'")).toEqual([{ reply_status: null }])
-      v4.putScheduleState('site-editor', 'tidy', '{}', iso(T0))
-      v4.setScheduleSkip('site-editor', 'tidy', 'bot_waiting_for_owner', iso(T0))
-      expect(v4.scheduleStates('site-editor')).toEqual([{ scheduleId: 'tidy', spec: '{}', nextRunAt: iso(T0), lastSkipAt: iso(T0), lastSkipReason: 'bot_waiting_for_owner' }])
-    } finally {
-      v4.close()
-    }
+  it('a model picked by hand for an owner\'s automation is its runs\' model; by usage is the default (#673)', async () => {
+    await f.bots.reconcileOnStartup()
+    const byHand = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Tidy.', model: 'opus' }, 'owner')
+    const byUsage = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Links.' }, 'owner')
+    // The bot's own schedules never name a model: only the owner picks one.
+    const own = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Mine.', model: 'opus' }, 'bot')
+    expect([byHand.model, byUsage.model, own.model]).toEqual(['opus', undefined, undefined])
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    const of = (scheduleId: string) => f.store.listActivations(botId).find((row) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId)!
+    expect(of(byHand.scheduleId).modelOverride).toEqual({ mode: 'named', model: 'opus', depth: 'normal' })
+    expect(of(byUsage.scheduleId).modelOverride).toBeNull()
+  })
+
+  it('the owner picks the bot\'s model by hand in About, or by usage again, on this computer (#673)', async () => {
+    expect(await f.bots.service.modelGet(botId)).toMatchObject({ model: null, computer: 'this_computer', computers: [{ id: 'this_computer' }] })
+    // The person's other computers are listed too, never pickable: a bot runs on the computer that holds it.
+    ;(f.bots.service as unknown as { options: { otherComputers?: () => unknown[] } }).options.otherComputers = () => [{ node: 'nod_laptop', name: 'Laptop', online: true }, { node: 'nod_studio', name: 'Studio', online: false }]
+    expect((await f.bots.service.modelGet(botId)).computers).toEqual([
+      expect.objectContaining({ id: 'this_computer' }),
+      { id: 'nod_laptop', name: 'Laptop', unavailable: 'A bot runs on the computer that holds it.' },
+      { id: 'nod_studio', name: 'Studio', offline: true, unavailable: 'Studio is offline.' }
+    ])
+    delete (f.bots.service as unknown as { options: { otherComputers?: unknown } }).options.otherComputers
+    const revision = f.store.registry(botId)!.revision
+    f.bots.service.modelSet(botId, 'sonnet')
+    expect(f.bots.ownerModel(botId)).toBe('sonnet')
+    expect(f.bots.definitionOf(botId).main.model).toEqual({ mode: 'named', model: 'sonnet', depth: 'normal' })
+    // A new revision with the same grant: no approval.
+    expect(f.store.registry(botId)!.revision).not.toBe(revision)
+    f.bots.service.modelSet(botId, null)
+    expect(f.bots.definitionOf(botId).main.model).toEqual({ mode: 'auto', depth: 'normal' })
+  })
+
+  it('nextOccurrenceAfter keeps the cadence when on time and collapses when late', () => {
+    const every5 = { kind: 'interval' as const, minutes: 5 }
+    expect(nextOccurrenceAfter(every5, iso(T0), new Date(T0 + 1000))).toBe(iso(T0 + 5 * MIN))
+    expect(nextOccurrenceAfter(every5, iso(T0), new Date(T0 + 30 * MIN))).toBe(iso(T0 + 35 * MIN))
   })
 })

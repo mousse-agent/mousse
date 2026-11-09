@@ -1,3 +1,4 @@
+import { takePanelMerge } from './pullRequestPanelRequests'
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PullRequestComment, PullRequestDetail, PullRequestReview } from '../../shared/pullRequests'
 import { useActiveThreadPullRequest } from '../hooks/useActiveThreadPullRequest'
@@ -650,6 +651,11 @@ export function PullRequestPanel() {
     if (asked && !askedStillShown) setAsked(null)
   }, [asked, askedStillShown])
   const ask = (action: 'merge' | 'close') => setAsked({ action, identity })
+  // Merge asked from the Automations inbox's run strip: the same question as the header's Merge…, once the row is ready.
+  const mergeReady = Boolean(row?.merge?.enabled) && confirm === null
+  useEffect(() => {
+    if (mergeReady && takePanelMerge(threadId, number)) setAsked({ action: 'merge', identity })
+  }, [mergeReady, threadId, number, identity])
   // Focus goes back to what opened the prompt: Merge…, or the menu Close was chosen from.
   const dismiss = (action: 'merge' | 'close') => {
     setAsked(null)

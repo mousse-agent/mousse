@@ -25,7 +25,7 @@ export function WorkflowCard({
         <div className="wf-meta">
           <span className="wf-chip">{item.slug}</span>
           <span className="wf-chip">
-            {state === 'published' ? 'Published' : state === 'unpublished-changes' ? 'Draft changes' : 'Draft'}
+            {state === 'published' ? 'Live' : 'Changes not live'}
           </span>
           {item.source === 'project' ? <span className="wf-chip">Project</span> : <span className="wf-chip">Profile</span>}
           {item.unsupportedNodes?.length ? (

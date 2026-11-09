@@ -14,6 +14,8 @@ export interface RowMenuItem {
   action?: string
   /** A fuller name for assistive tech, when the label leaves out what the item acts on. */
   ariaLabel?: string
+  /** `data-testid` on the item. */
+  testId?: string
 }
 
 /**
@@ -86,6 +88,7 @@ export function RowMenu({ label, items, disabled, buttonClassName = 'settings-ic
           disabled={item.disabled}
           title={item.title}
           data-action={item.action}
+          data-testid={item.testId}
           aria-label={item.ariaLabel}
           onClick={() => { setOpen(false); buttonRef.current?.focus(); item.onSelect() }}
         >{item.label}</button>)}

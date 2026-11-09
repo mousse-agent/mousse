@@ -1,6 +1,6 @@
 import { v5 as uuidv5 } from 'uuid'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { ScheduledJobWorkspace } from '../../shared/types'
+import type { ScheduledJobAgent, ScheduledJobWorkspace, ScheduledRunAgent } from '../../shared/types'
 import type { AgentAccessLevel } from '../../shared/settings'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
@@ -22,6 +22,8 @@ export interface ScheduledJobIngress {
   onWorkflowPrepared?: (invocationId: string) => void
   /** The provider instance and model the run uses; absent = the thread's model, else the profile default. */
   selection?: ModelOverride
+  /** A saved agent does the work (`ScheduledJob.agent`): its latest published revision runs the prompt. */
+  agent?: ScheduledJobAgent
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   /** The job's permission mode and ceiling (`ScheduledJob`); the run is the stricter of the two and its thread's mode. */
@@ -46,8 +48,12 @@ export interface BackgroundWorkflowTurnResult {
   aborted?: boolean
   waiting?: boolean
   transcriptWritten?: boolean
-  /** `queued`: the occurrence waits behind a busy thread. `replayed`: the occurrence was already admitted; its run is observed. */
-  status?: 'queued' | 'replayed'
+  /**
+   * `queued`: the occurrence waits behind a busy thread. `replayed`: the occurrence was already admitted; its run is
+   * observed. `busy`: nothing was admitted because the thread is running a turn and the occurrence cannot queue (a
+   * workflow); the scheduler keeps it due and tries again.
+   */
+  status?: 'queued' | 'replayed' | 'busy'
   threadId?: string
   runId?: string
   queueItemId?: string
@@ -55,6 +61,8 @@ export interface BackgroundWorkflowTurnResult {
   selection?: ModelOverride
   /** The permission mode the run's binding enforced, when it was bound by the time the call returned. */
   permissionMode?: PermissionMode
+  /** The saved agent that ran it, at the revision it ran. */
+  agent?: ScheduledRunAgent
 }
 
 const WAITING = new Set<WorkflowRunState>(['waiting-approval', 'waiting-input', 'waiting-condition'])

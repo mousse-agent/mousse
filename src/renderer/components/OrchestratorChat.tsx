@@ -92,6 +92,7 @@ import { extractChatReferences, type ChatReference } from '../../shared/chatRefe
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
+import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
 
 /** Before the first measurement arrives: no capacity, so the composer shows no ring. */
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
@@ -1435,6 +1436,7 @@ export function OrchestratorChat() {
         busy={turnActive || loading}
         messages={shownMessages}
         status={chatStatus}
+        toolRenderers={CHAT_TOOL_RENDERERS}
         onSend={() => void handleSend()}
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}

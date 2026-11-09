@@ -30,7 +30,7 @@ async function workedBot(description = 'Tidy my notes every evening.'): Promise<
     }
   })
   f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Tidy.' }, 'bot')
-  await f.bots.tickSchedules(new Date(f.clock.now))
+  await f.tickSchedules(new Date(f.clock.now))
   writeFileSync(join(f.bots.filesFolder(botId), 'notes.md'), 'tidy')
   return { botId, runThread: run.threadId! }
 }
@@ -53,12 +53,12 @@ describe('delete', () => {
     expect(f.store.activation(working.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
     // Kept for 30 days: chat, schedules, definition and files.
     expect(f.store.messages(botId, { limit: 100 }).length).toBeGreaterThan(0)
-    expect(f.store.schedules(botId)).toHaveLength(1)
+    expect(f.book.list(botId)).toHaveLength(1)
     expect(f.host.definitions.get(botId)).toBeDefined()
     expect(existsSync(join(f.bots.filesFolder(botId), 'notes.md'))).toBe(true)
     // Its schedules never run again.
     f.clock.now += 2 * 60 * 60_000
-    expect((await f.bots.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
   })
 })
 
@@ -74,8 +74,7 @@ describe('the 30-day purge', () => {
     // The home thread is deleted for good; the run threads it owns go with it.
     expect(f.trashed).toEqual([`thread:bot:${botId}`])
     expect(f.store.messages(botId, { limit: 100 })).toEqual([])
-    expect(f.store.schedules(botId)).toEqual([])
-    expect(f.store.scheduleStates(botId)).toEqual([])
+    expect(f.book.list(botId)).toEqual([])
     expect(f.host.definitions.get(botId)).toBeUndefined()
     expect(existsSync(f.bots.filesFolder(botId))).toBe(false)
     expect(f.store.botThreads(botId)).toEqual([])
@@ -86,7 +85,7 @@ describe('the 30-day purge', () => {
     expect(f.store.get('SELECT COUNT(*) AS n FROM bot_activations WHERE bot_id = ?', other.botId)).not.toEqual({ n: 0 })
     // The other bot is untouched.
     expect(chatOf(f, other.botId).length).toBeGreaterThan(0)
-    expect(f.store.schedules(other.botId)).toHaveLength(1)
+    expect(f.book.list(other.botId)).toHaveLength(1)
     expect(existsSync(join(f.bots.filesFolder(other.botId), 'notes.md'))).toBe(true)
     // Once: a later sweep finds nothing.
     expect(await f.bots.sweepDeleted(f.clock.now + 60 * DAY)).toEqual([])
@@ -156,16 +155,16 @@ describe('the 30-day purge', () => {
   it('the sweep runs from the scheduler tick, once a day', async () => {
     await f.bots.reconcileOnStartup()
     const t1 = f.clock.now
-    await f.bots.tickSchedules(new Date(t1))
+    await f.tickSchedules(new Date(t1))
     const { botId } = await workedBot()
     await f.bots.service.delete(botId)
     // Deleted long ago (a profile that was closed for a month).
     f.store.run('UPDATE bot_registry SET deleted_at = ? WHERE bot_id = ?', new Date(t1 - 31 * DAY).toISOString(), botId)
     f.clock.now = t1 + 60 * 60_000
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     expect(f.purged).toEqual([])
     f.clock.now = t1 + DAY + 60_000
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     expect(f.purged).toEqual([botId])
   })
 })

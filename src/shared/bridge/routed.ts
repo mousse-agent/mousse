@@ -577,8 +577,30 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'skills.read': read('computer', ['skillId'], { required: ['skillId'] }),
   'github.status': read('computer', []),
   'pullRequests.list': read('project', ['projectId', 'limit', 'force']),
-  'pullRequests.resolve': read('project', ['projectId', 'reference'], { required: ['reference'] })
+  'pullRequests.resolve': read('project', ['projectId', 'reference'], { required: ['reference'] }),
+
+  // ---------------------------------------------------------------- automations
+  // An automation is stored and run by the one computer that owns it; another computer lists, adds and edits it
+  // there, never in its own store. The list answers only automations another computer may see: no bot's, and none
+  // bound to (or added by) a private thread. Adding or editing one starts turns on the owner, so it is chat, like a
+  // send; the owner holds the job's ceiling to the limit it set for the calling computer.
+  'automations.list': read('computer', [], { via: 'domain' }),
+  'scheduled.create': chat('computer', ['input'], { required: ['input'] }),
+  'scheduled.update': chat('computer', ['id', 'patch'], { required: ['id', 'patch'] }),
+  'scheduled.run': chat('computer', ['id'], { required: ['id'] }),
+  'scheduled.pause': write('computer', ['id', 'reason', 'until'], { required: ['id'] }),
+  'scheduled.resume': write('computer', ['id'], { required: ['id'] }),
+  'scheduled.delete': write('computer', ['id'], { required: ['id'] })
 } as Record<string, RoutedRow>)
+
+/** The routed rows that name one automation (a scheduled job) of the owner by `id`. */
+export const ROUTED_JOB_METHODS: readonly string[] = [
+  'scheduled.update',
+  'scheduled.run',
+  'scheduled.pause',
+  'scheduled.resume',
+  'scheduled.delete'
+]
 
 /** A refusal of the owner, with the code and details the owner's own window would show. */
 export interface RoutedRefusal {
@@ -712,7 +734,7 @@ export const ROUTED_LEDGER_RESULT_MAX_BYTES = 16 * 1024
  * the owner's own complete lists. A routed write drops them: the caller merges the owner's rows into
  * its lists itself, and the ledger keeps small results.
  */
-export const ROUTED_LOCAL_LIST_FIELDS = ['threads', 'all', 'projects'] as const
+export const ROUTED_LOCAL_LIST_FIELDS = ['threads', 'all', 'projects', 'jobs'] as const
 /**
  * A queue write returns the whole queue beside the item it changed (with any image data). The caller
  * gets the queue from `queue.updated` or `queue.list`, so a routed `queue.*` write drops it too.
@@ -877,6 +899,22 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     prefixes: ['settings.', 'stats.', 'storage.', 'scheduled.', 'mcp.', 'webTools.'],
     reason: 'Settings and services of the computer, not thread features.'
+  },
+  {
+    methods: ['automations.asks.answer', 'automations.keep'],
+    reason: 'An agent’s ask and Keep are answered on the computer that holds them.'
+  },
+  {
+    methods: ['automations.request.resend', 'automations.keys.list', 'automations.keys.set'],
+    reason: 'A request’s stored payload and the saved keys stay on the computer that runs the automation.'
+  },
+  {
+    methods: ['automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.drafts.setWho', 'automations.drafts.nextWho', 'automations.manager.thread'],
+    reason: 'Drafts and the Automation manager’s thread belong to the computer whose manager wrote them; Turn on happens there.'
+  },
+  {
+    methods: ['automations.inbox.list', 'automations.inbox.counts', 'automations.inbox.resolve', 'automations.inbox.undo', 'automations.inbox.calibrate', 'automations.tuning.remove'],
+    reason: 'The inbox (runs, Needs you and Tuning notes) is kept by the computer that runs the automations, and read and changed there.'
   },
   {
     prefixes: ['providers.'],

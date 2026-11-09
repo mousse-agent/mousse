@@ -17,7 +17,7 @@ vi.mock('../../src/renderer/components/LinuxWindowResizeHandles', () => ({ Linux
 vi.mock('../../src/renderer/components/CommandPalette', () => ({ CommandPalette: () => null }))
 vi.mock('../../src/renderer/components/ThreadRenameDialog', () => ({ ThreadRenameDialog: () => null }))
 vi.mock('../../src/renderer/components/ui/Toast', () => ({ ToastHost: () => null }))
-vi.mock('../../src/renderer/components/ScheduledPage', () => ({ ScheduledPage: () => null }))
+vi.mock('../../src/renderer/components/AutomationsPage', () => ({ AutomationsPage: () => null }))
 vi.mock('../../src/renderer/components/ThreadsSidebar', () => ({ ThreadsSidebar: stub('threads-sidebar') }))
 vi.mock('../../src/renderer/components/OrchestratorChat', () => ({ OrchestratorChat: stub('conversation') }))
 vi.mock('../../src/renderer/components/chats/ChatWorkspace', () => ({ ChatWorkspace: stub('chats') }))

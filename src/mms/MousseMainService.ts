@@ -29,6 +29,7 @@ import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerPersonalBotMethods } from './bots/registerMethods'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
+import { registerAutomationMethods } from './automations/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -242,6 +243,36 @@ export class MousseMainService extends MmsProfileServices {
     registerBotBrowserMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return services.personalBots ? services.botBrowsers : null
+    })
+    registerAutomationMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return {
+        index: (viewer, signal) => viewer === 'window' ? services.automationIndexForWindow(signal) : viewer === 'computer' ? services.automationIndexForComputer() : services.automationIndex(),
+        answerAsk: (askId, answer) => services.answerAgentJobAsk(askId, answer),
+        keep: (jobId) => services.scheduled.keepJob(jobId),
+        resend: (jobId, occurrenceId) => services.scheduled.resendWebhook(jobId, occurrenceId),
+        keys: services.automationKeys,
+        drafts: {
+          turnOn: (draftId) => services.automationDrafts.turnOn(draftId),
+          discard: (draftId) => services.automationDrafts.discard(draftId),
+          blank: (projectId) => services.automationDrafts.blank(projectId),
+          answered: (draftId) => services.automationDrafts.answered(draftId),
+          setWho: (draftId, who) => services.automationDrafts.setWho(draftId, who),
+          nextWho: (botId, who) => services.automationDrafts.nextWho(botId ? { botId } : {}, who)
+        },
+        managerThread: (projectId) => services.automationManagerThread(projectId),
+        inbox: {
+          list: () => services.automationInbox(),
+          counts: () => services.automationInboxCounts(),
+          resolve: (runId) => services.automationRuns?.resolve(runId) ?? 0,
+          undo: () => services.automationRuns?.undo(),
+          calibrate: (runId, kind) => {
+            if (!services.automationRuns) throw new Error('The automations inbox is not available in this profile.')
+            return services.automationRuns.calibrate(runId, kind)
+          },
+          removeTuning: (noteId) => services.automationRuns?.removeTuning(noteId) ?? false
+        }
+      }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))

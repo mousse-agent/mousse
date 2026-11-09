@@ -17,7 +17,7 @@ import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageClean
 import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
-import { isPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
+import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
@@ -42,7 +42,8 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
@@ -99,7 +100,7 @@ import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './thread
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { threadFolderExpired } from '../data/expiredThreads'
 import { isLocalOnlyThread } from '../../shared/threadLineage'
-import { isQualifiedId } from '../../shared/threadRef'
+import { isQualifiedId, parseQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
@@ -108,9 +109,11 @@ import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadReco
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
-import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
+import { isExecutableJobEdit, jobPermissionRequest, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
 import { runNowRefusal } from '../scheduled/runNowRefusal'
+import { computeNextRun } from '../scheduled/computeNextRun'
+import { BotScheduleError } from '../scheduled/botJobs'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
@@ -412,7 +415,9 @@ async function prepareChatInput(ctx: HandlerContext, threadId: string, input: Or
   if (Object.hasOwn(raw, 'workflowInvocationId')) throw new DomainRpcError('invalid_params', 'Workflow receipt references are server-owned')
   const bridge = ctx.mms.platform?.workflowChat
   if (!bridge || !ctx.connection) return buildSendInput(input.content, input.mode, input.images)
-  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, isPerson(ctx.connection) ? 'gui' : 'cli')
+  // A workflow typed on a thread runs under that thread's mode (#338).
+  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, isPerson(ctx.connection) ? 'gui' : 'cli',
+    ctx.mms.orchestrator.workflowPermissionMode(threadId))
   if (prepared.workflowInvocationId) {
     // A workflow's steps run under the workflow's own policy, not under the permission mode of a turn, so a
     // device's limit cannot bind them. Until workflows have a permission mode, a /workflow command typed on
@@ -1522,6 +1527,23 @@ function withPermissionRefusals<T>(run: () => T): T {
   }
 }
 
+/**
+ * A thread-event trigger as the daemon stores it: the thread must have a pull request linked (its number is read from
+ * the link), and the job runs on demand otherwise. Refusals are readable.
+ */
+function threadEventTrigger(ctx: HandlerContext, input: { threadId: string; events: ThreadEventKind[]; number?: number }, schedule: { kind: string }): ScheduledThreadEventTrigger {
+  if (schedule.kind !== 'manual') throw jobRefused('An automation that wakes on a pull request has no clock: its When is the pull request.')
+  const thread = ctx.mms.threads.getThread(input.threadId)
+  if (!thread || thread.botOwned) throw jobRefused('That thread is gone.')
+  // Another computer never reaches a private thread here, not even as the pull request an automation wakes on.
+  if (ctx.connection?.bridgeCaller && privateThreadOf(ctx.mms.threads)(thread.id)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: input.threadId })
+  const link = thread.pullRequest
+  if (!link) throw jobRefused('That thread has no pull request linked. Link it from the thread first.')
+  // The number the page showed is checked against the link: a thread relinked meanwhile is not watched by surprise.
+  if (input.number !== undefined && input.number !== link.number) throw jobRefused(`That thread's pull request is #${link.number} now.`)
+  return { threadId: thread.id, number: link.number, events: input.events }
+}
+
 /** `validateScheduledJobOptions` with its plain-text refusals made visible to the caller. */
 function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateScheduledJobOptions>[0]): ReturnType<typeof validateScheduledJobOptions> {
   try {
@@ -1530,6 +1552,24 @@ function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateSch
     if (error instanceof AppError) throw error
     throw jobRefused(error instanceof Error ? error.message : String(error))
   }
+}
+
+/**
+ * Run now and Resume from another computer (also an update that turns it on): the job's runs may not be wider than
+ * what this computer lets that device run (its limit may have been lowered since the job was made, or the job may be
+ * one a person made here). A run asks for the job's mode, else its thread's. A person here is not limited by it.
+ */
+function refuseAboveDeviceLimit(ctx: HandlerContext, job: ScheduledJob | undefined): void {
+  const limit = deviceLimit(ctx)
+  if (!limit || !job) return
+  const runs = jobPermissionRequest(job) ?? ctx.mms.orchestrator.scheduledCreatorCeiling(job.threadId)
+  if (!isStricter(limit, runs)) return
+  throw new DomainRpcError('permission_mode_above_ceiling', `It runs in ${describePermissionMode(runs)}; this computer lets your device run ${describePermissionMode(limit)} at most. Lower its mode there, or raise the limit for this device on that computer, in Settings, Devices.`, { id: job.id, limit, reason: 'device_limit' })
+}
+
+/** An automation of another computer () that reached this one's store (routing is off): never acted on here. */
+function refuseOtherComputersJob(id: string): void {
+  if (parseQualifiedId(id)) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on working on threads of your other computers in Settings, Devices.', { id })
 }
 
 /** The profile services the scheduled-job checks read (model, mode and workspace of a job). */
@@ -2827,12 +2867,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'scheduled.create': {
       const p = isObject(params) ? params : {}
-      const input = asCreateScheduledJobInput(p.input)
+      // A call for another computer that reached this one's store (routing is off) is refused: it never falls back here.
+      if (p.node !== undefined) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on working on threads of your other computers in Settings, Devices.', { node: p.node })
+      const parsed = asCreateScheduledJobInput(p.input)
+      // A thread-event job runs on the pull request's thread unless another one is chosen.
+      const threadEvent = parsed.threadEvent ? threadEventTrigger(ctx, parsed.threadEvent, parsed.schedule) : undefined
+      const input = { ...parsed, threadEvent, ...(threadEvent && !parsed.threadId && !parsed.createThread ? { threadId: threadEvent.threadId } : {}) }
       // The selection is stored as the profile resolves it; a `worktree` workspace names the thread that owns it.
       const checked = checkJobOptions(ctx, input)
       // The job's ceiling is the mode its creator holds now (the target thread's, else the profile's). It comes
-      // from the daemon, never from the request, and the job's own mode may not exceed it.
-      const permissionCeiling = ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? input.threadId)
+      // from the daemon, never from the request, and the job's own mode may not exceed it. A person on another
+      // computer holds no more than this computer lets that device run a turn in.
+      const permissionCeiling = narrowPermissionMode(ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? input.threadId), deviceLimit(ctx))
       const tooWide = permissionAboveCeiling(input.permissionMode, permissionCeiling)
       if (tooWide) throw jobRefused(tooWide)
       const job = withPermissionRefusals(() => ctx.mms.scheduled.createJob({
@@ -2841,17 +2887,37 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(checked.selection ? { selection: checked.selection } : {}),
         ...(checked.threadId ? { threadId: checked.threadId } : {})
       }))
+      // Its pull request is read from now on (a Notify watch on the thread serves it as it is).
+      if (threadEvent) ctx.mms.syncThreadEventWatch(threadEvent.threadId)
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.update': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       const patch = asScheduledJobPatch(p.patch)
       const existing = ctx.mms.scheduled.getJob(id)
       if (!existing) throw new Error(`Job not found: ${id}`)
+      // A bot's schedule: When, Do, its name and Tell me change; Who, Where and May stay the bot's (its grant).
+      if (existing.bot) {
+        try {
+          // On or off is Pause and Resume, as for any automation; the rest is the bot's own edit.
+          const { enabled, ...rest } = patch
+          let job = Object.values(rest).some((value) => value !== undefined) ? ctx.mms.botSchedules.update(existing, rest) : existing
+          if (enabled === false) job = ctx.mms.scheduled.pauseJob(id) ?? job
+          if (enabled === true) job = ctx.mms.scheduled.resumeJob(id) ?? job
+          return { job, jobs: ctx.mms.scheduled.listJobs() }
+        } catch (error) {
+          if (error instanceof BotScheduleError) throw jobRefused(error.message)
+          throw error
+        }
+      }
       if (patch.schedule?.kind === 'once' && existing.trigger?.webhook) {
         throw jobRefused('A job with a webhook cannot become a one-time job; disable its webhook first, or use a manual schedule.')
       }
+      const wakesOn = existing.trigger?.threadEvent
+      if (wakesOn && patch.schedule && patch.schedule.kind !== 'manual') throw jobRefused('It wakes on its pull request, so it has no clock.')
+      if (patch.threadEvent && !wakesOn) throw jobRefused('It does not wake on a pull request.')
       // Validate the job as it would be after the change; `null` clears a field.
       const merged = {
         threadId: patch.threadId === undefined ? existing.threadId : patch.threadId ?? undefined,
@@ -2866,6 +2932,31 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // to their own mode by choosing a mode on purpose (see `permissionsAfterEdit`). It is worked out inside the store's
       // lock, against the job as stored at that moment, so two edits at once cannot undo each other's lowering.
       const executable = isExecutableJobEdit(patch)
+      const threadAfter = (current: ScheduledJob) => checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)
+      const permissionEdit = (current: ScheduledJob) => permissionsAfterEdit({
+        stored: current,
+        editor: narrowPermissionMode(ctx.mms.orchestrator.scheduledCreatorCeiling(threadAfter(current)), deviceLimit(ctx)),
+        patchMode: patch.permissionMode,
+        executable,
+        canRaise: true
+      })
+      const permissions = (current: ScheduledJob) => {
+        const after = permissionEdit(current)
+        // An edit that leaves it on with a next run it did not have (turning it on, giving a manual one a clock, giving a
+        // finished one a new schedule) is a Resume or a Run now: from another computer, never above that device's limit,
+        // with the mode and thread it will have after this edit. Read against the job as stored, under the store's lock.
+        const enabledAfter = patch.enabled ?? current.enabled
+        const scheduleAfter = patch.schedule ?? current.schedule
+        const startsRunning = enabledAfter && ((patch.enabled === true && !current.enabled) || (!current.nextRunAt && computeNextRun(scheduleAfter) !== null))
+        if (startsRunning) {
+          refuseAboveDeviceLimit(ctx, {
+            ...current,
+            threadId: threadAfter(current),
+            ...(after.ok && after.changed ? { permissionMode: after.permissionMode, permissionCeiling: after.permissionCeiling } : {})
+          })
+        }
+        return after
+      }
       const job = withPermissionRefusals(() => ctx.mms.scheduled.updateJob(id, {
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
@@ -2875,8 +2966,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(patch.threadId !== undefined || checked.threadId ? { threadId: checked.threadId ?? (patch.threadId === null ? undefined : patch.threadId) } : {}),
         ...(patch.projectId !== undefined ? { projectId: patch.projectId === null ? undefined : patch.projectId } : {}),
         ...(patch.selection !== undefined ? { selection: patch.selection === null ? undefined : checked.selection ?? patch.selection } : {}),
+        ...(patch.agent !== undefined ? { agent: patch.agent === null ? undefined : patch.agent } : {}),
         ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
         ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
+        ...(patch.tellMe !== undefined ? { tellMe: patch.tellMe } : {}),
+        ...(patch.keys !== undefined ? { keys: patch.keys?.length ? patch.keys : undefined } : {}),
+        ...(patch.threadEvent && wakesOn ? { trigger: { ...existing.trigger, threadEvent: { ...wakesOn, events: patch.threadEvent.events } } } : {}),
         ...(patch.repeat === null
           ? { repeat: undefined }
           : patch.repeat !== undefined
@@ -2887,43 +2982,57 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
                 }
               }
             : {})
-      }, {
-        permissions: (current) => permissionsAfterEdit({
-          stored: current,
-          editor: ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)),
-          patchMode: patch.permissionMode,
-          executable,
-          canRaise: true
-        })
-      }))
-      return { job, jobs: ctx.mms.scheduled.listJobs() }
+      }, { permissions }))
+      // A draft edited by hand: Turn on reads its problems again.
+      if (job?.draft) ctx.mms.automationDrafts?.recheck(id)
+      return { job: job?.draft ? ctx.mms.scheduled.getJob(id) ?? job : job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.delete': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
+      const watched = ctx.mms.scheduled.getJob(id)?.trigger?.threadEvent?.threadId
       const ok = ctx.mms.scheduled.deleteJob(id)
+      // The pull request's watch stops with the last automation that needed it, unless it is a Notify watch.
+      if (ok && watched) ctx.mms.syncThreadEventWatch(watched)
       return { ok, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.pause': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       const reason = asOptionalString(p.reason, 512)
-      const job = ctx.mms.scheduled.pauseJob(id, reason)
+      // `until`: the pause ends by itself then (Pause… → Until tomorrow, Until Monday, Until a date).
+      const untilText = asOptionalString(p.until, 64)
+      let until: string | undefined
+      if (untilText) {
+        const at = Date.parse(untilText)
+        if (!Number.isFinite(at)) throw jobRefused('until must be a date and time')
+        if (at <= Date.now()) throw jobRefused('Pick a time in the future to resume')
+        until = new Date(at).toISOString()
+      }
+      const job = ctx.mms.scheduled.pauseJob(id, reason, until)
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.resume': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
+      refuseAboveDeviceLimit(ctx, ctx.mms.scheduled.getJob(id))
       const job = ctx.mms.scheduled.resumeJob(id)
+      // A watch that ended meanwhile (a Stop on the thread) starts again for it.
+      if (job?.trigger?.threadEvent) ctx.mms.syncThreadEventWatch(job.trigger.threadEvent.threadId)
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.run': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       // A job with a run in flight or waiting in a queue has one occurrence outstanding; say so instead of reporting a start.
       const current = ctx.mms.scheduled.getJob(id)
       const refusal = current ? runNowRefusal(current) : undefined
       if (refusal) throw jobRefused(refusal)
+      refuseAboveDeviceLimit(ctx, current)
       const job = ctx.mms.scheduled.triggerJob(id)
       // Run now starts within seconds: the scheduler ticks now instead of at the next minute.
       if (job) ctx.mms.scheduled.wake()
@@ -2946,9 +3055,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (p[setting] !== undefined) update[setting] = asBoundedInt(p[setting], setting, AGENT_JOB_LIMIT_RANGES[key])
       }
       ctx.mms.config.updateScheduledSection(update)
-      // Off means the jobs agents made stop now, visibly paused; turning it on again does not restart them.
-      // A lower limit never pauses or removes a job: it only refuses the next create or change.
-      if (update.agentJobs === false) ctx.mms.scheduled.pauseAgentJobs()
+      // `agentJobs` is legacy: on lets every thread add automations without the first ask; off brings the ask back and
+      // stops nothing that exists (a person pauses or deletes those in the inbox). A lower limit never pauses or
+      // removes a job: it only refuses the next create or change.
       return { settings: scheduledSettings(ctx.mms.config) }
     }
     case 'scheduled.extend': {

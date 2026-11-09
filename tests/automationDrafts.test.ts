@@ -1,0 +1,407 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
+import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
+import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
+import { AGENT_EDIT_PAUSE, AutomationDrafts, cliNameOf, type AutomationDraftsDeps } from '../src/mms/automations/AutomationDrafts'
+import { buildAutomationIndex } from '../src/mms/automations/AutomationIndex'
+import { automationManagerWorkspace } from '../src/mms/automations/automationManager'
+import { automationTools, type AutomationToolHost } from '../src/mms/run/mcp/appTools/automations'
+import type { AppToolHost } from '../src/mms/run/mcp/appTools/host'
+import type { ToolCallContext } from '../src/mms/run/mcp/appTools/types'
+import { resolveRunTarget } from '../src/cli/commands/automation'
+import { runNowRefusal } from '../src/mms/scheduled/runNowRefusal'
+import type { PermissionMode } from '../src/shared/permissionMode'
+import type { Thread } from '../src/shared/types'
+
+let home: string
+let previousHome: string | undefined
+
+beforeEach(() => {
+  previousHome = process.env.MOUSSE_HOME
+  home = mkdtempSync(join(tmpdir(), 'mousse-drafts-'))
+  process.env.MOUSSE_HOME = home
+})
+afterEach(() => {
+  if (previousHome === undefined) delete process.env.MOUSSE_HOME
+  else process.env.MOUSSE_HOME = previousHome
+  rmSync(home, { recursive: true, force: true })
+})
+
+function setup(options: { ceiling?: PermissionMode } = {}) {
+  const store = new ScheduledJobStore(MousseConfigStore.load(home))
+  const prompts: string[] = []
+  const service = new ScheduledJobService({ runIsolated: async (prompt) => { prompts.push(prompt); return { text: 'Done.', silent: false } } }, store)
+  ;(service as unknown as { stopped: boolean }).stopped = false
+  const threads = new Map<string, Thread>([
+    ['t-pr', { id: 't-pr', name: 'Fix checkout', projectId: 'p1', pullRequest: { number: 712 } } as Thread],
+    ['t-bot', { id: 't-bot', name: 'Bot chat', projectId: 'p1', pullRequest: { number: 9 }, botOwned: true } as Thread]
+  ])
+  const reused: string[] = []
+  const botSchedules: Array<{ botId: string; prompt: string; name: string }> = []
+  const drafts = new AutomationDrafts({
+    get: (id) => service.getJob(id),
+    list: () => service.listJobs(),
+    create: (input) => service.createJob(input),
+    update: (id, patch) => service.updateJob(id, patch),
+    remove: (id) => service.deleteJob(id),
+    pause: (id, reason, until) => service.pauseJob(id, reason, until),
+    projects: () => [{ id: 'p1', name: 'mousse' }],
+    thread: (id) => threads.get(id),
+    botExists: (id) => id === 'bot_1',
+    addBotSchedule: (botId, input) => {
+      botSchedules.push({ botId, ...input })
+      return service.createJob({ name: input.name, prompt: input.prompt, schedule: input.schedule, tellMe: input.tellMe, bot: { botId, scheduleId: 's1', createdBy: 'owner' } }, { id: `bot-${botId}--s1` })
+    },
+    personCeiling: () => options.ceiling ?? 'accept_edits',
+    reuseThread: (jobId) => { reused.push(jobId); return { id: `thread-for-${jobId}` } }
+  })
+  const tick = () => (service as unknown as { tickOwned: () => Promise<void> }).tickOwned()
+  const settle = () => Promise.all([...(service as unknown as { inFlight: Map<string, Promise<void>> }).inFlight.values()])
+  return { store, service, drafts, prompts, tick, settle, reused, botSchedules }
+}
+
+const PR_CHECK = {
+  name: 'PR check',
+  trigger: { kind: 'time', schedule: { kind: 'cron', expr: '0 5 * * 4' } },
+  prompt: 'Review open PRs and comment on risky ones.',
+  result: { thread: 'new', tellMe: 'news' }
+}
+
+describe('automation drafts', () => {
+  it('saves a draft with its problems, asks one question, and turns on as the person\'s own automation', () => {
+    const { drafts, service } = setup()
+    const saved = drafts.save({ ...PR_CHECK, permissionMode: 'full' }, { managerThreadId: 'manager' })
+    // No project yet: Turn on stays off, and the manager knows what to ask.
+    expect(saved.problems).toEqual(['Which project should it run in?'])
+    const stored = service.getJob(saved.draftId)!
+    expect(stored).toMatchObject({ enabled: false, nextRunAt: null, draft: { draft: true, draftId: saved.draftId, managerThreadId: 'manager' } })
+    // Held to what the person holds, even before Turn on.
+    expect(stored.permissionMode).toBe('accept_edits')
+    expect(() => drafts.turnOn(saved.draftId)).toThrow('Which project should it run in?')
+
+    drafts.ask({ draftId: saved.draftId, question: 'Which project?', options: ['mousse', 'other', '', 'x', 'y'] }, { managerThreadId: 'manager' })
+    expect(service.getJob(saved.draftId)!.draft!.ask).toMatchObject({ question: 'Which project?', options: ['mousse', 'other', 'x', 'y'] })
+    drafts.answered(saved.draftId)
+    expect(service.getJob(saved.draftId)!.draft!.ask).toBeUndefined()
+
+    expect(drafts.save({ draftId: saved.draftId, project: 'Mousse' }, { managerThreadId: 'manager' }).problems).toEqual([])
+    const on = drafts.turnOn(saved.draftId)
+    expect(on).toMatchObject({ enabled: true, state: 'scheduled', projectId: 'p1', createThread: true, tellMe: 'look', permissionCeiling: 'accept_edits', permissionMode: 'accept_edits' })
+    expect(on.draft).toBeUndefined()
+    // A person's creation: no agent label, no end.
+    expect(on.createdBy).toBeUndefined()
+    expect(on.expiresAt).toBeUndefined()
+    expect(Date.parse(on.nextRunAt!)).toBeGreaterThan(Date.now())
+    // It stays on through a reload, with no draft left on it.
+    const reloaded = new ScheduledJobStore(MousseConfigStore.load(home)).getJob(on.id)!
+    expect(reloaded.draft).toBeUndefined()
+    expect(reloaded.enabled).toBe(true)
+  })
+
+  it('never runs a draft: not when due, not by Run now, not by Resume or enabling it', async () => {
+    const { drafts, service, store, prompts, tick, settle } = setup()
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'time', schedule: { kind: 'interval', minutes: 1 } } }, { managerThreadId: 'manager' })
+    // Even a draft whose next run is somehow due is not claimed.
+    store.updateJob(draftId, { nextRunAt: new Date(Date.now() - 60_000).toISOString() })
+    await tick()
+    await settle()
+    expect(prompts).toEqual([])
+    expect(runNowRefusal(service.getJob(draftId)!)).toMatch(/is a draft/)
+    expect(() => service.triggerJob(draftId)).toThrow(/draft/)
+    expect(() => service.resumeJob(draftId)).toThrow(/draft/)
+    expect(() => service.updateJob(draftId, { enabled: true })).toThrow(/draft/)
+    expect(service.getJob(draftId)!.enabled).toBe(false)
+    // Discard deletes it.
+    drafts.discard(draftId)
+    expect(service.getJob(draftId)).toBeUndefined()
+  })
+
+  it('lists drafts in their own section of the index, never in Needs you', () => {
+    const { drafts, service } = setup()
+    const { draftId } = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
+    drafts.ask({ draftId, question: 'Skip draft PRs?', options: ['Yes', 'No'] }, { managerThreadId: 'manager' })
+    const index = buildAutomationIndex({ jobs: () => service.listJobs(), thread: () => undefined, threads: () => [], projectName: () => 'mousse', threadMode: () => 'ask', computerName: 'Desk', timeZone: 'UTC' })
+    const item = index.items.find((entry) => entry.id === draftId)!
+    // The card shows what each run is asked to do, and how much it may do, before Turn on.
+    expect(item).toMatchObject({ paused: false, may: 'ask', draft: { draftId, managerThreadId: 'manager', prompt: PR_CHECK.prompt, problems: ['Which project should it run in?'], ask: { question: 'Skip draft PRs?', options: ['Yes', 'No'] } }, result: { thread: 'new' } })
+    expect(item.attention).toBeUndefined()
+    expect(item.next).toBeUndefined()
+  })
+
+  it('maps a CLI trigger to a manual job with a stable name that `automation run` finds', () => {
+    const { drafts, service } = setup()
+    const first = drafts.save({ ...PR_CHECK, name: 'Deploy preview', project: 'p1', trigger: { kind: 'cli' } }, {})
+    const second = drafts.save({ ...PR_CHECK, name: 'Deploy preview!', project: 'p1', trigger: { kind: 'cli' } }, {})
+    const a = service.getJob(first.draftId)!
+    const b = service.getJob(second.draftId)!
+    expect(a).toMatchObject({ schedule: { kind: 'manual' }, cliName: 'deploy-preview' })
+    expect(b.cliName).toBe('deploy-preview-2')
+    drafts.turnOn(first.draftId)
+    expect(service.getJob(first.draftId)!.cliName).toBe('deploy-preview')
+    expect(resolveRunTarget(service.listJobs(), 'deploy-preview')).toBe(a.id)
+    expect(resolveRunTarget(service.listJobs(), a.id.slice(0, 8))).toBe(a.id)
+    expect(resolveRunTarget(service.listJobs(), 'nope')).toBeUndefined()
+    expect(cliNameOf('  PR check: Thursday!  ')).toBe('pr-check-thursday')
+  })
+
+  it('takes Who from the person, never the manager: a bot\'s draft turns on as the bot\'s own schedule', () => {
+    const { drafts, service, botSchedules } = setup()
+    expect(() => drafts.save({ ...PR_CHECK, agent: { kind: 'bot', botId: 'bot_1' } }, { managerThreadId: 'manager' })).toThrow(/picked by the person/)
+    // The person picked Pip in the composer: the manager's next draft is Pip's, and needs no project.
+    drafts.nextWho({}, { kind: 'bot', botId: 'bot_1' })
+    const pip = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
+    expect(pip.problems).toEqual([])
+    expect(drafts.list().find((entry) => entry.id === pip.draftId)!.agent).toEqual({ kind: 'bot', botId: 'bot_1' })
+    // A bot repeats: a CLI trigger is a problem until When repeats.
+    expect(drafts.save({ draftId: pip.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' }).problems).toEqual(['A bot repeats: give it a time that repeats, at most every 5 minutes.'])
+    drafts.save({ draftId: pip.draftId, trigger: PR_CHECK.trigger }, { managerThreadId: 'manager' })
+    const on = drafts.turnOn(pip.draftId)
+    expect(botSchedules).toEqual([expect.objectContaining({ botId: 'bot_1', name: 'PR check', prompt: PR_CHECK.prompt })])
+    expect(on.bot).toMatchObject({ botId: 'bot_1' })
+    expect(service.getJob(pip.draftId)).toBeUndefined()
+    // Changing Who on the card back to the default agent asks for a project again.
+    drafts.nextWho({}, { kind: 'default' })
+    const plain = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
+    drafts.setWho(plain.draftId, { kind: 'bot', botId: 'bot_1' })
+    expect(service.getJob(plain.draftId)!.draft).toMatchObject({ who: { kind: 'bot', botId: 'bot_1' }, problems: [] })
+    drafts.setWho(plain.draftId, { kind: 'default' })
+    expect(service.getJob(plain.draftId)!.draft!.problems).toEqual(['Which project should it run in?'])
+  })
+
+  it('reads the rest of the contract: a pull request event and one reused thread', () => {
+    const { drafts, service, reused } = setup()
+    const event = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'thread_event', threadId: 't-pr', events: ['review'] } }, {})
+    expect(event.problems).toEqual([])
+    expect(service.getJob(event.draftId)).toMatchObject({ schedule: { kind: 'manual' }, threadId: 't-pr', trigger: { threadEvent: { threadId: 't-pr', number: 712, events: ['review'] } } })
+    const reuse = drafts.save({ ...PR_CHECK, project: 'p1', result: { thread: 'reuse', tellMe: 'problems' } }, {})
+    const on = drafts.turnOn(reuse.draftId)
+    expect(reused).toEqual([reuse.draftId])
+    expect(on).toMatchObject({ threadId: `thread-for-${reuse.draftId}`, tellMe: 'needs_you' })
+    expect(on.createThread).toBeUndefined()
+    expect(drafts.list().find((entry) => entry.id === reuse.draftId)).toMatchObject({ draft: false, result: { thread: 'reuse', tellMe: 'needs_you' } })
+  })
+
+  it('changes and pauses an automation for "Change it…", never raising its May', () => {
+    const { drafts, service } = setup({ ceiling: 'auto' })
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1', permissionMode: 'accept_edits' }, {})
+    drafts.turnOn(draftId)
+    const manager = { managerThreadId: 'manager', request: `Move it to Monday at 8\n\n[Project: mousse (p1) · Change automation: ${draftId}]` }
+    const changed = drafts.update({ id: draftId, trigger: { kind: 'time', schedule: { kind: 'cron', expr: '0 8 * * 1' } }, permissionMode: 'full' }, manager)
+    expect(changed.trigger).toEqual({ kind: 'time', schedule: { kind: 'cron', expr: '0 8 * * 1' } })
+    expect(changed.permissionMode).toBe('accept_edits')
+    expect(() => drafts.update({ id: draftId, project: 'elsewhere' }, manager)).toThrow(/no project "elsewhere"/)
+    // The new clock holds it until the person resumes it; the manager's pause keeps that hold as it is.
+    expect(drafts.pause({ id: draftId }, manager)).toMatchObject({ paused: true })
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: AGENT_EDIT_PAUSE })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+  })
+
+  it('holds an agent’s change until the person resumes it, also on one paused until a time, or a change of context', () => {
+    const { drafts, service, store } = setup()
+    const meta = new Map<string, { originThreadId?: string; context?: string }>()
+    ;(drafts as unknown as { deps: AutomationDraftsDeps }).deps.meta = { get: (id) => meta.get(id), set: (id, value) => { meta.set(id, value) }, move: () => {} }
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1', context: 'PR #712' }, {})
+    drafts.turnOn(draftId)
+    const manager = { managerThreadId: 'manager', request: `Change it\n\n[Change automation: ${draftId}]` }
+    // Paused by the person until tomorrow: an agent's change takes the end away, so it never restarts on its own.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString()
+    service.pauseJob(draftId, 'Away', tomorrow)
+    drafts.update({ id: draftId, prompt: 'Review open PRs, merge the green ones.' }, manager)
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: AGENT_EDIT_PAUSE })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+    expect(store.claimDueJobs(new Date(Date.now() + 2 * 86_400_000))).toEqual([])
+    expect(service.getJob(draftId)!.enabled).toBe(false)
+    // The context every run's first message carries is part of what it does: changing only that holds it too.
+    service.resumeJob(draftId)
+    expect(drafts.update({ id: draftId, context: 'PR #712, and merge it' }, manager)).toMatchObject({ paused: true, context: 'PR #712, and merge it' })
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: AGENT_EDIT_PAUSE })
+    // The same context again changes nothing a run does.
+    service.resumeJob(draftId)
+    drafts.update({ id: draftId, context: 'PR #712, and merge it' }, manager)
+    expect(service.getJob(draftId)).toMatchObject({ enabled: true })
+  })
+
+  it('never lets an agent end or shorten a pause: no until, and a pause already there stays', () => {
+    const { drafts, service } = setup()
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1' }, {})
+    drafts.turnOn(draftId)
+    const other = drafts.save({ ...PR_CHECK, name: 'Nightly build', project: 'p1' }, {}).draftId
+    drafts.turnOn(other)
+    const manager = { managerThreadId: 'manager', request: `Pause it\n\n[Change automation: ${draftId}]` }
+    const soon = new Date(Date.now() + 60_000).toISOString()
+    // Held after an agent's change: a pause with an end would restart it in a minute. Refused, and the hold stays.
+    drafts.update({ id: draftId, prompt: 'Review open PRs, merge the green ones.' }, manager)
+    expect(() => drafts.pause({ id: draftId, until: soon }, manager)).toThrow(/Only the person pauses an automation until a time/)
+    expect(drafts.pause({ id: draftId, reason: 'Quiet week' }, manager)).toMatchObject({ paused: true })
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: AGENT_EDIT_PAUSE })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+    // Paused by the person until tomorrow: the manager's pause only takes the end away, keeping the person's reason.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString()
+    service.resumeJob(draftId)
+    service.pauseJob(draftId, 'Away', tomorrow)
+    drafts.pause({ id: draftId }, manager)
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: 'Away' })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+    // An automation the person did not name is not the manager's to pause.
+    expect(() => drafts.pause({ id: other }, manager)).toThrow(/Ask the person to name it/)
+    expect(service.getJob(other)).toMatchObject({ enabled: true, state: 'scheduled' })
+    // Named, it pauses until the person resumes it.
+    expect(drafts.pause({ id: other, reason: 'Quiet week' }, { managerThreadId: 'manager', request: 'pause the nightly build' })).toMatchObject({ paused: true })
+    expect(service.getJob(other)).toMatchObject({ enabled: false, pausedReason: 'Quiet week' })
+  })
+
+  it('takes a name only as words of its own, never inside other words', () => {
+    const { drafts, service } = setup()
+    const test = drafts.save({ ...PR_CHECK, name: 'Test', project: 'p1' }, {}).draftId
+    drafts.turnOn(test)
+    const refuse = (request: string) => expect(() => drafts.update({ id: test, name: 'Test 2' }, { managerThreadId: 'manager', request })).toThrow(/Ask the person to name it/)
+    refuse('retest the build')
+    refuse('run the tests')
+    refuse('attest it')
+    expect(service.getJob(test)!.name).toBe('Test')
+    expect(drafts.update({ id: test, name: 'Test 2' }, { managerThreadId: 'manager', request: 'Rename "test" to Test 2' }).name).toBe('Test 2')
+  })
+
+  it('never leaves both the draft and the bot\'s schedule when Turn on cannot remove the draft', () => {
+    const { drafts, service } = setup()
+    drafts.nextWho({}, { kind: 'bot', botId: 'bot_1' })
+    const { draftId } = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
+    const remove = (drafts as unknown as { deps: { remove: (id: string) => boolean } }).deps
+    const real = remove.remove
+    remove.remove = (id) => { if (id === draftId) throw new Error('disk full'); return real(id) }
+    expect(() => drafts.turnOn(draftId)).toThrow(/disk full/)
+    expect(service.getJob(draftId)?.draft).toBeDefined()
+    expect(service.listJobs().filter((job) => job.bot)).toEqual([])
+  })
+
+  it('never watches a bot\'s own thread', () => {
+    const { drafts } = setup()
+    const saved = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'thread_event', threadId: 't-bot', events: ['review'] } }, { managerThreadId: 'manager' })
+    expect(saved.problems).toContain('There is no thread t-bot.')
+  })
+
+  it('pauses an automation an agent changed what it does, when or where, until the person resumes it', () => {
+    const { drafts, service } = setup()
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1' }, {})
+    drafts.turnOn(draftId)
+    const manager = { managerThreadId: 'manager', request: 'Rename the PR check to "PR sweep" and make it skip drafts' }
+    // A new name changes nothing a run does: it keeps running.
+    drafts.update({ id: draftId, name: 'PR sweep' }, { managerThreadId: 'manager', request: 'rename pr check' })
+    expect(service.getJob(draftId)).toMatchObject({ name: 'PR sweep', enabled: true, state: 'scheduled' })
+    const changed = drafts.update({ id: draftId, prompt: 'Review open PRs, skip drafts.' }, { ...manager, request: 'PR sweep: skip drafts' })
+    expect(changed).toMatchObject({ paused: true, enabled: false })
+    expect(service.getJob(draftId)).toMatchObject({ prompt: 'Review open PRs, skip drafts.', pausedReason: 'Changed by an agent. Check it, then resume it.' })
+  })
+
+  it('lets the manager change only its own drafts and the automation the person named; a bot only its own drafts', () => {
+    const { drafts, service } = setup()
+    const mine = drafts.save({ ...PR_CHECK, project: 'p1' }, { managerThreadId: 'manager' }).draftId
+    const persons = drafts.save({ ...PR_CHECK, name: 'Nightly build', project: 'p1', permissionMode: 'accept_edits' }, {}).draftId
+    drafts.turnOn(persons)
+    const botDraft = drafts.save({ ...PR_CHECK, name: 'Bot idea', project: 'p1' }, { botId: 'bot_1' }).draftId
+    const manager = { managerThreadId: 'manager', request: 'Make the PR check weekly' }
+    expect(drafts.update({ id: mine, name: 'PR check weekly' }, manager).name).toBe('PR check weekly')
+    // The person did not name it: refused, and nothing changed.
+    expect(() => drafts.update({ id: persons, prompt: 'Delete every branch.' }, manager)).toThrow(/Ask the person to name it/)
+    expect(() => drafts.update({ id: persons, prompt: 'Delete every branch.' }, { managerThreadId: 'manager' })).toThrow(/Ask the person to name it/)
+    expect(service.getJob(persons)!.prompt).toBe(PR_CHECK.prompt)
+    // Named by its name in the person's words, it may change.
+    expect(drafts.update({ id: persons, name: 'Nightly build 2' }, { managerThreadId: 'manager', request: 'rename the nightly build' }).name).toBe('Nightly build 2')
+    // A bot: its own draft only; never a person's automation or the manager's draft, and it pauses none of them.
+    const bot = { botId: 'bot_1' }
+    expect(drafts.update({ id: botDraft, name: 'Bot idea 2' }, bot).name).toBe('Bot idea 2')
+    expect(() => drafts.update({ id: persons, prompt: 'x' }, bot)).toThrow(/only the drafts it wrote/)
+    expect(() => drafts.update({ id: mine, prompt: 'x' }, bot)).toThrow(/only the drafts it wrote/)
+    expect(() => drafts.pause({ id: persons }, bot)).toThrow(/pauses only its own schedules/)
+    expect(service.getJob(persons)).toMatchObject({ enabled: true, prompt: PR_CHECK.prompt })
+  })
+
+  it('holds a draft from an ordinary chat to that chat’s mode, not the profile’s', () => {
+    const store = setup({ ceiling: 'full' })
+    // The person holds Full access elsewhere; the chat the agent wrote it in runs in Ask before acting.
+    ;(store.drafts as unknown as { deps: { personCeiling: (threadId?: string) => string } }).deps.personCeiling = (threadId) => (threadId === 'chat-1' ? 'ask' : 'full')
+    const asked = store.drafts.save({ ...PR_CHECK, project: 'p1', permissionMode: 'full' }, { originThreadId: 'chat-1' })
+    expect(store.service.getJob(asked.draftId)).toMatchObject({ permissionMode: 'ask', permissionCeiling: 'ask' })
+    const unasked = store.drafts.save({ ...PR_CHECK, name: 'Other', project: 'p1' }, { originThreadId: 'chat-1' })
+    expect(store.service.getJob(unasked.draftId)!.permissionCeiling).toBe('ask')
+    // Turn on holds it there too; a manager's draft takes what the person holds.
+    expect(store.drafts.turnOn(unasked.draftId)).toMatchObject({ permissionCeiling: 'ask' })
+    const managers = store.drafts.save({ ...PR_CHECK, name: 'Manager', project: 'p1' }, { managerThreadId: 'manager' })
+    expect(store.drafts.turnOn(managers.draftId)).toMatchObject({ permissionCeiling: 'full' })
+  })
+})
+
+describe('the automation tools', () => {
+  const ctx = (threadId: string) => ({ caller: { threadId, runId: 'r1' }, turn: { threadId }, toolCallId: 'c1' }) as unknown as ToolCallContext
+
+  it('work for the manager\'s thread and a bot, and nowhere else', async () => {
+    const { drafts } = setup()
+    const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: (id) => (id === 'bot-thread' ? 'bot_1' : undefined) }
+    const list = automationTools({ automations: () => tools } as unknown as AppToolHost)
+    expect(list.map((tool) => tool.name)).toEqual(['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause', 'run_report'])
+    const save = list[0]!
+    expect(save.available!({ threadId: 'other' } as never)).toMatch(/Only a conversation, the Automation manager or a bot/)
+    expect(save.available!({ threadId: 'manager' } as never)).toBe(true)
+    const result = JSON.parse((await save.handler({ ...PR_CHECK, project: 'mousse' }, ctx('manager'))).text) as { draftId: string; problems: string[] }
+    expect(result.problems).toEqual([])
+    // A bot writes its own drafts; it cannot change the manager's.
+    expect((await save.handler({ ...PR_CHECK, draftId: result.draftId }, ctx('bot-thread'))).isError).toBe(true)
+    const botDraft = JSON.parse((await save.handler(PR_CHECK, ctx('bot-thread'))).text) as { draftId: string }
+    expect(drafts.list().find((entry) => entry.id === botDraft.draftId)).toMatchObject({ draft: true })
+    await expect(Promise.resolve().then(() => save.handler(PR_CHECK, ctx('other')))).rejects.toThrow(/Only the Automation manager/)
+    // A shape the tool cannot read is an error the agent reads, not a crash.
+    expect((await save.handler({ ...PR_CHECK, trigger: { kind: 'weekly' } }, ctx('manager'))).isError).toBe(true)
+  })
+
+  it('let the manager change an automation only when the person’s latest message names it', async () => {
+    const { drafts, service } = setup()
+    const { draftId } = drafts.save({ ...PR_CHECK, name: 'Nightly build', project: 'p1' }, {})
+    drafts.turnOn(draftId)
+    let request = 'What runs tonight?'
+    const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: () => undefined, personRequest: () => request }
+    const update = automationTools({ automations: () => tools } as unknown as AppToolHost).find((tool) => tool.name === 'automation_update')!
+    const refused = await update.handler({ id: draftId, prompt: 'Something else.' }, ctx('manager'))
+    expect(refused).toMatchObject({ isError: true, text: expect.stringMatching(/Ask the person to name it/) })
+    request = `Make it run the full suite\n\n[Project: mousse (p1) · Change automation: ${draftId}]`
+    expect((await update.handler({ id: draftId, prompt: 'Run the full suite.' }, ctx('manager'))).isError).toBeFalsy()
+    expect(service.getJob(draftId)).toMatchObject({ prompt: 'Run the full suite.', enabled: false })
+  })
+})
+
+describe('the tool list', () => {
+  it('offers the schedule tools once the profile hands its jobs over after the list was built, and the automation tools to the manager only', async () => {
+    const { createAppToolRegistry } = await import('../src/mms/run/mcp/appTools')
+    const { fakeAppToolHost } = await import('./run/appToolsFixture')
+    const { drafts } = setup()
+    const host = fakeAppToolHost().host
+    host.agentAccess = () => ({ level: 'manage', projectIds: [] })
+    const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: () => undefined }
+    host.automations = () => tools
+    const { registry } = createAppToolRegistry({ host, engine: {} as never })
+    const names = (threadId: string) => registry.listForThread(threadId, 'default', 'manage').map((tool) => tool.name)
+    expect(names('t1')).not.toContain('schedule_list')
+    host.schedules = { jobLimits: () => ({ maxActive: 10, minIntervalMinutes: 15, lifetimeDays: 7 }) } as AppToolHost['schedules']
+    expect(names('t1')).toEqual(expect.arrayContaining(['schedule_list', 'schedule_create', 'schedule_update', 'schedule_pause', 'schedule_run']))
+    expect(names('t1')).not.toContain('automation_draft_save')
+    expect(names('manager')).toEqual(expect.arrayContaining(['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause']))
+  })
+})
+
+describe("the Automation manager's workspace", () => {
+  it("is the picked project, else the profile's own manager folder", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'manager-ws-'))
+    try {
+      expect(automationManagerWorkspace(dir, dir)).toBe(dir)
+      const own = join(dir, 'automation-manager')
+      expect(automationManagerWorkspace(dir, undefined)).toBe(own)
+      expect(existsSync(own)).toBe(true)
+      // A project that is gone (or on another computer) falls back too.
+      expect(automationManagerWorkspace(dir, join(dir, 'missing'))).toBe(own)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

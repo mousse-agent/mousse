@@ -3,7 +3,7 @@
  * does not. The daemon bounds these by the editor's own permission mode; the Scheduled page uses the same list to
  * tell the person what saving will do.
  */
-export const EXECUTABLE_JOB_FIELDS = ['prompt', 'selection', 'mode', 'workspace', 'threadId', 'projectId', 'createThread', 'permissionMode'] as const
+export const EXECUTABLE_JOB_FIELDS = ['prompt', 'selection', 'agent', 'mode', 'workspace', 'threadId', 'projectId', 'createThread', 'permissionMode'] as const
 
 /** True when the patch changes something a run does. */
 export function isExecutableJobEdit(patch: object): boolean {

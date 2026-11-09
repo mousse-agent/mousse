@@ -2,7 +2,7 @@ import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
@@ -33,7 +33,7 @@ import { createCodexProviderService, findCodexBinary, type CodexProviderService 
 import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
-import type { ScheduledJob } from '../shared/types'
+import type { ScheduledJob, Thread } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -58,7 +58,8 @@ import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
 import { createBotContextProvider } from './bots/memory/contextPack'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
-import { BotScheduler } from './bots/triggers/scheduler'
+import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
+import { migrateBotSchedules } from './scheduled/botScheduleMigration'
 import type { BotStore } from './bots/store/BotStore'
 import { botScheduleLabel } from '../shared/scheduleLabel'
 import { RunStore } from './run/RunStore'
@@ -83,7 +84,12 @@ import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLe
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
-import { createProfileSecretAdapter, deleteProfileSecret, writeProfileSecret } from './profiles/secrets'
+import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
+import { isKeyName } from '../shared/automationKeys'
+import { AutomationDrafts } from './automations/AutomationDrafts'
+import { AutomationRuns } from './automations/AutomationRuns'
+import type { AutomationInbox, InboxCounts } from '../shared/automationInbox'
+import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY, automationManagerWorkspace } from './automations/automationManager'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -122,7 +128,14 @@ import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
-import { PullRequestWatchService } from './git/PullRequestWatchService'
+import { PullRequestWatchService, type PullRequestWatchRead, type PullRequestWatchUpdate } from './git/PullRequestWatchService'
+import { ThreadEventTriggers } from './automations/threadEventTriggers'
+import { buildAutomationIndex, mergeRemoteAutomations } from './automations/AutomationIndex'
+import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
+import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
+import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
+import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
+import type { AutomationIndex } from '../shared/automations'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
@@ -222,6 +235,8 @@ export class MmsProfileServices {
    * for windows. Set and cleared with `threadRouter`; empty while routing is off.
    */
   remoteLists?: RemoteListsPort
+  /** The automations of the user's other computers, for windows' Automations page. Set and cleared with `threadRouter`. */
+  remoteAutomations?: RemoteAutomationsPort
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
@@ -276,7 +291,8 @@ export class MmsProfileServices {
   readonly botModels: BotModelChooser
   /** Each bot's own browser (`bots.browser.*`, the browser tools of a bot with "use the browser"). */
   readonly botBrowsers: BotBrowsers
-  private readonly botScheduler: BotScheduler | null
+  /** Bots' schedules: automations whose Who is the bot, in the shared scheduled-job store. */
+  readonly botSchedules: BotScheduleBook
   private readonly botStore: BotStore | null
   /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
   private botSweepTimer: ReturnType<typeof setInterval> | null = null
@@ -637,8 +653,17 @@ export class MmsProfileServices {
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
-      // A published schedule is read at once; before the scheduler started this does nothing.
-      schedulesChanged: () => { void this.botScheduler?.wake() },
+      // A resumed bot's due schedules are claimed at once; before the scheduler started this does nothing.
+      schedulesChanged: () => { this.scheduled?.wake() },
+      // The shared store, through the book made once the scheduler exists below (nothing reads it before that).
+      schedules: {
+        list: (botId) => this.botSchedules?.list(botId) ?? [],
+        get: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId),
+        add: (botId, input, createdBy, options) => this.botSchedules.add(botId, input, createdBy, options),
+        remove: (botId, scheduleId) => this.botSchedules?.remove(botId, scheduleId) ?? false,
+        removeAll: (botId) => this.botSchedules?.removeAll(botId) ?? 0,
+        labelOf: (when) => botScheduleLabel(when)
+      },
       models: botModels,
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
@@ -662,6 +687,18 @@ export class MmsProfileServices {
           return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
         }
       }),
+      // By hand (#673): the ready models that can hold a bot here, named by their provider.
+      modelChoices: async () => {
+        const seen = new Set<string>()
+        return (await botModels.holdable()).flatMap(({ instanceId, model }) => {
+          if (seen.has(model)) return []
+          seen.add(model)
+          const family = this.botProviderLabel(instanceId)
+          return [{ model, label: family ? `${family} · ${model}` : model }]
+        })
+      },
+      computerName: () => hostname(),
+      otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers
@@ -674,12 +711,27 @@ export class MmsProfileServices {
         readThread: (threadId) => this.threads.loadThreadData(threadId),
         listThreads: () => botThreadsForCatchUp(store.captureThreads())
       })
-      const context = createBotContextProvider({
+      const pack = createBotContextProvider({
         store: memory,
         journal,
         situation: (botId) => this.botSituation(botId),
-        scheduleCreatedAt: (botId, scheduleId) => store.schedules(botId).find((schedule) => schedule.id === scheduleId)?.createdAt
+        scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt
       })
+      // A scheduled run of a bot's automation learns the report levels, its context and Tuning, as any automation run does.
+      const context: typeof pack = {
+        ...pack,
+        runPreamble: async (input) => {
+          const text = await pack.runPreamble(input)
+          const jobId = input.scheduleId ? this.botSchedules?.get(input.botId, input.scheduleId)?.jobId : undefined
+          if (!jobId || !this.automationRuns) return text
+          try {
+            const notice = this.automationRuns.notice(jobId, this.scheduled.getJob(jobId)?.name)
+            return text ? `${text}\n\n${notice}` : notice
+          } catch {
+            return text
+          }
+        }
+      }
       const admin = createBotMemoryAdmin({
         store: memory,
         definition: (botId) => {
@@ -730,8 +782,6 @@ export class MmsProfileServices {
       })
     })
     this.orchestrator.setBotDispatcher(personalBots)
-    // Bot schedules tick only after the bot startup pass (`startOwned`).
-    this.botScheduler = personalBots ? new BotScheduler({ tick: (now) => personalBots.tickSchedules(now) }) : null
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -758,6 +808,8 @@ export class MmsProfileServices {
       }
     })
 
+    // A job whose Who is a saved agent runs it through the profile's agent library.
+    this.orchestrator.setScheduledAgentRunner(this.platform.scheduledAgentRunner)
     this.scheduledStore = new ScheduledJobStore(config)
     this.scheduled = new ScheduledJobService(
       {
@@ -769,6 +821,58 @@ export class MmsProfileServices {
     )
     // The Run Engine decides when a scheduled occurrence is over, including after a restart.
     this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
+    // One scheduler for bots too: a bot's schedule is a job whose Who is the bot, run in the bot's run lane. Its
+    // occurrences start only after the bot startup pass (`startOwned`); each tick then does the bots' upkeep.
+    this.botSchedules = new BotScheduleBook({ jobs: this.scheduled, label: (when) => botScheduleLabel(when) })
+    // An older build that saved the jobs dropped the fields it does not know (a bot's link, drafts, keys...): put back.
+    try {
+      const restored = this.scheduledStore.restoreDroppedFields()
+      if (restored.length) console.info('scheduled jobs: fields an older build dropped were put back', { jobs: restored.length })
+    } catch (error) {
+      console.warn('scheduled jobs: fields an older build dropped could not be put back', { error: error instanceof Error ? error.message : String(error) })
+    }
+    // Schedules earlier builds kept in `bots.db` move here once (marked there, never deleted), before anything ticks.
+    if (opened) {
+      try {
+        const moved = migrateBotSchedules({ bots: opened.store, jobs: this.scheduledStore })
+        if (moved.moved.length || moved.marked.length || moved.repaired.length || moved.removed.length) console.info('bot schedules moved to the shared scheduler', { moved: moved.moved.length, marked: moved.marked.length, repaired: moved.repaired.length, removed: moved.removed.length })
+        for (const failure of moved.failed) console.warn('a bot schedule could not be moved; the next start tries again', failure)
+      } catch (error) {
+        console.warn('bot schedules could not be moved; the next start tries again', { error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    // The Automations inbox: every run, its report, usage and the Needs you queue (`automations/automations.db`).
+    try {
+      this.automationRuns = new AutomationRuns({ profileHome: homeDir })
+    } catch (error) {
+      console.warn('the automations inbox could not be opened; runs are kept only in each automation\'s history', { error: error instanceof Error ? error.message : String(error) })
+    }
+    const runs = this.automationRuns
+    if (runs) {
+      this.scheduled.setRunLedger(runs)
+      let pending: NodeJS.Timeout | null = null
+      // The page and the project dots read again; a burst of changes is one event.
+      runs.onChange(() => {
+        if (pending) return
+        pending = setTimeout(() => {
+          pending = null
+          this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+        }, 200)
+        pending.unref?.()
+      })
+      // A deleted automation's Tuning notes and meta go; its runs and their threads stay in the inbox.
+      this.scheduled.on('jobRemoved', (jobId: string) => {
+        try { runs.forgetAutomation(jobId) } catch { /* the notes stay; nothing reads them */ }
+      })
+    }
+    if (personalBots) {
+      this.scheduled.setBotRunner({ runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
+      // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
+      this.scheduled.setTickHook(async (now) => {
+        await personalBots.maintain(now)
+        this.syncBotRuns()
+      })
+    }
     this.orchestrator.setScheduledHooks({
       onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event),
       currentPermissionRequest: (jobId) => {
@@ -777,6 +881,19 @@ export class MmsProfileServices {
       }
     })
     this.scheduled.setQuestionProbe((threadId) => this.questions.listPendingForThread(threadId).length > 0)
+    // An approval or a question on an automation run's thread is a Needs you item until it is answered where it was asked.
+    if (runs) {
+      this.questions.on('pending', (event: { requestId: string; threadId: string; approval?: unknown }) => {
+        try { runs.openAsk(event.threadId, event.requestId, event.approval ? 'approval' : 'ask') } catch { /* the run still asks in its thread */ }
+      })
+      this.questions.on('cleared', (event: { requestId: string }) => {
+        try { runs.closeAsk(event.requestId) } catch { /* the item stays until Resolve */ }
+      })
+      this.orchestrator.setAutomationRunHooks({
+        notice: (jobId, jobName) => runs.notice(jobId, jobName),
+        usage: ({ threadId, runId, ...usage }) => { runs.addUsage({ threadId, ...(runId ? { runId } : {}) }, usage) }
+      })
+    }
     // Jobs saved before permission ceilings existed get one now: the mode of the thread they run on, else the
     // mode threads start in, else `ask`. Jobs that already have one are untouched, so this is safe on every start.
     try {
@@ -794,17 +911,66 @@ export class MmsProfileServices {
       projects: this.projects,
       threads: this.threads
     })
+    this.agentJobAsks = new AgentJobAskStore(homeDir)
     this.orchestrator.setScheduledJobs({
-      enabled: () => config.agentJobsEnabled(),
+      // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
+      threadAllowed: (threadId) => config.agentJobsEnabled() || this.agentJobAsks.threadAllowed(threadId),
+      askFirst: (input) => {
+        const ask = this.agentJobAsks.ask(input)
+        this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+        return ask
+      },
       jobLimits: () => config.agentJobLimits(),
-      list: () => this.scheduled.listJobs(),
-      get: (id) => this.scheduled.getJob(id),
+      // A bot's schedules are the bot's: an agent's schedule tools never see or change them.
+      list: () => this.scheduled.listJobs().filter((job) => !job.bot),
+      get: (id) => {
+        const job = this.scheduled.getJob(id)
+        return job?.bot ? undefined : job
+      },
       validate: (job) => validateScheduledJobOptions(job, jobOptionDeps),
       create: (input) => this.scheduled.createJob(input),
       update: (id, patch) => this.scheduled.updateJob(id, patch),
       pause: (id, reason) => this.scheduled.pauseJob(id, reason),
       trigger: (id) => this.scheduled.triggerJob(id),
       wake: () => this.scheduled.wake()
+    })
+    // Automation drafts (v4): the Automation manager's and granted bots' `automation_*` tools, and the page's Turn on.
+    this.automationDrafts = new AutomationDrafts({
+      get: (id) => this.scheduled.getJob(id),
+      list: () => this.scheduled.listJobs(),
+      create: (input) => this.scheduled.createJob(input),
+      update: (id, patch) => this.scheduled.updateJob(id, patch),
+      remove: (id) => this.scheduled.deleteJob(id),
+      pause: (id, reason, until) => this.scheduled.pauseJob(id, reason, until),
+      projects: () => this.projects.listProjects().map(({ id, name }) => ({ id, name })),
+      thread: (id) => this.threads.getThread(id),
+      watch: (threadId) => this.syncThreadEventWatch(threadId),
+      botExists: (botId) => this.personalBots?.list().some((bot) => bot.id === botId) ?? false,
+      addBotSchedule: (botId, input) => {
+        const when = botWhenOf(input.schedule)
+        if (!when) throw new Error('A bot repeats: give it a time that repeats.')
+        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt, name: input.name, tellMe: input.tellMe }, 'owner')
+        return this.scheduled.getJob(entry.jobId)!
+      },
+      personCeiling: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
+      reuseThread: (jobId, name, projectId) => this.threads.ensureExecutionThread(`automation-thread:${jobId}`, name.slice(0, 120), projectId),
+      ...(runs ? { meta: { get: (jobId: string) => runs.meta(jobId), set: (jobId: string, meta: { originThreadId?: string; context?: string }) => runs.setMeta(jobId, meta), move: (from: string, to: string) => runs.moveMeta(from, to) } } : {})
+    })
+    this.orchestrator.setAutomationTools({
+      drafts: this.automationDrafts,
+      isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
+      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => message.role === 'user')?.content,
+      managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
+      botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
+      activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,
+      // "Check this daily" in an ordinary chat: a person's thread, not a run's, a bot's or the manager's.
+      ordinaryThread: (threadId) => {
+        const thread = this.threads.getThread(threadId)
+        if (!thread || thread.automationManager || thread.botOwned || thread.scheduledJobId || thread.settledAt) return false
+        if (this.personalBots?.tools.activationOf(threadId)) return false
+        return !runs?.liveRunFor({ threadId })
+      },
+      ...(runs ? { runs: { liveRunFor: (caller) => runs.liveRunFor(caller), report: (caller, level, summary) => runs.report(caller, level, summary) } } : {})
     })
     // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
     // looks them up in a small in-memory table that is rebuilt on any scheduler change, so a request costs no file work.
@@ -814,6 +980,17 @@ export class MmsProfileServices {
       delete: (ref) => deleteProfileSecret(homeDir, ref)
     })
     this.webhookSecretCache = new WebhookSecretCache(this.scheduledStore, webhookSecrets)
+    // Saved keys live in the same secret file, by name; a run that names one that is not there ends Incomplete.
+    this.automationKeys = {
+      list: () => listProfileKeyNames(homeDir),
+      set: (name, value) => {
+        if (!isKeyName(name)) throw new Error('A key name is a word like GITHUB_TOKEN')
+        writeProfileSecret(homeDir, name, value)
+        this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+      },
+      has: (name) => listProfileKeyNames(homeDir).includes(name)
+    }
+    this.scheduled.setKeyStore(this.automationKeys)
     this.scheduledWebhookServer = new ScheduledWebhookServer({
       resolveSecret: (jobId) => this.webhookSecretCache.resolve(jobId),
       schedulerRunning: () => this.scheduled.isRunning(),
@@ -1014,6 +1191,13 @@ export class MmsProfileServices {
     })
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
+    // Thread-event automations wake on their pull request's activity, never on what their own run caused.
+    const threadEvents = new ThreadEventTriggers({
+      jobs: () => this.scheduled.listJobs(),
+      queue: (jobId, kinds, options) => this.scheduled.queueThreadEvent(jobId, kinds, options)
+    })
+    this.pullRequestWatch.on('read', (event: PullRequestWatchRead) => threadEvents.onRead(event))
+    this.pullRequestWatch.on('updated', (event: PullRequestWatchUpdate) => threadEvents.onUpdated(event))
     const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
     this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
       this.storageCleanup.scheduleAfterPolicyChange()
@@ -1231,6 +1415,174 @@ export class MmsProfileServices {
     return record
   }
 
+  /** First-creation asks of agents that add automations (`AgentJobAskStore`). */
+  agentJobAsks!: AgentJobAskStore
+
+  /**
+   * Answers an agent's first-creation ask. Allow makes the automation as the agent asked, ending after the lifetime
+   * limit from now and counted against the active limit, and lets that thread add more; Not now closes the ask.
+   */
+  answerAgentJobAsk(askId: string, answer: 'allow' | 'not_now'): AgentJobAsk {
+    const limits = this.config.agentJobLimits()
+    const answered = this.agentJobAsks.answer(askId, answer, (ask) => {
+      const active = this.scheduled.listJobs().filter(isActiveAgentJob).length
+      if (active >= limits.maxActive) throw new Error(`Agents already have ${active} active automations (the limit is ${limits.maxActive}). Pause or delete one, or raise the limit in Settings, Agent access.`)
+      return this.scheduled.createJob({ ...ask.input, expiresAt: agentJobExpiry(limits.lifetimeDays) })
+    })
+    this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+    return answered
+  }
+
+  /** The Automations page's one list (`automations.list`): jobs (bots' schedules among them) and pull request watches. */
+  /**
+   * A thread's pull request watch for its thread-event automations: on (in `event` mode, unless Notify already serves it)
+   * while one of them needs it, and an `event` watch off once none does. A failure to turn it on is shown on the row
+   * (the watch is off), never thrown at the edit that caused it.
+   */
+  syncThreadEventWatch(threadId: string): void {
+    try {
+      // A draft never runs, so it needs no watch until it is turned on.
+      const needed = this.scheduled.listJobs().some((job) => !job.draft && job.trigger?.threadEvent?.threadId === threadId)
+      if (needed) this.pullRequestWatch.ensureEventWatch(threadId)
+      else this.pullRequestWatch.releaseEventWatch(threadId)
+    } catch (error) {
+      console.warn('a thread-event automation\'s pull request watch did not change', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Saved keys (#595, the automation part): names in the profile's secret store; values are written, never read back out. */
+  automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
+  automationDrafts!: AutomationDrafts
+
+  /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
+  private automationManagerProjectId: string | undefined
+
+  /** The profile's Automation manager thread: hidden, reusable, made the first time the composer sends. */
+  automationManagerThread(projectId?: string): { id: string } {
+    this.automationManagerProjectId = projectId
+    return this.threads.ensureExecutionThread(AUTOMATION_MANAGER_THREAD_KEY, AUTOMATION_MANAGER_NAME, undefined, undefined, { automationManager: true })
+  }
+
+  /** The Automations inbox (`automations/automations.db`); absent when it could not be opened. */
+  automationRuns: AutomationRuns | undefined
+
+  /** Brings the inbox's bot runs up to date with their activations. */
+  syncBotRuns(): void {
+    const runs = this.automationRuns
+    const bots = this.personalBots
+    if (!runs || !bots) return
+    for (const job of this.scheduled.listJobs()) {
+      if (!job.bot) continue
+      try {
+        const facts = bots.service.automationFacts(job.bot.botId, job.bot.scheduleId)
+        if (facts) runs.syncBotRuns(job.id, facts.runs)
+      } catch {
+        // That bot's runs follow at the next read.
+      }
+    }
+  }
+
+  /** `automations.inbox.list`: every run (newest first) with its report, items and usage, the Tuning notes and this month's cost. */
+  automationInbox(): AutomationInbox {
+    const runs = this.automationRuns
+    if (!runs) throw new Error('The automations inbox is not available in this profile.')
+    this.syncBotRuns()
+    const inbox = runs.list()
+    // A run's pull request is its thread's link, read now.
+    const threads = new Map<string, Thread | undefined>()
+    return {
+      ...inbox,
+      runs: inbox.runs.map((run) => {
+        if (!run.threadId) return run
+        if (!threads.has(run.threadId)) threads.set(run.threadId, this.threads.getThread(run.threadId))
+        const link = threads.get(run.threadId)?.pullRequest
+        return link ? { ...run, pr: { number: link.number, url: link.url } } : run
+      })
+    }
+  }
+
+  /** `automations.inbox.counts`: the project dots. */
+  automationInboxCounts(): InboxCounts {
+    const runs = this.automationRuns
+    if (!runs) return { byProject: {}, total: 0 }
+    this.syncBotRuns()
+    return runs.counts()
+  }
+
+  automationIndex(): AutomationIndex {
+    const bots = this.personalBots
+    return buildAutomationIndex({
+      jobs: () => this.scheduled.listJobs(),
+      thread: (id) => this.threads.getThread(id),
+      threads: () => this.threads.listAllThreads(),
+      projectName: (id) => this.projects.getProject(id)?.name,
+      threadMode: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
+      savedAgentName: (definitionId) => {
+        try {
+          return this.platform.agentDefinitions.get(definitionId).settings.identity.name
+        } catch {
+          return undefined
+        }
+      },
+      ...(bots ? { bot: (botId: string, scheduleId: string) => bots.service.automationFacts(botId, scheduleId) } : {}),
+      asks: () => this.agentJobAsks?.open() ?? [],
+      pendingApproval: (threadId) => {
+        const pending = this.questions.listPendingForThread(threadId)[0]
+        const question = pending?.questions.length === 1 ? pending.questions[0] : undefined
+        const allow = question?.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
+        const deny = question?.options.find((option) => option.decision === 'reject')
+        return pending && question && allow && deny && pending.approval
+          ? { kind: 'thread_approval', threadId, requestId: pending.requestId, questionId: question.id, allow: allow.id, deny: deny.id }
+          : undefined
+      },
+      workflowApproval: (runId) => {
+        const open = this.platform.workflowRuns.approvals.listOpen(this.profileId, runId)
+          .filter((record) => Date.parse(record.expiresAt) > Date.now())
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
+        return open ? { kind: 'workflow_approval', runId, approvalId: open.approvalId, nodeId: open.nodeId, instanceKey: open.instanceKey, attempt: open.attempt } : undefined
+      },
+      watchStatus: (threadId) => this.pullRequestWatch.status(threadId),
+      requestUrl: (jobId) => this.scheduledWebhookUrl(jobId),
+      deliveries: (jobId) => this.scheduled.listWebhookDeliveries(jobId),
+      payloadKept: (jobId, occurrenceId) => this.scheduled.hasWebhookPayload(jobId, occurrenceId),
+      keyStored: (name) => this.automationKeys.has(name)
+    })
+  }
+
+  /**
+   * The list another of the user's computers is given (`automations.list` over Bridge): only what it may see (no
+   * bot's automation, no agent's ask, nothing of a private thread), with the full records of its job rows so its
+   * window can edit them. Asks are answered on this computer, so nothing is answered in place from there.
+   */
+  automationIndexForComputer(): AutomationIndex {
+    const isPrivate = privateThreadOf(this.threads)
+    const index = this.automationIndex()
+    const jobs = this.scheduled.listJobs().filter((job) => jobSharedWithComputers(job, isPrivate))
+    const shared = new Set(jobs.map((job) => job.id))
+    const items = index.items
+      .filter((item) => (item.kind === 'job' ? shared.has(item.id) : item.kind === 'watch' ? !isPrivate(item.id) : false))
+      .map((item) => {
+        if (!item.attention?.answer) return item
+        const { answer: _answer, ...attention } = item.attention
+        return { ...item, attention }
+      })
+    return { ...index, items, jobs }
+  }
+
+  /** The list a window of this computer is given: this computer's automations, then the other computers'. */
+  async automationIndexForWindow(signal?: AbortSignal): Promise<AutomationIndex> {
+    const local = this.automationIndex()
+    const remote = this.remoteAutomations
+    if (!remote) return local
+    let parts: RemoteAutomationsPart[] = []
+    try {
+      parts = await remote.read(signal)
+    } catch {
+      // The other computers could not be read now: this computer's rows still show.
+    }
+    return mergeRemoteAutomations(local, parts)
+  }
+
   getOwnerLease(): MmsOwnerHandle | null {
     return this.ownerHandle
   }
@@ -1336,7 +1688,6 @@ export class MmsProfileServices {
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
-    this.botScheduler?.stop()
     if (this.botSweepTimer) clearInterval(this.botSweepTimer)
     this.botSweepTimer = null
     this.webhooksClosed = true
@@ -1450,8 +1801,19 @@ export class MmsProfileServices {
   }
 
   private wireServiceEvents(): void {
+    // A bot's schedules are its About's too: an edit from the Automations page (or a moved next run) tells its bot.
+    let botSchedulesSeen = new Map<string, string>()
     this.scheduled.on('updated', (jobs) => {
       this.events.emit({ channel: 'scheduled:updated', data: jobs })
+      const seen = new Map<string, string>()
+      for (const job of jobs as ScheduledJob[]) {
+        if (!job.bot) continue
+        seen.set(job.bot.botId, `${seen.get(job.bot.botId) ?? ''}|${job.id}:${job.name}:${job.prompt}:${JSON.stringify(job.schedule)}:${job.enabled}:${job.state === 'paused'}:${job.nextRunAt}:${job.tellMe ?? ''}`)
+      }
+      for (const botId of new Set([...seen.keys(), ...botSchedulesSeen.keys()])) {
+        if (seen.get(botId) !== botSchedulesSeen.get(botId)) this.personalBots?.schedulesEdited(botId)
+      }
+      botSchedulesSeen = seen
       // A change to the jobs (a rotated or removed secret, a deleted job) applies to the listener at once.
       this.webhookSecretCache.invalidate()
       this.reconcileScheduledWebhookListener(jobs as ScheduledJob[])
@@ -1598,9 +1960,8 @@ export class MmsProfileServices {
     this.startRunEngineWorkers()
 
     if (this.config.getScheduledSection().enabled) {
+      // Bot schedules are jobs in the same scheduler: with it off, nothing starts on its own.
       this.scheduled.start()
-      // Bot schedules follow the same switch: with the scheduler off, nothing starts on its own.
-      this.botScheduler?.start()
     }
     await this.net.start()
     // After the net service has loaded its ports, so the listener can refuse one of them.
@@ -1872,16 +2233,26 @@ export class MmsProfileServices {
     }
     this.endRunEngineEpoch()
     this.config.stopWatching()
-    try {
-      this.orchestrator.setRunEngine(null)
-      this.orchestrator.setBotDispatcher(null)
-      this.orchestrator.setBotThreads(null)
-      this.orchestrator.setBotAppTools(null)
-      this.personalBots?.close()
-      this.botStore?.close()
-      this.runEngine.store.db.close()
-    } catch (error) {
-      console.warn('run engine database close failed', error)
+    // Each database closes on its own, so one that fails to close never keeps the next open: an open SQLite file
+    // keeps the profile's folder from being removed on Windows.
+    const closes: Array<[string, () => void]> = [
+      ['run engine detach', () => {
+        this.orchestrator.setRunEngine(null)
+        this.orchestrator.setBotDispatcher(null)
+        this.orchestrator.setBotThreads(null)
+        this.orchestrator.setBotAppTools(null)
+      }],
+      ['personal bots close', () => this.personalBots?.close()],
+      ['bots database close', () => this.botStore?.close()],
+      ['automations database close', () => this.automationRuns?.close()],
+      ['run engine database close', () => this.runEngine.store.db.close()]
+    ]
+    for (const [what, close] of closes) {
+      try {
+        close()
+      } catch (error) {
+        console.warn(`${what} failed`, error)
+      }
     }
     // What this profile chose for worktrees is no longer Mousse's to act on through it.
     forgetWorktreeFolders(this.homeDir)

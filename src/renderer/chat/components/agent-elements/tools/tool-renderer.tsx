@@ -94,23 +94,33 @@ export const ToolRenderer = memo(function ToolRenderer({
       return <NoteTool part={part} />;
   }
 
-  // MCP tools
+  // Custom renderers: user-defined tools, and the host's own cards for its app tools (keyed by the bare tool name,
+  // whatever server prefix the runtime gave it, e.g. `mcp__mousse__automation_draft_save`).
   const mcpInfo = parseMcpToolType(partType);
+  // A runtime that names its calls only by title (an ACP agent) leaves the name in the row's summary.
+  const summaryName = typeof (part.input as { summary?: unknown } | undefined)?.summary === "string" ? ((part.input as { summary: string }).summary.trim()) : "";
+  const names = [
+    (mcpInfo?.toolName ?? (partType.startsWith("tool-") ? partType.slice(5) : partType)).split("__").pop() ?? "",
+    ...(/^[a-z][a-z0-9_]*$/.test(summaryName) ? [summaryName.split("__").pop() ?? ""] : []),
+  ];
+  const own = (key: string) => (toolRenderers && Object.prototype.hasOwnProperty.call(toolRenderers, key) ? toolRenderers[key] : undefined);
+  const bareName = names.find((name) => own(name)) ?? names[0] ?? "";
+  const CustomRenderer = toolRenderers
+    ? (mcpInfo?.serverName === "user-tools" ? toolRenderers[mcpInfo.toolName] : undefined) ?? own(bareName)
+    : undefined;
+  if (CustomRenderer) {
+    return (
+      <CustomRenderer
+        name={bareName}
+        input={(part.input ?? {}) as Record<string, unknown>}
+        output={part.output ? unwrapMcpOutput(part.output) : undefined}
+        status={deriveToolStatus(part, chatStatus)}
+      />
+    );
+  }
+
+  // MCP tools
   if (mcpInfo) {
-    // Custom renderer for user-defined tools
-    if (toolRenderers && mcpInfo.serverName === "user-tools") {
-      const CustomRenderer = toolRenderers[mcpInfo.toolName];
-      if (CustomRenderer) {
-        return (
-          <CustomRenderer
-            name={mcpInfo.toolName}
-            input={(part.input ?? {}) as Record<string, unknown>}
-            output={part.output ? unwrapMcpOutput(part.output) : undefined}
-            status={deriveToolStatus(part, chatStatus)}
-          />
-        );
-      }
-    }
     return <McpTool part={part} mcpInfo={mcpInfo} chatStatus={chatStatus} />;
   }
 

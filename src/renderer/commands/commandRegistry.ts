@@ -27,6 +27,12 @@ export interface CommandHandler {
    * (a surface letter) stays with the view that owns it while the palette can still list the command.
    */
   keys?: boolean
+  /**
+   * True: the handler answers key presses only, never the palette, the menu or the browser surface. A page uses it
+   * to give a chord its own meaning while the page has focus (⌘N on Automations), and the palette keeps the
+   * command's app-wide meaning.
+   */
+  keysOnly?: boolean
 }
 
 /** Where a run came from; each source builds its text-field and overlay context differently. */
@@ -58,13 +64,14 @@ const isEnabled = (handler: CommandHandler): boolean => handler.enabled?.() ?? t
 
 /** Whether a run from `source` may use the handler: key presses and forwarded chords skip `keys: false`. */
 const servesSource = (handler: CommandHandler, source: CommandSource): boolean =>
-  handler.keys !== false || (source !== 'key' && source !== 'guest')
+  handler.keysOnly === true ? source === 'key' : handler.keys !== false || (source !== 'key' && source !== 'guest')
 
 function stacked(stack: readonly CommandHandler[]): CommandHandler {
   if (stack.length === 1) return stack[0]!
   const handler: StackedHandler = {
     stack,
-    run: () => [...stack].reverse().find(isEnabled)?.run(),
+    // A run with no source (a direct call) is not a key press, so a key-only handler sits it out.
+    run: () => [...stack].reverse().find((entry) => isEnabled(entry) && entry.keysOnly !== true)?.run(),
     enabled: () => stack.some(isEnabled)
   }
   return handler
@@ -98,13 +105,17 @@ export function registerCommand(id: CommandId, handler: CommandHandler): () => v
     })
 }
 
-/** Registers a command for as long as the calling component is mounted. `run` and `enabled` are read when the command fires. */
-export function useCommand(id: CommandId, run: () => void, enabled?: () => boolean): void {
+/**
+ * Registers a command for as long as the calling component is mounted. `run` and `enabled` are read when the command
+ * fires. `keysOnly` registers a key-press-only handler (see `CommandHandler.keysOnly`).
+ */
+export function useCommand(id: CommandId, run: () => void, enabled?: () => boolean, options: { keysOnly?: boolean } = {}): void {
   const latest = useRef({ run, enabled })
   latest.current = { run, enabled }
+  const keysOnly = options.keysOnly === true
   useEffect(
-    () => registerCommand(id, { run: () => latest.current.run(), enabled: () => latest.current.enabled?.() ?? true }),
-    [id]
+    () => registerCommand(id, { run: () => latest.current.run(), enabled: () => latest.current.enabled?.() ?? true, ...(keysOnly ? { keysOnly: true } : {}) }),
+    [id, keysOnly]
   )
 }
 

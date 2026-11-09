@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * The Agents tab when there is little to show: each empty section says one line, Recent stays hidden until there is
- * a chat, and with nothing to talk to the pane offers to make the first bot. Automations keeps Agents, Workflows and
- * Scheduled, without a Bots tab.
+ * a chat, and with nothing to talk to the pane offers to make the first bot. The Automations Library keeps Agents and
+ * Workflows, without a Bots tab.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -24,7 +24,6 @@ vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ Composer
 // Automations' sections, reduced to a mark: the tests only check which one is showing.
 vi.mock('../../src/renderer/components/agentDefinitions/AgentDefinitionsWorkspace', () => ({ AgentDefinitionsWorkspace: () => null }))
 vi.mock('../../src/renderer/components/workflows/WorkflowsWorkspace', () => ({ WorkflowsWorkspace: () => null }))
-vi.mock('../../src/renderer/components/ScheduledPanel', () => ({ ScheduledPanel: () => null }))
 vi.mock('../../src/renderer/components/chats/OpenNetworkChatDialog', async () => {
   const { createElement: h } = await import('react')
   return { OpenNetworkChatDialog: () => h('div', { 'data-testid': 'space-dialog' }) }
@@ -32,7 +31,6 @@ vi.mock('../../src/renderer/components/chats/OpenNetworkChatDialog', async () =>
 
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
-const { AutomationsWorkspace } = await import('../../src/renderer/components/AutomationsWorkspace')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
@@ -68,7 +66,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
-  useAppStore.setState({ scheduledOpen: appInitial.scheduledOpen, automationsSectionRequest: null })
+  useAppStore.setState({ scheduledOpen: appInitial.scheduledOpen })
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
   setBotsClient(null)
@@ -134,24 +132,5 @@ describe('the Agents pane', () => {
     expect(button('New chat')).toBeUndefined()
     show(ChatWorkspace, [agent])
     expect(button('New chat')).toBeDefined()
-  })
-})
-
-describe('Automations', () => {
-  it('has Home (open first), Agents, Workflows and Schedule, and no Bots tab', () => {
-    act(() => root.render(createElement(AutomationsWorkspace)))
-    expect(text('[role="tab"]').map((label) => label?.trim())).toEqual(['Home', 'Agents', 'Workflows', 'Schedule'])
-    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.id).toBe('automations-home-tab')
-    expect(host.querySelector('#automations-bots-tab')).toBeNull()
-  })
-
-  it('switches to the section another surface asks for', async () => {
-    act(() => root.render(createElement(AutomationsWorkspace)))
-    click(host.querySelector('#automations-scheduled-tab') ?? undefined)
-    await act(async () => {})
-    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.id).toBe('automations-scheduled-tab')
-    act(() => useAppStore.getState().openAutomations('agents'))
-    await act(async () => {})
-    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.id).toBe('automations-agents-tab')
   })
 })

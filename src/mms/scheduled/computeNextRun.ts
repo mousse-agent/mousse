@@ -108,6 +108,16 @@ function recoverableOneshotRunAt(schedule: JobSchedule, now: Date, lastRunAt?: s
   return null
 }
 
+/**
+ * How far ahead a cron time is searched: past the longest gap between two Feb 29ths (8 years, 2096 to 2104), so a
+ * leap-day schedule (`0 0 29 2 *`) always finds its next run, and a time no calendar has (Feb 30) is found to never run.
+ */
+export const CRON_SEARCH_YEARS = 9
+
+/**
+ * The first minute after `base` that the cron fields allow, on this computer's clock. A month, day or hour that does
+ * not match is skipped whole, so a search over years costs a few hundred steps, not millions of minutes.
+ */
 function nextCronRun(expr: string, base: Date): Date | null {
   const fields = parseCron(expr)
   if (!fields) return null
@@ -115,12 +125,23 @@ function nextCronRun(expr: string, base: Date): Date | null {
   candidate.setSeconds(0, 0)
   candidate.setMinutes(candidate.getMinutes() + 1)
 
-  const limit = base.getTime() + 366 * 24 * 60 * 60 * 1000
+  const limit = base.getTime() + CRON_SEARCH_YEARS * 366 * 24 * 60 * 60 * 1000
   while (candidate.getTime() <= limit) {
-    if (matchesCron(fields, candidate)) {
-      return new Date(candidate.getTime())
+    if (matchesCron(fields, candidate)) return new Date(candidate.getTime())
+    const before = candidate.getTime()
+    if (!fields[3]!.has(candidate.getMonth() + 1)) {
+      candidate.setMonth(candidate.getMonth() + 1, 1)
+      candidate.setHours(0, 0, 0, 0)
+    } else if (!fields[2]!.has(candidate.getDate()) || !fields[4]!.has(candidate.getDay())) {
+      candidate.setDate(candidate.getDate() + 1)
+      candidate.setHours(0, 0, 0, 0)
+    } else if (!fields[1]!.has(candidate.getHours())) {
+      candidate.setHours(candidate.getHours() + 1, 0, 0, 0)
+    } else {
+      candidate.setMinutes(candidate.getMinutes() + 1, 0, 0)
     }
-    candidate.setMinutes(candidate.getMinutes() + 1)
+    // A clock change can land a jump on the same instant (a midnight that does not exist): always move on.
+    if (candidate.getTime() <= before) candidate.setTime(before + 60_000)
   }
   return null
 }
@@ -153,6 +174,37 @@ export function computeNextRun(
   }
 
   return null
+}
+
+/**
+ * The occurrence after `occurrenceAt`. When that one has passed too (Mousse was closed), every missed occurrence
+ * collapses into the one that just ran: the next is the first after `now`.
+ */
+export function nextOccurrenceAfter(schedule: JobSchedule, occurrenceAt: string, now: Date): string | null {
+  const next = computeNextRun(schedule, occurrenceAt, now)
+  if (next && Date.parse(next) > now.getTime()) return next
+  return computeNextRun(schedule, null, now)
+}
+
+/**
+ * How many occurrences of a schedule fell from the one due at `from` (itself one) until `now`, at most `cap`: the
+ * repeats a computer that was off missed, which collapse into one run.
+ */
+export function occurrencesSince(schedule: JobSchedule, from: string, now: Date, cap = 1000): number {
+  if (schedule.kind !== 'interval' && schedule.kind !== 'cron') return 1
+  if (schedule.kind === 'interval') {
+    const every = (schedule.minutes ?? 1) * 60_000
+    return Math.max(1, Math.min(cap, Math.floor((now.getTime() - Date.parse(from)) / every) + 1))
+  }
+  let count = 1
+  let cursor = from
+  while (count < cap) {
+    const next = computeNextRun(schedule, cursor, now)
+    if (!next || Date.parse(next) > now.getTime() || Date.parse(next) <= Date.parse(cursor)) break
+    count += 1
+    cursor = next
+  }
+  return count
 }
 
 export function isSilentOutput(text: string): boolean {

@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -470,5 +470,20 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(running.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
     expect(store.activeGrant('site-editor')).toBeUndefined()
     expect(bots.list()).toEqual([])
+  })
+})
+
+describe('activation requests', () => {
+  it('two deliveries of one request at the same time give one activation, and no error', async () => {
+    publish()
+    approve()
+    const input = { botId: 'site-editor', input: 'Fix it', clientRequestId: 'c2' }
+    // The second delivery reads no activation yet, then finds the first one's at its insert.
+    const byKey = store.activationByKey.bind(store)
+    let reads = 0
+    vi.spyOn(store, 'activationByKey').mockImplementation((key) => (++reads === 1 ? undefined : byKey(key)))
+    const [a, b] = await Promise.all([bots.activate(input), bots.activate(input)])
+    expect(a.id).toBe(b.id)
+    expect(store.listActivations('site-editor')).toHaveLength(1)
   })
 })

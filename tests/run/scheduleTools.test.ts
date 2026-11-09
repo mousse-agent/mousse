@@ -54,7 +54,8 @@ describe('the schedule tools (SPEC §15.1)', () => {
     const jobs = new ScheduledJobStore(MousseConfigStore.load(home))
     const state = {
       profile: profile(initial),
-      enabled: true,
+      /** Whether the person allowed the caller's thread (Allow on its first ask); read at every call. */
+      allowed: true,
       /** Whether a person started the calling run (`startedByPerson`); the real rule is tested against a daemon. */
       person: true,
       limits: { accessCap: 'manage' as AgentAccessLevel, permissionCeiling: 'full' as PermissionMode },
@@ -70,7 +71,8 @@ describe('the schedule tools (SPEC §15.1)', () => {
     const readOnly = new Set<string>()
     const woke = vi.fn()
     const schedules = {
-      enabled: vi.fn(() => state.enabled),
+      threadAllowed: vi.fn(() => state.allowed),
+      askFirst: vi.fn((input: { threadId: string; requestKey: string }) => ({ id: `ask-${input.requestKey}` })),
       jobLimits: vi.fn(() => ({ ...state.jobLimits })),
       list: vi.fn(() => jobs.listJobs()),
       get: vi.fn((id: string) => jobs.getJob(id)),
@@ -111,7 +113,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     return { fx, jobs, state, threads, botThreads, readOnly, schedules, woke, recordAgentAction, registry, request, turns, callerRun, call, as, denied, result, create, stored, personJob, otherJob, ...fake }
   }
 
-  describe('the access level and the setting', () => {
+  describe('the access level and the first ask', () => {
     it.each(['lineage', 'read'] as const)('a credential granted %s is refused all five tools before anything runs', async (level) => {
       const { call, denied, schedules, jobs } = await world()
       for (const name of TOOLS) {
@@ -131,45 +133,34 @@ describe('the schedule tools (SPEC §15.1)', () => {
       for (const name of TOOLS) expect((await denied(call(name, { ...CREATE, jobId: 'x' })))!.code, name).toBe('mousse_scope_denied')
     })
 
-    it('with "Agents may create jobs" off every tool says so, does nothing and is not listed', async () => {
-      const { call, registry, state, jobs, schedules } = await world()
-      state.enabled = false
-      expect(registry.listForThread('caller', 'default', 'manage').map((tool) => tool.name).filter((name) => name.startsWith('schedule_'))).toEqual([])
-      for (const name of TOOLS) {
-        const outcome = await call(name, { ...CREATE, jobId: 'x' })
-        expect(outcome, name).toMatchObject({ isError: true, text: expect.stringContaining('Agents may create jobs') })
-      }
+    it('the first job a thread asks for is an ask the person answers: nothing is made, and the agent is told it waits', async () => {
+      const { call, state, jobs, schedules } = await world()
+      state.allowed = false
+      const outcome = await call('schedule_create', { ...CREATE, clientRequestId: 'first' })
+      expect(outcome.isError).toBeFalsy()
+      const answer = JSON.parse(outcome.text)
+      expect(answer).toMatchObject({ waiting: true, askId: expect.any(String), message: expect.stringContaining('do not ask again') })
+      expect(schedules.askFirst).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'caller', job: expect.objectContaining({ name: CREATE.name, createdBy: expect.objectContaining({ threadId: 'caller' }) }) }))
       expect(schedules.create).not.toHaveBeenCalled()
       expect(jobs.listJobs()).toEqual([])
+      // Once the person allowed the thread, it adds more at once, within the limits.
+      state.allowed = true
+      expect(JSON.parse((await call('schedule_create', { ...CREATE, clientRequestId: 'second' })).text).job).toMatchObject({ name: CREATE.name })
     })
 
-    it('lists the five tools for a manage credential when the setting is on, and none below manage', async () => {
-      const { registry, state } = await world()
+    it('lists the five tools for a manage credential, and none below manage', async () => {
+      const { registry } = await world()
       const names = (granted: AgentAccessLevel) => registry.listForThread('caller', 'default', granted).map((tool) => tool.name).filter((name) => name.startsWith('schedule_')).sort()
       expect(names('manage')).toEqual(TOOLS)
       expect(names('read')).toEqual([])
       expect(names('lineage')).toEqual([])
-      state.enabled = false
-      expect(names('manage')).toEqual([])
-    })
-
-    it('turning the setting off after a job was made refuses updates, runs, pauses and listing', async () => {
-      const { call, create, state } = await world()
-      const job = await create({ schedule: { kind: 'manual' } })
-      state.enabled = false
-      for (const [name, args] of [
-        ['schedule_list', {}],
-        ['schedule_update', { jobId: job.id, name: 'Renamed' }],
-        ['schedule_pause', { jobId: job.id }],
-        ['schedule_run', { jobId: job.id }]
-      ] as const)
-        expect((await call(name, { ...args })).isError, name).toBe(true)
     })
 
     it('the tools are only for a host that has scheduled jobs', async () => {
       fx = delegationFixture()
       const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host)
-      expect(registry.list().filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
+      // Registered, so a host that gets its jobs later lists them then; until it does, none is listed.
+      expect(registry.listFor({ readOnly: false, modeCeiling: 'default', accessLevel: 'manage' }).filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
     })
   })
 

@@ -13,7 +13,7 @@ export const ROOT_HELP = `${CLI_NAME} — headless Mousse orchestrator CLI
 Usage:
   mousse-cli [options] [message...]          Interactive orchestrator chat (TTY) or one-shot
   mousse-cli chat "/<workflow> --arg value"   Invoke a published workflow from chat
-  mousse-cli schedule <subcommand>           Manage scheduled jobs
+  mousse-cli automation <subcommand>         Manage automations (alias: schedule)
   mousse-cli approvals [answer <id> <option>|rules <thread>|reset <thread>] List or answer approval requests, list or revoke a thread's "always" rules
   mousse-cli workflow <subcommand>          Run and inspect durable workflows
   mousse-cli browser <status|install|cancel> Manage browser automation setup
@@ -91,25 +91,25 @@ Examples:
   mousse-cli "Continue the plan"          # interactive, seed first message
   mousse-cli -p "Summarize this repo"     # print and exit
   cat README.md | mousse-cli -p "Summarize this text"
-  mousse-cli --mode json schedule list
+  mousse-cli --mode json automation list
   mousse-cli service run
 `
 
-export const SCHEDULE_HELP = `Usage:
-  mousse-cli schedule list
-  mousse-cli schedule add --name <name> --prompt <text> --every <minutes>
-  mousse-cli schedule add --name <name> --prompt <text> --cron <expr>
-  mousse-cli schedule add --name <name> --prompt <text> --at <iso-datetime>
-  mousse-cli schedule add --name <name> --prompt <text> --manual
-  mousse-cli schedule remove <id>
-  mousse-cli schedule run <id>
-  mousse-cli schedule extend <id> [--days 7]   Give a job an agent created more time (default 7 days; the Scheduled page sets it)
-  mousse-cli schedule enable <id>
-  mousse-cli schedule disable <id>
-  mousse-cli schedule webhook enable <id> [--port <port>]   (on a job that has one, --port moves the listener)
-  mousse-cli schedule webhook rotate <id>
-  mousse-cli schedule webhook disable <id>
-  mousse-cli schedule webhook deliveries <id>
+export const AUTOMATION_HELP = `Usage ("schedule" is an alias of "automation"):
+  mousse-cli automation list
+  mousse-cli automation add --name <name> --prompt <text> --every <minutes>
+  mousse-cli automation add --name <name> --prompt <text> --cron <expr>
+  mousse-cli automation add --name <name> --prompt <text> --at <iso-datetime>
+  mousse-cli automation add --name <name> --prompt <text> --manual
+  mousse-cli automation remove <id>
+  mousse-cli automation run <id|name>   An automation's id, or the name of one with a CLI trigger
+  mousse-cli automation extend <id> [--days 7]   Give an automation an agent added more time (default 7 days; Settings → Agent access sets it)
+  mousse-cli automation enable <id>
+  mousse-cli automation disable <id>
+  mousse-cli automation webhook enable <id> [--port <port>]   (on a job that has one, --port moves the listener)
+  mousse-cli automation webhook rotate <id>
+  mousse-cli automation webhook disable <id>
+  mousse-cli automation webhook deliveries <id>
 
 Webhook: "enable" and "rotate" print the URL (127.0.0.1 only) and the signing secret, once. A request is
 POST /hooks/<id> with X-Mousse-Timestamp (unix seconds) and X-Mousse-Signature: sha256=<hex>, the HMAC-SHA256
@@ -121,15 +121,16 @@ Options for add:
   --permission ask|accept_edits|auto|full
                                     How much the run may do without asking. Never above the mode you hold when
                                     you create the job (its thread's, else the default for new threads).
-                                    Without it the run follows its thread's mode, up to that limit. Not for a
-                                    workflow job (a prompt starting with /): workflows take no permission mode
+                                    Without it the run follows its thread's mode, up to that limit. A workflow
+                                    job (a prompt starting with /) runs its workflow under the same mode
+  --tell-me needs_you|look|fyi|every  The lowest report level you hear about (default look; failures always)
   --project <id>                    Project the run works in
   --thread <id>                     Run as a turn on this thread, with its history
   --workspace project|new-worktree|<path>
                                     Project checkout (default; an agent edits your own folder, unattended,
                                     with no undo: prefer new-worktree in a Git project), a new worktree
                                     per run, or an existing worktree
-  --manual                          No clock: the job runs only with "schedule run"
+  --manual                          No clock: it runs only with "automation run" (On demand)
 `
 
 export const WORKFLOW_HELP = `Usage:
@@ -228,8 +229,9 @@ export function commandHelp(command: string): string | null {
     case 'workflow':
     case 'workflows':
       return WORKFLOW_HELP
+    case 'automation':
     case 'schedule':
-      return SCHEDULE_HELP
+      return AUTOMATION_HELP
     case 'approvals':
       return APPROVALS_HELP
     case 'agents':

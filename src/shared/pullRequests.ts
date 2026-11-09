@@ -329,7 +329,11 @@ export interface PullRequestPushTarget {
 }
 
 /** What a watch does when its pull request changes: nothing, or tell the thread with a line in it. It never wakes the agent. */
-export type PullRequestWatchMode = 'off' | 'notify'
+/**
+ * `notify`: the thread gets a notice for each change. `event`: an automation wakes on the changes and the thread gets no
+ * notice (set by the daemon only, for a thread-event automation; `notify` serves it too).
+ */
+export type PullRequestWatchMode = 'off' | 'notify' | 'event'
 
 /** One page-bounded read of line comments: `drained` says the read reached the end; otherwise it continues at `nextPage`. */
 export interface LineCommentRead {

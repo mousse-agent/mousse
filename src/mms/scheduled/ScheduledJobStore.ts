@@ -19,10 +19,15 @@ import type {
   ScheduledJobRunClaim,
   ScheduledJobRunRecord,
   ScheduledJobWebhookTrigger,
+  ScheduledMissedRuns,
   ScheduledOccurrenceResult,
   ScheduledWebhookDelivery,
-  ScheduledWebhookDeliveryOutcome
+  ScheduledWebhookDeliveryOutcome,
+  ScheduledEventLogEntry,
+  ThreadEventKind
 } from '../../shared/types'
+import { THREAD_EVENT_KINDS } from '../../shared/types'
+import { THREAD_EVENT_MIN_GAP_MS, threadEventOccurrenceKey, threadEventsOfOccurrence } from '../../shared/threadEvents'
 import { DEFAULT_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { TERMINAL_RUN_STATUSES, type RunStatus } from '../run/types'
@@ -36,13 +41,17 @@ import {
 } from '../queue/processLiveness'
 import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
-import { AGENT_JOBS_OFF_REASON, agentJobExpiredReason, isExpired } from './agentJobLimits'
-import { computeNextRun } from './computeNextRun'
+import { agentJobExpiredReason, isExpired } from './agentJobLimits'
+import { computeNextRun, nextOccurrenceAfter, occurrencesSince } from './computeNextRun'
+import { botJobThreadGuard } from './botJobs'
 import { withFileLock } from './fileLock'
-import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, WORKFLOW_PERMISSION_REFUSAL, type JobPermissionEdit } from './jobPermission'
+import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
 import {
   ReceiptsUnreadableError,
   appendDelivery,
+  hasTriggerPayload,
+  keptPayloadIds,
+  pruneTriggerPayloads,
   readDeliveries,
   readReceipts,
   readTriggerPayload,
@@ -54,8 +63,12 @@ import {
   writeReceipts,
   writeTriggerPayload
 } from './webhookFiles'
+import { requestRefusal, takesRequests } from '../../shared/requestTrigger'
 
 export const TICKER_INTERVAL_MS = 60_000
+
+/** What starting, resuming or enabling a draft is told: only Turn on makes a draft an automation. */
+export const DRAFT_REFUSAL = 'It is a draft. Turn it on first.'
 
 /** A webhook request's timestamp may differ from the daemon's clock by this much (seconds), either way. */
 export const WEBHOOK_TIMESTAMP_TOLERANCE_S = 300
@@ -68,6 +81,8 @@ const WEBHOOK_RECEIPT_RETENTION_S = WEBHOOK_TIMESTAMP_TOLERANCE_S + 60
  * check: at the cap the job refuses new requests instead (see `saturatedUntil`).
  */
 const MAX_WEBHOOK_RECEIPTS = 2000
+/** Pull request events a thread-event job remembers for "(why?)". */
+const MAX_EVENT_LOG = 10
 /** A refusal of the same kind is logged at most this often per job, so a flood cannot churn the log file. */
 const REFUSAL_LOG_INTERVAL_MS = 1000
 
@@ -128,7 +143,7 @@ export interface ScheduledRunProbe {
 
 /** Fields of a run record the runner knows once the occurrence has a thread and a run. */
 export type ScheduledRunDetails = Partial<
-  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders'>
+  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent' | 'missingKey'>
 >
 
 export function scheduledReceiptId(jobId: string, occurrenceKey: string): string {
@@ -167,12 +182,12 @@ function atomicWriteJson(path: string, data: unknown): void {
   renameSync(tmpPath, path)
 }
 
-function atomicWriteEpoch(path: string): void {
+function atomicWriteEpoch(path: string, at: Date = new Date()): void {
   ensureScheduledDir(dirname(path))
   const tmpPath = join(dirname(path), `.hb_${process.pid}_${Date.now()}.tmp`)
   const fd = openSync(tmpPath, 'w')
   try {
-    writeSync(fd, String(Date.now() / 1000))
+    writeSync(fd, String(at.getTime() / 1000))
     fsyncSync(fd)
   } finally {
     closeSync(fd)
@@ -180,11 +195,11 @@ function atomicWriteEpoch(path: string): void {
   renameSync(tmpPath, path)
 }
 
-export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir()): void {
+export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir(), at: Date = new Date()): void {
   try {
-    atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat'))
+    atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat'), at)
     if (success) {
-      atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_last_success'))
+      atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_last_success'), at)
     }
   } catch {
     /* best effort */
@@ -210,41 +225,52 @@ export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt
   }
 }
 
+/** The fields an older build's save drops, kept aside for `restoreDroppedFields`. */
+type KeptJobFields = Pick<ScheduledJob, 'bot' | 'draft' | 'keys' | 'tellMe' | 'agent' | 'cliName'>
+const KEPT_FIELDS_FILE = 'jobs-kept.json'
+/** What an older build pauses a bot's schedule with: the thread its job names does not exist. */
+const GUARD_PAUSE = 'Its thread was deleted'
+
+function keptFieldsOf(job: ScheduledJob): KeptJobFields {
+  return {
+    ...(job.bot ? { bot: job.bot } : {}),
+    ...(job.draft ? { draft: job.draft } : {}),
+    ...(job.keys?.length ? { keys: job.keys } : {}),
+    ...(job.tellMe ? { tellMe: job.tellMe } : {}),
+    ...(job.agent ? { agent: job.agent } : {}),
+    ...(job.cliName ? { cliName: job.cliName } : {})
+  }
+}
+
 /**
  * The run records of a job an agent created say so. Every record is saved through here, so a record written by any
  * path (a finished run, a queued occurrence, an interrupted claim) carries the label without each writer knowing.
  */
-/** Pauses a job nothing is running for, with a reason the page shows. */
-function pauseIdleJob(job: ScheduledJob, reason: string): void {
-  job.enabled = false
-  job.state = 'paused'
-  job.pausedAt = new Date().toISOString()
-  job.pausedReason = reason
-  job.updatedAt = job.pausedAt
-}
-
 /**
  * The fields that pause a job. A running job keeps its running state and claim: the run in flight must be able to
  * finish. It settles as paused when it ends (`saveJobs`), and no further occurrence is claimed meanwhile.
  */
-function pauseFields(job: ScheduledJob, reason?: string): Partial<ScheduledJob> {
+function pauseFields(job: ScheduledJob, reason?: string, resumeAt?: string): Partial<ScheduledJob> {
   return {
     enabled: false,
     ...(job.state === 'running' ? {} : { state: 'paused' as const }),
     pausedAt: new Date().toISOString(),
-    pausedReason: reason
+    pausedReason: reason,
+    // A pause with an end resumes on its own then; a pause without one clears an earlier end.
+    resumeAt
   }
 }
 
 /** The fields that resume a job from its schedule. A running job stays running until its claim is finalized. */
 function resumeFields(job: ScheduledJob): Partial<ScheduledJob> {
-  if (job.state === 'running') return { enabled: true, pausedAt: undefined, pausedReason: undefined }
+  if (job.state === 'running') return { enabled: true, pausedAt: undefined, pausedReason: undefined, resumeAt: undefined }
   const nextRunAt = computeNextRun(job.schedule)
   return {
     enabled: true,
     state: nextRunAt || job.schedule.kind === 'manual' ? 'scheduled' : 'completed',
     pausedAt: undefined,
     pausedReason: undefined,
+    resumeAt: undefined,
     nextRunAt
   }
 }
@@ -263,10 +289,16 @@ function extractRuntime(job: ScheduledJob): ScheduledJobRuntime {
     lastError: job.lastError,
     pausedAt: job.pausedAt,
     pausedReason: job.pausedReason,
+    resumeAt: job.resumeAt,
+    waitingBehind: job.waitingBehind,
+    botSkip: job.botSkip,
     runHistory: labelAgentRuns(job),
     runClaim: job.runClaim,
     pendingOccurrence: job.pendingOccurrence,
     pendingTrigger: job.pendingTrigger,
+    pendingEvent: job.pendingEvent,
+    lastEventRunAt: job.lastEventRunAt,
+    eventLog: job.eventLog,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed ?? 0 }
       : undefined
@@ -293,10 +325,16 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
     lastError: runtime?.lastError,
     pausedAt: runtime?.pausedAt,
     pausedReason: runtime?.pausedReason,
+    resumeAt: runtime?.resumeAt,
+    waitingBehind: runtime?.waitingBehind,
+    botSkip: runtime?.botSkip,
     runHistory: runtime?.runHistory ?? [],
     runClaim: runtime?.runClaim,
     pendingOccurrence: runtime?.pendingOccurrence,
     pendingTrigger: runtime?.pendingTrigger,
+    pendingEvent: runtime?.pendingEvent,
+    lastEventRunAt: runtime?.lastEventRunAt,
+    eventLog: runtime?.eventLog,
     repeat
   }
 }
@@ -318,9 +356,36 @@ function claimRecordFields(claim: ScheduledJobRunClaim | undefined): Partial<Sch
   if (!claim) return {}
   return {
     ...(claim.occurrenceKey ? { occurrenceKey: claim.occurrenceKey } : {}),
+    ...(claim.missed ? { missed: claim.missed } : {}),
     ...(claim.threadId ? { threadId: claim.threadId } : {}),
     ...(claim.runId ? { runId: claim.runId } : {})
   }
+}
+
+/**
+ * A gap this long between two scheduler ticks (one a minute) means the scheduler was not running: Mousse was closed,
+ * or the computer off or asleep. A run this late is not one a busy tick delayed.
+ */
+export const MISSED_GRACE_MS = 5 * 60_000
+
+/** When the scheduler was last down: from its last tick before the gap to its first tick after it. */
+export interface SchedulerDowntime {
+  from: string
+  to: string
+}
+
+/**
+ * The repeats a job missed while its computer was off, when the occurrence it is about to run is one of them: it fell
+ * due while the scheduler was down (after its last tick before the gap, by the persisted heartbeat) and is more than a
+ * few minutes late. They collapse into this one run, which runs once and says so ("Missed while offline"). A run a
+ * busy scheduler delayed, however long, fell due while it was ticking and is never marked.
+ */
+export function missedWhileOffline(job: Pick<ScheduledJob, 'schedule'>, dueAt: string, now: Date, downtime?: SchedulerDowntime): ScheduledMissedRuns | undefined {
+  if (job.schedule.kind === 'manual' || !downtime) return undefined
+  const due = Date.parse(dueAt)
+  if (!Number.isFinite(due) || now.getTime() - due <= MISSED_GRACE_MS) return undefined
+  if (due <= Date.parse(downtime.from) || due > Date.parse(downtime.to)) return undefined
+  return { count: occurrencesSince(job.schedule, dueAt, now), since: new Date(due).toISOString() }
 }
 
 /** A clock-free job stays scheduled with no next run; every other kind without a next run has ended. */
@@ -435,48 +500,123 @@ export class ScheduledJobStore {
     const definitions = jobs.map((job) => jobToDefinition(job))
     this.config.updateScheduledSection({ jobs: definitions })
     this.saveRuntimeDurably(jobs)
+    this.saveKeptFields(jobs)
+  }
+
+  /**
+   * A copy of the fields an older build drops when it saves the jobs (its field list does not know them), in a file it
+   * never writes. `restoreDroppedFields` puts them back when this build opens the profile again.
+   */
+  private saveKeptFields(jobs: ScheduledJob[]): void {
+    const kept: Record<string, KeptJobFields> = {}
+    for (const job of jobs) {
+      const fields = keptFieldsOf(job)
+      if (Object.keys(fields).length) kept[job.id] = fields
+    }
+    const path = join(this.homeDir, 'scheduled', KEPT_FIELDS_FILE)
+    try {
+      if (!Object.keys(kept).length && !existsSync(path)) return
+      atomicWriteJsonSync(path, { version: 1, jobs: kept })
+    } catch (error) {
+      // The jobs themselves are saved; only the copy an older build's save could need is behind.
+      console.warn('scheduled jobs: the copy of fields older builds drop could not be written', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * After a profile was opened by an older build that saved the jobs: puts back each job's fields that build dropped
+   * (`bot`, `draft`, `keys`, `tellMe`, `agent`, `cliName`), from the copy this build keeps. A bot's schedule that build
+   * paused because its guard thread does not exist ("Its thread was deleted") runs again. A field is put back only on
+   * a job that has none of the kept ones, so an edit this build made is never undone. Returns the ids put back.
+   */
+  restoreDroppedFields(): string[] {
+    const path = join(this.homeDir, 'scheduled', KEPT_FIELDS_FILE)
+    if (!existsSync(path)) return []
+    let kept: Record<string, KeptJobFields>
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as { jobs?: Record<string, KeptJobFields> }
+      kept = parsed && typeof parsed.jobs === 'object' && parsed.jobs ? parsed.jobs : {}
+    } catch {
+      return []
+    }
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const restored: string[] = []
+      for (const job of jobs) {
+        const fields = kept[job.id]
+        if (!fields || typeof fields !== 'object') continue
+        if (Object.keys(keptFieldsOf(job)).length) continue
+        Object.assign(job, fields)
+        if (fields.bot) {
+          // A bot's job runs on its guard, as the repair from `bots.db` sets it, whatever thread that build gave it.
+          const guard = botJobThreadGuard(fields.bot.botId)
+          const guardPaused = job.threadId === guard && job.pausedReason === GUARD_PAUSE
+          job.threadId = guard
+          if (guardPaused) Object.assign(job, resumeFields(job))
+        }
+        // A draft never runs, even one that build turned on: it waits for Turn on again.
+        if (fields.draft) Object.assign(job, { enabled: false, ...(job.state === 'running' ? {} : { state: 'paused' as const }), nextRunAt: null, resumeAt: undefined })
+        restored.push(job.id)
+      }
+      if (restored.length) this.saveJobs(jobs)
+      return restored
+    })
   }
 
   getJob(id: string): ScheduledJob | undefined {
     return this.listJobs().find((job) => job.id === id)
   }
 
-  createJob(input: CreateScheduledJobInput): ScheduledJob {
+  /**
+   * Adds a job. `options.id` keeps an id the job already had elsewhere (a bot's schedule moved from `bots.db`): a job
+   * with that id already here is returned as it is, so a repeated move adds nothing. `options.nextRunAt` keeps the next
+   * run it had there.
+   */
+  createJob(input: CreateScheduledJobInput, options: { id?: string; nextRunAt?: string | null; createdAt?: string } = {}): ScheduledJob {
     const now = new Date().toISOString()
-    const nextRunAt = computeNextRun(input.schedule)
-    if (input.permissionMode && isWorkflowPrompt(input.prompt)) throw new JobPermissionRefused(WORKFLOW_PERMISSION_REFUSAL)
+    // A draft is stored, never enabled and never due: Turn on gives it its first next run.
+    const nextRunAt = input.draft ? null : options.nextRunAt !== undefined ? options.nextRunAt : computeNextRun(input.schedule)
     // A mode with no ceiling to bound it gets the strictest ceiling, and the mode is brought down to it.
     const permissionCeiling = input.permissionCeiling ?? (input.permissionMode ? 'ask' : undefined)
     const permissionMode = input.permissionMode && !input.permissionCeiling ? narrowPermissionMode(input.permissionMode, 'ask') : input.permissionMode
     const tooWide = permissionAboveCeiling(permissionMode, permissionCeiling)
     if (tooWide) throw new JobPermissionRefused(tooWide)
     const job: ScheduledJob = {
-      id: uuidv4(),
+      id: options.id ?? uuidv4(),
       name: input.name.trim() || 'Scheduled job',
       prompt: input.prompt.trim(),
       schedule: input.schedule,
-      enabled: true,
-      state: nextRunAt || input.schedule.kind === 'manual' ? 'scheduled' : 'completed',
+      enabled: !input.draft,
+      state: input.draft ? 'paused' : nextRunAt || input.schedule.kind === 'manual' ? 'scheduled' : 'completed',
       nextRunAt,
       threadId: input.threadId,
       projectId: input.projectId,
       createThread: input.createThread,
       selection: input.selection,
+      ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
+      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.model ? { model: input.bot.model } : {}) } } : {}),
       mode: input.mode,
       workspace: input.workspace,
       permissionMode,
       permissionCeiling,
+      ...(input.tellMe ? { tellMe: input.tellMe } : {}),
       createdBy: input.createdBy,
       accessCap: input.accessCap,
       expiresAt: input.expiresAt,
+      ...(input.keys?.length ? { keys: [...new Set(input.keys)] } : {}),
+      ...(input.draft ? { draft: input.draft } : {}),
+      ...(input.cliName ? { cliName: input.cliName } : {}),
+      ...(input.threadEvent ? { trigger: { threadEvent: { threadId: input.threadEvent.threadId, number: input.threadEvent.number, events: [...input.threadEvent.events] } } } : {}),
       repeat: input.repeat ? { times: input.repeat.times, completed: 0 } : undefined,
       runHistory: [],
-      createdAt: now,
+      createdAt: options.createdAt ?? now,
       updatedAt: now
     }
 
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
+      const existing = options.id ? jobs.find((entry) => entry.id === options.id) : undefined
+      if (existing) return existing
       jobs.push(job)
       this.saveJobs(jobs)
       return job
@@ -493,6 +633,8 @@ export class ScheduledJobStore {
       const index = jobs.findIndex((job) => job.id === id)
       if (index === -1) return null
 
+      // A draft never runs: nothing turns it on but Turn on, which clears `draft` in the same change.
+      if (jobs[index].draft && patch.enabled === true && !('draft' in patch && patch.draft === undefined)) throw new Error(DRAFT_REFUSAL)
       let applied = patch
       if (options?.permissions) {
         const edit = options.permissions(jobs[index])
@@ -505,11 +647,9 @@ export class ScheduledJobStore {
         id: jobs[index].id,
         updatedAt: new Date().toISOString()
       }
-      // However an edit arrives, a job's mode never exceeds its ceiling, a mode with no ceiling gets the strictest, and a
-      // workflow job has no mode. (A job the file already holds out of range is not made un-editable for other
+      // However an edit arrives, a job's mode never exceeds its ceiling, and a mode with no ceiling gets the strictest. (A job the file already holds out of range is not made un-editable for other
       // changes; the run narrows it anyway.)
       if ('permissionMode' in applied || 'permissionCeiling' in applied || 'prompt' in applied) {
-        if (updated.permissionMode && isWorkflowPrompt(updated.prompt)) throw new JobPermissionRefused(WORKFLOW_PERMISSION_REFUSAL)
         if (updated.permissionMode && !updated.permissionCeiling) {
           updated.permissionCeiling = 'ask'
           updated.permissionMode = narrowPermissionMode(updated.permissionMode, 'ask')
@@ -517,6 +657,8 @@ export class ScheduledJobStore {
         const tooWide = permissionAboveCeiling(updated.permissionMode, updated.permissionCeiling)
         if (tooWide) throw new JobPermissionRefused(tooWide)
       }
+      // A workflow runs itself: a prompt that becomes a workflow drops the saved agent.
+      if (updated.agent && isWorkflowPrompt(updated.prompt)) delete updated.agent
       // A schedule edit that adds or removes the clock moves the next run with it.
       if (patch.schedule && !('nextRunAt' in patch) && (patch.schedule.kind === 'manual') !== (jobs[index].schedule.kind === 'manual')) {
         updated.nextRunAt = computeNextRun(patch.schedule)
@@ -582,17 +724,20 @@ export class ScheduledJobStore {
       const job = jobs.find((entry) => entry.id === id)
       if (!job) return null
       if (trigger && job.schedule.kind === 'once') throw new Error('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
+      if (trigger && job.trigger?.threadEvent) throw new Error('It wakes on its pull request, so it takes no request URL.')
       const dropped = trigger ? undefined : job.pendingTrigger
       // A new or rotated secret verifies no earlier signature, so the old replay record goes with it. This is also
       // how an unreadable replay record is repaired.
       if (trigger) resetReceipts(this.homeDir, job.id)
-      job.trigger = trigger ? { webhook: trigger } : undefined
+      job.trigger = trigger ? { ...job.trigger, webhook: trigger } : job.trigger?.threadEvent ? { threadEvent: job.trigger.threadEvent } : undefined
       if (dropped) job.pendingTrigger = undefined
       job.updatedAt = new Date().toISOString()
       this.saveJobs(jobs)
       if (dropped) {
         this.settleWebhookDelivery(job.id, webhookOccurrenceKey(dropped.occurrenceId), { outcome: 'dispatch_failed', error: 'Dropped: the webhook was disabled before the run started' })
       }
+      // Turned off: the payloads kept for Resend go (a run in flight already read its own); the log stays.
+      if (!trigger) pruneTriggerPayloads(this.homeDir, job.id, new Set(this.referencedPayloads(job)))
       return job
     })
   }
@@ -613,8 +758,8 @@ export class ScheduledJobStore {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === jobId)
-      // A job an agent created never takes a webhook (decision: no inbound trigger for agent-made jobs).
-      if (!job?.trigger?.webhook || job.createdBy) return { kind: 'unknown' }
+      // A job an agent created takes no request until the person keeps it (Keep removes its end).
+      if (!job?.trigger?.webhook || !takesRequests(job)) return { kind: 'unknown' }
 
       const nowMs = request.now ?? Date.now()
       const nowSec = Math.floor(nowMs / 1000)
@@ -671,8 +816,112 @@ export class ScheduledJobStore {
         throw error
       }
       this.logDelivery(job.id, { occurrenceId, receivedAt: nowIso, outcome: 'accepted', bodyBytes })
+      this.pruneKeptPayloads(job)
       return { kind: 'accepted', occurrenceId }
     })
+  }
+
+  /**
+   * Resend (a person's choice): starts the job again with the payload an earlier delivery stored, as a new delivery in
+   * its log. No signature is checked (the person asked, over the owner's protocol), and the request rules that protect
+   * the URL do not apply; the job's own state does: one delivery at a time, never while paused or running.
+   */
+  resendWebhook(jobId: string, occurrenceId: string, now = Date.now()): { occurrenceId: string } {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === jobId)
+      if (!job) throw new Error('This automation is gone.')
+      if (!job.trigger?.webhook) throw new Error('It has no request URL now.')
+      const refusal = requestRefusal(job)
+      if (refusal) throw new Error(refusal)
+      if (job.state === 'running' || job.runClaim || job.pendingOccurrence) throw new Error('It is running. Resend once the run ends.')
+      if (job.pendingTrigger) throw new Error('Another request is waiting to start.')
+      if (!job.enabled || job.state === 'paused') throw new Error('It is paused. Resume it first.')
+      const stored = readTriggerPayload(this.homeDir, job.id, occurrenceId)
+      if (!stored) throw new Error('That request is no longer stored.')
+      const nowIso = new Date(now).toISOString()
+      const next = uuidv4()
+      writeTriggerPayload(this.homeDir, { occurrenceId: next, jobId: job.id, receivedAt: nowIso, bodyBytes: stored.bodyBytes, body: stored.body })
+      job.pendingTrigger = { occurrenceId: next, receivedAt: nowIso }
+      try {
+        this.saveRuntimeDurably(jobs)
+      } catch (error) {
+        removeTriggerPayload(this.homeDir, job.id, next)
+        throw error
+      }
+      this.logDelivery(job.id, { occurrenceId: next, receivedAt: nowIso, outcome: 'accepted', bodyBytes: stored.bodyBytes, resentFrom: occurrenceId })
+      this.pruneKeptPayloads(job)
+      return { occurrenceId: next }
+    })
+  }
+
+  /**
+   * Pull request events for a thread-event job (`ThreadEventTriggers` decided they are its own and not caused by its
+   * own run). They wait in one pending slot until the rate limit allows a run (one per `minGapMs`, counted from the last
+   * run events started), and a later event joins the slot. A paused job ignores them; `own` logs one that was ignored
+   * because the job's own run caused it. Every outcome is logged for "(why?)". Returns what became of them.
+   */
+  queueThreadEvent(
+    jobId: string,
+    kinds: ThreadEventKind[],
+    options: { now?: Date; minGapMs?: number; own?: string } = {}
+  ): ScheduledEventLogEntry['outcome'] | 'unknown' {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === jobId)
+      if (!job?.trigger?.threadEvent || !kinds.length) return 'unknown'
+      const now = options.now ?? new Date()
+      const nowIso = now.toISOString()
+      const log = (entry: Omit<ScheduledEventLogEntry, 'at' | 'kinds'>): void => {
+        job.eventLog = [...(job.eventLog ?? []), { at: nowIso, kinds, ...entry }].slice(-MAX_EVENT_LOG)
+      }
+      let outcome: ScheduledEventLogEntry['outcome']
+      if (options.own) {
+        outcome = 'own'
+        log({ outcome, reason: options.own })
+      } else if (!job.enabled || job.state === 'paused') {
+        outcome = 'paused'
+        log({ outcome })
+      } else {
+        const gap = options.minGapMs ?? THREAD_EVENT_MIN_GAP_MS
+        const last = Date.parse(job.lastEventRunAt ?? '')
+        const allowed = Number.isFinite(last) ? Math.max(now.getTime(), last + gap) : now.getTime()
+        const pending = job.pendingEvent
+        const dueAt = pending ? pending.dueAt : new Date(allowed).toISOString()
+        job.pendingEvent = {
+          kinds: THREAD_EVENT_KINDS.filter((kind) => kinds.includes(kind) || pending?.kinds.includes(kind)),
+          firstAt: pending?.firstAt ?? nowIso,
+          dueAt
+        }
+        // A run in flight holds the slot too: the events wait for it to end, then for the rate limit.
+        const held = Date.parse(dueAt) > now.getTime() || job.state === 'running' || Boolean(job.runClaim) || Boolean(job.pendingOccurrence)
+        outcome = held ? 'held' : 'started'
+        log(held ? { outcome, until: dueAt } : { outcome })
+      }
+      job.updatedAt = nowIso
+      this.saveRuntimeDurably(jobs)
+      return outcome
+    })
+  }
+
+  /** Whether a delivery's payload is still stored, so Resend can run it again. */
+  hasWebhookPayload(jobId: string, occurrenceId: string): boolean {
+    return hasTriggerPayload(this.homeDir, jobId, occurrenceId)
+  }
+
+  /** The occurrence ids a job's state still names: a delivery waiting, claimed or admitted. Caller holds the lock. */
+  private referencedPayloads(job: ScheduledJob): string[] {
+    return [job.pendingTrigger?.occurrenceId, job.runClaim?.webhookOccurrenceId, webhookIdOfOccurrence(job.pendingOccurrence?.occurrenceKey)]
+      .filter((id): id is string => Boolean(id))
+  }
+
+  /** Keeps the payloads of the newest accepted deliveries (Resend) and of any delivery in flight; the rest go. */
+  private pruneKeptPayloads(job: ScheduledJob): void {
+    try {
+      pruneTriggerPayloads(this.homeDir, job.id, new Set([...keptPayloadIds(this.homeDir, job.id), ...this.referencedPayloads(job)]))
+    } catch {
+      /* the daily sweep retries */
+    }
   }
 
   /**
@@ -717,10 +966,8 @@ export class ScheduledJobStore {
         isReferenced: (jobId, occurrenceId) => {
           const job = jobs.find((entry) => entry.id === jobId)
           if (!job) return false
-          const key = webhookOccurrenceKey(occurrenceId)
-          return job.pendingTrigger?.occurrenceId === occurrenceId
-            || job.runClaim?.webhookOccurrenceId === occurrenceId
-            || job.pendingOccurrence?.occurrenceKey === key
+          // A delivery in flight, or one of the newest the job keeps for Resend.
+          return this.referencedPayloads(job).includes(occurrenceId) || (Boolean(job.trigger?.webhook) && keptPayloadIds(this.homeDir, jobId).has(occurrenceId))
         }
       })
     })
@@ -748,12 +995,15 @@ export class ScheduledJobStore {
     this.logDelivery(jobId, { ...row, outcome })
   }
 
-  /** Moves a webhook delivery's log row to `result`; an ended delivery's stored payload goes with it. */
+  /**
+   * Moves a webhook delivery's log row to `result`. Its stored payload stays for Resend while the delivery is among the
+   * newest the job keeps (`MAX_KEPT_PAYLOADS`); a newer delivery prunes it.
+   */
   private settleWebhookDelivery(
     jobId: string,
     occurrenceKey: string | undefined,
     result: { outcome: ScheduledWebhookDeliveryOutcome; error?: string },
-    options: { keepPayload?: boolean; missingPlaceholders?: string[] } = {}
+    options: { missingPlaceholders?: string[] } = {}
   ): void {
     const occurrenceId = webhookIdOfOccurrence(occurrenceKey)
     if (!occurrenceId) return
@@ -765,14 +1015,14 @@ export class ScheduledJobStore {
     } catch {
       /* the log is a courtesy */
     }
-    if (!options.keepPayload) removeTriggerPayload(this.homeDir, jobId, occurrenceId)
   }
 
-  pauseJob(id: string, reason?: string): ScheduledJob | null {
+  /** Pauses a job, until a person resumes it or, with `resumeAt`, until then. */
+  pauseJob(id: string, reason?: string, resumeAt?: string): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const job = this.getJob(id)
       if (!job) return null
-      return this.updateJob(id, pauseFields(job, reason))
+      return this.updateJob(id, pauseFields(job, reason, resumeAt))
     })
   }
 
@@ -780,29 +1030,8 @@ export class ScheduledJobStore {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const job = this.getJob(id)
       if (!job) return null
+      if (job.draft) throw new Error(DRAFT_REFUSAL)
       return this.updateJob(id, resumeFields(job))
-    })
-  }
-
-  /**
-   * Pauses every job an agent created that is not paused (the setting "Agents may create jobs" was turned off). A job
-   * with a run in flight keeps its claim and settles as paused when the run ends. Returns how many it paused.
-   */
-  pauseAgentJobs(reason: string = AGENT_JOBS_OFF_REASON): number {
-    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
-      const jobs = this.listJobs()
-      let paused = 0
-      for (const job of jobs) {
-        if (!job.createdBy || !job.enabled || job.state === 'paused') continue
-        if (job.state === 'running' || job.runClaim) {
-          job.enabled = false
-          job.pausedAt = new Date().toISOString()
-          job.pausedReason = reason
-        } else pauseIdleJob(job, reason)
-        paused += 1
-      }
-      if (paused > 0) this.saveJobs(jobs)
-      return paused
     })
   }
 
@@ -825,17 +1054,38 @@ export class ScheduledJobStore {
   }
 
   /**
+   * Keep (a person's choice): an automation an agent added loses only its end, the lifetime limit. Its access, its
+   * frequency and the agent's right to add more are untouched. One that ended because its time ran out starts again on
+   * its schedule; a finished one-time job stays finished. A job a person made has no end and is refused.
+   */
+  keepJob(id: string): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const job = this.getJob(id)
+      if (!job) return null
+      if (!job.createdBy) throw new Error('Only an automation an agent added has an end to remove.')
+      const ended = job.state === 'completed' && job.schedule.kind !== 'once' && isExpired(job)
+      const nextRunAt = ended ? computeNextRun(job.schedule, job.lastRunAt) : undefined
+      return this.updateJob(id, {
+        expiresAt: undefined,
+        ...(ended ? { state: 'scheduled' as const, nextRunAt: nextRunAt ?? null, lastError: undefined } : {})
+      })
+    })
+  }
+
+  /**
    * Makes a job due now. A job that is running, or whose occurrence is admitted and not finished, is
    * returned as it is: the occurrence in flight is neither restarted nor queued behind itself.
    */
   triggerJob(id: string): ScheduledJob | null {
     const current = this.getJob(id)
     if (current?.state === 'running' || current?.runClaim || current?.pendingOccurrence) return current
+    if (current?.draft) throw new Error(DRAFT_REFUSAL)
     return this.updateJob(id, {
       enabled: true,
       state: 'scheduled',
       pausedAt: undefined,
       pausedReason: undefined,
+      resumeAt: undefined,
       nextRunAt: new Date().toISOString()
     })
   }
@@ -844,14 +1094,13 @@ export class ScheduledJobStore {
    * Atomically claim due jobs for execution. Each claimed job receives a durable
    * runClaim (pid + process instance + token). Live running claims are never stolen.
    */
-  claimDueJobs(now = new Date(), options: { limit?: number; skipJobIds?: ReadonlySet<string> } = {}): ScheduledJob[] {
+  claimDueJobs(now = new Date(), options: { limit?: number; skipJobIds?: ReadonlySet<string>; downtime?: SchedulerDowntime } = {}): ScheduledJob[] {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       // Reconcile dead running owners before taking new claims (same lock section).
       this.reconcileStaleRunningJobsUnlocked(now)
 
       const jobs = this.listJobs()
       const due: ScheduledJob[] = []
-      const agentJobsOn = this.config.agentJobsEnabled()
       const lifetimeDays = this.config.agentJobLimits().lifetimeDays
       // An occurrence whose run ended (or can never start) is released before its job is considered.
       const released: Array<{ jobId: string; threadId: string; runId: string }> = []
@@ -859,20 +1108,24 @@ export class ScheduledJobStore {
       const droppedDeliveries: Array<{ jobId: string; occurrenceId: string }> = []
 
       for (const job of jobs) {
+        // A pause with an end is over once its time has come: the job resumes on its schedule from now. A draft never does.
+        if (job.state === 'paused' && job.resumeAt && Date.parse(job.resumeAt) <= now.getTime() && !job.runClaim && !job.draft) {
+          Object.assign(job, resumeFields(job), { updatedAt: now.toISOString() })
+          dirty = true
+        }
         // A delivery that was accepted and then the job was paused does not run later, when it is stale.
         if (job.pendingTrigger && (!job.enabled || job.state === 'paused') && job.state !== 'running' && !job.runClaim) {
           droppedDeliveries.push({ jobId: job.id, occurrenceId: job.pendingTrigger.occurrenceId })
           job.pendingTrigger = undefined
           dirty = true
         }
-        // An idle job an agent created is held back while agents may not create jobs, and once it has ended; neither
-        // starts it again by itself, so a person resumes or extends it.
+        // Pull request events waiting when the job was paused do not run later either.
+        if (job.pendingEvent && (!job.enabled || job.state === 'paused') && job.state !== 'running' && !job.runClaim) {
+          job.pendingEvent = undefined
+          dirty = true
+        }
+        // An idle job an agent created ends once its time is up; it does not start again by itself, so a person keeps it.
         if (job.state !== 'running' && !job.runClaim && !job.pendingOccurrence) {
-          if (job.createdBy && job.enabled && job.state !== 'paused' && !agentJobsOn) {
-            pauseIdleJob(job, AGENT_JOBS_OFF_REASON)
-            dirty = true
-            continue
-          }
           if (job.expiresAt && job.state !== 'completed' && isExpired(job, now)) {
             job.state = 'completed'
             job.nextRunAt = null
@@ -881,7 +1134,7 @@ export class ScheduledJobStore {
             continue
           }
         }
-        if (!job.enabled || job.state === 'paused' || job.state === 'running' || job.runClaim) continue
+        if (!job.enabled || job.draft || job.state === 'paused' || job.state === 'running' || job.runClaim) continue
         // A job this process is already running is not claimed again: the caller would drop the claim.
         if (options.skipJobIds?.has(job.id)) continue
         // A bounded start (catch-up after downtime): the rest stay due for the next tick.
@@ -898,11 +1151,23 @@ export class ScheduledJobStore {
           dirty = true
           continue
         }
+        // Pull request events start a run once the rate limit allows it; it does not move the job's own timer.
+        if (job.pendingEvent && Date.parse(job.pendingEvent.dueAt) <= now.getTime()) {
+          const { kinds, firstAt } = job.pendingEvent
+          job.pendingEvent = undefined
+          job.lastEventRunAt = now.toISOString()
+          job.state = 'running'
+          job.runClaim = newRunClaim(threadEventOccurrenceKey(firstAt, kinds))
+          due.push({ ...job, runClaim: { ...job.runClaim } })
+          dirty = true
+          continue
+        }
         if (!job.nextRunAt) continue
         if (new Date(job.nextRunAt).getTime() > now.getTime()) continue
         const resumedWaiting = job.lastStatus === 'waiting'
+        const missed = resumedWaiting || job.waitingBehind ? undefined : missedWhileOffline(job, job.nextRunAt, now, options.downtime)
         job.state = 'running'
-        job.runClaim = { ...newRunClaim(job.nextRunAt), ...(resumedWaiting ? { resumedWaiting: true } : {}) }
+        job.runClaim = { ...newRunClaim(job.nextRunAt), ...(resumedWaiting ? { resumedWaiting: true } : {}), ...(missed ? { missed } : {}) }
         due.push({ ...job, runClaim: { ...job.runClaim } })
         dirty = true
       }
@@ -999,6 +1264,9 @@ export class ScheduledJobStore {
       silent: result.silent,
       ...(waiting && result.retryAt ? { usageLimitUntil: result.retryAt } : {}),
       ...(occurrenceKey ? { occurrenceKey } : {}),
+      ...(job.runClaim?.missed ? { missed: job.runClaim.missed } : {}),
+      ...(job.runClaim?.claimedAt ? { startedAt: job.runClaim.claimedAt } : {}),
+      endedAt: nowIso,
       ...details
     }
     const history = [...(job.runHistory ?? [])]
@@ -1019,6 +1287,7 @@ export class ScheduledJobStore {
     job.lastError = result.status === 'ok' || waiting ? undefined : result.error
     job.runClaim = undefined
     job.pendingOccurrence = undefined
+    job.waitingBehind = undefined
     job.updatedAt = nowIso
 
     // A webhook delivery ends with its occurrence: its log row gets the outcome and its payload is deleted.
@@ -1100,17 +1369,87 @@ export class ScheduledJobStore {
 
   /** The claim records the run its admission created, before anything starts. */
   markOccurrenceAdmitted(id: string, claimToken: string, runId: string): boolean {
-    return this.updateClaim(id, claimToken, (claim) => { claim.runId = runId })
+    return this.updateClaim(id, claimToken, (claim, job) => {
+      claim.runId = runId
+      job.waitingBehind = undefined
+    })
   }
 
-  private updateClaim(id: string, claimToken: string, write: (claim: ScheduledJobRunClaim) => void): boolean {
+  private updateClaim(id: string, claimToken: string, write: (claim: ScheduledJobRunClaim, job: ScheduledJob) => void): boolean {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken) return false
-      write(job.runClaim)
+      write(job.runClaim, job)
       this.saveJobs(jobs)
       return true
+    })
+  }
+
+  /**
+   * The claimed occurrence could not start because its bound thread is running a turn (#404). The claim goes back
+   * without a run record: the job stays due with the same occurrence, keeps its repeat, and says it waits behind that
+   * thread's run until a tick finds the thread free. A webhook delivery goes back to waiting to start.
+   */
+  deferBusyClaim(id: string, claimToken: string, threadId: string): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      const claim = job?.runClaim
+      if (!job || !claim || job.state !== 'running' || claim.token !== claimToken || claim.runId) return null
+      const now = new Date().toISOString()
+      if (claim.webhookOccurrenceId) job.pendingTrigger = { occurrenceId: claim.webhookOccurrenceId, receivedAt: now }
+      // Pull request events go back to waiting, due at once: the rate limit already let them start.
+      const events = threadEventsOfOccurrence(claim.occurrenceKey)
+      if (events?.length) job.pendingEvent = { kinds: events, firstAt: claim.claimedAt, dueAt: now }
+      job.runClaim = undefined
+      job.state = 'scheduled'
+      job.waitingBehind = { threadId, since: job.waitingBehind?.threadId === threadId ? job.waitingBehind.since : now }
+      job.updatedAt = now
+      this.saveJobs(jobs)
+      return job
+    })
+  }
+
+  /**
+   * A bot's occurrence was handed to the bot, whose run lane runs it, or was skipped (`skipped` says why). The claim
+   * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
+   * Mousse was closed collapse into this one, so a backlog never runs.
+   */
+  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string }, now: Date = new Date()): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      const claim = job?.runClaim
+      if (!job?.bot || !claim || job.state !== 'running' || claim.token !== claimToken) return null
+      const occurrenceAt = claim.occurrenceKey
+      job.runClaim = undefined
+      job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
+      if (!outcome.skipped) {
+        job.lastRunAt = occurrenceAt
+        job.lastStatus = 'ok'
+        job.lastError = undefined
+      }
+      job.nextRunAt = nextOccurrenceAfter(job.schedule, occurrenceAt, now)
+      job.state = job.nextRunAt ? 'scheduled' : 'error'
+      if (!job.nextRunAt) job.lastError = 'Failed to compute next run'
+      job.updatedAt = now.toISOString()
+      this.saveJobs(jobs)
+      return job
+    })
+  }
+
+  /** A claim that could not be handled yet (the bots are still starting) goes back as it was: the same occurrence stays due. */
+  releaseClaim(id: string, claimToken: string): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken || job.runClaim.runId) return null
+      job.runClaim = undefined
+      job.state = 'scheduled'
+      job.updatedAt = new Date().toISOString()
+      this.saveJobs(jobs)
+      return job
     })
   }
 
@@ -1132,7 +1471,7 @@ export class ScheduledJobStore {
       const now = new Date().toISOString()
       job.runHistory = [
         ...(job.runHistory ?? []),
-        { runAt: now, status: 'queued' as const, occurrenceKey: claim.occurrenceKey, ...details, threadId, runId, ...(queueItemId ? { queueItemId } : {}) }
+        { runAt: now, status: 'queued' as const, occurrenceKey: claim.occurrenceKey, startedAt: claim.claimedAt, ...(claim.missed ? { missed: claim.missed } : {}), ...details, threadId, runId, ...(queueItemId ? { queueItemId } : {}) }
       ].slice(-20)
       job.pendingOccurrence = {
         occurrenceKey: claim.occurrenceKey,
@@ -1142,9 +1481,10 @@ export class ScheduledJobStore {
         state: queueItemId ? 'queued' : 'admitted'
       }
       job.runClaim = undefined
+      job.waitingBehind = undefined
       job.state = 'scheduled'
       job.updatedAt = now
-      this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { keepPayload: true, missingPlaceholders: details?.missingPlaceholders })
+      this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { missingPlaceholders: details?.missingPlaceholders })
       const settled = claim.settledResult
       if (settled) this.applyOccurrenceResult(jobs, job, claim.occurrenceKey, settled, now)
       this.saveJobs(jobs)
@@ -1208,7 +1548,7 @@ export class ScheduledJobStore {
       const occurrenceKey = job.runClaim.occurrenceKey
 
       if (resultStatus === 'waiting') {
-        const record: ScheduledJobRunRecord = { runAt: now, status: 'waiting', output, silent }
+        const record: ScheduledJobRunRecord = { runAt: now, status: 'waiting', output, silent, ...(job.runClaim.missed ? { missed: job.runClaim.missed } : {}) }
         job.lastRunAt = now
         job.lastStatus = 'waiting'
         job.lastError = undefined

@@ -177,6 +177,39 @@ describe('PullRequestWatchService', () => {
     h = undefined
   })
 
+  describe('for a thread-event automation', () => {
+    it('an event watch tells the thread nothing, reports each change once with who wrote it, and says when the head moved', async () => {
+      h = setup()
+      const updates: Array<{ changes: string[]; headSha?: string | null; viewer?: string | null; remarks?: Array<{ kind: string; author: string }> }> = []
+      const reads: Array<{ headSha: string | null; previousHead: string | null }> = []
+      h.service.on('updated', (event) => updates.push(event))
+      h.service.on('read', (event) => reads.push(event))
+      expect(h.service.ensureEventWatch('t1').mode).toBe('event')
+      expect(h.store.get('t1')!.pullRequest!.watch).toBe('event')
+      await h.service.tick()
+      h.gh.conversation = [{ id: 'c1', login: 'maria', association: 'MEMBER', body: 'please rename', createdAt: h.at(MINUTE) }]
+      h.gh.headSha = 'b'.repeat(40)
+      h.gh.checks = [{ name: 'build', status: 'COMPLETED', conclusion: 'FAILURE' }]
+      await h.tick(2 * MINUTE)
+      await h.tick(MINUTE + 1000)
+      expect(h.notices).toEqual([])
+      expect(updates).toHaveLength(1)
+      expect(updates[0]).toMatchObject({ changes: ['checks_failed', 'comment'], headSha: 'b'.repeat(40), viewer: 'me', remarks: [{ kind: 'comment', author: 'maria' }] })
+      expect(reads.some((read) => read.previousHead === 'a'.repeat(40) && read.headSha === 'b'.repeat(40))).toBe(true)
+    })
+
+    it('keeps a Notify watch as it is, and turns only an event watch off when no automation needs it', async () => {
+      h = setup({ threads: ['t1', 't2'] })
+      h.service.setMode('t1', 'notify')
+      expect(h.service.ensureEventWatch('t1').mode).toBe('notify')
+      h.service.releaseEventWatch('t1')
+      expect(h.store.get('t1')!.pullRequest!.watch).toBe('notify')
+      h.service.ensureEventWatch('t2')
+      h.service.releaseEventWatch('t2')
+      expect(h.store.get('t2')!.pullRequest!.watch).toBe('off')
+    })
+  })
+
   describe('polling', () => {
     it('is silent at the baseline and when nothing changes, and the interval doubles from a minute to ten', async () => {
       h = setup()

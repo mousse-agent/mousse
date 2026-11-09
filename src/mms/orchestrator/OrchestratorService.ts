@@ -4,7 +4,7 @@ import { publishAppletPresentation, recoverAppletPresentation } from '../applets
 import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
 import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { sha256Hex } from '../../shared/agents/hashes'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { TaskWriterAuthority } from '../agents/TaskWriterAuthority'
@@ -84,6 +84,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
+import type { AutomationToolHost } from '../run/mcp/appTools/automations'
+import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManager'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
@@ -170,6 +172,7 @@ import {
   type UserQuestion,
   type UserQuestionAnswers,
   type AnsweredQuestion,
+  type ScheduledRunAgent,
   DEFAULT_CHAT_MODE
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
@@ -614,6 +617,16 @@ export interface ScheduledTurnRef {
   jobName?: string
 }
 
+/** Runs a job's saved agent for one occurrence (`setScheduledAgentRunner`). */
+export type ScheduledAgentRunner = (input: {
+  definitionId: string
+  threadId: string
+  workspaceRoot: string
+  prompt: string
+  runId: string
+  signal: AbortSignal
+}) => Promise<{ status: 'completed' | 'failed' | 'cancelled' | string; text: string; error?: string; agent: ScheduledRunAgent }>
+
 /** What the scheduler hears from the orchestrator about its occurrences. */
 export interface ScheduledTurnHooks {
   /** The mode a run of the job asks for now (its mode and ceiling as stored), or nothing when the job has neither. */
@@ -657,6 +670,8 @@ const SCHEDULED_NEVER_STARTED = 'Interrupted: never started'
 
 /** Open per-run threads one scheduled job may have; settle or delete some, or bind the job to a thread. */
 const MAX_OPEN_SCHEDULED_THREADS = 10
+/** What a scheduled run's agent is told about saying nothing new; hidden from the thread. */
+export const SCHEDULED_SILENT_NOTICE = '[Mousse] The next message comes from a scheduled automation that runs on its own. If this run finds nothing new to report, reply with exactly [SILENT] and nothing else.'
 
 /** Send refusals reported with their reason as the error code (SPEC §16.4). */
 /** Thrown inside the thread write to leave the file untouched when the stale rows no longer need closing. */
@@ -981,10 +996,39 @@ export class OrchestratorService extends EventEmitter {
   /** The scheduler hears when a scheduled turn's run ends, wherever (and by whomever) the turn was drained. */
   setScheduledHooks(hooks: ScheduledTurnHooks | undefined): void { this.scheduledHooks = hooks }
 
+  private scheduledAgentRunner?: ScheduledAgentRunner
+  /** What runs a job's saved agent (`ScheduledJob.agent`); the profile platform owns the agent definitions. */
+  setScheduledAgentRunner(runner: ScheduledAgentRunner | undefined): void { this.scheduledAgentRunner = runner }
+
   private scheduledJobs?: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'>
 
   /** The profile's scheduled jobs, for the agents' `schedule_*` tools; without them the tools are not registered. */
   setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'> | undefined): void { this.scheduledJobs = jobs }
+  /** The automation drafts the Automation manager and granted bots write (`automation_*`). */
+  private automationTools?: AutomationToolHost
+  setAutomationTools(tools: AutomationToolHost | undefined): void { this.automationTools = tools }
+  /**
+   * The Automations inbox's hooks: each scheduled run's hidden first message (the report levels, the automation's
+   * context and Tuning notes), and each request's usage on a thread, which the inbox adds to the run going there.
+   */
+  private automationRunHooks?: {
+    notice(jobId: string, jobName?: string): string
+    usage(input: { threadId: string; runId?: string; provider?: string; model: string; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number }): void
+  }
+  setAutomationRunHooks(hooks: OrchestratorService['automationRunHooks']): void { this.automationRunHooks = hooks }
+  /** A scheduled run's hidden first message; the plain [SILENT] notice when the inbox cannot say more. */
+  private scheduledNotice(scheduled: ScheduledTurnRef): string {
+    try {
+      return this.automationRunHooks?.notice(scheduled.jobId, scheduled.jobName) ?? SCHEDULED_SILENT_NOTICE
+    } catch {
+      return SCHEDULED_SILENT_NOTICE
+    }
+  }
+  /** The Automation manager's thread has no project; its turns work in the composer's project or the manager's folder. */
+  private automationManagerCwd(threadId: string): string | null {
+    if (!this.automationTools?.managerWorkspace || !this.threadStore?.getThread(threadId)?.automationManager) return null
+    return resolveProjectWorkingDirectory(this.automationTools.managerWorkspace())
+  }
 
   private remoteComputers?: RemoteComputersPort
   /** Remote subagents' tasks on other computers (issue #469); present while a run engine is attached. */
@@ -1543,6 +1587,8 @@ export class OrchestratorService extends EventEmitter {
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
   private boundSession = new ThreadSession('__unbound__')
   private sessions = new Map<string, ThreadSession>()
+  /** Threads running a scheduled occurrence's turn now (`isScheduledTurn`). */
+  private readonly scheduledTurnThreads = new Set<string>()
   private readonly transcripts = new WeakMap<ThreadSession, TranscriptAssembler>()
   private readonly sessionAls = new AsyncLocalStorage<ThreadSession>()
   private persistFn?: (threadId?: string | null) => void
@@ -3217,7 +3263,11 @@ export class OrchestratorService extends EventEmitter {
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: turn.bot ? '' : sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+        sessionInstructions: turn.bot ? '' : [
+          sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+          // The Automation manager's thread runs the default agent with its own brief (v4 Automations).
+          ...(mcpAttached && this.threadStore?.getThread(turn.threadId)?.automationManager ? [AUTOMATION_MANAGER_INSTRUCTIONS] : [])
+        ].filter(Boolean).join('\n\n'),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
@@ -3306,7 +3356,13 @@ export class OrchestratorService extends EventEmitter {
    * the credential's caller: its thread's session, run and mode ceiling.
    */
   mcpToolHost(): AppToolHost {
+    // Read at every use: the registry is built before the profile hands over its scheduled jobs.
+    const scheduleHost = (): AgentScheduleHost | undefined =>
+      this.scheduledJobs ? { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } : undefined
     return {
+      get schedules() {
+        return scheduleHost()
+      },
       delegation: (caller: McpCaller) =>
         this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling, caller.accessLevel),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
@@ -3354,7 +3410,7 @@ export class OrchestratorService extends EventEmitter {
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
-      ...(this.scheduledJobs ? { schedules: { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } } : {})
+      automations: () => this.automationTools
     }
   }
 
@@ -4855,6 +4911,14 @@ export class OrchestratorService extends EventEmitter {
    * bound to (its own, never above its lineage's ceiling), else the mode threads start in. Whatever
    * cannot be read asks. The job's ceiling is this value; no request carries one.
    */
+  /**
+   * The mode a workflow started on a thread is held to (#338): the thread's mode, else the mode threads start in, and
+   * never wider than `held` (a scheduled job's mode and ceiling).
+   */
+  workflowPermissionMode(threadId?: string, held?: PermissionMode): PermissionMode {
+    return narrowPermissionMode(held, this.scheduledCreatorCeiling(threadId))
+  }
+
   scheduledCreatorCeiling(threadId?: string): PermissionMode {
     try {
       if (threadId && this.threadStore?.getThread(threadId)) return this.requestedPermissionMode(threadId)
@@ -8493,6 +8557,11 @@ export class OrchestratorService extends EventEmitter {
     const decisionNotice: ChatMessage | null = approvalNote
       ? { id: uuidv4(), role: 'user', content: approvalNote, timestamp: new Date().toISOString(), hidden: true }
       : null
+    // A scheduled run's agent reports with run_report (the levels, the automation's context and Tuning notes are in
+    // this hidden message), or says "nothing new" with [SILENT]; the person never writes either.
+    const silentNotice: ChatMessage | null = scheduled && displayUserMessage
+      ? { id: uuidv4(), role: 'user', content: this.scheduledNotice(scheduled), timestamp: new Date().toISOString(), hidden: true }
+      : null
     const addedMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -8525,6 +8594,10 @@ export class OrchestratorService extends EventEmitter {
     if (decisionNotice) {
       this.messages.push(decisionNotice)
       this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(decisionNotice.content))
+    }
+    if (silentNotice) {
+      this.messages.push(silentNotice)
+      this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(silentNotice.content))
     }
     this.messages.push(addedMessage)
     this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(userContent, images))
@@ -9648,6 +9721,8 @@ export class OrchestratorService extends EventEmitter {
     }
     let turnResponse: OrchestratorResponse | undefined
     let turnFailure: unknown
+    // While a scheduled occurrence's turn runs, its thread's end-of-work notice is the automation's to give (Tell me).
+    if (opts?.schedule) this.scheduledTurnThreads.add(session.threadId)
     try {
       // A bot's turn is named by its thread, so a trash of that thread can tell it from other work.
       turnResponse = await this.lifecycle.run(opts?.bot ? `bot-turn:${session.threadId}` : 'turn', () => this.sessionAls
@@ -9664,6 +9739,7 @@ export class OrchestratorService extends EventEmitter {
         (opts?.queueItemId !== undefined && session.queue.some((item) => item.id === opts.queueItemId))
       this.settleRunAfterTurn(opts?.runId, requeued, turnFailure)
       if (opts?.schedule && opts.runId && !requeued) this.reportScheduledOccurrence(session, opts.schedule, opts.runId, turnResponse)
+      if (opts?.schedule) this.scheduledTurnThreads.delete(session.threadId)
       this.releaseSessionExecutionLease(session)
       session.turnAdmitted = false
       session.admissionRunId = undefined
@@ -10016,7 +10092,7 @@ export class OrchestratorService extends EventEmitter {
           session.projectCwd = session.workspace.projectPath
         } else {
           session.workspace = null
-          session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : null
+          session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : this.automationManagerCwd(session.threadId)
         }
         if (threadDir && !opts?.bot && modeMutatesFiles(request.mode)) snapshotFolder = this.snapshotFolderFor(session, request.mode, threadDir, projectPath, opts?.modelOverride)
         // Only move worktree root when this is the bound session and no concurrent turn
@@ -10503,12 +10579,22 @@ export class OrchestratorService extends EventEmitter {
         compaction: onCompaction,
         retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
         progress: () => { providerProgress = true },
-        // Usage statistics, as each runtime reports them.
+        // Usage statistics, as each runtime reports them; an automation run's turn adds it to the run in the inbox.
         usage: (usage) => {
           lastUsageAt = Date.now()
+          const model = promptMetrics?.realModelName ?? selectedModel.model
+          try {
+            this.automationRunHooks?.usage({
+              threadId: session.threadId, ...(engineRunId ? { runId: engineRunId } : {}), provider: selectedModel.llmProvider, model,
+              input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,
+              ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {})
+            })
+          } catch (error) {
+            logDebug('OrchestratorService', 'automation run usage could not be recorded', error, { threadId: session.threadId })
+          }
           this.lineEditStats?.recordUsage({
             timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
-            model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
+            model, input: usage.input, output: usage.output,
             cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
           })
         },
@@ -12373,23 +12459,52 @@ export class OrchestratorService extends EventEmitter {
 
   private async runIsolatedScheduledJobOwned(prompt: string, ingress?: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult> {
     try {
-      const workflow = prompt.startsWith('/') && ingress
+      const workflowThreadId = prompt.startsWith('/') && ingress ? this.resolveScheduledWorkflowThread(ingress) : undefined
+      // A workflow starts as a turn of its own and cannot wait in the thread's queue: on a thread that is running a turn
+      // the occurrence waits for it instead of failing (#404). The scheduler keeps it due, with its repeat.
+      if (workflowThreadId && ingress?.resumeWaiting !== true && this.scheduledThreadBusy(workflowThreadId)) {
+        return { text: '', silent: false, status: 'busy', threadId: workflowThreadId }
+      }
+      const workflow = workflowThreadId && ingress
         ? await this.admitBackgroundWorkflowTurn({
             content: prompt,
             source: 'schedule',
             requestId: scheduleWorkflowInvocationId(ingress),
-            threadId: this.resolveScheduledWorkflowThread(ingress),
+            threadId: workflowThreadId,
             signal: this.lifecycle.signal,
             terminalOnly: ingress.resumeWaiting === true,
-            onWorkflowPrepared: ingress.onWorkflowPrepared
+            onWorkflowPrepared: ingress.onWorkflowPrepared,
+            // Held to the strictest of the job's mode, its ceiling and the thread's (#338).
+            permissionMode: this.workflowPermissionMode(workflowThreadId, jobPermissionRequest(ingress))
           })
         : null
       if (workflow) return workflow
       if (!ingress) return { text: '', silent: false, error: 'A scheduled run needs its job' }
+      if (ingress.agent) return await this.runScheduledAgentTurn(prompt, ingress, ingress.agent.definitionId)
       return await this.runScheduledTurn(prompt, ingress)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return { text: '', silent: false, error: message }
+    }
+  }
+
+  /**
+   * Whether the thread's turn now is a scheduled occurrence's. Its end is announced by the automation, as its Tell me
+   * says, not as a thread finishing.
+   */
+  isScheduledTurn(threadId: string): boolean {
+    return this.scheduledTurnThreads.has(threadId)
+  }
+
+  /** Whether a thread has a turn admitted or running here, or a live peer holds its execution lease. */
+  private scheduledThreadBusy(threadId: string): boolean {
+    const session = this.sessions.get(threadId)
+    if (session && (session.turnAdmitted || session.isTurnRunning())) return true
+    try {
+      this.reclaimStaleThreadLease(threadId)
+      return this.isThreadLeaseHeldExternally(threadId, session?.executionLease?.owner.token)
+    } catch {
+      return false
     }
   }
 
@@ -12520,6 +12635,60 @@ export class OrchestratorService extends EventEmitter {
     const text = response.message?.trim() || 'Done.'
     const silent = text === '[SILENT]' || text.startsWith('[SILENT]')
     return { ...base, text, silent }
+  }
+
+  /**
+   * Runs an occurrence with the job's saved agent: its latest published revision, on the occurrence's thread, as an
+   * unattended definition run (its own grants decide what it may use; a step that needs a person asks on the thread).
+   * The prompt and the reply are written to the thread, so opening the run shows the work.
+   */
+  private async runScheduledAgentTurn(prompt: string, ingress: ScheduledJobIngress, definitionId: string): Promise<BackgroundWorkflowTurnResult> {
+    const runner = this.scheduledAgentRunner
+    if (!runner) return { text: '', silent: false, error: 'Saved agents cannot run here: the agent library is not loaded.' }
+    const { threadId } = this.chooseScheduledThread(ingress)
+    ingress.onThreadChosen?.(threadId)
+    if (this.scheduledThreadBusy(threadId)) return { text: '', silent: false, status: 'busy', threadId }
+    let workspaceRoot: string
+    try {
+      workspaceRoot = await this.scheduledAgentWorkspace(threadId)
+    } catch (error) {
+      return { text: '', silent: false, error: error instanceof Error ? error.message : String(error), threadId, transcriptWritten: true }
+    }
+    const runId = `schedule-agent:${ingress.jobId}:${uuidv4()}`
+    const at = new Date().toISOString()
+    this.scheduledTurnThreads.add(threadId)
+    try {
+      this.recordAgentDefinitionMessages(threadId, [{ id: `${runId}:user`, role: 'user', content: prompt, timestamp: at, turnId: runId }])
+      const run = await runner({ definitionId, threadId, workspaceRoot, prompt, runId, signal: this.lifecycle.signal })
+      const text = run.text.trim()
+      const silent = run.status === 'completed' && (text === '[SILENT]' || text.startsWith('[SILENT]'))
+      if (text || run.error) {
+        this.recordAgentDefinitionMessages(threadId, [{ id: `${runId}:reply`, role: 'assistant', content: text || run.error || '', timestamp: new Date().toISOString(), turnId: runId }])
+      }
+      const base = { threadId, agent: run.agent, transcriptWritten: true }
+      if (run.status !== 'completed') return { ...base, text: '', silent: false, error: run.error ?? (run.status === 'cancelled' ? 'Stopped' : 'The agent run failed') }
+      return { ...base, text: text || 'Done.', silent }
+    } catch (error) {
+      return { text: '', silent: false, error: error instanceof Error ? error.message : String(error), threadId, transcriptWritten: true }
+    } finally {
+      this.scheduledTurnThreads.delete(threadId)
+    }
+  }
+
+  /** The folder a saved agent's occurrence works in: the thread's own checkout or worktree, or a scratch folder. */
+  private async scheduledAgentWorkspace(threadId: string): Promise<string> {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir) throw new Error('The run thread is unavailable')
+    const projectPath = this.threadProjectPath(threadId)
+    if (!projectPath) {
+      const scratch = join(threadDir, 'agent-workspace')
+      mkdirSync(scratch, { recursive: true })
+      return scratch
+    }
+    if (this.threadStore?.getThread(threadId)?.workspaceBinding?.policy === 'primary') return resolveProjectWorkingDirectory(projectPath)
+    const workspace = await new WorkspaceResolver(threadDir, threadId, projectPath, this.placementOf(threadId), this.restoreNotifier(threadId))
+      .resolve('agent', 'main', this.lifecycle.signal, undefined, this.branchNameSource(threadId))
+    return workspace.projectPath ?? resolveProjectWorkingDirectory(projectPath)
   }
 
   /**
@@ -12710,11 +12879,14 @@ export class OrchestratorService extends EventEmitter {
     onAdmissionHandedOff?: () => void
     /** Called once the workflow command is stored on the thread. */
     onUserInputAccepted?: () => void
+    /** The mode the workflow is held to; the thread's when absent. */
+    permissionMode?: PermissionMode
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
     try {
-      prepared = await this.workflowChat.prepare(input.threadId, { content: input.content, requestId: input.requestId }, input.source)
+      prepared = await this.workflowChat.prepare(input.threadId, { content: input.content, requestId: input.requestId }, input.source,
+        input.permissionMode ?? this.workflowPermissionMode(input.threadId))
     } catch (error) {
       if (error instanceof DomainRpcError) return { text: '', silent: false, error: error.message }
       throw error

@@ -1,3 +1,4 @@
+import { useInboxShowsThread } from './automations/inbox/inboxStore'
 import { ProjectTerminalPanel } from './ProjectTerminalPanel'
 import { BrowserPanel } from './BrowserPanel'
 import { FilesPanel } from './FilesPanel'
@@ -13,7 +14,9 @@ import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 export function MainViewPanel() {
   const selectedView = useAppStore((s) => s.mainView)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
-  const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen || s.usageOpen)
+  // The Automations page covers the panel, except while it shows a run's thread (the panel then serves that thread).
+  const inboxThread = useInboxShowsThread()
+  const overlayOpen = useAppStore((s) => s.settingsOpen || s.usageOpen || (s.scheduledOpen && !inboxThread))
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const opened = useAppStore((s) => s.openedSurfaceKinds)
   const terminals = useAppStore((s) => s.projectTerminalTabs)

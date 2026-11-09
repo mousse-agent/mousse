@@ -5,6 +5,9 @@ import { CATEGORY_LABELS, CATEGORY_ORDER } from './defaultNode'
 import type { WorkflowEditorCatalogs } from './client'
 import { WorkflowNodeIcon } from './WorkflowNodeIcon'
 
+/** The steps most workflows use; the palette shows these until a search finds the rest. */
+export const COMMON_NODE_TYPES = ['agent', 'instruction', 'script', 'condition', 'for-each', 'ask-user', 'approval', 'write-artifact'] as const satisfies ReadonlyArray<(typeof WORKFLOW_NODE_TYPES)[number]>
+
 export function WorkflowPalette({
   catalogs,
   onAdd,
@@ -15,31 +18,31 @@ export function WorkflowPalette({
   disabled?: boolean
 }) {
   const [search, setSearch] = useState('')
+  const q = search.trim().toLowerCase()
+  // Without a search the palette shows the common steps; a search finds every step, tool, skill and subworkflow.
   const grouped = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    const groups = CATEGORY_ORDER.map((category) => ({
+    if (!q) return [{ category: 'common', label: 'Common steps', items: COMMON_NODE_TYPES.map((type) => WORKFLOW_NODE_CATALOG[type]) }]
+    return CATEGORY_ORDER.map((category) => ({
       category,
       label: CATEGORY_LABELS[category] ?? category,
       items: WORKFLOW_NODE_TYPES.filter((type) => WORKFLOW_NODE_CATALOG[type].category === category)
         .filter((type) => {
-          if (!q) return true
           const entry = WORKFLOW_NODE_CATALOG[type]
           return `${entry.label} ${type} ${CATEGORY_LABELS[category]}`.toLowerCase().includes(q)
         })
         .map((type) => WORKFLOW_NODE_CATALOG[type])
     })).filter((group) => group.items.length > 0)
-    return groups
-  }, [search])
+  }, [q])
 
-  const userAgents = catalogs.subworkflows.filter((item) => item.name.toLowerCase().includes(search.trim().toLowerCase()) || !search.trim())
-  const tools = catalogs.builtinTools.filter((item) => item.label.toLowerCase().includes(search.trim().toLowerCase()) || !search.trim())
-  const skills = catalogs.skills.filter((item) => item.name.toLowerCase().includes(search.trim().toLowerCase()) || !search.trim())
+  const userAgents = q ? catalogs.subworkflows.filter((item) => item.name.toLowerCase().includes(q)) : []
+  const tools = q ? catalogs.builtinTools.filter((item) => item.label.toLowerCase().includes(q)) : []
+  const skills = q ? catalogs.skills.filter((item) => item.name.toLowerCase().includes(q)) : []
+  const mcpTools = q ? catalogs.mcpServers.flatMap((server) => server.tools.filter((tool) => `${server.name} ${tool.toolName}`.toLowerCase().includes(q)).map((tool) => ({ server, tool }))) : []
 
   return (
     <nav className="wf-palette" aria-label="Node palette" data-palette="">
       <h2 className="wf-palette-title">Add a step</h2>
-      <p className="wf-help">Click a component to add it to your workflow.</p>
-      <SearchInput value={search} onChange={setSearch} placeholder="Search nodes" />
+      <SearchInput value={search} onChange={setSearch} placeholder="Search all steps, tools and skills" />
       {grouped.map((group) => (
         <section key={group.category}>
           <h2>{group.label}</h2>
@@ -74,23 +77,21 @@ export function WorkflowPalette({
           ))}
         </section>
       ) : null}
-      {catalogs.mcpServers.length > 0 ? (
+      {mcpTools.length > 0 ? (
         <section>
           <h2>MCP tools</h2>
-          {catalogs.mcpServers.flatMap((server) =>
-            server.tools.filter((tool) => `${server.name} ${tool.toolName}`.toLowerCase().includes(search.trim().toLowerCase())).map((tool) => (
-              <button
-                key={`${server.serverId}:${tool.toolName}`}
-                type="button"
-                className="wf-palette-item"
-                disabled={disabled || !tool.available}
-                title={tool.available ? undefined : 'MCP tool is unavailable'}
-                onClick={() => onAdd('mcp-tool', { serverId: server.serverId, toolName: tool.toolName })}
-              >
-                <WorkflowNodeIcon type="mcp-tool" /><span>{tool.toolName}<small>{server.name}</small></span>
-              </button>
-            ))
-          )}
+          {mcpTools.map(({ server, tool }) => (
+            <button
+              key={`${server.serverId}:${tool.toolName}`}
+              type="button"
+              className="wf-palette-item"
+              disabled={disabled || !tool.available}
+              title={tool.available ? undefined : 'MCP tool is unavailable'}
+              onClick={() => onAdd('mcp-tool', { serverId: server.serverId, toolName: tool.toolName })}
+            >
+              <WorkflowNodeIcon type="mcp-tool" /><span>{tool.toolName}<small>{server.name}</small></span>
+            </button>
+          ))}
         </section>
       ) : null}
       {skills.length > 0 ? (

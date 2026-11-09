@@ -9,6 +9,7 @@ import { MoreDetails, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { Select } from '../ui/Select'
 import { ShieldCheck } from '../../lib/icons'
 import { useComputers } from '../../lib/computers'
+import { AgentAutomationsSettings } from './AgentAutomationsSettings'
 
 /** What each level lets an agent do, in the words the screen uses (SPEC §15.1). */
 export const AGENT_ACCESS_LEVELS: ReadonlyArray<{ value: AgentAccessLevel; label: string; summary: string }> = [
@@ -193,6 +194,7 @@ export function AgentAccessSettings({
           {goneComputers.map((node) => choiceRow('computer', node, 'Removed computer', true, () => toggleComputer(node)))}
         </>
       ) : null}
+      <AgentAutomationsSettings />
       <SettingsRow
         title="Capped threads"
         description="These keep a lower level whatever you choose above."

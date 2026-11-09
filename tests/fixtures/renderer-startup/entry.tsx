@@ -2,7 +2,7 @@ import { useAppStore } from '../../../src/renderer/stores/appStore'
 import { getDefaultSettings } from '../../../src/shared/settings'
 import { applyAppearance } from '../../../src/renderer/hooks/useTheme'
 import '../../../src/renderer/styles/settings.css'
-import '../../../src/renderer/styles/scheduled-panel.css'
+import '../../../src/renderer/styles/automations-page.css'
 
 // I hold the real profile switcher's bootstrap replies while the actual root
 // mounts in StrictMode. The UI port is controlled; no daemon or credentials run.
@@ -83,7 +83,7 @@ function api(path: string[] = []): unknown {
   acrylic: (theme: 'blacksphere-plus' | 'github-dark' | 'light', intensity: number) => {
     applyAppearance({ ...appearance, theme, acrylic: true, acrylicIntensity: intensity })
   },
-  overlay: (page: 'settings' | 'scheduled', open: boolean) => {
+  overlay: (page: 'settings' | 'automations', open: boolean) => {
     const store = useAppStore.getState()
     if (page === 'settings') store.setSettingsOpen(open)
     else store.setScheduledOpen(open)

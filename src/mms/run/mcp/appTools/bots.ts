@@ -1,9 +1,8 @@
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotSchedule } from '../../../../shared/bots/personal/definition'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
-import { scheduleProblem } from '../../../bots/triggers/scheduler'
+import { botScheduleProblem } from '../../../scheduled/botJobs'
 import type { BotActivityContext, BotActivitySink, BotToolHost } from '../../../bots/seams'
-import { computeNextRun } from '../../../scheduled/computeNextRun'
 import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /**
@@ -106,8 +105,6 @@ export const BOT_TOOLS: Tool[] = [
 
 /** Longest consult answer handed back to the bot. */
 const CONSULT_ANSWER_CHARS = 16_000
-/** The shortest time between two runs of one schedule. */
-export const MIN_BOT_SCHEDULE_MINUTES = 5
 
 /** What the bot app tools reach beside the turn's authority. `MmsProfileServices` supplies it. */
 export interface BotAppToolDeps {
@@ -149,23 +146,6 @@ function botCall(deps: (() => BotAppToolDeps | undefined) | undefined, ctx: Tool
 }
 
 const isOutcome = (value: BotCall | ToolOutcome): value is ToolOutcome => 'text' in value
-
-/** Why a schedule time can't be used, or undefined: the scheduler's own check, plus at most every 5 minutes. */
-export function botScheduleProblem(when: unknown, prompt: unknown, now: Date = new Date()): string | undefined {
-  const problem = scheduleProblem({ id: 'new', when, prompt } as BotSchedule)
-  if (problem) return problem
-  const schedule = when as BotSchedule['when']
-  if (schedule.kind === 'interval') return schedule.minutes < MIN_BOT_SCHEDULE_MINUTES ? `A schedule runs at most every ${MIN_BOT_SCHEDULE_MINUTES} minutes.` : undefined
-  // A cron expression: no two of its next runs closer than 5 minutes.
-  let previous = computeNextRun({ kind: 'cron', expr: schedule.expr }, null, now)
-  for (let step = 0; previous && step < 30; step += 1) {
-    const next = computeNextRun({ kind: 'cron', expr: schedule.expr }, previous, now)
-    if (!next) break
-    if (Date.parse(next) - Date.parse(previous) < MIN_BOT_SCHEDULE_MINUTES * 60_000) return `A schedule runs at most every ${MIN_BOT_SCHEDULE_MINUTES} minutes.`
-    previous = next
-  }
-  return undefined
-}
 
 /** A tool's common shape: listed and offered on bot activation threads only. */
 function ownTool(tool: Tool, deps: (() => BotAppToolDeps | undefined) | undefined, part: Pick<MousseTool, 'class' | 'describe' | 'handler'>): MousseTool {
