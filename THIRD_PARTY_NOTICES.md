@@ -156,3 +156,49 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## kokoro-js (read aloud's Kokoro text front end)
+
+Adapted from `kokoro-js` 1.2.1 (Apache-2.0; hexgrad and Xenova), `dist/kokoro.js`:
+
+- `src/main/readAloud/kokoroText.ts`: the text normalisation before phonemes, the punctuation kept around the espeak-ng phonemes, the fixes to those phonemes, and the choice of a voice's style by input length.
+
+The full Apache License 2.0 text is in `node_modules/kokoro-js/LICENSE`.
+
+## ONNX Runtime and the ort crate (read aloud's voice engine)
+
+The packages carry `resources/voice-engine/mousse-voice` (`mousse-voice.exe` on Windows), built from `native/voice-engine` (Mousse's own code, in Rust). It links ONNX Runtime 1.31 from the prebuilt libraries the `ort` crate downloads while building, the Rust standard library and these crates, unmodified and pinned in `native/voice-engine/Cargo.lock`. The crates offered under MIT or Apache-2.0 are used under MIT. On Windows, the Visual C++ runtime DLLs (`msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`) from Visual Studio's redistributable folder sit beside the engine, under Microsoft's terms for redistributable code.
+
+| Component | Licence | Copyright |
+| --- | --- | --- |
+| ONNX Runtime 1.31 | MIT | Microsoft Corporation |
+| `ort` 2.0.0-rc.15 and `ort-sys` 2.0.0-rc.15 | MIT or Apache-2.0 | pyke.io |
+| `smallvec` 1.16.5 | MIT or Apache-2.0 | The Servo Project Developers |
+| Rust standard library (`std`, `core`, `alloc`) | MIT or Apache-2.0 | The Rust Project Developers |
+
+```
+MIT License
+
+Copyright (c) Microsoft Corporation.
+Copyright (c) pyke.io
+Copyright (c) The Servo Project Developers
+Copyright (c) The Rust Project Developers.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

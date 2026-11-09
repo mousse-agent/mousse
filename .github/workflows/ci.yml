@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # onnxruntime-node's install would download the CUDA provider on Linux x64; only the CPU one is used.
+  # onnxruntime-node, which transformers.js installs for the tests, would download the CUDA provider on Linux x64.
   ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 
 jobs:
@@ -151,6 +151,15 @@ jobs:
           key: sshd-helper-${{ runner.os }}-rust-1.96.0-${{ hashFiles('native/sshd-helper/Cargo.lock', 'native/sshd-helper/Cargo.toml', 'native/sshd-helper/src/**') }}
           restore-keys: sshd-helper-${{ runner.os }}-rust-1.96.0-
       - run: node scripts/build-sshd-helper.mjs --require
+      # Read aloud's voice engine (native/voice-engine): its build, and its own tests.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/voice-engine/target
+          key: voice-engine-${{ runner.os }}-rust-1.96.0-${{ hashFiles('native/voice-engine/Cargo.lock', 'native/voice-engine/Cargo.toml', 'native/voice-engine/build.rs', 'native/voice-engine/src/**') }}
+          restore-keys: voice-engine-${{ runner.os }}-rust-1.96.0-
+      - run: node scripts/build-voice-engine.mjs --require
+      - run: cargo test --release --locked
+        working-directory: native/voice-engine
       - name: Run Windows-relevant tests
         env:
           # The runner's default TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which
