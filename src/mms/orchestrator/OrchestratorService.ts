@@ -8235,7 +8235,9 @@ export class OrchestratorService extends EventEmitter {
     if (!thread || !isDefaultThreadName(thread.name)) return
     const fromMessage = heuristicTitle(userContent)
     if (!this.hasTitleModel()) {
-      if (fromMessage) this.writeThreadTitle(threadId, thread, fromMessage, 'final')
+      // No model will name it later: a message that names nothing ("hello") is used as written.
+      const name = fromMessage || fitTitle(cleanTitleText(userContent).text)
+      if (name) this.writeThreadTitle(threadId, thread, name, 'final')
       return
     }
     const shown = this.writeThreadTitle(threadId, thread, fromMessage || thread.name, 'provisional')
