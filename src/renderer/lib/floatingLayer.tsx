@@ -159,12 +159,15 @@ export interface PinnedPopoverOptions {
   contentRef: RefObject<HTMLElement | null>
   /** The tallest the layer may be; less where the window has less room. */
   maxHeight: number
-  /** Below this much room above the anchor (and more below it), the layer opens below instead. */
+  /** Below this much room on its side (and more on the other), the layer opens on the other side instead. */
   minHeight?: number
   gap?: number
   padding?: number
-  /** `right`: beside the anchor, bottom edges aligned, growing upward (a rail item's menu). */
-  side?: 'above' | 'right'
+  /**
+   * `above` (the default) or `below` the anchor, flipping only when `minHeight` does not fit there and the
+   * other side has more room. `right`: beside the anchor, bottom edges aligned, growing upward (a rail item's menu).
+   */
+  side?: 'above' | 'below' | 'right'
   /** Above or below the anchor: `end` lines the layer's right edge up with the anchor's (a row's "…" at its end). */
   align?: 'start' | 'end'
 }
@@ -220,7 +223,10 @@ export function usePinnedPopover({
       }
       const roomAbove = rect.top - gap - padding
       const roomBelow = viewportHeight - rect.bottom - gap - padding
-      const above = roomAbove >= Math.min(minHeight, maxHeight) || roomAbove >= roomBelow
+      const needed = Math.min(minHeight, maxHeight)
+      const above = side === 'below'
+        ? roomBelow < needed && roomAbove > roomBelow
+        : roomAbove >= needed || roomAbove >= roomBelow
       const room = Math.max(0, Math.floor(Math.min(maxHeight, above ? roomAbove : roomBelow)))
       const width = content.offsetWidth
       const start = align === 'end' ? rect.right - width : rect.left
