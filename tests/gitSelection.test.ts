@@ -210,6 +210,13 @@ describe('project folder selection', () => {
     expect(file).toMatchObject({ included: 'partial', indexDiverged: true, wholeFileOnly: true, hunks: [] })
   })
 
+  it('shows a staged new file deleted from disk as diverged', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    writeFileSync(join(cwd, 'new.txt'), 'new\n'); git(cwd, 'add', 'new.txt'); rmSync(join(cwd, 'new.txt'))
+    const file = fileIn(await service.readChanges(cwd, place), 'new.txt')
+    expect(file).toMatchObject({ included: 'partial', indexDiverged: true, wholeFileOnly: true, hunks: [] })
+  })
+
   it('gives repeated identical hunks their own ids and chooses them apart', async () => {
     const cwd = repo(), place = projectPlace(), service = new GitService()
     const doubled = [...LINES.slice(0, 5), 'import x', ...LINES.slice(5, 20), 'import x', ...LINES.slice(20)]
