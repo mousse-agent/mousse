@@ -3,8 +3,10 @@ import { app, BrowserWindow } from 'electron'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
 const config = JSON.parse(readFileSync(process.env.MOUSSE_FULL_SHELL_CONFIG, 'utf8'))
 const isCli = process.argv.includes('--cli')
+if (!isCli) { keepWindowsOffScreen(); exitWithParent() }
 const timer = isCli ? undefined : setTimeout(() => { console.error('Lifecycle full shell timed out'); app.exit(1) }, 140000)
 const delay = (ms) => new Promise((done) => setTimeout(done, ms))
 let stage = 'startup'
