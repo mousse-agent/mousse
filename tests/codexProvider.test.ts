@@ -633,6 +633,51 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(order.indexOf('thread/compact/start')).toBeGreaterThan(order.indexOf('turn/interrupt'))
     })
 
+    it('a Stop while a thread loaded only to compact is let go is not taken, and the thread is dropped', async () => {
+      let unsubscribed!: () => void
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        const threadId = (message.params as { threadId?: string } | undefined)?.threadId
+        const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+        if (method === 'account/read') return chatgpt
+        if (method === 'thread/start' || method === 'thread/resume')
+          return { result: { thread: { id: method === 'thread/resume' ? threadId : `thr-${server.messages.filter((entry) => entry.method === 'thread/start').length}` }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'turn/start') {
+          setImmediate(() => write('turn/completed', { threadId, turn: { id: 'turn-1', status: 'completed', error: null } }))
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        if (method === 'thread/compact/start') {
+          setImmediate(() => {
+            write('turn/started', { threadId, turn: { id: 'turn-c', status: 'inProgress', error: null } })
+            write('turn/completed', { threadId, turn: { id: 'turn-c', status: 'completed', error: null } })
+          })
+          return { result: {} }
+        }
+        // The answer to the unsubscribe is slow.
+        if (method === 'thread/unsubscribe') {
+          unsubscribed = () => server.processes.at(-1)!.stdout.write(JSON.stringify({ id: message.id, result: {} }) + '\n')
+          return undefined
+        }
+        if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
+        return { result: {} }
+      })
+      const requests = (method: string) => server.messages.filter((message) => message.method === method)
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      await service.stopAll('test')
+      const stop = new AbortController()
+      const running = service.compactConversation('t', 'h', undefined, stop.signal).then(() => 'resolved', (error: unknown) => error)
+      for (let tries = 0; !requests('thread/unsubscribe').length && tries < 400; tries += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+      expect(requests('thread/unsubscribe')).toHaveLength(1)
+      stop.abort(new Error('Compaction stopped'))
+      unsubscribed()
+      expect(await running).toMatchObject({ message: 'Compaction stopped' })
+      // The compaction completed, but it was not taken: the next turn starts a new thread with the full history.
+      await chat(service, { history: 'h' })
+      expect(requests('thread/start')).toHaveLength(2)
+    })
+
     it('drops the saved thread when the interrupt fails and no end comes in time', async () => {
       const server = stoppableServer('fails')
       const service = new CodexProviderService(home, questions, { launch: server.launch, compactSettleMs: 50 }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })

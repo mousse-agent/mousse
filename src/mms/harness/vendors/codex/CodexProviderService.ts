@@ -1614,6 +1614,11 @@ export class CodexProviderService {
       }
       // Loaded only for this: the next turn resumes it with its own settings.
       if (!wasLoaded) await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
+      // Stopped while the thread was let go: the compaction is not taken, and the thread it compacted is dropped.
+      if (signal.aborted) {
+        this.forgetConversation(threadId)
+        throw stopReason(signal)
+      }
       return true
     } catch (error) {
       // An older Codex without `thread/compact/start`, or a thread it no longer has.
