@@ -8169,11 +8169,13 @@ export class OrchestratorService extends EventEmitter {
       let caps: HarnessCaps | undefined
       let compactsNearWindow = false
       let driver: string | undefined
+      let instanceId: string | undefined
       try {
         const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
         caps = resolved.caps
         compactsNearWindow = resolved.compactsNearWindow === true
         driver = resolved.driver
+        instanceId = resolved.instanceId
       } catch {
         caps = undefined
       }
@@ -8201,10 +8203,12 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      // The cache of the history as it is now, on the model the composer would send to (another model has its own).
+      // The cache of the history as it is now, on the instance and model the composer would send to (another
+      // instance, a second Claude account, or another model has its own). A record that names no instance is cold.
       const cache = promptCacheOf(this.nativeContext)
       const cacheKey = cache?.modelKey
-      const cached = cache && (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
+      const cached = cache && instanceId !== undefined && cache.instanceId === instanceId &&
+        (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
       // A price only where the thread pays per token: pi with a saved API key and a priced model.
       const price = cached && driver === 'pi' && typeof this.providerAuth?.uncachedInputPrice === 'function'
         ? this.providerAuth.uncachedInputPrice(selectedModel.llmProvider, parseThinkingSuffixFromModelId(selectedModel.model).baseId)
@@ -10302,6 +10306,8 @@ export class OrchestratorService extends EventEmitter {
     let lastUsageAt: number | undefined
     let promptTurnCommitted = false
     const promptContextKey = `${selectedModel.llmProvider}:${selectedModel.model}`
+    /** The instance the turn runs on, once resolved: the prompt cache is that instance's. */
+    let promptCacheInstanceId: string | undefined
     const commitPromptTurn = (text: string): void => {
       if (promptTurnCommitted) return
       promptTurnCommitted = true
@@ -10323,7 +10329,8 @@ export class OrchestratorService extends EventEmitter {
       this.nativeContext.promptCache = nextPromptCache(this.nativeContext, {
         at: promptMetrics?.promptCache?.at ?? lastUsageAt ?? Date.now(),
         ...(promptMetrics?.promptCache?.ttlMs ? { ttlMs: promptMetrics.promptCache.ttlMs } : {}),
-        modelKey: promptContextKey
+        modelKey: promptContextKey,
+        ...(promptCacheInstanceId ? { instanceId: promptCacheInstanceId } : {})
       })
       this.persist(true)
     }
@@ -10334,6 +10341,7 @@ export class OrchestratorService extends EventEmitter {
         purpose: 'turn',
         scope: this.threadScope(session.threadId)
       })
+      promptCacheInstanceId = instance.instanceId
       // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
       // provider may have been switched, or the user's setup changed, since then.
       if (session.sharedWorkspace) {

@@ -164,6 +164,22 @@ it('shows the prompt cache a Claude turn left, until the history changes or is c
     expect((await usage()).promptCache).toBeUndefined()
     main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'opus' })
     expect((await usage()).promptCache).toBeDefined()
+    expect(main.threads.loadThreadData(thread.id).llmContext?.promptCache).toMatchObject({ instanceId: 'claude' })
+    // Another Claude instance (a second account) on the same model has its own cache.
+    main.harness.instanceMap.setEntry('claude:work', { driver: 'claude', enabled: true, config: { home: 'private', displayName: 'Claude (work)' } })
+    main.orchestrator.setThreadModelOverride(thread.id, { instanceId: 'claude:work', llmProvider: 'claude-subscription', model: 'opus' })
+    const onWork = await usage()
+    // Measured as the same model (the instance resolves), with no cache of its own.
+    expect(onWork.limit).toBe(200000)
+    expect(onWork.promptCache).toBeUndefined()
+    main.orchestrator.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' })
+    expect((await usage()).promptCache).toBeDefined()
+    // A record saved before it named its instance is cold.
+    const live = main.orchestrator.getOrCreateSession(thread.id).nativeContext
+    const { instanceId: _instance, ...legacy } = live.promptCache!
+    live.promptCache = legacy
+    expect((await usage()).promptCache).toBeUndefined()
+    live.promptCache = { ...legacy, instanceId: 'claude' }
     // Claude Code's own /compact leaves Mousse's history (and its revision) as it was; the cache is cold all the same.
     vi.spyOn(main.claudeSubscription, 'compactConversation').mockResolvedValue(true)
     expect(await main.orchestrator.compactConversationContext(thread.id)).toBe('native')
