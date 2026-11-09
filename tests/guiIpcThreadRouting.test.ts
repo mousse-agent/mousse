@@ -312,3 +312,15 @@ describe('a call to another computer that was not confirmed', () => {
     expect(calls.map((call) => call.method)).toEqual(['threads.rename'])
   })
 })
+
+describe('editing a queued message', () => {
+  it('sends the new text for the item, naming the thread for the router, and answers the saved item', async () => {
+    const saved = { id: 'q1', threadId: REMOTE, content: 'Fix the tests first' }
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      return { item: saved, items: [saved] }
+    })
+    await expect(invoke('queue:edit', REMOTE, 'q1', 'Fix the tests first')).resolves.toEqual(saved)
+    expect(sent('queue.edit')).toEqual([{ method: 'queue.edit', params: { threadId: REMOTE, itemId: 'q1', content: 'Fix the tests first' } }])
+  })
+})
