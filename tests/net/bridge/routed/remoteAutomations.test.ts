@@ -102,6 +102,22 @@ describe('one owning computer per automation', () => {
     expect((await t.dispatch('scheduled.resume', { id: held.id })).job).toMatchObject({ enabled: true })
   }, 60_000)
 
+  it('never reaches a private thread through the pull request an automation wakes on', async () => {
+    const secret = t.owner.threads.createThread('Secret PR', undefined, undefined, { started: true, localOnly: true })
+    t.owner.threads.updateThreadMeta(secret.id, { pullRequest: { number: 77, url: 'https://example.com/pr/77', host: 'example.com', nameWithOwner: 'o/r', headRefName: 'f', baseRefName: 'main', headRepository: null, isCrossRepository: false, linkedAt: new Date().toISOString() } }, { touch: false })
+    const owned = t.owner.scheduled.listJobs().length
+    const wakeOn = { threadId: t.qualified(secret.id), events: ['review'] }
+    // Without an output thread it would run in the private thread; with a new thread per run it would still name it.
+    expect((await t.refused(t.dispatch('scheduled.create', { node: t.node, input: manual('On its PR', { threadEvent: wakeOn }) }))).code).toBe('thread_not_found')
+    expect((await t.refused(t.dispatch('scheduled.create', { node: t.node, input: manual('On its PR, new thread', { threadEvent: wakeOn, createThread: true }) }))).code).toBe('thread_not_found')
+    expect(t.owner.scheduled.listJobs()).toHaveLength(owned)
+    // One the owner made that wakes on it stays on the owner: not listed, and not acted on.
+    const watching = t.owner.scheduled.createJob({ name: 'Watches secret', prompt: 'x', schedule: { kind: 'manual' }, createThread: true, threadEvent: { threadId: secret.id, number: 77, events: ['review'] } })
+    const index = await t.dispatch('automations.list', {})
+    expect(index.items.some((item: { id: string }) => item.id === t.qualified(watching.id))).toBe(false)
+    expect((await t.refused(t.dispatch('scheduled.update', { id: t.qualified(watching.id), patch: { name: 'Seen' } }))).code).toBe('job_not_found')
+  }, 60_000)
+
   it('refuses what only the owner picks, and what another computer may not see', async () => {
     const saved = await t.refused(t.dispatch('scheduled.create', { node: t.node, input: manual('Saved agent', { agent: { definitionId: 'agent-1' } }) }))
     expect(saved.code).toBe('job_refused')

@@ -919,6 +919,10 @@ export class OwnerRoutes {
     if (!isPlainObject(fields)) return
     if (typeof fields.threadId === 'string' && (isPrivate(fields.threadId) || !this.sharedThread(fields.threadId)))
       throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: fields.threadId })
+    // The pull request it wakes on is a thread too: one it may not see is not found, the same as an output thread.
+    const watched = isPlainObject(fields.threadEvent) ? fields.threadEvent.threadId : undefined
+    if (typeof watched === 'string' && (isPrivate(watched) || !this.sharedThread(watched)))
+      throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: watched })
     if (typeof fields.projectId === 'string' && !services.projects.getProject(fields.projectId))
       throw new DomainRpcError('project_not_found', 'Project not found', { projectId: fields.projectId })
     if (fields.agent !== undefined && fields.agent !== null)

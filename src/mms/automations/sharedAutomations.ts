@@ -25,6 +25,8 @@ export function jobSharedWithComputers(job: ScheduledJob, isPrivate: (threadId: 
   // A draft is this computer's manager's work in progress; it moves once it is an automation.
   if (job.draft) return false
   if (job.threadId && isPrivate(job.threadId)) return false
+  // An automation that wakes on a private thread's pull request names that thread and its pull request.
+  if (job.trigger?.threadEvent && isPrivate(job.trigger.threadEvent.threadId)) return false
   if (job.createdBy && isPrivate(job.createdBy.threadId)) return false
   return true
 }

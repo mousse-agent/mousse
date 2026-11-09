@@ -43,6 +43,7 @@ import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
@@ -1533,6 +1534,8 @@ function threadEventTrigger(ctx: HandlerContext, input: { threadId: string; even
   if (schedule.kind !== 'manual') throw jobRefused('An automation that wakes on a pull request has no clock: its When is the pull request.')
   const thread = ctx.mms.threads.getThread(input.threadId)
   if (!thread || thread.botOwned) throw jobRefused('That thread is gone.')
+  // Another computer never reaches a private thread here, not even as the pull request an automation wakes on.
+  if (ctx.connection?.bridgeCaller && privateThreadOf(ctx.mms.threads)(thread.id)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: input.threadId })
   const link = thread.pullRequest
   if (!link) throw jobRefused('That thread has no pull request linked. Link it from the thread first.')
   // The number the page showed is checked against the link: a thread relinked meanwhile is not watched by surprise.
