@@ -39,4 +39,15 @@ describe('a fetch of a ref into Mousse’s own ref (what the Git policy assumes)
     git(cwd, 'fetch', '--no-tags', '--no-write-fetch-head', '--', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/other')
     expect(git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/pr/')).toBe('refs/remotes/origin/pr/7')
   })
+
+  it('moves a tracking ref mapped from a commit by name too, unless it passes an empty --refmap=', () => {
+    const cwd = fixture()
+    const commit = git(cwd, 'rev-parse', 'origin/main')
+    git(cwd, 'config', '--add', 'remote.origin.fetch', `${commit}:refs/remotes/origin/unexpected`)
+    git(cwd, 'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--refmap=', 'origin', commit)
+    expect(git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/unexpected')).toBe('')
+
+    git(cwd, 'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', 'origin', commit)
+    expect(git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/unexpected')).toBe('refs/remotes/origin/unexpected')
+  })
 })
