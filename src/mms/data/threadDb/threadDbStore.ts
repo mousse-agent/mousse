@@ -45,7 +45,24 @@ interface Row {
  * What this store remembers about a list it handed out or saved (the rows it held), or about an object (its row, and
  * the rows of the list it first came in, so a copy of that list still knows what it held).
  */
-interface Known { dbId: string; rid?: number; rids?: Set<number> }
+/**
+ * The rows a list held when it was loaded or saved: every row of its collection up to `max`, except `missing`. Row
+ * ids only grow, so this stays exact for good, and one view is shared by the list and every object saved in it.
+ */
+interface View { max: number; missing: Set<number> | null }
+interface Known { dbId: string; rid?: number; view?: View }
+
+/** The view of a list that held `held`, among the collection's rows `rows`. */
+function viewOf(held: Iterable<number>, rows: readonly Row[]): View {
+  let max = 0
+  const set = held instanceof Set ? (held as Set<number>) : new Set(held)
+  for (const rid of set) if (rid > max) max = rid
+  let missing: Set<number> | null = null
+  for (const row of rows) {
+    if (row.rid <= max && !set.has(row.rid)) (missing ??= new Set()).add(row.rid)
+  }
+  return { max, missing }
+}
 
 interface Entry {
   info: DbInfo
@@ -223,11 +240,11 @@ export class ThreadDbStore {
         const value = fromSkeleton<unknown>(row.skel)
         return value
       })
-      const rids = new Set(rows.map((row) => row.rid))
+      const view: View = { max: rows.reduce((max, row) => Math.max(max, row.rid), 0), missing: null }
       items.forEach((value, index) => {
-        if (value && typeof value === 'object') this.known.set(value, { dbId, rid: rows[index]!.rid, rids })
+        if (value && typeof value === 'object') this.known.set(value, { dbId, rid: rows[index]!.rid, view })
       })
-      this.known.set(items, { dbId, rids })
+      this.known.set(items, { dbId, view })
       collections.set(coll, items)
     }
     const state = new Map<string, unknown>()
@@ -235,7 +252,7 @@ export class ThreadDbStore {
     const data = compose(collections, state)
     // Every list the data holds is known, the empty ones `compose` made too (a session with no messages yet).
     for (const items of decompose(data).collections.values()) {
-      if (!this.known.has(items)) this.known.set(items, { dbId, rids: new Set() })
+      if (!this.known.has(items)) this.known.set(items, { dbId, view: { max: 0, missing: null } })
     }
     this.observed.set(dir, { dbId, seq: entry.info.seq })
     return data
@@ -347,7 +364,9 @@ export class ThreadDbStore {
     // What the caller's data held: the rows of the lists it came from and of the objects it holds.
     let tracked = false
     let stale = false
-    const held = new Set<number>()
+    const own = new Set<number>()
+    // Each distinct view once: the objects of one list share theirs.
+    const views = new Set<View>()
     const note = (value: unknown): Known | undefined => {
       const found = value && typeof value === 'object' ? this.known.get(value) : undefined
       if (!found) return undefined
@@ -356,12 +375,28 @@ export class ThreadDbStore {
         return undefined
       }
       tracked = true
-      if (found.rid !== undefined) held.add(found.rid)
-      for (const rid of found.rids ?? []) held.add(rid)
+      if (found.rid !== undefined) own.add(found.rid)
+      if (found.view) views.add(found.view)
       return found
     }
     note(items)
     const ridOf = items.map((item) => note(item)?.rid)
+    // Views that lacked no row cover everything up to the largest of them; the few others are asked in turn.
+    let cover = 0
+    const partial: View[] = []
+    for (const view of views) {
+      if (view.missing?.size) partial.push(view)
+      else if (view.max > cover) cover = view.max
+    }
+    partial.sort((a, b) => b.max - a.max)
+    const held = { has: (rid: number): boolean => {
+      if (rid <= cover || own.has(rid)) return true
+      for (const view of partial) {
+        if (view.max < rid) return false
+        if (!view.missing!.has(rid)) return true
+      }
+      return false
+    } }
     /**
      * Rows the caller had: those it may remove, and the only ones a new message may take the place of. The model
      * context and subagent sessions are written only by the thread's owner, so a save replaces them whole.
@@ -393,8 +428,9 @@ export class ThreadDbStore {
         if (id !== null) {
           row = byId.get(id)?.find((candidate) => !claimed.has(candidate.rid))
           // A message id names one message: a row with it that the caller's lists did not hold (written again after
-          // an undo and redo, or by another writer) is still this message, and is updated rather than duplicated.
-          row ??= old.find((candidate) => candidate.id === id && !claimed.has(candidate.rid))
+          // an undo and redo) is still this message, and is updated rather than duplicated. A row this process has
+          // not seen yet is taken only when it holds the same message: another writer may reuse an id.
+          row ??= old.find((candidate) => candidate.id === id && !claimed.has(candidate.rid) && (!candidate.unseen || sameAsSkeleton(item, candidate.skel)))
         }
       }
       if (!row && !hasIds) {
@@ -502,21 +538,22 @@ export class ThreadDbStore {
   /** After a save, each list is known to hold exactly the rows it was saved with, and each object its row. */
   private registerObjects(entry: Entry, plan: Plan, rids: number[]): void {
     const dbId = entry.info.dbId
-    for (const { planned, items } of plan.collections.values()) {
+    for (const [coll, { planned, items }] of plan.collections) {
       const saved = new Set<number>()
       for (const slot of planned) {
         const rid = slot.rid ?? rids[slot.tmp!]
         if (rid !== undefined) saved.add(rid)
       }
+      const view = viewOf(saved, entry.collections.get(coll) ?? [])
       for (const slot of planned) {
         const rid = slot.rid ?? rids[slot.tmp!]
         if (rid === undefined || !slot.item || typeof slot.item !== 'object') continue
         const before = this.known.get(slot.item)
         // An object already known keeps the list it knew; a new one learns the list it was saved in.
         if (before && before.dbId === dbId && before.rid === rid) continue
-        this.known.set(slot.item, { dbId, rid, rids: saved })
+        this.known.set(slot.item, { dbId, rid, view })
       }
-      this.known.set(items, { dbId, rids: saved })
+      this.known.set(items, { dbId, view })
     }
   }
 

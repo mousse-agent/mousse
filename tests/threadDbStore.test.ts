@@ -286,6 +286,32 @@ describe('ThreadDbStore removes only rows a caller had', () => {
     expect(new ThreadDbStore(client).load(dir).messages.map((m) => [m.id, m.content])).toEqual([['a', 'a'], ['b', 'b from session']])
   })
 
+  it('a stale object never takes over another writer\'s different message with the same id', () => {
+    store.save(dir, { messages: [message('dup', 'original')] })
+    const mine = store.load(dir).messages
+    // Another process adds a different message with the same id, then removes the original.
+    const theirs = peer.load(dir).messages
+    peer.save(dir, { messages: [...theirs, message('dup', 'peer')] })
+    peer.save(dir, { messages: peer.load(dir).messages.filter((m) => m.content !== 'original') })
+    store.save(dir, { messages: mine })
+    expect(new ThreadDbStore(client).load(dir).messages.map((m) => m.content).sort()).toEqual(['original', 'peer'])
+  })
+
+  it('a live list keeps a bounded record of what it held, however many times it grows', () => {
+    const live = store.load(dir).messages
+    for (let i = 0; i < 300; i++) {
+      live.push(message(`m${i}`, `${i}`))
+      store.save(dir, { messages: live })
+    }
+    const known = (store as unknown as { known: WeakMap<object, { view?: { max: number; missing: Set<number> | null } }> }).known
+    // Each object remembers its row and one shared view: no list of rows per object.
+    expect(live.every((m) => known.get(m)?.view && known.get(m)!.view!.missing === null)).toBe(true)
+    const started = performance.now()
+    const unchanged = Array.from({ length: 20 }, () => store.save(dir, { messages: live }))
+    expect(unchanged.every((stats) => stats.inserted + stats.updated + stats.deleted === 0)).toBe(true)
+    expect(performance.now() - started).toBeLessThan(2_000)
+  })
+
   it('copies saved after the thread left the cache keep a later append', () => {
     store.save(dir, { messages: [message('a', 'a')] })
     const copies = store.load(dir).messages.map((m) => structuredClone(m))
