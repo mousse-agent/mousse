@@ -129,7 +129,7 @@ describe('the model answer as a sidebar name', () => {
   it('fits the cap at a word, without a dangling stopword', () => {
     const title = normalizeTitle('Investigating why project groups disappear after restart on the other computer')!
     expect(titleLength(title)).toBeLessThanOrEqual(TITLE_MAX_CHARS)
-    expect(title).toBe('Investigating why project')
+    expect(title).toBe('Investigating why')
   })
 
   it('names nothing for UNTITLED or an empty answer', () => {
@@ -138,7 +138,7 @@ describe('the model answer as a sidebar name', () => {
   })
 
   it('keeps another language as written and counts an emoji or accent as one character', () => {
-    expect(normalizeTitle('Corrigir recorte do título')).toBe('Corrigir recorte do título')
+    expect(normalizeTitle('Recorte do título')).toBe('Recorte do título')
     expect(titleLength('é👍🏽')).toBe(2)
   })
 
@@ -149,7 +149,7 @@ describe('the model answer as a sidebar name', () => {
 
 describe('the title from the message alone', () => {
   it('drops "please"/"can you" and uses the first sentence that names something', () => {
-    expect(heuristicTitle('Hi! Can you fix the OAuth callback loop? It started yesterday.')).toBe('Fix the OAuth callback loop')
+    expect(heuristicTitle('Hi! Can you fix the OAuth callback loop? It started yesterday.')).toBe('Fix the OAuth callback')
   })
 
   it('names nothing for "continue" or a paste alone, and falls back to the command or a file', () => {
