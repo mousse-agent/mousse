@@ -372,8 +372,8 @@ export class AutomationDrafts {
     const fields = parseFields(args)
     const who = current ? current.draft!.who : this.pendingWho.get(this.authorKey(author))
     const { job, problems, reuseThread } = this.build(fields, current, who)
-    // Held to what the person holds now; Turn on holds it again.
-    const ceiling = this.deps.personCeiling(job.threadId)
+    // Held to what the person holds now, and a draft from an ordinary chat to that chat's mode; Turn on holds it again.
+    const ceiling = this.ceilingOf(job.threadId, author.originThreadId ?? current?.draft?.originThreadId)
     const permissionMode = job.permissionMode ? narrowPermissionMode(job.permissionMode, ceiling) : current?.permissionMode
     const draft = {
       draft: true as const,
@@ -412,6 +412,14 @@ export class AutomationDrafts {
     this.keepMeta(created.id, fields, author)
     this.deps.changed?.()
     return { draftId: created.id, problems }
+  }
+
+  /**
+   * The most a draft's runs may do: what the person holds for its thread (or the profile's mode), and for a draft an
+   * agent wrote in an ordinary chat, never more than that chat's own mode: its agent cannot hand a run more than it had.
+   */
+  private ceilingOf(threadId: string | undefined, originThreadId: string | undefined): PermissionMode {
+    return narrowPermissionMode(this.deps.personCeiling(threadId), originThreadId ? this.deps.personCeiling(originThreadId) : undefined)
   }
 
   /** The person picked Who in the composer: the next drafts this manager writes take it. */
@@ -540,7 +548,7 @@ export class AutomationDrafts {
       return made
     }
     const threadId = reuseThread ? this.deps.reuseThread(job.id, job.name, job.projectId).id : job.threadId
-    const ceiling = this.deps.personCeiling(threadId)
+    const ceiling = this.ceilingOf(threadId, job.draft!.originThreadId)
     const updated = this.deps.update(job.id, {
       draft: undefined,
       enabled: true,

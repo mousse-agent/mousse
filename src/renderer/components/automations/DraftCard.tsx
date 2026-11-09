@@ -4,8 +4,9 @@
 import { useState } from 'react'
 import type { AutomationItem } from '../../../shared/automations'
 import { describeSchedule } from '../../../shared/scheduleLabel'
+import { describePermissionMode } from '../../../shared/permissionMode'
 import type { JobSchedule, Project } from '../../../shared/types'
-import { CircleCheck, Clock, Folder, MessageSquare, Pause, Pencil, Repeat, User } from '../../lib/icons'
+import { CircleCheck, Clock, Folder, MessageSquare, Pause, Pencil, Repeat, Shield, User } from '../../lib/icons'
 import { Select, type SelectOption } from '../ui/Select'
 import { ownedWhenText } from './automationTime'
 import type { BotChoice } from './whoDo'
@@ -117,6 +118,7 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
           <span>{context}</span>
         </p>
       ) : null}
+      {draft?.prompt ? <p className="inbox-draft-prompt" data-testid={`${testIdPrefix}-prompt`} title={draft.prompt}>{draft.prompt}</p> : null}
       <div className="inbox-draft-fields">
         <span className="inbox-draft-field" title="When">
           <Clock size={13} strokeWidth={1.8} aria-hidden="true" />
@@ -135,6 +137,12 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
           <Folder size={13} strokeWidth={1.8} aria-hidden="true" />
           {onProject ? <Select ariaLabel="Project" size="small" value={item.where?.projectId ?? ''} options={projectOptions} disabled={busy} onChange={(projectId) => { if (projectId) void run(() => onProject(projectId)) }} /> : <span className="inbox-draft-fixed">{item.where?.name ?? 'No project'}</span>}
         </span>
+        {item.may && !item.mayIsGrant ? (
+          <span className="inbox-draft-field" title="May: how much each run may do without asking. Change it in Edit details." data-testid={`${testIdPrefix}-may`}>
+            <Shield size={13} strokeWidth={1.8} aria-hidden="true" />
+            <span className="inbox-draft-fixed">{describePermissionMode(item.may)}</span>
+          </span>
+        ) : null}
       </div>
       {problems.length && !draft?.ask ? <p className="inbox-draft-problem" data-testid={`${testIdPrefix}-problem`} title={problems.join(' ')}>{problems[0]}</p> : null}
       {draft?.ask ? (

@@ -124,7 +124,8 @@ describe('automation drafts', () => {
     drafts.ask({ draftId, question: 'Skip draft PRs?', options: ['Yes', 'No'] }, { managerThreadId: 'manager' })
     const index = buildAutomationIndex({ jobs: () => service.listJobs(), thread: () => undefined, threads: () => [], projectName: () => 'mousse', threadMode: () => 'ask', computerName: 'Desk', timeZone: 'UTC' })
     const item = index.items.find((entry) => entry.id === draftId)!
-    expect(item).toMatchObject({ paused: false, draft: { draftId, managerThreadId: 'manager', problems: ['Which project should it run in?'], ask: { question: 'Skip draft PRs?', options: ['Yes', 'No'] } }, result: { thread: 'new' } })
+    // The card shows what each run is asked to do, and how much it may do, before Turn on.
+    expect(item).toMatchObject({ paused: false, may: 'ask', draft: { draftId, managerThreadId: 'manager', prompt: PR_CHECK.prompt, problems: ['Which project should it run in?'], ask: { question: 'Skip draft PRs?', options: ['Yes', 'No'] } }, result: { thread: 'new' } })
     expect(item.attention).toBeUndefined()
     expect(item.next).toBeUndefined()
   })
@@ -193,6 +194,20 @@ describe('automation drafts', () => {
     const until = new Date(Date.now() + 86_400_000).toISOString()
     expect(drafts.pause({ id: draftId, until })).toMatchObject({ paused: true })
     expect(service.getJob(draftId)!.resumeAt).toBe(until)
+  })
+
+  it('holds a draft from an ordinary chat to that chat’s mode, not the profile’s', () => {
+    const store = setup({ ceiling: 'full' })
+    // The person holds Full access elsewhere; the chat the agent wrote it in runs in Ask before acting.
+    ;(store.drafts as unknown as { deps: { personCeiling: (threadId?: string) => string } }).deps.personCeiling = (threadId) => (threadId === 'chat-1' ? 'ask' : 'full')
+    const asked = store.drafts.save({ ...PR_CHECK, project: 'p1', permissionMode: 'full' }, { originThreadId: 'chat-1' })
+    expect(store.service.getJob(asked.draftId)).toMatchObject({ permissionMode: 'ask', permissionCeiling: 'ask' })
+    const unasked = store.drafts.save({ ...PR_CHECK, name: 'Other', project: 'p1' }, { originThreadId: 'chat-1' })
+    expect(store.service.getJob(unasked.draftId)!.permissionCeiling).toBe('ask')
+    // Turn on holds it there too; a manager's draft takes what the person holds.
+    expect(store.drafts.turnOn(unasked.draftId)).toMatchObject({ permissionCeiling: 'ask' })
+    const managers = store.drafts.save({ ...PR_CHECK, name: 'Manager', project: 'p1' }, { managerThreadId: 'manager' })
+    expect(store.drafts.turnOn(managers.draftId)).toMatchObject({ permissionCeiling: 'full' })
   })
 })
 

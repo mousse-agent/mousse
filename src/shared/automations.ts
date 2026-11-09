@@ -282,6 +282,8 @@ export interface AutomationItem {
     originThreadId?: string
     /** Who does it, as the person picked: a bot; absent: the default agent. */
     who?: { kind: 'bot'; botId: string }
+    /** What each run is asked to do: the card shows it before Turn on. */
+    prompt: string
     problems: string[]
     ask?: { question: string; options: string[] }
   }
