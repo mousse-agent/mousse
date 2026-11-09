@@ -1344,11 +1344,11 @@ export function registerGuiIpc(
     return res.items
   })
   registerHandler('queue:promoteToSteer', async (_e, threadId: string, itemId: string) => {
-    const res = await guiMms.request<{ ok: boolean }>('queue.promoteToSteer', {
+    const res = await guiMms.request<{ ok: boolean; notice?: 'compaction_finished' }>('queue.promoteToSteer', {
       threadId,
       itemId
     })
-    return res.ok
+    return { ok: res.ok, ...(res.notice ? { notice: res.notice } : {}) }
   })
 
   // ── Projects / threads (protocol) ────────────────────────────────────────

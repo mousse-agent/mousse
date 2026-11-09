@@ -2473,8 +2473,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const expectedRunId = asOptionalString(p.expectedRunId, 256)
       // A message an agent wrote keeps the mode limit it carries: a run that runs looser than that limit refuses it.
       const limit = deviceLimit(ctx)
-      const ok = queueRpc(() => ctx.mms.orchestrator.promoteQueueItemToSteer(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
-      return { ok, items: ctx.mms.orchestrator.listQueue(threadId) }
+      const sent = queueRpc(() => ctx.mms.orchestrator.promoteQueueItem(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
+      return { ok: sent.ok, ...(sent.notice ? { notice: sent.notice } : {}), items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'orchestrator.contextUsage': {
       const p = isObject(params) ? params : {}

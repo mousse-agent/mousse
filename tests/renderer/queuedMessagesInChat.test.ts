@@ -29,6 +29,7 @@ function Chat({ hold = null }: { hold?: QueueHold | null }) {
   return createElement(Fragment, null,
     createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
     createElement(ComposerNoticeSource, { notice: thread.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, onDismiss: thread.dismissDraftMoved } : null }),
+    createElement(ComposerNoticeSource, { notice: thread.notice ? { tone: 'info', title: thread.notice, onDismiss: thread.clearNotice } : null }),
     createElement(ComposerNoticeSlot),
     createElement(QueuedMessages, { queue: thread }))
 }
@@ -47,7 +48,7 @@ beforeEach(() => {
     edit: vi.fn(async (_thread: string, itemId: string, content: string) => ({ item: queued(itemId, content) })),
     reorder: vi.fn(async (_thread: string, ids: string[]) => ids.map((id) => listed.find((item) => item.id === id)!)),
     remove: vi.fn(async () => null),
-    promoteToSteer: vi.fn(async () => true)
+    promoteToSteer: vi.fn(async () => ({ ok: true }))
   }
   ;(window as unknown as { mousse: unknown }).mousse = {
     queue: { ...api, onUpdated: (listener: typeof push) => { push = listener; return () => { push = null } } }
@@ -596,6 +597,14 @@ describe('queued messages while a compaction runs', () => {
     expect(button('b', 'Remove')).not.toBeNull()
     await click(skip)
     expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'a')
+    expect(host.querySelector('.composer-notice')).toBeNull()
+  })
+
+  it('says so when the compaction had already finished: the message goes first with the compacted context', async () => {
+    api.promoteToSteer.mockResolvedValueOnce({ ok: true, notice: 'compaction_finished' })
+    await show([queued('a', 'one')], { historyTokens: 182_000 })
+    await click(button('a', 'Send now: skip compacting')!)
+    expect(host.querySelector('.composer-notice')?.textContent).toContain('Compaction already finished · sent first with the compacted context')
   })
 
   it('leaves the size out when the context is not known', async () => {

@@ -808,6 +808,15 @@ const NATIVE_COMPACT_TIMEOUT_MS = 5 * 60_000
 /** The compaction row of a `/compact` that was stopped or ran out of time. */
 const COMPACTION_STOPPED_TEXT = 'Compaction stopped · full history kept'
 
+/**
+ * What Send now did: `ok` false when it was refused. `notice: 'compaction_finished'`: it would have skipped a
+ * compaction that had already finished, so the message goes first with the compacted context.
+ */
+export interface SendNowOutcome {
+  ok: boolean
+  notice?: 'compaction_finished'
+}
+
 /** "182K", "9K", "1.2M": a compaction row's sizes. */
 function shortTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
@@ -1603,6 +1612,8 @@ export class OrchestratorService extends EventEmitter {
   private turnStates = new Map<string, TurnState>()
   /** Each thread's running `/compact`, so a Stop can end it (`stopCompaction`). */
   private readonly compactions = new Map<string, AbortController>()
+  /** Running compactions whose result was taken: a Stop or Send now comes too late for them. */
+  private readonly takenCompactions = new WeakSet<AbortController>()
   /** How long a `/compact` waits for the runtime's own compaction (tests shorten it). */
   private nativeCompactTimeoutMs = NATIVE_COMPACT_TIMEOUT_MS
   /** How often a running compaction renews its saved queue hold (tests shorten it). */
@@ -7357,6 +7368,18 @@ export class OrchestratorService extends EventEmitter {
     itemId: string,
     opts?: { expectedRevision?: string; expectedRunId?: string; permissionCeiling?: PermissionMode }
   ): boolean {
+    return this.promoteQueueItem(threadId, itemId, opts).ok
+  }
+
+  /**
+   * Send now, with what became of it: `notice: 'compaction_finished'` when the compaction it would skip had already
+   * finished (its result taken), so the message goes first with the compacted context.
+   */
+  promoteQueueItem(
+    threadId: string,
+    itemId: string,
+    opts?: { expectedRevision?: string; expectedRunId?: string; permissionCeiling?: PermissionMode }
+  ): SendNowOutcome {
     const session = this.getOrCreateSession(threadId)
     if (session.queue.find((entry) => entry.id === itemId)?.inboxIds?.length)
       throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
@@ -7406,10 +7429,10 @@ export class OrchestratorService extends EventEmitter {
       this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
     ) {
       this.emitQueueUpdated(threadId, session.queue)
-      return true
+      return { ok: true }
     }
 
-    return this.deliverPromotedItem(session, item!, steerRunId)
+    return { ok: this.deliverPromotedItem(session, item!, steerRunId) }
   }
 
   /**
@@ -7419,7 +7442,7 @@ export class OrchestratorService extends EventEmitter {
    * compaction another process runs is asked to stop through its saved hold, which that process reads when it
    * renews the hold.
    */
-  private sendNowSkippingCompaction(session: ThreadSession, itemId: string, expectedRevision?: string): boolean {
+  private sendNowSkippingCompaction(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
     const threadId = session.threadId
     const toFront = (items: QueuedMessage[]): QueuedMessage[] => {
       assertQueueRevision(items, expectedRevision)
@@ -7431,21 +7454,28 @@ export class OrchestratorService extends EventEmitter {
     }
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, toFront) : toFront(session.queue)
     this.emitQueueUpdated(threadId, session.queue)
+    // Too late once its result was taken: the message then goes first with the compacted context, and says so.
+    const running = this.compactions.get(threadId)
+    if (running && this.takenCompactions.has(running)) return { ok: true, notice: 'compaction_finished' }
     // A Stop already on its way ends it the same way.
-    if (!this.stopCompaction(threadId)) this.requestPeerCompactionStop(threadId)
-    return true
+    if (this.stopCompaction(threadId)) return { ok: true }
+    return this.requestPeerCompactionStop(threadId) === 'taken' ? { ok: true, notice: 'compaction_finished' } : { ok: true }
   }
 
-  /** Asks the process that runs the thread's compaction (its saved queue hold names it) to stop it. */
-  private requestPeerCompactionStop(threadId: string): void {
+  /**
+   * Asks the process that runs the thread's compaction (its saved queue hold names it) to stop it. `taken` when
+   * that compaction's result was already taken: too late to stop.
+   */
+  private requestPeerCompactionStop(threadId: string): 'requested' | 'taken' | 'gone' {
     const threadDir = this.resolveThreadDir(threadId)
-    if (!threadDir) return
+    if (!threadDir) return 'gone'
     try {
       const hold = readQueueHold(threadDir)
-      if (hold && hold.ownerInstance !== PROCESS_INSTANCE_ID) requestQueueHoldStop(threadDir, hold.id)
+      return hold && hold.ownerInstance !== PROCESS_INSTANCE_ID ? requestQueueHoldStop(threadDir, hold.id) : 'gone'
     } catch (error) {
       // The message is first in the queue all the same, and goes when the compaction ends.
       console.warn('[orchestrator] the compaction in another process could not be asked to stop', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return 'gone'
     }
   }
 
@@ -12275,7 +12305,10 @@ export class OrchestratorService extends EventEmitter {
    */
   private takeCompactionResult(threadId: string, threadDir: string | null | undefined, holdId: string, stop: AbortController): boolean {
     if (stop.signal.aborted) return false
-    if (!threadDir) return true
+    if (!threadDir) {
+      this.takenCompactions.add(stop)
+      return true
+    }
     let taken: ReturnType<typeof takeQueueHold>
     try {
       taken = takeQueueHold(threadDir, holdId, this.queueHoldClock())
@@ -12288,7 +12321,9 @@ export class OrchestratorService extends EventEmitter {
       if (!stop.signal.aborted) stop.abort()
       return false
     }
-    return !stop.signal.aborted
+    if (stop.signal.aborted) return false
+    this.takenCompactions.add(stop)
+    return true
   }
 
   /** A runtime's compaction whose result was not taken: its session is dropped, so the next turn has the full history. */

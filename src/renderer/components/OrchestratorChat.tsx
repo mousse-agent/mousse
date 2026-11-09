@@ -1505,6 +1505,7 @@ export function OrchestratorChat() {
 
         <ComposerNoticeSource notice={queue.error ? { tone: 'error', title: queue.error, onDismiss: queue.clearError } : null} />
         <ComposerNoticeSource notice={queue.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, shortTitle: 'Your edit is in the composer', onDismiss: queue.dismissDraftMoved } : null} />
+        <ComposerNoticeSource notice={queue.notice ? { tone: 'info', title: queue.notice, onDismiss: queue.clearNotice } : null} />
         {/* The dock on the composer's top edge: the top notice, one at a time. */}
         <ComposerNoticeSlot />
 

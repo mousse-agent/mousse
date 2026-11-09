@@ -355,7 +355,7 @@ describe('a message sent while the context compacts', () => {
     const compaction = compactNow(orch, engine, thread.id)
     await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
     const dir = store.getThreadDir(thread.id)
-    expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe(true)
+    expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe('requested')
     expect(await compaction).toBe('stopped')
     expect(lastRow(orch, thread.id)).toMatchObject({ content: 'Compaction stopped · full history kept', compaction: { kept: 'stopped' } })
     expect(fullHistory(orch, thread.id, before)).toBe(true)
@@ -375,7 +375,7 @@ describe('a message sent while the context compacts', () => {
         const compaction = compactNow(orch, engine, thread.id)
         await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
         const dir = store.getThreadDir(thread.id)
-        if (ending === 'stop asked') expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe(true)
+        if (ending === 'stop asked') expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe('requested')
         else rmSync(getQueueHoldPath(dir))
         finish(runtimeCompacted)
         expect(await compaction).toBe('stopped')
@@ -401,6 +401,30 @@ describe('a message sent while the context compacts', () => {
     expect(orch.getMessagesForPersistence(thread.id).find((message) => message.kind === 'context_compaction')?.content).toMatch(/^Context compacted · \d+K → \d+K$/)
     expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(false)
     await until(() => Boolean(sentWith(prompts, 'waiting for the compaction')))
+  }, 30_000)
+
+  it('Send now here once the result was taken says the compaction had finished, and the message goes with the compacted context', async () => {
+    const { orch, thread, harness, engine, prompts } = await setup()
+    longThread(orch, thread.id)
+    const finish = controlled(harness as never)
+    const compaction = compactNow(orch, engine, thread.id)
+    await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+    await orch.send('just too late', false, { threadId: thread.id, clientRequestId: 'too-late' })
+    const [item] = orch.listQueue(thread.id)
+    // Send now while the result is being saved.
+    const internal = orch as unknown as { persist: (immediate?: boolean) => void }
+    const realPersist = internal.persist.bind(orch)
+    let sent: unknown
+    vi.spyOn(internal, 'persist').mockImplementation((immediate) => {
+      if (sent === undefined && lastRow(orch, thread.id)?.content.startsWith('Context compacted')) sent = orch.promoteQueueItem(thread.id, item!.id)
+      return realPersist(immediate)
+    })
+    finish(false)
+    expect(await compaction).toBe('compacted')
+    vi.restoreAllMocks()
+    expect(sent).toEqual({ ok: true, notice: 'compaction_finished' })
+    await until(() => Boolean(sentWith(prompts, 'just too late')))
+    expect(orch.getNativeContext(thread.id).compaction).toBeDefined()
   }, 30_000)
 
   it('lifts the hold when the compaction row cannot be saved at the start, so a following send runs', async () => {
@@ -533,6 +557,18 @@ describe('a compaction hold found at startup', () => {
     await until(() => prompts.some((prompt) => prompt.text.includes('queued before the restart')))
     expect(prompts[0]!.text).toContain('picked')
     expect(prompts[0]!.text).not.toContain('queued before the restart')
+  }, 30_000)
+
+  it('of another process whose result was already taken: Send now says so, and the message goes first all the same', async () => {
+    const { orch, thread, store } = await setup()
+    leftBehind(store, thread.id, { pid: process.ppid, instance: 'another-process' })
+    const path = getQueueHoldPath(store.getThreadDir(thread.id))
+    writeFileSync(path, JSON.stringify({ ...readQueueHold(store.getThreadDir(thread.id)), taken: true }))
+    await orch.send('picked', false, { threadId: thread.id, clientRequestId: 'peer-taken' })
+    const picked = orch.listQueue(thread.id).find((item) => item.content === 'picked')!
+    expect(orch.promoteQueueItem(thread.id, picked.id)).toEqual({ ok: true, notice: 'compaction_finished' })
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['picked', 'queued before the restart'])
+    expect(readQueueHold(store.getThreadDir(thread.id))?.stopRequested).toBeUndefined()
   }, 30_000)
 
   it('of another process that still runs it: nothing drains and a send queues, until that compaction ends', async () => {

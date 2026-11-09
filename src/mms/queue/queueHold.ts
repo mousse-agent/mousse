@@ -96,14 +96,16 @@ export function renewQueueHold(threadDir: string, id: string, now = Date.now()):
 
 /**
  * Asks the process that set the hold `id` to stop its compaction: the request is saved on the hold, which that
- * process reads when it next renews it. Returns whether the hold was there to ask.
+ * process reads when it next renews it. `taken` when the compaction's result was already taken (too late to stop),
+ * `gone` when the hold is no longer there.
  */
-export function requestQueueHoldStop(threadDir: string, id: string): boolean {
+export function requestQueueHoldStop(threadDir: string, id: string): 'requested' | 'taken' | 'gone' {
   return withQueueMutationLock(threadDir, () => {
     const hold = readQueueHold(threadDir)
-    if (!hold || hold.id !== id || hold.taken) return false
+    if (!hold || hold.id !== id) return 'gone'
+    if (hold.taken) return 'taken'
     if (!hold.stopRequested) atomicWriteJsonSync(getQueueHoldPath(threadDir), { ...hold, stopRequested: true })
-    return true
+    return 'requested'
   })
 }
 

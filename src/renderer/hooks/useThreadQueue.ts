@@ -57,6 +57,9 @@ export interface ThreadQueue {
   /** The last failed change, for the composer's notice line; it stays until dismissed or a change succeeds. */
   error: string | null
   clearError: () => void
+  /** What a change did that the person should know, for the composer's notice line (Send now came too late to skip a compaction). */
+  notice: string | null
+  clearNotice: () => void
   /** An unsaved edit of this thread went to the composer (its message had started), for the composer's notice line. */
   draftMoved: boolean
   dismissDraftMoved: () => void
@@ -81,6 +84,9 @@ export interface ThreadQueue {
 
 export type QueueEditOutcome = 'saved' | 'changed' | 'failed'
 
+/** Send now on a message held for a compaction that had just finished: it goes first, with the compacted context. */
+export const COMPACTION_FINISHED_NOTICE = 'Compaction already finished · sent first with the compacted context'
+
 export function reorderByIds(items: QueuedMessage[], orderedIds: string[]): QueuedMessage[] {
   const byId = new Map(items.map((item) => [item.id, item]))
   const next: QueuedMessage[] = []
@@ -104,6 +110,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // The thread `items` were read for; null until the shown thread's list arrives.
   const [itemsThread, setItemsThread] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   // Open edits and "your edit is in the composer" notices live in the app store, by thread: they outlast the thread
   // shown, and the open edits are saved with the profile's workspace, so a reload keeps them.
   const shownEdit = useAppStore((state) => (threadId ? state.queueEditDrafts[threadId] : undefined))
@@ -212,6 +219,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     setItems([])
     setItemsThread(null)
     setError(null)
+    setNotice(null)
     setBusyIds({})
     // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list. An update of
     // another thread only matters to an edit open there.
@@ -308,12 +316,15 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     const refused = 'Could not send it now; the reply may have ended. The message is still queued.'
     markBusy(itemId, true)
     setError(null)
+    setNotice(null)
     try {
-      const ok = await window.mousse.queue.promoteToSteer(threadId, itemId)
+      const sent = await window.mousse.queue.promoteToSteer(threadId, itemId)
       if (!live()) return
-      if (!ok) {
+      if (!sent.ok) {
         setError(refused)
         void loadQueue(threadId)
+      } else if (sent.notice === 'compaction_finished') {
+        setNotice(COMPACTION_FINISHED_NOTICE)
       }
     } catch (err) {
       if (!live()) return
@@ -360,6 +371,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   }, [threadId, loadQueue, markBusy, changeScope, reconcileEdit])
 
   const clearError = useCallback(() => setError(null), [])
+  const clearNotice = useCallback(() => setNotice(null), [])
   const dismissDraftMoved = useCallback(() => {
     const thread = threadIdRef.current
     if (thread) useAppStore.getState().setQueueDraftNotice(thread, false)
@@ -389,7 +401,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   ].filter((item) => !item.internal), [items, optimisticItems, threadId])
 
   return useMemo(
-    () => ({ threadId, items: shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit }),
-    [threadId, shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit]
+    () => ({ threadId, items: shown, busyIds, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit }),
+    [threadId, shown, busyIds, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit]
   )
 }
