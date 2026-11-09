@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadData } from './collections'
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
+import { formatCursor, parseCursor } from './pageCursor'
 import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
@@ -157,6 +158,15 @@ function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null
   })
 }
 
+/** The cursor of a transcript row: its message id, and its occurrence when the id repeats. */
+function rowCursor(db: DatabaseSync, row: { rid: number; ord: number; payload: string; msg_id: string | null }): string {
+  const id = row.msg_id ?? String((JSON.parse(row.payload) as { id?: unknown }).id)
+  const total = Number((db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND msg_id = ?").get(id) as { n: number }).n)
+  if (total <= 1) return id
+  const earlier = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND msg_id = ? AND (ord < ? OR (ord = ? AND rid < ?))").get(id, row.ord, row.ord, row.rid) as { n: number }
+  return formatCursor(id, Number(earlier.n), true)
+}
+
 function loadFrom(db: DatabaseSync, dir: string): DbLoad {
   db.exec('BEGIN')
   try {
@@ -213,13 +223,15 @@ export class ThreadDbEngine {
           // Format 2: a hidden flag for paging, and the message id of removed rows for changesSince.
           db.exec('BEGIN IMMEDIATE')
           try {
-            db.exec("ALTER TABLE items ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0; UPDATE items SET hidden = 1 WHERE coll = 'm' AND json_extract(payload, '$.hidden') = 1; ALTER TABLE removed ADD COLUMN msg_id TEXT; PRAGMA user_version=2;")
+            // Another connection may have migrated while this one waited for the write lock.
+            version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+            if (version === 1) db.exec("ALTER TABLE items ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0; UPDATE items SET hidden = 1 WHERE coll = 'm' AND json_extract(payload, '$.hidden') = 1; ALTER TABLE removed ADD COLUMN msg_id TEXT; PRAGMA user_version=2;")
             db.exec('COMMIT')
           } catch (error) {
             if (db.isTransaction) db.exec('ROLLBACK')
             throw error
           }
-          version = 2
+          version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
         }
         if (version !== THREAD_DB_FORMAT) throw new ThreadDbError('format', `Unsupported thread database format ${version} at ${path}`)
       } catch (error) {
@@ -383,47 +395,50 @@ export class ThreadDbEngine {
 
   /**
    * A page of the visible transcript, read in one transaction: the newest messages, or those just before or after
-   * the message `before`/`after` (its last occurrence when an id repeats), up to `limit` and `maxBytes` (always at
-   * least one). `earlier`/`later` say how many visible messages are left on each side. Image data is left out
-   * unless `images`; it is fetched one image at a time. `missing` when the cursor message is not in the thread.
+   * the cursor `before`/`after`, up to `limit` and `maxBytes` of the JSON returned (UTF-8, blobs put back; always at
+   * least one message). A cursor is a message id, with the occurrence appended (`parseCursor`) when the id repeats;
+   * a bare repeated id means its last occurrence. `earlier`/`later` say how many visible messages are left on each
+   * side. Image data is left out unless `images`; it is fetched one image at a time. `missing` when the cursor
+   * message is not in the thread.
    */
   page(dir: string, request: MessagePageRequest): MessagePage {
     const { db } = this.open(dir)
     db.exec('BEGIN')
     try {
       const info = readInfo(db)
-      const cursorId = request.before ?? request.after
+      const cursorText = request.before ?? request.after
       let cursor: { ord: number; rid: number } | undefined
-      if (cursorId !== undefined) {
-        cursor = db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord DESC, rid DESC LIMIT 1").get(cursorId) as { ord: number; rid: number } | undefined
+      if (cursorText !== undefined) {
+        const { id, occurrence } = parseCursor(cursorText)
+        cursor = (occurrence === undefined
+          ? db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord DESC, rid DESC LIMIT 1").get(id)
+          : db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord ASC, rid ASC LIMIT 1 OFFSET ?").get(id, occurrence)) as { ord: number; rid: number } | undefined
         if (!cursor) return { info, messages: [], missing: true }
       }
       const forward = request.after !== undefined
       const where = cursor ? (forward ? 'AND (ord > ? OR (ord = ? AND rid > ?))' : 'AND (ord < ? OR (ord = ? AND rid < ?))') : ''
       const order = forward ? 'ORDER BY ord ASC, rid ASC' : 'ORDER BY ord DESC, rid DESC'
       const args = cursor ? [cursor.ord, cursor.ord, cursor.rid] : []
-      const statement = db.prepare(`SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' AND hidden = 0 ${where} ${order} LIMIT ?`)
-      const raw = statement.all(...args, request.limit) as unknown as Array<DbRow & { blob_paths: string | null }>
-      const kept: typeof raw = []
+      const statement = db.prepare(`SELECT rid, coll, ord, msg_id, payload, blob_paths FROM items WHERE coll = 'm' AND hidden = 0 ${where} ${order} LIMIT ?`)
+      const kept: Array<DbRow & { msg_id: string | null }> = []
       let bytes = 0
-      for (const row of raw) {
-        const size = row.payload.length
+      // Measured as returned: blobs put back, in UTF-8.
+      for (const raw of statement.iterate(...args, request.limit) as Iterable<DbRow & { msg_id: string | null; blob_paths: string | null }>) {
+        const row = hydrateRows(dir, [raw], { images: request.images === true })[0]!
+        const size = Buffer.byteLength(row.payload)
         if (kept.length && bytes + size > request.maxBytes) break
         bytes += size
-        kept.push(row)
+        kept.push({ ...row, msg_id: raw.msg_id })
       }
       if (!forward) kept.reverse()
-      const rows = hydrateRows(dir, kept, { images: request.images === true })
-      const out: MessagePage = { info, messages: rows.map((row) => row.payload) }
-      if (rows.length) {
+      const out: MessagePage = { info, messages: kept.map((row) => row.payload) }
+      if (kept.length) {
         const first = kept[0]!
         const last = kept[kept.length - 1]!
         const before = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND (ord < ? OR (ord = ? AND rid < ?))").get(first.ord, first.ord, first.rid) as { n: number }
         const after = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND (ord > ? OR (ord = ? AND rid > ?))").get(last.ord, last.ord, last.rid) as { n: number }
-        const firstId = (JSON.parse(rows[0]!.payload) as { id: string }).id
-        const lastId = (JSON.parse(rows[rows.length - 1]!.payload) as { id: string }).id
-        if (Number(before.n) > 0) out.earlier = { before: firstId, count: Number(before.n) }
-        if (Number(after.n) > 0) out.later = { after: lastId, count: Number(after.n) }
+        if (Number(before.n) > 0) out.earlier = { before: rowCursor(db, first), count: Number(before.n) }
+        if (Number(after.n) > 0) out.later = { after: rowCursor(db, last), count: Number(after.n) }
       }
       return out
     } finally {
@@ -431,18 +446,31 @@ export class ThreadDbEngine {
     }
   }
 
-  /** The visible transcript messages that changed since `since`, the ids of those removed, and the new sequence. */
+  /**
+   * The visible transcript messages that changed since `since`, the ids that have no visible message any more
+   * (removed or hidden since), and the new sequence. A reader applies `removed` first, then `messages`.
+   */
   messageChanges(dir: string, since: number, epoch?: number): MessageChanges {
     const changes = this.changes(dir, since, epoch)
-    const rows = changes.rows
     if (changes.reset) return { info: changes.info, reset: true, messages: [], removed: [] }
-    const removedIds = this.statement(this.open(dir), "SELECT DISTINCT msg_id FROM removed WHERE coll = 'm' AND changed_seq > ? AND msg_id IS NOT NULL").all(since) as Array<{ msg_id: string }>
-    return {
-      info: changes.info,
-      reset: false,
-      messages: rows.filter((row) => row.coll === 'm').map((row) => ({ ord: row.ord, payload: row.payload })).filter((row) => (JSON.parse(row.payload) as { hidden?: unknown }).hidden !== true),
-      removed: removedIds.map((row) => row.msg_id)
+    const connection = this.open(dir)
+    const transcript = changes.rows.filter((row) => row.coll === 'm')
+    const messages: Array<{ ord: number; payload: string }> = []
+    const gone = new Set<string>()
+    for (const row of transcript) {
+      const value = JSON.parse(row.payload) as { id?: unknown; hidden?: unknown }
+      if (value.hidden === true) {
+        if (typeof value.id === 'string') gone.add(value.id)
+      } else {
+        messages.push({ ord: row.ord, payload: row.payload })
+      }
     }
+    const removedIds = this.statement(connection, "SELECT DISTINCT msg_id FROM removed WHERE coll = 'm' AND changed_seq > ? AND msg_id IS NOT NULL").all(since) as Array<{ msg_id: string }>
+    for (const row of removedIds) gone.add(row.msg_id)
+    // Net of what is there now: an id removed and written again, or hidden in one row and shown in another, stays.
+    const visible = this.statement(connection, "SELECT 1 FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ? LIMIT 1")
+    const removed = [...gone].filter((id) => !visible.get(id))
+    return { info: changes.info, reset: false, messages, removed }
   }
 
   /** One transcript message, whole (images included), by id; its last occurrence when an id repeats. */

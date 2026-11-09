@@ -11570,13 +11570,19 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * `recoverAndDrainPendingQueues` for the start of the daemon: each thread kept in thread.db is read in the read
-   * worker just before its session loads, one at a time, so the start never loads every transcript on the event
-   * loop in one go.
+   * worker just before something needs it (a claim to reclaim, its session), one at a time, so the start never
+   * loads every transcript on the event loop in one go. Every claim is still reclaimed before any drain.
    */
   private async recoverAndDrainPendingQueuesAsync(): Promise<void> {
     if (this.lifecycle.stopping || !this.threadStore) return
     const ordered = this.startupRecoveryOrder()
-    for (const thread of ordered) if (!thread.settledAt) this.reclaimForStartup(thread.id)
+    for (const thread of ordered) {
+      if (this.lifecycle.stopping) return
+      if (thread.settledAt) continue
+      // Reclaiming reads the transcript only for a queue that holds a claim.
+      if (!this.sessions.has(thread.id) && this.hasClaimedQueueItem(thread.id)) await this.threadStore.warmThread(thread.id).catch(() => undefined)
+      this.reclaimForStartup(thread.id)
+    }
     for (const thread of ordered) {
       if (this.lifecycle.stopping) return
       if (thread.settledAt || this.startupDrainScheduled.has(thread.id)) continue
@@ -11606,6 +11612,14 @@ export class OrchestratorService extends EventEmitter {
   /** Every thread, in the deterministic order startup recovery schedules them in. */
   private startupRecoveryOrder(): Thread[] {
     return [...(this.threadStore?.listAllThreads() ?? [])].sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  private hasClaimedQueueItem(threadId: string): boolean {
+    try {
+      return this.threadStore?.loadMessageQueue(threadId).some((item) => item.state === 'claimed') ?? false
+    } catch {
+      return false
+    }
   }
 
   private reclaimForStartup(threadId: string): void {

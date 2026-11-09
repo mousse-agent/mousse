@@ -94,6 +94,7 @@ import {
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
 import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes } from './transcriptPaging'
+import { isOpenActivityRow } from '../run/restartNote'
 import { ROUTED_MESSAGES_PAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
@@ -2065,16 +2066,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         turnSnapshot: withoutLocalOnlyKeys(ctx, ctx.mms.orchestrator.getTurnSnapshot()),
         revision: ctx.globalSequence()
       }
-      if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId)) {
-        // Opening a thread that is not loaded reads one page from its database in the read worker; the whole thread
-        // is loaded only when something needs it (a turn, a queue drain).
-        const page = withTranscript
-          ? await ctx.mms.threads.readMessagePage(threadId, {
-            limit: newest ?? Number.MAX_SAFE_INTEGER,
-            maxBytes: newest ? ROUTED_SNAPSHOT_MESSAGE_BYTES : Number.MAX_SAFE_INTEGER,
-            images: true
-          })
-          : undefined
+      // Opening a thread that is not loaded reads one page from its database in the read worker; the whole thread
+      // is loaded only when something needs it (a turn, a queue drain). A page showing work still running loads the
+      // session after all: loading it settles work a previous daemon left running.
+      const page = !ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId) && withTranscript
+        ? await ctx.mms.threads.readMessagePage(threadId, {
+          limit: newest ?? Number.MAX_SAFE_INTEGER,
+          maxBytes: newest ? ROUTED_SNAPSHOT_MESSAGE_BYTES : Number.MAX_SAFE_INTEGER,
+          images: true
+        })
+        : undefined
+      const pageOnly = !ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId) &&
+        (!withTranscript || (page !== undefined && !page.messages.some(isOpenActivityRow)))
+      if (pageOnly) {
         const items = ctx.mms.threads.loadMessageQueue(threadId)
         return {
           ...common,
@@ -2114,11 +2118,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const cursor = before ?? after
       let page: { messages: ChatMessage[]; earlier?: unknown; later?: unknown } | undefined
-      if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId)) {
+      const fromDatabase = !ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId)
+      if (fromDatabase) {
         // An index range in the read worker; the thread is not loaded.
         page = await ctx.mms.threads.readMessagePage(threadId, { before, after, limit, maxBytes: ROUTED_MESSAGES_PAGE_BYTES })
-      } else {
+      }
+      // A page showing work still running loads the session, which settles work a previous daemon left running.
+      const settle = page !== undefined && page.messages.some(isOpenActivityRow)
+      if (!fromDatabase || settle) {
         await ctx.mms.threads.warmThread(threadId)
+        if (settle) ctx.mms.orchestrator.getOrCreateSession(threadId)
         const messages = ctx.mms.orchestrator.getMessages(threadId)
         page = before !== undefined ? messagesBefore(messages, before, limit, ROUTED_MESSAGES_PAGE_BYTES) : messagesAfter(messages, after!, limit, ROUTED_MESSAGES_PAGE_BYTES)
       }

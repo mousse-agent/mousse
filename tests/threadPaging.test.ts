@@ -7,6 +7,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
+import { messagesAfter, messagesBefore, newestPage } from '../src/mms/protocol/transcriptPaging'
 import type { ChatMessage } from '../src/shared/types'
 
 const message = (id: string, content: string, extra: Partial<ChatMessage> = {}): ChatMessage =>
@@ -67,6 +68,72 @@ describe('thread pages from thread.db', () => {
     expect((await client.call('messageChanges', dir, seq, changes.info.epoch + 1)).reset).toBe(true)
   })
 
+  it('measures a page by the JSON it returns, long text kept in blobs included', async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-paging-blob-')))
+    try {
+      client.callSync('create', other)
+      store.save(other, { messages: [0, 1, 2].map((i) => message(`b${i}`, `${i}`.repeat(200_000))) })
+      const page = await client.call('page', other, { limit: 3, maxBytes: 300_000 })
+      expect(ids(page.messages)).toEqual(['b2'])
+      expect(page.earlier).toEqual({ before: 'b2', count: 2 })
+      const one = await client.call('page', other, { limit: 3, maxBytes: 1 })
+      expect(one.messages[0]!.length).toBeGreaterThan(200_000)
+    } finally {
+      client.quiesce(other)
+      rmSync(other, { recursive: true, force: true })
+    }
+  })
+
+  it('pages through a transcript whose ids repeat, one message at a time, without skipping or cycling', async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-paging-dup-')))
+    try {
+      client.callSync('create', other)
+      const list = [message('a', 'a'), message('d', 'first d'), message('x', 'x'), message('d', 'second d'), message('y', 'y')]
+      store.save(other, { messages: list })
+      const contents = (payloads: string[]) => payloads.map((payload) => (JSON.parse(payload) as ChatMessage).content)
+      let page = await client.call('page', other, { limit: 1, maxBytes: 1_000_000 })
+      const seen = contents(page.messages)
+      for (let step = 0; page.earlier && step < 10; step++) {
+        page = await client.call('page', other, { before: page.earlier.before, limit: 1, maxBytes: 1_000_000 })
+        seen.unshift(...contents(page.messages))
+      }
+      expect(seen).toEqual(['a', 'first d', 'x', 'second d', 'y'])
+      // Forward from the first copy reaches the second one too.
+      let forward = await client.call('page', other, { after: 'a', limit: 1, maxBytes: 1_000_000 })
+      const ahead = contents(forward.messages)
+      for (let step = 0; forward.later && step < 10; step++) {
+        forward = await client.call('page', other, { after: forward.later.after, limit: 1, maxBytes: 1_000_000 })
+        ahead.push(...contents(forward.messages))
+      }
+      expect(ahead).toEqual(['first d', 'x', 'second d', 'y'])
+      // The loaded transcript pages the same way.
+      const loaded = store.load(other).messages
+      let shown = newestPage(loaded, 1, 1_000_000)
+      const fromMemory = shown.messages.map((m) => m.content)
+      for (let step = 0; shown.earlier && step < 10; step++) {
+        shown = messagesBefore(loaded, shown.earlier.before, 1, 1_000_000)!
+        fromMemory.unshift(...shown.messages.map((m) => m.content))
+      }
+      expect(fromMemory).toEqual(['a', 'first d', 'x', 'second d', 'y'])
+      expect(messagesAfter(loaded, 'a', 10, 1_000_000)!.messages.map((m) => m.content)).toEqual(['first d', 'x', 'second d', 'y'])
+    } finally {
+      client.quiesce(other)
+      rmSync(other, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a message hidden since as removed, and one removed and written again as present', async () => {
+    const seq = store.info(dir).seq
+    const loaded = store.load(dir).messages
+    loaded[98] = { ...loaded[98]!, hidden: true }
+    store.save(dir, { messages: loaded.filter((m) => m.id !== 'm97') })
+    const again = store.load(dir).messages
+    store.save(dir, { messages: [...again.slice(0, 96), message('m97', 'written again'), ...again.slice(96)] })
+    const changes = await client.call('messageChanges', dir, seq)
+    expect(changes.removed).toEqual(['m98'])
+    expect(changes.messages.map((row) => (JSON.parse(row.payload) as ChatMessage).content)).toEqual(['written again'])
+  })
+
   it('moves a database of the first format to the second when it is opened', async () => {
     client.quiesce(dir)
     const db = new DatabaseSync(join(dir, 'thread.db'))
@@ -119,6 +186,15 @@ describe('opening a thread kept in thread.db', () => {
     const loaded = await dispatchMethod(ctx(), 'thread.snapshot', { threadId: thread.id, newest: 50 }) as { messages: ChatMessage[]; earlier?: { count: number } }
     expect(loaded.messages.at(-1)!.id).toBe('m900')
     expect(loaded.earlier?.count).toBe(451 - 50)
+  })
+
+  it('settles work a previous daemon left running before a page shows it', async () => {
+    const thread = mms.threads.createThread('Interrupted', undefined, undefined, { started: true })
+    const compaction = message('c1', '', { role: 'assistant', kind: 'context_compaction', streaming: true } as Partial<ChatMessage>)
+    mms.threads.mutateThreadData(thread.id, () => ({ messages: [...transcript(20), compaction] }))
+    const snapshot = await dispatchMethod(ctx(), 'thread.snapshot', { threadId: thread.id, newest: 5 }) as { messages: ChatMessage[] }
+    const row = snapshot.messages.find((m) => m.id === 'c1')!
+    expect(row.streaming).not.toBe(true)
   })
 
   it('answers a snapshot without newest with the whole visible transcript', async () => {

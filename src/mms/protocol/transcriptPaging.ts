@@ -4,13 +4,15 @@
  * message's size is its JSON, so an image held inline counts in full.
  */
 
+import { cursorAt, cursorIndex } from '../data/threadDb/pageCursor'
+
 interface Identified {
   id: string
 }
 
 /** What is left before the first message a reader was given: load it from `before` with `thread.messages`. */
 export interface EarlierMessages {
-  /** The id of the oldest message the reader has. */
+  /** The cursor of the oldest message the reader has: its id (with the occurrence when the id repeats). */
   before: string
   /** How many older messages there still are. */
   count: number
@@ -41,7 +43,7 @@ export function newestMessages<T extends Identified>(
 ): { messages: T[]; earlier?: EarlierMessages } {
   const kept = takeNewest(messages, messages.length, maxBytes, Number.POSITIVE_INFINITY)
   const left = messages.length - kept.length
-  return left > 0 ? { messages: kept, earlier: { before: kept[0].id, count: left } } : { messages: kept }
+  return left > 0 ? { messages: kept, earlier: { before: cursorAt(messages, left), count: left } } : { messages: kept }
 }
 
 /** The newest messages, at most `limit` of them within `maxBytes`; `earlier` names the older ones left out. */
@@ -52,7 +54,7 @@ export function newestPage<T extends Identified>(
 ): { messages: T[]; earlier?: EarlierMessages } {
   const kept = takeNewest(messages, messages.length, maxBytes, limit)
   const left = messages.length - kept.length
-  return left > 0 && kept.length ? { messages: kept, earlier: { before: kept[0].id, count: left } } : { messages: kept }
+  return left > 0 && kept.length ? { messages: kept, earlier: { before: cursorAt(messages, left), count: left } } : { messages: kept }
 }
 
 /** What is left after the last message a reader was given: load it from `after` with `thread.messages`. */
@@ -62,7 +64,7 @@ export interface LaterMessages {
 }
 
 /**
- * Up to `limit` messages immediately after the message `after`, within `maxBytes`, in order.
+ * Up to `limit` messages immediately after the cursor `after` (`pageCursor`), within `maxBytes`, in order.
  * Undefined when `after` is not in the transcript.
  */
 export function messagesAfter<T extends Identified>(
@@ -71,7 +73,7 @@ export function messagesAfter<T extends Identified>(
   limit: number,
   maxBytes: number
 ): { messages: T[]; later?: LaterMessages } | undefined {
-  const at = messages.findIndex((message) => message.id === after)
+  const at = cursorIndex(messages, after)
   if (at < 0) return undefined
   let bytes = 0
   let end = at + 1
@@ -83,11 +85,11 @@ export function messagesAfter<T extends Identified>(
   }
   const kept = messages.slice(at + 1, end) as T[]
   const left = messages.length - end
-  return left > 0 && kept.length ? { messages: kept, later: { after: kept[kept.length - 1].id, count: left } } : { messages: kept }
+  return left > 0 && kept.length ? { messages: kept, later: { after: cursorAt(messages, end - 1), count: left } } : { messages: kept }
 }
 
 /**
- * Up to `limit` messages immediately before the message `before`, within `maxBytes`, in order.
+ * Up to `limit` messages immediately before the cursor `before` (`pageCursor`), within `maxBytes`, in order.
  * Undefined when `before` is not in the transcript.
  */
 export function messagesBefore<T extends Identified>(
@@ -96,12 +98,12 @@ export function messagesBefore<T extends Identified>(
   limit: number,
   maxBytes: number
 ): { messages: T[]; earlier?: EarlierMessages } | undefined {
-  const at = messages.findIndex((message) => message.id === before)
+  const at = cursorIndex(messages, before)
   if (at < 0) return undefined
   const kept = takeNewest(messages, at, maxBytes, limit)
   const left = at - kept.length
   return left > 0 && kept.length
-    ? { messages: kept, earlier: { before: kept[0].id, count: left } }
+    ? { messages: kept, earlier: { before: cursorAt(messages, left), count: left } }
     : { messages: kept }
 }
 
