@@ -478,7 +478,7 @@ const api = {
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
       ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
     /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
-    listDrives: (): Promise<{ home: string; drives: Array<{ path: string; label: string }> }> => ipcRenderer.invoke('fs:listDrives'),
+    listDrives: (): Promise<{ home: string; drives: Array<{ path: string; label: string; volume?: string }> }> => ipcRenderer.invoke('fs:listDrives'),
     search: (
       query: string,
       options?: { limit?: number; kinds?: Array<'file' | 'directory'> },

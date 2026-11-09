@@ -2270,7 +2270,7 @@ export function registerGuiIpc(
   const browseSupported = browseSupport(() => guiMms.hello?.instanceId, () => guiMms.request('capabilities'))
   const browsedRoot = (root: unknown) => browsedRootParams(root, browseSupported)
 
-  registerHandler('fs:listDrives', () => guiMms.request<{ home: string; drives: Array<{ path: string; label: string }> }>('files.drives'))
+  registerHandler('fs:listDrives', () => guiMms.request<{ home: string; drives: Array<{ path: string; label: string; volume?: string }> }>('files.drives'))
 
   registerHandler(
     'fs:listDir',
