@@ -3,6 +3,11 @@ import type { LocalTtsWorkerEvent, LocalTtsWorkerRequest } from './localTtsWorke
 
 /** What the read aloud engine uses of a worker; a WebAssembly `Worker` or a `NativeTtsSlot`. */
 export interface TtsWorker {
+  /**
+   * True when `cancel` stops a segment being voiced. A WebAssembly worker cannot be interrupted
+   * and only drops the result, so a stopped read terminates and replaces it instead.
+   */
+  readonly cancelsInPlace?: boolean
   postMessage(message: LocalTtsWorkerRequest): void
   addEventListener(type: 'message', listener: (event: MessageEvent<LocalTtsWorkerEvent>) => void): void
   addEventListener(type: 'error', listener: (event: ErrorEvent) => void): void
@@ -33,14 +38,14 @@ function errorEvent(message: string): ErrorEvent {
 }
 
 /**
- * Kokoro on a native engine slot (onnxruntime-node in a process main runs), behind the same
- * messages as the WebAssembly worker. Requests run one at a time in the order they were sent.
- * `terminate` kills the slot's process, so a segment being voiced stops at once.
+ * Kokoro on a native engine slot (the voice engine process main runs), behind the same messages
+ * as the WebAssembly worker. Requests run one at a time in the order they were sent. `cancel` and
+ * `terminate` stop a segment being voiced at once.
  *
- * When the slot cannot start, or its process ends before it voiced anything, Kokoro is switched to
+ * When the slot cannot start, or its engine ends before it voiced anything, Kokoro is switched to
  * WebAssembly for the rest of the app session: this slot starts `createFallback()` and hands it the
  * requests that got no answer, so the read carries on. Once the slot has voiced a segment, losing
- * its process is an `error` event, as a crashed worker is. A segment the engine could not voice is
+ * its engine is an `error` event, as a crashed worker is. A segment the engine could not voice is
  * an `error` message for that request and never switches.
  */
 export class NativeTtsSlot implements TtsWorker {
@@ -89,6 +94,10 @@ export class NativeTtsSlot implements TtsWorker {
     this.events.removeEventListener(type, listener as EventListener)
   }
 
+  get cancelsInPlace(): boolean {
+    return this.state === 'opening' || this.state === 'open'
+  }
+
   postMessage(message: LocalTtsWorkerRequest): void {
     if (this.state === 'fallback') {
       this.fallback?.postMessage(message)
@@ -98,8 +107,13 @@ export class NativeTtsSlot implements TtsWorker {
       this.pump()
     } else if (message.type === 'cancel') {
       const queued = this.queue.findIndex((request) => request.id === message.id)
-      if (queued >= 0) this.queue.splice(queued, 1)
-      else if (this.running?.id === message.id) this.cancelled.add(message.id)
+      if (queued >= 0) {
+        this.queue.splice(queued, 1)
+      } else if (this.running?.id === message.id && !this.cancelled.has(message.id)) {
+        this.cancelled.add(message.id)
+        // Only this slot's running segment is in main, so cancelling the slot stops just that one.
+        if (this.slotId !== null) void window.mousse.readAloud.nativeCancel(this.slotId).catch(() => undefined)
+      }
     }
   }
 
@@ -148,7 +162,7 @@ export class NativeTtsSlot implements TtsWorker {
     )
   }
 
-  /** The slot could not open, or its process ended. */
+  /** The slot could not open, or its engine ended. */
   private onSlotFailed(error: unknown): void {
     if (this.state !== 'opening' && this.state !== 'open') return
     const slotId = this.slotId

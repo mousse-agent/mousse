@@ -44,6 +44,7 @@ function fakeNative() {
       speaks.push({ slotId, text, reply })
       return reply.promise
     }),
+    nativeCancel: vi.fn(async () => undefined),
     nativeClose: vi.fn(async () => undefined),
     onNativeSlotExit: vi.fn((listener: (slotId: number) => void) => {
       exitListeners.add(listener)
@@ -139,7 +140,7 @@ describe('native read aloud slot', () => {
     expect(native.api.nativeSpeak).not.toHaveBeenCalled()
   })
 
-  it('kills the process on terminate and stops listening for exits', async () => {
+  it('closes the slot on terminate and stops listening for exits', async () => {
     const { slot } = openSlot()
     native.opens[0].resolve(4)
     await flush()
@@ -149,21 +150,41 @@ describe('native read aloud slot', () => {
     expect(native.exitListeners.size).toBe(0)
   })
 
-  it('drops the answer of a cancelled request, and never sends one cancelled while queued', async () => {
+  it('stops a cancelled running request in the engine and drops its answer, and never sends one cancelled while queued', async () => {
     const { slot, messages } = openSlot()
     native.opens[0].resolve(1)
     slot.postMessage(speak(1))
     slot.postMessage(speak(2))
     slot.postMessage(speak(3))
     await flush()
+    expect(slot.cancelsInPlace).toBe(true)
+    slot.postMessage({ type: 'cancel', id: 1 })
     slot.postMessage({ type: 'cancel', id: 1 })
     slot.postMessage({ type: 'cancel', id: 2 })
-    native.speaks[0].reply.resolve(audio())
+    expect(native.api.nativeCancel.mock.calls).toEqual([[1]])
+    native.speaks[0].reply.resolve({ error: 'The segment was cancelled' })
     await flush()
     expect(native.speaks.map((entry) => entry.text)).toEqual(['segment 1', 'segment 3'])
     native.speaks[1].reply.resolve(audio())
     await flush()
     expect(messages).toMatchObject([{ type: 'audio', id: 3 }])
+    // Audio that arrives for a cancelled request is dropped as well.
+    slot.postMessage(speak(4))
+    await flush()
+    slot.postMessage({ type: 'cancel', id: 4 })
+    native.speaks[2].reply.resolve(audio())
+    await flush()
+    expect(messages).toHaveLength(1)
+  })
+
+  it('cancels a request that is waiting for the slot to open without telling main', async () => {
+    const { slot } = openSlot()
+    slot.postMessage(speak(1))
+    slot.postMessage({ type: 'cancel', id: 1 })
+    native.opens[0].resolve(2)
+    await flush()
+    expect(native.api.nativeSpeak).not.toHaveBeenCalled()
+    expect(native.api.nativeCancel).not.toHaveBeenCalled()
   })
 
   it('reports a segment the engine could not voice as an error for that request, and keeps the native engine', async () => {
@@ -200,6 +221,8 @@ describe('native read aloud slot falling back to WebAssembly', () => {
     await flush()
 
     expect(slotModule.nativeKokoroUnavailable()).toBe(true)
+    // A WebAssembly worker cannot stop mid-segment.
+    expect(slot.cancelsInPlace).toBe(false)
     const [worker] = fallbacks
     expect(worker.posted).toEqual([speak(1)])
     // Later messages go to the worker, and its answers come out of the slot.
@@ -212,7 +235,7 @@ describe('native read aloud slot falling back to WebAssembly', () => {
     expect(worker.terminated).toBe(1)
   })
 
-  it('switches when the process ends before the slot voiced anything, re-sending the requests that got no answer', async () => {
+  it('switches when the engine ends before the slot voiced anything, re-sending the requests that got no answer', async () => {
     const { slot, errors } = openSlot()
     native.opens[0].resolve(5)
     slot.postMessage(speak(1))

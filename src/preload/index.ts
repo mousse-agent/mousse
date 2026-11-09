@@ -1090,14 +1090,16 @@ const api = {
     /** Bytes of one file of a downloaded local model. */
     readLocalModelFile: (modelId: LocalTtsModelId, path: string): Promise<Uint8Array> =>
       ipcRenderer.invoke('readAloud:readLocalModelFile', modelId, path),
-    /** Starts a native engine slot for a downloaded Kokoro model; resolves with its id once the model has loaded. */
+    /** Opens a native engine slot for a downloaded Kokoro model; resolves with its id once the model has loaded. */
     nativeOpen: (modelId: LocalTtsModelId): Promise<number> => ipcRenderer.invoke('readAloud:nativeOpen', modelId),
     /** Voices one segment on a slot; rejects when the slot stopped. */
     nativeSpeak: (slotId: number, text: string, voice: string, speed: number): Promise<NativeSpeechResult> =>
       ipcRenderer.invoke('readAloud:nativeSpeak', slotId, text, voice, speed),
-    /** Stops a slot at once, also mid-segment. */
+    /** Stops the slot's segments at once, also mid-segment; they resolve with an error. The slot stays open. */
+    nativeCancel: (slotId: number): Promise<void> => ipcRenderer.invoke('readAloud:nativeCancel', slotId),
+    /** Closes a slot; its segments stop at once. */
     nativeClose: (slotId: number): Promise<void> => ipcRenderer.invoke('readAloud:nativeClose', slotId),
-    /** A slot's process ended without being closed. */
+    /** The engine of a slot ended without the slot being closed. */
     onNativeSlotExit: (cb: (slotId: number) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: { slotId: number }) => cb(event.slotId)
       ipcRenderer.on('readAloud:nativeSlotExit', handler)
