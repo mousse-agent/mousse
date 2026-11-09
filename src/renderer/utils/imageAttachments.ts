@@ -91,7 +91,9 @@ export function imagePayloadToDataUrl(image: ImageAttachmentPayload): string {
 }
 
 /** Rebuild a paste-able File from a persisted image payload (queue → composer editing). */
-export async function imagePayloadToFile(image: ImageAttachmentPayload): Promise<File> {
-  const blob = await (await fetch(imagePayloadToDataUrl(image))).blob()
-  return new File([blob], image.name, { type: image.mimeType })
+export function imagePayloadToFile(image: ImageAttachmentPayload): File {
+  const binary = atob(image.data)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return new File([bytes], image.name, { type: image.mimeType })
 }

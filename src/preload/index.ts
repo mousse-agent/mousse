@@ -64,6 +64,7 @@ import type {
   PtyCreateRequest,
   PtyCreateResult,
   QueuedMessage,
+  QueueEditResult,
   CreateScheduledJobInput,
   ScheduledJob,
   ScheduledJobPatch,
@@ -345,9 +346,12 @@ const api = {
       ipcRenderer.invoke('queue:enqueue', threadId, request),
     remove: (threadId: string, itemId: string): Promise<QueuedMessage | null> =>
       ipcRenderer.invoke('queue:remove', threadId, itemId),
-    /** Replaces a queued message's text in place; resolves the saved item. */
-    edit: (threadId: string, itemId: string, content: string): Promise<QueuedMessage> =>
-      ipcRenderer.invoke('queue:edit', threadId, itemId, content),
+    /**
+     * Replaces a queued message's text in place. With `expectedContent` (the content the edit started from) it saves
+     * only if the message still has it, and otherwise answers the message as it is now, `changed`.
+     */
+    edit: (threadId: string, itemId: string, content: string, expectedContent?: string): Promise<QueueEditResult> =>
+      ipcRenderer.invoke('queue:edit', threadId, itemId, content, expectedContent),
     reorder: (threadId: string, orderedIds: string[]): Promise<QueuedMessage[]> =>
       ipcRenderer.invoke('queue:reorder', threadId, orderedIds),
     promoteToSteer: (threadId: string, itemId: string): Promise<boolean> =>

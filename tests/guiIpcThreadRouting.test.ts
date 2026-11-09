@@ -320,7 +320,47 @@ describe('editing a queued message', () => {
       calls.push({ method, params })
       return { item: saved, items: [saved] }
     })
-    await expect(invoke('queue:edit', REMOTE, 'q1', 'Fix the tests first')).resolves.toEqual(saved)
+    await expect(invoke('queue:edit', REMOTE, 'q1', 'Fix the tests first')).resolves.toEqual({ item: saved })
     expect(sent('queue.edit')).toEqual([{ method: 'queue.edit', params: { threadId: REMOTE, itemId: 'q1', content: 'Fix the tests first' } }])
+  })
+
+  /** The daemon's answers, in turn, to the calls the handler makes. */
+  const answer = (...replies: Array<(method: string) => unknown>) => {
+    for (const reply of replies) {
+      request.mockImplementationOnce(async (method: string, params?: unknown) => {
+        calls.push({ method, params })
+        return reply(method)
+      })
+    }
+  }
+  const listing = (content: string, revision = 'rev-1') => () => ({ items: [{ id: 'q1', threadId: REMOTE, content }], revision })
+
+  it('saves over the text the edit started from, naming the revision it read so nothing changes in between', async () => {
+    const saved = { id: 'q1', threadId: REMOTE, content: 'Fix the tests first' }
+    answer(listing('Fix the tests'), () => ({ item: saved, items: [saved] }))
+    await expect(invoke('queue:edit', REMOTE, 'q1', 'Fix the tests first', 'Fix the tests')).resolves.toEqual({ item: saved })
+    expect(calls).toEqual([
+      { method: 'queue.list', params: { threadId: REMOTE } },
+      { method: 'queue.edit', params: { threadId: REMOTE, itemId: 'q1', content: 'Fix the tests first', expectedRevision: 'rev-1' } }
+    ])
+  })
+
+  it('saves nothing when the text changed since the edit started, and answers the message as it is now', async () => {
+    answer(listing('Deploy instead'))
+    await expect(invoke('queue:edit', REMOTE, 'q1', 'Fix the tests first', 'Fix the tests'))
+      .resolves.toEqual({ item: { id: 'q1', threadId: REMOTE, content: 'Deploy instead' }, changed: true })
+    expect(sent('queue.edit')).toEqual([])
+  })
+
+  it('reads again when another message of the queue changed between the read and the edit', async () => {
+    const saved = { id: 'q1', threadId: REMOTE, content: 'Fix the tests first' }
+    answer(
+      listing('Fix the tests', 'rev-1'),
+      () => { throw new MmsProtocolError('revision_mismatch', 'The queue changed since you read it; read it again before changing it.') },
+      listing('Fix the tests', 'rev-2'),
+      () => ({ item: saved, items: [saved] })
+    )
+    await expect(invoke('queue:edit', REMOTE, 'q1', 'Fix the tests first', 'Fix the tests')).resolves.toEqual({ item: saved })
+    expect(sent('queue.edit').map((call) => (call.params as { expectedRevision?: string }).expectedRevision)).toEqual(['rev-1', 'rev-2'])
   })
 })

@@ -19,7 +19,7 @@ import { removeInlineSkillToken } from '../../shared/composerCommands'
 import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase, isTurnStoppable } from '../../shared/types'
-import { useAppStore } from '../stores/appStore'
+import { deletedThreadIds, useAppStore } from '../stores/appStore'
 import { useCommand } from '../commands/commandRegistry'
 import {
   ChatComposer,
@@ -27,7 +27,8 @@ import {
   type VoiceMessage,
   buildComposerMessageContent
 } from './ChatComposer'
-import { useThreadQueue } from '../hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
+import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { contextTokens } from '../lib/promptCache'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
@@ -341,12 +342,27 @@ export function OrchestratorChat() {
   // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
   const historyTokens = contextTokens(contextUsage) || undefined
   const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
+  // An unsaved edit of a queued message that started meanwhile goes to its thread's composer (shown or not) with the
+  // message's images, browser elements and references. Files are kept by thread here, like a paste.
+  const addComposerFiles = useCallback((threadId: string, files: AttachedFile[]) => {
+    const key = composerMediaKey(threadId)
+    if (key === activeMediaKeyRef.current) { setAttachedFiles((current) => [...current, ...files]); return }
+    const current = mediaByThreadRef.current[key] ?? EMPTY_COMPOSER_MEDIA
+    mediaByThreadRef.current[key] = { files: [...current.files, ...files], voice: current.voice }
+  }, [setAttachedFiles])
+  const onQueueDraftToComposer = useCallback((threadId: string, recovered: RecoveredQueueDraft) => {
+    restoreQueuedDraft(threadId, recovered, addComposerFiles)
+  }, [addComposerFiles])
   const queue = useThreadQueue({
     threadId: activeThreadId,
     optimisticItems: optimisticQueueItems,
     onOptimisticItemReconciled: onOptimisticQueueItemReconciled,
-    hold: queueHold
+    hold: queueHold,
+    onDraftToComposer: onQueueDraftToComposer
   })
+  // The notice about the moved edit goes once the composer is empty again (sent or cleared).
+  const { draftMoved: queueDraftMoved, dismissDraftMoved } = queue
+  useEffect(() => { if (queueDraftMoved && !input.trim()) dismissDraftMoved() }, [queueDraftMoved, input, dismissDraftMoved])
 
   const turnActivityRequestRef = useRef(0)
   const [renderQuestions, setRenderQuestions] = useState(false)
@@ -530,6 +546,17 @@ export function OrchestratorChat() {
     setAttachedFilesState(restored.files)
     setVoiceMessagesState(restored.voice)
   }, [activeThreadId])
+
+  // A deleted thread's staged files and voice notes (a recovered queued edit's images among them) are let go.
+  useEffect(() => useAppStore.subscribe((state, previous) => {
+    for (const threadId of deletedThreadIds(previous, state)) {
+      const key = composerMediaKey(threadId)
+      const media = mediaByThreadRef.current[key]
+      if (!media || key === activeMediaKeyRef.current) continue
+      releaseComposerMediaUrls(media)
+      delete mediaByThreadRef.current[key]
+    }
+  }), [])
 
   useEffect(() => {
     return () => {
@@ -1477,6 +1504,7 @@ export function OrchestratorChat() {
         </div>
 
         <ComposerNoticeSource notice={queue.error ? { tone: 'error', title: queue.error, onDismiss: queue.clearError } : null} />
+        <ComposerNoticeSource notice={queue.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, shortTitle: 'Your edit is in the composer', onDismiss: queue.dismissDraftMoved } : null} />
         {/* The dock on the composer's top edge: the top notice, one at a time. */}
         <ComposerNoticeSlot />
 

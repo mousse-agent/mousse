@@ -146,3 +146,33 @@
   background: transparent;
   box-shadow: none;
 }
+
+/* The message changed elsewhere while it was being edited: a warning word and two quiet text buttons, before
+   the editor's own buttons on its line. */
+.queued-message-changed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 4px;
+  color: var(--warning);
+}
+
+.queued-message-text-btn {
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-an-foreground-muted);
+  font: inherit;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.queued-message-text-btn:hover {
+  color: var(--color-an-foreground);
+  background: color-mix(in oklab, var(--color-an-foreground) 10%, transparent);
+}
+
+.queued-message-text-btn:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 1px;
+}
