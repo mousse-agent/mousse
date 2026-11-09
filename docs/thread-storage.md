@@ -31,6 +31,16 @@ info(key, value)
 
 What stays a file: `meta.json` (the thread's identity, read by lifecycle code without opening a database), `queue.json` and its journal (the queue's own lock and durability contract), the operation `journal/`, `workspace.json`, `actions.json`, `conversation-branches.json` and terminal scrollback.
 
+## Images and large outputs
+
+Image data (`images[].data` in messages, image parts of the model context) and any text longer than 64 KiB are kept outside the rows, in the thread's `blobs/` folder: one file per SHA-256 of the content, so the same image in two messages is stored once, and deleting the thread's folder frees them. Image data that is exact base64 is stored as its decoded bytes.
+
+A row that refers to blobs lists them in its `blob_paths` column: for each, the exact path in the row's JSON, the hash, the size and how it is stored. The payload holds an empty string there. That list is the only thing that marks a value as a blob, so an ordinary value can never be read as one.
+
+- A save writes and fsyncs its blobs before the transaction that commits the rows referring to them.
+- Reading a row puts its blobs back and checks each one's hash. A missing or damaged blob shows as empty image data or `[attachment unavailable]`, the thread still opens, and the row keeps its reference: a later save of that row writes the reference back, not the placeholder.
+- When a save removes or rewrites a row that had blobs, blobs no row refers to any more are deleted, once they are an hour old. Saves and collection both run under the thread's lock, and the hour keeps a blob another process has just written for a save it has not committed yet.
+
 ## Saving only what changed
 
 The daemon keeps, for each thread it uses, what it last wrote: per row its `rid`, its `ord` and a skeleton of its value (objects and arrays copied, strings shared with the value, since JavaScript strings never change). A save walks the thread it is given and compares each message with its skeleton. Text that did not change is the same string, so comparing it costs nothing; the walk costs a step per field, not per byte, and finds every change, however it was made. Only the rows that differ are serialized and written.

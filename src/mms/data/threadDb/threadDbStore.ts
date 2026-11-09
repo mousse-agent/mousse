@@ -28,6 +28,7 @@ import { compose, decompose, TRANSCRIPT, type StoredThreadData } from './collect
 import { fromSkeleton, sameAsSkeleton, sameSkeleton, skeletonOf, type Skeleton } from './jsonSkeleton'
 import { ORD_STEP, THREAD_DB_FILE, type DbChanges, type DbInfo, type DbLoad, type SaveRequest } from './threadDbEngine'
 import type { ThreadDbClient } from './threadDbClient'
+import { encodeRow, type BlobPath } from './threadBlobs'
 
 interface Row {
   rid: number
@@ -38,6 +39,10 @@ interface Row {
   seq: number
   /** Added by another process and never handed out or saved here since. */
   unseen?: boolean
+  /** The row refers to blobs; removing or rewriting it may leave some unused. */
+  hasBlobs?: boolean
+  /** Blobs it refers to that could not be read; their references are kept while the row shows their placeholders. */
+  lost?: BlobPath[]
 }
 
 /** What this store remembers about an object or array it handed out or saved. */
@@ -96,10 +101,13 @@ function sortRows(rows: Row[]): void {
 }
 
 const MAX_CACHED_THREADS = 64
+/** How often a save also collects unused blobs, at the least. */
+const COLLECT_INTERVAL_MS = 60 * 60_000
 
 export class ThreadDbStore {
   private readonly entries = new Map<string, Entry>()
   private readonly known = new WeakMap<object, Known>()
+  private readonly collectedAt = new Map<string, number>()
   /** Per thread folder, the newest sequence this process handed out or saved in full; outlives the cache. */
   private readonly observed = new Map<string, { dbId: string; seq: number }>()
   /** Loads a save or synchronous read had to do without a warm copy; tests assert entry points never cause one. */
@@ -124,7 +132,7 @@ export class ThreadDbStore {
       const value = JSON.parse(row.payload) as unknown
       let rows = collections.get(row.coll)
       if (!rows) collections.set(row.coll, (rows = []))
-      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: horizon === undefined || row.seq > horizon })
+      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: horizon === undefined || row.seq > horizon, hasBlobs: row.hasBlobs, lost: row.missing })
     }
     for (const rows of collections.values()) sortRows(rows)
     const state = new Map<string, Skeleton>(load.state.map((row) => [row.key, skeletonOf(JSON.parse(row.payload)) ?? null]))
@@ -152,7 +160,7 @@ export class ThreadDbStore {
       if (!rows) entry.collections.set(row.coll, (rows = []))
       const index = rows.findIndex((existing) => existing.rid === row.rid)
       // An edit by another process changes a row this process may well know; only a new row is unseen.
-      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: index >= 0 ? rows[index]!.unseen : true }
+      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: index >= 0 ? rows[index]!.unseen : true, hasBlobs: row.hasBlobs, lost: row.missing }
       if (index >= 0) rows[index] = next
       else rows.push(next)
       touched.add(row.coll)
@@ -282,7 +290,12 @@ export class ThreadDbStore {
         return (this.lastSave = { inserted: 0, updated: 0, deleted: 0, state: 0, bytes: 0 })
       }
       if (info) plan.request.info = info
+      // Blobs no row needs any more are collected at least hourly, also when no blob-bearing row changed now
+      // (an attachment removed while its blob was still too new to collect).
+      const collectDue = Date.now() - (this.collectedAt.get(dir) ?? 0) > COLLECT_INTERVAL_MS
+      if (collectDue) plan.request.collectBlobs = true
       const result = this.client.callSync('save', dir, plan.request)
+      if (result.ok && plan.request.collectBlobs) this.collectedAt.set(dir, Date.now())
       if (!result.ok) {
         // Another process wrote between our look and our write; look again and redo the difference.
         if (attempt >= 3) throw new Error('Thread data kept changing during the save')
@@ -336,7 +349,8 @@ export class ThreadDbStore {
       collections: new Map(),
       state: new Map(),
       bytes: 0,
-      moved: new Map()
+      moved: new Map(),
+      blobHashes: new Set()
     }
     for (const [coll, items] of target) this.planCollection(entry, coll, items, plan)
     for (const [key, value] of targetState) {
@@ -447,11 +461,14 @@ export class ThreadDbStore {
     }
     // Kept rows must stay in their stored order; a row that would move is written again instead.
     let lastOrd = -Infinity
+    // A row written again because it moved keeps the blob references it could not read.
+    const formerLost: Array<BlobPath[] | undefined> = new Array(items.length)
     for (let j = 0; j < items.length; j++) {
       const row = matches[j]
       if (!row) continue
       if (row.ord > lastOrd) lastOrd = row.ord
       else {
+        formerLost[j] = row.lost
         claimed.delete(row.rid)
         matches[j] = undefined
         plan.request.epochBump = true
@@ -460,8 +477,10 @@ export class ThreadDbStore {
     const survivors: Row[] = []
     for (const row of old) {
       if (claimed.has(row.rid)) continue
-      if (seen(row)) plan.request.deletes.push({ rid: row.rid, coll })
-      else survivors.push(row)
+      if (seen(row)) {
+        plan.request.deletes.push({ rid: row.rid, coll })
+        if (row.hasBlobs) plan.request.collectBlobs = true
+      } else survivors.push(row)
     }
 
     // Orders for new rows: between the rows they sit between, or after the last one.
@@ -516,25 +535,44 @@ export class ThreadDbStore {
       if (row) {
         const same = sameAsSkeleton(item, row.skel)
         if (same && row.ord === ord) {
-          planned.push({ item, rid: row.rid, ord, skel: row.skel, seq: row.seq })
+          planned.push({ item, rid: row.rid, ord, skel: row.skel, seq: row.seq, hasBlobs: row.hasBlobs, lost: row.lost })
+          continue
+        }
+        if (same) {
+          plan.request.updates.push({ rid: row.rid, coll, ord })
+          planned.push({ item, rid: row.rid, ord, skel: row.skel, hasBlobs: row.hasBlobs, lost: row.lost })
           continue
         }
         // The payload is the skeleton serialized, so what is written and what is remembered can never differ.
-        const skel = same ? row.skel : skeletonOf(item) ?? null
-        const payload = same ? undefined : JSON.stringify(skel)
-        if (payload !== undefined) plan.bytes += payload.length
-        plan.request.updates.push({ rid: row.rid, coll, ord, payload })
-        planned.push({ item, rid: row.rid, ord, skel })
+        const skel = skeletonOf(item) ?? null
+        const encoded = this.encode(skel, row.lost, plan)
+        if (row.hasBlobs) plan.request.collectBlobs = true
+        plan.request.updates.push({ rid: row.rid, coll, ord, payload: encoded.payload, blobPaths: encoded.blobPaths })
+        planned.push({ item, rid: row.rid, ord, skel, hasBlobs: encoded.blobPaths !== null, lost: encoded.kept })
       } else {
         const skel = skeletonOf(item) ?? null
-        const payload = JSON.stringify(skel)
-        plan.bytes += payload.length
+        const encoded = this.encode(skel, formerLost[j], plan)
         const tmp = plan.request.inserts.length
-        plan.request.inserts.push({ tmp, coll, ord, payload })
-        planned.push({ item, tmp, ord, skel })
+        plan.request.inserts.push({ tmp, coll, ord, payload: encoded.payload, blobPaths: encoded.blobPaths })
+        planned.push({ item, tmp, ord, skel, hasBlobs: encoded.blobPaths !== null, lost: encoded.kept })
       }
     }
     plan.collections.set(coll, { planned, survivors, items })
+  }
+
+  /** A row's payload with images and long text moved to blobs, and the blobs added to the save. */
+  private encode(skel: Skeleton, lost: BlobPath[] | undefined, plan: Plan): { payload: string; blobPaths: string | null; kept?: BlobPath[] } {
+    const encoded = encodeRow(skel, lost)
+    plan.bytes += encoded.payload.length
+    for (const blob of encoded.blobs) {
+      if (plan.blobHashes.has(blob.sha256)) continue
+      plan.blobHashes.add(blob.sha256)
+      ;(plan.request.blobs ??= []).push(blob)
+      plan.bytes += blob.data.length
+    }
+    // References still missing their blob, kept so a later save keeps them too.
+    const kept = encoded.paths?.filter((ref) => lost?.some((missing) => missing.sha256 === ref.sha256 && missing.kind === ref.kind))
+    return { payload: encoded.payload, blobPaths: encoded.paths ? JSON.stringify(encoded.paths) : null, kept: kept?.length ? kept : undefined }
   }
 
   /** After a save, each list is known to hold exactly the rows it was saved with, and each object its row. */
@@ -564,7 +602,7 @@ export class ThreadDbStore {
       const rows: Row[] = planned.map((slot) => {
         const rid = slot.rid ?? rids[slot.tmp!]!
         // Unchanged rows keep their sequence; written ones (and moved ones) take this save's.
-        return { rid, ord: slot.ord, id: rowId(coll, slot.item), skel: slot.skel, seq: slot.seq ?? info.seq }
+        return { rid, ord: slot.ord, id: rowId(coll, slot.item), skel: slot.skel, seq: slot.seq ?? info.seq, hasBlobs: slot.hasBlobs, lost: slot.lost }
       })
       for (const survivor of survivors) {
         const moved = plan.moved.get(survivor.rid)
@@ -587,7 +625,7 @@ export class ThreadDbStore {
 }
 
 /** `seq` is set for a row left exactly as it was. */
-interface PlannedRow { item: unknown; rid?: number; tmp?: number; ord: number; skel: Skeleton; seq?: number }
+interface PlannedRow { item: unknown; rid?: number; tmp?: number; ord: number; skel: Skeleton; seq?: number; hasBlobs?: boolean; lost?: BlobPath[] }
 
 interface Plan {
   request: SaveRequest
@@ -595,4 +633,5 @@ interface Plan {
   state: Map<string, Skeleton | null>
   bytes: number
   moved: Map<number, number>
+  blobHashes: Set<string>
 }
