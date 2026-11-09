@@ -2557,7 +2557,8 @@ html.platform-darwin .titlebar-left {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: min(280px, calc(100vw - 48px));
+  /* Wide enough that the cache line and Compact now share one line. */
+  width: min(300px, calc(100vw - 48px));
   padding: 10px 12px 12px;
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
