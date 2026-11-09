@@ -126,7 +126,7 @@
 }
 
 /* The reply line in the tooltip: the theme's secondary text, not the prompt's colour at 60% opacity, which
-   fell to about 4:1 on the white light-theme tooltip. */
+   was about 4.6:1 on the white light-theme tooltip, only just above the 4.5:1 minimum. */
 .an-message-list-wrap .chat-prompt-preview p {
   opacity: 1;
   color: var(--text-secondary);

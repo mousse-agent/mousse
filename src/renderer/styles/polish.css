@@ -1257,6 +1257,11 @@ html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
   backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
 }
 
+/* On the glass, hover still deepens the fill and brings the text to full colour. */
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump:hover {
+  background-color: color-mix(in srgb, var(--text-primary) 8%, rgba(var(--surface-soft-rgb), var(--frosted-composer-alpha, 0.6)));
+}
+
 /* Go to latest sits on the content now, so it takes the composer's glass, just above it. */
 html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
   bottom: calc(var(--chat-composer-stack, 32px) + 8px);
