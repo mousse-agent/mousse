@@ -587,7 +587,6 @@ function MessageToolbar({
       onPointerDown={(event) => event.stopPropagation()}
     >
       {timestamp && <span>{timestamp}</span>}
-      {promptTurnId && <PromptVersionSwitcher turnId={promptTurnId} />}
       {undoMessageId && <PromptUndoButton messageId={undoMessageId} />}
       {onEdit && <PromptEditButton turnId={promptTurnId} onEdit={onEdit} />}
       {text && speechKey && (speechText ?? text) && (
@@ -1703,6 +1702,10 @@ export const MessageList = memo(function MessageList({
                           className={classNames?.userMessage}
                           enableImagePreview={enableImagePreview}
                         />
+                        )}
+                        {/* An edited prompt says so, with its versions, whether or not the pointer is over it. */}
+                        {promptTurnId && editingPromptId !== turn.userMsg.id && (
+                          <PromptVersionSwitcher turnId={promptTurnId} />
                         )}
                         {showUserToolbar && editingPromptId !== turn.userMsg.id && (
                           <MessageToolbar

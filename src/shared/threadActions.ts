@@ -147,6 +147,12 @@ export interface ConversationBranch {
    * prompt). Branches made at the start of the same turn, with the branch that turn ran on, are versions of its prompt.
    */
   at?: 'start' | 'end'
+  /**
+   * `shared`: the branch keeps no files of its own. An edited prompt's branch shares the thread's files as they are:
+   * making it, or switching to or from it, changes only the conversation, never a file (`retainedRef` pins the files
+   * as they were when it was made, as a record).
+   */
+  files?: 'shared'
   gitBranch: string
   retainedRef: string
   activeActionId?: ActionId

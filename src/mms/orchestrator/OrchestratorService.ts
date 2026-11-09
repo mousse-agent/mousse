@@ -250,7 +250,7 @@ import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agent
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync } from '../actions/snapshots'
-import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync } from '../actions/git'
+import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync, tryGitAsync as actionTryGitAsync } from '../actions/git'
 import {
   claimNextNormal,
   clearPendingQueue,
@@ -336,6 +336,7 @@ interface NormalizedOrchestratorSendRequest {
   mode: ChatMode
   images?: ChatImageAttachment[]
   workflowInvocationId?: string
+  conversationBranchId?: string
 }
 
 interface NormalizedContextUsageRequest {
@@ -352,8 +353,19 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
     content: request.content,
     workflowInvocationId: request.workflowInvocationId,
     mode: normalizeChatMode(request.mode),
-    images: request.images?.filter((img) => img.data && img.mimeType)
+    images: request.images?.filter((img) => img.data && img.mimeType),
+    ...(request.conversationBranchId ? { conversationBranchId: request.conversationBranchId } : {})
   }
+}
+
+/** The conversation branch a send names (an edited prompt's), if any. */
+function expectedBranchOf(input: OrchestratorSendInput): string | undefined {
+  return typeof input === 'object' ? input.conversationBranchId : undefined
+}
+
+/** A send that names a branch the thread is no longer on: nothing was sent. */
+function branchChanged(): DomainRpcError {
+  return new DomainRpcError('conversation_branch_changed', 'The conversation changed while you were editing. Try again.')
 }
 
 /** Render one answered value with option labels where they resolve, raw text otherwise. */
@@ -2357,6 +2369,48 @@ export class OrchestratorService extends EventEmitter {
    * Ends a queued run that nothing can start (the daemon stopped between its admission and the write that
    * would have started it) as cancelled. A stale write or a run that is already terminal changes nothing.
    */
+  /**
+   * What the model is told on the first turn of an edited prompt's branch (`files: 'shared'`): the conversation went
+   * back to before the replaced message, but the files did not, and which files differ from when it was sent (the
+   * replaced turn's start snapshot against this turn's). Only the model reads it; the transcript and Mousse's record of
+   * the conversation keep the person's text. Undefined on any other turn, and when no file differs.
+   */
+  private async editedPromptNote(threadDirectory: string, branchId: string, turnId: string, startSha: string | undefined, cwd: string | null): Promise<string | undefined> {
+    try {
+      const branch = new ConversationBranchService(threadDirectory).list().find((item) => item.id === branchId)
+      if (branch?.files !== 'shared' || !branch.parentTurnId) return undefined
+      const actions = new ThreadActionService(threadDirectory).list()
+      const prompted = (action: import('../../shared/threadActions').ThreadAction) => action.actor?.kind !== 'user' && Boolean(action.nativeContextStartBoundary)
+      if (actions.some((action) => action.conversationBranchId === branchId && action.turnId !== turnId && prompted(action))) return undefined
+      const index = actions.findIndex((action) => action.turnId === branch.parentTurnId)
+      const replaced = actions[index]
+      if (!replaced) return undefined
+      const later = actions.slice(index).filter((action) => action.conversationBranchId === replaced.conversationBranchId && prompted(action)).length
+      const turns = later === 1 ? 'the replaced turn' : `${later} turns from the replaced one on`
+      const head = `[Mousse] This message replaces an earlier one. The conversation above ends before the replaced message. The project files were not rewound: they still hold the changes made by ${turns}, which are no longer shown.`
+      const listed = startSha && cwd ? await actionTryGitAsync(cwd, ['diff', '--name-status', '--no-renames', replaced.startSha, startSha]) : undefined
+      if (!listed?.ok) return `${head} Read a file before relying on what you remember of it.`
+      const rows = listed.stdout.split('\n').filter(Boolean)
+      if (!rows.length) return undefined
+      const word: Record<string, string> = { A: 'added', D: 'deleted', M: 'modified', T: 'type changed' }
+      const named = rows.slice(0, 50).map((row) => { const [status, ...path] = row.split('\t'); return `${path.join('\t')} (${word[status?.[0] ?? ''] ?? 'changed'})` })
+      const more = rows.length > 50 ? `, and ${rows.length - 50} more` : ''
+      return `${head} Files that differ from when it was sent: ${named.join(', ')}${more}. Read a file before relying on what you remember of it.`
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The conversation branch a thread is on now, as its workspace record says; `main` when it has none. */
+  private activeConversationBranch(threadId: string): string {
+    try {
+      const directory = this.resolveThreadDir(threadId)
+      return (directory ? new ThreadWorkspaceManager(directory).load()?.conversationBranchId : undefined) ?? 'main'
+    } catch {
+      return 'main'
+    }
+  }
+
   private cancelOrphanedAdmission(runId: string, error: string): void {
     this.markRun(runId, (runs, id) => {
       if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { interruptedBy: 'daemon_restart', error })
@@ -8988,6 +9042,10 @@ export class OrchestratorService extends EventEmitter {
     if (session.deleted) {
       throw new Error(`Thread deleted: ${threadId}`)
     }
+    // An edited prompt is refused at once when the thread is already on another branch; its turn checks again when it
+    // starts, under the thread's lease, and it never waits in the queue, where nothing would check it.
+    const expectedBranch = expectedBranchOf(input)
+    if (expectedBranch && this.activeConversationBranch(threadId) !== expectedBranch) throw branchChanged()
 
     // A person's new message on a thread paused by a usage limit joins the queue and the pause stays: it runs after
     // the continue turn (at the reset or Resume now), or at once when the pause is cancelled. Agents' messages,
@@ -9125,6 +9183,11 @@ export class OrchestratorService extends EventEmitter {
       })()
 
     if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause) {
+      if (expectedBranch) {
+        const busy = new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
+        if (run) this.cancelOrphanedAdmission(run.runId, busy.message)
+        throw busy
+      }
       const item = this.enqueueForThread(threadId, input, {
         source: opts?.source,
         runId: run?.runId,
@@ -9606,6 +9669,8 @@ export class OrchestratorService extends EventEmitter {
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
     const requeueUnstarted = (): OrchestratorResponse => {
+      // An edited prompt never waits in the queue, where nothing would check its branch: it is refused instead.
+      if (expectedBranchOf(input)) throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
       if (queueItemId) {
         const released = this.releaseSessionClaim(session, queueItemId, claimOwnerToken)
         return { message: '', actions: [], queued: true, queueItem: released ?? undefined }
@@ -9771,6 +9836,8 @@ export class OrchestratorService extends EventEmitter {
     // Set only when this turn made the thread's worktree while the project folder held uncommitted changes.
     const turnStartNote = session.workspace?.startNote
     const conversationBranchId = recoveryManager?.load()?.conversationBranchId ?? 'main'
+    // Under the thread's lease, after any switch that was running has finished: an edited prompt runs only on its branch.
+    if (request.conversationBranchId && request.conversationBranchId !== conversationBranchId) throw branchChanged()
     const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
       ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
       : []
@@ -10132,6 +10199,9 @@ export class OrchestratorService extends EventEmitter {
           ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
           : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
       const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
+      // An edited prompt's first turn: the model is told the files were not rewound, and which ones differ.
+      const editDirectory = session.threadId !== '__unbound__' && displayUserMessage && !reuseLastUser ? this.resolveThreadDir(session.threadId) : undefined
+      const editNote = editDirectory ? await this.editedPromptNote(editDirectory, conversationBranchId, turnId, turnStartSha, checkpointCwd) : undefined
       handoffs = await this.planTurnHandoffs({
         session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel,
         content: userContent, images, mode, modelOverride, planning
@@ -10157,7 +10227,7 @@ export class OrchestratorService extends EventEmitter {
         child: this.childTurnPolicy(session),
         ...(opts?.source === 'provider-continuation' ? { continuation: true, continuationId: opts.continuationId } : {}),
         ...(opts?.agent ? { fromAgent: true as const } : {}),
-        prompt: handoffs ? handoffs.prompt(userContent) : userContent,
+        prompt: (editNote ? `${editNote}\n\n` : '') + (handoffs ? handoffs.prompt(userContent) : userContent),
         messages: handoffs ? handoffs.messages(activeMessages) : activeMessages,
         // A switch handoff stands in for the transcript, including its compaction memory.
         contextSummary: handoffs?.replaceHistory ? undefined : getCompactionSummary(this.nativeContext),

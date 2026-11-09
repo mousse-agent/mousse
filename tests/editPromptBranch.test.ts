@@ -18,7 +18,9 @@ describe('the versions of an edited prompt', () => {
     id, name: id, parentBranchId: 'main', parentTurnId, ...(at ? { at } : {}), gitBranch: '', retainedRef: '',
     contextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }, lifecycle: 'inactive', creationReason: 'fork', createdAt: ''
   })
-  const action = (turnId: string, conversationBranchId: string) => ({ turnId, conversationBranchId }) as ThreadAction
+  const action = (turnId: string, conversationBranchId: string) => ({
+    turnId, conversationBranchId, actor: { kind: 'main' }, nativeContextStartBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+  }) as ThreadAction
   const actions = [action('t1', 'main'), action('t2', 'main'), action('t2-edit', 'e1'), action('t2-edit-2', 'e2')]
   const branches = [branch('e1', 't2', 'start'), branch('e2', 't2', 'start'), branch('after', 't1')]
 
@@ -82,28 +84,28 @@ describe('editing a prompt through the daemon', { timeout: 60_000 }, () => {
     return { thread, cwd, first, second, record, call }
   }
 
-  it('starts an edit of the second prompt with the files and conversation from before its turn, and switches back to the original', async () => {
+  it('an edit of the second prompt shares the files as they are: making it, switching to it and back change no file', async () => {
     const { cwd, second, record, call } = await twoTurns()
     const { branch } = await call('actions.fork', { actionId: second.id, at: 'start', name: 'Edited' }) as { branch: ConversationBranch }
-    expect(branch).toMatchObject({ parentTurnId: 't2', at: 'start', contextBoundary: { messageIndex: 2 } })
+    expect(branch).toMatchObject({ parentTurnId: 't2', at: 'start', files: 'shared', contextBoundary: { messageIndex: 2 } })
     await call('actions.activateBranch', { conversationBranchId: branch.id })
     expect(readFileSync(join(cwd, 'first.txt'), 'utf8')).toBe('t1\n')
-    expect(existsSync(join(cwd, 'second.txt'))).toBe(false)
+    expect(readFileSync(join(cwd, 'second.txt'), 'utf8')).toBe('t2\n')
 
     // The edited prompt's turn runs on the new branch; the conversation then shows its versions on that prompt.
     await record('t2-edit', 2, 'edited.txt', branch.id)
     expect((await call('actions.list') as { promptVersions: unknown }).promptVersions).toEqual([{ turnId: 't2-edit', versions: ['main', branch.id], current: 1 }])
     await call('actions.activateBranch', { conversationBranchId: 'main' })
-    expect(readFileSync(join(cwd, 'second.txt'), 'utf8')).toBe('t2\n')
+    for (const file of ['first.txt', 'second.txt', 'edited.txt']) expect(existsSync(join(cwd, file))).toBe(true)
     expect((await call('actions.list') as { promptVersions: unknown }).promptVersions).toEqual([{ turnId: 't2', versions: ['main', branch.id], current: 0 }])
   })
 
-  it('edits the first prompt, which has no turn before it', async () => {
+  it('edits the first prompt, which has no turn before it, and leaves its files', async () => {
     const { cwd, first, call } = await twoTurns()
-    const { branch } = await call('actions.fork', { actionId: first.id, at: 'start' }) as { branch: ConversationBranch }
-    await call('actions.activateBranch', { conversationBranchId: branch.id })
-    expect(existsSync(join(cwd, 'first.txt'))).toBe(false)
-    expect(existsSync(join(cwd, 'second.txt'))).toBe(false)
+    const { branch } = await call('actions.fork', { actionId: first.id, at: 'start', activate: true }) as { branch: ConversationBranch }
+    expect(branch.files).toBe('shared')
+    expect(existsSync(join(cwd, 'first.txt'))).toBe(true)
+    expect(existsSync(join(cwd, 'second.txt'))).toBe(true)
   })
 
   it('refuses to make or switch a branch while a turn or queued work is busy, before anything changes', async () => {

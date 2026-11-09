@@ -785,7 +785,9 @@ export function OrchestratorChat() {
       images?: Awaited<ReturnType<typeof filesToImagePayloads>>,
       targetThreadId = activeThreadId,
       /** Puts the staged text, files and references back, for a message that turns out not to have arrived. */
-      onUnsent?: () => void
+      onUnsent?: () => void,
+      /** The conversation branch the message must land on (an edited prompt's); refused on another. */
+      conversationBranchId?: string
     ) => {
       if (!content && !(images && images.length)) return
 
@@ -802,7 +804,8 @@ export function OrchestratorChat() {
         requestId,
         content: content || (images?.length ? '[Image attachment]' : ''),
         mode,
-        images
+        images,
+        ...(conversationBranchId ? { conversationBranchId } : {})
       }
       // Paint an ordinary send before IPC/disk/provider work. The App event handler swaps this
       // row for the durable message by matching its content; stale hydration snapshots retain it.
@@ -974,11 +977,11 @@ export function OrchestratorChat() {
         if (resendBusy || !useAppStore.getState().workspaceReady) return
         void sendMessage(content, chatMode, images, activeThreadId)
       },
-      // An edited prompt: a conversation branch that starts before its turn, with the files from then, made active,
-      // then the edited text sent there with the prompt's images. The original stays a version to switch back to.
+      // An edited prompt: the conversation goes back to before that prompt on a new branch, made and switched to in
+      // one step by the daemon; the files stay as they are. The edited text is sent there, naming that branch, with the
+      // prompt's images. The original stays a version to switch back to.
       editPrompt: async (promptId, turnId, text) => {
         try {
-          if (resendBusy) throw new Error('Wait for the current turn to finish before editing a message.')
           const history = await readThreadActionHistory(activeThreadId, true)
           const action = editablePrompt(history, turnId)
           if (!action) throw new Error("This message can't be edited now.")
@@ -988,11 +991,10 @@ export function OrchestratorChat() {
           const images = await Promise.all(original.map(async (image, index) => image.data ? image
             : { ...image, ...await window.mousse.threads.messageImage(activeThreadId, promptId, index) }))
           const { branch } = await window.mousse.actions.fork({
-            threadId: activeThreadId, actionId: action.id, at: 'start', name: 'Edited', expectedJournalGeneration: history.journalGeneration
+            threadId: activeThreadId, actionId: action.id, at: 'start', activate: true, name: 'Edited', expectedJournalGeneration: history.journalGeneration
           }) as { branch: { id: string } }
-          await window.mousse.actions.activateBranch({ threadId: activeThreadId, conversationBranchId: branch.id })
           invalidateThreadActionHistory(activeThreadId)
-          await sendMessage(text, chatMode, images.length ? images : undefined, activeThreadId)
+          await sendMessage(text, chatMode, images.length ? images : undefined, activeThreadId, undefined, branch.id)
         } catch (error) {
           showToast({ tone: 'error', message: readableError(error, "The edited message wasn't sent. Try again.") })
           throw error

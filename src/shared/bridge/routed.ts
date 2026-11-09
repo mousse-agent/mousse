@@ -279,10 +279,12 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'continuationOfRunId',
       'acknowledgeUncertain',
       ROUTED_STAGED_KEY,
-      'refuseWhilePaused'
+      'refuseWhilePaused',
+      'conversationBranchId'
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
-    { required: ['content'], ...staging(['content', 'images']), version: 3, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3 } }
+    // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
+    { required: ['content'], ...staging(['content', 'images']), version: 4, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4 } }
   ),
   'orchestrator.steer': chat(
     'thread',
@@ -425,11 +427,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   }),
   'actions.fork': write(
     'thread',
-    ['threadId', 'conversationBranchId', 'actionId', 'name', 'codeMode', 'at', GEN],
+    ['threadId', 'conversationBranchId', 'actionId', 'name', 'codeMode', 'at', 'activate', GEN],
     {
       required: ['actionId'],
       version: 2,
-      since: { at: 2 }
+      since: { at: 2, activate: 2 }
     }
   ),
   'actions.pin': write('thread', ['threadId', 'actionId', 'pinned', 'reason', GEN], {

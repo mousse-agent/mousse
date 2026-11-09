@@ -467,8 +467,10 @@ export function promptVersionsOf(
   activeBranchId: string
 ): Array<{ turnId: string; versions: string[]; current: number }> {
   const edits = branches.filter((branch) => branch.at === 'start' && branch.parentTurnId && branch.lifecycle !== 'tombstoned')
-  const firstTurnOf = (branchId: string) => actions.find((action) => action.conversationBranchId === branchId)?.turnId
-  const branchOfTurn = (turnId: string) => actions.find((action) => action.turnId === turnId)?.conversationBranchId
+  // Turns a prompt started: not the records of the person's own changes made between turns (`actor: user`).
+  const prompts = actions.filter((action) => action.actor?.kind !== 'user' && action.nativeContextStartBoundary)
+  const firstTurnOf = (branchId: string) => prompts.find((action) => action.conversationBranchId === branchId)?.turnId
+  const branchOfTurn = (turnId: string) => prompts.find((action) => action.turnId === turnId)?.conversationBranchId
   // The first version's turn of the prompt `turnId` is a version of: up through the edits whose first turn it is.
   const rootOf = (turnId: string): string => {
     let root = turnId
@@ -1985,7 +1987,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused'
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId'
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
@@ -2010,7 +2012,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (p.acknowledgeUncertain !== undefined && !continuationOfRunId)
         throw new DomainRpcError('invalid_params', 'acknowledgeUncertain applies only with continuationOfRunId')
       ctx.mms.orchestrator.getOrCreateSession(threadId)
-      const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
+      const prepared = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
+      // An edited prompt names the branch it was made for; the turn refuses to run on another.
+      const conversationBranchId = asOptionalString(p.conversationBranchId, 256)
+      const input = conversationBranchId ? { ...(typeof prepared === 'string' ? { content: prepared } : prepared), conversationBranchId } : prepared
       const limit = deviceLimit(ctx)
       const sentFrom = sentFromOf(ctx)
       return await ctx.mms.orchestrator.send(input, false, {
@@ -3409,12 +3414,32 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // `start`: the branch begins before the action's turn, as an edited version of its prompt; `end` (default): after it.
       if (p.at !== undefined && p.at !== 'start' && p.at !== 'end') throw new DomainRpcError('invalid_params', "at must be 'start' or 'end'")
       const at = p.at === 'start' ? 'start' as const : 'end' as const
-      assertHistoryIdle(ctx, operation.threadId)
-      saveConversationState(ctx, operation.threadId, operation.threadDirectory, sourceBranchId)
-      const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration, p.codeMode === 'current' ? 'current' : 'historical', at)
-      saveConversationState(ctx, operation.threadId, operation.threadDirectory, branch.id, at === 'start'
+      const activate = asOptionalBoolean(p.activate, 'activate') === true
+      if (activate && at !== 'start') throw new DomainRpcError('invalid_params', "activate applies to at: 'start' (an edited prompt)")
+      const service = new ConversationBranchService(operation.threadDirectory)
+      const assertIdle = () => assertHistoryIdle(ctx, operation.threadId)
+      // Refused at once while a turn runs (the locks would wait for it), and again under the locks.
+      assertIdle()
+      const savedFor = (branch: import('../../shared/threadActions').ConversationBranch) => saveConversationState(ctx, operation.threadId, operation.threadDirectory, branch.id, at === 'start'
         ? { presentationEnd: action.presentationMessageStart, nativeEnd: branch.contextBoundary.messageIndex, boundary: branch.contextBoundary }
         : { presentationEnd: action.presentationMessageEnd, nativeEnd: action.nativeContextBoundary.messageIndex, boundary: action.nativeContextBoundary })
+      if (activate) {
+        // An edited prompt: the branch is made and switched to in one step under the thread's locks, conversation only.
+        const { branch, notice } = await service.edit(workspace.worktreePath, sourceBranchId, actionId, name, {
+          expectedJournalRevision: operation.currentGeneration,
+          assertIdle,
+          saveContext: (leaving) => saveConversationState(ctx, operation.threadId, operation.threadDirectory, leaving),
+          created: savedFor,
+          restoreContext: (selected) => {
+            const state = loadConversationState(operation.threadDirectory, selected.id)
+            ctx.mms.orchestrator.replaceConversationState(operation.threadId, state.messages, state.nativeContext)
+          }
+        })
+        return { branch, activated: true, ...(notice ? { notice } : {}) }
+      }
+      saveConversationState(ctx, operation.threadId, operation.threadDirectory, sourceBranchId)
+      const branch = await service.fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration, p.codeMode === 'current' ? 'current' : 'historical', at, assertIdle)
+      savedFor(branch)
       return { branch }
     }
     case 'actions.activateBranch': {
@@ -3426,8 +3451,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const branches = new ConversationBranchService(operation.threadDirectory)
       const leaving = workspace.conversationBranchId ?? FIRST_BRANCH_ID
-      // A switch while a turn runs would wait for its lease and land after it; and once the files have switched, the
-      // running turn would refuse the conversation swap and leave the thread waiting for recovery.
+      // Refused at once while a turn runs (the locks would wait for it), and again under the locks below.
       assertHistoryIdle(ctx, operation.threadId)
       // A branch with no record, a removed one, or one whose conversation was never saved or can't be read is refused
       // before anything changes. The branch being left has its conversation saved by the switch itself.
@@ -3442,7 +3466,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const { branch, notice } = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
         const state = target ?? loadConversationState(operation.threadDirectory, branchId)
         ctx.mms.orchestrator.replaceConversationState(operation.threadId, state.messages, state.nativeContext)
-      }, (left) => saveConversationState(ctx, operation.threadId, operation.threadDirectory, left))
+      }, (left) => saveConversationState(ctx, operation.threadId, operation.threadDirectory, left),
+      // Checked under the thread's locks: a turn that started first holds them, and none can start after the check
+      // until the switch is done. Before them, a switch could land after a turn, or switch files under it.
+      () => assertHistoryIdle(ctx, operation.threadId))
       return { branch, ...(notice ? { notice } : {}) }
     }
     case 'operations.get': {

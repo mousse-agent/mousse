@@ -334,11 +334,13 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   requestId?: string
   mode?: unknown
   images?: unknown
+  conversationBranchId?: string
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
     requestId: request.requestId,
+    ...(typeof request.conversationBranchId === 'string' ? { conversationBranchId: request.conversationBranchId } : {}),
     mode: request.mode,
     images: request.images
   }
@@ -1140,7 +1142,8 @@ export function registerGuiIpc(
           clientRequestId: requestId,
           mode: body.mode,
           images: body.images,
-          source: 'gui'
+          source: 'gui',
+          ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {})
         }
       )
       if (result.heldByPause) {
