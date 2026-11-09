@@ -151,6 +151,46 @@ describe('queued messages in the conversation', () => {
     expect(api.reorder).toHaveBeenCalledTimes(2)
   })
 
+  describe('dragging by the grip', () => {
+    /** jsdom has no DragEvent; React reads `dataTransfer` off the native event. */
+    const fire = async (target: Element, type: string) => {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { setData: () => undefined, setDragImage: () => undefined, getData: () => '', effectAllowed: 'all', dropEffect: 'move', types: [] }
+      })
+      await act(async () => { target.dispatchEvent(event) })
+    }
+    /** Picks `id` up by its grip and holds it over `overId`: the list shows the new order, nothing is saved yet. */
+    const pickUp = async (id: string, overId: string) => {
+      await fire(button(id, 'Reorder')!, 'pointerdown')
+      await fire(row(id), 'dragstart')
+      await fire(row(overId), 'dragover')
+    }
+    const ids = () => rows().map((entry) => entry.dataset.queuedId)
+
+    it('saves the new order when it is dropped on the list', async () => {
+      await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+      await pickUp('a', 'c')
+      expect(ids()).toEqual(['b', 'c', 'a'])
+      expect(api.reorder).not.toHaveBeenCalled()
+      await fire(row('c'), 'drop')
+      await fire(row('a'), 'dragend')
+      expect(api.reorder).toHaveBeenCalledTimes(1)
+      expect(api.reorder).toHaveBeenCalledWith('t1', ['b', 'c', 'a'])
+      expect(ids()).toEqual(['b', 'c', 'a'])
+    })
+
+    it('puts the order back and saves nothing when the drag is cancelled (Escape, or let go outside the list)', async () => {
+      await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+      await pickUp('a', 'c')
+      expect(ids()).toEqual(['b', 'c', 'a'])
+      // No drop on the list: the drag only ends.
+      await fire(row('a'), 'dragend')
+      expect(api.reorder).not.toHaveBeenCalled()
+      expect(ids()).toEqual(['a', 'b', 'c'])
+    })
+  })
+
   it('puts the order back when the reorder fails', async () => {
     api.reorder.mockRejectedValueOnce(new Error('nope'))
     await show([queued('a', 'one'), queued('b', 'two')])

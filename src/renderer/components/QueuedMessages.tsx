@@ -141,7 +141,8 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
   const [editing, setEditing] = useState<{ id: string; width: number | null } | null>(null)
   const [savingId, setSavingId] = useState<string | null>(null)
   // Drag to reorder starts only from the grip (`armedId`), so the text stays selectable. While dragging
-  // the list reorders live under the pointer (`dragOrder`); letting go saves the order.
+  // the list reorders live under the pointer (`dragOrder`); dropping on the list saves the order, and a drag
+  // that ends anywhere else (Escape, let go outside) puts it back.
   const [armedId, setArmedId] = useState<string | null>(null)
   const [dragId, setDragId] = useState<string | null>(null)
   const [dragOrder, setDragOrder] = useState<string[] | null>(null)
@@ -188,11 +189,15 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
     dragOrderRef.current = next
     setDragOrder(next)
   }
-  const finishDrag = () => {
-    const order = dragOrderRef.current
+  const endDrag = () => {
     updateDragOrder(null)
     setDragId(null)
     setArmedId(null)
+  }
+  // `drop` comes before `dragend`, so a drop saves and the `dragend` after it finds nothing left to put back.
+  const dropDrag = () => {
+    const order = dragOrderRef.current
+    endDrag()
     if (order && order.join('\n') !== ids.join('\n')) void queue.reorder(order)
   }
   const onDragStart = (event: DragEvent<HTMLDivElement>, id: string) => {
@@ -246,7 +251,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
       aria-label="Queued messages"
       data-find-ignore
       onDragOver={(event) => { if (dragId) event.preventDefault() }}
-      onDrop={(event) => { if (!dragId) return; event.preventDefault(); finishDrag() }}
+      onDrop={(event) => { if (!dragId) return; event.preventDefault(); dropDrag() }}
     >
       {shown.map((item, index) => {
         const optimistic = isOptimisticQueueItem(item)
@@ -270,7 +275,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
             draggable={armedId === item.id}
             onDragStart={(event) => onDragStart(event, item.id)}
             onDragOver={(event) => onDragOverItem(event, item.id)}
-            onDragEnd={finishDrag}
+            onDragEnd={endDrag}
           >
             {isEditing ? (
               <QueuedEditor
