@@ -12037,7 +12037,7 @@ export class OrchestratorService extends EventEmitter {
     timeout.unref?.()
     const note: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
       content: 'Compacting context…', streaming: true, compaction: { manual: true }, timestamp: new Date().toISOString() }
-    const finish = (content: string, kept?: 'stopped'): void => this.sessionAls.run(session, () => {
+    const finish = (content: string, kept?: 'stopped' | 'failed'): void => this.sessionAls.run(session, () => {
       note.content = content
       note.streaming = false
       if (kept) note.compaction = { manual: true, kept }
@@ -12103,7 +12103,7 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       // The row says why; the queue then goes on with the full history.
       const reason = error instanceof Error ? error.message : String(error)
-      finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted')
+      finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted', 'failed')
       throw error
     } finally {
       clearTimeout(timeout)

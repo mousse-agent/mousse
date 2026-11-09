@@ -316,7 +316,9 @@ describe('a message sent while the context compacts', () => {
         expect(await compaction).toBe('stopped')
       }
       const row = orch.getMessagesForPersistence(thread.id).find((message) => message.kind === 'context_compaction')
-      expect(row?.content).toBe(ending === 'failed' ? 'Context not compacted · disk full' : 'Compaction stopped · full history kept')
+      expect(row).toMatchObject(ending === 'failed'
+        ? { content: 'Context not compacted · disk full', compaction: { kept: 'failed' } }
+        : { content: 'Compaction stopped · full history kept', compaction: { kept: 'stopped' } })
 
       await until(() => Boolean(sentWith(prompts, `waiting (${ending})`)))
       expect(fullHistory(orch, thread.id, before)).toBe(true)
