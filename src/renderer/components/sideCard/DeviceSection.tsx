@@ -18,7 +18,7 @@ import {
 } from './deviceMenu'
 import { OpenInEditor } from './EditorMenuButton'
 import { SideCardMenuRow } from './SideCardMenuRow'
-import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
+import type { SideCardSectionContext } from './SideCardSection'
 import { useSideCardMenu } from './useSideCardMenu'
 import './deviceSection.css'
 
@@ -27,16 +27,14 @@ const WORKSPACE_ICONS = { checkout: Folder, worktree: FolderPlus } as const
 const rowIcon = (Icon: typeof Laptop) => <Icon size={14} aria-hidden="true" />
 
 /**
- * Name of the computer the thread runs on ("This computer" locally, the other
- * computer's name, and whether it is offline, for a thread that runs there). Plain
- * text once the thread has started, while a send is in flight, or when there is
- * nothing to pick; on a new, empty thread it opens a menu to pick where it runs (this
- * computer or a connected one, as in the composer toolbar) and whether it starts in a
- * new worktree. A thread that has started cannot move to another computer, so it
- * only names the one it runs on. Below it, a thread's folder opens in an editor on
- * this computer; for a thread of another computer the item says where it would open.
+ * The card's header: one row with the project and the computer the thread runs on, and at its end the editor and
+ * file manager the folder opens in on this computer. The computer's name is plain text once the thread has started,
+ * while a send is in flight, or when there is nothing to pick; on a new, empty thread it opens a menu to pick where
+ * it runs (this computer or a connected one, as in the composer toolbar) and whether it starts in a new worktree.
+ * A thread that has started cannot move to another computer, so it only names the one it runs on. For a thread of
+ * another computer the editor button sits under the row, with what it needs from that computer.
  */
-export function DeviceSection({ threadId }: SideCardSectionContext) {
+export function DeviceSection({ threadId, projectId }: SideCardSectionContext) {
   const name = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
   const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
   const isNew = useAppStore((s) => isNewEmptyThread(
@@ -45,32 +43,42 @@ export function DeviceSection({ threadId }: SideCardSectionContext) {
     s.messages.length
   ))
   const locked = useAppStore(isComposerWorkspaceLocked)
+  const project = useAppStore((s) => (projectId ? s.projects.find((entry) => entry.id === projectId)?.name ?? null : null))
   const computer = useComputer(thread?.node)
+  const remote = Boolean(thread?.node) && !isNew
+  const computerName = remote ? computer?.name ?? UNKNOWN_COMPUTER_NAME : name
+  const state = remote && thread ? threadComputerState(thread, computer) : 'online'
+  const Icon = remote ? Server : Laptop
   return (
-    <SideCardSection title="Computer" threadId={threadId}>
-      {isNew
-        ? <DeviceMenuButton threadId={threadId} name={name} locked={locked} />
-        : thread?.node
-          ? <ComputerName name={computer?.name ?? UNKNOWN_COMPUTER_NAME} state={threadComputerState(thread, computer)} detail={offlineLabel(computer, Date.now())} />
-          : <DeviceName name={name} />}
-      <OpenInEditor />
-    </SideCardSection>
+    <section className="side-card-section side-card-header" data-thread-id={threadId ?? undefined} aria-label="Computer">
+      <div className="side-card-header-row">
+        <Icon className="side-card-header-icon" size={14} aria-hidden="true" />
+        {isNew
+          ? <DeviceMenuButton threadId={threadId} name={name} locked={locked} />
+          : <HeaderName project={project} computer={computerName} />}
+        {state === 'offline' && <span className="side-card-header-tag">offline</span>}
+        {!remote && <OpenInEditor compact />}
+      </div>
+      {state === 'offline' && <p className="side-card-computer-note">{offlineLabel(computer, Date.now())}</p>}
+      {state === 'not-shared' && <p className="side-card-computer-note">{computerName} is not sharing its threads with this computer right now.</p>}
+      {remote && <OpenInEditor />}
+    </section>
+  )
+}
+
+/** "acme-web · DEV-LAPTOP": the project in full, the computer quieter; the full text is the tooltip. */
+function HeaderName({ project, computer }: { project: string | null; computer: string }) {
+  const title = project ? `${project} on ${computer}` : computer
+  return (
+    <p className="side-card-device-name side-card-header-name" title={title}>
+      {project && <span className="side-card-header-project">{project}</span>}
+      <span className="side-card-header-computer">{project ? ` · ${computer}` : computer}</span>
+    </p>
   )
 }
 
 function DeviceName({ name }: { name: string }) {
   return <p className="side-card-device-name" title={name}>{name}</p>
-}
-
-/** The other computer a thread runs on, with a note while it cannot be reached. */
-function ComputerName({ name, state, detail }: { name: string; state: 'online' | 'offline' | 'not-shared'; detail: string }) {
-  return (
-    <>
-      <p className="side-card-device-name" title={name}>{name}</p>
-      {state === 'offline' && <p className="side-card-computer-note">{detail}</p>}
-      {state === 'not-shared' && <p className="side-card-computer-note">{name} is not sharing its threads with this computer right now.</p>}
-    </>
-  )
 }
 
 function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null; name: string; locked: boolean }) {

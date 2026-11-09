@@ -304,12 +304,12 @@ describe('DeviceSection rendering', () => {
     Object.assign(initial, state)
   }
   const render = () => renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: null }))
-  // The section's heading always has its collapse toggle (a button with a chevron); the picker lives in the body.
+  // The header row starts with the computer's icon; the picker, or the plain name, comes after it.
   const renderBody = () => {
     const html = render()
-    const start = html.indexOf('class="side-card-section-body"')
+    const start = html.indexOf('class="side-card-header-row"')
     expect(start).toBeGreaterThan(-1)
-    return html.slice(start)
+    return html.slice(start).replace(/<svg[^>]*side-card-header-icon[\s\S]*?<\/svg>/, '')
   }
 
   afterEach(() => {
@@ -328,6 +328,20 @@ describe('DeviceSection rendering', () => {
     expect(html).not.toContain('<button')
     expect(html).not.toContain('<svg')
     expect(html).not.toContain('aria-haspopup')
+  })
+
+  it('names the project and the computer in one row', () => {
+    seed({
+      activeThreadId: 't1',
+      threads: [thread({ startedAt: '2026-01-01T00:00:01Z' })],
+      projects: [{ id: 'p1', name: 'acme-web' }] as never,
+      appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'x', deviceName: 'Mac mini' }
+    })
+    const html = renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: 'p1' }))
+    expect(html).toContain('title="acme-web on Mac mini"')
+    expect(html).toMatch(/side-card-header-project">acme-web<\/span><span class="side-card-header-computer"> · Mac mini</)
+    expect(html).not.toContain('side-card-section-name')
+    seed({ projects: [] })
   })
 
   it('names the other computer, and offers no editor, for a thread that runs there', () => {

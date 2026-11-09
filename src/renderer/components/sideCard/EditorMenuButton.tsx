@@ -47,7 +47,11 @@ const refreshQuietly = () => { void refreshEditors() }
  * Open the thread's folder in an editor or the file manager. Nothing without a folder. A thread of
  * another computer opens in an editor installed here, over SSH (see `OpenInRemoteEditor`).
  */
-export function OpenInEditor() {
+/**
+ * `compact` is the card header's form: icon buttons at the end of its row (the editor, and the file manager beside it
+ * when there is one), with notes and errors wrapping under the row.
+ */
+export function OpenInEditor({ compact = false }: { compact?: boolean } = {}) {
   const { projectId, path } = useActiveProjectLocation()
   const profileId = useAppStore((s) => s.profileId)
   const editors = useEditorsStore((s) => s.editors)
@@ -71,7 +75,7 @@ export function OpenInEditor() {
     saveLastEditorId(profileId, editor.id)
     setLastId(editor.id)
   }
-  return <OpenInEditorView path={path} editors={editors} lastId={lastId} onOpen={open} onMenuOpen={refreshQuietly} />
+  return <OpenInEditorView path={path} editors={editors} lastId={lastId} onOpen={open} onMenuOpen={refreshQuietly} compact={compact} />
 }
 
 /** What the last open or ask came to, until the next one. */
@@ -246,10 +250,12 @@ interface OpenInEditorViewProps {
   extra?: ReactNode
   /** Replaces what the main button does and says, as when editor connections are off and the button asks the computer. */
   primary?: { label: string; title?: string; onClick: () => void }
+  /** Icon buttons for the card header's row: the editor's icon names it in the tooltip, and the file manager sits beside it. */
+  compact?: boolean
 }
 
 /** The split button, its menu and its inline error, given the data. `OpenInEditor` supplies it. */
-export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, blocked, refusal, hint, extra, primary }: OpenInEditorViewProps) {
+export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, blocked, refusal, hint, extra, primary, compact = false }: OpenInEditorViewProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [error, setError] = useTransientError()
   const busyRef = useRef(false)
@@ -290,20 +296,24 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, bl
     void openEditor(editor)
   }
   const { editors: apps, files } = splitEditors(editors)
+  // The header's own file manager button, when the main button opens an editor and there is one to show the folder in.
+  const fileManager = compact && !primary && current.kind !== 'files' ? files[0] ?? null : null
+  const iconOnly = compact && !primary
 
   return (
-    <div className="side-card-open-editor">
+    <div className={`side-card-open-editor${compact ? ' compact' : ''}`}>
       <div ref={groupRef} className={`side-card-open-editor-group${choices ? '' : ' single'}`}>
         <button
           type="button"
           className={`side-card-open-editor-main${blocked ? ' blocked' : ''}`}
           aria-describedby={blocked ? noteId : undefined}
-          title={primary?.title}
+          aria-label={iconOnly ? openLabel(current) : undefined}
+          title={primary?.title ?? (iconOnly ? openLabel(current) : undefined)}
           data-action={primary ? 'ask' : undefined}
           onClick={() => (primary ? primary.onClick() : void openEditor(current))}
         >
           <EditorIcon editor={current} />
-          <span className="side-card-open-editor-label">{primary ? primary.label : openLabel(current)}</span>
+          {!iconOnly && <span className="side-card-open-editor-label">{primary ? primary.label : openLabel(current)}</span>}
         </button>
         {choices && (
           <button
@@ -321,6 +331,17 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, bl
           </button>
         )}
       </div>
+      {fileManager && (
+        <button
+          type="button"
+          className="side-card-open-editor-files"
+          title={openLabel(fileManager)}
+          aria-label={openLabel(fileManager)}
+          onClick={() => void openEditor(fileManager)}
+        >
+          <Folder size={14} aria-hidden="true" />
+        </button>
+      )}
       {blocked && (
         <div id={noteId} className="side-card-open-editor-note" role="note">
           <p>{blocked.message}</p>
