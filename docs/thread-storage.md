@@ -68,13 +68,15 @@ The worker is built as one self-contained file beside each bundle (`out/cli/thre
 
 ## Search
 
-`<profile>/thread-index.db` holds the transcript text of every thread kept in `thread.db`, with an FTS5 trigram index over it, so search matches substrings, case-insensitively, as it always did. It is a cache: the app never treats it as the record of anything.
+`<profile>/thread-index.db` holds the transcript text of every thread kept in `thread.db`, lowercased by JavaScript, with a case-sensitive FTS5 trigram index over it, so search matches exactly as `toLowerCase().includes()` always did, for every alphabet. It is a cache: the app never treats it as the record of anything.
 
 - It runs in the read worker, which handles requests in order.
 - **A save, then a search.** After a save, the daemon sends an index notice within a second, or right before the next search. The worker applies the notice before answering, so a search finds what was saved before it.
-- **Writes from elsewhere.** Before answering, a search also catches up any candidate thread whose database files changed since it was indexed, for example written by another process. That check costs a `stat` per thread.
+- **Writes from elsewhere.** Before answering, a search also catches up any candidate thread whose database files (inode, size and time) changed since it was indexed, for example written by another process. That check costs a `stat` per thread. The minute sweep also compares each database's own sequence, so a write the file stamp did not show is caught there.
 - **The sweep.** It runs at startup and every minute. It catches up changed threads and drops threads that are no longer listed.
-- **Rebuilding.** A missing, damaged or outdated index file is deleted and rebuilt from the thread databases. A thread whose database was replaced or renumbered is indexed again from scratch.
+- **Rebuilding.** Missing or outdated tables are recreated inside the index, in one transaction. A file that is not a database or is damaged is set aside and a new one made. A busy or locked index is never taken for damage. A thread whose database was replaced or renumbered is indexed again from scratch.
+- **When the index cannot answer,** search reads each thread's transcript in the read worker instead, so a broken cache never breaks search.
+- **Results** come in the threads' name order and then transcript order, and the index is asked for more until the limit is filled after repeats are removed. Lifecycle state is checked for every thread on every search; only the folder lookup is cached.
 - **Who may be searched.** That is still decided in the daemon, before the limit. The index is given the allowed threads and returns message matches only. Title and project matches are unchanged.
 - **Query length.** Queries of three characters or more use the full-text index. Shorter ones scan the index table, never the thread files.
 - **No scan bound.** Threads in `thread.db` are always all searched. `maxMessageThreads` still bounds the scan of threads that are still on JSON.

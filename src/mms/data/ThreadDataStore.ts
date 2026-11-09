@@ -1826,17 +1826,49 @@ export class ThreadDataStore extends EventEmitter {
         }
       }
     }
-    if (indexed.length) {
-      this.flushIndexNotices()
-      const byId = new Map(indexed.map((thread) => [thread.id, thread]))
-      const ordered = [...indexed].sort((a, b) => a.name.localeCompare(b.name)).map((thread) => ({ id: thread.id, name: thread.name, dir: thread.dir }))
-      const hits = await this.threadDb().client.call('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: limit * 4 })
-      for (const hit of hits) {
-        const thread = byId.get(hit.threadId)
-        if (thread) messages.push(...this.messageResults(thread, plan, [{ id: hit.messageId, content: hit.body }]))
-      }
-    }
+    if (indexed.length) messages.push(...(await this.indexedMessageResults(indexed, plan, limit)))
     return this.finishSearch([...plan.titles, ...messages], limit)
+  }
+
+  /**
+   * Message matches of threads kept in thread.db, from the search index: in batches until `limit` distinct results
+   * are found or the matches run out (a result that repeats another's does not count). If the index cannot answer,
+   * each thread's transcript is searched in the read worker instead, so a broken cache never breaks search.
+   */
+  private async indexedMessageResults(indexed: Array<Thread & { dir: string }>, plan: SearchPlan, limit: number): Promise<ScoredSearchResult[]> {
+    const byId = new Map(indexed.map((thread) => [thread.id, thread]))
+    const ordered = [...indexed].sort((a, b) => a.name.localeCompare(b.name)).map((thread) => ({ id: thread.id, name: thread.name, dir: thread.dir }))
+    const out: ScoredSearchResult[] = []
+    const distinct = new Set<string>()
+    try {
+      this.flushIndexNotices()
+      const batch = Math.max(limit, 50)
+      for (let offset = 0; distinct.size < limit; offset += batch) {
+        const hits = await this.threadDb().client.call('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: batch, offset })
+        for (const hit of hits) {
+          const thread = byId.get(hit.threadId)
+          if (!thread) continue
+          for (const result of this.messageResults(thread, plan, [{ id: hit.messageId, content: hit.body }])) {
+            out.push(result)
+            distinct.add(`${result.threadId}:${result.messageId}:${result.snippet}`)
+          }
+        }
+        if (hits.length < batch) break
+      }
+      return out
+    } catch (error) {
+      console.warn('thread search index could not answer; searching transcripts instead', { error: error instanceof Error ? error.message : String(error) })
+      out.length = 0
+      for (const thread of ordered) {
+        try {
+          const found = await this.threadDb().client.call('searchTranscript', thread.dir, plan.normalized, limit)
+          out.push(...this.messageResults(byId.get(thread.id)!, plan, found))
+        } catch {
+          /* skip a thread that cannot be read now */
+        }
+      }
+      return out
+    }
   }
 
   /** Who may be matched (decided before anything is matched), and the title and project matches. */
@@ -1908,8 +1940,14 @@ export class ThreadDataStore extends EventEmitter {
   private readonly dirCache = new Map<string, string>()
 
   private listedThreadDir(id: string): string {
+    // Lifecycle state is checked every time (another process may have fenced or moved the thread); only the
+    // folder's resolution is cached.
+    if (!this.isLifecycleVisible(id)) {
+      this.dirCache.delete(id)
+      throw new Error(`Thread ${id} is not active`)
+    }
     let dir = this.dirCache.get(id)
-    if (!dir) {
+    if (!dir || this.lifecycleStore.get(id)?.location !== dir) {
       dir = this.getThreadDir(id)
       this.dirCache.set(id, dir)
     }
