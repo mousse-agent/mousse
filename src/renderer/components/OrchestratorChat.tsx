@@ -28,6 +28,7 @@ import {
   buildComposerMessageContent
 } from './ChatComposer'
 import { useThreadQueue } from '../hooks/useThreadQueue'
+import { contextTokens } from '../lib/promptCache'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
   ComposerQuestionModal,
@@ -332,10 +333,19 @@ export function OrchestratorChat() {
   const onOptimisticQueueItemReconciled = useCallback((id: string) => {
     setOptimisticQueueItems((current) => current.filter((item) => item.id !== id))
   }, [])
+  // A compaction the person started is running: a message sent now waits in the queue until it ends.
+  const compactionRunning = useMemo(
+    () => messages.some((message) => message.kind === 'context_compaction' && message.streaming === true && message.compaction?.manual === true),
+    [messages]
+  )
+  // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
+  const historyTokens = contextTokens(contextUsage) || undefined
+  const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
   const queue = useThreadQueue({
     threadId: activeThreadId,
     optimisticItems: optimisticQueueItems,
-    onOptimisticItemReconciled: onOptimisticQueueItemReconciled
+    onOptimisticItemReconciled: onOptimisticQueueItemReconciled,
+    hold: queueHold
   })
 
   const turnActivityRequestRef = useRef(0)
@@ -819,7 +829,9 @@ export function OrchestratorChat() {
       // row for the durable message by matching its content; stale hydration snapshots retain it.
       // The messages the transcript had before this one, to tell it from an identical one sent earlier.
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
-      const optimisticMessageId = !loading && targetThreadId
+      // During a reply or a compaction the message goes to the queue, so it is painted there.
+      const queuesNow = loading || compactionRunning
+      const optimisticMessageId = !queuesNow && targetThreadId
         ? `optimistic:${crypto.randomUUID()}`
         : null
       if (optimisticMessageId) {
@@ -831,7 +843,7 @@ export function OrchestratorChat() {
           images
         })
       }
-      const optimisticQueueId = loading && targetThreadId ? `optimistic:${crypto.randomUUID()}` : null
+      const optimisticQueueId = queuesNow && targetThreadId ? `optimistic:${crypto.randomUUID()}` : null
       if (optimisticQueueId && targetThreadId) {
         setOptimisticQueueItems((current) => [...current, {
           id: optimisticQueueId,
@@ -964,7 +976,7 @@ export function OrchestratorChat() {
         return false
       }
     },
-    [activeThreadId, profileId, chatMode, loading, setLoading]
+    [activeThreadId, profileId, chatMode, loading, compactionRunning, setLoading]
   )
 
   const handleStop = useCallback(async () => {
@@ -1021,10 +1033,6 @@ export function OrchestratorChat() {
   // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
   // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
-  const compactionRunning = useMemo(
-    () => messages.some((message) => message.kind === 'context_compaction' && message.streaming === true && message.compaction?.manual === true),
-    [messages]
-  )
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId
     if (!threadId) return

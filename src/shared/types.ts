@@ -743,9 +743,9 @@ export interface ChatMessage {
   /**
    * A `context_compaction` row: `manual` when a person started it (`/compact`, Compact now), so it can be
    * stopped while it runs; `kept` when it ended with the full history still in place (stopped, timed out,
-   * or cut short by a daemon restart).
+   * failed, or cut short by a daemon restart).
    */
-  compaction?: { manual?: true; kept?: 'stopped' | 'interrupted' }
+  compaction?: { manual?: true; kept?: 'stopped' | 'failed' | 'interrupted' }
   planCard?: PlanCardMetadata
   thinking?: {
     content: string

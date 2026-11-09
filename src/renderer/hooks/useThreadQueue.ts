@@ -11,6 +11,13 @@ export interface UseThreadQueueOptions {
   /** Messages just sent while a reply runs, shown until the daemon lists them. */
   optimisticItems?: QueuedMessage[]
   onOptimisticItemReconciled?: (id: string) => void
+  /** A compaction holds the queue until it ends; null when nothing does. */
+  hold?: QueueHold | null
+}
+
+/** What holds the queue: a running compaction, and the size of the history it would replace. */
+export interface QueueHold {
+  historyTokens?: number
 }
 
 /** The open thread's queued messages and what can be done with them. */
@@ -23,7 +30,9 @@ export interface ThreadQueue {
   /** The last failed change, for the composer's notice line; it stays until dismissed or a change succeeds. */
   error: string | null
   clearError: () => void
-  /** Sends the item into the running reply now. */
+  /** While a compaction runs, the queue waits for it; Send now then skips the compaction. */
+  hold: QueueHold | null
+  /** Sends the item into the running reply now; while a compaction holds the queue, stops it and sends the item first. */
   steer: (itemId: string) => Promise<void>
   remove: (itemId: string) => Promise<void>
   /** Saves a new order; shown at once, put back when the save fails. */
@@ -52,7 +61,7 @@ export function reorderByIds(items: QueuedMessage[], orderedIds: string[]): Queu
  * Loads the thread's queue, keeps it in step with `queue:updated`, and wraps the queue's changes
  * (send now, remove, reorder, edit) with busy marks and error text.
  */
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled }: UseThreadQueueOptions): ThreadQueue {
+export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null }: UseThreadQueueOptions): ThreadQueue {
   const [items, setItems] = useState<QueuedMessage[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busyIds, setBusyIds] = useState<Record<string, boolean>>({})
@@ -210,7 +219,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   ].filter((item) => !item.internal), [items, optimisticItems, threadId])
 
   return useMemo(
-    () => ({ threadId, items: shown, busyIds, error, clearError, steer, remove, reorder, edit }),
-    [threadId, shown, busyIds, error, clearError, steer, remove, reorder, edit]
+    () => ({ threadId, items: shown, busyIds, error, clearError, hold, steer, remove, reorder, edit }),
+    [threadId, shown, busyIds, error, clearError, hold, steer, remove, reorder, edit]
   )
 }

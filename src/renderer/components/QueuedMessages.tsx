@@ -1,6 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type { QueuedMessage } from '../../shared/types'
-import { ArrowTurnForward, Check, GripVertical, Pencil, Trash2, X } from '../lib/icons'
+import { ArrowTurnForward, Check, GripVertical, Loader2, Pencil, Trash2, X } from '../lib/icons'
+import { shortTokens } from '../lib/promptCache'
 import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
 import { UserMessage } from '../chat/components/agent-elements/user-message'
 import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
@@ -34,6 +35,11 @@ export function canEditQueued(item: QueuedMessage): boolean {
 }
 
 const isSteering = (item: QueuedMessage) => item.intent === 'steer' || item.state === 'steering'
+
+/** Send now on the first message a compaction holds: it stops the compaction and sends with the full history. */
+export function skipCompactionLabel(historyTokens?: number): string {
+  return historyTokens ? `Send now: skip compacting and keep the full ${shortTokens(historyTokens)} history` : 'Send now: skip compacting and keep the full history'
+}
 
 function moveId(ids: string[], id: string, to: number): string[] {
   const next = ids.filter((entry) => entry !== id)
@@ -126,9 +132,12 @@ function QueuedEditor({ initial, width, saving, canBeEmpty, label, onSave, onCan
  * the place it will land, with its full text. Under each bubble, like under a sent prompt, a line whose
  * buttons show on hover: reorder (drag the grip, or Alt+Up/Down on it), send now, edit in place, remove.
  * One quiet "Queued" on the last line speaks for the group.
+ *
+ * While a compaction holds the queue, "Queued" has a small spinner, and Send now on the first message skips
+ * the compaction: it stops (nothing is cut) and that message goes with the full history.
  */
 export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
-  const { items, busyIds } = queue
+  const { items, busyIds, hold } = queue
   const [editing, setEditing] = useState<{ id: string; width: number | null } | null>(null)
   const [savingId, setSavingId] = useState<string | null>(null)
   // Drag to reorder starts only from the grip (`armedId`), so the text stays selectable. While dragging
@@ -173,6 +182,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
   }, [items, editing])
 
   if (items.length === 0) return null
+  const firstHeldId = shown.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending')?.id
 
   const updateDragOrder = (next: string[] | null) => {
     dragOrderRef.current = next
@@ -245,8 +255,12 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         const last = index === shown.length - 1
         const canDrag = ids.length > 1 && !optimistic && !busy
         const isEditing = editing?.id === item.id
-        const sendLabel = steering ? 'Sending now…' : 'Send now'
-        const label = last ? <span className="queued-message-state" title="Sends when the current reply ends">Queued</span> : null
+        // While a compaction holds the queue, the first message's Send now skips it.
+        const skipsCompaction = hold !== null && item.id === firstHeldId
+        const sendLabel = steering ? 'Sending now…' : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : 'Send now'
+        const label = !last ? null : hold
+          ? <span className="queued-message-state is-held" title="Sends after compacting"><Loader2 size={12} className="animate-spin" aria-hidden="true" />Queued</span>
+          : <span className="queued-message-state" title="Sends when the current reply ends">Queued</span>
         return (
           <div
             key={item.id}
@@ -289,7 +303,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                       type="button"
                       className="queued-message-btn queued-message-send"
                       title={sendLabel}
-                      aria-label={steering ? 'Sending the queued message now' : 'Send the queued message now'}
+                      aria-label={steering ? 'Sending the queued message now' : skipsCompaction ? sendLabel : 'Send the queued message now'}
                       disabled={busy || steering}
                       onClick={() => void queue.steer(item.id)}
                     >

@@ -2149,7 +2149,7 @@ function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text:
   </div>;
 }
 
-type CompactionMetadata = { compaction?: boolean; compacting?: boolean; compactionManual?: boolean; compactionKept?: "stopped" | "interrupted" };
+type CompactionMetadata = { compaction?: boolean; compacting?: boolean; compactionManual?: boolean; compactionKept?: "stopped" | "failed" | "interrupted" };
 
 /**
  * A compaction in the transcript: a spinner while it runs (with Stop when a person started it), then what it

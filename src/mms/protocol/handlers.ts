@@ -1895,8 +1895,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const focus = asOptionalString(p.focus, 2000)?.trim() || undefined
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      const ran = await localActionRun(ctx, threadId, 'compact', () => ctx.mms.orchestrator.compactConversationContext(threadId, focus))
-      return { outcome: 'result' in ran ? ran.result : 'unchanged' }
+      let started = false
+      try {
+        const ran = await localActionRun(ctx, threadId, 'compact', () => {
+          started = true
+          return ctx.mms.orchestrator.compactConversationContext(threadId, focus)
+        })
+        return { outcome: 'result' in ran ? ran.result : 'unchanged' }
+      } finally {
+        // The run has ended: what waited in the queue goes now, however the compaction ended.
+        if (started) ctx.mms.orchestrator.drainQueueAfterCompaction(threadId)
+      }
     }
     case 'threads.stopCompaction': {
       // The compaction row's Stop: the running `/compact` ends with the full history kept.
