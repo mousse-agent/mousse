@@ -15,7 +15,8 @@ vi.mock('../../src/renderer/components/downloads/DownloadsIndicator', () => ({ D
 const { NavigationRail } = await import('../../src/renderer/components/NavigationRail')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { ProfileSwitcher } = await import('../../src/renderer/components/profiles/ProfileSwitcher')
-const { paletteColorFor } = await import('../../src/renderer/lib/profilePalette')
+const { paletteColorFor, profileColor } = await import('../../src/renderer/lib/profilePalette')
+const { ProfileEditDialog } = await import('../../src/renderer/components/profiles/ProfileEditDialog')
 
 const profiles = [
   { id: 'prf_alpha', displayName: 'Work', status: 'active', isDefault: true, revision: 1, color: '#4d6088' },
@@ -127,5 +128,36 @@ describe('the profile avatar on the rail', () => {
     expect(rail).toBe(probe.style.background)
     act(() => footerRoot.unmount())
     footer.remove()
+  })
+
+  it('gives a profile one colour on every surface in every theme: rail, footer, menu dot and the colour picker', async () => {
+    const css = (color: string) => { const probe = document.createElement('span'); probe.style.background = color; return probe.style.background }
+    for (const profile of profiles) {
+      for (const theme of ['dark', 'light', 'blacksphere-plus']) {
+        document.documentElement.dataset.theme = theme
+        useAppStore.setState({ profileId: profile.id })
+        ;(window as unknown as { mousse: { profiles: { status: unknown } } }).mousse.profiles.status = async () => ({ binding: { profileId: profile.id } })
+        await render()
+        const footer = document.createElement('div')
+        document.body.appendChild(footer)
+        const footerRoot = createRoot(footer)
+        await act(async () => footerRoot.render(createElement(ProfileSwitcher)))
+        await act(async () => avatar()!.click())
+        const dot = [...document.querySelectorAll('.profile-menu-item')].find((row) => row.textContent?.includes(profile.displayName))!.querySelector<HTMLElement>('.profile-dot')!
+        await act(async () => footerRoot.render(createElement(ProfileEditDialog, { mode: { kind: 'edit', profile } as never, onSubmit: () => {}, onClose: () => {} })))
+        const swatch = footer.ownerDocument.querySelector<HTMLElement>('.profile-edit-swatch[aria-checked="true"]')!
+        const expected = css(profile.color ?? paletteColorFor(profile.id))
+        expect(css(profileColor(profile))).toBe(expected)
+        expect([
+          avatar()!.querySelector<HTMLElement>('.profile-avatar')!.style.background,
+          dot.style.background,
+          swatch.style.background
+        ]).toEqual([expected, expected, expected])
+        act(() => footerRoot.unmount())
+        footer.remove()
+        await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })))
+      }
+    }
+    delete document.documentElement.dataset.theme
   })
 })
