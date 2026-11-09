@@ -273,6 +273,19 @@ describe('ThreadDbStore removes only rows a caller had', () => {
     expect(new ThreadDbStore(client).load(dir).messages.map((m) => [m.id, m.content])).toEqual([['b', 'owner edit']])
   })
 
+  it('a message written again elsewhere (undo, then redo) is updated, never duplicated', () => {
+    store.save(dir, { messages: [message('a', 'a'), message('b', 'b')] })
+    const session = store.load(dir).messages
+    // Another writer in this process removes b, then writes it back as a new row.
+    const other = store.load(dir).messages
+    store.save(dir, { messages: other.filter((m) => m.id !== 'b') })
+    store.save(dir, { messages: [...store.load(dir).messages, message('b', 'b again')] })
+    // The session still holds its old b, whose row is gone.
+    session[1]!.content = 'b from session'
+    store.save(dir, { messages: session })
+    expect(new ThreadDbStore(client).load(dir).messages.map((m) => [m.id, m.content])).toEqual([['a', 'a'], ['b', 'b from session']])
+  })
+
   it('copies saved after the thread left the cache keep a later append', () => {
     store.save(dir, { messages: [message('a', 'a')] })
     const copies = store.load(dir).messages.map((m) => structuredClone(m))

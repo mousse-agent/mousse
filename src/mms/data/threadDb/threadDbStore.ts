@@ -15,7 +15,8 @@
  * A save removes only rows its caller had. Every list this store hands out remembers exactly which rows it held,
  * and every object its row and the rows of the list it first came in (kept by object, so it holds after the
  * thread leaves the cache; a copy of a list, as the orchestrator saves, still knows through its objects). A save
- * may remove, or give to a new message, only rows its lists or objects held. A save does not widen that: a list is
+ * may remove, or give to a new message, only rows its lists or objects held (a message with an id still updates
+ * the row with that id rather than adding a second one). A save does not widen that: a list is
  * then known to hold just the rows it was saved with, objects that were already known keep what they knew, and
  * only objects new to the store learn the saved list. Data with nothing remembered (fully copied) may remove only rows this process has handed out;
  * after the cache lost a thread, rows newer than anything this process saw of it count as never handed out. Data
@@ -382,7 +383,12 @@ export class ThreadDbStore {
       }
       if (!row && hasIds) {
         const id = rowId(coll, item)
-        if (id !== null) row = byId.get(id)?.find((candidate) => !claimed.has(candidate.rid))
+        if (id !== null) {
+          row = byId.get(id)?.find((candidate) => !claimed.has(candidate.rid))
+          // A message id names one message: a row with it that the caller's lists did not hold (written again after
+          // an undo and redo, or by another writer) is still this message, and is updated rather than duplicated.
+          row ??= old.find((candidate) => candidate.id === id && !claimed.has(candidate.rid))
+        }
       }
       if (!row && !hasIds) {
         // Positions among the rows the caller saw: a row another writer appended is not taken for a new one.
