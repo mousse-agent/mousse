@@ -54,6 +54,7 @@ import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
+import { ProjectRunsDot } from './automations/mock/ProjectRunsDot'
 import '../styles/threads-sidebar.css'
 import '../styles/sidebar-view-motion.css'
 
@@ -1816,6 +1817,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                       ))}
 
                     </button>
+
+                    {/* Mock-up (localStorage `mousse.automationsMock`): its automations' runs that need the person. */}
+                    <ProjectRunsDot project={project.name} />
 
                     <button
                       type="button"

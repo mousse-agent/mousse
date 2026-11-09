@@ -92,6 +92,7 @@ import { extractChatReferences, type ChatReference } from '../../shared/chatRefe
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
+import { useMockChatDraft } from './automations/mock/ChatDraft'
 
 /** Before the first measurement arrives: no capacity, so the composer shows no ring. */
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
@@ -172,6 +173,7 @@ export function OrchestratorChat() {
     s.threads.find((thread) => thread.id === s.activeThreadId)
   )
   const threads = useAppStore((s) => s.threads)
+  const mockChatDraft = useMockChatDraft(activeThread?.name)
   // The profile default, and the pick made on a blank composer before its thread exists.
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
   const [blankPermissionMode, setBlankPermissionMode] = useState<PermissionMode | undefined>(undefined)
@@ -1409,7 +1411,9 @@ export function OrchestratorChat() {
       })
   }
 
-  const emptyThread = shownMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  // UI mock-up (localStorage `mousse.automationsMock`): an inline automation draft in one seeded thread. Static, not sent.
+  const threadMessages = mockChatDraft ? [...shownMessages, ...mockChatDraft.messages] : shownMessages
+  const emptyThread = threadMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Delete after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading
   const newThreadKey = `${profileId}:${activeThreadId ?? '__blank__'}`
@@ -1433,8 +1437,9 @@ export function OrchestratorChat() {
         key={activeThreadId ?? 'no-thread'}
         threadId={activeThreadId}
         busy={turnActive || loading}
-        messages={shownMessages}
+        messages={threadMessages}
         status={chatStatus}
+        toolRenderers={mockChatDraft?.toolRenderers}
         onSend={() => void handleSend()}
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}
