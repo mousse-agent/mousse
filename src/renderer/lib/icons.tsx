@@ -154,6 +154,7 @@ import ViewIcon from '@hugeicons/core-free-icons/ViewIcon'
 import ViewOffSlashIcon from '@hugeicons/core-free-icons/ViewOffSlashIcon'
 import VolumeHighIcon from '@hugeicons/core-free-icons/VolumeHighIcon'
 import WebhookIcon from '@hugeicons/core-free-icons/WebhookIcon'
+import WorkflowCircle03Icon from '@hugeicons/core-free-icons/WorkflowCircle03Icon'
 import WorkflowSquare01Icon from '@hugeicons/core-free-icons/WorkflowSquare01Icon'
 import Wrench01Icon from '@hugeicons/core-free-icons/Wrench01Icon'
 
@@ -326,6 +327,7 @@ export const Users = /* @__PURE__ */ createIcon('Users', UserGroupIcon)
 export const Wand2 = /* @__PURE__ */ createIcon('Wand2', MagicWand01Icon)
 export const Webhook = /* @__PURE__ */ createIcon('Webhook', WebhookIcon)
 export const Workflow = /* @__PURE__ */ createIcon('Workflow', WorkflowSquare01Icon)
+export const Automations = /* @__PURE__ */ createIcon('Automations', WorkflowCircle03Icon)
 export const Wrench = /* @__PURE__ */ createIcon('Wrench', Wrench01Icon)
 export const X = /* @__PURE__ */ createIcon('X', Cancel01Icon)
 export const Zap = /* @__PURE__ */ createIcon('Zap', FlashIcon)
