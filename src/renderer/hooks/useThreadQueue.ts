@@ -37,9 +37,14 @@ export interface ThreadQueue {
   remove: (itemId: string) => Promise<void>
   /** Saves a new order; shown at once, put back when the save fails. */
   reorder: (orderedIds: string[]) => Promise<void>
-  /** Replaces the item's text in place; resolves whether it was saved. */
-  edit: (itemId: string, content: string) => Promise<boolean>
+  /**
+   * Replaces the item's text in place. With `expectedContent` (the content the edit started from) it is not saved
+   * when the text changed meanwhile: `changed`, and the item shows the new text.
+   */
+  edit: (itemId: string, content: string, expectedContent?: string) => Promise<QueueEditOutcome>
 }
+
+export type QueueEditOutcome = 'saved' | 'changed' | 'failed'
 
 export const isOptimisticQueueItem = (item: QueuedMessage): boolean => item.id.startsWith('optimistic:')
 
@@ -216,24 +221,23 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     }
   }, [threadId, loadQueue, markBusy, changeScope])
 
-  const edit = useCallback(async (itemId: string, content: string) => {
-    if (!threadId) return false
+  // The editor stays open until the edit answers, so the item keeps its text until then.
+  const edit = useCallback(async (itemId: string, content: string, expectedContent?: string): Promise<QueueEditOutcome> => {
+    if (!threadId) return 'failed'
     const live = changeScope(threadId)
-    const previous = itemsRef.current
     markBusy(itemId, true)
-    setItems(previous.map((item) => (item.id === itemId ? { ...item, content } : item)))
     try {
-      const saved = await window.mousse.queue.edit(threadId, itemId, content)
-      if (!live()) return false
-      setItems((current) => current.map((item) => (item.id === saved.id ? saved : item)))
+      const { item, changed } = await window.mousse.queue.edit(threadId, itemId, content, expectedContent)
+      if (!live()) return 'failed'
+      setItems((current) => current.map((entry) => (entry.id === item.id ? item : entry)))
+      if (changed) return 'changed'
       setError(null)
-      return true
+      return 'saved'
     } catch (err) {
-      if (!live()) return false
-      setItems(previous)
+      if (!live()) return 'failed'
       setError(readableError(err, 'Could not edit the queued message.'))
       void loadQueue(threadId)
-      return false
+      return 'failed'
     } finally {
       if (live()) markBusy(itemId, false)
     }

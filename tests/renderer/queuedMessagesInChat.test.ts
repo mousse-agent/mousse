@@ -37,7 +37,7 @@ beforeEach(() => {
   listed = []
   api = {
     list: vi.fn(async () => listed),
-    edit: vi.fn(async (_thread: string, itemId: string, content: string) => queued(itemId, content)),
+    edit: vi.fn(async (_thread: string, itemId: string, content: string) => ({ item: queued(itemId, content) })),
     reorder: vi.fn(async (_thread: string, ids: string[]) => ids.map((id) => listed.find((item) => item.id === id)!)),
     remove: vi.fn(async () => null),
     promoteToSteer: vi.fn(async () => true)
@@ -103,7 +103,8 @@ describe('queued messages in the conversation', () => {
     expect(document.activeElement).toBe(area)
     await type(area, 'two, but better\nwith a second line')
     await key(area, { key: 'Enter' })
-    expect(api.edit).toHaveBeenCalledWith('t1', 'b', 'two, but better\nwith a second line')
+    // Saved only if the message still has the text the edit started from.
+    expect(api.edit).toHaveBeenCalledWith('t1', 'b', 'two, but better\nwith a second line', 'two')
     expect(host.querySelector('textarea')).toBeNull()
     expect(rows().map((entry) => entry.dataset.queuedId)).toEqual(['a', 'b', 'c'])
     expect(row('b').querySelector('.chat-user-bubble p')?.textContent).toBe('two, but better\nwith a second line')
@@ -137,6 +138,64 @@ describe('queued messages in the conversation', () => {
     await click(button('a', 'Save'))
     expect(host.querySelector('textarea')).not.toBeNull()
     expect(host.querySelector('.composer-notice')?.textContent).toContain('already started')
+  })
+
+  describe('when the message changes elsewhere while it is edited', () => {
+    const changedLine = () => row('a').querySelector('.queued-message-changed')
+    const textButton = (label: string) => [...row('a').querySelectorAll<HTMLButtonElement>('.queued-message-text-btn')].find((entry) => entry.textContent === label)!
+
+    it('keeps the draft and says so when the save finds newer text, then loads the new text on request', async () => {
+      api.edit.mockResolvedValueOnce({ item: queued('a', 'theirs'), changed: true })
+      await show([queued('a', 'one')])
+      await click(button('a', 'Edit'))
+      await type(row('a').querySelector('textarea')!, 'mine')
+      await click(button('a', 'Save'))
+      expect(api.edit).toHaveBeenCalledWith('t1', 'a', 'mine', 'one')
+      const area = row('a').querySelector('textarea')!
+      expect(area.value).toBe('mine')
+      expect(changedLine()?.textContent).toContain('Changed elsewhere')
+      expect(button('a', 'Save')!.disabled).toBe(true)
+      // The error line of the composer is for failures; this is not one.
+      expect(host.querySelector('.composer-notice')).toBeNull()
+      await click(textButton('Load new'))
+      expect(row('a').querySelector('textarea')!.value).toBe('theirs')
+      expect(changedLine()).toBeNull()
+    })
+
+    it('saves the kept draft over the new text', async () => {
+      api.edit.mockResolvedValueOnce({ item: queued('a', 'theirs'), changed: true })
+      await show([queued('a', 'one')])
+      await click(button('a', 'Edit'))
+      await type(row('a').querySelector('textarea')!, 'mine')
+      await click(button('a', 'Save'))
+      await click(textButton('Keep mine'))
+      expect(changedLine()).toBeNull()
+      expect(row('a').querySelector('textarea')!.value).toBe('mine')
+      await click(button('a', 'Save'))
+      expect(api.edit).toHaveBeenLastCalledWith('t1', 'a', 'mine', 'theirs')
+      expect(host.querySelector('textarea')).toBeNull()
+    })
+
+    it('says so as soon as the queue shows the new text, when the draft has changes', async () => {
+      await show([queued('a', 'one')])
+      await click(button('a', 'Edit'))
+      await type(row('a').querySelector('textarea')!, 'mine')
+      await act(async () => { push!({ threadId: 't1', items: [queued('a', 'theirs')] }) })
+      expect(row('a').querySelector('textarea')!.value).toBe('mine')
+      expect(changedLine()?.textContent).toContain('Changed elsewhere')
+    })
+
+    it('follows the new text when the draft has no changes of its own', async () => {
+      await show([queued('a', 'one')])
+      await click(button('a', 'Edit'))
+      await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one, revised')] }) })
+      const area = row('a').querySelector('textarea')!
+      expect(area.value).toBe('one, revised')
+      expect(changedLine()).toBeNull()
+      await type(area, 'one, revised again')
+      await click(button('a', 'Save'))
+      expect(api.edit).toHaveBeenCalledWith('t1', 'a', 'one, revised again', 'one, revised')
+    })
   })
 
   it('moves a message with Alt+Up and Alt+Down on its grip', async () => {
@@ -285,7 +344,7 @@ describe('a change that answers after the thread changed', () => {
   })
 
   it("does not put the old thread's messages back when its edit fails late", async () => {
-    const answer = deferred<QueuedMessage>()
+    const answer = deferred<{ item: QueuedMessage }>()
     api.edit.mockReturnValueOnce(answer.promise)
     await open('t1', t1)
     await click(button('a', 'Edit'))

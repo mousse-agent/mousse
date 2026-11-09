@@ -929,6 +929,15 @@ export interface QueuedMessage {
 }
 
 /**
+ * What an edit of a queued message answers: the saved message, or, with `changed`, the message as it is now
+ * when its text changed after the edit started; then nothing was saved.
+ */
+export interface QueueEditResult {
+  item: QueuedMessage
+  changed?: true
+}
+
+/**
  * The agent a message came from (SPEC §15.1): the thread and run that sent it. Stored on the user
  * message the target thread shows, so a message an agent wrote never passes for one a person typed.
  */

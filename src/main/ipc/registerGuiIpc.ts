@@ -148,7 +148,9 @@ import type {
   QuestionAnswerOutcome,
   PendingUserQuestions,
   ThreadApprovalRequest,
-  UserQuestionAnswers
+  UserQuestionAnswers,
+  QueuedMessage,
+  QueueEditResult
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
 import { isQualifiedId, parseQualifiedId, unqualifyId } from '../../shared/threadRef'
@@ -1308,10 +1310,31 @@ export function registerGuiIpc(
     })
     return res.removed
   })
-  // Replaces a queued message's text; it keeps its place in the queue.
-  registerHandler('queue:edit', async (_e, threadId: string, itemId: string, content: string) => {
-    const res = await guiMms.request<{ item: unknown }>('queue.edit', { threadId, itemId, content })
-    return res.item
+  // Replaces a queued message's text; it keeps its place in the queue. With `expectedContent` (the content the
+  // edit started from), text that changed meanwhile (another window, another computer) is not overwritten: the
+  // message is read with the queue's revision, and the edit names that revision so nothing can change in between.
+  registerHandler('queue:edit', async (_e, threadId: string, itemId: string, content: string, expectedContent?: unknown): Promise<QueueEditResult> => {
+    if (typeof expectedContent !== 'string') {
+      const res = await guiMms.request<{ item: QueuedMessage }>('queue.edit', { threadId, itemId, content })
+      return { item: res.item }
+    }
+    for (let attempt = 1; ; attempt += 1) {
+      const listed = await guiMms.request<{ items: QueuedMessage[]; revision?: string }>('queue.list', { threadId })
+      const current = listed.items.find((item) => item.id === itemId)
+      if (current && current.content !== expectedContent) return { item: current, changed: true }
+      try {
+        const res = await guiMms.request<{ item: QueuedMessage }>('queue.edit', {
+          threadId,
+          itemId,
+          content,
+          ...(listed.revision ? { expectedRevision: listed.revision } : {})
+        })
+        return { item: res.item }
+      } catch (error) {
+        // Another message of the queue changed between the read and the edit: read it again.
+        if ((error as { code?: unknown } | null)?.code !== 'revision_mismatch' || attempt >= 3) throw error
+      }
+    }
   })
   registerHandler('queue:reorder', async (_e, threadId: string, orderedIds: string[]) => {
     const res = await guiMms.request<{ items: unknown[] }>('queue.reorder', {
