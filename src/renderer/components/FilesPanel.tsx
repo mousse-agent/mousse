@@ -549,7 +549,7 @@ export function FilesPanel() {
     setHome(places.home)
     // A volume name is shown when the service sends one (`volume`); the letter alone otherwise.
     return places.drives.map((drive) => {
-      const volume = (drive as { volume?: unknown }).volume
+      const { volume } = drive
       return { kind: 'drive', label: drive.label, path: drive.path, ...(typeof volume === 'string' && volume ? { detail: volume } : {}) }
     })
   }, [])
