@@ -7,6 +7,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { dispatchMethod } from '../../../../src/mms/protocol/handlers'
 import { NetError } from '../../../../src/shared/net'
 import { cleanupAll, linked } from './routerFixture'
 
@@ -105,6 +106,32 @@ describe('one owning computer per automation', () => {
     // An edit that lowers the mode within the limit may turn it on in the same change.
     const lowered = (await t.dispatch('scheduled.update', { id: t.qualified(full.id), patch: { enabled: true, permissionMode: 'ask' } })).job
     expect(lowered).toMatchObject({ enabled: true, permissionMode: 'ask' })
+  }, 60_000)
+
+  it('never lets another computer give an automation a schedule that runs above its limit', async () => {
+    const cron = { kind: 'cron', expr: '* * * * *' }
+    // The owner's own window: no device limit applies to a person there.
+    const ownerDispatch = (method: string, params: unknown) => dispatchMethod(
+      { mms: t.owner, connection: { id: 'owner-window', clientType: 'gui', capabilities: new Set(), binding: { profileId: t.owner.profileId, epoch: 1 } }, globalSequence: () => t.owner.protocolSequence() },
+      method,
+      params
+    )
+    // A manual one that is on, in Full access: a clock would make it run in Full access every minute.
+    const manualFull = t.owner.scheduled.createJob({ name: 'Manual full', prompt: 'x', schedule: { kind: 'manual' }, permissionMode: 'full', permissionCeiling: 'full' })
+    const refused = await t.refused(t.dispatch('scheduled.update', { id: t.qualified(manualFull.id), patch: { schedule: cron } }))
+    expect(refused.code).toBe('permission_mode_above_ceiling')
+    expect(t.owner.scheduled.getJob(manualFull.id)).toMatchObject({ schedule: { kind: 'manual' }, nextRunAt: null })
+    // A finished one, given a new schedule.
+    const finished = t.owner.scheduled.createJob({ name: 'Finished full', prompt: 'x', schedule: { kind: 'manual' }, permissionMode: 'full', permissionCeiling: 'full' })
+    t.owner.scheduled.updateJob(finished.id, { state: 'completed', nextRunAt: null })
+    expect((await t.refused(t.dispatch('scheduled.update', { id: t.qualified(finished.id), patch: { schedule: cron } }))).code).toBe('permission_mode_above_ceiling')
+    expect(t.owner.scheduled.getJob(finished.id)).toMatchObject({ schedule: { kind: 'manual' }, state: 'completed', nextRunAt: null })
+    // The same edits by a person on the owner are allowed.
+    expect((await ownerDispatch('scheduled.update', { id: manualFull.id, patch: { schedule: cron } })).job).toMatchObject({ schedule: cron, enabled: true, nextRunAt: expect.any(String) })
+    expect((await ownerDispatch('scheduled.update', { id: finished.id, patch: { schedule: cron } })).job).toMatchObject({ schedule: cron, state: 'scheduled', nextRunAt: expect.any(String) })
+    // A job within the limit takes a clock from the other computer.
+    const { job: within } = await t.dispatch('scheduled.create', { node: t.node, input: manual('Clock within') })
+    expect((await t.dispatch('scheduled.update', { id: within.id, patch: { schedule: cron } })).job).toMatchObject({ schedule: cron, nextRunAt: expect.any(String) })
   }, 60_000)
 
   it('never reaches a private thread through the pull request an automation wakes on', async () => {

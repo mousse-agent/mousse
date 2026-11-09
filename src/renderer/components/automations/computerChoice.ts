@@ -1,6 +1,5 @@
-import { offlineText, type AutomationIndex } from '../../../shared/automations'
+import type { AutomationIndex } from '../../../shared/automations'
 import type { Project } from '../../../shared/types'
-import type { SelectOption } from '../ui/Select'
 
 /**
  * The Computer chip: which of the person's computers owns an automation. It shows only with two or more computers,
@@ -26,13 +25,4 @@ export function computerChoicesOf(index: Pick<AutomationIndex, 'computer' | 'com
 /** The projects of one computer, as Where offers them once a computer is chosen. */
 export function projectsOn<P extends GroupProject>(projects: readonly P[], node: string): P[] {
   return projects.filter((project) => (project.node ?? '') === node)
-}
-
-/** The chip's options: an offline computer is greyed and says so. */
-export function computerOptions(computers: readonly ComputerChoice[]): SelectOption[] {
-  return computers.map((computer) => ({
-    value: computer.node,
-    label: computer.name,
-    ...(computer.offline ? { disabled: true, description: offlineText(computer) } : {})
-  }))
 }

@@ -112,6 +112,7 @@ import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type Schedule
 import { isExecutableJobEdit, jobPermissionRequest, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
 import { runNowRefusal } from '../scheduled/runNowRefusal'
+import { computeNextRun } from '../scheduled/computeNextRun'
 import { BotScheduleError } from '../scheduled/botJobs'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
@@ -2932,22 +2933,29 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // lock, against the job as stored at that moment, so two edits at once cannot undo each other's lowering.
       const executable = isExecutableJobEdit(patch)
       const threadAfter = (current: ScheduledJob) => checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)
-      const permissions = (current: ScheduledJob) => permissionsAfterEdit({
+      const permissionEdit = (current: ScheduledJob) => permissionsAfterEdit({
         stored: current,
         editor: narrowPermissionMode(ctx.mms.orchestrator.scheduledCreatorCeiling(threadAfter(current)), deviceLimit(ctx)),
         patchMode: patch.permissionMode,
         executable,
         canRaise: true
       })
-      // Turning it on (or giving a finished one a clock again) is a Resume: from another computer, never above that
-      // device's limit, with the mode and thread it will have after this edit.
-      if ((patch.enabled === true && !existing.enabled) || (patch.schedule && existing.state === 'completed')) {
-        const after = permissions(existing)
-        refuseAboveDeviceLimit(ctx, {
-          ...existing,
-          threadId: threadAfter(existing),
-          ...(after.ok && after.changed ? { permissionMode: after.permissionMode, permissionCeiling: after.permissionCeiling } : {})
-        })
+      const permissions = (current: ScheduledJob) => {
+        const after = permissionEdit(current)
+        // An edit that leaves it on with a next run it did not have (turning it on, giving a manual one a clock, giving a
+        // finished one a new schedule) is a Resume or a Run now: from another computer, never above that device's limit,
+        // with the mode and thread it will have after this edit. Read against the job as stored, under the store's lock.
+        const enabledAfter = patch.enabled ?? current.enabled
+        const scheduleAfter = patch.schedule ?? current.schedule
+        const startsRunning = enabledAfter && ((patch.enabled === true && !current.enabled) || (!current.nextRunAt && computeNextRun(scheduleAfter) !== null))
+        if (startsRunning) {
+          refuseAboveDeviceLimit(ctx, {
+            ...current,
+            threadId: threadAfter(current),
+            ...(after.ok && after.changed ? { permissionMode: after.permissionMode, permissionCeiling: after.permissionCeiling } : {})
+          })
+        }
+        return after
       }
       const job = withPermissionRefusals(() => ctx.mms.scheduled.updateJob(id, {
         ...(patch.name !== undefined ? { name: patch.name } : {}),

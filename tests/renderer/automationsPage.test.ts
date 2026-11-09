@@ -14,7 +14,6 @@ import type { Project, ScheduledJob } from '../../src/shared/types'
 import type { Thread } from '../../src/shared/types'
 import { pauseUntil } from '../../src/renderer/components/automations/automationList'
 import { ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src/renderer/components/automations/automationTime'
-import { computerOptions } from '../../src/renderer/components/automations/computerChoice'
 import { botComputerOptions } from '../../src/renderer/components/bots/BotAboutPanel'
 import { whenSentence } from '../../src/renderer/components/automations/AutomationDetail'
 import { openEdit, setInboxClient, useInboxStore } from '../../src/renderer/components/automations/inbox/inboxStore'
@@ -55,9 +54,7 @@ describe('time on the owning computer\'s clock', () => {
     expect(ownedWhenText(at, NOW, laptop, ZONE)).toMatch(/ Laptop time$/)
   })
 
-  it('greys an offline computer in the Computer chip', () => {
-    const all = [{ node: '', name: 'Desk', timeZone: ZONE }, { node: 'nod_laptop', name: 'Laptop', timeZone: ZONE }, { node: 'nod_studio', name: 'Studio', timeZone: ZONE, offline: true }]
-    expect(computerOptions(all)[2]).toMatchObject({ disabled: true, description: 'Studio is offline.' })
+  it('greys an offline computer in the bot computer choice', () => {
     // A bot runs on the computer that holds it: the others are listed, greyed, with why.
     expect(botComputerOptions([{ id: 'this_computer', name: 'Desk' }, { id: 'nod_laptop', name: 'Laptop', offline: true, unavailable: 'Laptop is offline.' }])).toEqual([
       { value: 'this_computer', label: 'Desk' },
