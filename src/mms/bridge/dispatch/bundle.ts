@@ -88,6 +88,8 @@ export async function verifyAndImportBundle(
       '--no-prune',
       '--no-prune-tags',
       '--no-write-fetch-head',
+      '--no-recurse-submodules',
+      '--refmap=',
       bundle,
       `${inputRef(base)}:${inputRef(base)}`
     ],
@@ -120,6 +122,8 @@ export async function verifyAndImportBundle(
       '--no-prune',
       '--no-prune-tags',
       '--no-write-fetch-head',
+      '--no-recurse-submodules',
+      '--refmap=',
       repository,
       `${inputRef(base)}:${inputRef(base)}`
     ],

@@ -241,6 +241,7 @@ export class DispatchService {
             '--no-prune-tags',
             '--no-recurse-submodules',
             '--no-write-fetch-head',
+            '--refmap=',
             record.binding.options.remote,
             request.baseCommit
           ],

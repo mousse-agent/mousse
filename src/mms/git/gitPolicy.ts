@@ -456,26 +456,49 @@ function updateRefInput(stdin: string | undefined): string[] | null {
 
 const isObjectName = (value: string): boolean => /^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(value)
 
-/** Every value an option is given before `--`, whether as `--flag=value` or `--flag value`. */
-function optionValues(rest: readonly string[], flag: string): string[] {
-  const values: string[] = []
-  for (let index = 0; index < rest.length && rest[index] !== '--'; index += 1) {
-    const arg = rest[index]
-    if (arg === flag) values.push(rest[++index] ?? '')
-    else if (arg.startsWith(`${flag}=`)) values.push(arg.slice(flag.length + 1))
+/**
+ * A command's arguments as Git reads them: its options, with an operand given separately joined on as
+ * `--flag=value` (so `--server-option --refmap=` is a server option, not a refmap), and its positionals, which
+ * `--` ends the options for.
+ */
+function parseArgs(rest: readonly string[], withValue: ReadonlySet<string>): { options: string[]; positionals: string[] } {
+  const options: string[] = []
+  const found: string[] = []
+  for (let index = 0; index < rest.length; index++) {
+    const arg = rest[index]!
+    if (arg === '--') {
+      found.push(...rest.slice(index + 1))
+      break
+    }
+    if (arg.startsWith('-') && arg !== '-') {
+      if (withValue.has(arg)) options.push(`${arg}=${rest[++index] ?? ''}`)
+      else options.push(arg)
+      continue
+    }
+    found.push(arg)
   }
-  return values
+  return { options, positionals: found }
 }
+
+/** Shallow fetches move the repository's shallow boundary (`.git/shallow`), which no ref names. */
+const SHALLOW_OPTIONS = ['--depth', '--deepen', '--shallow-since', '--shallow-exclude', '--unshallow', '--update-shallow']
 
 function fetchEffect(rest: readonly string[]): Effect {
   const withValue = new Set(['--depth', '--deepen', '--shallow-since', '--shallow-exclude', '--refmap', '-j', '--jobs', '--negotiation-tip', '-o', '--server-option', '--filter', '--upload-pack', '--recurse-submodules-default', '--submodule-prefix'])
-  const [, ...refspecs] = positionals(rest, withValue)
+  const { options, positionals: [, ...refspecs] } = parseArgs(rest, withValue)
+  const option = (...flags: string[]): boolean => has(options, ...flags)
+  const refmaps = options.filter((arg) => arg.startsWith('--refmap=')).map((arg) => arg.slice('--refmap='.length))
   // An empty `--refmap=` narrows a fetch: the remote's configured refspecs then update no tracking ref next to the
   // refspecs given. Any other refmap names refs the arguments do not list.
-  const widening = has(rest, '--prune', '-p', '--prune-tags', '-P', '--all', '--multiple', '--tags', '-t', '--upload-pack', '--update-head-ok', '-u') ||
-    optionValues(rest, '--refmap').some((value) => value !== '')
+  const widening = option('--prune', '-p', '--prune-tags', '-P', '--all', '--multiple', '--tags', '-t', '--upload-pack', '--update-head-ok', '-u') ||
+    refmaps.some((value) => value !== '')
+  // Without an empty refmap, whatever a refspec names (a ref, or even a commit by name) can also move the tracking
+  // ref the remote's configured fetch refspecs map it to (Git's opportunistic update): those are in the config, not
+  // the arguments. A fetch that follows submodules fetches inside them, where this command's refmap does not reach.
+  const configured = !refmaps.includes('')
+  const submodules = !(option('--no-recurse-submodules') || options.includes('--recurse-submodules=no'))
   const refs: string[] = []
-  let unlisted = widening || !has(rest, '--no-tags', '-n') || refspecs.length === 0
+  let unlisted = widening || configured || submodules || option(...SHALLOW_OPTIONS) || !option('--no-tags', '-n') || refspecs.length === 0
   for (const refspec of refspecs) {
     const spec = refspec.replace(/^\+/, '')
     const colon = spec.indexOf(':')

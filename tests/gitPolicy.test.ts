@@ -84,25 +84,63 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args })).toMatchObject({ allowed: false })
   })
 
+  // What every fetch Mousse runs by itself must say: no tags, no submodules, no FETCH_HEAD, and an empty refmap.
+  const OWN_FETCH = ['fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--refmap=']
+
   it('allows a fetch only into owned refs, without tags and with every refspec named', () => {
-    const into = ['fetch', '--no-tags', '--no-write-fetch-head', '--', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/head']
+    const into = [...OWN_FETCH, '--', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/head']
     expect(decide({ args: into })).toMatchObject({ access: 'owned', allowed: true })
     // A commit by name only downloads objects: no ref changes.
-    expect(decide({ args: ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', 'a'.repeat(40)] })).toMatchObject({ access: 'read', allowed: true })
+    expect(decide({ args: [...OWN_FETCH, 'origin', 'a'.repeat(40)] })).toMatchObject({ access: 'read', allowed: true })
     expect(decide({ args: ['fetch', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/head'] })).toMatchObject({ allowed: false })
-    expect(decide({ args: ['fetch', '--no-tags', 'origin', 'refs/heads/main:refs/heads/main'] })).toMatchObject({ allowed: false })
-    expect(decide({ args: ['fetch', '--no-tags', '--prune', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...OWN_FETCH, 'origin', 'refs/heads/main:refs/heads/main'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...OWN_FETCH, '--prune', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['fetch', '--progress'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['fetch', '--progress'], userRequested: USER })).toMatchObject({ access: 'userRequested', allowed: true })
   })
 
+  it('refuses an own fetch without an empty refmap, since the remote’s configured refspecs could move a tracking ref', () => {
+    // `remote.origin.fetch` maps refs (or even a commit by name) onto tracking refs, which Git updates next to the
+    // refspec given. The arguments cannot list them.
+    const noRefmap = ['fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head']
+    expect(decide({ args: [...noRefmap, '--', 'origin', '+refs/heads/main:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...noRefmap, '--', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/head'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...noRefmap, 'origin', 'a'.repeat(40)] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...noRefmap, 'origin', `${'a'.repeat(40)}:refs/mousse/x`] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...OWN_FETCH, 'origin', `${'a'.repeat(40)}:refs/mousse/x`] })).toMatchObject({ access: 'owned', allowed: true })
+    // A refmap after `--` is a refspec, not an option.
+    expect(decide({ args: [...noRefmap, '--', '--refmap=', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    // What the person asks for is theirs to have.
+    expect(decide({ args: ['fetch', '--no-tags', 'origin', '+refs/heads/main:refs/mousse/x'], userRequested: USER })).toMatchObject({ allowed: true })
+  })
+
+  it('reads an option’s operand as Git does, so a value cannot pass for an empty refmap or another flag', () => {
+    const base = ['fetch', '--no-tags', '--no-prune', '--no-prune-tags', '--no-recurse-submodules', '--no-write-fetch-head']
+    // Git takes `--refmap=` as the server option's value here: there is no refmap at all.
+    expect(decide({ args: [...base, '--server-option', '--refmap=', 'origin', 'refs/heads/main:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...base, '-o', '--refmap=', 'origin', 'refs/heads/main:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['fetch', '--server-option', '--no-tags', '--no-recurse-submodules', '--refmap=', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['fetch', '--no-tags', '--server-option', '--no-recurse-submodules', '--refmap=', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+  })
+
+  it('refuses an own fetch that may follow submodules or move the shallow boundary', () => {
+    const recursing = ['fetch', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', 'x:refs/mousse/x']
+    expect(decide({ args: recursing })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...recursing.slice(0, 1), '--recurse-submodules=no', ...recursing.slice(1)] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: [...recursing.slice(0, 1), '--recurse-submodules=on-demand', ...recursing.slice(1)] })).toMatchObject({ allowed: false })
+    for (const shallow of [['--depth=1'], ['--depth', '1'], ['--deepen=2'], ['--shallow-since=2020-01-01'], ['--shallow-exclude', 'main'], ['--unshallow'], ['--update-shallow']]) {
+      expect(decide({ args: [...OWN_FETCH, ...shallow, 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    }
+    expect(decide({ args: [...OWN_FETCH, '--depth=1', 'origin', 'x:refs/mousse/x'], userRequested: USER })).toMatchObject({ allowed: true })
+  })
+
   it('treats an empty refmap as narrowing a fetch, and any other refmap as widening it', () => {
     // The upstream check: an empty refmap keeps the remote's configured refspecs from moving its tracking refs.
-    const check = ['fetch', '--no-tags', '--no-write-fetch-head', '--refmap=', '--', 'origin', '+refs/heads/main:refs/mousse/upstream-check/x']
+    const check = ['fetch', '--no-tags', '--recurse-submodules=no', '--no-write-fetch-head', '--refmap=', '--', 'origin', '+refs/heads/main:refs/mousse/upstream-check/x']
     expect(decide({ args: check })).toMatchObject({ access: 'owned', allowed: true })
-    expect(decide({ args: ['fetch', '--no-tags', '--refmap', '', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ access: 'owned', allowed: true })
-    expect(decide({ args: ['fetch', '--no-tags', '--refmap=+refs/heads/*:refs/remotes/origin/*', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
-    expect(decide({ args: ['fetch', '--no-tags', '--refmap', 'refs/heads/*:refs/heads/*', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['fetch', '--no-tags', '--no-recurse-submodules', '--refmap', '', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: [...OWN_FETCH, '--refmap=+refs/heads/*:refs/remotes/origin/*', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: [...OWN_FETCH, '--refmap', 'refs/heads/*:refs/heads/*', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
   })
 
   it('never treats a push as owned, whatever the branch is called: it publishes to the user\'s remote', () => {
