@@ -15,6 +15,8 @@ const BLOCK_TAGS = new Set([
 
 export const HIGHLIGHT_NAME = "mousse-find";
 export const ACTIVE_HIGHLIGHT_NAME = "mousse-find-active";
+/** The most occurrences painted at once; the mounted rows rarely hold more, and a one-letter query should not paint thousands. */
+export const MAX_PAINTED_RANGES = 1000;
 
 /** The part of the thread an occurrence belongs to, and its place among that part's occurrences. */
 export type ScopeOccurrence = { messageId: string; partIndex: number; ordinal: number };
@@ -160,9 +162,11 @@ export function createFindPainter(rowsRoot: HTMLElement): FindPainter {
     }
     const all: Range[] = [];
     let current: Range | null = null;
-    for (const row of rows()) {
+    paintRows: for (const row of rows()) {
       for (const occurrence of occurrencesOf(row)) {
-        all.push(occurrence.range);
+        // Past the cap only the active match is still looked for; it has its own highlight.
+        if (all.length < MAX_PAINTED_RANGES) all.push(occurrence.range);
+        else if (!active || current) break paintRows;
         if (
           active &&
           row.dataset.turnKey === active.turnKey &&
