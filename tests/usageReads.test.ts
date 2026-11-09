@@ -83,6 +83,11 @@ describe('the protocol methods', () => {
     expect(mms.providerAccess.usageFor).not.toHaveBeenCalled()
   })
 
+  it('lists Claude with its Settings entry, its sign-ins previewed first', async () => {
+    const mms = { ...services(), claudeSubscription: { configured: () => true } }
+    expect((await call(mms, 'providers.usageSlots') as { slots: unknown[] }).slots).toContainEqual({ id: 'claude-subscription', label: 'Claude subscription', instanceId: 'claude', previewAccounts: true })
+  })
+
   it('reads one provider at a time; a hung one does not hold the others, and the fresh reading is kept', async () => {
     vi.useFakeTimers()
     try {

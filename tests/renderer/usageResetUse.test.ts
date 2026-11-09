@@ -15,7 +15,7 @@ import type { ProviderUsage, UseLimitResetResponse } from '../../src/shared/prov
 
 const NOW = Date.parse('2026-11-09T12:00:00Z')
 const chatgpt = (patch: Partial<ProviderUsage> = {}): ProviderUsage => ({
-  id: 'codex:chatgpt-subscription', label: 'ChatGPT subscription', plan: 'Plus', status: 'available',
+  id: 'codex:chatgpt-subscription', label: 'ChatGPT subscription', plan: 'Plus', status: 'available', resettable: true,
   windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 0, resetsAt: '2026-11-11T10:00:00Z' }],
   resets: { available: 2, credits: [
     { id: 'rc_late', title: 'Full reset', type: 'codexRateLimits', expiresAt: '2026-12-01T12:00:00Z' },

@@ -16,7 +16,7 @@ const providers: ProviderUsage[] = [
   { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 58 }] },
   { id: 'vercel-ai-gateway', label: 'Vercel AI Gateway', authType: 'api_key', status: 'available', windows: [], credit: { balanceUsd: 12.4, usedUsd: 37.6 } },
   { id: 'codex:chatgpt-subscription', label: 'ChatGPT subscription', status: 'unavailable', windows: [], signedOut: true, message: 'Signed out' },
-  { id: 'xai', label: 'Grok (xAI)', authType: 'oauth', status: 'error', windows: [], problem: 'session_expired', message: 'Grok session expired.' },
+  { id: 'xai', label: 'Grok (xAI)', instanceId: 'pi:xai', authType: 'oauth', status: 'error', windows: [], problem: 'session_expired', message: 'Grok session expired.' },
   { id: 'opencode-go', label: 'OpenCode Go', authType: 'api_key', status: 'unavailable', windows: [], problem: 'no_subscription', message: 'No subscription' }
 ]
 

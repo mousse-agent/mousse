@@ -210,7 +210,7 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
                 {provider.plan && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-plan">{provider.plan}</span>}
                 {multi && provider.proxy && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-source">via CLI API proxy</span>}
                 {!multi && <UsageResetsChip resets={provider.resets} now={now} />}
-                {!multi && onUseReset && local && provider.id.startsWith('codex') && <UsageResetButton
+                {!multi && onUseReset && local && provider.resettable && <UsageResetButton
                   resets={provider.resets}
                   hint={provider.windows.some((window) => (remainingNow(window, now) ?? 100) < 20)}
                   onStart={() => setResetFlow({ providerId: provider.id, phase: 'confirm' })}
@@ -240,7 +240,7 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
           {needsProxyKey(provider) && onSaveProxyKey && local
             ? <ProxyKeyNote provider={provider} onSave={onSaveProxyKey} onSaved={onRefresh} />
             : !multi && !waiting && <UsageNote provider={provider} />}
-          {!multi && onUseReset && local && provider.id.startsWith('codex') && <UsageResetConfirm
+          {!multi && onUseReset && local && provider.resettable && <UsageResetConfirm
             resets={provider.resets}
             flow={resetFlow?.providerId === provider.id ? resetFlow : null}
             onConfirm={() => void runReset(provider)}
@@ -313,7 +313,7 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
       setFailed(false)
       await Promise.all(slots.map(async (slot) => {
         try {
-          if (slot.id === 'claude-subscription') {
+          if (slot.previewAccounts) {
             // Several proxy sign-ins: listed first, then filled in one by one.
             const { provider: preview } = await providers.getUsageFor({ providerId: slot.id, preview: true })
             if (preview?.accounts?.length) {
@@ -354,7 +354,7 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   const disable = async (provider: ProviderUsage) => {
     setDisableAsk(null)
     // The same switch as Settings → Providers: off on this computer; existing threads stay as they are.
-    await window.mousse.providers.instances.setEnabled(usageInstanceId(provider.id), DEVICE_SCOPE, false)
+    await window.mousse.providers.instances.setEnabled(usageInstanceId(provider), DEVICE_SCOPE, false)
     void loadUsage()
   }
   const rowActions: UsageRowActions = {

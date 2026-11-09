@@ -58,7 +58,7 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
-import { checkProxyKey, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, type ProxyUsage, type ProxyUsageOptions } from '../../../providers/localProxyUsage'
+import { checkProxyKey, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, type ProxyUsage, type ProxyUsageOptions } from './localProxyUsage'
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'

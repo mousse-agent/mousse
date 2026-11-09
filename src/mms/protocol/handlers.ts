@@ -3287,7 +3287,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
       // Claude turned off in Settings is not shown either.
       const claudeOn = !ctx.mms.providerInstances?.isDisabled?.('claude')
-      const claude = claudeOn && ctx.mms.claudeSubscription.configured() ? [{ id: CLAUDE_USAGE_ID, label: 'Claude subscription' }] : []
+      const claude = claudeOn && ctx.mms.claudeSubscription.configured() ? [{ id: CLAUDE_USAGE_ID, label: 'Claude subscription', instanceId: 'claude', previewAccounts: true as const }] : []
       const slots = [
         ...ctx.mms.providerAccess.usageSlots(),
         ...claude,
@@ -3351,13 +3351,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.setUsageProxyKey': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A usage proxy key is set on its own computer')
       const p = isObject(params) ? params : {}
-      if (asString(p.providerId, 'providerId', 128) !== 'claude-subscription') throw new Error('Only Claude usage reads through a proxy')
+      if (asString(p.providerId, 'providerId', 128) !== CLAUDE_USAGE_ID) throw new Error('Only Claude usage reads through a proxy')
       return ctx.mms.claudeSubscription.setUsageProxyKey(asString(p.key, 'key', 1024))
     }
     case 'providers.clearUsageProxyKey': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A usage proxy key is cleared on its own computer')
       const p = isObject(params) ? params : {}
-      if (asString(p.providerId, 'providerId', 128) !== 'claude-subscription') throw new Error('Only Claude usage reads through a proxy')
+      if (asString(p.providerId, 'providerId', 128) !== CLAUDE_USAGE_ID) throw new Error('Only Claude usage reads through a proxy')
       ctx.mms.claudeSubscription.clearUsageProxyKey()
       return { ok: true }
     }

@@ -1,6 +1,6 @@
 import { isIP } from 'node:net'
-import type { ProviderUsage, ProviderUsageWindow, UsageAccount, UsageProxyKeyResult, UsageProxyState } from '../../shared/providerAuth'
-import { claudeLimitWindows, claudeResetGrants } from '../harness/vendors/claude/usage'
+import type { ProviderUsage, ProviderUsageWindow, UsageAccount, UsageProxyKeyResult, UsageProxyState } from '../../../../shared/providerAuth'
+import { claudeLimitWindows, claudeResetGrants } from './usage'
 
 /**
  * Plan limits of a Claude sign-in that runs through a local CLI-to-API proxy (CLIProxyAPI): when
