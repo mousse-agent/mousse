@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import type { ProfilePublicDto } from '../../../shared/profiles/types'
 import { Check } from '../../lib/icons'
-import { PROFILE_SWATCHES } from '../../lib/profilePalette'
+import { PROFILE_SWATCHES, profileColor } from '../../lib/profilePalette'
 import { Modal } from '../ui/Modal'
 
 export const PROFILE_NAME_MAX = 64
@@ -38,7 +38,9 @@ export function ProfileEditDialog({ mode, canArchive = false, busy = false, erro
   const creating = mode.kind === 'create'
   const profile = mode.kind === 'edit' ? mode.profile : undefined
   const [name, setName] = useState(profile?.displayName ?? '')
-  const [color, setColor] = useState<string | undefined>(mode.kind === 'create' ? mode.color : profile?.color)
+  // An edited profile's colour is the one it shows everywhere, chosen or derived from its id.
+  const shownColor = profile ? profileColor(profile).toLowerCase() : undefined
+  const [color, setColor] = useState<string | undefined>(mode.kind === 'create' ? mode.color : shownColor)
   const formId = useId()
   const swatchesRef = useRef<HTMLDivElement>(null)
   const focusColor = mode.kind === 'edit' && mode.focus === 'color'
@@ -55,13 +57,13 @@ export function ProfileEditDialog({ mode, canArchive = false, busy = false, erro
   }, [focusColor])
 
   const checked = checkedProfileName(name)
-  const changed = creating || checked !== profile?.displayName || color !== profile?.color
+  const changed = creating || checked !== profile?.displayName || color !== shownColor
   const canSave = !busy && !!checked && changed
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (!canSave || !checked) return
-    onSubmit({ displayName: checked, ...(color && (creating || color !== profile?.color) ? { color } : {}) })
+    onSubmit({ displayName: checked, ...(color && (creating || color !== shownColor) ? { color } : {}) })
   }
 
   return (
