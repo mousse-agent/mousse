@@ -43,6 +43,7 @@ import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { agentJobExpiredReason, isExpired } from './agentJobLimits'
 import { computeNextRun, nextOccurrenceAfter, occurrencesSince } from './computeNextRun'
+import { botJobThreadGuard } from './botJobs'
 import { withFileLock } from './fileLock'
 import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
 import {
@@ -221,6 +222,23 @@ export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt
   return {
     heartbeatAt: readEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat')),
     successAt: readEpoch(join(homeDir, 'scheduled', 'ticker_last_success'))
+  }
+}
+
+/** The fields an older build's save drops, kept aside for `restoreDroppedFields`. */
+type KeptJobFields = Pick<ScheduledJob, 'bot' | 'draft' | 'keys' | 'tellMe' | 'agent' | 'cliName'>
+const KEPT_FIELDS_FILE = 'jobs-kept.json'
+/** What an older build pauses a bot's schedule with: the thread its job names does not exist. */
+const GUARD_PAUSE = 'Its thread was deleted'
+
+function keptFieldsOf(job: ScheduledJob): KeptJobFields {
+  return {
+    ...(job.bot ? { bot: job.bot } : {}),
+    ...(job.draft ? { draft: job.draft } : {}),
+    ...(job.keys?.length ? { keys: job.keys } : {}),
+    ...(job.tellMe ? { tellMe: job.tellMe } : {}),
+    ...(job.agent ? { agent: job.agent } : {}),
+    ...(job.cliName ? { cliName: job.cliName } : {})
   }
 }
 
@@ -482,6 +500,59 @@ export class ScheduledJobStore {
     const definitions = jobs.map((job) => jobToDefinition(job))
     this.config.updateScheduledSection({ jobs: definitions })
     this.saveRuntimeDurably(jobs)
+    this.saveKeptFields(jobs)
+  }
+
+  /**
+   * A copy of the fields an older build drops when it saves the jobs (its field list does not know them), in a file it
+   * never writes. `restoreDroppedFields` puts them back when this build opens the profile again.
+   */
+  private saveKeptFields(jobs: ScheduledJob[]): void {
+    const kept: Record<string, KeptJobFields> = {}
+    for (const job of jobs) {
+      const fields = keptFieldsOf(job)
+      if (Object.keys(fields).length) kept[job.id] = fields
+    }
+    const path = join(this.homeDir, 'scheduled', KEPT_FIELDS_FILE)
+    try {
+      if (!Object.keys(kept).length && !existsSync(path)) return
+      atomicWriteJsonSync(path, { version: 1, jobs: kept })
+    } catch (error) {
+      // The jobs themselves are saved; only the copy an older build's save could need is behind.
+      console.warn('scheduled jobs: the copy of fields older builds drop could not be written', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * After a profile was opened by an older build that saved the jobs: puts back each job's fields that build dropped
+   * (`bot`, `draft`, `keys`, `tellMe`, `agent`, `cliName`), from the copy this build keeps. A bot's schedule that build
+   * paused because its guard thread does not exist ("Its thread was deleted") runs again. A field is put back only on
+   * a job that has none of the kept ones, so an edit this build made is never undone. Returns the ids put back.
+   */
+  restoreDroppedFields(): string[] {
+    const path = join(this.homeDir, 'scheduled', KEPT_FIELDS_FILE)
+    if (!existsSync(path)) return []
+    let kept: Record<string, KeptJobFields>
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as { jobs?: Record<string, KeptJobFields> }
+      kept = parsed && typeof parsed.jobs === 'object' && parsed.jobs ? parsed.jobs : {}
+    } catch {
+      return []
+    }
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const restored: string[] = []
+      for (const job of jobs) {
+        const fields = kept[job.id]
+        if (!fields || typeof fields !== 'object') continue
+        if (Object.keys(keptFieldsOf(job)).length) continue
+        Object.assign(job, fields)
+        if (fields.bot && job.threadId === botJobThreadGuard(fields.bot.botId) && job.pausedReason === GUARD_PAUSE) Object.assign(job, resumeFields(job))
+        restored.push(job.id)
+      }
+      if (restored.length) this.saveJobs(jobs)
+      return restored
+    })
   }
 
   getJob(id: string): ScheduledJob | undefined {

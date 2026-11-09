@@ -826,11 +826,18 @@ export class MmsProfileServices {
     // One scheduler for bots too: a bot's schedule is a job whose Who is the bot, run in the bot's run lane. Its
     // occurrences start only after the bot startup pass (`startOwned`); each tick then does the bots' upkeep.
     this.botSchedules = new BotScheduleBook({ jobs: this.scheduled, label: (when) => botScheduleLabel(when) })
+    // An older build that saved the jobs dropped the fields it does not know (a bot's link, drafts, keys...): put back.
+    try {
+      const restored = this.scheduledStore.restoreDroppedFields()
+      if (restored.length) console.info('scheduled jobs: fields an older build dropped were put back', { jobs: restored.length })
+    } catch (error) {
+      console.warn('scheduled jobs: fields an older build dropped could not be put back', { error: error instanceof Error ? error.message : String(error) })
+    }
     // Schedules earlier builds kept in `bots.db` move here once (marked there, never deleted), before anything ticks.
     if (opened) {
       try {
         const moved = migrateBotSchedules({ bots: opened.store, jobs: this.scheduledStore })
-        if (moved.moved.length || moved.marked.length) console.info('bot schedules moved to the shared scheduler', { moved: moved.moved.length, marked: moved.marked.length })
+        if (moved.moved.length || moved.marked.length || moved.repaired.length || moved.removed.length) console.info('bot schedules moved to the shared scheduler', { moved: moved.moved.length, marked: moved.marked.length, repaired: moved.repaired.length, removed: moved.removed.length })
         for (const failure of moved.failed) console.warn('a bot schedule could not be moved; the next start tries again', failure)
       } catch (error) {
         console.warn('bot schedules could not be moved; the next start tries again', { error: error instanceof Error ? error.message : String(error) })

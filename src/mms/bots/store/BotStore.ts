@@ -1244,6 +1244,11 @@ export class BotStore {
     return this.all('SELECT * FROM bot_schedules WHERE removed_at IS NULL AND migrated_at IS NULL ORDER BY bot_id, created_at, id').map(scheduleOf)
   }
 
+  /** Every schedule removed, moved or not: one an older build removed after its move goes from the shared store too. */
+  removedSchedules(): BotScheduleRow[] {
+    return this.all('SELECT * FROM bot_schedules WHERE removed_at IS NOT NULL ORDER BY bot_id, created_at, id').map(scheduleOf)
+  }
+
   /** Every schedule moved to the shared store, for `unmigrateBotSchedules`. */
   migratedSchedules(): BotScheduleRow[] {
     return this.all('SELECT * FROM bot_schedules WHERE migrated_at IS NOT NULL ORDER BY bot_id, created_at, id').map(scheduleOf)

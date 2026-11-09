@@ -14,14 +14,21 @@ import type { ScheduledJobStore } from './ScheduledJobStore'
  * - The row in `bots.db` is marked with the job it became (`migrated_at`, `migrated_job_id`), never deleted.
  * - It is idempotent and safe to stop at any point: a job that is already there is never made twice (its id is fixed),
  *   and a row is marked only after its job is saved, so a move cut short is finished by the next one.
+ * - It repairs what an older build did meanwhile. That build's save drops the `bot` field, and it then pauses the job
+ *   with "Its thread was deleted": a moved job without its bot gets it back and runs again. A schedule that build
+ *   removed (after `bots.db.pre-v5` was restored) is removed from the shared store too.
  */
 
 /** What the move needs from the shared store: the store itself, or the service over it. */
 export interface BotScheduleMoveTarget {
   listJobs(): ScheduledJob[]
   createJob: ScheduledJobStore['createJob']
+  updateJob(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null
   deleteJob(id: string): boolean
 }
+
+/** What an older build pauses a bot's job with: the guard thread it names does not exist. */
+const GUARD_PAUSE = 'Its thread was deleted'
 
 /** The spec the old bot scheduler kept beside each next run: a time edited since then starts from now. */
 function oldSpec(when: { kind: 'interval'; minutes: number } | { kind: 'cron'; expr: string }): string {
@@ -33,15 +40,18 @@ export interface BotScheduleMoveResult {
   moved: string[]
   /** Rows whose job was there already (a move cut short, or run again): only marked. */
   marked: string[]
+  /** Moved jobs an older build had stripped of their bot, given it back. */
+  repaired: string[]
+  /** Moved jobs whose schedule an older build removed, removed here too. */
+  removed: string[]
   /** Rows that could not be moved now, with why; they stay as they were and the next start tries again. */
   failed: Array<{ botId: string; scheduleId: string; error: string }>
 }
 
 export function migrateBotSchedules(input: { bots: BotStore; jobs: BotScheduleMoveTarget; now?: () => Date }): BotScheduleMoveResult {
   const now = input.now ?? (() => new Date())
-  const result: BotScheduleMoveResult = { moved: [], marked: [], failed: [] }
+  const result: BotScheduleMoveResult = { moved: [], marked: [], repaired: [], removed: [], failed: [] }
   const rows = input.bots.unmigratedSchedules()
-  if (!rows.length) return result
   const states = new Map<string, ReturnType<BotStore['scheduleStates']>>()
   const existing = new Set(input.jobs.listJobs().map((job) => job.id))
   for (const row of rows) {
@@ -69,7 +79,45 @@ export function migrateBotSchedules(input: { bots: BotStore; jobs: BotScheduleMo
       result.failed.push({ botId: row.botId, scheduleId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
   }
+  repairMovedJobs(input, result)
   return result
+}
+
+/**
+ * An older build's save keeps a moved job but drops its `bot`, so it is an ordinary job on the guard thread, paused as
+ * "Its thread was deleted". Each moved row's job gets its bot back (and runs again if that pause was the guard's);
+ * a job whose row an older build removed goes.
+ */
+function repairMovedJobs(input: { bots: BotStore; jobs: BotScheduleMoveTarget }, result: BotScheduleMoveResult): void {
+  const jobs = new Map(input.jobs.listJobs().map((job) => [job.id, job]))
+  for (const row of input.bots.migratedSchedules()) {
+    if (row.removedAt) continue
+    const jobId = row.migratedJobId ?? botJobId(row.botId, row.id)
+    const job = jobs.get(jobId)
+    if (!job || (job.bot?.botId === row.botId && job.bot.scheduleId === row.id)) continue
+    try {
+      const guard = botJobThreadGuard(row.botId)
+      const paused = job.threadId === guard && job.pausedReason === GUARD_PAUSE
+      const next = paused ? computeNextRun(job.schedule) : undefined
+      input.jobs.updateJob(jobId, {
+        bot: { botId: row.botId, scheduleId: row.id, createdBy: row.createdBy },
+        threadId: guard,
+        ...(paused ? { enabled: true, state: next ? 'scheduled' as const : 'completed' as const, nextRunAt: next ?? null, pausedAt: undefined, pausedReason: undefined, resumeAt: undefined } : {})
+      })
+      result.repaired.push(jobId)
+    } catch (error) {
+      result.failed.push({ botId: row.botId, scheduleId: row.id, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  for (const row of input.bots.removedSchedules()) {
+    const jobId = row.migratedJobId ?? botJobId(row.botId, row.id)
+    if (!jobs.has(jobId)) continue
+    try {
+      if (input.jobs.deleteJob(jobId)) result.removed.push(jobId)
+    } catch (error) {
+      result.failed.push({ botId: row.botId, scheduleId: row.id, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
 }
 
 /**

@@ -8,12 +8,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
-import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
+import { jobToDefinition, MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { botJobThreadGuard } from '../../src/mms/scheduled/botJobs'
 import { migrateBotSchedules, unmigrateBotSchedules } from '../../src/mms/scheduled/botScheduleMigration'
 import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
 import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
+import type { ScheduledJob } from '../../src/shared/types'
 import { botFixture, createBot, T0 } from './botFixture'
 
 const NOW = new Date('2026-11-09T10:00:00.000Z')
@@ -65,7 +66,7 @@ describe('moving bot schedules to the shared store', () => {
 
   it('copies each schedule once, keeping its id, prompt, who added it, when it was made and its next run', () => {
     const result = move()
-    expect(result).toEqual({ moved: ['bot-a--tidy', 'bot-a--news', 'bot-b--daily'], marked: [], failed: [] })
+    expect(result).toEqual({ moved: ['bot-a--tidy', 'bot-a--news', 'bot-b--daily'], marked: [], repaired: [], removed: [], failed: [] })
     expect(jobs.getJob('bot-a--tidy')).toMatchObject({
       name: 'Tidy the notes.',
       prompt: 'Tidy the notes.',
@@ -94,7 +95,7 @@ describe('moving bot schedules to the shared store', () => {
   it('run again, it changes nothing', () => {
     move()
     const before = JSON.stringify(jobs.listJobs())
-    expect(move()).toEqual({ moved: [], marked: [], failed: [] })
+    expect(move()).toEqual({ moved: [], marked: [], repaired: [], removed: [], failed: [] })
     expect(JSON.stringify(jobs.listJobs())).toBe(before)
     expect(jobs.listJobs()).toHaveLength(3)
   })
@@ -110,7 +111,7 @@ describe('moving bot schedules to the shared store', () => {
     expect(first.failed).toEqual([{ botId: 'bot-a', scheduleId: 'news', error: 'Mousse stopped' }])
     expect(jobs.listJobs()).toHaveLength(3)
     vi.restoreAllMocks()
-    expect(move()).toEqual({ moved: [], marked: ['bot-a--news'], failed: [] })
+    expect(move()).toEqual({ moved: [], marked: ['bot-a--news'], repaired: [], removed: [], failed: [] })
     expect(jobs.listJobs().map((job) => job.id).sort()).toEqual(['bot-a--news', 'bot-a--tidy', 'bot-b--daily'])
     expect(bots!.unmigratedSchedules()).toEqual([])
   })
@@ -127,14 +128,14 @@ describe('moving bot schedules to the shared store', () => {
     expect(first.failed).toMatchObject([{ scheduleId: 'news', error: 'disk full' }])
     expect(bots!.unmigratedSchedules().map((row) => row.id)).toEqual(['news'])
     vi.restoreAllMocks()
-    expect(move()).toEqual({ moved: ['bot-a--news'], marked: [], failed: [] })
+    expect(move()).toEqual({ moved: ['bot-a--news'], marked: [], repaired: [], removed: [], failed: [] })
     expect(jobs.listJobs()).toHaveLength(3)
   })
 
   it('a moved schedule the bot removes later is never moved back', () => {
     move()
     expect(jobs.deleteJob('bot-a--tidy')).toBe(true)
-    expect(move()).toEqual({ moved: [], marked: [], failed: [] })
+    expect(move()).toEqual({ moved: [], marked: [], repaired: [], removed: [], failed: [] })
     expect(jobs.getJob('bot-a--tidy')).toBeUndefined()
   })
 
@@ -158,6 +159,62 @@ describe('moving bot schedules to the shared store', () => {
     await service.tickNow()
     expect(jobs.getJob('bot-a--tidy')).toMatchObject({ state: 'paused', pausedReason: 'Its thread was deleted' })
     service.beginShutdown()
+  })
+})
+
+describe('going back to an older build and coming back', () => {
+  /** What an older build's save does: it writes every job through its own field list, which knows none of these. */
+  function olderBuildSaves(change: (job: ScheduledJob) => ScheduledJob = (job) => job): void {
+    const inside = jobs as unknown as { config: MousseConfigStore; saveRuntimeDurably(list: ScheduledJob[]): void }
+    const list = jobs.listJobs().map(change)
+    const stripped = list.map((job) => jobToDefinition(job)).map(({ bot: _bot, draft: _draft, keys: _keys, tellMe: _tellMe, agent: _agent, cliName: _cliName, ...rest }) => rest)
+    inside.config.updateScheduledSection({ jobs: stripped })
+    inside.saveRuntimeDurably(list)
+  }
+
+  it('gives a moved job its bot back after an older build stripped it and paused it, and it runs again', () => {
+    move()
+    // The older build's tick: the guard thread does not exist, so it pauses the job. That save is this build's here,
+    // so the copy of the fields is behind too: only the bots.db row can repair it.
+    jobs.updateJob('bot-a--tidy', { bot: undefined })
+    jobs.pauseJob('bot-a--tidy', 'Its thread was deleted')
+    const result = move()
+    expect(result).toMatchObject({ moved: [], repaired: ['bot-a--tidy'], failed: [] })
+    expect(jobs.getJob('bot-a--tidy')).toMatchObject({ bot: { botId: 'bot-a', scheduleId: 'tidy', createdBy: 'bot' }, threadId: botJobThreadGuard('bot-a'), enabled: true, state: 'scheduled' })
+    expect(jobs.getJob('bot-a--tidy')?.pausedReason).toBeUndefined()
+    expect(move().repaired).toEqual([])
+  })
+
+  it('repairs a job the restored bots.db.pre-v5 rows find already there, and removes one the older build removed', () => {
+    move()
+    jobs.updateJob('bot-a--news', { bot: undefined })
+    // bots.db.pre-v5 restored: no marks; the older build then removed `tidy`.
+    bots!.run('UPDATE bot_schedules SET migrated_at = NULL, migrated_job_id = NULL')
+    bots!.run("UPDATE bot_schedules SET removed_at = ? WHERE id = 'tidy'", '2026-11-08T00:00:00.000Z')
+    const result = move()
+    expect(result).toMatchObject({ moved: [], marked: ['bot-a--news', 'bot-b--daily'], repaired: ['bot-a--news'], removed: ['bot-a--tidy'], failed: [] })
+    expect(jobs.getJob('bot-a--tidy')).toBeUndefined()
+    expect(jobs.getJob('bot-a--news')?.bot).toEqual({ botId: 'bot-a', scheduleId: 'news', createdBy: 'owner' })
+  })
+
+  it('puts back every field an older build’s save dropped: a bot’s link, a draft, keys, Tell me and a CLI name', () => {
+    move()
+    const draft = jobs.createJob({ name: 'Draft', prompt: 'x', schedule: { kind: 'manual' }, draft: { draft: true, draftId: 'd1' } })
+    const keyed = jobs.createJob({ name: 'Keyed', prompt: 'x', schedule: { kind: 'manual' }, keys: ['GITHUB_TOKEN'], tellMe: 'every', cliName: 'keyed' })
+    // The older build saves, and pauses a bot's job on its guard thread.
+    olderBuildSaves((job) => job.id === 'bot-b--daily' ? { ...job, enabled: false, state: 'paused', pausedAt: NOW.toISOString(), pausedReason: 'Its thread was deleted' } : job)
+    expect(jobs.getJob('bot-b--daily')).toMatchObject({ state: 'paused' })
+    expect(jobs.getJob('bot-b--daily')?.bot).toBeUndefined()
+    const before = jobs.getJob(keyed.id)
+    expect(before?.keys).toBeUndefined()
+    expect(jobs.restoreDroppedFields().sort()).toEqual(['bot-a--news', 'bot-a--tidy', 'bot-b--daily', draft.id, keyed.id].sort())
+    expect(jobs.getJob(draft.id)).toMatchObject({ draft: { draft: true, draftId: 'd1' }, enabled: false })
+    expect(jobs.getJob(keyed.id)).toMatchObject({ keys: ['GITHUB_TOKEN'], tellMe: 'every', cliName: 'keyed' })
+    expect(jobs.getJob('bot-b--daily')).toMatchObject({ bot: { botId: 'bot-b', scheduleId: 'daily' }, enabled: true, state: 'scheduled' })
+    // Nothing more to put back; an edit this build makes afterwards is never undone.
+    expect(jobs.restoreDroppedFields()).toEqual([])
+    jobs.updateJob(keyed.id, { keys: undefined })
+    expect(jobs.restoreDroppedFields()).toEqual([])
   })
 })
 
