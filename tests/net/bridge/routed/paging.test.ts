@@ -355,7 +355,8 @@ describe('images of a thread read from another computer', () => {
       intent: 'queue',
       state: 'pending'
     }
-    vi.spyOn(f.mms.orchestrator, 'listQueue').mockReturnValue([queued] as never)
+    // The thread's durable queue, which a snapshot reads whether or not the thread is loaded.
+    f.mms.threads.saveMessageQueue(t.id, [{ ...queued, threadId: t.id }] as never)
 
     const snapshot = await ok('thread.snapshot', { threadId: t.id })
     expect(snapshot.queue).toEqual([
