@@ -34,13 +34,14 @@ export async function runAutomation(args: ParsedArgs): Promise<void> {
           const rows = data as ScheduledJob[]
           if (rows.length === 0) return 'No automations.'
           return formatTable([
-            ['ID', 'NAME', 'ENABLED', 'STATE', 'MODEL', 'BY', 'NEXT'],
+            ['ID', 'NAME', 'RUN AS', 'ENABLED', 'STATE', 'MODEL', 'BY', 'NEXT'],
             ...rows.map((job: ScheduledJob) => [
               job.id.slice(0, 8),
               job.name,
+              job.cliName ?? '-',
               String(job.enabled),
               // An admitted occurrence that has not ended is shown as queued, whatever the job's own state.
-              job.pendingOccurrence ? 'queued' : job.state,
+              job.draft ? 'draft' : job.pendingOccurrence ? 'queued' : job.state,
               job.selection ? `${job.selection.instanceId ?? job.selection.llmProvider}/${job.selection.model}` : '-',
               // A job an agent created says so (`createdBy`).
               job.createdBy ? 'agent' : '-',
@@ -76,12 +77,15 @@ export async function runAutomation(args: ParsedArgs): Promise<void> {
         break
       }
       case 'run': {
-        const id = positional[0]
-        if (!id) exitWithError('automation run requires an automation id.', globals.mode)
+        const target = positional[0]
+        if (!target) exitWithError('automation run requires an automation id or name.', globals.mode)
+        const { jobs } = await client.request<{ jobs: ScheduledJob[] }>('scheduled.list')
+        const id = resolveRunTarget(jobs, target)
+        if (!id) exitWithError(`Automation not found: ${target}`, globals.mode)
         const res = await client.request<{ job: ScheduledJob | null }>('scheduled.run', {
           id
         })
-        if (!res.job) exitWithError(`Automation not found: ${id}`, globals.mode)
+        if (!res.job) exitWithError(`Automation not found: ${target}`, globals.mode)
         writeOutput(globals.mode, res.job)
         break
       }
@@ -155,6 +159,17 @@ export async function runAutomation(args: ParsedArgs): Promise<void> {
   } finally {
     await closeMmsContext(ctx)
   }
+}
+
+/**
+ * The automation `automation run` means: its id, the name of a CLI trigger (`cliName`), or the start of an id as
+ * `automation list` shows it. Undefined when none, or when a short id fits more than one.
+ */
+export function resolveRunTarget(jobs: readonly Pick<ScheduledJob, 'id' | 'cliName'>[], target: string): string | undefined {
+  const exact = jobs.find((job) => job.id === target) ?? jobs.find((job) => job.cliName === target)
+  if (exact) return exact.id
+  const prefixed = target.length >= 4 ? jobs.filter((job) => job.id.startsWith(target)) : []
+  return prefixed.length === 1 ? prefixed[0]!.id : undefined
 }
 
 interface WebhookSecretResult {

@@ -39,13 +39,19 @@ export const BOT_BROWSER_PERMISSION = 'browser'
 export const BOT_BROWSER_TOOLS: readonly BrowserAutomationTool[] = BROWSER_AUTOMATION_TOOLS.filter((tool) => tool !== 'browser_request_human')
 
 /**
- * The Mousse app tools a bot may be granted: ones that read the web, its own browser, and the
- * bot's own tools. Every other app tool starts, wakes, writes or reads other threads (delegation,
- * forks, queues, merge-backs), acts in the owner's name, or asks a person, so it would run work
- * outside the grant. Consults (6c-2) are the way a bot uses other threads. The skill tools come
- * with granted skills.
+ * The automation tools (`automation_*`, v4): a bot granted them builds drafts the owner turns on, and lists, changes
+ * and pauses the owner's automations. They are permissions: the first use asks the owner.
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION])
+export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause']
+
+/**
+ * The Mousse app tools a bot may be granted: ones that read the web, its own browser, the bot's
+ * own tools, and the automation tools. Every other app tool starts, wakes, writes or reads other
+ * threads (delegation, forks, queues, merge-backs), acts in the owner's name, or asks a person, so
+ * it would run work outside the grant. Consults (6c-2) are the way a bot uses other threads. The
+ * skill tools come with granted skills.
+ */
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS])
 
 const OWN_APP_TOOLS: ReadonlySet<string> = new Set(BOT_OWN_APP_TOOLS)
 const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)

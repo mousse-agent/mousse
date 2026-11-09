@@ -66,6 +66,9 @@ import { requestRefusal, takesRequests } from '../../shared/requestTrigger'
 
 export const TICKER_INTERVAL_MS = 60_000
 
+/** What starting, resuming or enabling a draft is told: only Turn on makes a draft an automation. */
+export const DRAFT_REFUSAL = 'It is a draft. Turn it on first.'
+
 /** A webhook request's timestamp may differ from the daemon's clock by this much (seconds), either way. */
 export const WEBHOOK_TIMESTAMP_TOLERANCE_S = 300
 /** Signature-valid requests one job accepts per minute; further ones are answered 429. */
@@ -492,7 +495,8 @@ export class ScheduledJobStore {
    */
   createJob(input: CreateScheduledJobInput, options: { id?: string; nextRunAt?: string | null; createdAt?: string } = {}): ScheduledJob {
     const now = new Date().toISOString()
-    const nextRunAt = options.nextRunAt !== undefined ? options.nextRunAt : computeNextRun(input.schedule)
+    // A draft is stored, never enabled and never due: Turn on gives it its first next run.
+    const nextRunAt = input.draft ? null : options.nextRunAt !== undefined ? options.nextRunAt : computeNextRun(input.schedule)
     // A mode with no ceiling to bound it gets the strictest ceiling, and the mode is brought down to it.
     const permissionCeiling = input.permissionCeiling ?? (input.permissionMode ? 'ask' : undefined)
     const permissionMode = input.permissionMode && !input.permissionCeiling ? narrowPermissionMode(input.permissionMode, 'ask') : input.permissionMode
@@ -503,8 +507,8 @@ export class ScheduledJobStore {
       name: input.name.trim() || 'Scheduled job',
       prompt: input.prompt.trim(),
       schedule: input.schedule,
-      enabled: true,
-      state: nextRunAt || input.schedule.kind === 'manual' ? 'scheduled' : 'completed',
+      enabled: !input.draft,
+      state: input.draft ? 'paused' : nextRunAt || input.schedule.kind === 'manual' ? 'scheduled' : 'completed',
       nextRunAt,
       threadId: input.threadId,
       projectId: input.projectId,
@@ -521,6 +525,8 @@ export class ScheduledJobStore {
       accessCap: input.accessCap,
       expiresAt: input.expiresAt,
       ...(input.keys?.length ? { keys: [...new Set(input.keys)] } : {}),
+      ...(input.draft ? { draft: input.draft } : {}),
+      ...(input.cliName ? { cliName: input.cliName } : {}),
       ...(input.threadEvent ? { trigger: { threadEvent: { threadId: input.threadEvent.threadId, number: input.threadEvent.number, events: [...input.threadEvent.events] } } } : {}),
       repeat: input.repeat ? { times: input.repeat.times, completed: 0 } : undefined,
       runHistory: [],
@@ -548,6 +554,8 @@ export class ScheduledJobStore {
       const index = jobs.findIndex((job) => job.id === id)
       if (index === -1) return null
 
+      // A draft never runs: nothing turns it on but Turn on, which clears `draft` in the same change.
+      if (jobs[index].draft && patch.enabled === true && !('draft' in patch && patch.draft === undefined)) throw new Error(DRAFT_REFUSAL)
       let applied = patch
       if (options?.permissions) {
         const edit = options.permissions(jobs[index])
@@ -943,6 +951,7 @@ export class ScheduledJobStore {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const job = this.getJob(id)
       if (!job) return null
+      if (job.draft) throw new Error(DRAFT_REFUSAL)
       return this.updateJob(id, resumeFields(job))
     })
   }
@@ -991,6 +1000,7 @@ export class ScheduledJobStore {
   triggerJob(id: string): ScheduledJob | null {
     const current = this.getJob(id)
     if (current?.state === 'running' || current?.runClaim || current?.pendingOccurrence) return current
+    if (current?.draft) throw new Error(DRAFT_REFUSAL)
     return this.updateJob(id, {
       enabled: true,
       state: 'scheduled',

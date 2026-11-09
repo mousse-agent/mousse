@@ -84,6 +84,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
+import type { AutomationToolHost } from '../run/mcp/appTools/automations'
+import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManager'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
@@ -1002,6 +1004,9 @@ export class OrchestratorService extends EventEmitter {
 
   /** The profile's scheduled jobs, for the agents' `schedule_*` tools; without them the tools are not registered. */
   setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'> | undefined): void { this.scheduledJobs = jobs }
+  /** The automation drafts the Automation manager and granted bots write (`automation_*`). */
+  private automationTools?: AutomationToolHost
+  setAutomationTools(tools: AutomationToolHost | undefined): void { this.automationTools = tools }
 
   private remoteComputers?: RemoteComputersPort
   /** Remote subagents' tasks on other computers (issue #469); present while a run engine is attached. */
@@ -3236,7 +3241,11 @@ export class OrchestratorService extends EventEmitter {
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: turn.bot ? '' : sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+        sessionInstructions: turn.bot ? '' : [
+          sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+          // The Automation manager's thread runs the default agent with its own brief (v4 Automations).
+          ...(mcpAttached && this.threadStore?.getThread(turn.threadId)?.automationManager ? [AUTOMATION_MANAGER_INSTRUCTIONS] : [])
+        ].filter(Boolean).join('\n\n'),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
@@ -3325,7 +3334,13 @@ export class OrchestratorService extends EventEmitter {
    * the credential's caller: its thread's session, run and mode ceiling.
    */
   mcpToolHost(): AppToolHost {
+    // Read at every use: the registry is built before the profile hands over its scheduled jobs.
+    const scheduleHost = (): AgentScheduleHost | undefined =>
+      this.scheduledJobs ? { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } : undefined
     return {
+      get schedules() {
+        return scheduleHost()
+      },
       delegation: (caller: McpCaller) =>
         this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling, caller.accessLevel),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
@@ -3373,7 +3388,7 @@ export class OrchestratorService extends EventEmitter {
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
-      ...(this.scheduledJobs ? { schedules: { ...this.scheduledJobs, limits: (caller) => this.scheduledCreatorLimits(caller), startedByPerson: (caller) => this.runStartedByPerson(caller) } } : {})
+      automations: () => this.automationTools
     }
   }
 

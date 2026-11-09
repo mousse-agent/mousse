@@ -22,6 +22,10 @@ export interface AutomationsDomain {
   resend(jobId: string, occurrenceId: string): { occurrenceId: string }
   /** Saved keys: their names in the profile's secret store (never values), and storing one typed into a masked field. */
   keys: { list(): string[]; set(name: string, value: string): void }
+  /** Drafts: Turn on (the person's creation), Discard, a blank one to set up by hand, and an answered question. */
+  drafts: { turnOn(draftId: string): ScheduledJob; discard(draftId: string): void; blank(projectId?: string): ScheduledJob; answered(draftId: string): void }
+  /** The Automation manager's hidden thread, made the first time. */
+  managerThread(): { id: string }
 }
 
 /**
@@ -127,6 +131,91 @@ export function registerAutomationMethods(
       if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'Add a key from a Mousse window.')
       ;(await bound(binding)).keys.set(params.name as string, params.value as string)
       return { name: params.name }
+    }
+  })
+  const draftId = (params: unknown) => {
+    const p = domainObject(params ?? {}, ['profileId', 'draftId'])
+    if (typeof p.draftId !== 'string' || !p.draftId || p.draftId.length > 256) throw new DomainRpcError('invalid_params', 'A draft id is required')
+    return p
+  }
+  /** A person turns a draft on, discards it, or answers it: from a window or the CLI, never from another computer. */
+  const personOnly = (client: string | undefined) => {
+    if (client === 'bridge') throw new DomainRpcError('forbidden', 'A draft is turned on from the computer that holds it.')
+  }
+  const refused = (error: unknown): never => {
+    if (error instanceof DomainRpcError) throw error
+    throw new DomainRpcError('draft_refused', error instanceof Error ? error.message : String(error))
+  }
+  domains.register({
+    method: 'automations.drafts.turnOn',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: draftId,
+    async handle(context, params, binding) {
+      personOnly(context.connection?.clientType)
+      try {
+        return { job: (await bound(binding)).drafts.turnOn(params.draftId as string) }
+      } catch (error) {
+        return refused(error)
+      }
+    }
+  })
+  domains.register({
+    method: 'automations.drafts.discard',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: draftId,
+    async handle(context, params, binding) {
+      personOnly(context.connection?.clientType)
+      try {
+        ;(await bound(binding)).drafts.discard(params.draftId as string)
+        return { ok: true }
+      } catch (error) {
+        return refused(error)
+      }
+    }
+  })
+  domains.register({
+    method: 'automations.drafts.answered',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: draftId,
+    async handle(context, params, binding) {
+      personOnly(context.connection?.clientType)
+      try {
+        ;(await bound(binding)).drafts.answered(params.draftId as string)
+        return { ok: true }
+      } catch (error) {
+        return refused(error)
+      }
+    }
+  })
+  domains.register({
+    method: 'automations.drafts.create',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => {
+      const p = domainObject(params ?? {}, ['profileId', 'projectId'])
+      if (p.projectId !== undefined && (typeof p.projectId !== 'string' || p.projectId.length > 256)) throw new DomainRpcError('invalid_params', 'projectId is a project id')
+      return p
+    },
+    async handle(context, params, binding) {
+      personOnly(context.connection?.clientType)
+      try {
+        return { job: (await bound(binding)).drafts.blank(params.projectId as string | undefined) }
+      } catch (error) {
+        return refused(error)
+      }
+    }
+  })
+  domains.register({
+    method: 'automations.manager.thread',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => domainObject(params ?? {}, ['profileId']),
+    async handle(context, _params, binding) {
+      if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'The Automation manager is used from a Mousse window.')
+      return { threadId: (await bound(binding)).managerThread().id }
     }
   })
   domains.register({

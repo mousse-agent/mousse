@@ -252,7 +252,14 @@ export class MousseMainService extends MmsProfileServices {
         keep: (jobId) => services.scheduled.keepJob(jobId),
         move: (jobIds, node, signal) => services.moveAutomations(jobIds, node, signal),
         resend: (jobId, occurrenceId) => services.scheduled.resendWebhook(jobId, occurrenceId),
-        keys: services.automationKeys
+        keys: services.automationKeys,
+        drafts: {
+          turnOn: (draftId) => services.automationDrafts.turnOn(draftId),
+          discard: (draftId) => services.automationDrafts.discard(draftId),
+          blank: (projectId) => services.automationDrafts.blank(projectId),
+          answered: (draftId) => services.automationDrafts.answered(draftId)
+        },
+        managerThread: () => services.automationManagerThread()
       }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>

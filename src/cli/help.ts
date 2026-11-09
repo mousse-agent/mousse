@@ -102,7 +102,7 @@ export const AUTOMATION_HELP = `Usage ("schedule" is an alias of "automation"):
   mousse-cli automation add --name <name> --prompt <text> --at <iso-datetime>
   mousse-cli automation add --name <name> --prompt <text> --manual
   mousse-cli automation remove <id>
-  mousse-cli automation run <id>
+  mousse-cli automation run <id|name>   An automation's id, or the name of one with a CLI trigger
   mousse-cli automation extend <id> [--days 7]   Give an automation an agent added more time (default 7 days; Settings → Agent access sets it)
   mousse-cli automation enable <id>
   mousse-cli automation disable <id>

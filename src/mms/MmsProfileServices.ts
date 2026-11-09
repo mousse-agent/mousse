@@ -86,6 +86,8 @@ import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
 import { isKeyName } from '../shared/automationKeys'
+import { AutomationDrafts } from './automations/AutomationDrafts'
+import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY } from './automations/automationManager'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -870,6 +872,33 @@ export class MmsProfileServices {
       trigger: (id) => this.scheduled.triggerJob(id),
       wake: () => this.scheduled.wake()
     })
+    // Automation drafts (v4): the Automation manager's and granted bots' `automation_*` tools, and the page's Turn on.
+    this.automationDrafts = new AutomationDrafts({
+      get: (id) => this.scheduled.getJob(id),
+      list: () => this.scheduled.listJobs(),
+      create: (input) => this.scheduled.createJob(input),
+      update: (id, patch) => this.scheduled.updateJob(id, patch),
+      remove: (id) => this.scheduled.deleteJob(id),
+      pause: (id, reason, until) => this.scheduled.pauseJob(id, reason, until),
+      projects: () => this.projects.listProjects().map(({ id, name }) => ({ id, name })),
+      thread: (id) => this.threads.getThread(id),
+      savedAgent: (id) => {
+        try {
+          this.platform.agentDefinitions.get(id)
+          return true
+        } catch {
+          return false
+        }
+      },
+      validate: (job) => validateScheduledJobOptions(job, jobOptionDeps),
+      personCeiling: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
+      reuseThread: (jobId, name, projectId) => this.threads.ensureExecutionThread(`automation-thread:${jobId}`, name.slice(0, 120), projectId)
+    })
+    this.orchestrator.setAutomationTools({
+      drafts: this.automationDrafts,
+      isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
+      botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId
+    })
     // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
     // looks them up in a small in-memory table that is rebuilt on any scheduler change, so a request costs no file work.
     const webhookSecrets = createProfileSecretAdapter({ profileRoot: homeDir, inheritProcessEnv: false })
@@ -1349,6 +1378,12 @@ export class MmsProfileServices {
 
   /** Saved keys (#595, the automation part): names in the profile's secret store; values are written, never read back out. */
   automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
+  automationDrafts!: AutomationDrafts
+
+  /** The profile's Automation manager thread: hidden, reusable, made the first time the composer sends. */
+  automationManagerThread(): { id: string } {
+    return this.threads.ensureExecutionThread(AUTOMATION_MANAGER_THREAD_KEY, AUTOMATION_MANAGER_NAME, undefined, undefined, { automationManager: true })
+  }
 
   automationIndex(): AutomationIndex {
     const bots = this.personalBots

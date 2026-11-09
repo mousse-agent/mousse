@@ -145,6 +145,8 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     ...(isTellMe(job.tellMe) ? { tellMe: job.tellMe } : {}),
     trigger: job.trigger,
     ...(job.keys?.length ? { keys: [...job.keys] } : {}),
+    ...(job.draft ? { draft: job.draft } : {}),
+    ...(job.cliName ? { cliName: job.cliName } : {}),
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
       : undefined,

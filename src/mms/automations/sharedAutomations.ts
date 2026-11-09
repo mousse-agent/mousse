@@ -22,6 +22,8 @@ export function privateThreadOf(threads: { getThread(id: string): Thread | undef
 /** Whether another computer may see and change this automation. */
 export function jobSharedWithComputers(job: ScheduledJob, isPrivate: (threadId: string) => boolean): boolean {
   if (job.bot) return false
+  // A draft is this computer's manager's work in progress; it moves once it is an automation.
+  if (job.draft) return false
   if (job.threadId && isPrivate(job.threadId)) return false
   if (job.createdBy && isPrivate(job.createdBy.threadId)) return false
   return true

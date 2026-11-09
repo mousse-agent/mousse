@@ -267,6 +267,7 @@ export class ToolRegistry {
    */
   listForThread(threadId: string, fallback: ModeCeiling = 'default', granted: AgentAccessLevel = 'lineage'): MousseTool[] {
     return this.listFor({
+      threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
       accessLevel: this.effectiveLevel(granted),

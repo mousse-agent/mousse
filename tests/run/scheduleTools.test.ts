@@ -159,7 +159,8 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('the tools are only for a host that has scheduled jobs', async () => {
       fx = delegationFixture()
       const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host)
-      expect(registry.list().filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
+      // Registered, so a host that gets its jobs later lists them then; until it does, none is listed.
+      expect(registry.listFor({ readOnly: false, modeCeiling: 'default', accessLevel: 'manage' }).filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
     })
   })
 

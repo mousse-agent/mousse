@@ -198,6 +198,8 @@ export type Availability = true | string
  * read-only status and the build allow it, whatever the current turn's mode.
  */
 export interface ToolListing {
+  /** The thread the list is for, when it is one thread's. */
+  threadId?: string
   readOnly: boolean
   modeCeiling: ModeCeiling
   /** The caller's effective agent access level; absent is `lineage`, which hides tools that need more. */

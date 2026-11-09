@@ -92,6 +92,8 @@ export interface ScheduledJobDefinition {
   tellMe?: ScheduledJob['tellMe']
   trigger?: ScheduledJob['trigger']
   keys?: ScheduledJob['keys']
+  draft?: ScheduledJob['draft']
+  cliName?: ScheduledJob['cliName']
   repeat?: { times: number; completed?: number }
   createdAt: string
   updatedAt: string

@@ -2,7 +2,7 @@ import type { PermissionMode } from '../../../../shared/permissionMode'
 import { isWorkflowPrompt, permissionsAfterEdit } from '../../../scheduled/jobPermission'
 import { narrowAgentAccess } from '../../../../shared/settings'
 import type { JobSchedule, ScheduledJob } from '../../../../shared/types'
-import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
+import { AGENT_JOB_LIMIT_DEFAULTS, type AgentJobLimits } from '../../../../shared/agentJobLimits'
 import { agentJobExpiry, isActiveAgentJob, isExpired } from '../../../scheduled/agentJobLimits'
 import { runNowRefusal } from '../../../scheduled/runNowRefusal'
 import { cronProblem, minCronGapMinutes } from '../../../scheduled/computeNextRun'
@@ -140,9 +140,16 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
 const PRIVATE_JOB_REFUSAL = 'This is a private thread: a job that makes a new thread for each run would share that thread with the user\'s other devices. Give threadId (this thread or one of its lineage) so the job runs here.'
 
 export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[] {
-  const schedules = host.schedules
-  if (!schedules) return []
-  const limitsNow = (): AgentJobLimits => schedules.jobLimits()
+  // The profile hands its scheduled jobs over after the registry is built: every use reads them then.
+  const schedules = new Proxy({} as AgentScheduleHost, {
+    get: (_target, key) => {
+      const current = host.schedules
+      if (!current) throw new McpToolError('mousse_scope_denied', 'Scheduled jobs are not available in this profile.')
+      const value = (current as unknown as Record<PropertyKey, unknown>)[key]
+      return typeof value === 'function' ? value.bind(current) : value
+    }
+  })
+  const limitsNow = (): AgentJobLimits => (host.schedules ? host.schedules.jobLimits() : AGENT_JOB_LIMIT_DEFAULTS)
   const allowed = (threadId: string): boolean => {
     try {
       return schedules.threadAllowed(threadId)
@@ -250,7 +257,9 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     // touch is the handler's decision (`visible`): the ones its own thread made.
     target: () => ({}),
     threadArgChecked: 'the handlers accept the caller\'s own thread or its lineage only (checkTarget)',
-    offered: () => false
+    offered: () => false,
+    listed: () => host.schedules !== undefined,
+    available: () => (host.schedules ? true as const : 'Scheduled jobs are not available in this profile.')
   }
 
   return [

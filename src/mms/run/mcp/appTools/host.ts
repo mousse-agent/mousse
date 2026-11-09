@@ -318,6 +318,8 @@ export interface AppToolHost extends DelegationToolsHost {
   steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */
   schedules?: AgentScheduleHost
+  /** Automation drafts (`automation_*`), read at every call: the Automation manager's and granted bots' tools. */
+  automations?(): import('./automations').AutomationToolHost | undefined
   /** The request `requestId` in any state, or undefined when nobody asked it. */
   approvalRequest?(requestId: string): ApprovalRequestInfo | undefined
   /**

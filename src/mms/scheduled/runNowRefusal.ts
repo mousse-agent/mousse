@@ -5,7 +5,8 @@ import type { ScheduledJob } from '../../shared/types'
  * waiting in a queue has one occurrence outstanding; starting another would stack a second behind it. The
  * protocol's `scheduled.run` and the agents' `schedule_run` refuse by the same rule.
  */
-export function runNowRefusal(job: Pick<ScheduledJob, 'name' | 'state' | 'runClaim' | 'pendingOccurrence'>): string | undefined {
+export function runNowRefusal(job: Pick<ScheduledJob, 'name' | 'state' | 'runClaim' | 'pendingOccurrence' | 'draft'>): string | undefined {
+  if (job.draft) return `${job.name} is a draft. Turn it on first.`
   if (job.state === 'running' || job.runClaim) return `Job is already running: ${job.name}`
   if (job.pendingOccurrence) {
     return `Job already has a run ${job.pendingOccurrence.state === 'queued' ? 'waiting in the queue' : 'in progress'}: ${job.name}. It can run again when that run ends.`

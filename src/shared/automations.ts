@@ -8,7 +8,10 @@ import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRun
  * without merging them: scheduled jobs, personal bots' schedules and threads that watch their pull request.
  */
 
-export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set'] as const
+export const AUTOMATIONS_METHODS = [
+  'automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set',
+  'automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.manager.thread'
+] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
@@ -265,6 +268,18 @@ export interface AutomationItem {
     heldUntil?: string
     log: ScheduledEventLogEntry[]
   }
+  /** A draft a manager wrote: it never runs until Turn on (`automations.drafts.turnOn`). Shown in its own Draft section. */
+  draft?: {
+    draftId: string
+    managerThreadId?: string
+    botId?: string
+    problems: string[]
+    ask?: { question: string; options: string[] }
+  }
+  /** The Result: a new thread each run, or one thread for every run. */
+  result?: { thread: 'new' | 'reuse' }
+  /** `mousse-cli automation run <cliName>` starts it. */
+  cliName?: string
   /** Present exactly when the item is in Needs you. */
   attention?: AutomationAttention
   link: AutomationLink
@@ -328,4 +343,20 @@ export function attentionOf(input: { ask?: { text: string; threadId?: string; an
   if (last?.state === 'failed') return { kind: 'failed', text: last.detail ?? 'Failed', ...(last.threadId ? { threadId: last.threadId } : {}) }
   if (last?.state === 'incomplete') return { kind: 'incomplete', text: last.detail ?? 'Stopped at a missing permission', ...(last.threadId ? { threadId: last.threadId } : {}), ...(last.missingKey ? { addKey: last.missingKey } : {}) }
   return undefined
+}
+
+/**
+ * What the Automations composer sends the manager (the Automation manager or a bot): the person's words, then the
+ * context they picked on one line, so the manager knows the project, the computer, and the draft or automation meant.
+ */
+export function managerMessage(input: { text: string; project?: { id: string; name: string }; computer?: string; draftId?: string; automationId?: string }): string {
+  const context = [
+    input.project ? `Project: ${input.project.name} (${input.project.id})` : 'Project: none picked',
+    ...(input.computer ? [`Computer: ${input.computer}`] : []),
+    ...(input.draftId ? [`Draft: ${input.draftId}`] : []),
+    ...(input.automationId ? [`Change automation: ${input.automationId}`] : [])
+  ]
+  return `${input.text.trim()}
+
+[${context.join(' · ')}]`
 }

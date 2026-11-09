@@ -327,8 +327,32 @@ export interface ScheduledJob {
   lastEventRunAt?: string
   /** The newest pull request events and what became of each (at most 10). */
   eventLog?: ScheduledEventLogEntry[]
+  /**
+   * A draft a manager (the Automation manager or a bot) wrote: stored, never enabled, never run. Turn on makes it an
+   * ordinary automation the person created; Discard deletes it. Set and cleared by the daemon only.
+   */
+  draft?: AutomationDraftState
+  /** `mousse-cli automation run <cliName>` starts it (a CLI trigger: a manual job with a stable name). */
+  cliName?: string
   createdAt: string
   updatedAt: string
+}
+
+/** What a draft carries besides the job it will become. */
+export interface AutomationDraftState {
+  draft: true
+  /** The draft's id: the id of the job it is stored as, and keeps after Turn on. */
+  draftId: string
+  /** The hidden thread of the manager that wrote it, for "Open conversation". */
+  managerThreadId?: string
+  /** A bot wrote it (Built by a bot); absent: the Automation manager or a person. */
+  botId?: string
+  /** What still keeps Turn on off, in the manager's and the person's words. */
+  problems: string[]
+  /** The manager's open question, answered inline under the card. */
+  ask?: { question: string; options: string[]; at: string }
+  /** Turn on gives it one reusable thread for every run (Result: reuse). */
+  reuseThread?: true
 }
 
 /** Profile settings of the scheduler that people choose on the Scheduled page. */
@@ -384,6 +408,10 @@ export interface CreateScheduledJobInput {
   threadEvent?: ScheduledThreadEventTrigger
   /** Saved keys its runs need, by name. */
   keys?: string[]
+  /** Daemon-only: a draft (`automation_draft_save`). The protocol refuses it. */
+  draft?: AutomationDraftState
+  /** Daemon-only: the CLI name of a CLI trigger. */
+  cliName?: string
 }
 
 /** The edits the Scheduled page sends; `null` clears a field so the job goes back to its default. */
@@ -1280,6 +1308,11 @@ export interface Thread {
    * owner sees them, so no client lists or searches them as threads.
    */
   botOwned?: true
+  /**
+   * Set on a profile's Automation manager thread: the hidden, reusable thread the Automations composer sends to. No
+   * list shows it; "Open conversation" on the Automations page opens it.
+   */
+  automationManager?: true
   /**
    * When the thread deletes itself (ISO time): it, its subagents, worktree, checkpoints and attachments are
    * deleted for good, not archived and not moved to Recently deleted. A subagent follows its root thread's.

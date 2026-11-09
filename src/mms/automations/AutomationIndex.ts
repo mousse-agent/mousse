@@ -199,7 +199,8 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
       : { kind: 'agent', name: job.selection?.model ?? 'Default agent' }
   const wakesOn = job.trigger?.threadEvent
   const trigger = wakesOn ? 'thread_event' : job.trigger?.webhook && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
-  const paused = job.state === 'paused' || (!job.enabled && job.state !== 'running')
+  // A draft is not paused: it has never been on.
+  const paused = !job.draft && (job.state === 'paused' || (!job.enabled && job.state !== 'running'))
   const active = jobActiveRun(job, now)
   const last = jobLastEndedRun(job)
   const request = requestPart(job, sources)
@@ -220,7 +221,17 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
   const projectName = job.projectId ? sources.projectName(job.projectId) : undefined
   // A saved agent keeps to what it may use (its grants), not a permission mode.
   const may = job.agent && !workflow ? undefined : jobEffectiveMay(job, sources.threadMode(job.threadId))
-  const attention = attentionOf({ ...(ask ? { ask } : {}), ...(last ? { last } : {}) })
+  // A draft never runs, so it never needs the person: it waits in the Draft section for Turn on.
+  const attention = job.draft ? undefined : attentionOf({ ...(ask ? { ask } : {}), ...(last ? { last } : {}) })
+  const draft = job.draft
+    ? {
+        draftId: job.draft.draftId || job.id,
+        ...(job.draft.managerThreadId ? { managerThreadId: job.draft.managerThreadId } : {}),
+        ...(job.draft.botId ? { botId: job.draft.botId } : {}),
+        problems: job.draft.problems,
+        ...(job.draft.ask ? { ask: { question: job.draft.ask.question, options: job.draft.ask.options } } : {})
+      }
+    : undefined
   return {
     key: `job:${job.id}`,
     kind: 'job',
@@ -234,7 +245,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     paused,
     ...(paused && job.resumeAt ? { pausedUntil: job.resumeAt } : {}),
     ...(paused && job.pausedReason ? { pausedReason: job.pausedReason } : {}),
-    ...(job.nextRunAt && !paused && job.state !== 'completed' ? { next: { at: job.nextRunAt, timeZone: computer.timeZone } } : {}),
+    ...(job.nextRunAt && !paused && !job.draft && job.state !== 'completed' ? { next: { at: job.nextRunAt, timeZone: computer.timeZone } } : {}),
     ...(active ? { active } : {}),
     ...(last ? { last } : {}),
     runs,
@@ -247,6 +258,9 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     ...(request ? { request } : {}),
     ...(job.keys?.length ? { keys: job.keys.map((name) => ({ name, stored: safely(() => sources.keyStored?.(name)) ?? false })) } : {}),
     ...(wakesOn ? { threadEvent: threadEventPart(job, wakesOn, sources) } : {}),
+    ...(draft ? { draft } : {}),
+    result: { thread: job.draft?.reuseThread || (job.threadId && !wakesOn) ? 'reuse' : 'new' },
+    ...(job.cliName ? { cliName: job.cliName } : {}),
     ...(attention ? { attention } : {}),
     link: { kind: 'job', jobId: job.id },
     computer
