@@ -297,6 +297,16 @@ describe('ThreadDbStore removes only rows a caller had', () => {
     expect(new ThreadDbStore(client).load(dir).messages.map((m) => m.content).sort()).toEqual(['original', 'peer'])
   })
 
+  it('an object from the model context brings no claim on transcript rows', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const mine = store.load(dir).messages
+    peer.save(dir, { messages: [...peer.load(dir).messages, message('peer', 'p')] })
+    const ctx = message('ctx', 'from context')
+    store.save(dir, { llmContext: context([ctx]) })
+    store.save(dir, { messages: [...mine, ctx] })
+    expect(ids()).toEqual(['a', 'peer', 'ctx'])
+  })
+
   it('a live list keeps a bounded record of what it held, however many times it grows', () => {
     const live = store.load(dir).messages
     for (let i = 0; i < 300; i++) {

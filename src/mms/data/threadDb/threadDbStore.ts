@@ -46,14 +46,15 @@ interface Row {
  * the rows of the list it first came in, so a copy of that list still knows what it held).
  */
 /**
- * The rows a list held when it was loaded or saved: every row of its collection up to `max`, except `missing`. Row
- * ids only grow, so this stays exact for good, and one view is shared by the list and every object saved in it.
+ * The rows a list held when it was loaded or saved: every row of its collection `coll` up to `max`, except `missing`.
+ * Row ids only grow, so this stays exact for good, and one view is shared by the list and every object saved in it.
+ * A view says nothing about other collections.
  */
-interface View { max: number; missing: Set<number> | null }
+interface View { coll: string; max: number; missing: Set<number> | null }
 interface Known { dbId: string; rid?: number; view?: View }
 
 /** The view of a list that held `held`, among the collection's rows `rows`. */
-function viewOf(held: Iterable<number>, rows: readonly Row[]): View {
+function viewOf(coll: string, held: Iterable<number>, rows: readonly Row[]): View {
   let max = 0
   const set = held instanceof Set ? (held as Set<number>) : new Set(held)
   for (const rid of set) if (rid > max) max = rid
@@ -61,7 +62,7 @@ function viewOf(held: Iterable<number>, rows: readonly Row[]): View {
   for (const row of rows) {
     if (row.rid <= max && !set.has(row.rid)) (missing ??= new Set()).add(row.rid)
   }
-  return { max, missing }
+  return { coll, max, missing }
 }
 
 interface Entry {
@@ -240,7 +241,7 @@ export class ThreadDbStore {
         const value = fromSkeleton<unknown>(row.skel)
         return value
       })
-      const view: View = { max: rows.reduce((max, row) => Math.max(max, row.rid), 0), missing: null }
+      const view: View = { coll, max: rows.reduce((max, row) => Math.max(max, row.rid), 0), missing: null }
       items.forEach((value, index) => {
         if (value && typeof value === 'object') this.known.set(value, { dbId, rid: rows[index]!.rid, view })
       })
@@ -251,8 +252,8 @@ export class ThreadDbStore {
     for (const [key, skel] of entry.state) state.set(key, fromSkeleton(skel))
     const data = compose(collections, state)
     // Every list the data holds is known, the empty ones `compose` made too (a session with no messages yet).
-    for (const items of decompose(data).collections.values()) {
-      if (!this.known.has(items)) this.known.set(items, { dbId, view: { max: 0, missing: null } })
+    for (const [coll, items] of decompose(data).collections) {
+      if (!this.known.has(items)) this.known.set(items, { dbId, view: { coll, max: 0, missing: null } })
     }
     this.observed.set(dir, { dbId, seq: entry.info.seq })
     return data
@@ -376,7 +377,8 @@ export class ThreadDbStore {
       }
       tracked = true
       if (found.rid !== undefined) own.add(found.rid)
-      if (found.view) views.add(found.view)
+      // An object from another collection (a context message moved into the transcript) brings only its own row.
+      if (found.view && found.view.coll === coll) views.add(found.view)
       return found
     }
     note(items)
@@ -544,7 +546,7 @@ export class ThreadDbStore {
         const rid = slot.rid ?? rids[slot.tmp!]
         if (rid !== undefined) saved.add(rid)
       }
-      const view = viewOf(saved, entry.collections.get(coll) ?? [])
+      const view = viewOf(coll, saved, entry.collections.get(coll) ?? [])
       for (const slot of planned) {
         const rid = slot.rid ?? rids[slot.tmp!]
         if (rid === undefined || !slot.item || typeof slot.item !== 'object') continue
