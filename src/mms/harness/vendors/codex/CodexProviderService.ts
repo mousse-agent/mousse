@@ -60,6 +60,7 @@ import {
   type CodexTurn,
   type ModelListResponse,
   type RateLimitSnapshot,
+  type RateLimitWindow,
   type SandboxPolicy,
   type ThreadConfig,
   type ThreadItem,
@@ -179,8 +180,47 @@ type Settings = {
   /** ISO time `models` was last listed by Codex. */
   modelsRefreshedAt?: string
   threads?: Record<string, SavedThread>
+  /** The plan limits Codex last reported, kept across restarts; `account` is a hash of the account (`limitsOwner`). */
+  rateLimits?: SavedLimits
 }
+type SavedLimits = { snapshot: RateLimitSnapshot; at: number; account: string }
 type AccountProbe = CodexAccountReading
+
+/** A one-way key of the account a limits snapshot belongs to: the account itself is never written. */
+function limitsOwner(subject: string | undefined): string | undefined {
+  return subject ? createHash('sha256').update(`codex-limits ${subject}`).digest('hex') : undefined
+}
+
+/** A window as it is saved: its three numbers only, whatever else Codex sent with it. */
+function savedWindow(value: unknown): RateLimitWindow | null {
+  if (!value || typeof value !== 'object') return null
+  const { usedPercent, windowDurationMins, resetsAt } = value as Partial<RateLimitWindow>
+  if (typeof usedPercent !== 'number' || !Number.isFinite(usedPercent)) return null
+  const number = (entry: unknown) => (typeof entry === 'number' && Number.isFinite(entry) ? entry : null)
+  return { usedPercent, windowDurationMins: number(windowDurationMins), resetsAt: number(resetsAt) }
+}
+
+/** The fields of a snapshot Mousse reads, so nothing else Codex reports is written to disk. */
+function savedSnapshot(snapshot: RateLimitSnapshot): RateLimitSnapshot {
+  const reached = snapshot.rateLimitReachedType
+  const plan = snapshot.planType
+  return {
+    primary: savedWindow(snapshot.primary),
+    secondary: savedWindow(snapshot.secondary),
+    ...(typeof reached === 'string' || reached === null ? { rateLimitReachedType: reached } : {}),
+    ...(typeof plan === 'string' && /^[a-z_]{1,32}$/i.test(plan) ? { planType: plan } : {})
+  }
+}
+
+function savedLimits(value: unknown): SavedLimits | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const { snapshot, at, account } = value as Partial<SavedLimits>
+  if (!snapshot || typeof snapshot !== 'object' || typeof at !== 'number' || !Number.isFinite(at) || typeof account !== 'string' || !account) return undefined
+  return { snapshot: savedSnapshot(snapshot), at, account }
+}
+
+/** How often a turn's limit updates are written to disk; every one is kept in memory, and the next save writes the latest. */
+const LIMITS_SAVE_MS = 60_000
 
 /** An account check's answer: `label`/`subject` override what `account()` derives from plan and email. */
 export type CodexAccountReading =
@@ -1051,7 +1091,9 @@ export class CodexProviderService {
   /** Model listings in flight; they keep the process open. */
   private listing = 0
   /** The plan limits as the process last reported them (a read, or a turn's update), for when a read fails. */
-  private lastLimits?: { snapshot: RateLimitSnapshot; at: number; account: string }
+  private lastLimits?: SavedLimits
+  /** When `settings.rateLimits` was last written to disk. */
+  private limitsSavedAt = 0
   private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
   /** Bumped by disconnect; a turn from an older scope does not save its thread. */
   private scope = 0
@@ -1108,6 +1150,7 @@ export class CodexProviderService {
       const parsed: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'))
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
       this.settings = parsed as Settings
+      this.lastLimits = savedLimits(this.settings.rateLimits)
     } catch (error) {
       if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT')
         this.settingsError = `Mousse could not read this profile's Codex settings (${this.settingsPath}). Fix or remove the file, then recheck.`
@@ -1152,6 +1195,11 @@ export class CodexProviderService {
   /** The program that runs (reported as `resolvedBinaryPath`). */
   private binary(): string | undefined {
     return this.launchTarget()?.path
+  }
+
+  /** The Codex program this service would start (the chosen one, else the one found on PATH). */
+  programPath(): string | undefined {
+    return this.binary()
   }
 
   standaloneWorkspace(threadId: string): string {
@@ -1426,18 +1474,48 @@ export class CodexProviderService {
     try {
       const conn = await this.connection()
       const response = await conn.request('account/rateLimits/read', undefined, { timeoutMs: 10_000, signal })
-      const account = this.account()?.subject
-      if (account) this.lastLimits = { snapshot: response.rateLimits, at: Date.now(), account }
+      this.rememberLimits(response.rateLimits, this.account()?.subject)
       return { snapshot: response.rateLimits, at: Date.now(), live: true }
     } catch (error) {
       // Only the signed-in account's own last snapshot stands in: never another account's limits.
       const last = this.lastLimits
-      if (signal?.aborted || !last || last.account !== this.account()?.subject) throw error
+      if (signal?.aborted || !last || last.account !== limitsOwner(this.account()?.subject)) throw error
       return { snapshot: last.snapshot, at: last.at, live: false }
     } finally {
       this.listing -= 1
       this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
     }
+  }
+
+  /**
+   * The limits Codex last reported for `subject` (default: the signed-in account), from a read or a
+   * turn, without asking Codex now. Undefined when it reported none for that account.
+   */
+  reportedRateLimits(subject: string | undefined = this.account()?.subject): { snapshot: RateLimitSnapshot; at: number } | undefined {
+    const last = this.lastLimits
+    const owner = limitsOwner(subject)
+    return last && owner && last.account === owner ? { snapshot: last.snapshot, at: last.at } : undefined
+  }
+
+  /** Keeps limits read elsewhere for this entry's account (`subject`), as if Codex had reported them here. */
+  keepRateLimits(snapshot: RateLimitSnapshot, subject: string | undefined): void {
+    this.rememberLimits(snapshot, subject)
+  }
+
+  /** Keeps the account's latest limits, on disk too, so the usage page has them after a restart. */
+  private rememberLimits(snapshot: RateLimitSnapshot, subject: string | undefined): void {
+    const account = limitsOwner(subject)
+    const saved = this.settings.rateLimits
+    this.lastLimits = account ? { snapshot: savedSnapshot(snapshot), at: Date.now(), account } : undefined
+    if (!this.lastLimits && !saved) return
+    if (this.lastLimits) this.settings.rateLimits = this.lastLimits
+    else delete this.settings.rateLimits
+    // Codex sends an update after each model reply: the file (which holds every saved thread) is
+    // written at once for a new account or none, and at most once a minute for the same one.
+    const now = Date.now()
+    if (saved && this.lastLimits && saved.account === this.lastLimits.account && now - this.limitsSavedAt < LIMITS_SAVE_MS) return
+    this.limitsSavedAt = now
+    this.save()
   }
 
   /**
@@ -1848,8 +1926,7 @@ export class CodexProviderService {
     // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
     const limits = notificationParams(notification, 'account/rateLimits/updated')
     if (limits) {
-      const owner = this.account()?.subject
-      this.lastLimits = owner ? { snapshot: limits.rateLimits, at: Date.now(), account: owner } : undefined
+      this.rememberLimits(limits.rateLimits, this.account()?.subject)
       for (const held of this.turns.values()) held.rateLimits = limits.rateLimits
       return
     }

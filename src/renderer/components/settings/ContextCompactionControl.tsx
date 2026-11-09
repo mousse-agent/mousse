@@ -80,7 +80,7 @@ export function ContextCompactionControl({ context, model, onSave }: {
     : CONTEXT_COMPACTION_PRESETS
   const save = (compactionTokens: ContextSettings['compactionTokens']) => {
     if (context.compactionEnabled && compactionTokens === context.compactionTokens) return
-    onSave({ compactionEnabled: true, compactionTokens })
+    onSave({ ...context, compactionEnabled: true, compactionTokens })
   }
   return (
     <div className="settings-compaction">

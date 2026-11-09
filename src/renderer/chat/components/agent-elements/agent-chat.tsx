@@ -20,6 +20,7 @@ export function AgentChat({
   attachments,
   showCopyToolbar,
   lastTurnNotice,
+  afterTurns,
   initialScrollBehavior,
   enableImagePreview,
   enableFind,
@@ -163,6 +164,7 @@ export function AgentChat({
           toolRenderers={toolRenderers}
           onComposerCompactChange={composerFold.onCompactChange}
           lastTurnNotice={lastTurnNotice}
+          afterTurns={afterTurns}
           showCopyToolbar={showCopyToolbar}
           initialScrollBehavior={initialScrollBehavior}
           enableImagePreview={enableImagePreview}

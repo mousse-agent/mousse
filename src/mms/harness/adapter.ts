@@ -39,7 +39,7 @@ export interface ProviderCapabilities {
   fork: 'native' | 'portable'
   /** `CommandPolicy.heartbeatToleranceMs`: sparse event streams get 6x the heartbeat window. */
   events: 'rich' | 'sparse'
-  /** `featureGates.restoreMode` (Phase 6): weak containment never auto-restores. */
+  /** `featureGates.restoreMode` (Phase 6): weak containment restores the worktree's files only. */
   containment: 'strong' | 'weak'
   /** `featureGates.handoffDelivery` (Phase 6). */
   historyInjection: 'native' | 'prompt'
@@ -207,6 +207,11 @@ export interface ProviderMetrics {
     contextWindow?: number
     modelName?: string
   }
+  /**
+   * The prompt cache the turn left: when its last request was answered, and the longest lifetime its
+   * requests wrote (absent when they wrote none or the provider does not say).
+   */
+  promptCache?: { at?: number; ttlMs?: number }
 }
 
 export interface TurnControl {

@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
 import { foldersOf, workspaceOf, type BotManifest } from './definition'
-import { isAbsolutePath } from './manifest'
+import { BOT_BROWSER_PERMISSION, botGrantTool, isAbsolutePath } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -13,7 +13,12 @@ import { isAbsolutePath } from './manifest'
 export const BOT_BUDGET_WALL_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const
 export type BotBudgetWallKey = (typeof BOT_BUDGET_WALL_KEYS)[number]
 
-/** What a wall asks the owner to allow. */
+/**
+ * What a wall asks the owner to allow. A `path` request is file access as a whole, "use files on
+ * this computer" (`filesAsk`): whichever folder it names, allowing it lets the bot read and change
+ * files anywhere. Asks are written in the one form `filesAsk` returns; rows of older builds name
+ * the folder that was asked about.
+ */
 export type BotPermissionRequest =
   | { tool: string }
   | { path: string; access: 'read' | 'write' }
@@ -112,10 +117,47 @@ const BUDGET_WORDS: Record<BotBudgetWallKey, string> = {
   maxUsd: 'spend'
 }
 
+/**
+ * `request` as the one permission it falls under: an ask for any browser tool (`browser_act`) is
+ * "use the browser" (`{tool: 'browser'}`), so it has one card, one fingerprint and one grant.
+ */
+export function grantRequestOf<T extends BotAskRequest>(request: T): T {
+  if (!('tool' in request) || typeof request.tool !== 'string') return request
+  const tool = botGrantTool(request.tool)
+  return (tool === request.tool ? request : { tool }) as T
+}
+
+/** The top of the file system `path` is on: `/`, a drive (`C:\\`) or a network share (`\\\\server\\share\\`). */
+export function pathRoot(path: string): string {
+  const drive = /^([A-Za-z]:)[\\/]/.exec(path)
+  if (drive) return `${drive[1]!.toUpperCase()}\\`
+  const share = /^\\\\([^\\/]+)[\\/]([^\\/]+)/.exec(path)
+  if (share) return `\\\\${share[1]}\\${share[2]}\\`
+  return '/'
+}
+
+/**
+ * The one file ask (bot-architecture.md §3.7): "use files on this computer", for every folder,
+ * read and write. Its folder is the top of the file system the computer starts from (`/`, or the
+ * system drive on Windows), so every file ask has the same fingerprint, and an older build reading
+ * the row sees a folder it can show.
+ */
+export function filesAsk(): { path: string; access: 'write' } {
+  const scope = globalThis as { process?: { platform?: string; env?: Record<string, string | undefined> } }
+  const windows = scope.process?.platform === 'win32'
+  return { path: windows ? pathRoot(`${scope.process?.env?.SystemDrive ?? 'C:'}\\`) : '/', access: 'write' }
+}
+
+/** `request` as it is asked: any folder becomes the one file ask (`filesAsk`). */
+export function filesAskOf<T extends BotAskRequest>(request: T): T {
+  return ('path' in request ? filesAsk() : request) as T
+}
+
 /** A permission request in plain words. */
 export function permissionText(permission: BotPermissionRequest): string {
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
-  if ('path' in permission) return permission.access === 'write' ? `Read and edit files in ${permission.path}` : `Read files in ${permission.path}`
+  if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
   if ('mcp' in permission) return `Use the ${permission.mcp.serverId} tool \`${permission.mcp.tool}\``
   const { key, amount } = permission.budget
@@ -159,9 +201,10 @@ export function askProblem(value: unknown): string | undefined {
 }
 
 /**
- * `manifest` with `permission` added ("Allow for this bot" and "Allow this time"). A path adds a
- * root (and write access when asked), a tool adds a built-in or an app tool, a budget raises the
- * limit by `amount`. The result is checked like any manifest before it is published.
+ * `manifest` with `permission` added ("Allow for this bot" and "Allow this time"). A path gives
+ * file access as a whole (the workspace becomes the top of the file system, read and write), a
+ * tool adds a built-in or an app tool, a budget raises the limit by `amount`. The result is
+ * checked like any manifest before it is published.
  */
 export function withPermission(manifest: BotManifest, permission: BotPermissionRequest, amount?: number): BotManifest {
   const next: BotManifest = {
@@ -170,17 +213,18 @@ export function withPermission(manifest: BotManifest, permission: BotPermissionR
     appTools: [...manifest.appTools],
     mcp: manifest.mcp.map((pair) => ({ ...pair })),
     skills: [...manifest.skills],
-    // Every folder keeps its own access, in the one canonical form (`workspaceOf`).
-    workspace: workspaceOf(foldersOf(manifest.workspace)),
+    workspace: manifest.workspace ? { ...manifest.workspace, roots: [...manifest.workspace.roots], ...(manifest.workspace.rootAccess ? { rootAccess: { ...manifest.workspace.rootAccess } } : {}) } : null,
     budget: { ...manifest.budget }
   }
   if ('tool' in permission) {
-    if (isNeutralTool(permission.tool)) {
-      if (!next.tools.includes(permission.tool)) next.tools.push(permission.tool)
-    } else if (!next.appTools.includes(permission.tool)) next.appTools.push(permission.tool)
+    // Any browser tool is the browser as a whole.
+    const tool = botGrantTool(permission.tool)
+    if (isNeutralTool(tool)) {
+      if (!next.tools.includes(tool)) next.tools.push(tool)
+    } else if (!next.appTools.includes(tool)) next.appTools.push(tool)
   } else if ('path' in permission) {
-    // Only this folder is added or upgraded; every other folder keeps exactly its access.
-    next.workspace = workspaceOf([...foldersOf(next.workspace), [permission.path, permission.access]])
+    // File access is one permission: whatever folder was asked about, every folder is allowed.
+    next.workspace = { roots: [pathRoot(permission.path)], access: 'write' }
   } else if ('skill' in permission) {
     if (!next.skills.includes(permission.skill)) next.skills.push(permission.skill)
   } else if ('mcp' in permission) {

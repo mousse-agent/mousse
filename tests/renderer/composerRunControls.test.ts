@@ -4,7 +4,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/components/ComposerFooter'
+import { ComposerFooter, type ComposerFooterProps, type ComposerRunProps } from '../../src/renderer/components/ComposerFooter'
 import * as icons from '../../src/renderer/lib/icons'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import type { PermissionMode } from '../../src/shared/permissionMode'
@@ -44,17 +44,19 @@ function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: P
   const onPermission = vi.fn()
   const props: ComposerFooterProps = {
     ...options.footer,
-    providers: options.providers ?? [provider(options.models ?? [opus, sonnet, plain], options.auto ?? true, options.agent)],
-    selectedProviderId: 'claude-subscription',
-    selectedModelId: options.modelId ?? 'opus:high',
-    modelMenuOpen: options.open ?? true,
-    onModelMenuOpenChange,
-    onModelSelect,
-    modelReadOnly: options.readOnly ?? false,
-    onOpenSettings: vi.fn(),
-    contextUsage: { used: 0, limit: 0, percent: 0 } as unknown as ComposerFooterProps['contextUsage'],
-    contextOpen: false,
-    onContextOpenChange: vi.fn(),
+    run: {
+      providers: options.providers ?? [provider(options.models ?? [opus, sonnet, plain], options.auto ?? true, options.agent)],
+      selectedProviderId: 'claude-subscription',
+      selectedModelId: options.modelId ?? 'opus:high',
+      modelMenuOpen: options.open ?? true,
+      onModelMenuOpenChange,
+      onModelSelect,
+      modelReadOnly: options.readOnly ?? false,
+      onOpenSettings: vi.fn(),
+      contextUsage: { used: 0, limit: 0, percent: 0 } as unknown as ComposerRunProps['contextUsage'],
+      contextOpen: false,
+      onContextOpenChange: vi.fn()
+    },
     onAttachClick: vi.fn(),
     ...(options.permission === false ? {} : { permission: { mode: options.mode ?? 'accept_edits', ...(options.ceiling ? { ceiling: options.ceiling, ceilingReason: 'This computer allows up to Auto-accept edits.' } : {}), onSelect: onPermission } })
   }

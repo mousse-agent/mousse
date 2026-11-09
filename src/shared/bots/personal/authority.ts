@@ -23,9 +23,13 @@ export interface BotThreads {
   roleOf(threadId: string): BotThreadRole | undefined
 }
 
-/** One tool call as the gate sees it, after its native name was mapped (`nativeToolNames`). */
+/**
+ * One tool call as the gate sees it, after its native name was mapped (`nativeToolNames`). `own`:
+ * every path the call names is in the runtime's own storage for this bot (Claude Code's saved tool
+ * output, `claudeOwnFolders`), checked by the runtime's gate; such a file call needs no file access.
+ */
 export type NormalisedCall =
-  | { kind: 'builtin'; tool: NeutralTool; nativeName: string; args: Record<string, unknown> }
+  | { kind: 'builtin'; tool: NeutralTool; nativeName: string; args: Record<string, unknown>; own?: true }
   | { kind: 'app'; tool: string; args: Record<string, unknown> }
   | { kind: 'mcp'; server: string; tool: string; args: Record<string, unknown> }
   | { kind: 'skill'; skill: string }
@@ -38,6 +42,10 @@ export type NormalisedCall =
 export type WallReason =
   | { kind: 'tool'; tool: string }
   | { kind: 'path'; tool: string; path: string; access: 'read' | 'write' }
+  /** A path inside Mousse's own data, closed to every bot even with file access: never an ask. */
+  | { kind: 'closed'; tool: string; path: string }
+  /** A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask. */
+  | { kind: 'path_form'; tool: string; path: string }
   | { kind: 'skill'; skill: string }
   | { kind: 'mcp'; server: string; tool: string }
   | { kind: 'waiting' }
@@ -88,7 +96,11 @@ export interface BotAuthority {
   skills: ReadonlySet<string>
   /** Granted MCP tools, as `<server id>::<tool name>`. */
   mcp: ReadonlySet<`${string}::${string}`>
-  /** The roots the bot may touch and how, and the activation's private scratch folder; null without file access. */
+  /**
+   * The roots the bot may touch and how, and the activation's private scratch folder; null when it
+   * may touch no folder at all. With file access the roots are the tops of the file system and
+   * `computer` is set.
+   */
   workspace: {
     roots: readonly string[]
     access: 'read' | 'write'
@@ -100,6 +112,11 @@ export interface BotAuthority {
      * on a runtime that asks before calls (Claude Code, Codex on the owner's entries).
      */
     files?: string
+    /**
+     * File access (bot-architecture.md §3.7): every folder, read and write, but `closed`, Mousse's
+     * own data folder, of which only the files folder and scratch are the bot's.
+     */
+    computer?: { closed: string }
   } | null
   /** True while the activation waits for the owner's answer to a wall (`waiting_grant`). */
   waiting(): boolean

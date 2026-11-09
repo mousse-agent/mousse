@@ -4,6 +4,7 @@ import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type 
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_PAGE, type BotChatAttachment } from '../../../shared/bots/personal/methods'
+import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
 import type { BotStore } from '../store/BotStore'
@@ -50,8 +51,8 @@ export function firstMessagePrompt(description: string, nameIt = false): string 
   return `[Mousse] The owner just created you. Their description: "${description}".${naming} In one or two sentences say what you understood. If you will need a permission, ask for the first one now with escalate; don't ask whether to ask. If the description is unclear, ask one question instead.`
 }
 
-/** A chat message as the bot's input: the owner's text, and the files attached to it. */
-export function chatInput(text: string, attachments: readonly BotChatAttachment[] | undefined): string {
+/** A chat message as the bot's input: the owner's text, and the files attached to it (their copies in the files folder). */
+export function chatInput(text: string, attachments: readonly SavedBotAttachment[] | undefined): string {
   if (!attachments?.length) return text
   const files = `Attached files:\n${attachments.map((file) => `- ${file.name}: ${file.path}`).join('\n')}`
   return text ? `${text}\n\n${files}` : files
@@ -187,7 +188,9 @@ export class BotChatService {
     // The activation this message belongs to: its row and journal row say so (the chat pack then
     // leaves it out, as it is the request).
     const target = this.engine.chatActivationFor(input.botId)
-    const prompt = chatInput(text, input.attachments)
+    // The files are copied into the bot's files folder first: the bot reads its copies, so its grant needs nothing more.
+    const saved = input.attachments?.length ? copyBotAttachments(this.engine.filesFolder(input.botId), input.attachments, this.options.now()) : []
+    const prompt = chatInput(text, saved)
     const key = `chat:${input.clientRequestId}`
     let message: BotChatMessage
     let refused: BotEngineError | undefined
@@ -198,7 +201,7 @@ export class BotChatService {
           author: 'owner',
           kind: 'text',
           text,
-          ...(input.attachments?.length ? { attachments: input.attachments.map((file) => ({ name: file.name, path: file.path })) } : {}),
+          ...(saved.length ? { attachments: saved } : {}),
           clientRequestId: input.clientRequestId,
           activationId: target.activationId,
           lane: 'chat'
@@ -207,6 +210,7 @@ export class BotChatService {
         return posted
       })
     } catch (error) {
+      removeBotAttachments(saved)
       // The message and its journal row are written together or not at all: the bot never runs unrecorded.
       const code = (error as { code?: unknown } | null)?.code
       if (code !== 'bot_journal_failed' && code !== 'storage_full') throw error

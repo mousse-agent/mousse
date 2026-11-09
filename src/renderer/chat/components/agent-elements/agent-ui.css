@@ -541,30 +541,68 @@
   color: inherit;
 }
 
+/* Find in thread. In the thread pane the bar sits in the side card's column (find-bar-host.ts puts it in the
+   card's layer): the card's top, right edge and width, and the card stacks under it (sideCard.css). Elsewhere
+   it takes the same spot over the transcript's top-right corner. It lifts in over --ui-dur. */
 .chat-find-bar {
   position: absolute;
-  top: 8px;
-  right: 40px;
+  top: 12px;
+  right: 12px;
   z-index: 20;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 4px 4px 4px 10px;
-  border: 1px solid var(--ui-line-strong);
-  border-radius: var(--ui-control-radius);
+  width: min(272px, calc(100% - 24px));
+  height: var(--chat-find-bar-height, 34px);
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-card-radius);
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
   color: var(--text-primary);
+  pointer-events: auto;
+  transition: opacity var(--ui-dur) ease, translate var(--ui-dur) var(--ui-collapse-ease);
 }
 
-.chat-find-input {
-  width: 200px;
+@starting-style {
+  .chat-find-bar {
+    opacity: 0;
+    translate: 0 -4px;
+  }
+}
+
+.thread-side-card-layer > .chat-find-bar {
+  top: var(--side-card-gutter);
+  right: var(--side-card-gutter);
+  width: var(--side-card-width);
+}
+
+.thread-side-card-layer--overlay > .chat-find-bar {
+  width: min(var(--side-card-width), calc(100% - 2 * var(--side-card-gutter)));
+}
+
+/* The transcript's pane is hidden (Usage): so is its bar, which lives beside it in the card's layer. */
+.sidebar:has(> .keep-mounted-pane[hidden]) > .thread-side-card-layer > .chat-find-bar {
+  display: none;
+}
+
+/* A plain field: no border, ring or fill of its own, also not the app-wide `input:focus` ones. */
+.chat-find-bar .chat-find-input,
+.chat-find-bar .chat-find-input:focus,
+.chat-find-bar .chat-find-input:focus-visible {
+  flex: 1 1 auto;
+  width: auto;
   min-width: 0;
-  border: none;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  box-shadow: none;
   background: transparent;
   color: inherit;
   font-size: 13px;
-  outline: none;
 }
 
 .chat-find-input::placeholder {
@@ -573,7 +611,8 @@
 }
 
 .chat-find-count {
-  min-width: 52px;
+  flex: none;
+  min-width: 44px;
   padding: 0 6px;
   color: var(--text-secondary);
   font-size: 12px;
@@ -583,6 +622,7 @@
 }
 
 .chat-find-button {
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;

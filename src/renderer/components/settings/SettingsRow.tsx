@@ -28,6 +28,7 @@ export function SettingsGroup({
   icon: Icon,
   description,
   action,
+  titleAction,
   id,
   anchor,
   className,
@@ -39,6 +40,8 @@ export function SettingsGroup({
   description?: ReactNode
   /** Optional control aligned with the heading, e.g. a switch for the whole group. */
   action?: ReactNode
+  /** A small control right after the title (a settings gear), outside the heading itself. */
+  titleAction?: ReactNode
   id?: string
   /** Where a settings search result lands (lib/settingsSearch.ts). */
   anchor?: string
@@ -56,11 +59,18 @@ export function SettingsGroup({
       {(title || action) && (
         <div className="settings-group-head">
           <div className="settings-group-head-text">
-            {title && (
-              <h3 id={headingId} className="settings-group-title">
-                {Icon && <Icon size={15} strokeWidth={1.8} aria-hidden="true" className="settings-group-icon" />}
-                {title}
-              </h3>
+            {title && (titleAction
+              ? <div className="settings-group-title-row">
+                  <h3 id={headingId} className="settings-group-title">
+                    {Icon && <Icon size={15} strokeWidth={1.8} aria-hidden="true" className="settings-group-icon" />}
+                    {title}
+                  </h3>
+                  {titleAction}
+                </div>
+              : <h3 id={headingId} className="settings-group-title">
+                  {Icon && <Icon size={15} strokeWidth={1.8} aria-hidden="true" className="settings-group-icon" />}
+                  {title}
+                </h3>
             )}
             {description && <p className="settings-group-desc">{description}</p>}
           </div>

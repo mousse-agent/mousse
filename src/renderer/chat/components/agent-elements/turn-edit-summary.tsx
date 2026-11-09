@@ -5,7 +5,7 @@ import { useActiveProjectPath } from "../../../hooks/useActiveProjectPath";
 import { useTurnChangedFiles } from "../../../lib/turnChangedFilesSetting";
 import { Collapse } from "../../../components/ui/Collapse";
 import { useAppStore } from "../../../stores/appStore";
-import { openTurnInReview } from "../../../components/review/openReview";
+import { openTurnInChanges } from "../../../components/changes/openChanges";
 import { FileExtIcon } from "./icons/file-ext-icon";
 import { extractFilePathArg } from "./utils/tool-adapters";
 import { isRecord, isV5ToolPart } from "./utils/assistant-blocks";
@@ -13,7 +13,7 @@ import { isRecord, isV5ToolPart } from "./utils/assistant-blocks";
 interface FileEdit {
   /** Relative to the project folder when it is inside it. */
   path: string;
-  /** The path as the agent wrote it, which Review maps to its changed file. */
+  /** The path as the agent wrote it, which the Changes tab maps to its changed file. */
   source: string;
   added: number;
   removed: number;
@@ -209,7 +209,7 @@ function Stat({ added, removed }: { added: number; removed: number }) {
 
 /**
  * The quiet line at the end of a turn that changed files: "8 files changed +12 −4", a Review
- * action for the turn, and a chevron that lists the files (each opens in Review). Settings >
+ * action for the turn, and a chevron that lists the files (each opens in the Changes tab). Settings >
  * General > "Changed files after each turn" picks the line (default), the list already open, or
  * nothing.
  */
@@ -222,7 +222,7 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
   if (!summary) return null;
   const open = userOpen ?? mode === "list";
   const countLabel = `${summary.files.length} file${summary.files.length === 1 ? "" : "s"} changed`;
-  const review = (file?: string) => void openTurnInReview(useAppStore.getState().activeThreadId, turnId, file);
+  const review = (file?: string) => void openTurnInChanges(useAppStore.getState().activeThreadId, turnId, file);
   const toggleLabel = open ? "Hide changed files" : "Show changed files";
 
   return (

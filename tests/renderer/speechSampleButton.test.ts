@@ -34,7 +34,7 @@ describe('Speech settings sample button', () => {
     const button = sampleButton('loading')
     expect(button).toContain('aria-label="Stop sample"')
     expect(button).toContain('aria-busy="true"')
-    expect(button).toContain('title="Loading voice, click to stop"')
+    expect(button).toContain('title="Preparing audio, click to stop"')
     expect(button).toContain('icon-spin')
   })
 

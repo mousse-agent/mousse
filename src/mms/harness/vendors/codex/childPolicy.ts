@@ -1,4 +1,5 @@
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
+import { entriesBeside } from '../../../bots/grants/compile'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { AskForApproval, SandboxMode, SandboxPolicy } from './protocol'
@@ -24,7 +25,8 @@ export interface CodexTurnPolicy {
  * - Full access is Codex's own full-access profile: `never` ask, no sandbox.
  * - A bot's turn (`bot`) asks like Ask before acting (`untrusted`), and the bot's authority answers.
  *   Without "run commands" it is in the read-only sandbox; with it, in the `workspaceWrite` sandbox
- *   over exactly the bot's own folders (`codexBotSandbox`), with no network and no temporary folder.
+ *   over exactly the bot's own folders, or with file access every folder but Mousse's own data
+ *   (`codexBotSandbox`), with no network and no temporary folder.
  *
  * Nothing here edits the user's Codex configuration or their MCP servers.
  */
@@ -51,16 +53,26 @@ export interface CodexBotSandbox {
   writableRoots: string[]
 }
 
+/** The kernel's own file systems: never a writable root (Codex's sandbox keeps `/dev/null` writable itself). */
+const KERNEL_FOLDERS: ReadonlySet<string> = new Set(['/proc', '/sys', '/dev'])
+
 /**
  * A bot's Codex sandbox from its authority: with `shell`, writable are its files folder, its
  * scratch folder and the folders granted for writing (`BotAuthority.workspace.writeRoots`, which
- * holds the files folder), and nothing else.
+ * holds the files folder), and nothing else. With file access (`workspace.computer`,
+ * bot-architecture.md §3.7) that is the whole file system but Mousse's own data: every entry
+ * beside the way down to it (`entriesBeside`), and the files and scratch folders inside it.
  */
 export function codexBotSandbox(bot: Partial<Pick<BotAuthority, 'tools' | 'workspace'>>): CodexBotSandbox {
   const shell = bot.tools?.has('shell') === true
   const workspace = bot.workspace
-  const roots = workspace ? [...(workspace.writeRoots ?? (workspace.access === 'write' ? workspace.roots : [])), ...(workspace.files !== undefined ? [workspace.files] : []), workspace.scratch] : []
-  return { shell, writableRoots: shell ? [...new Set(roots)] : [] }
+  if (!shell || !workspace) return { shell, writableRoots: [] }
+  const mine = [...(workspace.files !== undefined ? [workspace.files] : []), workspace.scratch]
+  const computer = workspace.computer
+  const roots = computer
+    ? workspace.roots.flatMap((root) => entriesBeside(root, [computer.closed])).filter((root) => !KERNEL_FOLDERS.has(root))
+    : workspace.writeRoots ?? (workspace.access === 'write' ? workspace.roots : [])
+  return { shell, writableRoots: [...new Set([...roots, ...mine])] }
 }
 
 /**

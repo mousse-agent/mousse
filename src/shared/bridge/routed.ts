@@ -192,6 +192,10 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     required: ['scope', 'path']
   }),
   'git.status': read('folder', [...FOLDER]),
+  // HEAD → working tree as hunks, with what the next commit takes. A large answer is paged.
+  'git.changes': read('folder', [...FOLDER, 'paths']),
+  // The reverts of the folder its copies still let the person restore.
+  'git.revertedList': read('folder', [...FOLDER]),
   'git.diff': read('folder', [...FOLDER, 'path', 'staged'], { required: ['path'] }),
   'git.log': read('folder', [...FOLDER, 'limit']),
   'git.branches': read('folder', [...FOLDER]),
@@ -301,6 +305,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'orchestrator.retry': chat('thread', ['threadId']),
   'threads.clearContext': chat('thread', ['threadId']),
   'threads.compact': chat('thread', ['threadId', 'focus']),
+  'threads.stopCompaction': chat('thread', ['threadId']),
   'orchestrator.answerQuestions': chat('thread', ['threadId', 'requestId', 'answers'], {
     required: ['requestId', 'answers'],
     owned: { requestId: 'question' }
@@ -461,11 +466,20 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'git.checkout': write('folder', [...FOLDER, 'operationId', 'dirty', 'branch'], {
     required: ['branch']
   }),
-  'git.commit': write('folder', [...FOLDER, 'operationId', 'message', 'amend', 'expectedBranch'], {
-    required: ['message']
+  // `selection` (version 2): an owner from before it refuses the key (`computerOutdated`), so a chosen commit never
+  // becomes a commit of everything there.
+  'git.commit': write('folder', [...FOLDER, 'operationId', 'message', 'amend', 'expectedBranch', 'selection'], {
+    required: ['message'],
+    version: 2,
+    since: { selection: 2 }
   }),
   'git.push': write('folder', [...FOLDER, 'operationId', 'expectedBranch']),
-  'git.suggestCommitMessage': write('folder', [...FOLDER, 'expectedBranch']),
+  'git.suggestCommitMessage': write('folder', [...FOLDER, 'expectedBranch', 'selection'], { version: 2, since: { selection: 2 } }),
+  'git.include': write('folder', [...FOLDER, 'path', 'version', 'include', 'hunks', 'lines', 'all'], { required: ['include'] }),
+  'git.undoLastCommit': write('folder', [...FOLDER, 'expectedHead'], { required: ['expectedHead'] }),
+  // Small answers: the tab reads the file again with `git.changes`; a restore that finds changes names blob ids, never contents.
+  'git.revert': write('folder', [...FOLDER, 'path', 'version', 'hunks', 'lines'], { required: ['path', 'version'] }),
+  'git.restoreReverted': write('folder', [...FOLDER, 'revertId'], { required: ['revertId'] }),
   'git.stage': write('folder', [...FOLDER, 'all', 'paths']),
   'git.unstage': write('folder', [...FOLDER, 'all', 'paths']),
   'git.discard': write('folder', [...FOLDER, 'paths'], { required: ['paths'] }),
@@ -623,6 +637,7 @@ export const ROUTED_LARGE_READS: readonly string[] = [
   'files.read',
   'files.readAsset',
   'git.diff',
+  'git.changes',
   'review.file',
   'runs.events'
 ]

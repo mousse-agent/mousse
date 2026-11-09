@@ -1,7 +1,7 @@
 import { formatBinding } from '../../shared/commands'
 import type { MainView } from '../../shared/types'
 import { useCommandBindings, useCommands } from '../commands/commandRegistry'
-import { Bot, Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Terminal } from '../lib/icons'
+import { Bot, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, Terminal } from '../lib/icons'
 import { SURFACE_CHOICES, openSurface, type SurfaceChoice } from '../lib/surfaces'
 import { useAppStore } from '../stores/appStore'
 
@@ -9,8 +9,7 @@ const ICONS = {
   browser: Globe,
   terminal: Terminal,
   files: FolderOpen,
-  git: GitBranch,
-  review: Eye,
+  git: GitCompare,
   pullRequest: GitPullRequest,
   agents: Bot,
   documents: FileText

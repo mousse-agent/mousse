@@ -13,6 +13,7 @@ import type {
   BrowserWaitCondition,
   BrowserWorkerRequest
 } from '../../../shared/browser/types'
+import { AGENT_CURSOR_GLIDE_MS, agentCursorFor, type BrowserAgentCursor } from '../../../shared/browser/agentCursor'
 import { imagePointToViewport } from '../../../shared/browser/geometry'
 import { browserNavigationUrl, validateBrowserActionRequest, validateBrowserWait } from '../../../shared/browser/validation'
 import type { BrowserArtifactPort, BrowserJournalPort } from '../../../mms/browser/ports'
@@ -24,7 +25,7 @@ import { dispatchAction, waitForLoad } from '../../../browser-worker/action/disp
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS } from '../../../browser-worker/observation/collect'
 import { captureViewportScreenshot } from '../../../browser-worker/observation/screenshot'
 import { BrowserReferenceStore, type ReferenceIdentity } from '../../../browser-worker/observation/ReferenceStore'
-import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl } from '../../../browser-worker/util'
+import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep } from '../../../browser-worker/util'
 import type { AttachedControlState, AttachedUiTabId } from '../../../shared/browser/attached'
 import { ElectronDebuggerTransport, type DebuggerTransportOptions } from './debuggerTransport'
 import type { TrustedGuestRecord } from './registry'
@@ -42,6 +43,11 @@ export interface AttachedPageSessionConfig {
   clock?: () => Date
   interceptCommand?: DebuggerTransportOptions['interceptCommand']
   onControlStateChange?: (state: AttachedControlState) => void
+  /**
+   * Where the agent is about to act (`agentCursor.ts`): drawn over the tab by its window, never in
+   * the page. True when a window shows it: only then does the cursor glide before the input.
+   */
+  onAgentCursor?: (event: { uiTabId: AttachedUiTabId; cursor: BrowserAgentCursor }) => boolean
 }
 
 interface TabState {
@@ -89,6 +95,7 @@ export class AttachedPageSession {
   private repeatedActionCount = 0
   private stopNav: (() => void) | null = null
   private readonly onControlStateChange?: (state: AttachedControlState) => void
+  private readonly onAgentCursor?: AttachedPageSessionConfig['onAgentCursor']
   private readonly interceptCommand?: DebuggerTransportOptions['interceptCommand']
   private readonly browserVersion: string
   private readonly profileEpoch: string
@@ -112,6 +119,7 @@ export class AttachedPageSession {
     this.artifacts = config.artifacts
     this.browserVersion = config.browserVersion ?? 'electron-attached'
     this.onControlStateChange = config.onControlStateChange
+    this.onAgentCursor = config.onAgentCursor
     this.interceptCommand = config.interceptCommand
     this.refs = new BrowserReferenceStore({ profileId: this.profileId, sessionId: this.id, generation: this.generation })
     this.tab = {
@@ -417,6 +425,7 @@ export class AttachedPageSession {
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       const target = await this.resolveActionTarget(request, tab)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
+      if (!humanLease) await this.glideCursor(request, tab, target, abort.signal)
       this.inFlight.dispatched = true
       dispatched = true
       await this.journal.append({
@@ -617,6 +626,31 @@ export class AttachedPageSession {
     }
     if (stored.identity.documentId !== tab.documentId) fail('stale_ref', 'Reference belongs to a previous document')
     return prepareActionableTarget(this.requireCdp(), stored.cdpSessionId ?? ATTACHED_CDP_SESSION, stored, this.inFlight?.abort.signal)
+  }
+
+  /**
+   * The agent cursor moves to the resolved target over the tab, and glides there for a moment
+   * before the input is sent, so the person watching sees where the agent acts.
+   */
+  private async glideCursor(request: BrowserActionRequest, tab: TabState, target: ActionableTarget | { from: ActionableTarget; to: ActionableTarget } | undefined, signal: AbortSignal): Promise<void> {
+    if (!this.onAgentCursor) return
+    const point = target ? ('from' in target ? target.from.point : target.point) : undefined
+    const viewport = this.observations.get(request.observationId)?.viewport
+    if (!viewport) return
+    const cursor = agentCursorFor(request.action, point, { width: viewport.cssWidth, height: viewport.cssHeight }, this.clock().getTime(), tab.publicId)
+    if (!cursor) return
+    let shown = false
+    try { shown = this.onAgentCursor({ uiTabId: this.uiTabId, cursor }) } catch { /* a view never fails an action */ }
+    if (!shown) return
+    try {
+      await sleep(AGENT_CURSOR_GLIDE_MS, signal)
+    } catch {
+      fail('cancelled', 'Action cancelled before dispatch')
+    }
+    if (target && 'from' in target) {
+      const dropped = { ...cursor, x: target.to.point.x, y: target.to.point.y }
+      setTimeout(() => { try { this.onAgentCursor?.({ uiTabId: this.uiTabId, cursor: { ...dropped, at: this.clock().getTime() } }) } catch { /* view only */ } }, 150)
+    }
   }
 
   private matchWait(observation: BrowserObservation, condition: BrowserWaitCondition): boolean {

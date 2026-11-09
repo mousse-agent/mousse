@@ -1,5 +1,6 @@
 import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
+import '../styles/thinking-icon.css'
 import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
@@ -7,6 +8,7 @@ import Alert02Icon from '@hugeicons/core-free-icons/Alert02Icon'
 import AlertCircleIcon from '@hugeicons/core-free-icons/AlertCircleIcon'
 import Archive01Icon from '@hugeicons/core-free-icons/Archive01Icon'
 import ArchiveRestoreIcon from '@hugeicons/core-free-icons/ArchiveRestoreIcon'
+import ArrowShrink02Icon from '@hugeicons/core-free-icons/ArrowShrink02Icon'
 import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
 import ArrowDown02Icon from '@hugeicons/core-free-icons/ArrowDown02Icon'
 import ArrowDownDoubleIcon from '@hugeicons/core-free-icons/ArrowDownDoubleIcon'
@@ -25,6 +27,7 @@ import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
 import Brain01Icon from '@hugeicons/core-free-icons/Brain01Icon'
+import Atom01Icon from '@hugeicons/core-free-icons/Atom01Icon'
 import BrowserIcon from '@hugeicons/core-free-icons/BrowserIcon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatIcon from '@hugeicons/core-free-icons/BubbleChatIcon'
@@ -73,6 +76,7 @@ import GitMergeIcon from '@hugeicons/core-free-icons/GitMergeIcon'
 import GitPullRequestIcon from '@hugeicons/core-free-icons/GitPullRequestIcon'
 import GitPullRequestClosedIcon from '@hugeicons/core-free-icons/GitPullRequestClosedIcon'
 import Globe02Icon from '@hugeicons/core-free-icons/Globe02Icon'
+import ArrowExpandDiagonal01Icon from '@hugeicons/core-free-icons/ArrowExpandDiagonal01Icon'
 import GridViewIcon from '@hugeicons/core-free-icons/GridViewIcon'
 import HammerIcon from '@hugeicons/core-free-icons/HammerIcon'
 import HashtagIcon from '@hugeicons/core-free-icons/HashtagIcon'
@@ -234,6 +238,7 @@ export const GitMerge = /* @__PURE__ */ createIcon('GitMerge', GitMergeIcon)
 export const GitPullRequest = /* @__PURE__ */ createIcon('GitPullRequest', GitPullRequestIcon)
 export const GitPullRequestClosed = /* @__PURE__ */ createIcon('GitPullRequestClosed', GitPullRequestClosedIcon)
 export const Globe = /* @__PURE__ */ createIcon('Globe', Globe02Icon)
+export const Maximize = /* @__PURE__ */ createIcon('Maximize', ArrowExpandDiagonal01Icon)
 export const GripVertical = /* @__PURE__ */ createIcon('GripVertical', DragDropVerticalIcon)
 export const Hammer = /* @__PURE__ */ createIcon('Hammer', HammerIcon)
 export const Hash = /* @__PURE__ */ createIcon('Hash', HashtagIcon)
@@ -334,12 +339,55 @@ export const Image = /* @__PURE__ */ createIcon('Image', Image01Icon)
 export const Stop = /* @__PURE__ */ createIcon('Stop', StopIcon)
 export const VolumeHigh = /* @__PURE__ */ createIcon('VolumeHigh', VolumeHighIcon)
 export const ArchiveRestore = /* @__PURE__ */ createIcon('ArchiveRestore', ArchiveRestoreIcon)
+export const ArrowShrink = /* @__PURE__ */ createIcon('ArrowShrink', ArrowShrink02Icon)
 export const Clean = /* @__PURE__ */ createIcon('Clean', CleanIcon)
 export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
 export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)
 export const PinOff = /* @__PURE__ */ createIcon('PinOff', PinOffIcon)
 
+export interface ThinkingIconProps extends IconProps {
+  /** While the model thinks: the orbits turn around the still centre (thinking-icon.css). */
+  active?: boolean
+}
+
+/**
+ * The chat's thinking icon (Hugeicons Atom 01). Its own SVG so the centre circle and the orbits
+ * (arcs and dots) are separate: only the orbit group rotates while `active`.
+ */
+export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIconProps>(function ThinkingIcon(
+  { size = 16, stroke, strokeWidth, active = false, className = '', ...props },
+  ref,
+) {
+  const width = strokeWidth === undefined ? (typeof stroke === 'number' ? stroke : 1.5) : Number(strokeWidth)
+  const color = typeof stroke === 'string' ? stroke : 'currentColor'
+  const [centre, ...orbits] = Atom01Icon as unknown as Array<[string, Record<string, string>]>
+  const draw = ([tag, { key, ...attrs }]: [string, Record<string, string>]) => {
+    const shape = { ...attrs, stroke: color, strokeWidth: width }
+    return tag === 'circle' ? <circle key={key} {...shape} /> : <path key={key} {...shape} />
+  }
+  return (
+    <svg
+      ref={ref}
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden={props['aria-label'] ? undefined : true}
+      data-icon-library="hugeicons"
+      data-thinking={active ? 'active' : 'done'}
+      className={`mousse-icon thinking-icon${active ? ' is-thinking' : ''} ${className}`.trim()}
+      {...props}
+    >
+      {draw(centre!)}
+      <g className="thinking-icon-orbit">{orbits.map(draw)}</g>
+    </svg>
+  )
+})
+ThinkingIcon.displayName = 'ThinkingIcon'
+
 export const IconBrain = Brain
+export const IconThinking = ThinkingIcon
 export const IconArrowBackUp = Undo2
 export const IconArrowDown = ArrowDown
 export const IconCheck = Check

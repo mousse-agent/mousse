@@ -1,8 +1,10 @@
 .agents-workspace { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); }
-.agents-workspace__header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border-color, #ffffff18); }
-.agents-workspace__header nav { display: flex; flex-wrap: wrap; gap: 4px; }
-.agents-workspace__header [role="tab"] { display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
-.agents-workspace__header [aria-selected="true"] { background: var(--bg-tertiary, #ffffff0d); color: var(--text-primary); }
+.agents-workspace__header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 4px 16px 10px; }
+/* The sidebar's pill tabs (ui/PillTabs.tsx). A pill-tabs container in its 240-319px band, so only the open tab
+   shows its word and the word widens into the tab opened next. */
+.automations-tabs-row { container: pill-tabs / inline-size; display: flex; width: 272px; max-width: 100%; }
+/* The panes swap with the sidebar's fold-and-fade (.view-swap in sidebar-view-motion.css). */
+.automations-swap { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
 .agents-workspace__pane { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .agents-workspace__error { margin: 8px 16px; color: var(--error-color, #e67e8c); font-size: 12px; }
 .agents-workspace__runs { min-width: 220px; }

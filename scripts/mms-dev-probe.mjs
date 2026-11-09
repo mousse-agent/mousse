@@ -8,6 +8,11 @@ const MAX_FRAME_BYTES = 16 * 1024 * 1024
  * keeps it in sync). Not the owner lease's version, which is a separate contract.
  */
 export const DAEMON_PROTOCOL_VERSION = 2
+/**
+ * With several profiles the daemon refuses personal methods (`threads.list`) on an unbound
+ * connection, so the probe asks for profiles and checks each one (`PROFILES_V1_CAPABILITY`).
+ */
+const PROFILES_CAPABILITY = 'profiles-v1'
 
 function encodeFrame(value) {
   const body = Buffer.from(JSON.stringify(value), 'utf-8')
@@ -67,7 +72,8 @@ class DevProbeClient {
             protocolVersion: this.protocolVersion,
             ownerToken: this.owner.token,
             clientType: 'cli',
-            clientBuild: 'dev-restart-probe'
+            clientBuild: 'dev-restart-probe',
+            requestedCapabilities: [PROFILES_CAPABILITY]
           })
         )
       })
@@ -101,6 +107,10 @@ class DevProbeClient {
         reject(error)
       }
     })
+  }
+
+  hasCapability(capability) {
+    return Array.isArray(this.hello?.capabilities) && this.hello.capabilities.includes(capability)
   }
 
   close() {
@@ -150,9 +160,36 @@ class DevProbeClient {
   }
 }
 
-/** Return whether replacing the daemon would interrupt a main orchestrator turn. */
+/** The first thread of the connection's (bound) profile with a running orchestrator turn. */
+async function findActiveThread(client) {
+  const listed = await client.request('threads.list')
+  const threads = Array.isArray(listed?.threads) ? listed.threads : []
+
+  // Keep below the protocol pending-request cap even for very large histories.
+  for (let offset = 0; offset < threads.length; offset += 32) {
+    const batch = threads.slice(offset, offset + 32)
+    const activity = await Promise.all(
+      batch.map(async (thread) => {
+        if (!thread || typeof thread.id !== 'string') return null
+        const result = await client.request('orchestrator.isTurnActive', {
+          threadId: thread.id
+        })
+        return result?.active || result?.running ? thread.id : null
+      })
+    )
+    const threadId = activity.find((id) => typeof id === 'string')
+    if (threadId) return threadId
+  }
+  return undefined
+}
+
+/**
+ * Return whether replacing the daemon would interrupt a main orchestrator turn in any active
+ * profile. A daemon without profiles is checked on the unbound connection, as before.
+ */
 export async function probeMmsActiveTurn(homeDir, opts = {}) {
-  const timeoutMs = opts.timeoutMs ?? 3_000
+  // Binding a profile can load its services in the daemon, so the first check of several profiles may take a while.
+  const timeoutMs = opts.timeoutMs ?? 10_000
   let client
   const operation = async () => {
     const owner = await readOwner(homeDir)
@@ -168,22 +205,18 @@ export async function probeMmsActiveTurn(homeDir, opts = {}) {
         client = new DevProbeClient(owner, spoken)
         await client.connect()
       }
-      const listed = await client.request('threads.list')
-      const threads = Array.isArray(listed?.threads) ? listed.threads : []
-
-      // Keep below the protocol pending-request cap even for very large histories.
-      for (let offset = 0; offset < threads.length; offset += 32) {
-        const batch = threads.slice(offset, offset + 32)
-        const activity = await Promise.all(
-          batch.map(async (thread) => {
-            if (!thread || typeof thread.id !== 'string') return null
-            const result = await client.request('orchestrator.isTurnActive', {
-              threadId: thread.id
-            })
-            return result?.active || result?.running ? thread.id : null
-          })
-        )
-        const threadId = activity.find((id) => typeof id === 'string')
+      if (!client.hasCapability(PROFILES_CAPABILITY)) {
+        const threadId = await findActiveThread(client)
+        return threadId ? { active: true, threadId } : { active: false }
+      }
+      const listed = await client.request('profiles.list')
+      const profiles = Array.isArray(listed?.profiles) ? listed.profiles : []
+      const active = profiles.filter((profile) => profile?.status === 'active' && typeof profile.id === 'string')
+      // No readable profile list means the probe cannot tell; the caller then defers the restart.
+      if (active.length === 0) throw new Error('MMS lists no active profile')
+      for (const profile of active) {
+        await client.request('profiles.bind', { profile: profile.id })
+        const threadId = await findActiveThread(client)
         if (threadId) return { active: true, threadId }
       }
       return { active: false }

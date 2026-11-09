@@ -201,12 +201,12 @@ describe('Settings > Agents > Compact context', () => {
     expect([...document.querySelectorAll('[role="option"]')].map((option) => option.textContent))
       .toEqual(['Off', 'Auto', '128k tokens', '256k tokens', '512k tokens', '1M tokens'])
     act(() => document.querySelector<HTMLElement>('[role="option"]')!.click())
-    expect(saved()).toEqual({ compactionEnabled: false, compactionTokens: 512000 })
+    expect(saved()).toEqual({ compactionEnabled: false, compactionTokens: 512000, idleCompaction: 'suggest' })
     expect(field().value).toBe('Off')
     pick('512k tokens')
-    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 512000 })
+    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 512000, idleCompaction: 'suggest' })
     pick('Auto')
-    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 'model-max' })
+    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 'model-max', idleCompaction: 'suggest' })
     expect(field().value).toBe('Auto')
   })
 
@@ -214,7 +214,7 @@ describe('Settings > Agents > Compact context', () => {
     show()
     type('300k')
     press(field(), 'Enter')
-    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 300_000 })
+    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 300_000, idleCompaction: 'suggest' })
     expect(field().value).toBe('300k tokens')
     expect(field().getAttribute('aria-invalid')).toBeNull()
   })
@@ -317,6 +317,22 @@ describe('Settings > Agents > Compact context', () => {
     store.set({ provider: { llmProvider: 'anthropic', model: 'opus' } })
     show({ ...OPTIONS, llmProviders: [{ id: 'anthropic', label: 'Anthropic', models: [{ id: 'opus', label: 'Opus 5.5' }] } as unknown as LlmProviderOption] })
     expect(note()).toBeNull()
+  })
+
+  it("when the cache expires: suggests compacting by default, and Don't suggest keeps the size", () => {
+    store.set({ context: { compactionEnabled: true, compactionTokens: 300_000, idleCompaction: 'suggest' } })
+    show()
+    const row = host.querySelector('[data-settings-anchor="agents-idle-compaction"]')!
+    expect(row.querySelector('.settings-item-title')!.textContent).toBe('When the cache expires')
+    const trigger = row.querySelector<HTMLElement>('[aria-label="When the cache expires"]')!
+    expect(trigger.textContent).toContain('Suggest compacting')
+    act(() => trigger.click())
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent === "Don't suggest")!
+    act(() => option.click())
+    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 300_000, idleCompaction: 'off' })
+    // Changing the size afterwards keeps the choice.
+    pick('512k tokens')
+    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 512000, idleCompaction: 'off' })
   })
 })
 

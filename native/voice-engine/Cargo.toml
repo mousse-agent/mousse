@@ -1,0 +1,22 @@
+[package]
+name = "mousse-voice-engine"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Runs Mousse's local Kokoro voice model through ONNX Runtime for read aloud."
+
+[[bin]]
+name = "mousse-voice"
+path = "src/main.rs"
+
+[dependencies]
+# ONNX Runtime 1.31, linked into the binary from the prebuilt libraries ort downloads at build time. The engine
+# never touches the network when it runs.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

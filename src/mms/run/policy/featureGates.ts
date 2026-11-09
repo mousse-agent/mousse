@@ -18,13 +18,16 @@ export function forkStrategy(caps: ProviderCapabilities): ForkStrategy {
 }
 
 /**
- * Phase 6 checkpoint restore. Strong containment (Mousse ran every tool) restores automatically;
- * weak containment may have touched files Mousse did not see, so the user reviews the diff.
+ * How Undo and code revert restore files (SPEC §16.3). Both restore automatically, and only in a
+ * worktree the thread owns. Strong containment (Mousse ran every tool) restores everything the turn
+ * did; weak containment restores the worktree's files, which snapshots record whoever wrote them, but
+ * not what the agent's own tools did outside it (`workspace_only`). `review_diff` is for capabilities
+ * Mousse does not know: the diff is reviewed first.
  */
-export type RestoreMode = 'auto' | 'review_diff'
+export type RestoreMode = 'auto' | 'workspace_only' | 'review_diff'
 
 export function restoreMode(caps: ProviderCapabilities): RestoreMode {
-  return caps.containment === 'strong' ? 'auto' : 'review_diff'
+  return caps.containment === 'strong' ? 'auto' : 'workspace_only'
 }
 
 /**

@@ -246,10 +246,6 @@ html[data-theme='high-contrast'] {
   box-shadow: var(--ui-specular);
 }
 
-.app .navigation-rail-separator {
-  border-top-color: var(--ui-line-strong);
-}
-
 .app .resizer {
   background: var(--ui-line);
 }
@@ -925,7 +921,8 @@ textarea:focus {
    upper edge that fades out before the corners. padding-box keeps that line
    inside the border, which would otherwise paint over it. */
 .app .chat-input-area .composer,
-.app .agent-chat-composer {
+.app .agent-chat-composer,
+.thread-search-dialog {
   background-color: var(--ui-raised);
   background-image:
     linear-gradient(90deg, transparent, var(--ui-glint), transparent),
@@ -1153,18 +1150,19 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   padding-bottom: var(--chat-composer-gap);
 }
 
-/* The last line ends above the composer and the strip Go to latest sits in. */
+/* At the end of the transcript the last line sits just above the composer, clear of the fade below. */
 .chat:not(.chat--empty) .an-message-list > div {
-  padding-bottom: calc(var(--chat-composer-stack, 160px) + 56px);
+  padding-bottom: calc(var(--chat-composer-stack, 160px) + 16px);
 }
 
+/* The transcript runs down to the composer and fades out only in the last 12px above its top edge. */
 .chat:not(.chat--empty) .an-message-list {
   --transcript-mask: linear-gradient(
     to bottom,
     transparent 0,
     #000 28px,
-    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 56px)),
-    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) - 40px)),
+    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 12px)),
+    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) - 0px)),
     transparent 100%
   );
   -webkit-mask-image: var(--transcript-mask);
@@ -1176,11 +1174,13 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 }
 
 /*
- * On the composer's top edge, in a strip the transcript fades out before (see the mask above), so it
- * never covers text. Hidden while a composer menu or the notice slot is open: they use that space.
+ * Floats over the bottom of the transcript, centred a few px above the composer's top edge; it takes no
+ * height, so the transcript runs on beneath it. It only shows while the reader is scrolled up, so it
+ * never covers the last line at the end. Hidden while a composer menu or the notice slot is open: they
+ * use that space.
  */
 .chat-jump {
-  bottom: calc(var(--chat-composer-stack, 32px) + 4px);
+  bottom: calc(var(--chat-composer-stack, 32px) + 8px);
   width: 32px;
   height: 32px;
   border: 1px solid var(--ui-line-strong);

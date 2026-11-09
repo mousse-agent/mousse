@@ -1,4 +1,5 @@
 import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { PermissionLimits } from '../../../shared/permissionMode'
@@ -11,7 +12,7 @@ import type { LoginSession } from '../../providers/LoginSession'
 import { CODEX_CAPABILITIES, CodexAdapter } from './codex/adapter'
 import { cliNames, ownedLaunchEnv, ownedUserArgs, ownedUserEnv } from '../env'
 import { telemetryOf } from '../telemetry'
-import { usageWindows } from '../vendors/codex/rateLimits'
+import { reportedUsageWindows, snapshotPlan, usageWindows } from '../vendors/codex/rateLimits'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../vendors/codex/managedRuntime'
 import { ownedHomeProblem } from '../ownedHome'
@@ -168,12 +169,13 @@ function readAuth(service: CodexProviderService, status: Awaited<ReturnType<Code
  */
 async function readUsage(service: CodexProviderService, signal: AbortSignal): Promise<RuntimeUsage> {
   const limits = await service.rateLimits(signal)
-  const windows = usageWindows(limits.snapshot)
+  const windows = limits.live ? usageWindows(limits.snapshot) : reportedUsageWindows(limits.snapshot, Date.now())
   if (!windows.length) return { status: 'unavailable', windows: [], message: 'Codex reported no usage limits for this plan.' }
   return {
     status: 'available',
     windows,
-    ...(limits.live ? {} : { message: `Codex could not be reached; these are the limits it last reported (${new Date(limits.at).toISOString()}).` })
+    ...(snapshotPlan(limits.snapshot) ? { plan: snapshotPlan(limits.snapshot) } : {}),
+    ...(limits.live ? {} : { message: "Codex couldn't be reached.", readAt: new Date(limits.at).toISOString() })
   }
 }
 
@@ -223,7 +225,50 @@ interface OwnedService {
  * home of its own (another account) it signs in and out there from Mousse with Codex's own device
  * sign-in; on the user's home it runs as the built-in does.
  */
+/**
+ * A reader of the plan's limits through the user's own Codex CLI (the program the built-in entry
+ * would run) and its stored sign-in. It ignores the built-in entry's signed-out flag (that entry may
+ * be removed while the managed one uses the same account), keeps its settings in the managed entry's
+ * state folder, and only ever reads the account and its limits.
+ */
+export function userCodexLimitsReader(
+  context: Pick<DriverContext, 'profileHome' | 'questions' | 'stateDir' | 'instanceId'>,
+  program: () => string | undefined,
+  launch: (launch: CodexLaunch) => CodexProcess = spawnCodexAppServer
+): CodexProviderService {
+  return new CodexProviderService(context.profileHome, context.questions, {
+    findBinary: program,
+    launch: (spec) => {
+      recordHarnessSpawn({ instanceId: context.instanceId, purpose: 'usage-limits', command: spec.binary, args: spec.args, env: spec.env })
+      return launch(spec)
+    }
+  }, {
+    dir: join(context.stateDir, 'user-codex-limits'),
+    launch: () => ({}),
+    signedOut: () => false
+  })
+}
+
 export function codexDriver(options: CodexDriverOptions): HarnessDriver {
+  /**
+   * A managed entry, which may read its plan's limits through the user's own Codex CLI and its stored
+   * sign-in (same ChatGPT account only). Its own Codex has no ChatGPT login to ask, and the profile's
+   * built-in entry may be removed or signed out, so a reader of its own does it: it only reads the
+   * account and its limits, never runs a turn, and its settings stay in the entry's state folder.
+   */
+  function managedRuntime(context: DriverContext): DriverRuntime {
+    let reader: CodexProviderService | undefined
+    const userCodex = () => (reader ??= userCodexLimitsReader(context, () => options.builtIn().programPath()))
+    const runtime = createManagedCodexRuntime(context, { userCodex })
+    return {
+      ...runtime,
+      stop: () => {
+        reader?.stop()
+        return runtime.stop?.()
+      }
+    }
+  }
+
   /**
    * The service of each added instance, kept across the runtimes a config change rebuilds: one
    * service, and so one writer, per instance's settings file, and a sign-in running when its own
@@ -270,7 +315,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     },
     create(context: DriverContext): DriverRuntime {
       // A managed entry keeps its own runtime and ChatGPT sign-in.
-      if (context.config.setup === 'managed') return (options.managed ?? createManagedCodexRuntime)(context)
+      if (context.config.setup === 'managed') return options.managed ? options.managed(context) : managedRuntime(context)
       if (context.builtIn) {
         const service = options.builtIn()
         return {

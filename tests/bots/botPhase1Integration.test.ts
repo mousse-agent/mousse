@@ -296,11 +296,11 @@ describe('Bot Phase 1, composed', () => {
     expect(w.store.activation(run2.id)).toMatchObject({ status: 'done' })
     const cards = chat(botId).filter((message) => message.ask)
     expect(cards).toHaveLength(1)
-    expect(cards[0]).toMatchObject({ kind: 'notice', ask: { status: 'open', title: `read files in ${elsewhere}` } })
+    expect(cards[0]).toMatchObject({ kind: 'notice', ask: { status: 'open', title: 'use files on this computer' } })
     expect(lastBot(botId)).toMatchObject({ kind: 'run_report', text: 'Tonight: risotto. I could not read your recipes.' })
-    // Allow: the next run may read there, and About lists it.
+    // Allow: the next run may use files anywhere, and About lists it as one permission.
     await w.engine.service.answer(botId, cards[0]!.ask!.askId, 'allow')
-    expect(w.engine.service.get(botId).permissions.map((item) => item.title)).toEqual([`read files in ${elsewhere}`])
+    expect(w.engine.service.get(botId).permissions.map((item) => item.title)).toEqual(['use files on this computer'])
   })
 
   it('forgetting in the chat leaves no forgotten text in the chip that is stored', async () => {

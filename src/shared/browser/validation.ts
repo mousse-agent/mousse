@@ -1,5 +1,5 @@
 import { knownAppError } from '../errors'
-import type { BrowserAction, BrowserActionRequest, BrowserTarget, BrowserWaitCondition } from './types'
+import type { BrowserAction, BrowserActionRequest, BrowserHumanInput, BrowserTarget, BrowserWaitCondition } from './types'
 
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw invalidAction('invalid_action: expected object')
@@ -116,6 +116,24 @@ export function validateBrowserActionRequest(value: unknown): BrowserActionReque
     requestId: id(p.requestId), sessionId: id(p.sessionId), tabId: id(p.tabId), generation,
     observationId: id(p.observationId), controlLeaseId: id(p.controlLeaseId), action: validateBrowserAction(p.action),
     timeoutMs: number(p.timeoutMs, 1, 120_000), ...(p.expected === undefined ? {} : { expected: validateBrowserWait(p.expected) })
+  }
+}
+
+/** A person's input to a managed tab (`BrowserHumanInput`), checked like an action. */
+export function validateBrowserHumanInput(value: unknown): BrowserHumanInput {
+  if (!value || typeof value !== 'object') throw invalidAction('invalid_action: expected input')
+  const kind = (value as Record<string, unknown>).kind
+  switch (kind) {
+    case 'click': { const p = object(value, ['kind', 'x', 'y']); return { kind, x: number(p.x, 0, 100_000), y: number(p.y, 0, 100_000) } }
+    case 'scroll': {
+      const p = object(value, ['kind', 'x', 'y', 'deltaX', 'deltaY'])
+      return { kind, x: number(p.x, 0, 100_000), y: number(p.y, 0, 100_000), deltaX: number(p.deltaX, -100_000, 100_000), deltaY: number(p.deltaY, -100_000, 100_000) }
+    }
+    case 'type': { const p = object(value, ['kind', 'text']); return { kind, text: string(p.text, 8192) } }
+    case 'key': { const p = object(value, ['kind', 'key']); return { kind, key: string(p.key, 64) } }
+    case 'navigate': { const p = object(value, ['kind', 'url']); return { kind, url: browserNavigationUrl(p.url) } }
+    case 'back': case 'forward': case 'reload': object(value, ['kind']); return { kind }
+    default: throw invalidAction('invalid_action: unsupported input')
   }
 }
 

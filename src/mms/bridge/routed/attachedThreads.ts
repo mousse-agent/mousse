@@ -405,6 +405,7 @@ export class AttachedThreads {
       case 'pullRequests.updated':
       case 'actions.updated':
       case 'workspace.updated':
+      case 'git.selectionChanged':
       case 'thread.title-generation-failed':
         return [{ type, data: qualified(type, isRecord(data) ? { threadId: owner, ...data } : data) }]
       // The thread's row is a row of the merged lists: it is updated there, and windows hear it as `threads.updated`.

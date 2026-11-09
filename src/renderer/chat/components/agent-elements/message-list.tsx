@@ -24,7 +24,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { Brain, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -54,6 +54,7 @@ import {
   isTextPart,
   isV5ToolPart,
   partitionTurnSegments,
+  isCompactionRow,
   settleFinishedTurn,
   turnAnswerText,
   type ToolPartBase,
@@ -85,7 +86,10 @@ import {
 import { useTurnWindow } from "./virtual/use-turn-window";
 import { TurnIdContext } from "./turn-context";
 import { FindInThreadBar } from "./find/FindInThreadBar";
+import { findBarHost, placeFindBar } from "./find/find-bar-host";
 import { useThreadFind } from "./find/use-thread-find";
+import { FindRailButton } from "./find/FindRailButton";
+import { cappedWords, markdownPreviewText } from "./utils/preview-text";
 import { flashLocated, revealMessage } from "./reveal-message";
 import { isStale, useChatNavigationStore } from "../../../stores/chatNavigationStore";
 import "../../../styles/prompt-visibility.css";
@@ -98,6 +102,11 @@ export type MessageListProps = {
   /** The composer should fold to one line: the reader is browsing earlier messages. */
   onComposerCompactChange?: (compact: boolean) => void;
   lastTurnNotice?: React.ReactNode;
+  /**
+   * Drawn after the last turn (the thread's queued messages). Outside the windowed rows, so it
+   * follows the end like the breathing space does.
+   */
+  afterTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
   suppressQuestionTool?: boolean;
   /**
@@ -207,7 +216,8 @@ function turnDurationMs(
   if (start == null) return null;
   let end = start;
   for (const message of assistants) {
-    if (isThreadNotice(message)) continue;
+    // A compaction started after the turn (Compact now, hours later) is no part of its work.
+    if (isThreadNotice(message) || isCompactionRow(message)) continue;
     const at = readCreatedAt(message);
     if (at != null && at > end) end = at;
   }
@@ -330,6 +340,35 @@ function PromptEditor({ initial, onCancel, onSend }: { initial: string; onCancel
         <button type="button" onClick={send} disabled={sending || !text.trim()} className="rounded-md bg-an-foreground px-2.5 py-1 text-xs text-an-background disabled:opacity-40">{sending ? "Sending…" : "Send"}</button>
       </div>
     </div>
+  );
+}
+
+/** Fork from here: a new thread that starts after this finished turn, with the conversation up to it. */
+function ForkFromTurnButton({ turnId }: { turnId: string }) {
+  const turnActions = useTurnActions();
+  const [forking, setForking] = useState(false);
+  if (!turnActions?.forkFrom) return null;
+  const forkFrom = turnActions.forkFrom;
+  return (
+    <button
+      type="button"
+      disabled={forking}
+      onClick={() => {
+        setForking(true);
+        forkFrom(turnId);
+        window.setTimeout(() => setForking(false), 1500);
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      title="Fork from here"
+      aria-label="Fork from here"
+      className={cn(
+        "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
+        "opacity-50 bg-transparent enabled:hover:opacity-100 enabled:hover:bg-an-foreground/10 disabled:cursor-default",
+      )}
+    >
+      <GitFork className="w-3.5 h-3.5 text-an-foreground-muted" />
+    </button>
   );
 }
 
@@ -546,6 +585,7 @@ function MessageToolbar({
   undoMessageId,
   promptTurnId,
   onEdit,
+  forkTurnId,
   metadata,
   speechKey,
   speechText,
@@ -561,6 +601,8 @@ function MessageToolbar({
   /** The prompt's turn, for Edit and its versions. */
   promptTurnId?: string;
   onEdit?: () => void;
+  /** The finished turn Fork from here starts after (its run, the `turnId` of its messages). */
+  forkTurnId?: string;
   metadata?: ResponseMetadata;
   /** Identifies the message for read aloud; the button shows only with text. */
   speechKey?: string;
@@ -593,6 +635,7 @@ function MessageToolbar({
         <ReadAloudButton speechKey={speechKey} markdown={speechText ?? text} />
       )}
       {text && <CopyButton text={text} onCopied={onCopied} />}
+      {forkTurnId && <ForkFromTurnButton turnId={forkTurnId} />}
       {metadata && (
         <span onPointerDown={(event) => event.stopPropagation()}>
           <MetadataButton metadata={metadata} onOpenChange={setMetadataOpen} />
@@ -642,10 +685,6 @@ export type PromptMarkerLayout = {
   subscribe: (listener: () => void) => () => void;
 };
 
-function cappedWords(text: string, limit: number): string {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  return words.slice(0, limit).join(" ") + (words.length > limit ? "…" : "");
-}
 
 /** Width of the tick column (`.chat-prompt-ticks`) and its gap to the transcript text. */
 const PROMPT_RAIL_WIDTH = 40;
@@ -683,6 +722,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   markProgrammatic,
   scrollAnimRef,
   layout,
+  onFind,
 }: {
   messages: UIMessage[];
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -694,6 +734,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   scrollAnimRef: React.MutableRefObject<number>;
   /** Set while the list is windowed; without it every prompt is read from the DOM. */
   layout?: PromptMarkerLayout;
+  /** Opens find in thread: a search button sits above the ticks. */
+  onFind?: (() => void) | null;
 }) {
   const [markers, setMarkers] = useState<PromptMarker[]>([]);
   const [activeId, setActiveId] = useState<string>();
@@ -753,9 +795,12 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           : target instanceof HTMLElement
             ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
             : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
-        const preview = cappedWords(getTextFromParts(userMsg.parts ?? [], " "), 10);
+        // The tooltip shows plain text: Markdown syntax in the prompt or the reply is dropped.
+        const preview = cappedWords(markdownPreviewText(getTextFromParts(userMsg.parts ?? [], "\n")), 10);
         const responsePreview = cappedWords(
-          turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], " ")).join(" "),
+          markdownPreviewText(
+            turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], "\n\n")).join("\n\n"),
+          ),
           24,
         );
         next.push({
@@ -919,6 +964,9 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         if (!event.currentTarget.contains(event.relatedTarget)) setPreviewId(undefined);
       }}
     >
+      {/* The column the ticks centre in; the find button hangs above it, so the ticks do not move. */}
+      <div className="chat-prompt-column">
+      {onFind && <FindRailButton onOpen={onFind} />}
       <nav className="chat-prompt-ticks" aria-label="Conversation turns">
       {markers.map((marker, index) => (
         <button
@@ -940,6 +988,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         </button>
       ))}
       </nav>
+      </div>
       {previewMarker && (
         <div className="chat-prompt-preview" aria-hidden="true">
           <strong>{previewMarker.preview}</strong>
@@ -956,6 +1005,7 @@ export const MessageList = memo(function MessageList({
   className,
   showCopyToolbar = true,
   lastTurnNotice,
+  afterTurns,
   onAtBottomChange,
   onComposerCompactChange,
   suppressQuestionTool = false,
@@ -1758,6 +1808,8 @@ export const MessageList = memo(function MessageList({
                     const toolbarText = showCopyToolbar ? assistantText : "";
                     // Read aloud reads the answer, not the notes the agent wrote while it worked.
                     const speechText = turnAnswerText(turn.assistantMsgs);
+                    // A finished turn of this thread can be forked from; a fork's copies of its source name no turn.
+                    const forkTurnId = isTurnStreaming ? undefined : (turn.userMsg as { turnId?: string } | undefined)?.turnId;
 
                     const promptId = turn.userMsg?.id;
                     const workedMs = isTurnStreaming
@@ -1906,7 +1958,7 @@ export const MessageList = memo(function MessageList({
                                   count={items.length}
                                   icon={
                                     groupLabel ? (
-                                      <Brain size={18} />
+                                      <ThinkingIcon size={18} active={anyToolPending && isLastTurn && isStreaming} />
                                     ) : (
                                       <Wrench size={18} />
                                     )
@@ -1953,6 +2005,7 @@ export const MessageList = memo(function MessageList({
                             metadata={turnMetadata}
                             speechKey={copyKey}
                             speechText={speechText}
+                            forkTurnId={forkTurnId}
                           />
                         ) : activeCopyId === copyKey ? (
                           <MessageToolbar
@@ -1965,6 +2018,7 @@ export const MessageList = memo(function MessageList({
                             metadata={turnMetadata}
                             speechKey={copyKey}
                             speechText={speechText}
+                            forkTurnId={forkTurnId}
                           />
                         ) : null}
                       </div>
@@ -1994,6 +2048,7 @@ export const MessageList = memo(function MessageList({
             );
           })}
         </div>
+        {afterTurns}
         {showAssistantBreathingSpace && (
           <div
             aria-hidden="true"
@@ -2012,8 +2067,9 @@ export const MessageList = memo(function MessageList({
       markProgrammatic={markProgrammaticScroll}
       scrollAnimRef={promptScrollAnimRef}
       layout={markerLayout}
+      onFind={find.openFind}
     />
-    {find.barProps && <FindInThreadBar {...find.barProps} />}
+    {find.barProps && placeFindBar(<FindInThreadBar {...find.barProps} />, findBarHost(chatContainerRef.current))}
     {showJumpButton && (
       <button
         type="button"
@@ -2091,6 +2147,29 @@ function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text:
       <span className="inline-flex items-center gap-1.5" title={handoff.to.model}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{to}</span>
     </span>
   </div>;
+}
+
+type CompactionMetadata = { compaction?: boolean; compacting?: boolean; compactionManual?: boolean; compactionKept?: "stopped" | "interrupted" };
+
+/**
+ * A compaction in the transcript: a spinner while it runs (with Stop when a person started it), then what it
+ * did ("Context compacted · 182K → 9K"), or that it ended with the full history kept.
+ */
+function CompactionRow({ text, metadata }: { text: string; metadata: CompactionMetadata }) {
+  const actions = useTurnActions();
+  const compacting = metadata.compacting === true;
+  const stop = compacting && metadata.compactionManual ? actions?.stopCompaction : undefined;
+  return <div role="status"><ToolRowBase
+    icon={compacting ? <SpiralLoader size={12} /> : metadata.compactionKept ? <History size={14} /> : <ArrowShrink size={14} />}
+    shimmerLabel="Compacting context…"
+    completeLabel={text || "Context compacted"}
+    isAnimating={compacting}
+    trailingContent={stop ? (
+      <button type="button" className="an-compaction-stop" title="Stop compacting" aria-label="Stop compacting" onClick={stop}>
+        <Square size={10} strokeWidth={2} fill="currentColor" />
+      </button>
+    ) : undefined}
+  /></div>;
 }
 
 function AssistantParts({
@@ -2266,11 +2345,10 @@ function AssistantParts({
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)
     return <ContextClearedDivider text={parts.filter(isTextPart).map((part) => part.text).join('') || 'Context cleared'} />;
-  const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
+  const compactionMetadata = msg.metadata as CompactionMetadata | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');
-    return <div role="status"><ToolRowBase icon={compactionMetadata.compacting ? <SpiralLoader size={12} /> : undefined}
-      shimmerLabel="Compacting context…" completeLabel={text || 'Context compacted'} isAnimating={compactionMetadata.compacting === true} /></div>;
+    return <CompactionRow text={text} metadata={compactionMetadata} />;
   }
   // A scheduled job's result appended here links to the thread where its turn ran.
   const scheduledRun = (msg.metadata as { scheduledRun?: { threadId?: unknown } } | undefined)?.scheduledRun;

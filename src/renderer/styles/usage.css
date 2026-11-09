@@ -23,11 +23,6 @@
   white-space: nowrap;
 }
 
-.usage-computer {
-  font-weight: 400;
-  color: var(--text-secondary);
-}
-
 .subscription-usage-page-body {
   flex: 1;
   min-height: 0;
@@ -63,7 +58,7 @@
   overflow-wrap: anywhere;
 }
 
-.usage-window + .usage-message {
+.usage-windows + .usage-message {
   border-top: 1px solid var(--ui-line);
 }
 
@@ -77,53 +72,447 @@
   font-size: var(--settings-fs-small);
 }
 
-/* One window per line: the ring (or an empty slot, so lines align), then the words. */
+/* One row per limit window: label and share used, a bar, then when it resets. Rows sit 14px apart,
+   the parts of a row 6px apart. */
+.usage-windows {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: var(--space-12) 0;
+}
+
 .usage-window {
   display: flex;
-  align-items: center;
-  gap: var(--space-8);
-  min-height: calc(var(--settings-control-h) + 2 * var(--space-4));
-  padding: var(--space-8) 0;
+  flex-direction: column;
+  gap: 6px;
   font-size: var(--settings-fs-row);
-  font-variant-numeric: tabular-nums;
 }
 
-.usage-window + .usage-window {
-  border-top: 1px solid var(--ui-line);
+.usage-window-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-12);
 }
 
-.usage-ring-slot {
-  display: inline-flex;
-  flex: none;
-  width: 16px;
-  height: 16px;
-}
-
-.usage-window-line {
+.usage-window-label {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.usage-window-line.is-low { color: var(--warning); }
-.usage-window-line.is-empty { color: var(--danger); }
-
-.usage-ring circle {
-  fill: none;
+.usage-window-used {
+  flex: none;
+  font-variant-numeric: tabular-nums;
 }
 
-.usage-ring-track {
-  stroke: var(--ui-line-strong);
+.usage-window-reset {
+  font-size: var(--settings-fs-small);
+  font-variant-numeric: tabular-nums;
 }
 
-.usage-ring-arc {
-  stroke: var(--accent);
-  stroke-linecap: round;
+/* The bar: a rounded track in the secondary surface, filled to the share used. */
+.usage-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  box-shadow: inset 0 0 0 1px var(--ui-line);
+  overflow: hidden;
 }
 
-.usage-ring.is-low .usage-ring-arc {
-  stroke: var(--warning);
+.usage-bar-fill {
+  /* The accent while plenty is left; toward empty it takes on some of the theme's red (`--usage-red`,
+     set per bar: none above 35% left, rising smoothly to about half near 0%). */
+  --usage-bar-color: color-mix(in srgb, var(--danger) var(--usage-red, 0%), var(--accent));
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 8px;
+  border-radius: inherit;
+  background-color: var(--usage-bar-color);
+  /* Slow diagonal stripes, white at about a fifth: they drift by one tile per loop. */
+  background-image: linear-gradient(
+    -45deg,
+    rgba(255, 255, 255, 0.2) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.2) 50%,
+    rgba(255, 255, 255, 0.2) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 12px 12px;
+  /* The theme's lit top edge and dark lip for accent fills. */
+  box-shadow: var(--ui-specular-accent);
+  animation: usage-bar-stripes 1.2s linear infinite;
+  transition: width calc(320ms * var(--ui-motion-scale, 1)) ease;
 }
 
-html[data-theme='high-contrast'] .usage-ring-arc {
-  stroke: var(--text-primary);
+/* The specular: the theme's accent sheen as a faint inner gloss, and a thin light line along the top
+   that feathers out toward both ends (the theme's glint; none in the light theme, where the top
+   inset alone carries it). */
+.usage-bar-fill::before,
+.usage-bar-fill::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+.usage-bar-fill::before {
+  inset: 0;
+  background: var(--ui-sheen-accent);
+  opacity: 0.45;
+}
+
+.usage-bar-fill::after {
+  top: 0;
+  left: 10%;
+  right: 10%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--ui-glint), transparent);
+  opacity: 0.55;
+}
+
+
+@keyframes usage-bar-stripes {
+  from { background-position: 12px 0; }
+  to { background-position: 0 0; }
+}
+
+[data-motion='off'] .usage-bar-fill {
+  animation: none;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-bar-fill {
+    animation: none;
+  }
+}
+
+html[data-theme='high-contrast'] .usage-bar-fill {
+  --usage-bar-color: var(--text-primary);
+  background-image: none;
+  box-shadow: none;
+}
+
+html[data-theme='high-contrast'] .usage-bar-fill::before,
+html[data-theme='high-contrast'] .usage-bar-fill::after {
+  display: none;
+}
+
+/* The header: the plan, muted, after the name; when older windows were taken, right-aligned. */
+.usage-provider-plan {
+  font-size: var(--settings-fs-small);
+  font-weight: 400;
+}
+
+.usage-provider-read-at {
+  font-size: var(--settings-fs-small);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The computer picker sits beside the title, before Refresh. */
+.usage-computer-select {
+  flex: none;
+}
+
+/* In All computers, a row that is one computer's own account names it, muted, before the provider's link. */
+.usage-provider-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.usage-provider-computer {
+  font-size: var(--settings-fs-small);
+  white-space: nowrap;
+}
+
+/* A provider read through a CLI API proxy: the gear sits right after the title. */
+.usage-provider .settings-group-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.usage-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.usage-settings-btn:hover,
+.usage-settings-btn[aria-expanded='true'] {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.usage-settings-btn:focus-visible {
+  outline: 1px solid var(--settings-focus);
+  outline-offset: 0;
+}
+
+/* A small text action inside a card or the settings popover. */
+.usage-text-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.usage-text-btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.usage-text-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.usage-proxy-note {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+}
+
+.usage-proxy-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--settings-row-y) 0;
+}
+
+.usage-proxy-form .settings-input {
+  flex: 1;
+  min-width: 140px;
+}
+
+.usage-proxy-error {
+  flex-basis: 100%;
+  font-size: var(--settings-fs-small);
+}
+
+.usage-settings-popover {
+  width: 300px;
+  padding: var(--space-8) var(--space-12);
+  font-size: var(--settings-fs-small);
+}
+
+.usage-settings-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-12);
+  padding: var(--space-4) 0;
+}
+
+.usage-settings-label {
+  flex: none;
+  width: 44px;
+  color: var(--text-secondary);
+}
+
+.usage-settings-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Thinner bars: the summary strip's 7px, a table cell's 5px. */
+.usage-bar.is-summary { height: 7px; }
+.usage-bar.is-cell { height: 5px; }
+.usage-bar.is-cell .usage-bar-fill { min-width: 5px; }
+/* A cell bar is too thin for the feathered top line; its lit edge and gloss stay. */
+.usage-bar.is-cell .usage-bar-fill::after { display: none; }
+
+/* Several accounts in one card: a summary strip of each limit across them, then a table. */
+.usage-multi {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  padding: var(--space-12) 0;
+}
+
+.usage-provider-active {
+  font-size: var(--settings-fs-small);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-12) var(--space-24);
+  padding: var(--space-12) var(--space-12);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.usage-summary-col {
+  display: flex;
+  flex: 1 1 150px;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.usage-summary-label,
+.usage-summary-reset {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-summary-value {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-summary-value .settings-muted {
+  font-size: var(--settings-fs-small);
+  font-weight: 400;
+}
+
+/* The table: Account, then a column per limit. No row borders; rows sit about 10px apart. */
+.usage-table {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 var(--space-4);
+}
+
+.usage-table-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.4fr) repeat(var(--usage-limit-columns), minmax(72px, 1fr));
+  align-items: center;
+  gap: var(--space-16);
+}
+
+.usage-table-heading {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-table-account {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+  font-size: var(--settings-fs-small);
+}
+
+.usage-table-account.is-inactive .usage-table-account-name {
+  color: var(--text-secondary);
+}
+
+.usage-table-account.is-inactive .usage-avatar {
+  opacity: 0.45;
+  filter: saturate(0.5);
+}
+
+.usage-avatar {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: hsl(var(--usage-avatar-hue) 42% 52%);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.usage-table-account-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-table-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.usage-table-cell.is-missing {
+  font-size: var(--settings-fs-small);
+}
+
+.usage-table-cell-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-8);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-table-cell-value {
+  font-size: var(--settings-fs-small);
+}
+
+.usage-table-cell-reset {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* An account that cannot be read says why across its limit columns. */
+.usage-table-problem {
+  grid-column: 2 / -1;
+  font-size: var(--settings-fs-small);
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-table-problem.is-info {
+  color: var(--text-secondary);
+}
+
+/* Narrow: the account name sits above its cells, and the headings drop the Account column. */
+@container (max-width: 480px) {
+  .usage-table-row {
+    grid-template-columns: repeat(var(--usage-limit-columns), minmax(0, 1fr));
+    row-gap: 6px;
+  }
+
+  .usage-table-account,
+  .usage-table-problem {
+    grid-column: 1 / -1;
+  }
+
+  .usage-table-row.is-head .usage-table-heading:first-child {
+    display: none;
+  }
+
+  .usage-table {
+    gap: var(--space-12);
+  }
 }

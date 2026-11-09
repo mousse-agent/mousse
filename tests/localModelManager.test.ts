@@ -193,6 +193,25 @@ describe('LocalModelManager', () => {
     expect(Buffer.from(await manager.readFile('kokoro-82m', 'config.json')).equals(Buffer.from(CONFIG))).toBe(true)
   })
 
+  it('gives the path of a file of a downloaded model, and refuses others and damaged files', async () => {
+    const model = fakeModel()
+    const rootDir = tempRoot()
+    const manager = new LocalModelManager({
+      rootDir,
+      models: [model],
+      fetchImpl: servedFetch(model, { 'config.json': CONFIG, 'onnx/model.onnx': WEIGHTS })
+    })
+    await expect(manager.filePath('kokoro-82m', 'onnx/model.onnx')).rejects.toThrow(/not downloaded/)
+    await manager.download('kokoro-82m')
+    const path = await manager.filePath('kokoro-82m', 'onnx/model.onnx')
+    expect(path).toBe(join(manager.modelDir(model), 'onnx', 'model.onnx'))
+    for (const bad of ['../abc123/config.json', 'onnx/../config.json', '.complete', '']) {
+      await expect(manager.filePath('kokoro-82m', bad)).rejects.toThrow(/no file named/)
+    }
+    await writeFile(path, WEIGHTS.subarray(1))
+    await expect(manager.filePath('kokoro-82m', 'onnx/model.onnx')).rejects.toThrow(/not downloaded|damaged/)
+  })
+
   it('deletes a downloaded model and its siblings only', async () => {
     const model = fakeModel()
     const rootDir = tempRoot()

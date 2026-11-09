@@ -30,6 +30,15 @@ function throwPendingChanges(result: unknown): void {
   if (result && typeof result === 'object' && 'pendingChangesError' in result) throw result.pendingChangesError
 }
 
+/**
+ * A daemon that does not know the thread's agent asks to review the files Undo would restore before it restores
+ * them (SPEC §16.3). The app shows no such review, so that Undo stops with a reason instead of doing nothing.
+ */
+function throwReviewRequired(result: unknown): void {
+  if (result && typeof result === 'object' && (result as { requiresReview?: unknown }).requiresReview === true)
+    throw new Error("Undo didn't change anything. Mousse doesn't know this thread's agent, so it restores files only after a review, which the app can't show yet.")
+}
+
 /** The line a finished Undo or Redo returned with its action, if any. */
 function noticeOf(result: unknown): string | null {
   const action = result && typeof result === 'object' ? (result as { action?: unknown }).action : undefined
@@ -84,6 +93,7 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
       }
       const result = await window.mousse.actions.undoLatest(threadId, target.journalGeneration, target.turnId)
       throwPendingChanges(result)
+      throwReviewRequired(result)
       if (isCurrent()) setNotice(noticeOf(result))
       // The daemon publishes the restored transcript; never remove messages locally.
       invalidateThreadActionHistory(threadId)

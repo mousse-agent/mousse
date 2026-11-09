@@ -3,7 +3,7 @@ import type { ChatReference } from '../../shared/chatReferences'
 import { formatMousseFileLink, parseChatReference } from '../../shared/chatReferences'
 import { openProjectReference, routeLink } from '../utils/chatLinks'
 import { useAppStore } from '../stores/appStore'
-import { useReviewStore } from '../stores/reviewStore'
+import { useChangesStore } from '../stores/changesStore'
 import { openSurface } from '../lib/surfaces'
 import { scopeFromKey } from './review/reviewComments'
 
@@ -71,8 +71,8 @@ export function openChatReference(reference: ChatReference): void {
     // Back to the version of the file the comment was made on, scrolled to its line.
     const scope = scopeFromKey(reference.reviewScope)
     if (scope) {
-      useReviewStore.getState().revealComment(store.activeThreadId, { scope, absolutePath: reference.path, line: reference.line })
-      openSurface('review')
+      useChangesStore.getState().revealComment(store.activeThreadId, { scope, absolutePath: reference.path, line: reference.line })
+      openSurface('git')
       return
     }
   }

@@ -15,7 +15,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
-import { createNativeContext, isNativeLastTurnUsage, normalizeNativeContext } from './nativeContext'
+import { createNativeContext, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
 
 /**
  * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
@@ -147,6 +147,9 @@ export class ThreadSession {
     this.measuredAtHistoryLength = lastTurnUsage?.measuredAtHistoryLength ?? 0
     if (!lastTurnUsage && this.nativeContext.lastTurnUsage) {
       delete this.nativeContext.lastTurnUsage
+    }
+    if (this.nativeContext.promptCache !== undefined && !isNativePromptCache(this.nativeContext.promptCache)) {
+      delete this.nativeContext.promptCache
     }
     this.activeToolCallMessageIds.clear()
     this.callToMessage.clear()

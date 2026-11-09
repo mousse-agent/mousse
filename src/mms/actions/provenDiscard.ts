@@ -471,6 +471,11 @@ interface IndexPlan {
   sparse: readonly string[]
   /** End the merge, revert or cherry-pick: the whole index goes back to HEAD, if nothing else in it changed. */
   wholeTree: boolean
+  /**
+   * Runs while the lock is held, once the copy holds the change and before it replaces the index: false leaves the index
+   * as it was (`aborted`). A revert's restore writes its files here, so they and the index change together or not at all.
+   */
+  beforeCommit?: (restaged: ReadonlySet<string>) => Promise<boolean>
 }
 
 /**
@@ -483,7 +488,7 @@ interface IndexPlan {
  * (`elsewhere` names those that did). Assume-unchanged and skip-worktree flags stay. Returns `locked` with nothing
  * changed when the lock stays taken.
  */
-async function commitIndexAsync(top: string, discardGit: DiscardGit, head: string | undefined, before: ReadonlyMap<string, string>, plan: IndexPlan): Promise<{ restaged: string[]; elsewhere: string[]; ended: boolean; written?: Map<string, string>; locked?: string }> {
+export async function commitIndexAsync(top: string, discardGit: DiscardGit, head: string | undefined, before: ReadonlyMap<string, string>, plan: IndexPlan): Promise<{ restaged: string[]; elsewhere: string[]; ended: boolean; written?: Map<string, string>; locked?: string; aborted?: boolean }> {
   const indexPath = resolve(top, firstLine((await discardGit(['rev-parse', '--git-path', 'index'])).stdout))
   const lockPath = `${indexPath}.lock`
   let handle: FileHandle | undefined
@@ -527,6 +532,7 @@ async function commitIndexAsync(top: string, discardGit: DiscardGit, head: strin
     if (skipWorktree.length) await discardGitOrThrow(discardGit, ['update-index', '-z', '--skip-worktree', '--stdin'], env, `${skipWorktree.join('\0')}\0`)
     // What the index holds once written, to tell later changes by someone else from what this discard left.
     const written = stagedEntryDigests(await listZ(discardGit, ['ls-files', '-s', '-z'], env))
+    if (plan.beforeCommit && !await plan.beforeCommit(restaged)) return { restaged: [...restaged], elsewhere, ended: false, aborted: true }
     const bytes = await readFile(copy).catch(() => undefined)
     if (bytes) {
       await handle.writeFile(bytes)

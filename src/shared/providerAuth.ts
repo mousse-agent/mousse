@@ -124,7 +124,40 @@ export interface ProviderUsage {
   message?: string
   /** Where the provider's own usage page is, when Mousse cannot show the numbers itself. */
   manageUrl?: string
+  /** Where the numbers came from when it is not the provider itself (for example "via local proxy"). */
+  source?: string
+  /** ISO time the windows were reported, when that is not now (the last snapshot a provider sent). */
+  readAt?: string
+  /** The plan the limits belong to, as the provider names it ("Plus", "Pro"), when it says. */
+  plan?: string
+  /** The local CLI-to-API proxy the limits are read through, when one was detected. */
+  proxy?: UsageProxyState
+  /** Each account's own windows, when the provider reads several (a proxy with several sign-ins). */
+  accounts?: UsageAccount[]
 }
+
+/** One account of a provider that reads several: its label, its windows, or why it has none. */
+export interface UsageAccount {
+  id: string
+  /** As the source names it (the sign-in's email or label). */
+  label: string
+  windows: ProviderUsageWindow[]
+  /** Why this account has no windows, in a few words ("Sign-in expired"). */
+  problem?: string
+}
+
+/** A detected CLI-to-API proxy, as the usage page shows it. Never carries the key itself. */
+export interface UsageProxyState {
+  /** `host:port` of the proxy. */
+  address: string
+  /** Where its management key comes from: none yet, saved in Mousse, or Claude's environment. */
+  key: 'none' | 'saved' | 'environment'
+  /** Why the limits could not be read with that key. */
+  problem?: 'rejected' | 'unreachable'
+}
+
+/** The answer to saving a proxy key: kept only when the proxy accepted it. */
+export type UsageProxyKeyResult = { ok: true } | { ok: false; reason: 'rejected' | 'unreachable' | 'no_proxy' }
 
 export interface ProvidersUsageResponse {
   providers: ProviderUsage[]

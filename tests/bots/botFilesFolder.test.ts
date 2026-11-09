@@ -47,7 +47,6 @@ const compile = (patch: Partial<CompileInput> = {}) => {
     filesFolder: files,
     nativeNames: piNames,
     remaining: { deadlineMs: 600_000 },
-    temps: [join(base, 'tmp-root')],
     ...patch
   })
 }
@@ -95,20 +94,23 @@ describe('the files folder', () => {
     expect(authority.workspace?.writeRoots).toContain(realpathSync(files))
   })
 
-  it('stays writable beside a read-only folder the owner allowed', () => {
+  it('stays the bot\'s with file access, while the rest of Mousse\'s data stays closed', () => {
     const grant: BotManifest = { ...botStarterManifest(), workspace: { roots: [notes], access: 'read' } }
     const authority = authorityOf({ grant })
-    expect(authority.check(builtin('read', join(notes, 'a.md')))).toEqual({ ok: true })
-    expect(authority.check(builtin('write', join(notes, 'a.md')))).toMatchObject({ ok: false, wall: { kind: 'path', access: 'write' } })
+    expect(authority.check(builtin('write', join(notes, 'a.md')))).toEqual({ ok: true })
     expect(authority.check(builtin('write', join(files, 'a.md')))).toEqual({ ok: true })
+    expect(authority.check(builtin('write', join(scratch, 'a.md')))).toEqual({ ok: true })
+    expect(authority.check(builtin('read', join(botFilesFolder(profile, 'bot-2'), 'x.md')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(authority.check(builtin('read', join(profile, 'bots', 'bots.db')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(authority.workspace).toMatchObject({ files: realpathSync(files), computer: { closed: profile } })
   })
 
-  it('is the one folder inside Mousse data a grant may name, by its exact path', () => {
-    const named = compile({ grant: { ...botStarterManifest(), workspace: { roots: [files], access: 'write' } } })
-    if (!named.ok) throw new Error(named.error.message)
-    expect(named.permissions.workspace?.roots).toEqual([])
-    expect(compile({ grant: { ...botStarterManifest(), workspace: { roots: [join(profile, 'bots')], access: 'read' } } })).toMatchObject({ ok: false })
-    expect(compile({ grant: { ...botStarterManifest(), workspace: { roots: [join(files, 'sub')], access: 'read' } } })).toMatchObject({ ok: false })
+  it('a grant an older build wrote naming it, or a folder inside Mousse data, compiles as file access', () => {
+    for (const roots of [[files], [join(profile, 'bots')], [join(files, 'sub')]]) {
+      const named = compile({ grant: { ...botStarterManifest(), workspace: { roots, access: 'write' } } })
+      if (!named.ok) throw new Error(named.error.message)
+      expect(named.permissions.workspace, roots[0]).toMatchObject({ files: realpathSync(files), computer: { closed: profile } })
+    }
   })
 
   it('must be where Mousse keeps bots\' files', () => {

@@ -46,10 +46,13 @@
 
 .navigation-rail-button:disabled { opacity: 0.35; cursor: not-allowed; }
 
-.navigation-rail-separator {
-  width: 26px;
-  margin: 3px 0;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.16);
+/* Downloads, Usage and Settings sit at the bottom at any window height. */
+.navigation-rail-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: inherit;
+  margin-top: auto;
 }
 
 /* A small dot, not a bar: something in Settings is waiting to be looked at. */
@@ -63,3 +66,25 @@
   background: var(--accent);
   pointer-events: none;
 }
+
+/* The current profile, last on the rail while the sidebar is closed (the sidebar's footer shows it
+   otherwise). It fades and folds away as the sidebar opens; a hover peek keeps it. */
+.navigation-rail-profile {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows calc(160ms * var(--ui-motion-scale, 1)) ease,
+    margin-top calc(160ms * var(--ui-motion-scale, 1)) ease,
+    opacity calc(160ms * var(--ui-motion-scale, 1)) ease,
+    visibility 0s;
+}
+.navigation-rail-profile > * { min-height: 0; }
+.navigation-rail-profile[data-shown='false'] {
+  grid-template-rows: 0fr;
+  /* Takes back the group's gap too. */
+  margin-top: -6px;
+  opacity: 0;
+  visibility: hidden;
+  transition-delay: 0s, 0s, 0s, calc(160ms * var(--ui-motion-scale, 1));
+}
+.navigation-rail-profile[data-shown='false'] > * { overflow: hidden; }

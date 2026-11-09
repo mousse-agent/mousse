@@ -5,7 +5,7 @@ import { confirmNavigation } from '../../services/navigationGuards'
 import { migrateLegacyProfilePreferences } from '../../lib/profilePreferences'
 import { nextProfileColor, profileColor } from '../../lib/profilePalette'
 import { beginProfileSwitch } from '../../lib/providerSnapshots'
-import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
+import { FloatingPortal, useFloatingPosition, usePinnedPopover } from '../../lib/floatingLayer'
 import { useAppStore } from '../../stores/appStore'
 import { devicesLine, mousseIdName, mousseIdSignedIn, useMousseId, useMousseIdAvailable } from '../../stores/mousseIdStore'
 import { openSettingsSection } from '../../lib/settingsNavigation'
@@ -16,6 +16,8 @@ import './profile-switcher.css'
 
 interface ProfileSwitcherProps {
   onSwitched?: (profile: ProfilePublicDto) => void
+  /** `rail`: a round avatar on the icon rail, its menu opening to the right (shown while the sidebar is closed). */
+  variant?: 'sidebar' | 'rail'
 }
 
 const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : String(cause)
@@ -24,7 +26,8 @@ const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : S
  * The sidebar footer: a trigger showing the account and current profile, and a two-column popover.
  * Account on the left (only when this build has Mousse ID), profiles on the right.
  */
-export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
+export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwitcherProps) {
+  const rail = variant === 'rail'
   const [profiles, setProfiles] = useState<ProfilePublicDto[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -44,10 +47,13 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   const withAccount = useMousseIdAvailable()
   const account = useMousseId(withAccount)
   const signedIn = withAccount && mousseIdSignedIn(account.plus)
-  const menuStyle = useFloatingPosition({
-    open, anchorRef: triggerRef, contentRef: menuRef, placement: 'above-start', matchAnchorWidth: true,
+  const sidebarMenuStyle = useFloatingPosition({
+    open: open && !rail, anchorRef: triggerRef, contentRef: menuRef, placement: 'above-start', matchAnchorWidth: true,
     deps: [profiles.length, error, withAccount, signedIn]
   })
+  // On the rail the menu sits beside the avatar, bottom edges aligned, placed before the first paint.
+  const railMenuStyle = usePinnedPopover({ open: open && rail, anchorRef: triggerRef, contentRef: menuRef, maxHeight: 560, side: 'right' })
+  const menuStyle = rail ? railMenuStyle : sidebarMenuStyle
 
   const reload = async () => {
     const epoch = ++reloadEpoch.current
@@ -93,6 +99,12 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
     if (!open) setRowMenu(null)
   }, [open])
 
+  // The rail avatar steps aside for the sidebar's own footer; its menu goes with it.
+  const sidebarOpen = useAppStore((state) => state.threadsSidebarOpen)
+  useEffect(() => {
+    if (rail && sidebarOpen) setOpen(false)
+  }, [rail, sidebarOpen])
+
   // Keyboard focus returns to the trigger once the edit dialog is gone.
   const dialogOpen = !!dialog
   const dialogWasOpen = useRef(false)
@@ -102,7 +114,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   }, [dialogOpen])
 
   useEffect(() => {
-    if (!open || menuStyle.visibility !== 'visible') return
+    if (!open || menuStyle.visibility === 'hidden') return
     if (!menuRef.current?.contains(document.activeElement)) {
       menuRef.current?.querySelector<HTMLElement>('[role^="menuitem"]:not(:disabled)')?.focus()
     }
@@ -262,6 +274,8 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
     />
   )
 
+  // The rail has no room for loading or retry states; the sidebar shows them.
+  if (!selected && rail) return null
   if (!selected) return error ? <div className="profile-switcher profile-switcher-sidebar" role="alert">
     <button type="button" title={error} onClick={() => {
       setError(null)
@@ -343,7 +357,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
     </button>
   </div>
 
-  const menu = open && <div ref={menuRef} className={`profile-menu${withAccount ? ' profile-menu-wide' : ''}`}
+  const menu = open && <div ref={menuRef} className={`profile-menu${withAccount ? ' profile-menu-wide' : ''}${rail ? ' profile-menu-rail' : ''}`}
     style={menuStyle} role="menu" aria-label={withAccount ? 'Account and profiles' : 'Profiles'}>
     <div className="profile-menu-columns">
       {accountColumn}
@@ -352,9 +366,13 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
     {error && <div className="profile-switcher-error" role="alert">{error}</div>}
   </div>
 
-  return (
-    <div ref={rootRef} className="profile-switcher profile-switcher-sidebar" data-profile-id={selected.id}>
-      <button ref={triggerRef} className="profile-sidebar-trigger"
+  const trigger = rail
+    ? <button ref={triggerRef} className="navigation-rail-button profile-rail-trigger" type="button"
+      aria-label={`Mousse profile: ${selected.displayName}`} title={selected.displayName}
+      aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      {avatar(selected)}
+    </button>
+    : <button ref={triggerRef} className="profile-sidebar-trigger"
         type="button" aria-label={withAccount ? `${signedIn ? `Mousse ID: ${mousseIdName(account.plus)}` : 'Sign in'}, Mousse profile: ${selected.displayName}` : `Mousse profile: ${selected.displayName}`}
         title={withAccount ? (signedIn ? account.plus?.email ?? mousseIdName(account.plus) : selected.displayName) : selected.displayName} aria-haspopup="menu" aria-expanded={open}
         onClick={() => setOpen((value) => !value)}>
@@ -370,6 +388,10 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
         </>}
         <ChevronUp size={16} aria-hidden="true" />
       </button>
+
+  return (
+    <div ref={rootRef} className={rail ? 'profile-rail' : 'profile-switcher profile-switcher-sidebar'} data-profile-id={selected.id}>
+      {trigger}
       <FloatingPortal>
         {menu}
         {open && rowMenu && rowMenuProfile && (

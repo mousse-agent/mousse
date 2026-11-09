@@ -27,10 +27,8 @@
 .bot-you-bubble p { margin: 0 0 8px; }
 .bot-you-bubble p:last-child { margin-bottom: 0; }
 .chat-participant-message.bot-you > time { font-size: 11px; color: var(--text-secondary); padding-right: 4px; }
-.bot-you-files, .bot-composer-files { display: flex; flex-wrap: wrap; gap: 6px; }
-.bot-composer-files { margin-bottom: 8px; }
+.bot-you-files { display: flex; flex-wrap: wrap; gap: 6px; }
 .bot-file-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 8px; font-size: 11px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
-.bot-file-pill button { display: grid; place-items: center; color: var(--text-secondary); }
 .bot-loading-older { text-align: center; }
 
 /* One-line activity chips: quiet, never a tool log. */
@@ -59,11 +57,6 @@
 .bot-paused-line { margin: 0; font-size: 12px; color: var(--text-secondary); }
 .bot-paused-line button { color: var(--accent); font-weight: 500; }
 
-/* Composer: text, attach and send or Stop. No model, mention or device. */
-.bot-attach { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--text-secondary); }
-.bot-attach:hover { background: color-mix(in srgb, var(--text-secondary) 10%, transparent); }
-.chat-send-button.bot-send-ready { opacity: 1; }
-
 /* New bot and the look dialogs. */
 .bot-look-picker { margin-bottom: 18px; }
 .bot-new-label { display: block; font-size: 12px; color: var(--text-secondary); margin: 0 0 10px; }
@@ -72,7 +65,7 @@
 .chat-dialog .bot-new-text { min-height: 84px; resize: none; margin-bottom: 0; }
 .chat-dialog .bot-new-name::placeholder, .chat-dialog .bot-new-text::placeholder { color: var(--text-secondary); }
 .bot-new-foot { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
-.bot-new-foot .chat-primary-button { margin-left: auto; padding: 9px 16px; }
+.bot-new-foot .chat-primary-button { margin-left: auto; padding: 9px 16px; display: inline-flex; align-items: center; gap: 6px; }
 .bot-new-foot .chat-primary-button[disabled] { opacity: .4; }
 .bot-new-foot .bot-ghost-button + .chat-primary-button { margin-left: 0; }
 .bot-new-foot .bot-ghost-button:first-child { margin-left: auto; }

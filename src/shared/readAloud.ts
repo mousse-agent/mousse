@@ -42,7 +42,7 @@ interface LocalTtsModelBase extends LocalModelManifest {
   maxWorkers?: number
 }
 
-/** Kokoro through kokoro-js (transformers.js). */
+/** Kokoro: natively through the voice engine, or through kokoro-js (transformers.js) on WebAssembly. */
 export interface KokoroTtsModel extends LocalTtsModelBase {
   runtime: 'kokoro'
   /** transformers.js dtype that selects the ONNX file in `files`. */
@@ -115,7 +115,8 @@ const KOKORO_VOICES: readonly LocalTtsVoice[] = (
 
 /**
  * Kokoro v1.0 ONNX weights from `onnx-community/Kokoro-82M-v1.0-ONNX`, the repository loaded by
- * the official `kokoro-js` package (hexgrad/kokoro). The q8 model runs on CPU through WebAssembly.
+ * the official `kokoro-js` package (hexgrad/kokoro). The q8 model runs on CPU, in the native voice
+ * engine or through WebAssembly.
  */
 export const KOKORO_82M: KokoroTtsModel = {
   id: 'kokoro-82m',
@@ -453,6 +454,12 @@ export const localTtsModelBytes: (model: LocalTtsModel) => number = localModelBy
 export type LocalTtsModelState = LocalModelState
 
 export type LocalTtsModelStatus = LocalModelStatus<LocalTtsModelId>
+
+/**
+ * One segment voiced by a native engine slot (Kokoro on the native voice engine main runs), or why
+ * it could not be voiced, a cancelled segment included. A slot that stopped rejects instead.
+ */
+export type NativeSpeechResult = { samples: Float32Array; sampleRate: number } | { error: string }
 
 // ---------------------------------------------------------------------------------------------
 // Provider models

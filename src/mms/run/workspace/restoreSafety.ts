@@ -11,8 +11,9 @@ import { restoreMode, type RestoreMode } from '../policy/featureGates'
 /**
  * Restore safety for undo and code revert (docs/run-engine/SPEC.md §16.3). A file restore needs a
  * workspace the thread owns that no other thread's worktree or live working directory overlaps
- * (realpath containment either way); weak-containment providers additionally get the diff to review
- * instead of an automatic restore.
+ * (realpath containment either way). A restore there is automatic for every known provider: it is a
+ * three-way merge that keeps later edits, refuses an overlap, and keeps a copy of what it replaces.
+ * Only unknown capabilities get the diff to review first.
  */
 
 /** Where another thread works: its own worktree or the directory its live turn runs in. */

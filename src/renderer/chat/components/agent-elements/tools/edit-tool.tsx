@@ -4,7 +4,7 @@ import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
 import { File, FilePlus, GitCompare, IconChevronRight, Pencil } from "../../../../lib/icons";
 import { Collapse } from "../../../../components/ui/Collapse";
-import { CODE_FONT_VAR } from "../../../../lib/typography";
+import { diffSurfaceStyle, diffUnsafeCSS, useDiffThemeType } from "../../../../lib/diffTheme";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
   extractFilePathArg,
@@ -14,7 +14,7 @@ import {
 import { cn } from "../utils/cn";
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
 import { openFileInPanel } from "../../../../utils/chatLinks";
-import { openTurnInReview } from "../../../../components/review/openReview";
+import { openTurnInChanges } from "../../../../components/changes/openChanges";
 import { useAppStore } from "../../../../stores/appStore";
 import { TurnIdContext } from "../turn-context";
 
@@ -212,105 +212,22 @@ function fileFromRawCall(
   };
 }
 
-// The app themes via `html[data-theme="…"]` (+ `color-scheme`), not the
-// `.dark` class, so checking only `.dark` leaves themeType stuck on "light".
-// That renders light shiki tokens (dark text) on a dark `light-dark()` diff
-// background — unreadable. Resolve against data-theme first, then computed
-// color-scheme, then the legacy `.dark` class / OS preference.
-function resolveEditDiffThemeIsDark(): boolean {
-  if (typeof document === "undefined") return true;
-  const root = document.documentElement;
-  const dataTheme = root.getAttribute("data-theme");
-  if (dataTheme === "light") return false;
-  if (dataTheme === "system") {
-    if (typeof window !== "undefined" && window.matchMedia) {
-      return window.matchMedia("(prefers-color-scheme: dark)").matches;
-    }
-    return true;
-  }
-  // Every other mousse theme id (dark, solarized-dark, github-dark,
-  // high-contrast, blacksphere-plus, …) is dark-only.
-  if (dataTheme) return true;
-  if (root.classList.contains("dark")) return true;
-  try {
-    const colorScheme = getComputedStyle(root).colorScheme;
-    if (colorScheme.includes("dark")) return true;
-    if (colorScheme.includes("light")) return false;
-  } catch {
-    // getComputedStyle unavailable (SSR/test) — fall through.
-  }
-  if (typeof window !== "undefined" && window.matchMedia) {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  }
-  return true;
-}
-
-/** The diff's light or dark syntax theme, following the app theme while the diff is open. */
-function useDiffThemeType(): "light" | "dark" {
-  const [themeType, setThemeType] = React.useState<"light" | "dark">(() =>
-    resolveEditDiffThemeIsDark() ? "dark" : "light",
-  );
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    const updateTheme = () => setThemeType(resolveEditDiffThemeIsDark() ? "dark" : "light");
-    updateTheme();
-    const observer = new MutationObserver(updateTheme);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class", "data-theme", "style"],
-    });
-    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-    media?.addEventListener?.("change", updateTheme);
-    return () => {
-      observer.disconnect();
-      media?.removeEventListener?.("change", updateTheme);
-    };
-  }, []);
-  return themeType;
-}
-
 const DIFF_CLASS = "an-edit-diff bg-an-tool-background";
 
 /**
  * One file's diff. Rendered only while its row is open, so a collapsed row costs no diff and no theme watcher.
  * The diff points the library at the app theme tokens instead of hardcoded black, and `colorScheme` keeps the
  * library's `light-dark()` backgrounds in sync with the syntax tokens (without it dark text lands on a dark
- * background). The font matches the Git tab diff.
+ * background). The font matches the Changes tab.
  */
 function EditDiff({ diff }: { diff: DiffSource }) {
   const themeType = useDiffThemeType();
-  const style = React.useMemo(
-    () =>
-      ({
-        "--diffs-bg": "var(--an-tool-background)",
-        "--diffs-bg-buffer-override": "var(--an-tool-background)",
-        "--diffs-bg-context-override": "var(--an-tool-background)",
-        "--diffs-bg-hover-override": "var(--an-background-secondary)",
-        "--diffs-bg-separator-override": "var(--an-background-secondary)",
-        "--diffs-font-family": CODE_FONT_VAR,
-        colorScheme: themeType,
-      }) as React.CSSProperties,
-    [themeType],
-  );
+  const style = React.useMemo(() => diffSurfaceStyle(themeType), [themeType]);
   const options = React.useMemo(
     () => ({
       theme: { dark: "github-dark", light: "github-light" } as const,
       themeType,
-      unsafeCSS: `
-[data-diff],
-[data-file],
-[data-diffs-header],
-[data-error-wrapper],
-[data-virtualizer-buffer] {
-  --diffs-bg: var(--an-tool-background);
-  --diffs-bg-buffer-override: var(--an-tool-background);
-  --diffs-bg-context-override: var(--an-tool-background);
-  --diffs-bg-hover-override: var(--an-background-secondary);
-  --diffs-bg-separator-override: var(--an-background-secondary);
-  --diffs-font-family: ${CODE_FONT_VAR};
-  color-scheme: ${themeType};
-}
-`,
+      unsafeCSS: diffUnsafeCSS(themeType),
       diffStyle: "unified" as const,
       disableFileHeader: true,
     }),
@@ -478,7 +395,7 @@ function fileIcon(verb: FileVerb): React.ReactNode {
   return verb === "create" ? <FilePlus size={16} /> : <Pencil size={16} />;
 }
 
-/** One file's row: "Edited <name> +N −M", opening to its diff, with Review and Files actions on hover. */
+/** One file's row: "Edited <name> +N −M", opening to its diff, with Changes and Files actions on hover. */
 function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) {
   const turnId = useContext(TurnIdContext);
   const rowStatus: RowStatus = status === "done" && file.error ? "failed" : status;
@@ -492,9 +409,9 @@ function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) 
       <button
         type="button"
         className={ROW_ICON_BUTTON}
-        aria-label={`Open ${file.name} in Review`}
-        title="Open in Review"
-        onClick={() => void openTurnInReview(useAppStore.getState().activeThreadId, turnId, path)}
+        aria-label={`Open ${file.name} in Changes`}
+        title="Open in Changes"
+        onClick={() => void openTurnInChanges(useAppStore.getState().activeThreadId, turnId, path)}
       >
         <GitCompare size={16} />
       </button>

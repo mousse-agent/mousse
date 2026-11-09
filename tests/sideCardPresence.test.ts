@@ -188,7 +188,8 @@ describe('side card stylesheet', () => {
   it('matches the fade duration the presence logic waits for', () => {
     expect(SIDE_CARD_FADE_MS).toBe(180)
     // Both scale with Animation speed; the exit wait follows (sideCardFadeMs).
-    expect(css).toContain('transition: opacity calc(180ms * var(--ui-motion-scale)) ease, transform calc(180ms * var(--ui-motion-scale)) ease;')
+    // The card's own fade and slide; `translate` after them is the find bar's push (find in thread).
+    expect(css).toContain('transition: opacity calc(180ms * var(--ui-motion-scale)) ease, transform calc(180ms * var(--ui-motion-scale)) ease,\n    translate var(--ui-dur-slow) var(--ui-collapse-ease);')
     expect(css).toMatch(/\.sidebar\.sidebar-full \.chat-input-area \{[^}]*transition: width calc\(180ms \* var\(--ui-motion-scale\)\) ease, margin-left calc\(180ms \* var\(--ui-motion-scale\)\) ease;/)
   })
 

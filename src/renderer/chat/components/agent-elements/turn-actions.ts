@@ -11,6 +11,10 @@ export type TurnActions = {
   retry: (promptId: string) => void;
   /** Sends "Continue" to the thread. */
   continueRun: () => void;
+  /** Stops the thread's running compaction; the full history stays. */
+  stopCompaction?: () => void;
+  /** Forks the thread after the finished turn with this `turnId` and opens the fork. */
+  forkFrom?: (turnId: string) => void;
   /**
    * Sends an edited version of the prompt with this message id (turn `turnId`): the conversation continues from
    * before that turn on a new branch, and the original stays a version to switch back to.
@@ -34,13 +38,16 @@ type RetryImage = { data?: string };
 export function createTurnActions<Image extends RetryImage>({
   prompt,
   send,
+  forkFrom,
   editPrompt,
 }: {
   prompt: (promptId: string) => { content: string; images?: Image[] } | undefined;
   send: (content: string, images?: Image[]) => void;
+  forkFrom?: (turnId: string) => void;
   editPrompt?: TurnActions["editPrompt"];
 }): TurnActions {
   return {
+    ...(forkFrom ? { forkFrom } : {}),
     ...(editPrompt ? { editPrompt } : {}),
     retryTitle: (promptId) => {
       const message = prompt(promptId);

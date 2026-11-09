@@ -53,17 +53,19 @@ function usage(used: number, limit = 200_000, extra: Partial<ContextUsageSnapsho
 function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; reports?: 'reported' | 'none'; compaction?: ContextSettings } = {}) {
   const onContextOpenChange = vi.fn()
   const props: ComposerFooterProps = {
-    providers: [provider(options.reports)],
-    selectedProviderId: 'claude-subscription',
-    selectedModelId: 'opus',
-    modelMenuOpen: false,
-    onModelMenuOpenChange: vi.fn(),
-    onModelSelect: vi.fn(),
-    onOpenSettings: vi.fn(),
-    contextUsage,
-    ...(options.compaction ? { contextCompactionSetting: options.compaction } : {}),
-    contextOpen: options.open ?? false,
-    onContextOpenChange,
+    run: {
+      providers: [provider(options.reports)],
+      selectedProviderId: 'claude-subscription',
+      selectedModelId: 'opus',
+      modelMenuOpen: false,
+      onModelMenuOpenChange: vi.fn(),
+      onModelSelect: vi.fn(),
+      onOpenSettings: vi.fn(),
+      contextUsage,
+      ...(options.compaction ? { contextCompactionSetting: options.compaction } : {}),
+      contextOpen: options.open ?? false,
+      onContextOpenChange
+    },
     onAttachClick: vi.fn()
   }
   act(() => root.render(createElement(ComposerFooter, props)))

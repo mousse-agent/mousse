@@ -977,6 +977,14 @@ export class BotStore {
     this.run('UPDATE bot_escalations SET message_id = ? WHERE id = ? AND message_id IS NULL', messageId, id)
   }
 
+  /**
+   * An ask in its current form (an older build's folder ask worded as the one file ask): what it
+   * asks for, its fingerprint and its card's words. Only one open ask may hold a fingerprint.
+   */
+  reword(id: string, ask: { permission: BotAskRequest; fingerprint: string; title: string; note: string }): boolean {
+    return this.run('UPDATE bot_escalations SET permission_json = ?, fingerprint = ?, title = ?, note = ? WHERE id = ?', JSON.stringify(ask.permission), ask.fingerprint, ask.title, ask.note, id) > 0
+  }
+
   /** Compare-and-set from `open`: false when it was already answered, expired or cancelled. */
   answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string): boolean {
     return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0

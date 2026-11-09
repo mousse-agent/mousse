@@ -149,7 +149,10 @@ const SAVE: Phrase = phrase('Saved a file', 'saved a file', 'saved {n} files')
 const PUBLISH: Phrase = phrase('Published a thread’s changes', 'published a thread’s changes', 'published a thread’s changes {n} times')
 const STAGE: Phrase = phrase('Changed staged files', 'changed staged files', 'changed staged files {n} times')
 const DISCARD: Phrase = phrase('Discarded changes', 'discarded changes', 'discarded changes {n} times')
+const REVERT_CHANGES: Phrase = phrase('Reverted changes', 'reverted changes', 'reverted changes {n} times')
+const RESTORE_REVERTED: Phrase = phrase('Restored reverted changes', 'restored reverted changes', 'restored reverted changes {n} times')
 const COMMIT: Phrase = phrase('Made a commit', 'made a commit', 'made {n} commits')
+const UNDO_COMMIT: Phrase = phrase('Undid a commit', 'undid a commit', 'undid {n} commits')
 const PUSH: Phrase = phrase('Pushed to a remote', 'pushed to a remote', 'pushed to a remote {n} times')
 const SYNC: Phrase = phrase('Fetched or pulled', 'fetched or pulled', 'fetched or pulled {n} times')
 const BRANCH: Phrase = phrase('Changed branches', 'changed branches', 'changed branches {n} times')
@@ -226,6 +229,7 @@ const PHRASES: Record<string, Phrase> = {
   'threads.regenerateTitle': RENAME,
   'threads.clearContext': CONTEXT,
   'threads.compact': CONTEXT,
+  'threads.stopCompaction': CONTEXT,
   'threads.setWorktreeEnabled': THREAD_SETTING,
   'threads.setExpiry': THREAD_SETTING,
   'thread.fork': FORK,
@@ -250,7 +254,11 @@ const PHRASES: Record<string, Phrase> = {
   'git.suggestCommitMessage': COMMIT_MESSAGE,
   'git.stage': STAGE,
   'git.unstage': STAGE,
+  'git.include': STAGE,
+  'git.undoLastCommit': UNDO_COMMIT,
   'git.discard': DISCARD,
+  'git.revert': REVERT_CHANGES,
+  'git.restoreReverted': RESTORE_REVERTED,
   'git.fetch': SYNC,
   'git.pull': SYNC,
   'git.abortInProgress': OPERATION,

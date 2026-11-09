@@ -159,14 +159,19 @@
     "digest": "ad89934d35f26755",
     "security": "6f012c3ca58ce7c5"
   },
+  "git.changes": {
+    "version": 1,
+    "digest": "a2dd348075261274",
+    "security": "23c8269058d1b9db"
+  },
   "git.checkout": {
     "version": 1,
     "digest": "f53d0aa6063bfdc2",
     "security": "6f012c3ca58ce7c5"
   },
   "git.commit": {
-    "version": 1,
-    "digest": "96584e3584c54c4f",
+    "version": 2,
+    "digest": "a47cf64c2d31d423",
     "security": "6f012c3ca58ce7c5"
   },
   "git.createBranch": {
@@ -199,6 +204,11 @@
     "digest": "2491700da58ef245",
     "security": "6f012c3ca58ce7c5"
   },
+  "git.include": {
+    "version": 1,
+    "digest": "11c3e9334dda0ff0",
+    "security": "6f012c3ca58ce7c5"
+  },
   "git.init": {
     "version": 1,
     "digest": "0b514123a517746d",
@@ -229,6 +239,21 @@
     "digest": "0814058e14a91abf",
     "security": "6f012c3ca58ce7c5"
   },
+  "git.restoreReverted": {
+    "version": 1,
+    "digest": "9bf824c8b5094a0a",
+    "security": "6f012c3ca58ce7c5"
+  },
+  "git.revert": {
+    "version": 1,
+    "digest": "81f6b6ddd98590e1",
+    "security": "6f012c3ca58ce7c5"
+  },
+  "git.revertedList": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
+  },
   "git.stage": {
     "version": 1,
     "digest": "5258b6f22a1a17a8",
@@ -240,8 +265,13 @@
     "security": "23c8269058d1b9db"
   },
   "git.suggestCommitMessage": {
+    "version": 2,
+    "digest": "2e0b7a1ca2c5c137",
+    "security": "6f012c3ca58ce7c5"
+  },
+  "git.undoLastCommit": {
     "version": 1,
-    "digest": "ce4d427495bbe3f9",
+    "digest": "821678803e5babed",
     "security": "6f012c3ca58ce7c5"
   },
   "git.unstage": {
@@ -409,11 +439,6 @@
     "digest": "be5c180f1cc0b52d",
     "security": "23c8269058d1b9db"
   },
-  "pullRequests.mergeMethod": {
-    "version": 1,
-    "digest": "be5c180f1cc0b52d",
-    "security": "23c8269058d1b9db"
-  },
   "pullRequests.close": {
     "version": 1,
     "digest": "cf3ce34633230e04",
@@ -453,6 +478,11 @@
     "version": 2,
     "digest": "cbaac88941932f74",
     "security": "6f012c3ca58ce7c5"
+  },
+  "pullRequests.mergeMethod": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
   },
   "pullRequests.pushTarget": {
     "version": 1,
@@ -723,6 +753,11 @@
     "version": 1,
     "digest": "d45007f32a42eb40",
     "security": "ceacd93869361a7a"
+  },
+  "threads.stopCompaction": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
   },
   "workflowRuns.answer": {
     "version": 1,
