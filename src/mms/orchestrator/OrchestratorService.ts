@@ -289,7 +289,16 @@ import {
   type ThreadLeaseHandle
 } from '../queue/ThreadExecutionLease'
 import { isProcessAlive } from '../queue/processLiveness'
-import { clearQueueHold, isQueueHoldLive, readQueueHold, setQueueHold } from '../queue/queueHold'
+import {
+  clearQueueHold,
+  clearStaleQueueHold,
+  isQueueHoldLive,
+  QUEUE_HOLD_RENEW_MS,
+  readQueueHold,
+  renewQueueHold,
+  setQueueHold,
+  type QueueHold
+} from '../queue/queueHold'
 import {
   completeClaimDurable,
   mutateDurableQueue,
@@ -1594,6 +1603,10 @@ export class OrchestratorService extends EventEmitter {
   private readonly compactions = new Map<string, AbortController>()
   /** How long a `/compact` waits for the runtime's own compaction (tests shorten it). */
   private nativeCompactTimeoutMs = NATIVE_COMPACT_TIMEOUT_MS
+  /** How often a running compaction renews its saved queue hold (tests shorten it). */
+  private queueHoldRenewMs = QUEUE_HOLD_RENEW_MS
+  /** The clock saved queue holds are renewed and judged by (tests move it). */
+  private queueHoldClock: () => number = () => Date.now()
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
   private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause'>> & { blockedOnWait?: boolean }): void {
@@ -11316,19 +11329,65 @@ export class OrchestratorService extends EventEmitter {
     return this.peerCompactionHold(threadId)
   }
 
-  /** A hold another live process saved on the thread's queue. A hold its process left behind is removed and holds nothing. */
+  /**
+   * A hold another live process saved on the thread's queue and still renews. A hold its process left behind, or
+   * that nobody renewed in time (a hung process, a pid another program now has), is removed and holds nothing.
+   */
   private peerCompactionHold(threadId: string): boolean {
     const threadDir = this.resolveThreadDir(threadId)
     if (!threadDir) return false
     const hold = readQueueHold(threadDir)
     if (!hold) return false
-    if (isQueueHoldLive(hold, () => this.compactions.has(threadId))) return true
+    const live = (current: QueueHold): boolean => isQueueHoldLive(current, () => this.compactions.has(threadId), this.queueHoldClock())
+    if (live(hold)) return true
     try {
-      clearQueueHold(threadDir, hold.id)
+      // Read again under the lock: the owner may have renewed it meanwhile, or a new hold replaced it.
+      if (!clearStaleQueueHold(threadDir, hold.id, live)) {
+        const current = readQueueHold(threadDir)
+        return current !== null && live(current)
+      }
+      // Outside the caller's locks (a drain reads this under the queue lock).
+      setImmediate(() => {
+        try {
+          this.settleLeftCompactionRow(threadId, hold.id)
+        } catch (error) {
+          logDebug('OrchestratorService', 'the row of a compaction left behind could not be settled', error, { threadId })
+        }
+      })
     } catch (error) {
       logDebug('OrchestratorService', 'a stale queue hold could not be removed', error, { threadId })
     }
     return false
+  }
+
+  /**
+   * The row of a compaction whose saved hold was left behind (its process gone, or no longer renewing it): that
+   * compaction never finished, so the row says so (interrupted, full history kept), on disk and in a loaded session.
+   */
+  private settleLeftCompactionRow(threadId: string, rowId: string): void {
+    const settle = (messages: readonly ChatMessage[]): Map<string, ChatMessage> =>
+      closeStaleActivity(messages.filter((message) => message.id === rowId && message.kind === 'context_compaction'), new Date().toISOString())
+    let saved: ChatMessage | undefined
+    const store = this.threadStore
+    if (store?.getThread(threadId)) {
+      try {
+        store.mutateThreadData(threadId, (current) => {
+          const closed = settle(current.messages)
+          if (!closed.size) throw new StaleActivitySkipped()
+          saved = closed.get(rowId)
+          return { messages: current.messages.map((message) => closed.get(message.id) ?? message) }
+        })
+      } catch (error) {
+        if (!(error instanceof StaleActivitySkipped)) throw error
+      }
+    }
+    const session = this.sessions.get(threadId)
+    const row = session?.messages.find((message) => message.id === rowId)
+    if (!session || !row || !isOpenActivityRow(row)) return
+    const closed = saved ?? settle([row]).get(rowId)
+    if (!closed) return
+    session.messages = session.messages.map((message) => (message.id === rowId ? closed : message))
+    this.sessionAls.run(session, () => this.emitMessageUpdated(closed))
   }
 
   /**
@@ -12056,12 +12115,15 @@ export class OrchestratorService extends EventEmitter {
     // that drains this thread's queue waits too.
     const threadDir = this.resolveThreadDir(threadId)
     try {
-      if (threadDir) setQueueHold(threadDir, { kind: 'compaction', id: note.id })
+      if (threadDir) setQueueHold(threadDir, { kind: 'compaction', id: note.id }, this.queueHoldClock())
     } catch (error) {
       this.compactions.delete(threadId)
       clearTimeout(timeout)
       throw error
     }
+    // The hold is renewed while the compaction runs: one nobody renews is taken as left behind.
+    const renewal = threadDir ? setInterval(() => this.renewCompactionHold(threadId, threadDir, note.id, stop), this.queueHoldRenewMs) : undefined
+    renewal?.unref?.()
     // From here on the hold and the Stop are released however this ends, a failed write of the row included.
     try {
       this.sessionAls.run(session, () => {
@@ -12121,6 +12183,7 @@ export class OrchestratorService extends EventEmitter {
       throw error
     } finally {
       clearTimeout(timeout)
+      clearInterval(renewal)
       this.compactions.delete(threadId)
       try {
         if (threadDir) clearQueueHold(threadDir, note.id)
@@ -12136,6 +12199,24 @@ export class OrchestratorService extends EventEmitter {
           logDebug('OrchestratorService', 'the queue could not go on after a compaction', error, { threadId })
         }
       })
+    }
+  }
+
+  /**
+   * The heartbeat of a running compaction's queue hold. A hold that is gone was found stale by another process,
+   * whose queue may already have gone on with the full history: the compaction stops, so nothing it cut follows.
+   */
+  private renewCompactionHold(threadId: string, threadDir: string, holdId: string, stop: AbortController): void {
+    if (stop.signal.aborted) return
+    try {
+      const hold = renewQueueHold(threadDir, holdId, this.queueHoldClock())
+      if (!hold) {
+        console.warn('[orchestrator] the queue hold of a running compaction was lifted elsewhere; stopping the compaction', { threadId })
+        stop.abort()
+      }
+    } catch (error) {
+      // A missed renewal is retried on the next beat; the hold stays well within its lifetime meanwhile.
+      logDebug('OrchestratorService', 'the queue hold of a compaction could not be renewed', error, { threadId })
     }
   }
 
