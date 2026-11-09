@@ -24,6 +24,8 @@ const providers: ProviderUsage[] = [
   { id: 'opencode-go', label: 'OpenCode Go', authType: 'api_key', status: 'error', windows: [], problem: 'key_expired', message: 'x' },
   { id: 'vercel-ai-gateway', label: 'Vercel AI Gateway', authType: 'api_key', status: 'available', windows: [], credit: { balanceUsd: 4.39, usedUsd: 30.61 } }
 ]
+// The Settings entry each one lists with, as the daemon's usage slots name it.
+const instanceIds: Record<string, string> = { 'claude-subscription': 'claude', xai: 'pi:xai', 'opencode-go': 'pi:opencode-go', 'vercel-ai-gateway': 'pi:vercel-ai-gateway' }
 const setEnabled = vi.fn(async () => ({}))
 let root: Root | undefined
 let host: HTMLElement | undefined
@@ -38,7 +40,7 @@ beforeEach(() => {
   useAppStore.setState({ profileId: 'prf_work' })
   ;(window as unknown as { mousse: unknown }).mousse = {
     providers: {
-      usageSlots: async () => ({ slots: providers.map((provider) => ({ id: provider.id, label: provider.label, ...(provider.authType ? { authType: provider.authType } : {}) })) }),
+      usageSlots: async () => ({ slots: providers.map((provider) => ({ id: provider.id, label: provider.label, instanceId: instanceIds[provider.id], ...(provider.authType ? { authType: provider.authType } : {}) })) }),
       getUsageFor: async ({ providerId, preview }: { providerId: string; preview?: boolean }) => (preview ? {} : { provider: providers.find((provider) => provider.id === providerId) }),
       instances: { setEnabled },
       onSnapshots: () => () => {},

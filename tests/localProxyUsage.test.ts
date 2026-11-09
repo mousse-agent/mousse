@@ -16,7 +16,7 @@ import {
   readLocalProxyClaudeUsage,
   resetLocalProxyDetection,
   type ProxyFetch
-} from '../src/mms/providers/localProxyUsage'
+} from '../src/mms/harness/vendors/claude/localProxyUsage'
 
 /**
  * Claude limits through a local CLI-to-API proxy (CLIProxyAPI): found only on this computer or the

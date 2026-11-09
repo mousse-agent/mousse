@@ -50,8 +50,8 @@ describe('why a provider needs attention', () => {
   })
 
   it('Reconnect opens the right entry in Settings → Providers', () => {
-    expect([usageInstanceId('codex:chatgpt-subscription'), usageInstanceId('claude-subscription'), usageInstanceId('codex'), usageInstanceId('xai'), usageInstanceId('opencode-go')])
-      .toEqual(['codex:chatgpt-subscription', 'claude', 'codex', 'pi:xai', 'pi:opencode-go'])
+    expect([usageInstanceId({ id: 'codex:chatgpt-subscription' }), usageInstanceId({ id: 'claude-subscription', instanceId: 'claude' }), usageInstanceId({ id: 'xai', instanceId: 'pi:xai' })])
+      .toEqual(['codex:chatgpt-subscription', 'claude', 'pi:xai'])
   })
 })
 

@@ -67,7 +67,7 @@ export function AttentionRow({ provider, computerName, onReconnect, menu }: { pr
     <span className="usage-slim-name">{provider.label}{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
     <span className="usage-slim-figure">
       <span className="settings-muted" title={provider.message}>{reason.text}</span>
-      {reason.reconnect && onReconnect && !computerName && <button type="button" className="usage-text-btn" data-testid="usage-reconnect" onClick={() => onReconnect(usageInstanceId(provider.id))}>Reconnect</button>}
+      {reason.reconnect && onReconnect && !computerName && <button type="button" className="usage-text-btn" data-testid="usage-reconnect" onClick={() => onReconnect(usageInstanceId(provider))}>Reconnect</button>}
       {menu}
     </span>
   </div>

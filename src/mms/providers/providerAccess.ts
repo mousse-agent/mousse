@@ -2,6 +2,7 @@ import { AppError } from '../../shared/errors'
 import type { ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../../shared/dictation'
 import type { ProviderAuthType, ProvidersUsageResponse, ProviderUsage } from '../../shared/providerAuth'
 import type { ProviderSpeechRequest, ProviderSpeechResult } from '../../shared/readAloud'
+import { piInstanceId } from '../../shared/providerInstances'
 import type { ProviderAuthService } from './ProviderAuthService'
 
 export const PROVIDER_REMOVED_CODE = 'provider_removed'
@@ -45,7 +46,7 @@ export interface ProviderAccess {
   /** Usage of every credentialed provider, without the ones removed from this profile. */
   usage(): Promise<ProvidersUsageResponse>
   /** The credentialed providers the usage page lists, without reading any. */
-  usageSlots(): Array<{ id: string; label: string; authType?: ProviderAuthType }>
+  usageSlots(): Array<{ id: string; label: string; authType?: ProviderAuthType; instanceId?: string }>
   /** One credentialed provider's usage; undefined for one removed from this profile or not credentialed. */
   usageFor(providerId: string): Promise<ProviderUsage | undefined>
 }
@@ -87,7 +88,7 @@ export function createProviderAccess(auth: SharedProviderCalls, instances: Profi
     },
     // A removed provider's usage is not read at all (no request with the shared key).
     usage: () => auth.getUsage((providerId) => !removed(providerId)),
-    usageSlots: () => auth.getConfiguredProviders().filter((provider) => !removed(provider.id) && !disabled(provider.id)).map((provider) => ({ id: provider.id, label: provider.label, authType: provider.authType })),
+    usageSlots: () => auth.getConfiguredProviders().filter((provider) => !removed(provider.id) && !disabled(provider.id)).map((provider) => ({ id: provider.id, label: provider.label, authType: provider.authType, instanceId: piInstanceId(provider.id) })),
     usageFor: async (providerId) => (removed(providerId) || disabled(providerId) ? undefined : (await auth.getUsage((id) => id === providerId)).providers[0])
   }
 }

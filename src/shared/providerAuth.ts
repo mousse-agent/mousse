@@ -138,6 +138,10 @@ export interface ProviderUsage {
   credit?: UsageCredit
   /** Limit resets the account has available, when the provider reports them. */
   resets?: UsageResets
+  /** The usage page can use those resets (`providers.useLimitReset`). */
+  resettable?: true
+  /** Its entry in Settings → Providers, when that is not `id`. */
+  instanceId?: string
   /** The entry is set up and turned on but not signed in: listed so the usage page can offer Reconnect. */
   signedOut?: true
   /** Why there are no numbers, when the reader knows: it decides what the page says and offers. */
@@ -206,6 +210,10 @@ export interface UsageSlot {
   label: string
   authType?: ProviderAuthType
   signedOut?: true
+  /** Its entry in Settings → Providers, when that is not `id`. */
+  instanceId?: string
+  /** Lists its sign-ins before reading them (`getUsageFor` with `preview`), then reads each one. */
+  previewAccounts?: true
   /** The last reading this computer made, dated (`readAt`), to show until the fresh one arrives. */
   cached?: ProviderUsage
 }
