@@ -472,6 +472,116 @@
   outline-offset: 2px;
 }
 
+/* Advanced opens on what can be changed: one compact list of rows, no section headings. */
+.prov-editor .prov-advanced-list .settings-group-rows > .settings-item {
+  --settings-row-y: var(--space-8);
+}
+
+.prov-secret-mask {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Info: the read-only facts, folded and quiet at the bottom of Advanced. Muted until pointed at or
+   focused; one line per fact, long paths cut with the whole path in the tooltip. Low borders,
+   background highlights only. */
+.prov-info {
+  margin-top: var(--space-16);
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+
+.prov-info:hover,
+.prov-info:focus-within {
+  opacity: 1;
+}
+
+.prov-info-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 2px var(--space-4);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--settings-fs-small);
+  cursor: pointer;
+}
+
+.prov-info-toggle:hover {
+  background: var(--ui-hover);
+}
+
+.prov-info-toggle:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 2px;
+}
+
+.prov-info-chevron {
+  transition: transform 180ms var(--ui-collapse-ease-close);
+}
+
+.prov-info-toggle[aria-expanded='true'] .prov-info-chevron {
+  transform: rotate(90deg);
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
+}
+
+.prov-info-rows {
+  display: flex;
+  flex-direction: column;
+  margin: var(--space-4) 0 0;
+}
+
+.prov-info-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-12);
+  min-height: 26px;
+  padding: 0 var(--space-4);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+}
+
+.prov-info-row:hover {
+  background: var(--ui-hover);
+}
+
+.prov-info-row dt {
+  color: var(--text-secondary);
+}
+
+.prov-info-row dd {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.prov-info-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.prov-info-row .prov-micro {
+  flex: none;
+  opacity: 0;
+}
+
+.prov-info-row:hover .prov-micro,
+.prov-info-row .prov-micro:focus-visible {
+  opacity: 1;
+}
+
 /* Models folds like Advanced; its counts sit beside the heading so it reads while closed. */
 .prov-models-summary {
   margin-left: var(--space-4);
@@ -768,27 +878,6 @@
 
 /* Runtime: the executable in use, and updates. A one-click update is a button; an update Mousse
    cannot run itself is a command to copy, in its own box, so the two never look alike. */
-
-.prov-binary {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.prov-binary-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-primary);
-}
-
-.prov-binary-meta {
-  font-size: var(--settings-fs-small);
-  color: var(--text-secondary);
-}
 
 .prov-update.is-one-click .prov-update-btn {
   color: var(--accent);

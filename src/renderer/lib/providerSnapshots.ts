@@ -293,7 +293,7 @@ function signInSignature(snapshot: InstanceSnapshot): string {
 }
 
 /**
- * Calls `changed` when an instance signs in, signs out or changes account, as snapshots events
+ * Calls `changed` when an instance signs in, signs out, changes account or its settings file changes, as snapshots events
  * report it (an instance added or removed counts too). Bursts are gathered into one call. Pages that
  * show sign-in state without reading the snapshot store (the usage page) read again from here.
  */
@@ -302,7 +302,8 @@ export function onProviderSignInChanged(changed: () => void, delayMs = LISTING_R
   let timer: ReturnType<typeof setTimeout> | undefined
   const unsubscribe = window.mousse.providers.onSnapshots((event) => {
     const key = scopeKey(event.scope)
-    const signature = JSON.stringify(event.snapshots.map((snapshot) => [snapshot.instanceId, signInSignature(snapshot)]))
+    // A change to the provider's own settings file (another base URL, key or proxy) counts too.
+    const signature = JSON.stringify(event.snapshots.map((snapshot) => [snapshot.instanceId, signInSignature(snapshot), snapshot.settingsFile?.revision ?? null]))
     const previous = last.get(key)
     last.set(key, signature)
     // The first event of a scope is the baseline: nothing is known to have changed yet.

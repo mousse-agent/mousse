@@ -5,7 +5,8 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import type { ProviderAddOption } from '../src/shared/harness/types'
 import { AgentConnectStep, CustomCommandStep, addChoices, onFoldedKey, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
-import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { AccountRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { agentInfoRows } from '../src/renderer/components/providers/ProviderInfo'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
@@ -125,15 +126,16 @@ describe('Setup row: the status and its one next step', () => {
 })
 
 describe('Runtime rows', () => {
-  it('shows the resolved executable with its version and source', () => {
-    const html = renderToStaticMarkup(createElement(BinaryRow, { snapshot: snapshot() }))
-    expect(html).toContain('/usr/local/bin/claude')
-    expect(html).toContain('v2.1.0 · Found on PATH · installed with npm')
+  it('lists the resolved executable with its version and source under Info', () => {
+    expect(agentInfoRows(snapshot())).toEqual(expect.arrayContaining([
+      { label: 'Executable', value: '/usr/local/bin/claude', copy: true },
+      { label: 'Version', value: 'v2.1.0' },
+      { label: 'Source', value: 'Found on PATH · installed with npm' }
+    ]))
   })
 
   it('says Not found once checked without a binary', () => {
-    const html = renderToStaticMarkup(createElement(BinaryRow, { snapshot: snapshot({ binary: undefined }) }))
-    expect(html).toContain('Not found')
+    expect(agentInfoRows(snapshot({ binary: undefined }))).toContainEqual({ label: 'Executable', value: 'Not found' })
   })
 
   it('offers a one-click update only with a proven owner', () => {
@@ -592,7 +594,9 @@ describe('Cursor in the agent editor', () => {
   it('shows the bundled runtime, with no executable, arguments, home or variables to set', () => {
     const entry = { ...snapshot({ instanceId: 'cursor:work', driver: 'cursor', displayName: 'Work', builtIn: false }), binary: { source: 'bundled' as const } }
     const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-    expect(html).toContain('Bundled with Mousse')
+    // The runtime is a fact: it is listed under Info, which starts closed.
+    expect(agentInfoRows(entry)).toContainEqual({ label: 'Executable', value: 'Bundled with Mousse' })
+    expect(agentInfoRows(entry).map((row) => row.label)).not.toContain('Account home')
     expect(html).not.toContain('Not found')
     expect(html).not.toContain('Environment')
     expect(html).not.toContain('executable path')
@@ -621,9 +625,9 @@ describe('Agent editor scope', () => {
     return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
   }
 
-  it('in a project scope, says display name, runtime, environment and models apply to the whole device', () => {
+  it('in a project scope, says display name, the Advanced settings and models apply to the whole device', () => {
     const notes = (html: string) => html.split('Applies to this device, in every project.').length - 1
-    expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(4)
+    expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(3)
     expect(notes(editor({ kind: 'device' }))).toBe(0)
   })
 })

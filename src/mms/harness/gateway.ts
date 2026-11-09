@@ -41,7 +41,7 @@ import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { TurnSettlement } from '../run/mcp/McpCredentials'
 import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
@@ -58,7 +58,10 @@ import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
 import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
-import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
+import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
+import { claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
+import { SharedSettingsConsentStore } from './sharedSettingsConsent'
+import type { SetVendorSettingInput, VendorSettingsView } from '../../shared/harness/vendorSettings'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
@@ -408,6 +411,18 @@ export interface HarnessInstances {
   allowKnownProblem(instanceId: string, version: string): Promise<InstanceSnapshot>
   /** Bypasses the probe cache. */
   recheck(instanceId: string): Promise<InstanceSnapshot>
+  /**
+   * The provider's own settings file (Claude Code's `settings.json` in the entry's account home), with
+   * secret values masked; undefined for a provider whose file Mousse does not edit.
+   */
+  vendorSettings(instanceId: string): VendorSettingsView | undefined
+  /**
+   * Sets or removes one setting in that file, then checks every entry reading it again. A file shared
+   * with the user's terminal is written only once they agreed for that file (`confirmShared`, kept
+   * by the service); an edit on a file changed since `expectedRevision` is refused. Resolves with
+   * the masked view.
+   */
+  setVendorSetting(input: SetVendorSettingInput): Promise<VendorSettingsView>
   refreshModels(instanceId: string): Promise<InstanceSnapshot>
   /**
    * Refreshes the model list of every enabled instance (Settings → Providers → "Refresh models"),
@@ -835,6 +850,8 @@ export class Harness implements HarnessGateway {
   /** Sign-outs started per instance (`signOut`), so a move that copies a key never undoes one. */
   private readonly signOutsStarted = new Map<string, number>()
   private readonly facts: RuntimeFactsStore
+  /** Shared provider settings files the user agreed Mousse may edit. */
+  private readonly sharedConsent: SharedSettingsConsentStore
   /** Executable stats taken when no probe recorded one, reused for the probe TTL. */
   private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
   /** Threads already told that an instance approves tools itself (`thread|instance`). */
@@ -876,6 +893,7 @@ export class Harness implements HarnessGateway {
     this.scopes = new HarnessScopeStore(options.profileHome)
     this.counters = new InstanceCounterStore(options.profileHome)
     this.facts = new RuntimeFactsStore(options.profileHome)
+    this.sharedConsent = new SharedSettingsConsentStore(options.profileHome)
     this.latest = options.latest ?? new LatestVersionCache(options.profileHome, options.now ? { now: options.now } : {})
     this.prefs = new ModelPrefsService(options.prefs ?? memoryPrefs())
     this.names = new ModelNamesService(options.names ?? memoryNames())
@@ -927,6 +945,11 @@ export class Harness implements HarnessGateway {
         await this.probe(instanceId, true, { handshake: true })
         return this.snapshot(instanceId, { kind: 'device' })
       },
+      vendorSettings: (instanceId) => {
+        const target = this.vendorSettingsTarget(this.record(instanceId, { allowDisabled: true }))
+        return target ? this.readVendorSettings(target) : undefined
+      },
+      setVendorSetting: (input) => this.setVendorSetting(input),
       refreshModels: (instanceId) => this.refreshModels(instanceId),
       refreshAllModels: () => this.refreshAllModels(),
       move: (fromInstanceId, toInstanceId, options) => this.move(fromInstanceId, toInstanceId, options),
@@ -2364,6 +2387,7 @@ export class Harness implements HarnessGateway {
     const auth = this.isSignedOut(record) ? this.signedOutReading(record) : shown?.auth ?? { state: 'unknown' as const }
     const update = this.updateFor(record)
     const settingsNotice = this.settingsNotices.get(instanceId)
+    const settingsFile = this.settingsFileView(record)
     const sameAccount = auth.state === 'signed_in' ? this.sameAccountNote(record) : undefined
     const dropped = this.droppedEnvNote(record)
     const prefs = this.prefs.get(instanceId)
@@ -2435,6 +2459,7 @@ export class Harness implements HarnessGateway {
       ...(state?.lastGood ? { lastGoodAt: state.lastGood.checkedAt } : {}),
       ...(nextStep ? { nextStep } : {}),
       ...(settingsNotice ? { settingsNotice } : {}),
+      ...(settingsFile ? { settingsFile } : {}),
       telemetry: telemetryView(driver, config, record.env.home)
     }
   }
@@ -2530,6 +2555,59 @@ export class Harness implements HarnessGateway {
         console.warn('[harness] driver upgrade failed', { driver: driver.kind, error: errorText(error) })
       }
     }
+  }
+
+  /**
+   * The settings file a Claude Code entry reads: `settings.json` in the home its processes start
+   * with (its own home, else the user's `CLAUDE_CONFIG_DIR` or `~/.claude`). Shared when the entry
+   * runs in the user's own home, where the terminal's Claude reads the same file. None for a
+   * relative `CLAUDE_CONFIG_DIR`, which names no one file.
+   */
+  private vendorSettingsTarget(record: InstanceRecord): { path: string; shared: boolean } | undefined {
+    if (record.entry.driver !== 'claude') return undefined
+    const env = record.env.home ? ownedLaunchEnv('claude', record.env, record.config.env) : { ...record.env.env, ...(record.config.env ?? {}) }
+    const path = claudeSettingsPath(env)
+    return path ? { path, shared: !record.env.home } : undefined
+  }
+
+  private readVendorSettings(target: { path: string; shared: boolean }): VendorSettingsView {
+    return readClaudeSettingsFile(target.path, { shared: target.shared, confirmed: target.shared && this.sharedConsent.has(target.path) })
+  }
+
+  private settingsFileView(record: InstanceRecord): InstanceSnapshot['settingsFile'] {
+    const target = this.vendorSettingsTarget(record)
+    if (!target) return undefined
+    let revision: number | undefined
+    try {
+      revision = statSync(target.path).mtimeMs
+    } catch {
+      revision = undefined
+    }
+    return { ...target, ...(revision !== undefined ? { revision } : {}) }
+  }
+
+  private async setVendorSetting(input: SetVendorSettingInput): Promise<VendorSettingsView> {
+    const record = this.record(input.instanceId, { allowDisabled: true })
+    const target = this.vendorSettingsTarget(record)
+    if (!target) return harnessFail('unsupported', 'Mousse does not edit the settings of this provider.', input.instanceId)
+    // The user's own file is also their terminal's: never written until they agreed once for this
+    // file. The answer is kept here, not in the window, and only a window or the CLI on this computer
+    // reaches this method (see the handler).
+    if (target.shared && !this.sharedConsent.has(target.path)) {
+      if (input.confirmShared !== true)
+        return harnessFail('unsupported', 'This also changes Claude in your terminal. Confirm the change first.', input.instanceId)
+      this.sharedConsent.add(target.path)
+    }
+    // The value is never logged or echoed: a failure names the setting, not what was typed.
+    writeClaudeSetting(target.path, input.key, input.value, input.expectedRevision)
+    // Every entry reading the same file runs differently now (another key, URL or model).
+    const entries = this.instanceMap.list()
+    for (const instanceId of Object.keys(entries)) {
+      const other = this.recordOrUndefined(instanceId)
+      if (other && this.vendorSettingsTarget(other)?.path === target.path) void this.probe(instanceId, true).catch(() => undefined)
+    }
+    this.emitSnapshots({ kind: 'device' })
+    return this.readVendorSettings(target)
   }
 
   /**

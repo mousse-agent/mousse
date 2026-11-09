@@ -27,7 +27,7 @@ const PROFILE_PROVIDER_METHODS = new Set([
   'providers.instances.cancelInstall', 'providers.instances.update',
   'providers.instances.signIn', 'providers.instances.respondSignIn', 'providers.instances.signOut',
   'providers.instances.allowKnownProblem',
-  'providers.instances.recheck', 'providers.instances.refreshModels', 'providers.instances.refreshAllModels',
+  'providers.instances.recheck', 'providers.instances.vendorSettings', 'providers.instances.setVendorSetting', 'providers.instances.refreshModels', 'providers.instances.refreshAllModels',
   'providers.instances.setModelPrefs',
   'providers.instances.move', 'providers.instances.removeInstall', 'providers.registry.search'
 ])
