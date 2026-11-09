@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages, queuedContentWithText, splitQueuedContent } from '../../src/renderer/components/QueuedMessages'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
+import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { QueuedMessage } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -39,6 +40,8 @@ beforeEach(() => {
   push = null
   listed = []
   toComposer = vi.fn()
+  // Open edits and their notices live in the app store, by thread.
+  useAppStore.setState({ queueEditDrafts: {}, queueDraftNotices: {} })
   api = {
     list: vi.fn(async () => listed),
     edit: vi.fn(async (_thread: string, itemId: string, content: string) => ({ item: queued(itemId, content) })),
@@ -372,17 +375,22 @@ function deferred<T>() {
 
 describe('a change that answers after the thread changed', () => {
   /** The chat with a thread switch: the hook stays, the conversation (and its queue) is drawn per thread. */
-  function SwitchingChat({ threadId }: { threadId: string }) {
+  function SwitchingChat({ threadId }: { threadId: string | null }) {
     const thread = useThreadQueue({ threadId, onDraftToComposer: toComposer })
     return createElement(Fragment, null,
       createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
       createElement(ComposerNoticeSource, { notice: thread.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, onDismiss: thread.dismissDraftMoved } : null }),
       createElement(ComposerNoticeSlot),
-      createElement(QueuedMessages, { key: threadId, queue: thread }))
+      createElement(QueuedMessages, { key: threadId ?? 'none', queue: thread }))
   }
   const open = async (threadId: string, items: QueuedMessage[]) => {
     act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(SwitchingChat, { threadId }))))
     await act(async () => { push!({ threadId, items }) })
+  }
+  const editT1 = async (text: string) => {
+    await open('t1', t1)
+    await click(button('a', 'Edit'))
+    await type(row('a').querySelector('textarea')!, text)
   }
   const t1 = [queued('a', 'one'), queued('b', 'two')]
   const t2 = [queued('x', 'other thread', { threadId: 't2' })]
@@ -469,6 +477,16 @@ describe('a change that answers after the thread changed', () => {
     await open('t1', [t1[1]!])
     expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
     expect(host.querySelector('textarea')).toBeNull()
+  })
+
+  it('recovers the draft once when two updates of the hidden thread come before a render', async () => {
+    await editT1('one, edited')
+    await open('t2', t2)
+    await act(async () => {
+      push!({ threadId: 't1', items: [t1[1]!] })
+      push!({ threadId: 't1', items: [t1[1]!] })
+    })
+    expect(toComposer).toHaveBeenCalledTimes(1)
   })
 
   it("does not reload the old thread over the new one's load", async () => {

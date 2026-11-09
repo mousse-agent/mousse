@@ -20,6 +20,7 @@ import type {
   BrowserTabState
 } from '../../shared/types'
 import { parseChatReference, type ChatReference } from '../../shared/chatReferences'
+import { queueEditDraftsForStorage, queueEditDraftsFromStorage, type QueueEditDraft } from '../lib/queuedContent'
 import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
@@ -215,6 +216,16 @@ interface AppState {
   composerDrafts: Record<string, string>
   /** Durable rich references staged in each composer. */
   composerReferences: Record<string, ChatReference[]>
+  /** Open edits of queued messages, by thread; saved with the workspace without images or a save in flight. */
+  queueEditDrafts: Record<string, QueueEditDraft>
+  /** Threads where an unsaved edit of a queued message went to the composer, for its notice. Not persisted. */
+  queueDraftNotices: Record<string, true>
+  /** Changes the thread's open edit of `itemId` (null closes it); nothing when another edit is open there. */
+  updateQueueEditDraft: (threadId: string, itemId: string, change: (draft: QueueEditDraft) => QueueEditDraft | null) => void
+  setQueueEditDraft: (threadId: string, draft: QueueEditDraft) => void
+  /** Removes and returns the thread's open edit of `itemId` at once, so only one caller ever recovers it. */
+  takeQueueEditDraft: (threadId: string, itemId: string) => QueueEditDraft | undefined
+  setQueueDraftNotice: (threadId: string, shown: boolean) => void
 
   /** Threads whose transcript is only its newest part: the older messages are loaded on request. */
   earlierByThread: Record<string, EarlierMessages>
@@ -380,7 +391,7 @@ const personalWorkspaceKeys = [
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'threadFeedOrder',
-  'reviewIgnoreWhitespace'
+  'reviewIgnoreWhitespace', 'queueEditDrafts'
 ] as const
 let profileActivated = false
 
@@ -412,7 +423,8 @@ export function sanitizeSavedWorkspace<T extends { mainView: MainView; openedSur
 function savePersonalWorkspace(state: AppState): void {
   if (typeof window === 'undefined') return
   try {
-    const workspace = Object.fromEntries(personalWorkspaceKeys.map((key) => [key, state[key]]))
+    // Open edits are saved without their images, which could be too large for this storage.
+    const workspace = Object.fromEntries(personalWorkspaceKeys.map((key) => [key, key === 'queueEditDrafts' ? queueEditDraftsForStorage(state.queueEditDrafts) : state[key]]))
     window.localStorage.setItem(`mousse-profile-${state.profileId}-workspace`, JSON.stringify(workspace))
   } catch { /* quota/private mode */ }
 }
@@ -505,6 +517,39 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   }),
   composerDrafts: {},
   composerReferences: {},
+  queueEditDrafts: {},
+  queueDraftNotices: {},
+  updateQueueEditDraft: (threadId, itemId, change) =>
+    set((s) => {
+      const draft = s.queueEditDrafts[threadId]
+      if (!draft || draft.itemId !== itemId) return s
+      const changed = change(draft)
+      const queueEditDrafts = { ...s.queueEditDrafts }
+      if (changed) queueEditDrafts[threadId] = changed
+      else delete queueEditDrafts[threadId]
+      return { queueEditDrafts }
+    }),
+  setQueueEditDraft: (threadId, draft) => set((s) => ({ queueEditDrafts: { ...s.queueEditDrafts, [threadId]: draft } })),
+  takeQueueEditDraft: (threadId, itemId) => {
+    let taken: QueueEditDraft | undefined
+    set((s) => {
+      const draft = s.queueEditDrafts[threadId]
+      if (!draft || draft.itemId !== itemId) return s
+      taken = draft
+      const queueEditDrafts = { ...s.queueEditDrafts }
+      delete queueEditDrafts[threadId]
+      return { queueEditDrafts }
+    })
+    return taken
+  },
+  setQueueDraftNotice: (threadId, shown) =>
+    set((s) => {
+      if (Boolean(s.queueDraftNotices[threadId]) === shown) return s
+      const queueDraftNotices = { ...s.queueDraftNotices }
+      if (shown) queueDraftNotices[threadId] = true
+      else delete queueDraftNotices[threadId]
+      return { queueDraftNotices }
+    }),
   earlierByThread: {},
   applyEarlierMessages: (threadId, messages, earlier) =>
     set((s) => {
@@ -720,6 +765,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
+      queueEditDrafts: {} as Record<string, QueueEditDraft>,
       reviewIgnoreWhitespace: false,
       sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: DEFAULT_MAIN_VIEW as MainView,
@@ -736,6 +782,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
         if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
         if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
+        next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
       } catch { /* malformed profile-local state is discarded */ }
     }
     messageCache.clear()
@@ -750,6 +797,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       shortcuts: {},
       paletteOpen: false,
       ...next,
+      queueDraftNotices: {},
       messages: [],
       agents: [],
       tasks: [],

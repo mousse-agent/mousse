@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChatImageAttachment, QueuedMessage } from '../../shared/types'
 import { readableError } from '../lib/errorText'
-import { canEditQueued, isOptimisticQueueItem, splitQueuedContent } from '../lib/queuedContent'
+import { canEditQueued, isOptimisticQueueItem, splitQueuedContent, type QueueEditDraft } from '../lib/queuedContent'
+import { useAppStore } from '../stores/appStore'
 
 export { isOptimisticQueueItem }
+export type { QueueEditDraft }
 
 /** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
 export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
@@ -30,23 +32,6 @@ export interface UseThreadQueueOptions {
    * and references. The thread may not be the one shown.
    */
   onDraftToComposer?: (threadId: string, recovered: RecoveredQueueDraft) => void
-}
-
-/**
- * An open edit of a queued message. It is kept by thread, outside the conversation drawn for one thread, so it
- * is still open with its draft after a switch to another thread and back.
- */
-export interface QueueEditDraft {
-  itemId: string
-  /** The editor's width, from the bubble it replaced. */
-  width: number | null
-  /** The content the edit started from (or was last brought up to); a save expects the message still has it. */
-  base: string
-  draft: string
-  /** The message's images, which the editor does not show; they go with a recovered draft. */
-  images?: ChatImageAttachment[]
-  /** A save is in flight: what the message leaving the queue means waits for its outcome. */
-  saving?: boolean
 }
 
 /** An unsaved edit whose message left the queue, as the composer takes it. */
@@ -119,11 +104,10 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // The thread `items` were read for; null until the shown thread's list arrives.
   const [itemsThread, setItemsThread] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  // Open edits and "your edit is in the composer" notices, by thread.
-  const [edits, setEdits] = useState<Record<string, QueueEditDraft>>({})
-  const editsRef = useRef(edits)
-  editsRef.current = edits
-  const [movedDrafts, setMovedDrafts] = useState<Record<string, true>>({})
+  // Open edits and "your edit is in the composer" notices live in the app store, by thread: they outlast the thread
+  // shown, and the open edits are saved with the profile's workspace, so a reload keeps them.
+  const shownEdit = useAppStore((state) => (threadId ? state.queueEditDrafts[threadId] : undefined))
+  const draftMoved = useAppStore((state) => Boolean(threadId && state.queueDraftNotices[threadId]))
   const toComposer = useRef(onDraftToComposer)
   toComposer.current = onDraftToComposer
   const [busyIds, setBusyIds] = useState<Record<string, boolean>>({})
@@ -176,41 +160,37 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     }
   }, [])
 
-  const editFor = useCallback((thread: string, itemId: string, change: (draft: QueueEditDraft) => QueueEditDraft | null) => {
-    setEdits((current) => {
-      const draft = current[thread]
-      if (!draft || draft.itemId !== itemId) return current
-      const next = { ...current }
-      const changed = change(draft)
-      if (changed) next[thread] = changed
-      else delete next[thread]
-      return next
-    })
-  }, [])
-
   // The message of an open edit left the queue or started (sent, or removed elsewhere), here or while its thread
   // was not shown: the edit closes, and a draft with changes of its own goes to that thread's composer with the
   // message's attachments, so it is not lost. While a save is in flight this waits for its outcome: a saved edit
-  // is not recovered. The message's text changed elsewhere while the draft has no changes: the draft follows it.
+  // is not recovered. The message's text changed elsewhere while the draft has no changes: the draft follows it. An
+  // edit read back after a reload gets the message's images again from the queue.
   const reconcileEdit = useCallback((thread: string, list: QueuedMessage[]) => {
-    const draft = editsRef.current[thread]
+    const store = useAppStore.getState()
+    const draft = store.queueEditDrafts[thread]
     if (!draft || draft.saving) return
     const item = list.find((entry) => entry.id === draft.itemId)
     const base = splitQueuedContent(draft.base)
     if (item && canEditQueued(item)) {
       if (item.content !== draft.base && draft.draft === base.text) {
-        editFor(thread, draft.itemId, (open) => ({ ...open, base: item.content, draft: splitQueuedContent(item.content).text, images: item.images }))
+        store.updateQueueEditDraft(thread, draft.itemId, (open) => ({ ...open, base: item.content, draft: splitQueuedContent(item.content).text, images: item.images }))
+      } else if (!draft.images && item.images?.length && item.content === draft.base) {
+        store.updateQueueEditDraft(thread, draft.itemId, (open) => ({ ...open, images: item.images }))
       }
       return
     }
-    editFor(thread, draft.itemId, () => null)
-    const text = draft.draft.trim()
+    // Taken out of the store at once: a second update before the next render finds nothing to recover, and the
+    // saved workspace no longer has it, so a reload does not recover it again.
+    const taken = store.takeQueueEditDraft(thread, draft.itemId)
+    if (!taken) return
+    const text = taken.draft.trim()
+    const images = taken.images?.length ? taken.images : undefined
     if (!text || text === base.text) return
-    toComposer.current?.(thread, { text, markers: base.markers, ...(draft.images?.length ? { images: draft.images } : {}) })
-    setMovedDrafts((current) => ({ ...current, [thread]: true }))
+    toComposer.current?.(thread, { text, markers: base.markers, ...(images ? { images } : {}) })
+    store.setQueueDraftNotice(thread, true)
     // The notice says what happened; an error about the same message (its edit refused) adds nothing.
     if (thread === threadIdRef.current) setError(null)
-  }, [editFor])
+  }, [])
 
   useEffect(() => {
     setItems([])
@@ -243,7 +223,6 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     }
   }, [threadId, loadQueue, reconcileEdit])
 
-  const shownEdit = threadId ? edits[threadId] : undefined
   useEffect(() => {
     if (threadId && itemsThread === threadId) reconcileEdit(threadId, items)
   }, [threadId, itemsThread, items, shownEdit, reconcileEdit])
@@ -330,7 +309,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     const thread = threadId
     const live = changeScope(threadId)
     markBusy(itemId, true)
-    editFor(thread, itemId, (open) => ({ ...open, saving: true }))
+    useAppStore.getState().updateQueueEditDraft(thread, itemId, (open) => ({ ...open, saving: true }))
     let outcome: QueueEditOutcome = 'failed'
     try {
       const { item, changed } = await window.mousse.queue.edit(threadId, itemId, content, expectedContent)
@@ -348,38 +327,34 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       void loadQueue(threadId)
       return 'failed'
     } finally {
-      editFor(thread, itemId, (open) => (outcome === 'saved' ? null : { ...open, saving: false }))
+      useAppStore.getState().updateQueueEditDraft(thread, itemId, (open) => (outcome === 'saved' ? null : { ...open, saving: false }))
       if (live()) markBusy(itemId, false)
     }
-  }, [threadId, loadQueue, markBusy, changeScope, editFor])
+  }, [threadId, loadQueue, markBusy, changeScope])
 
   const clearError = useCallback(() => setError(null), [])
-  const draftMoved = Boolean(threadId && movedDrafts[threadId])
   const dismissDraftMoved = useCallback(() => {
     const thread = threadIdRef.current
-    if (thread) setMovedDrafts((current) => {
-      if (!current[thread]) return current
-      const next = { ...current }
-      delete next[thread]
-      return next
-    })
+    if (thread) useAppStore.getState().setQueueDraftNotice(thread, false)
   }, [])
   const editDraft = shownEdit ?? null
   const startEdit = useCallback((item: QueuedMessage, width: number | null) => {
     const thread = threadIdRef.current
     if (!thread) return
-    setEdits((current) => ({ ...current, [thread]: { itemId: item.id, width, base: item.content, draft: splitQueuedContent(item.content).text, ...(item.images?.length ? { images: item.images } : {}) } }))
+    useAppStore.getState().setQueueEditDraft(thread, { itemId: item.id, width, base: item.content, draft: splitQueuedContent(item.content).text, ...(item.images?.length ? { images: item.images } : {}) })
   }, [])
   const updateEdit = useCallback((patch: Partial<Pick<QueueEditDraft, 'base' | 'draft' | 'images'>>) => {
     const thread = threadIdRef.current
-    const open = thread ? editsRef.current[thread] : undefined
-    if (thread && open) editFor(thread, open.itemId, (draft) => ({ ...draft, ...patch }))
-  }, [editFor])
+    const store = useAppStore.getState()
+    const open = thread ? store.queueEditDrafts[thread] : undefined
+    if (thread && open) store.updateQueueEditDraft(thread, open.itemId, (draft) => ({ ...draft, ...patch }))
+  }, [])
   const closeEdit = useCallback(() => {
     const thread = threadIdRef.current
-    const open = thread ? editsRef.current[thread] : undefined
-    if (thread && open) editFor(thread, open.itemId, () => null)
-  }, [editFor])
+    const store = useAppStore.getState()
+    const open = thread ? store.queueEditDrafts[thread] : undefined
+    if (thread && open) store.updateQueueEditDraft(thread, open.itemId, () => null)
+  }, [])
 
   const shown = useMemo(() => [
     ...items,
