@@ -38,9 +38,10 @@ Image data (`images[].data` in messages, image parts of the model context) and a
 A row that refers to blobs lists them in its `blob_paths` column: for each, the exact path in the row's JSON, the hash, the size and how it is stored. The payload holds an empty string there. That list is the only thing that marks a value as a blob, so an ordinary value can never be read as one.
 
 - A save writes and fsyncs its blobs before the transaction that commits the rows referring to them.
-- Reading a row puts its blobs back and checks each one's hash. A missing or damaged blob shows as `[attachment unavailable: blob <hash>]` and the thread still opens. The placeholder names its blob, so a later save that still holds it, wherever the value moved to, writes the reference back instead of the placeholder.
+- Reading a row puts its blobs back and checks each one's hash. A missing or damaged blob shows as `[attachment unavailable: blob <kind>:<hash>]` and the thread still opens. The placeholder names its blob, so a later save that still holds it, wherever the value moved to (the row too), writes the reference back instead of the placeholder. An image whose bytes are missing is sent to the model as the note `[image unavailable]`, never as image data.
+- Writing a blob that is already there checks the copy's hash and replaces a damaged one, and fsyncs it and its folders either way, so a copy another writer has just made is durable before a row that refers to it commits.
 - Text that UTF-8 cannot hold exactly (a lone surrogate) stays in its row. New blob folders are fsynced into their parents before rows that refer to them commit, and collection never removes a folder that is not empty.
-- When a save removes or rewrites a row that had blobs, blobs no row refers to any more are deleted, once they are an hour old. Saves and collection both run under the thread's lock, and the hour keeps a blob another process has just written for a save it has not committed yet.
+- When a save removes or rewrites a row that had blobs, and on a thread's first save each hour, blobs no row refers to any more are deleted, once they are an hour old. Saves and collection both run under the thread's lock, and the hour keeps a blob another process has just written for a save it has not committed yet. An import that fails or finds its source changed removes the blobs it wrote.
 
 ## Saving only what changed
 
