@@ -14,7 +14,7 @@ mod protocol;
 
 use std::{
     collections::VecDeque,
-    io::{self, BufWriter},
+    io::{self, BufWriter, Write},
     path::Path,
     sync::{Arc, Condvar, Mutex},
     thread,
@@ -54,7 +54,15 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     wake: Condvar,
-    output: Mutex<BufWriter<io::Stdout>>,
+    output: Mutex<Box<dyn Write + Send>>,
+}
+
+/// What the worker does next. A request handed over as `Run` is already marked running, so a `cancel` that
+/// arrives while the worker starts it is never lost between the queue and the run.
+enum Next {
+    Load(String),
+    Run(Run, Arc<RunOptions>),
+    Failed { id: u32, message: String },
 }
 
 impl Shared {
@@ -69,7 +77,7 @@ fn main() {
     let shared = Arc::new(Shared {
         state: Mutex::new(State::default()),
         wake: Condvar::new(),
-        output: Mutex::new(BufWriter::new(io::stdout())),
+        output: Mutex::new(Box::new(BufWriter::new(io::stdout()))),
     });
     let worker = shared.clone();
     thread::spawn(move || work(&worker));
@@ -122,14 +130,30 @@ fn cancel(shared: &Shared, id: u32) {
     }
 }
 
-fn next_job(shared: &Shared) -> Job {
+fn next_job(shared: &Shared) -> Next {
     let mut state = shared.state.lock().unwrap();
     loop {
-        if let Some(job) = state.jobs.pop_front() {
-            return job;
+        match state.jobs.pop_front() {
+            Some(Job::Load(path)) => return Next::Load(path),
+            Some(Job::Run(run)) => {
+                // Marked running under the same lock that took it off the queue.
+                return match RunOptions::new() {
+                    Ok(options) => {
+                        let options = Arc::new(options);
+                        state.running = Some(Running { id: run.id, options: options.clone(), cancelled: false });
+                        Next::Run(run, options)
+                    }
+                    Err(error) => Next::Failed { id: run.id, message: error.to_string() },
+                };
+            }
+            None => state = shared.wake.wait(state).unwrap(),
         }
-        state = shared.wake.wait(state).unwrap();
     }
+}
+
+/// Clears the running request; true when it was cancelled while it ran.
+fn finish_running(shared: &Shared) -> bool {
+    shared.state.lock().unwrap().running.take().is_some_and(|running| running.cancelled)
 }
 
 fn work(shared: &Shared) {
@@ -137,7 +161,7 @@ fn work(shared: &Shared) {
     let mut session: Option<Session> = None;
     loop {
         match next_job(shared) {
-            Job::Load(path) => {
+            Next::Load(path) => {
                 if session.is_none() {
                     match load(&mut environment, &path) {
                         Ok(loaded) => session = Some(loaded),
@@ -149,21 +173,21 @@ fn work(shared: &Shared) {
                 }
                 shared.send(&Event::Ready);
             }
-            Job::Run(run) => {
+            Next::Failed { id, message } => shared.send(&Event::Error { id, message }),
+            Next::Run(run, options) => {
                 let Some(session) = session.as_mut() else {
-                    shared.send(&Event::Error { id: run.id, message: "The voice model is not loaded".into() });
+                    let cancelled = finish_running(shared);
+                    shared.send(&if cancelled {
+                        Event::Cancelled(run.id)
+                    } else {
+                        Event::Error { id: run.id, message: "The voice model is not loaded".into() }
+                    });
                     continue;
                 };
-                let options = match RunOptions::new() {
-                    Ok(options) => Arc::new(options),
-                    Err(error) => {
-                        shared.send(&Event::Error { id: run.id, message: error.to_string() });
-                        continue;
-                    }
-                };
-                shared.state.lock().unwrap().running = Some(Running { id: run.id, options: options.clone(), cancelled: false });
+                // A cancel that came after the request was marked running has already set the terminate flag,
+                // so this run stops at once.
                 let result = voice(session, &run, &options);
-                let cancelled = shared.state.lock().unwrap().running.take().is_some_and(|running| running.cancelled);
+                let cancelled = finish_running(shared);
                 shared.send(&match (cancelled, result) {
                     (true, _) => Event::Cancelled(run.id),
                     (false, Ok(samples)) => Event::Audio { id: run.id, sample_rate: SAMPLE_RATE, samples },
@@ -216,4 +240,40 @@ fn voice(session: &mut Session, run: &Run, options: &RunOptions) -> Result<Vec<f
     let waveform = outputs.get("waveform").ok_or("The voice model gave no waveform")?;
     let (_, samples) = waveform.try_extract_tensor::<f32>().map_err(failed)?;
     Ok(samples.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Shared {
+        Shared { state: Mutex::new(State::default()), wake: Condvar::new(), output: Mutex::new(Box::new(io::sink())) }
+    }
+
+    fn run(id: u32) -> Run {
+        Run { id, input_ids: vec![0, 1, 0], style: vec![0.0; STYLE_LEN], speed: 1.0 }
+    }
+
+    #[test]
+    fn a_cancel_between_dequeue_and_run_is_kept() {
+        let shared = shared();
+        queue(&shared, Job::Run(run(7)));
+        // The worker takes the request off the queue; the run has not started yet.
+        let Next::Run(taken, _options) = next_job(&shared) else { panic!("expected a run") };
+        assert_eq!(taken.id, 7);
+        // The cancel arrives in that window: it must find the request.
+        cancel(&shared, 7);
+        assert!(finish_running(&shared), "the cancel was lost between the queue and the run");
+    }
+
+    #[test]
+    fn a_cancel_for_a_queued_request_removes_it() {
+        let shared = shared();
+        queue(&shared, Job::Run(run(1)));
+        queue(&shared, Job::Run(run(2)));
+        cancel(&shared, 1);
+        let Next::Run(taken, _) = next_job(&shared) else { panic!("expected a run") };
+        assert_eq!(taken.id, 2);
+        assert!(!finish_running(&shared));
+    }
 }
