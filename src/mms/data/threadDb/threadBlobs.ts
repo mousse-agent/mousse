@@ -120,12 +120,19 @@ export function blobPath(dir: string, hash: string): string {
   return join(dir, BLOBS_DIR, hash.slice(0, 2), hash)
 }
 
-function fsyncPath(path: string): void {
+/** Flushes a file. Opened for writing: Windows flushes only a handle that may write. */
+function fsyncFile(path: string): void {
+  const fd = openSync(path, 'r+')
+  try { fsyncSync(fd) } finally { closeSync(fd) }
+}
+
+/** Flushes a folder's entries. Windows cannot open a folder to flush it; NTFS journals folder entries itself. */
+function fsyncDir(path: string): void {
+  if (process.platform === 'win32') return
   const fd = openSync(path, 'r')
   try { fsyncSync(fd) } finally { closeSync(fd) }
 }
 
-/** Writes a blob unless it is already there: to a temporary file, fsynced, renamed into place. */
 /**
  * Writes a blob unless an intact copy is already there, and returns whether it wrote one. A damaged copy is
  * replaced. Either way the blob, its folder and the folders above it are fsynced before this returns: a copy
@@ -141,10 +148,10 @@ export function writeBlob(dir: string, blob: BlobData): boolean {
   let intact = false
   try { intact = sha256(readFileSync(target)) === blob.sha256 } catch { /* absent */ }
   if (intact) {
-    fsyncPath(target)
-    fsyncPath(folder)
-    fsyncPath(root)
-    fsyncPath(dir)
+    fsyncFile(target)
+    fsyncDir(folder)
+    fsyncDir(root)
+    fsyncDir(dir)
     return false
   }
   const tmp = join(folder, `.${blob.sha256}.${randomUUID()}.tmp`)
@@ -156,9 +163,9 @@ export function writeBlob(dir: string, blob: BlobData): boolean {
     closeSync(fd)
   }
   renameSync(tmp, target)
-  fsyncPath(folder)
-  fsyncPath(root)
-  fsyncPath(dir)
+  fsyncDir(folder)
+  fsyncDir(root)
+  fsyncDir(dir)
   return true
 }
 
@@ -250,16 +257,16 @@ export function publishStagedBlobs(dir: string, stage: string): number {
         let intact = false
         try { intact = sha256(readFileSync(target)) === name } catch { /* absent */ }
         if (intact) {
-          fsyncPath(target)
+          fsyncFile(target)
         } else {
           renameSync(join(staged, prefix, name), target)
           moved += 1
         }
-        fsyncPath(folder)
-        fsyncPath(root)
+        fsyncDir(folder)
+        fsyncDir(root)
       }
     }
-    fsyncPath(dir)
+    fsyncDir(dir)
   }
   rmSync(stage, { recursive: true, force: true })
   return moved
