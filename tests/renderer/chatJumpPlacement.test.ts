@@ -19,20 +19,28 @@ const offset = (text: string, sign = 1) => {
 }
 
 describe('Go to latest', () => {
-  it('sits above the composer, in a strip the transcript has faded out of', () => {
+  it('floats over the transcript a few px above the composer, and takes no height', () => {
     const jump = rule(polish, '.chat-jump')
     const bottom = offset(/bottom: (.*);/.exec(jump)![1]!)
-    const top = bottom + Number(/height: (\d+)px/.exec(jump)![1])
-    expect(bottom).toBeGreaterThanOrEqual(0)
+    expect(bottom).toBeGreaterThanOrEqual(4)
+    expect(bottom).toBeLessThanOrEqual(12)
+    // Positioned over the list, not laid out in it.
+    const list = readFileSync(new URL('../../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
+    expect(list).toMatch(/"chat-jump absolute left-1\/2 [^"]*-translate-x-1\/2"/)
+  })
+
+  it('lets the transcript run down to the composer, fading only in the last few px above it', () => {
     const mask = rule(polish, '.chat:not(.chat--empty) .an-message-list')
     // `100% - stack - Npx` from the top is N px above the composer.
     const stops = [...mask.matchAll(/(#000|transparent) max\(28px, calc\((100% - var\(--chat-composer-stack, \d+px\) [+-] \d+px)\)\)/g)]
-    const clear = stops.find((stop) => stop[1] === 'transparent')!
-    expect(offset(clear[2]!, -1)).toBeGreaterThanOrEqual(top)
-    // At the end of the transcript, the last line ends above that strip.
+    const opaque = offset(stops.find((stop) => stop[1] === '#000')![2]!, -1)
+    const clear = offset(stops.find((stop) => stop[1] === 'transparent')![2]!, -1)
+    expect(opaque).toBeLessThanOrEqual(16)
+    expect(clear).toBe(0)
+    // At the end of the transcript, the last line ends above the fade, and not much higher.
     const padding = offset(rule(polish, '.chat:not(.chat--empty) .an-message-list > div'))
-    const opaque = stops.find((stop) => stop[1] === '#000')!
-    expect(padding).toBeGreaterThanOrEqual(offset(opaque[2]!, -1))
+    expect(padding).toBeGreaterThanOrEqual(opaque)
+    expect(padding).toBeLessThanOrEqual(opaque + 8)
   })
 
   it('hides while a composer menu or the notice slot is open', () => {
