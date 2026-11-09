@@ -111,6 +111,14 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // The last list of each thread with an open edit seen while that thread was not shown: a save that fails there
   // decides on it.
   const hiddenLists = useRef(new Map<string, QueuedMessage[]>())
+  // A list is kept only while its thread has an open edit: a save, a cancel, a recovery or the thread's deletion
+  // drops it, so the lists (and their images) do not pile up over a session.
+  useEffect(() => useAppStore.subscribe((state, previous) => {
+    if (state.queueEditDrafts === previous.queueEditDrafts) return
+    for (const thread of hiddenLists.current.keys()) {
+      if (!state.queueEditDrafts[thread]) hiddenLists.current.delete(thread)
+    }
+  }), [])
   const toComposer = useRef(onDraftToComposer)
   toComposer.current = onDraftToComposer
   const [busyIds, setBusyIds] = useState<Record<string, boolean>>({})
