@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { CLAUDE_AUTH_STATUS_TTL_MS, ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../src/mms/run/EffectOutbox'
@@ -291,6 +291,56 @@ describe('Claude Subscription native provider', () => {
     // The session keeps its fingerprint: the next turn resumes the compacted session.
     await service.chat({ ...chatInput(home), history: 'history' })
     expect(inputs[2].options.resume).toBe('vendor-session')
+  })
+  it('/compact stopped during the sign-in check never runs, and the session stays resumable', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const signedIn = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
+    const runAuth = vi.fn(async () => signedIn)
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery([result])
+    }, true, undefined, undefined, { runAuth })
+    await service.chat(chatInput(home))
+    service.commitConversation('thread', 'history')
+    // The cached check is out of date, and the new one is slow.
+    const now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now + CLAUDE_AUTH_STATUS_TTL_MS + 1)
+    let answer!: () => void
+    runAuth.mockImplementationOnce(() => new Promise<string>((resolve) => { answer = () => resolve(signedIn) }))
+    const calls = runAuth.mock.calls.length
+    const stop = new AbortController()
+    const running = service.compactConversation('thread', 'history', undefined, undefined, stop.signal)
+    const settled = running.then(() => 'resolved', (error: unknown) => error)
+    for (let tries = 0; runAuth.mock.calls.length === calls && tries < 100; tries += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(runAuth.mock.calls.length).toBe(calls + 1)
+    stop.abort(new Error('Compaction stopped'))
+    answer()
+    expect(await settled).toMatchObject({ message: 'Compaction stopped' })
+    clock.mockRestore()
+    expect(inputs.filter((input) => typeof input.prompt === 'string' && input.prompt.startsWith('/compact'))).toEqual([])
+    await service.chat({ ...chatInput(home), history: 'history' })
+    expect(inputs.at(-1)!.options.resume).toBe('vendor-session')
+  })
+  it('/compact stopped after Claude Code compacted is not taken: the next turn starts a new session', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const boundary = { type: 'system', subtype: 'compact_boundary', session_id: 'vendor-session', compact_metadata: { trigger: 'manual', pre_tokens: 1000 } }
+    const stop = new AbortController()
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      if (input.prompt !== '/compact') return fakeQuery([result])
+      // The Stop comes between the compaction and Claude Code's answer.
+      const events = (async function* () {
+        yield boundary
+        stop.abort(new Error('Compaction stopped'))
+        yield result
+      })()
+      return Object.assign(events, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    })
+    await service.chat(chatInput(home))
+    service.commitConversation('thread', 'history')
+    await expect(service.compactConversation('thread', 'history', undefined, undefined, stop.signal)).rejects.toThrow('Compaction stopped')
+    await service.chat({ ...chatInput(home), history: 'history' })
+    expect(inputs.at(-1)!.options.resume).toBeUndefined()
   })
   it('/compact reports nothing compacted when Claude Code made no compact boundary', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
