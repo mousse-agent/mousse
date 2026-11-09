@@ -71,6 +71,8 @@ describe('validation', () => {
       ['bots.get', {}],
       ['bots.update', { botId }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', glow: true } }],
+      ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', kind: 7 } }],
+      ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', eyes: 'x'.repeat(41) } }],
       ['bots.chat.list', { botId, limit: 101 }],
       ['bots.chat.list', { botId, beforeSeq: 0 }],
       ['bots.chat.send', { botId, text: '  ', clientRequestId: 'm1' }],
@@ -141,6 +143,9 @@ describe('a bot through the v2 methods', () => {
     const botId = await created()
     expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots).toMatchObject([{ id: botId, name: 'Inbox Helper', state: 'idle', unread: 1 }])
     expect(await call<{ bot: BotSummary }>('bots.update', { botId, name: 'Invoice Sum', look: { colour: 'pink', accessory: 'crown' } })).toMatchObject({ bot: { name: 'Invoice Sum', look: { colour: 'pink', accessory: 'crown' } } })
+    // A Mousse with heart eyes is kept; back to the mouse with pill eyes stores no extra fields.
+    expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
+    expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mouse', eyes: 'pill' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown' })
 
     // The owner asks; the chat turn asks for a folder with `escalate`, and the card lands on its reply.
     const invoices = join(f.base, 'Invoices')

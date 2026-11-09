@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { askText } from '../../../shared/bots/personal/askText'
+import { lookFields } from '../../../shared/bots/personal/look'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { BotChatMessage, BotChip, BotError } from '../../../shared/bots/personal/chat'
 import {
@@ -3899,7 +3900,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** The bot renames itself or changes its description (`set_profile`), or the owner renames it or changes its look. */
-  setProfile(botId: string, profile: { name?: string; description?: string; look?: { colour: string; accessory: string } }): BotDefinition {
+  setProfile(botId: string, profile: { name?: string; description?: string; look?: { colour: string; accessory: string; kind?: string; eyes?: string } }): BotDefinition {
     const name = profile.name?.trim()
     if (profile.name !== undefined && (!name || name.length > 60)) throw new BotEngineError('invalid_profile', 'A name is 1 to 60 characters.')
     const description = profile.description?.trim()
@@ -3908,7 +3909,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...definition,
       ...(name ? { name } : {}),
       ...(description ? { description } : {}),
-      ...(profile.look ? { look: { colour: profile.look.colour, accessory: profile.look.accessory } } : {})
+      ...(profile.look ? { look: lookFields(profile.look) } : {})
     }))
   }
 

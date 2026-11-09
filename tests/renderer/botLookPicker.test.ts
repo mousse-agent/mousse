@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BotLookPicker, shuffleLook } from '../../src/renderer/components/bots/face/BotLookPicker'
 import { resetSharedFaceRenderer } from '../../src/renderer/components/bots/face/faceRenderer'
-import { BOT_ACCESSORIES, BOT_COLOURS, type BotLook } from '../../src/shared/bots/personal/look'
+import { BOT_ACCESSORIES, BOT_COLOURS, BOT_EYES, BOT_KINDS, type BotLook } from '../../src/shared/bots/personal/look'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -32,7 +32,8 @@ function renderPicker(look: BotLook, existingLooks?: BotLook[]) {
   return onChange
 }
 
-const groups = () => [...host.querySelectorAll('[role="radiogroup"]')]
+/** The picker's groups: colours, accessories, characters and eyes. */
+const groups = () => ['colours', 'accessories', 'kinds', 'eyes'].map((name) => host.querySelector(`.bot-look-picker__${name}[role="radiogroup"]`))
 const radios = (group: Element) => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
 const checked = (group: Element) => radios(group).find((radio) => radio.getAttribute('aria-checked') === 'true')
 
@@ -95,11 +96,47 @@ describe('BotLookPicker', () => {
     act(() => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Shuffle')!.click())
     expect(onChange).toHaveBeenCalledWith({ colour: 'green', accessory: 'crown' })
   })
+
+  it('picks a character and eye shape, each shown on the look, and keeps the rest', () => {
+    const onChange = renderPicker({ colour: 'purple', accessory: 'glasses' })
+    const [, , kinds, eyes] = groups()
+    expect(radios(kinds!).map((radio) => radio.dataset.value)).toEqual([...BOT_KINDS])
+    expect(radios(eyes!).map((radio) => radio.dataset.value)).toEqual([...BOT_EYES])
+    expect(checked(kinds!)?.getAttribute('aria-label')).toBe('Mouse')
+    expect(checked(eyes!)?.getAttribute('aria-label')).toBe('Pill eyes')
+    for (const radio of radios(kinds!)) {
+      const face = radio.querySelector('.bot-face')!
+      expect(face.getAttribute('data-kind')).toBe(radio.dataset.value)
+      expect(face.getAttribute('data-accessory')).toBe('glasses')
+    }
+    act(() => radios(kinds!).find((radio) => radio.dataset.value === 'mousse')!.click())
+    expect(onChange).toHaveBeenLastCalledWith({ colour: 'purple', accessory: 'glasses', kind: 'mousse' })
+    act(() => radios(eyes!).find((radio) => radio.dataset.value === 'star')!.click())
+    expect(onChange).toHaveBeenLastCalledWith({ colour: 'purple', accessory: 'glasses', eyes: 'star' })
+  })
+
+  it('names a Mousse with its eyes and accessory, and draws the default pieces without stored fields', () => {
+    const onChange = renderPicker({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
+    const [colours, , kinds, eyes] = groups()
+    expect(host.querySelector('.bot-look-picker__preview .bot-face')?.getAttribute('aria-label')).toBe('Pink Mousse with heart eyes and crown')
+    expect(checked(kinds!)?.dataset.value).toBe('mousse')
+    expect(checked(eyes!)?.dataset.value).toBe('heart')
+    act(() => radios(colours!).find((radio) => radio.dataset.value === 'blue')!.click())
+    expect(onChange).toHaveBeenLastCalledWith({ colour: 'blue', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
+    act(() => radios(kinds!).find((radio) => radio.dataset.value === 'mouse')!.click())
+    expect(onChange).toHaveBeenLastCalledWith({ colour: 'pink', accessory: 'crown', eyes: 'heart' })
+  })
 })
 
 describe('shuffleLook', () => {
   it('never returns the current look', () => {
     for (const r of [0, 0.25, 0.5, 0.999]) expect(shuffleLook({ colour: 'coral', accessory: 'none' }, [], () => r)).not.toEqual({ colour: 'coral', accessory: 'none' })
+  })
+
+  it('keeps the character and eyes', () => {
+    const picked = shuffleLook({ colour: 'coral', accessory: 'none', kind: 'mousse', eyes: 'heart' }, [], () => 0.5)
+    expect(picked.kind).toBe('mousse')
+    expect(picked.eyes).toBe('heart')
   })
 
   it('falls back to any other look when all are worn', () => {

@@ -42,7 +42,9 @@
 }
 .bot-look-picker__swatch[aria-checked='true'] { outline-color: var(--text-primary); }
 .bot-look-picker__swatch:focus-visible { outline-color: var(--accent); }
-.bot-look-picker__accessories { display: grid; grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 5px; }
+.bot-look-picker__accessories,
+.bot-look-picker__kinds,
+.bot-look-picker__eyes { display: grid; grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 5px; }
 .bot-look-picker__accessory {
   display: flex;
   flex-direction: column;
