@@ -1121,7 +1121,7 @@ export class CodexProviderService {
    * Codex threads compacting for `/compact`, by Codex thread id: the compaction's turn once Codex started it, and
    * its end, resolved by the compaction's `turn/completed`.
    */
-  private readonly compactions = new Map<string, { turnId?: string; done: (turn: CodexTurn) => void }>()
+  private readonly compactions = new Map<string, CompactionTurn>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
   /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
@@ -1559,11 +1559,24 @@ export class CodexProviderService {
     const saved = this.settings.threads?.[threadId]
     if (!saved || saved.historyKey !== historyKey(history) || (saved.instanceId ?? CODEX_INSTANCE_ID) !== (instanceId ?? CODEX_INSTANCE_ID)) return false
     if (this.activeThreads.has(threadId)) throw new Error('A Codex turn is already running for this thread')
-    if (this.checkDue()) await this.status()
-    if (!this.configured()) return false
+    // Held from here, before anything is awaited: no turn of the thread starts while it compacts.
     this.activeThreads.add(threadId)
     const codexThreadId = saved.codexThreadId
     try {
+      // A stopped turn of the thread is still being interrupted, or still settling on the server: the compaction
+      // starts after, so none of that turn's events can be taken for the compaction's.
+      const sweeping = this.pendingSweeps.get(threadId)
+      if (sweeping) await abortable(sweeping, signal)
+      const previous = this.turns.get(codexThreadId)
+      if (previous) {
+        await abortable(Promise.race([previous.finished, new Promise((done) => setTimeout(done, PREVIOUS_TURN_SETTLE_MS).unref?.())]), signal)
+        if (this.turns.has(codexThreadId)) throw new Error('The previous Codex turn on this thread is still running')
+      }
+      if (this.checkDue()) await abortable(this.status(), signal)
+      if (signal.aborted) throw stopReason(signal)
+      if (!this.configured()) return false
+      // The saved thread may have changed while this waited (a sign-out, a new account).
+      if (this.settings.threads?.[threadId] !== saved) return false
       const conn = await this.verifiedConnection(signal)
       const wasLoaded = this.loaded.has(codexThreadId)
       if (!wasLoaded)
@@ -1577,11 +1590,12 @@ export class CodexProviderService {
       // Codex runs the compaction as a turn of its own: its `turn/completed` says how it went.
       let done!: (turn: CodexTurn) => void
       const completed = new Promise<CodexTurn>((resolve) => { done = resolve })
-      const compaction: { turnId?: string; done: (turn: CodexTurn) => void } = { done }
+      const compaction: CompactionTurn = { sent: false, done }
       this.compactions.set(codexThreadId, compaction)
       try {
         if (signal.aborted) throw stopReason(signal)
         // Not tied to the signal: once sent, a stop has to interrupt what Codex started.
+        compaction.sent = true
         const start = conn.request('thread/compact/start', { threadId: codexThreadId })
         try {
           await abortable(start, signal)
@@ -1619,7 +1633,7 @@ export class CodexProviderService {
   private async interruptCompaction(
     conn: CodexConnection,
     codexThreadId: string,
-    compaction: { turnId?: string },
+    compaction: CompactionTurn,
     start: Promise<unknown>,
     completed: Promise<CodexTurn>
   ): Promise<boolean> {
@@ -1991,12 +2005,22 @@ export class CodexProviderService {
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
     if (typeof threadId !== 'string') return
     const compaction = this.compactions.get(threadId)
-    if (compaction) {
+    if (compaction?.sent) {
+      // Only the compaction's own turn: the first that starts once it was asked for, then that turn by id. An end
+      // before any start is another turn's (one stopped earlier still settling).
       const started = notificationParams(notification, 'turn/started')
-      if (started?.turn?.id) compaction.turnId = started.turn.id
+      if (started?.turn?.id && compaction.turnId === undefined) {
+        compaction.turnId = started.turn.id
+        return
+      }
       const completed = notificationParams(notification, 'turn/completed')
-      if (completed) compaction.done(completed.turn)
-      return
+      if (completed && compaction.turnId !== undefined && completed.turn.id === compaction.turnId) {
+        compaction.done(completed.turn)
+        return
+      }
+      // The compaction turn's other events are its own too.
+      const turnOf = notification.params as { turnId?: unknown; turn?: { id?: unknown } } | undefined
+      if (compaction.turnId !== undefined && (turnOf?.turnId === compaction.turnId || turnOf?.turn?.id === compaction.turnId)) return
     }
     const run = this.turns.get(threadId)
     if (run) return run.handle(notification)
@@ -3063,6 +3087,13 @@ function pinnedProvider<T extends { modelProvider?: string }>(expected: string, 
 
 function textInput(text: string): UserInput {
   return { type: 'text', text, text_elements: [] }
+}
+
+/** A `/compact` running on a Codex thread: whether it was asked for yet, its turn once Codex started it, and its end. */
+interface CompactionTurn {
+  sent: boolean
+  turnId?: string
+  done: (turn: CodexTurn) => void
 }
 
 /** The reason a stopped `/compact` rejects with. */

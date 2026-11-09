@@ -359,7 +359,11 @@ describe('CodexProviderService options (managed Codex)', () => {
         const turn = options.compact ? options.compact() : { status: 'completed' as const }
         if (turn === 'unknown') return { error: { code: -32601, message: 'unknown method' } }
         const threadId = (message.params as { threadId: string }).threadId
-        setImmediate(() => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: 'turn-c', error: null, ...turn } } }) + '\n'))
+        const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+        setImmediate(() => {
+          write('turn/started', { threadId, turn: { id: 'turn-c', status: 'inProgress', error: null } })
+          write('turn/completed', { threadId, turn: { id: 'turn-c', error: null, ...turn } })
+        })
         return { result: {} }
       }
       if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
@@ -552,6 +556,81 @@ describe('CodexProviderService options (managed Codex)', () => {
       // The Codex thread was compacted after all: the next turn starts a new one with the full history.
       await chat(service, { history: 'h' })
       expect(server.requests('thread/start')).toHaveLength(2)
+    })
+
+    it('holds the thread from the start: a turn sent during a slow sign-in check is refused, not run beside it', async () => {
+      const server = turnServer()
+      let gate: Promise<void> = Promise.resolve()
+      mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+      writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary }))
+      const service = new CodexProviderService(home, questions, { launch: server.launch }, {
+        launch: () => ({ binaryPath: binary }),
+        signedOut: () => signedOut,
+        account: { read: async () => { await gate; return { kind: 'signed_in', planType: 'plus', email: null, label: 'ChatGPT Plus', subject: 'chatgpt:sub' } } }
+      })
+      services.push(service)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      const now = Date.now()
+      vi.spyOn(Date, 'now').mockImplementation(() => now + CODEX_ACCOUNT_TTL_MS + 1)
+      let release!: () => void
+      gate = new Promise((resolve) => { release = resolve })
+      const compaction = compact(service, 'h')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      await expect(chat(service, { history: 'h' })).rejects.toThrow('A Codex turn is already running for this thread')
+      release()
+      expect(await compaction).toBe(true)
+      expect(server.requests('turn/start')).toHaveLength(1)
+      vi.restoreAllMocks()
+    })
+
+    it('starts after a stopped turn has settled, and takes no event of that turn for its own', async () => {
+      let hang = false
+      const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        const threadId = (message.params as { threadId?: string } | undefined)?.threadId
+        if (method === 'account/read') return chatgpt
+        if (method === 'thread/start') return { result: { thread: { id: 'thr-1' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'turn/start') {
+          if (!hang) setImmediate(() => write('turn/completed', { threadId, turn: { id: 'turn-1', status: 'completed', error: null } }))
+          else setImmediate(() => write('turn/started', { threadId, turn: { id: 'turn-2', status: 'inProgress', error: null } }))
+          return { result: { turn: { id: hang ? 'turn-2' : 'turn-1', status: 'inProgress', error: null } } }
+        }
+        // The stopped turn ends a moment after its interrupt.
+        if (method === 'turn/interrupt') {
+          setTimeout(() => write('turn/completed', { threadId, turn: { id: 'turn-2', status: 'interrupted', error: null } }), 50)
+          return { result: {} }
+        }
+        if (method === 'thread/compact/start') {
+          setImmediate(() => {
+            // A late end of the stopped turn, then the compaction's own turn.
+            write('turn/completed', { threadId, turn: { id: 'turn-2', status: 'interrupted', error: null } })
+            write('turn/started', { threadId, turn: { id: 'turn-c', status: 'inProgress', error: null } })
+            setTimeout(() => write('turn/completed', { threadId, turn: { id: 'turn-c', status: 'completed', error: null } }), 20)
+          })
+          return { result: {} }
+        }
+        if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
+        return { result: {} }
+      })
+      const requests = (method: string) => server.messages.filter((message) => message.method === method)
+      const service = new CodexProviderService(home, questions, { launch: server.launch, helperSweepMs: 200 }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
+      services.push(service)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      hang = true
+      const stop = new AbortController()
+      const stopped = chat(service, { history: 'h', signal: stop.signal }).then(() => 'resolved', (error: unknown) => error)
+      for (let tries = 0; requests('turn/start').length < 2 && tries < 200; tries += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      stop.abort(new Error('stopped'))
+      expect(await stopped).toBeInstanceOf(Error)
+      service.commitInterrupted('t', 'h2')
+      // At once: the stopped turn is still being interrupted.
+      expect(await compact(service, 'h2')).toBe(true)
+      const order = server.messages.map((message) => message.method)
+      expect(order.indexOf('thread/compact/start')).toBeGreaterThan(order.indexOf('turn/interrupt'))
     })
 
     it('drops the saved thread when the interrupt fails and no end comes in time', async () => {
