@@ -35,6 +35,10 @@ files:
   - '!**/node_modules/node-pty/prebuilds/win32-arm64/**'
   - '!**/node_modules/node-pty/**/*.{map,ts,md}'
   - '!**/node_modules/node-pty/**/*.test.js'
+  # Read aloud runs only in the app window; the CLI has no use for its engine.
+  - '!out/main/nativeTtsHost.js'
+  - '!**/node_modules/onnxruntime-node/**'
+  - '!**/node_modules/onnxruntime-common/**'
 asarUnpack:
   - out/net-native/**
   - out/browser-worker/**

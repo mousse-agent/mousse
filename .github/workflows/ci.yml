@@ -21,6 +21,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # onnxruntime-node's install would download the CUDA provider on Linux x64; only the CPU one is used.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+
 jobs:
   workflow-tools:
     name: Workflow tools

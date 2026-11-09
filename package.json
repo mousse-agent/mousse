@@ -76,6 +76,7 @@
     "micromark-extension-gfm-table": "^2.1.2",
     "node-datachannel": "0.33.4",
     "node-pty": "^1.0.0",
+    "onnxruntime-node": "1.21.0",
     "pele": "^1.10.0",
     "qrcode-generator": "^1.5.2",
     "shiki": "^3.23.0",
@@ -209,7 +210,11 @@
       "!**/node_modules/nan/**",
       "!**/node_modules/ssh2/lib/protocol/crypto/build/**",
       "!**/node_modules/ssh2/lib/protocol/crypto/src/**",
-      "!**/node_modules/ssh2/lib/protocol/crypto/binding.gyp"
+      "!**/node_modules/ssh2/lib/protocol/crypto/binding.gyp",
+      "!**/node_modules/onnxruntime-node/bin/napi-v3/!(${platform})/**",
+      "!**/node_modules/onnxruntime-node/bin/napi-v3/*/!(${arch})/**",
+      "!**/node_modules/onnxruntime-node/bin/napi-v3/win32/*/DirectML.dll",
+      "!**/node_modules/onnxruntime-node/bin/napi-v3/linux/*/libonnxruntime_providers_{cuda,tensorrt}*"
     ],
     "asarUnpack": [
       "out/net-native/**",
@@ -222,7 +227,8 @@
       "node_modules/node-pty/third_party/**",
       "node_modules/@node-datachannel/**",
       "node_modules/@cursor/sdk-*/**",
-      "out/main/cursorHost.js"
+      "out/main/cursorHost.js",
+      "node_modules/onnxruntime-node/bin/**"
     ],
     "npmRebuild": false,
     "extraResources": [

@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -10,6 +11,31 @@ if (!Number.isInteger(rendererPort) || rendererPort < 1024 || rendererPort > 655
   throw new Error('MOUSSE_RENDERER_PORT must be an integer between 1024 and 65535')
 }
 
+/**
+ * The read aloud host (`src/main/readAloud/nativeTtsHost.ts`) bundles kokoro-js and transformers.js
+ * for Node. transformers.js needs sharp only for images, so it gets a stand-in that refuses them.
+ * kokoro-js reads its voices from beside its own files whenever `fs/promises` is there, which would
+ * bypass the app's verified download; without it, kokoro-js fetches them and the host serves them
+ * from the download. Only kokoro-js's import is replaced, in its own code: the rest of main uses
+ * `fs/promises` as usual.
+ */
+const nativeTtsHostStubs: Plugin = {
+  name: 'native-tts-host-stubs',
+  enforce: 'pre',
+  resolveId(source) {
+    return source === 'sharp' ? '\0native-tts-sharp' : null
+  },
+  load(id) {
+    return id === '\0native-tts-sharp' ? 'export default function sharp() { throw new Error(\'Images are not supported here\') }' : null
+  },
+  transform(code, id) {
+    if (!/[\\/]node_modules[\\/]kokoro-js[\\/]dist[\\/]kokoro\.js$/.test(id)) return null
+    const replaced = code.replace(/import\s*(\w+)\s*from\s*["']fs\/promises["'];?/, 'const $1 = undefined;')
+    if (replaced === code) this.error('kokoro-js no longer imports fs/promises as expected; check how it loads voices')
+    return { code: replaced, map: null }
+  }
+}
+
 export default defineConfig({
   main: {
     resolve: {
@@ -17,7 +43,7 @@ export default defineConfig({
         'highlight.js/lib/index.js': 'highlight.js'
       }
     },
-    plugins: [externalizeDepsPlugin()],
+    plugins: [nativeTtsHostStubs, externalizeDepsPlugin()],
     build: {
       rollupOptions: {
         plugins: [
@@ -40,11 +66,14 @@ export default defineConfig({
           index: resolve(__dirname, 'src/main/index.ts'),
           cli: resolve(__dirname, 'src/main/cli.ts'),
           // The Cursor host runs as its own process (`ELECTRON_RUN_AS_NODE`), one per Cursor instance.
-          cursorHost: resolve(__dirname, 'src/mms/harness/hosts/cursorHost.ts')
+          cursorHost: resolve(__dirname, 'src/mms/harness/hosts/cursorHost.ts'),
+          // The read aloud host runs as a utility process, one per native Kokoro slot.
+          nativeTtsHost: resolve(__dirname, 'src/main/readAloud/nativeTtsHost.ts')
         },
         // Keep the public package id. Vite's dependency externalizer resolves
         // highlight.js to lib/index.js, which is not an exported ESM subpath.
-        external: ['@cursor/sdk', 'bun:sqlite', 'highlight.js']
+        // onnxruntime-common stays external so transformers.js and onnxruntime-node share one copy.
+        external: ['@cursor/sdk', 'bun:sqlite', 'highlight.js', 'onnxruntime-common']
       }
     }
   },
