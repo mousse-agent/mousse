@@ -92,6 +92,8 @@ const MIGRATIONS: readonly Migration[] = [
 /** How many runs the inbox lists, newest first; runs with an open item are always listed. */
 const LIST_LIMIT = 400
 const MAX_SUMMARY = 300
+/** How long the page offers Undo for the last Resolve under the list (`u` undoes it later too). */
+const UNDO_OFFER_MS = 15 * 60_000
 
 type Row = Record<string, unknown>
 
@@ -419,8 +421,11 @@ export class AutomationRuns {
     return runId
   }
 
+  /** The person's last Resolve, while it is recent enough for the page to offer Undo under the list. */
   private lastResolved(): { runId: string; jobName: string } | undefined {
-    const row = this.row(`SELECT items.run_id AS run_id, runs.job_name AS job_name FROM items JOIN runs ON runs.id = items.run_id WHERE items.resolved_by = 'person' AND items.resolve_batch IS NOT NULL ORDER BY items.resolve_batch DESC LIMIT 1`)
+    const since = new Date(this.clock() - UNDO_OFFER_MS).toISOString()
+    const row = this.row(`SELECT items.run_id AS run_id, runs.job_name AS job_name, items.resolved_at AS resolved_at FROM items JOIN runs ON runs.id = items.run_id WHERE items.resolved_by = 'person' AND items.resolve_batch IS NOT NULL ORDER BY items.resolve_batch DESC LIMIT 1`)
+    if (row && String(row.resolved_at) < since) return undefined
     return row ? { runId: String(row.run_id), jobName: String(row.job_name) } : undefined
   }
 
