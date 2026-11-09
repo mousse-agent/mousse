@@ -59,7 +59,7 @@ import {
   turnAnswerText,
   type ToolPartBase,
 } from "./utils/assistant-blocks";
-import { PromptUndoButton } from "../../../components/PromptUndoControls";
+import { PromptEditButton, PromptUndoButton, PromptVersionSwitcher } from "../../../components/PromptUndoControls";
 import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
@@ -292,6 +292,55 @@ function formatTimestamp(date: Date): string {
     return timeFormatter.format(date);
   }
   return dateFormatter.format(date);
+}
+
+/**
+ * A prompt open for editing, in place of its bubble. Send (or Enter) sends the edited text as a new version of the
+ * prompt; Cancel (or Escape) closes it unchanged. Shift+Enter adds a line.
+ */
+function PromptEditor({ initial, onCancel, onSend }: { initial: string; onCancel: () => void; onSend: (text: string) => Promise<void> }) {
+  const [text, setText] = useState(initial);
+  const [sending, setSending] = useState(false);
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const area = ref.current;
+    if (!area) return;
+    area.focus();
+    area.setSelectionRange(area.value.length, area.value.length);
+  }, []);
+  useEffect(() => {
+    const area = ref.current;
+    if (!area) return;
+    area.style.height = "auto";
+    area.style.height = `${Math.min(area.scrollHeight, 320)}px`;
+  }, [text]);
+  const send = () => {
+    const value = text.trim();
+    if (!value || sending) return;
+    setSending(true);
+    void onSend(value).finally(() => setSending(false));
+  };
+  return (
+    <div className="ml-auto w-full max-w-[85%] rounded-2xl border border-an-border bg-an-background-secondary p-2" data-find-ignore>
+      <textarea
+        ref={ref}
+        aria-label="Edit message"
+        value={text}
+        disabled={sending}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") { event.preventDefault(); onCancel(); }
+          else if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); }
+        }}
+        rows={1}
+        className="w-full resize-none bg-transparent px-2 py-1 text-sm text-an-foreground outline-none"
+      />
+      <div className="flex justify-end gap-2 pt-1">
+        <button type="button" onClick={onCancel} disabled={sending} className="rounded-md px-2.5 py-1 text-xs text-an-foreground-muted hover:bg-an-foreground/10">Cancel</button>
+        <button type="button" onClick={send} disabled={sending || !text.trim()} className="rounded-md bg-an-foreground px-2.5 py-1 text-xs text-an-background disabled:opacity-40">{sending ? "Sending…" : "Send"}</button>
+      </div>
+    </div>
+  );
 }
 
 /** Fork from here: a new thread that starts after this finished turn, with the conversation up to it. */
@@ -534,6 +583,8 @@ function MessageToolbar({
   alignClass,
   onCopied,
   undoMessageId,
+  promptTurnId,
+  onEdit,
   forkTurnId,
   metadata,
   speechKey,
@@ -547,6 +598,9 @@ function MessageToolbar({
   alignClass: string;
   onCopied?: () => void;
   undoMessageId?: string;
+  /** The prompt's turn, for Edit and its versions. */
+  promptTurnId?: string;
+  onEdit?: () => void;
   /** The finished turn Fork from here starts after (its run, the `turnId` of its messages). */
   forkTurnId?: string;
   metadata?: ResponseMetadata;
@@ -576,6 +630,7 @@ function MessageToolbar({
     >
       {timestamp && <span>{timestamp}</span>}
       {undoMessageId && <PromptUndoButton messageId={undoMessageId} />}
+      {onEdit && <PromptEditButton turnId={promptTurnId} onEdit={onEdit} />}
       {text && speechKey && (speechText ?? text) && (
         <ReadAloudButton speechKey={speechKey} markdown={speechText ?? text} />
       )}
@@ -975,6 +1030,9 @@ export const MessageList = memo(function MessageList({
   );
   const assistantSpaceActiveRef = useRef(false);
   const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
+  /** The prompt open for editing, by message id. */
+  const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
+  const turnActionsForEdit = useTurnActions();
   const [isMounted, setIsMounted] = useState(false);
   const [isPinned, setIsPinned] = useState(initialScrollBehavior !== "top");
   useEffect(() => { onAtBottomChange?.(isPinned) }, [isPinned, onAtBottomChange]);
@@ -1671,17 +1729,35 @@ export const MessageList = memo(function MessageList({
                         : undefined;
                     // Keep unavailable Undo visible with an explanation for this prompt.
                     const showUserToolbar = true;
+                    // Edit and versions act on the prompt's turn; a fork's copies of its source name none.
+                    const promptTurnId = (turn.userMsg as { turnId?: string }).turnId;
+                    const editPrompt = turnActionsForEdit?.editPrompt;
                     return (
                       <div
                         className="group/user-message"
                         data-prompt-id={turn.userMsg.id}
                       >
+                        {editingPromptId === turn.userMsg.id && promptTurnId && editPrompt ? (
+                          <PromptEditor
+                            initial={text}
+                            onCancel={() => setEditingPromptId(null)}
+                            onSend={async (edited) => {
+                              await editPrompt(turn.userMsg!.id, promptTurnId, edited);
+                              setEditingPromptId(null);
+                            }}
+                          />
+                        ) : (
                         <CustomUserMessage
                           message={turn.userMsg}
                           className={classNames?.userMessage}
                           enableImagePreview={enableImagePreview}
                         />
-                        {showUserToolbar && (
+                        )}
+                        {/* An edited prompt says so, with its versions, whether or not the pointer is over it. */}
+                        {promptTurnId && editingPromptId !== turn.userMsg.id && (
+                          <PromptVersionSwitcher turnId={promptTurnId} />
+                        )}
+                        {showUserToolbar && editingPromptId !== turn.userMsg.id && (
                           <MessageToolbar
                             text={showCopyToolbar ? text : ""}
                             timestamp={userTimestamp}
@@ -1691,6 +1767,8 @@ export const MessageList = memo(function MessageList({
                             alignClass="justify-end"
                             onCopied={() => markCopied(userCopyKey)}
                             undoMessageId={turn.userMsg.id}
+                            promptTurnId={promptTurnId}
+                            onEdit={promptTurnId && editPrompt ? () => setEditingPromptId(turn.userMsg!.id) : undefined}
                             speechKey={userCopyKey}
                           />
                         )}

@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { IconArrowBackUp } from '../lib/icons'
+import { ChevronLeft, ChevronRight, IconArrowBackUp, Pencil } from '../lib/icons'
+import { showToast } from './ui/Toast'
 import { useAppStore } from '../stores/appStore'
 import { isSessionClosing, readableError } from '../lib/errorText'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
@@ -190,4 +191,60 @@ export function PromptUndoButton({ messageId }: { messageId: string }) {
     className="size-6 flex items-center justify-center rounded-md opacity-50 bg-transparent enabled:hover:opacity-100 enabled:hover:bg-an-foreground/10 disabled:cursor-not-allowed">
     <IconArrowBackUp className="w-3.5 h-3.5 text-an-foreground-muted" />
   </button>
+}
+
+/**
+ * Whether the prompt of turn `turnId` can be edited: its turn finished on the active conversation branch, recorded the
+ * files and conversation before it began, and no turn runs now. A fork's copies of its source name no turn.
+ */
+export function editablePrompt(history: ThreadActionHistory | null, turnId: string | undefined): ThreadActionHistory['actions'][number] | undefined {
+  if (!history || !turnId) return undefined
+  const action = history.actions.find((item) => item.turnId === turnId && item.conversationBranchId === (history.activeBranchId ?? 'main'))
+  const start = action?.nativeContextStartBoundary
+  if (!action || action.scope === 'conversation' || action.state === 'running' || !start?.safeBoundaryProof || start.fidelity === 'legacy') return undefined
+  return action
+}
+
+/** Edit on a prompt: opens it for editing. Hidden when the prompt can't be edited. */
+export function PromptEditButton({ turnId, onEdit }: { turnId?: string; onEdit: () => void }) {
+  const state = useContext(PromptUndoContext)
+  if (!state || state.busy || state.working || !editablePrompt(state.history, turnId)) return null
+  return <button type="button" aria-label="Edit" title="Edit message. The conversation continues from here; files stay as they are."
+    onClick={onEdit} onPointerDown={event => event.stopPropagation()} onMouseDown={event => event.stopPropagation()}
+    className="size-6 flex items-center justify-center rounded-md opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10">
+    <Pencil className="w-3.5 h-3.5 text-an-foreground-muted" />
+  </button>
+}
+
+/**
+ * "Edited ‹ 2/3 ›" under an edited prompt, always shown: each version is a conversation branch, and switching shows its
+ * conversation. Files stay as they are. Hidden when the prompt has one version.
+ */
+export function PromptVersionSwitcher({ turnId }: { turnId?: string }) {
+  const state = useContext(PromptUndoContext)
+  const [switching, setSwitching] = useState(false)
+  const entry = turnId ? state?.history?.promptVersions?.find((item) => item.turnId === turnId) : undefined
+  if (!state?.threadId || !entry || entry.versions.length < 2) return null
+  const threadId = state.threadId
+  const disabled = state.busy || state.working || switching
+  const go = (index: number) => {
+    const branchId = entry.versions[index]
+    if (disabled || !branchId) return
+    setSwitching(true)
+    void window.mousse.actions.activateBranch({ threadId, conversationBranchId: branchId })
+      .then(() => { invalidateThreadActionHistory(threadId) })
+      .catch((error: unknown) => { showToast({ tone: 'error', message: readableError(error, "Couldn't switch to that version. Try again.") }) })
+      .finally(() => setSwitching(false))
+  }
+  const arrow = 'size-6 flex items-center justify-center rounded-md opacity-50 bg-transparent enabled:hover:opacity-100 enabled:hover:bg-an-foreground/10 disabled:opacity-25 disabled:cursor-default'
+  return <div className="flex justify-end pt-1"><span className="flex items-center gap-0.5 text-xs tabular-nums text-an-foreground-muted" data-find-ignore onPointerDown={event => event.stopPropagation()} onMouseDown={event => event.stopPropagation()}>
+    <span className="pr-1">Edited</span>
+    <button type="button" aria-label="Previous version" title="Previous version (conversation only)" className={arrow} disabled={disabled || entry.current === 0} onClick={() => go(entry.current - 1)}>
+      <ChevronLeft className="w-3.5 h-3.5 text-an-foreground-muted" />
+    </button>
+    <span aria-label={`Version ${entry.current + 1} of ${entry.versions.length}`}>{entry.current + 1}/{entry.versions.length}</span>
+    <button type="button" aria-label="Next version" title="Next version (conversation only)" className={arrow} disabled={disabled || entry.current === entry.versions.length - 1} onClick={() => go(entry.current + 1)}>
+      <ChevronRight className="w-3.5 h-3.5 text-an-foreground-muted" />
+    </button>
+  </span></div>
 }

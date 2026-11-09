@@ -154,12 +154,25 @@ export class ConversationBranchService {
     branchId: ConversationBranchId,
     expectedJournalRevision?: number,
     restoreContext?: (branch: ConversationBranch) => void | Promise<void>,
-    saveContext?: (leaving: ConversationBranchId) => void | Promise<void>
+    saveContext?: (leaving: ConversationBranchId) => void | Promise<void>,
+    assertIdle?: () => void
   ): Promise<ConversationBranchActivation> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-activate', async () => {
-      new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+      // Under the thread's locks, which a turn holds while it runs: no turn can start between this check and the switch.
+      assertIdle?.()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      await refuseUnsafeChangesAsync(workspacePath, 'Thread workspace', { discard: true })
+      return this.activateHeld(workspacePath, branchId, restoreContext, saveContext)
+    })
+  }
+
+  /** {@link activate}, under the locks the caller holds. */
+  private async activateHeld(
+    workspacePath: string,
+    branchId: ConversationBranchId,
+    restoreContext?: (branch: ConversationBranch) => void | Promise<void>,
+    saveContext?: (leaving: ConversationBranchId) => void | Promise<void>
+  ): Promise<ConversationBranchActivation> {
+    {
       const manager = new ThreadWorkspaceManager(this.threadDirectory)
       const metadata = manager.load()
       const leaving = metadata?.conversationBranchId ?? FIRST_BRANCH_ID
@@ -168,6 +181,31 @@ export class ConversationBranchService {
       if (!selected) throw new ConversationBranchUnavailableError(branchId)
       const threadId = metadata?.threadId
       const operationId = randomUUID()
+      // A switch to or from a branch that shares the thread's files (an edited prompt's) changes the conversation
+      // only: no file is read, merged, restored or refused, so it can't conflict and the folder stays as it is.
+      const conversationOnly = selected.files === 'shared' || branches.find((branch) => branch.id === leaving)?.files === 'shared'
+      // A switch that stopped is finished by recovery first; a newer one never goes ahead of it, or recovery would
+      // later put the older one back over it.
+      new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+      if (conversationOnly && leaving !== selected.id) {
+        // No file is read or recorded: the thread's files, and the ref and snapshot that record them, stay as they are.
+        // The branch being left has its conversation saved first; then the switch is recorded as pending before the
+        // branch list or the thread's record change, so recovery finishes it (`recoverPending`) whatever stopped it.
+        this.journal.append({ operationId, operationType: 'conversation-activate', state: 'running', expectedPreState: { branchId, leaving, conversationOnly: true } })
+        try {
+          await saveContext?.(leaving)
+        } catch (error) {
+          this.journal.append({ operationId, operationType: 'conversation-activate', state: 'failed', details: { branchId, error: error instanceof Error ? error.message : String(error) } })
+          throw error
+        }
+        this.journal.append({ operationId, operationType: 'conversation-activate', state: 'context_pending', details: { branchId: selected.id, restoreContext: Boolean(restoreContext), conversationOnly: true } })
+        await this.settleConversation(workspacePath, branches, selected)
+        if (restoreContext) await restoreContext(selected)
+        this.journal.append({ operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: selected.id, conversationOnly: true } })
+        return { branch: selected }
+      }
+      new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+      await refuseUnsafeChangesAsync(workspacePath, 'Thread workspace', { discard: true })
       this.journal.append({
         operationId,
         operationType: 'conversation-activate',
@@ -244,6 +282,28 @@ export class ConversationBranchService {
         if (staying) this.stayOn(leaving, staying.base, staying.current)
         throw error
       }
+    }
+  }
+
+  /**
+   * A conversation-only switch: the selected branch is active and the thread's record says so. The files are the same,
+   * so the selected branch takes them as its own: its ref is moved to the commit that records the files now (the
+   * thread's `retainedRef`, which every turn's record moves), and becomes the thread's `retainedRef`. The branch left
+   * keeps its ref as it was, so an inactive branch that owns its files never has them written over by turns on
+   * another. The snapshot, HEAD and `switchedIn` (what a file switch brought along, which a later file switch merges
+   * from) stay as they are. Reads a ref, never a file. Idempotent: recovery runs it again.
+   */
+  private async settleConversation(workspacePath: string, branches: ConversationBranch[], selected: ConversationBranch): Promise<void> {
+    for (const branch of branches) if (branch.lifecycle !== 'tombstoned') branch.lifecycle = branch.id === selected.id ? 'active' : 'inactive'
+    atomicWriteJsonSync(this.path, branches)
+    const manager = new ThreadWorkspaceManager(this.threadDirectory)
+    const metadata = manager.load()
+    if (!metadata) return
+    const files = metadata.retainedRef ? (await tryGitAsync(workspacePath, ['rev-parse', '--verify', '-q', `${metadata.retainedRef}^{commit}`])).stdout.trim() : ''
+    if (files && metadata.retainedRef !== selected.retainedRef) await gitAsync(workspacePath, ['update-ref', '--no-deref', selected.retainedRef, files])
+    if (metadata.conversationBranchId === selected.id && (!files || metadata.retainedRef === selected.retainedRef)) return
+    atomicWriteJsonSync(manager.workspacePath, {
+      ...metadata, conversationBranchId: selected.id, ...(files ? { retainedRef: selected.retainedRef } : {}), generation: (metadata.generation ?? 0) + 1
     })
   }
 
@@ -398,10 +458,13 @@ export class ConversationBranchService {
           continue
         }
         if (entry.state !== 'context_pending') continue
-        const details = entry.details as { branchId: string; restoreContext: boolean }
-        const branch = this.list().find((item) => item.id === details.branchId)
+        const details = entry.details as { branchId: string; restoreContext: boolean; conversationOnly?: boolean }
+        const branches = this.list()
+        const branch = branches.find((item) => item.id === details.branchId)
         // The files were switched before this entry was written; only the conversation side is left to restore.
         if (!branch) throw new Error('Conversation branch recovery does not match the recorded branch.')
+        // A conversation-only switch may have stopped before the branch list or the thread's record named the branch.
+        if (details.conversationOnly) await this.settleConversation(workspacePath, branches, branch)
         if (details.restoreContext) await restoreContext(branch)
         this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: branch.id, recovered: true } })
       }
@@ -419,27 +482,78 @@ export class ConversationBranchService {
     actionId: string,
     name: string,
     expectedJournalRevision?: number,
-    codeMode: 'historical' | 'current' = 'historical'
+    codeMode: 'historical' | 'current' = 'historical',
+    at: 'start' | 'end' = 'end',
+    assertIdle?: () => void
   ): Promise<ConversationBranch> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-fork', async () => {
+      assertIdle?.()
       this.actions.assertExpectedRevision(expectedJournalRevision)
+      return this.forkHeld(workspacePath, sourceBranchId, actionId, name, codeMode, at)
+    })
+  }
+
+  /**
+   * Edits a prompt: one step, under the thread's locks, that makes a branch starting before the action's turn which
+   * shares the thread's files (`files: 'shared'`) and switches to it. Only the conversation changes; no file does.
+   * `created` is told the branch before the switch (its conversation is saved there), so the switch restores it.
+   */
+  async edit(
+    workspacePath: string,
+    sourceBranchId: ConversationBranchId,
+    actionId: string,
+    name: string,
+    hooks: {
+      expectedJournalRevision?: number
+      assertIdle?: () => void
+      created: (branch: ConversationBranch) => void | Promise<void>
+      restoreContext: (branch: ConversationBranch) => void | Promise<void>
+      saveContext: (leaving: ConversationBranchId) => void | Promise<void>
+    }
+  ): Promise<ConversationBranchActivation> {
+    return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-edit', async () => {
+      hooks.assertIdle?.()
+      this.actions.assertExpectedRevision(hooks.expectedJournalRevision)
+      await hooks.saveContext(sourceBranchId)
+      const branch = await this.forkHeld(workspacePath, sourceBranchId, actionId, name, 'current', 'start')
+      await hooks.created(branch)
+      return this.activateHeld(workspacePath, branch.id, hooks.restoreContext, hooks.saveContext)
+    })
+  }
+
+  private async forkHeld(
+    workspacePath: string,
+    sourceBranchId: ConversationBranchId,
+    actionId: string,
+    name: string,
+    codeMode: 'historical' | 'current',
+    at: 'start' | 'end'
+  ): Promise<ConversationBranch> {
+    {
       const action = this.actions.get(actionId)
-      if (action?.scope === 'conversation') throw new Error('Conversation-only turns have no repository snapshot to fork.')
-      if (!action || action.state !== 'completed') throw new Error('Fork requires a completed action.')
+      // A branch before a turn (an edited prompt) shares the thread's files and needs no snapshot of the action's, so
+      // it works for a turn older than the Undo window, and for a turn that recorded no files.
+      if (action?.scope === 'conversation' && at === 'end') throw new Error('Conversation-only turns have no repository snapshot to fork.')
+      // A branch after a turn needs the turn to have finished well; one before it (an edited prompt) only needs it to
+      // have finished, so a prompt after a stopped turn, or the first prompt, can be edited.
+      if (!action || (at === 'end' ? action.state !== 'completed' : action.state === 'running')) throw new Error(at === 'end' ? 'Fork requires a completed action.' : 'Wait for the turn to finish before editing its prompt.')
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
-      if (codeMode === 'historical') new UndoRetentionService(this.threadDirectory).assertAvailable(action)
+      if (codeMode === 'historical' && at === 'end') new UndoRetentionService(this.threadDirectory).assertAvailable(action)
       if (action.conversationBranchId !== sourceBranchId) throw new Error('Action does not belong to the source conversation branch.')
-      if (!action.nativeContextBoundary.safeBoundaryProof) throw new Error('The selected turn has no validated native-context boundary.')
+      const boundary = at === 'start' ? action.nativeContextStartBoundary : action.nativeContextBoundary
+      if (!boundary?.safeBoundaryProof || (at === 'start' && boundary.fidelity === 'legacy')) throw new Error('The selected turn has no validated native-context boundary.')
       const id = randomUUID()
       const operationId = randomUUID()
       const retainedRef = `refs/mousse/conversation-branches/${id}`
       const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
-      const codeSha = codeMode === 'current' ? (await takeSnapshotAsync(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId })).sha : action.endSha
+      // A branch that shares the thread's files reads none: its ref only pins the thread's latest recorded files.
+      const codeSha = at === 'start' ? metadata?.snapshotSha ?? action.endSha ?? action.startSha
+        : codeMode === 'current' ? (await takeSnapshotAsync(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId })).sha : action.endSha
       this.journal.append({
         operationId,
         operationType: 'conversation-fork',
         state: 'running',
-        expectedPreState: { sourceBranchId, actionId, codeMode, codeSha }
+        expectedPreState: { sourceBranchId, actionId, codeMode, codeSha, at }
       })
       try {
         await gitAsync(workspacePath, ['update-ref', '--no-deref', retainedRef, codeSha])
@@ -448,10 +562,11 @@ export class ConversationBranchService {
           name,
           parentBranchId: sourceBranchId,
           parentTurnId: action.turnId,
+          ...(at === 'start' ? { at, files: 'shared' as const } : {}),
           // Conversation branches share the worktree and its Git branch; they differ in the snapshot they own.
           gitBranch: metadata?.branch ?? '',
           retainedRef,
-          contextBoundary: action.nativeContextBoundary,
+          contextBoundary: boundary,
           lifecycle: 'inactive',
           creationReason: 'fork',
           createdAt: new Date().toISOString()
@@ -476,6 +591,6 @@ export class ConversationBranchService {
         })
         throw error
       }
-    })
+    }
   }
 }

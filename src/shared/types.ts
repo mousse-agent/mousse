@@ -339,6 +339,11 @@ export interface OrchestratorSendRequest {
   requestId?: string
   /** MMS-only receipt reference. Public ingress never accepts this field. */
   workflowInvocationId?: string
+  /**
+   * The conversation branch the message must land on (an edited prompt's). The turn checks it when it starts, under
+   * the thread's lease; a thread on another branch by then refuses the message (`conversation_branch_changed`).
+   */
+  conversationBranchId?: string
 }
 
 export type OrchestratorSendInput = string | OrchestratorSendRequest
