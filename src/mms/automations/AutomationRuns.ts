@@ -89,6 +89,9 @@ const MIGRATIONS: readonly Migration[] = [
   }
 ]
 
+/** How long an ended run is kept (`prune`, at profile open). */
+const KEEP_RUNS_DAYS = 180
+
 /** How many runs the inbox lists, newest first; runs with an open item are always listed. */
 const LIST_LIMIT = 400
 const MAX_SUMMARY = 300
@@ -161,7 +164,31 @@ export class AutomationRuns {
   constructor(options: AutomationRunsOptions) {
     this.clock = options.clock ?? Date.now
     this.db = new ProfileDatabase({ profileHome: options.profileHome, name: 'automations', clock: this.clock })
-    this.db.migrate(MIGRATIONS)
+    try {
+      this.db.migrate(MIGRATIONS)
+    } catch (error) {
+      // A database it cannot use is closed at once: an open file keeps the profile's folder from being removed.
+      this.db.close()
+      throw error
+    }
+    try {
+      this.prune()
+    } catch (error) {
+      console.warn('automations: old runs could not be pruned', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * Old runs go, so the database does not grow without end: a run that ended more than `KEEP_RUNS_DAYS` ago, unless it
+   * is its automation's newest (its number goes on from it) or still has an open item. Its items go with it.
+   */
+  prune(): number {
+    const before = new Date(this.clock() - KEEP_RUNS_DAYS * 24 * 60 * 60_000).toISOString()
+    return this.db.statement(
+      `DELETE FROM runs WHERE ended_at IS NOT NULL AND ended_at < ?
+         AND id NOT IN (SELECT run_id FROM items WHERE resolved_at IS NULL)
+         AND id NOT IN (SELECT id FROM runs AS newest WHERE newest.number = (SELECT MAX(number) FROM runs AS other WHERE other.job_id = newest.job_id))`
+    ).run(before).changes as number
   }
 
   close(): void {
@@ -308,14 +335,23 @@ export class AutomationRuns {
   // ── run_report ──────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * The live run a caller's turn belongs to: the run its engine run is, else the live run on its thread (or the bot
-   * activation's). Undefined when the caller is not in an automation run that is still going.
+   * The live run a caller's turn belongs to: the run its engine run is, else the bot activation's. On its thread alone
+   * only a run that is running now counts, and only for a turn that is not another engine run: a person's turn on a
+   * reused thread while a run waits (a usage limit, a deferral) is not the run's. Undefined otherwise.
    */
   liveRunFor(caller: { threadId: string; runId?: string; activationId?: string }): InboxRun | undefined {
     const row = (caller.runId ? this.row('SELECT id FROM runs WHERE engine_run_id = ? AND ended_at IS NULL', caller.runId) : undefined)
       ?? (caller.activationId ? this.row('SELECT id FROM runs WHERE activation_id = ? AND ended_at IS NULL', caller.activationId) : undefined)
-      ?? this.row('SELECT id FROM runs WHERE thread_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1', caller.threadId)
+      ?? this.runningOnThread(caller)
     return row ? this.get(String(row.id)) : undefined
+  }
+
+  /** The run going now on the caller's thread, unless the caller is an engine run that is not that run's. */
+  private runningOnThread(caller: { threadId: string; runId?: string }): Record<string, unknown> | undefined {
+    return this.row(
+      `SELECT id, usage FROM runs WHERE thread_id = ? AND ended_at IS NULL AND state = 'running' AND (? IS NULL OR engine_run_id IS NULL) ORDER BY started_at DESC LIMIT 1`,
+      caller.threadId, caller.runId ?? null
+    )
   }
 
   /** `run_report`: the run's level and one line. At most one report per run; a second call replaces the first. */
@@ -349,7 +385,7 @@ export class AutomationRuns {
   /** One request's usage on a run's turn, added to its model's line. A thread with no live run is not counted. */
   addUsage(caller: { threadId: string; runId?: string }, usage: RunModelUsage): boolean {
     const row = (caller.runId ? this.row('SELECT id, usage FROM runs WHERE engine_run_id = ?', caller.runId) : undefined)
-      ?? this.row('SELECT id, usage FROM runs WHERE thread_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1', caller.threadId)
+      ?? this.runningOnThread(caller)
     if (!row) return false
     const lines = usageOf(row.usage)
     const line = lines.find((entry) => entry.model === usage.model && entry.provider === usage.provider)

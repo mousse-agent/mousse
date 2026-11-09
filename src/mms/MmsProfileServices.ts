@@ -947,12 +947,13 @@ export class MmsProfileServices {
       pause: (id, reason, until) => this.scheduled.pauseJob(id, reason, until),
       projects: () => this.projects.listProjects().map(({ id, name }) => ({ id, name })),
       thread: (id) => this.threads.getThread(id),
+      watch: (threadId) => this.syncThreadEventWatch(threadId),
       botExists: (botId) => this.personalBots?.list().some((bot) => bot.id === botId) ?? false,
       addBotSchedule: (botId, input) => {
         const when = botWhenOf(input.schedule)
         if (!when) throw new Error('A bot repeats: give it a time that repeats.')
-        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt }, 'owner')
-        return this.scheduled.updateJob(entry.jobId, { name: input.name, tellMe: input.tellMe }) ?? this.scheduled.getJob(entry.jobId)!
+        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt, name: input.name, tellMe: input.tellMe }, 'owner')
+        return this.scheduled.getJob(entry.jobId)!
       },
       personCeiling: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
       reuseThread: (jobId, name, projectId) => this.threads.ensureExecutionThread(`automation-thread:${jobId}`, name.slice(0, 120), projectId),
@@ -1443,7 +1444,8 @@ export class MmsProfileServices {
    */
   syncThreadEventWatch(threadId: string): void {
     try {
-      const needed = this.scheduled.listJobs().some((job) => job.trigger?.threadEvent?.threadId === threadId)
+      // A draft never runs, so it needs no watch until it is turned on.
+      const needed = this.scheduled.listJobs().some((job) => !job.draft && job.trigger?.threadEvent?.threadId === threadId)
       if (needed) this.pullRequestWatch.ensureEventWatch(threadId)
       else this.pullRequestWatch.releaseEventWatch(threadId)
     } catch (error) {
@@ -2262,18 +2264,26 @@ export class MmsProfileServices {
     }
     this.endRunEngineEpoch()
     this.config.stopWatching()
-    try {
-      this.orchestrator.setRunEngine(null)
-      this.orchestrator.setBotDispatcher(null)
-      this.orchestrator.setBotThreads(null)
-      this.orchestrator.setBotAppTools(null)
-      this.personalBots?.close()
-      this.botStore?.close()
-      // The inbox's database too: an open SQLite file keeps the profile's folder from being removed on Windows.
-      this.automationRuns?.close()
-      this.runEngine.store.db.close()
-    } catch (error) {
-      console.warn('run engine database close failed', error)
+    // Each database closes on its own, so one that fails to close never keeps the next open: an open SQLite file
+    // keeps the profile's folder from being removed on Windows.
+    const closes: Array<[string, () => void]> = [
+      ['run engine detach', () => {
+        this.orchestrator.setRunEngine(null)
+        this.orchestrator.setBotDispatcher(null)
+        this.orchestrator.setBotThreads(null)
+        this.orchestrator.setBotAppTools(null)
+      }],
+      ['personal bots close', () => this.personalBots?.close()],
+      ['bots database close', () => this.botStore?.close()],
+      ['automations database close', () => this.automationRuns?.close()],
+      ['run engine database close', () => this.runEngine.store.db.close()]
+    ]
+    for (const [what, close] of closes) {
+      try {
+        close()
+      } catch (error) {
+        console.warn(`${what} failed`, error)
+      }
     }
     // What this profile chose for worktrees is no longer Mousse's to act on through it.
     forgetWorktreeFolders(this.homeDir)

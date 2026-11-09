@@ -320,6 +320,26 @@ describe('creating and editing a job through the protocol', () => {
     return created.thread.id
   }
 
+  describe('on and off, and a CLI name', () => {
+    it('turns a bot\'s automation off and on through update, as Pause and Resume do', async () => {
+      const bot = mms.scheduled.createJob({ name: 'Bot job', prompt: 'tidy', schedule: { kind: 'interval', minutes: 30 }, threadId: 'bot-schedule:bot-1', bot: { botId: 'bot-1', scheduleId: 's1', createdBy: 'owner' } })
+      expect((await update(bot.id, { enabled: false })).job).toMatchObject({ enabled: false, state: 'paused' })
+      expect((await update(bot.id, { enabled: true })).job).toMatchObject({ enabled: true, state: 'scheduled' })
+      await expect(update(bot.id, { threadId: null })).rejects.toThrow(/stay the bot's/)
+    })
+
+    it('takes a CLI name for a job started by hand, unique on this computer', async () => {
+      expect((await create({ name: 'Deploy', cliName: 'deploy' })).job.cliName).toBe('deploy')
+      await expect(create({ name: 'Deploy again', cliName: 'deploy' })).rejects.toThrow(/already started by/)
+      await expect(create({ name: 'Timed', cliName: 'timed', schedule: { kind: 'interval', minutes: 60 } })).rejects.toThrow(/Only an automation started by hand/)
+    })
+
+    it('makes a job paused, with its reason, when asked', async () => {
+      const { job } = await create({ name: 'Paused', paused: { reason: 'Moving here' } })
+      expect(job).toMatchObject({ enabled: false, state: 'paused', pausedReason: 'Moving here' })
+    })
+  })
+
   describe('creation', () => {
     it('gives a job with no thread the mode threads start in as its ceiling', async () => {
       for (const mode of MODES) {

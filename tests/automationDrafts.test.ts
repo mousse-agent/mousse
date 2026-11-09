@@ -36,7 +36,8 @@ function setup(options: { ceiling?: PermissionMode } = {}) {
   const service = new ScheduledJobService({ runIsolated: async (prompt) => { prompts.push(prompt); return { text: 'Done.', silent: false } } }, store)
   ;(service as unknown as { stopped: boolean }).stopped = false
   const threads = new Map<string, Thread>([
-    ['t-pr', { id: 't-pr', name: 'Fix checkout', projectId: 'p1', pullRequest: { number: 712 } } as Thread]
+    ['t-pr', { id: 't-pr', name: 'Fix checkout', projectId: 'p1', pullRequest: { number: 712 } } as Thread],
+    ['t-bot', { id: 't-bot', name: 'Bot chat', projectId: 'p1', pullRequest: { number: 9 }, botOwned: true } as Thread]
   ])
   const reused: string[] = []
   const botSchedules: Array<{ botId: string; prompt: string; name: string }> = []
@@ -195,6 +196,24 @@ describe('automation drafts', () => {
     const until = new Date(Date.now() + 86_400_000).toISOString()
     expect(drafts.pause({ id: draftId, until }, manager)).toMatchObject({ paused: true })
     expect(service.getJob(draftId)!.resumeAt).toBe(until)
+  })
+
+  it('never leaves both the draft and the bot\'s schedule when Turn on cannot remove the draft', () => {
+    const { drafts, service } = setup()
+    drafts.nextWho({}, { kind: 'bot', botId: 'bot_1' })
+    const { draftId } = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
+    const remove = (drafts as unknown as { deps: { remove: (id: string) => boolean } }).deps
+    const real = remove.remove
+    remove.remove = (id) => { if (id === draftId) throw new Error('disk full'); return real(id) }
+    expect(() => drafts.turnOn(draftId)).toThrow(/disk full/)
+    expect(service.getJob(draftId)?.draft).toBeDefined()
+    expect(service.listJobs().filter((job) => job.bot)).toEqual([])
+  })
+
+  it('never watches a bot\'s own thread', () => {
+    const { drafts } = setup()
+    const saved = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'thread_event', threadId: 't-bot', events: ['review'] } }, { managerThreadId: 'manager' })
+    expect(saved.problems).toContain('There is no thread t-bot.')
   })
 
   it('pauses an automation an agent changed what it does, when or where, until the person resumes it', () => {

@@ -85,7 +85,7 @@ export interface AutomationDraftsDeps {
   remove(id: string): boolean
   pause(id: string, reason?: string, until?: string): ScheduledJob | null
   projects(): Array<{ id: string; name: string }>
-  thread(id: string): Pick<Thread, 'id' | 'projectId' | 'pullRequest' | 'settledAt'> | undefined
+  thread(id: string): Pick<Thread, 'id' | 'projectId' | 'pullRequest' | 'settledAt' | 'botOwned'> | undefined
   /** Whether the bot exists (and is not deleted). */
   botExists?(botId: string): boolean
   /** Turn on with a bot as Who: the bot's schedule, made the way its own schedules are (`BotScheduleBook.add`). */
@@ -96,6 +96,8 @@ export interface AutomationDraftsDeps {
   reuseThread(jobId: string, name: string, projectId?: string): { id: string }
   /** The scheduler and the page hear of a change. */
   changed?(): void
+  /** A thread's pull request is read while an automation (not a draft) wakes on it: starts or ends its watch. */
+  watch?(threadId: string): void
   now?(): Date
   /** Where the context and the chat a draft came from are kept; without it they are not kept. */
   meta?: DraftMetaPort
@@ -334,7 +336,8 @@ export class AutomationDrafts {
         break
       case 'thread_event': {
         const thread = this.deps.thread(trigger.threadId)
-        if (!thread || thread.settledAt) problems.push(`There is no thread ${trigger.threadId}.`)
+        // The same threads the protocol takes: a bot's own thread is the bot's, never an automation's.
+        if (!thread || thread.settledAt || thread.botOwned) problems.push(`There is no thread ${trigger.threadId}.`)
         else if (!thread.pullRequest) problems.push('That thread has no pull request to watch.')
         else {
           threadEvent = { threadEvent: { threadId: thread.id, number: thread.pullRequest.number, events: trigger.events } }
@@ -526,6 +529,7 @@ export class AutomationDrafts {
     // What it does, when, or where it runs changed at an agent's hand: it waits for the person to look and resume it.
     const executable = (['prompt', 'schedule', 'trigger', 'threadId', 'projectId', 'createThread'] as const).some((key) => JSON.stringify(updated[key] ?? null) !== JSON.stringify(job[key] ?? null))
     const paused = executable && job.enabled && job.state !== 'paused' ? this.deps.pause(job.id, AGENT_EDIT_PAUSE) : null
+    for (const threadId of new Set([job.trigger?.threadEvent?.threadId, updated.trigger?.threadEvent?.threadId])) if (threadId) this.deps.watch?.(threadId)
     this.deps.changed?.()
     return this.contract(paused ?? updated)
   }
@@ -574,7 +578,18 @@ export class AutomationDrafts {
       } catch {
         // Its context stays behind; the runs still start.
       }
-      this.deps.remove(job.id)
+      // The draft goes once the schedule is made; if it cannot, the schedule goes too, so there are never both.
+      try {
+        this.deps.remove(job.id)
+      } catch (error) {
+        try {
+          this.deps.meta?.move(made.id, job.id)
+        } catch {
+          // The draft keeps its fields; only its context is lost.
+        }
+        this.deps.remove(made.id)
+        throw error
+      }
       this.deps.changed?.()
       return made
     }
@@ -588,6 +603,8 @@ export class AutomationDrafts {
       ...(reuseThread ? { threadId, createThread: undefined } : {})
     })
     if (!updated) fail(`No draft ${draftId}.`)
+    // On now: its pull request is read from now on.
+    if (updated.trigger?.threadEvent) this.deps.watch?.(updated.trigger.threadEvent.threadId)
     this.deps.changed?.()
     return updated
   }

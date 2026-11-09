@@ -114,6 +114,12 @@ export interface ScheduledOccurrenceSettled {
   permissionMode?: ScheduledRunDetails['permissionMode']
 }
 
+/** Why a bot's schedule is paused when every occurrence would be skipped the same way: no bots here, or its bot is deleted. */
+const LASTING_BOT_SKIPS: Record<string, string | undefined> = {
+  bots_unavailable: 'Bots could not be opened in this profile. Resume it once they are back.',
+  bot_deleted: 'Its bot was deleted.'
+}
+
 export class ScheduledJobService extends EventEmitter {
   private readonly lifecycle = new OwnedWorkBarrier()
   private shutdownPromise?: Promise<void>
@@ -855,6 +861,9 @@ export class ScheduledJobService extends EventEmitter {
       this.record('bot run', (ledger) => ledger.begin({ jobId: job.id, jobName: job.name, occurrenceKey: claim.occurrenceKey, botId: job.bot.botId, activationId, state: 'queued', ...(job.projectId ? { projectId: job.projectId } : {}) }))
     }
     if (this.store.finishBotClaim(job.id, claim.token, outcome.kind === 'skipped' ? { skipped: outcome.reason } : {}, now)) this.ownedRunClaims.delete(job.id)
+    // A skip that every later occurrence would repeat pauses it once, with why, instead of skipping it forever.
+    const lasting = outcome.kind === 'skipped' ? LASTING_BOT_SKIPS[outcome.reason] : undefined
+    if (lasting && this.store.pauseJob(job.id, lasting)) this.emitUpdated()
   }
 
   private async executeJob(job: ScheduledJob): Promise<void> {

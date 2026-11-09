@@ -195,7 +195,7 @@ export class BotScheduleBook {
    * Adds a schedule: at most 8 per bot, at least 5 minutes apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
     const problem = botScheduleProblem(input.when, prompt)
@@ -203,7 +203,9 @@ export class BotScheduleBook {
     const scheduleId = options.scheduleId ?? `s-${randomUUID().slice(0, 8)}`
     const when: BotSchedule['when'] = input.when.kind === 'interval' ? { kind: 'interval', minutes: input.when.minutes } : { kind: 'cron', expr: input.when.expr.trim() }
     const job = this.options.jobs.createJob({
-      name: botJobName(prompt),
+      // A draft turned on keeps its name and Tell me, in the same write.
+      name: input.name?.trim() || botJobName(prompt),
+      ...(input.tellMe ? { tellMe: input.tellMe } : {}),
       prompt,
       schedule: jobScheduleOf(when),
       threadId: botJobThreadGuard(botId),

@@ -2905,7 +2905,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A bot's schedule: When, Do, its name and Tell me change; Who, Where and May stay the bot's (its grant).
       if (existing.bot) {
         try {
-          return { job: ctx.mms.botSchedules.update(existing, patch), jobs: ctx.mms.scheduled.listJobs() }
+          // On or off is Pause and Resume, as for any automation; the rest is the bot's own edit.
+          const { enabled, ...rest } = patch
+          let job = Object.values(rest).some((value) => value !== undefined) ? ctx.mms.botSchedules.update(existing, rest) : existing
+          if (enabled === false) job = ctx.mms.scheduled.pauseJob(id) ?? job
+          if (enabled === true) job = ctx.mms.scheduled.resumeJob(id) ?? job
+          return { job, jobs: ctx.mms.scheduled.listJobs() }
         } catch (error) {
           if (error instanceof BotScheduleError) throw jobRefused(error.message)
           throw error
@@ -3037,8 +3042,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (p[setting] !== undefined) update[setting] = asBoundedInt(p[setting], setting, AGENT_JOB_LIMIT_RANGES[key])
       }
       ctx.mms.config.updateScheduledSection(update)
-      // Off means the jobs agents made stop now, visibly paused; turning it on again does not restart them.
-      // A lower limit never pauses or removes a job: it only refuses the next create or change.
+      // `agentJobs` is legacy: on lets every thread add automations without the first ask; off brings the ask back and
+      // stops nothing that exists (a person pauses or deletes those in the inbox). A lower limit never pauses or
+      // removes a job: it only refuses the next create or change.
       return { settings: scheduledSettings(ctx.mms.config) }
     }
     case 'scheduled.extend': {

@@ -34,6 +34,27 @@ afterEach(() => {
 const begin = (jobId: string, key: string, extra: Partial<Parameters<AutomationRuns['begin']>[0]> = {}) =>
   runs.begin({ jobId, jobName: `Job ${jobId}`, occurrenceKey: key, projectId: 'p1', ...extra })
 
+describe('old runs', () => {
+  it('go after 180 days at open, keeping each automation\'s newest and any with an open item', () => {
+    runs.close()
+    const start = Date.parse('2026-01-01T00:00:00Z')
+    const old = new AutomationRuns({ profileHome: home, clock: () => start })
+    for (const key of ['k1', 'k2', 'k3']) {
+      old.begin({ jobId: 'j1', jobName: 'Job j1', occurrenceKey: key })
+      old.finish({ jobId: 'j1', occurrenceKey: key, failed: false })
+    }
+    old.begin({ jobId: 'j2', jobName: 'Job j2', occurrenceKey: 'k1' })
+    old.finish({ jobId: 'j2', occurrenceKey: 'k1', failed: true, error: 'broke' })
+    old.begin({ jobId: 'j2', jobName: 'Job j2', occurrenceKey: 'k2' })
+    old.finish({ jobId: 'j2', occurrenceKey: 'k2', failed: false })
+    old.close()
+    runs = new AutomationRuns({ profileHome: home, clock: () => start + 200 * 24 * 60 * 60_000 })
+    const left = runs.list().runs.map((run) => `${run.jobId}#${run.number}`).sort()
+    expect(left).toEqual(['j1#3', 'j2#1', 'j2#2'])
+    expect(runs.begin({ jobId: 'j1', jobName: 'Job j1', occurrenceKey: 'k4' }).number).toBe(4)
+  })
+})
+
 describe('run_report and the run record', () => {
   it('stores one report per run (a second call replaces it), and a run that ends without one shows No report, never quiet', () => {
     const first = begin('j1', '2026-11-09T09:00:00Z')
@@ -211,6 +232,18 @@ describe('usage', () => {
     expect(inbox.month.byJob.j1!.tokens).toBe(208)
     expect(inbox.month.byJob.j1!.costUsd).toBeCloseTo(0.015)
     expect(inbox.month.label).toMatch(/^API keys · /)
+  })
+
+  it('never gives a person’s turn on a reused thread to a run that waits there, or to one another engine run is doing', () => {
+    begin('j2', 'k2', { threadId: 't2' })
+    runs.update('j2', 'k2', { state: 'paused_usage', until: '2026-11-09T14:00:00Z' })
+    expect(runs.addUsage({ threadId: 't2', runId: 'person-turn' }, { model: 'claude-x', input: 1, output: 1, cacheRead: 0, cacheWrite: 0 })).toBe(false)
+    expect(runs.liveRunFor({ threadId: 't2', runId: 'person-turn' })).toBeUndefined()
+    begin('j3', 'k3', { threadId: 't3' })
+    runs.update('j3', 'k3', { engineRunId: 'engine-3' })
+    expect(runs.liveRunFor({ threadId: 't3', runId: 'person-turn' })).toBeUndefined()
+    expect(runs.addUsage({ threadId: 't3', runId: 'person-turn' }, { model: 'claude-x', input: 1, output: 1, cacheRead: 0, cacheWrite: 0 })).toBe(false)
+    expect(runs.liveRunFor({ threadId: 't3', runId: 'engine-3' })).toMatchObject({ jobId: 'j3' })
   })
 })
 

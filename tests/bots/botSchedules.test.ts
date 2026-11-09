@@ -255,6 +255,15 @@ describe('bot schedules in the shared scheduler', () => {
     await f.bots.remove(botId)
     expect((await f.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
     expect(entry().skip?.reason).toBe('bot_deleted')
+    // Paused once, with why, instead of skipping every occurrence until the purge.
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: 'Its bot was deleted.' })
+  })
+
+  it('pauses a bot\'s schedule once in a profile where bots could not be opened', async () => {
+    await scheduled()
+    f.scheduler.setBotRunner(null)
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: expect.stringMatching(/^Bots could not be opened/) })
   })
 
   it('a run report of a schedule told Only problems is quiet; other rows notify as before', async () => {
