@@ -304,12 +304,12 @@ describe('DeviceSection rendering', () => {
     Object.assign(initial, state)
   }
   const render = () => renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: null }))
-  // The section's heading always has its collapse toggle (a button with a chevron); the picker lives in the body.
+  // The header row starts with the computer's icon; the picker, or the plain name, comes after it.
   const renderBody = () => {
     const html = render()
-    const start = html.indexOf('class="side-card-section-body"')
+    const start = html.indexOf('class="side-card-header-row"')
     expect(start).toBeGreaterThan(-1)
-    return html.slice(start)
+    return html.slice(start).replace(/<svg[^>]*side-card-header-icon[\s\S]*?<\/svg>/, '')
   }
 
   afterEach(() => {
@@ -328,6 +328,39 @@ describe('DeviceSection rendering', () => {
     expect(html).not.toContain('<button')
     expect(html).not.toContain('<svg')
     expect(html).not.toContain('aria-haspopup')
+  })
+
+  it('names the project in one row, leaving this computer to the icon and the tooltip', () => {
+    seed({
+      activeThreadId: 't1',
+      threads: [thread({ startedAt: '2026-01-01T00:00:01Z' })],
+      projects: [{ id: 'p1', name: 'acme-web' }] as never,
+      appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'x', deviceName: 'Mac mini' }
+    })
+    const html = renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: 'p1' }))
+    expect(html).toContain('title="acme-web on Mac mini"')
+    expect(html).toContain('side-card-header-project">acme-web</span>')
+    expect(html).not.toContain('side-card-header-computer')
+    expect(html).not.toContain('side-card-section-name')
+    // Without a project the computer is the name.
+    expect(renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: null }))).toContain('side-card-header-computer">Mac mini</span>')
+    seed({ projects: [] })
+  })
+
+
+  it('tags another computer that is offline or not sharing, and says why under the row', () => {
+    const remote = (patch: Partial<Thread>) => {
+      seed({
+        activeThreadId: 'nod_studio:t1',
+        threads: [thread({ id: 'nod_studio:t1', node: 'nod_studio', startedAt: '2026-01-01T00:00:01Z', ...patch } as Partial<Thread>)],
+        appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'x', deviceName: 'Mac mini' }
+      })
+      return renderToStaticMarkup(createElement(DeviceSection, { threadId: 'nod_studio:t1', projectId: null }))
+    }
+    expect(remote({ offline: true } as Partial<Thread>)).toContain('side-card-header-tag">offline<')
+    const notShared = remote({ notShared: true, offline: true } as Partial<Thread>)
+    expect(notShared).toContain('side-card-header-tag">not sharing<')
+    expect(notShared).toContain('is not sharing its threads with this computer right now.')
   })
 
   it('names the other computer, and offers no editor, for a thread that runs there', () => {

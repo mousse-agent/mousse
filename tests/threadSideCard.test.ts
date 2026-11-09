@@ -276,7 +276,9 @@ describe('thread side card rendering', () => {
     const titles = [...html.matchAll(/side-card-section-name">([^<]+)</g)].map((match) => match[1])
     // Without a project Git starts collapsed under its heading, and without subagents Lineage collapses to one
     // quiet line at the end without a heading.
-    expect(titles).toEqual(['Computer', 'Git', 'Actions'])
+    // The computer is the header row above them, with no heading of its own.
+    expect(titles).toEqual(['Git', 'Actions'])
+    expect(html.indexOf('side-card-header')).toBeLessThan(html.indexOf('>Git<'))
     expect(html).toMatch(/side-card-section-name">Git<\/span><span class="side-card-section-note">No project</)
     expect(html.indexOf('lineage-collapsed')).toBeGreaterThan(html.indexOf('>Actions<'))
     expect(html).toContain('data-thread-id="thread-1"')

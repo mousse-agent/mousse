@@ -335,3 +335,108 @@
   font-size: 12px;
   line-height: 1.4;
 }
+
+/* The card's header: one row with the project and computer, then the editor and file manager as icon buttons.
+   The compact editor control's notes and errors wrap under the row. */
+.side-card-header {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.side-card-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.side-card-header-icon {
+  flex: none;
+  color: var(--ui-faint);
+}
+
+.side-card-header-name,
+.side-card-header-row .side-card-device-button {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The project gives way first: computer names are short, project names may not be. */
+.side-card-header-name {
+  display: flex;
+}
+
+.side-card-header-project {
+  flex: 0 1 auto;
+  min-width: 2ch;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+
+.side-card-header-computer {
+  flex: 0 0 auto;
+  max-width: 70%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.side-card-header-tag {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.side-card-header .side-card-computer-note {
+  margin-top: 4px;
+}
+
+.side-card-open-editor.compact {
+  display: contents;
+}
+
+.side-card-open-editor.compact .side-card-open-editor-group {
+  flex: none;
+  height: 26px;
+  background: transparent;
+}
+
+.side-card-open-editor.compact .side-card-open-editor-main {
+  padding: 0 6px;
+}
+
+.side-card-open-editor.compact .side-card-open-editor-chevron {
+  width: 18px;
+  border-left: 0;
+}
+
+.side-card-open-editor.compact .side-card-open-editor-note,
+.side-card-open-editor.compact .side-card-open-editor-error {
+  flex: 1 0 100%;
+}
+
+.side-card-open-editor-files {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.side-card-open-editor.compact .side-card-open-editor-main:hover:not(.blocked),
+.side-card-open-editor-files:hover {
+  background: var(--ui-hover);
+}
+
+.side-card-open-editor-files:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

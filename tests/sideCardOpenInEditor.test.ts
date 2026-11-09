@@ -256,3 +256,28 @@ describe('OpenInEditorView', () => {
     expect(html).not.toContain('side-card-open-editor-chevron')
   })
 })
+
+describe('OpenInEditorView in the card header (compact)', () => {
+  const render = (props: { editors: EditorInfo[]; lastId: string | null; primary?: { label: string; onClick: () => void } }) =>
+    renderToStaticMarkup(createElement(OpenInEditorView, { path: '/work/app', onOpen: async () => undefined, compact: true, ...props }))
+
+  it('shows the editor as an icon named by its label, with the file manager beside it', () => {
+    const html = render({ editors: [cursor, zed, finder], lastId: 'zed' })
+    expect(html).toContain('side-card-open-editor compact')
+    expect(html).toMatch(/class="side-card-open-editor-main"[^>]*aria-label="Open in Zed"[^>]*title="Open in Zed"/)
+    expect(html).not.toContain('side-card-open-editor-label')
+    expect(html).toMatch(/class="side-card-open-editor-files"[^>]*title="Show in Finder"[^>]*aria-label="Show in Finder"/)
+    expect(html).toContain('aria-label="Choose where to open"')
+  })
+
+  it('has no second file manager button when the file manager is what opens, or when there is none', () => {
+    expect(render({ editors: [finder], lastId: null })).not.toContain('side-card-open-editor-files')
+    expect(render({ editors: [cursor, zed], lastId: null })).not.toContain('side-card-open-editor-files')
+  })
+
+  it('keeps its words when the button asks another computer instead of opening', () => {
+    const html = render({ editors: [cursor, finder], lastId: null, primary: { label: 'Ask Studio to allow', onClick: () => undefined } })
+    expect(html).toContain('Ask Studio to allow')
+    expect(html).not.toContain('side-card-open-editor-files')
+  })
+})
