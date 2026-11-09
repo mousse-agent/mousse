@@ -203,10 +203,12 @@ function savedWindow(value: unknown): RateLimitWindow | null {
 /** The fields of a snapshot Mousse reads, so nothing else Codex reports is written to disk. */
 function savedSnapshot(snapshot: RateLimitSnapshot): RateLimitSnapshot {
   const reached = snapshot.rateLimitReachedType
+  const plan = snapshot.planType
   return {
     primary: savedWindow(snapshot.primary),
     secondary: savedWindow(snapshot.secondary),
-    ...(typeof reached === 'string' || reached === null ? { rateLimitReachedType: reached } : {})
+    ...(typeof reached === 'string' || reached === null ? { rateLimitReachedType: reached } : {}),
+    ...(typeof plan === 'string' && /^[a-z_]{1,32}$/i.test(plan) ? { planType: plan } : {})
   }
 }
 
@@ -1195,6 +1197,11 @@ export class CodexProviderService {
     return this.launchTarget()?.path
   }
 
+  /** The Codex program this service would start (the chosen one, else the one found on PATH). */
+  programPath(): string | undefined {
+    return this.binary()
+  }
+
   standaloneWorkspace(threadId: string): string {
     const directory = join(this.dir, 'workspaces', historyKey(threadId))
     mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -1488,6 +1495,11 @@ export class CodexProviderService {
     const last = this.lastLimits
     const owner = limitsOwner(subject)
     return last && owner && last.account === owner ? { snapshot: last.snapshot, at: last.at } : undefined
+  }
+
+  /** Keeps limits read elsewhere for this entry's account (`subject`), as if Codex had reported them here. */
+  keepRateLimits(snapshot: RateLimitSnapshot, subject: string | undefined): void {
+    this.rememberLimits(snapshot, subject)
   }
 
   /** Keeps the account's latest limits, on disk too, so the usage page has them after a restart. */

@@ -189,6 +189,8 @@ export interface RateLimitSnapshot {
   primary: RateLimitWindow | null
   secondary: RateLimitWindow | null
   rateLimitReachedType?: string | null
+  /** The ChatGPT plan the limits belong to (`plus`, `pro`), when the server says. */
+  planType?: string | null
 }
 export interface RateLimitsReadResponse {
   rateLimits: RateLimitSnapshot

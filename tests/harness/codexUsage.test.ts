@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { USAGE_READ_MS, type Harness } from '../../src/mms/harness/gateway'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import type { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
-import { reportedUsageWindows, usageWindows } from '../../src/mms/harness/vendors/codex/rateLimits'
-import { managedCodexUsage } from '../../src/mms/harness/vendors/codex/managedRuntime'
+import { reportedUsageWindows, snapshotPlan, usageWindows } from '../../src/mms/harness/vendors/codex/rateLimits'
+import { managedCodexUsage, userCodexLimits } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { usageText } from '../../src/mms/providers/usageText'
 import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
@@ -25,6 +25,15 @@ import type { DriverContext } from '../../src/mms/harness/driver'
 
 const device = { kind: 'device' } as const
 const window = (usedPercent: number, windowDurationMins: number | null, resetsAt: number | null) => ({ usedPercent, windowDurationMins, resetsAt })
+
+describe('snapshotPlan', () => {
+  it('names the plan as ChatGPT does, and nothing for an unknown or odd value', () => {
+    expect(['plus', 'pro', 'team', 'edu_plus'].map((planType) => snapshotPlan({ primary: null, secondary: null, planType }))).toEqual(['Plus', 'Pro', 'Team', 'Edu Plus'])
+    expect(snapshotPlan({ primary: null, secondary: null, planType: 'unknown' })).toBeUndefined()
+    expect(snapshotPlan({ primary: null, secondary: null, planType: '<b>x</b>' })).toBeUndefined()
+    expect(snapshotPlan({ primary: null, secondary: null })).toBeUndefined()
+  })
+})
 
 describe('usageWindows', () => {
   it('names the 5-hour and weekly windows and reports what is left', () => {
@@ -77,6 +86,26 @@ describe('a ChatGPT subscription shows the limits Codex reported on its last tur
     expect(managedCodexUsage(false, reported, now)).toEqual({ status: 'unavailable', windows: [], message: 'Sign in with ChatGPT to see limits.', manageUrl: CHATGPT_USAGE_URL })
     expect(managedCodexUsage(true, undefined, now)).toEqual({ status: 'unavailable', windows: [], message: 'Limits show after the next turn.', manageUrl: CHATGPT_USAGE_URL })
     expect(managedCodexUsage(true, { snapshot: { primary: null, secondary: null }, at: now }, now)).toMatchObject({ status: 'unavailable', message: 'No limits reported for this plan.' })
+  })
+})
+
+describe("the plan's limits read now through the user's own Codex CLI", () => {
+  const snapshot = { primary: window(10, 300, null), secondary: null }
+  const cli = (subject: string | undefined, read: () => Promise<{ snapshot: typeof snapshot; at: number; live: boolean }>) =>
+    ({ status: async () => ({}) as never, account: () => (subject ? { subject } : undefined), rateLimits: read })
+
+  it('only for the same ChatGPT account, only a live read, and never a failure', async () => {
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => ({ snapshot, at: 5, live: true })), ' Me@Example.com ')).toEqual({ snapshot, at: 5 })
+    expect(await userCodexLimits(cli('chatgpt:other@example.com', async () => ({ snapshot, at: 5, live: true })), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => ({ snapshot, at: 5, live: false })), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => { throw new Error('offline') }), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli(undefined, async () => ({ snapshot, at: 5, live: true })), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => ({ snapshot, at: 5, live: true })), null)).toBeUndefined()
+    expect(await userCodexLimits(undefined, 'me@example.com')).toBeUndefined()
+  })
+
+  it('a reading made now is shown undated', () => {
+    expect(managedCodexUsage(true, { snapshot, at: 1 }, 2, { live: true })).toEqual({ status: 'available', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 90 }], manageUrl: CHATGPT_USAGE_URL })
   })
 })
 

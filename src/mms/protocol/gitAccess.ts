@@ -158,6 +158,8 @@ export const GIT_ACCESS = {
   'settings.getOptions': 'none',
   'providers.getUsage': 'none',
   'providers.getSubscriptionUsage': 'none',
+  'providers.setUsageProxyKey': 'none',
+  'providers.clearUsageProxyKey': 'none',
   'providers.synthesizeSpeech': 'none',
   'providers.transcribeAudio': 'none',
   'providers.snapshots': 'none',

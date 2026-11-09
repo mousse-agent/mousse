@@ -1,5 +1,5 @@
 import { isIP } from 'node:net'
-import type { ProviderUsage, ProviderUsageWindow } from '../../shared/providerAuth'
+import type { ProviderUsage, ProviderUsageWindow, UsageAccount, UsageProxyKeyResult, UsageProxyState } from '../../shared/providerAuth'
 import { claudeLimitWindows } from '../harness/vendors/claude/usage'
 
 /**
@@ -23,7 +23,8 @@ export const PROXY_READ_TIMEOUT_MS = 5_000
 /** The longest a whole read may take, every sign-in included, whether or not the caller set a limit. */
 export const PROXY_TOTAL_TIMEOUT_MS = 10_000
 const MAX_BODY_BYTES = 256 * 1024
-const MAX_ACCOUNTS = 4
+/** A bound on what one reading lists, far above any real proxy; it never decides which sign-ins show. */
+const MAX_ACCOUNTS = 32
 const DETECT_CACHE_MS = 60_000
 
 export type ProxyFetch = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal; redirect: 'manual' }) => Promise<{ status: number; text(): Promise<string> }>
@@ -137,25 +138,37 @@ export async function detectCliProxy(origin: string, fetchImpl: ProxyFetch, opti
 }
 
 export interface ProxyClaudeAccount {
+  /** The credential's own id in the proxy (else its auth index): the only thing two entries are deduped by. */
+  id: string
   authIndex: string
   label?: string
+  /** `active`: its usage is read; `disabled` in the proxy, or an `api_key` with no plan limits: shown, not read. */
+  state: 'active' | 'disabled' | 'api_key'
 }
 
-/** The proxy's enabled Claude sign-ins from its credential list (`{ files: [...] }`, or a bare list). */
+/**
+ * Every Claude sign-in in the proxy's credential list (`{ files: [...] }`, `{ credentials: [...] }`
+ * or a bare list): active, disabled or an API key, each once by its credential id. None is left out.
+ */
 export function claudeProxyAccounts(value: unknown): ProxyClaudeAccount[] {
   const list = Array.isArray(value) ? value : isRecord(value) ? (value.files ?? value.credentials) : undefined
   if (!Array.isArray(list)) return []
   const accounts: ProxyClaudeAccount[] = []
+  const seen = new Set<string>()
   for (const item of list) {
     if (!isRecord(item)) continue
     const provider = [item.provider, item.type].find((entry): entry is string => typeof entry === 'string')
-    if (!provider || !/^(claude|anthropic)$/i.test(provider.trim())) continue
-    if (item.disabled === true || item.unavailable === true) continue
+    if (!provider || !/^(claude|anthropic|claude[-_](code|oauth))$/i.test(provider.trim())) continue
     const index = item.auth_index ?? item.authIndex
     const authIndex = typeof index === 'number' && Number.isFinite(index) ? String(index) : typeof index === 'string' ? index.trim() : ''
     if (!authIndex || authIndex.length > 128) continue
+    const ownId = typeof item.id === 'string' && item.id.trim() && item.id.length <= 256 ? item.id.trim() : authIndex
+    if (seen.has(ownId)) continue
+    seen.add(ownId)
     const label = [item.email, item.label, item.account].find((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0 && entry.length <= 128)
-    accounts.push({ authIndex, ...(label ? { label: label.trim() } : {}) })
+    const kind = [item.account_type, item.auth_type, item.accountType].find((entry): entry is string => typeof entry === 'string') ?? ''
+    const state = item.disabled === true || item.status === 'disabled' ? 'disabled' : /api[_-]?key/i.test(kind) ? 'api_key' : 'active'
+    accounts.push({ id: ownId, authIndex, state, ...(label ? { label: label.trim() } : {}) })
     if (accounts.length >= MAX_ACCOUNTS) break
   }
   return accounts
@@ -183,13 +196,36 @@ export function proxyClaudeWindows(body: unknown, account: ProxyClaudeAccount, i
   return claudeLimitWindows(body).map((window) => several ? { ...window, id: `${index}:${window.id}`, label: `${window.label} · ${name}` } : window)
 }
 
-export type ProxyUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'source'>
+/**
+ * One sign-in's group on the usage page: its own windows, or why it has none. `upstream` is the
+ * account usage reply the proxy relayed (undefined when the proxy itself did not answer).
+ */
+export function proxyClaudeAccount(account: ProxyClaudeAccount, index: number, upstream: { status: number; body: unknown } | undefined): UsageAccount {
+  const group = { id: account.id, label: account.label ?? `Account ${index + 1}` }
+  if (account.state === 'disabled') return { ...group, windows: [], problem: 'Disabled in proxy' }
+  if (account.state === 'api_key') return { ...group, windows: [], problem: 'API key · no plan limits' }
+  if (!upstream) return { ...group, windows: [], problem: 'Not reachable' }
+  if (upstream.status === 401 || upstream.status === 403) return { ...group, windows: [], problem: 'Sign-in expired' }
+  if (upstream.status === 429) return { ...group, windows: [], problem: 'Rate limited' }
+  if (upstream.status !== 200) return { ...group, windows: [], problem: "Couldn't read limits" }
+  const windows = isRecord(upstream.body) ? claudeLimitWindows(upstream.body) : []
+  return windows.length ? { ...group, windows } : { ...group, windows: [], problem: 'No limits reported' }
+}
+
+export type ProxyUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'source' | 'proxy' | 'accounts'>
+
+/** `host:port` of a proxy origin, as the usage page shows it. */
+export function proxyAddress(origin: string): string {
+  return new URL(origin).host
+}
 
 export interface ProxyUsageOptions {
   /** Claude Code's base URL as it runs (environment and settings). */
   baseUrl: string | undefined
-  /** The management key from Claude's environment, if the user set one. */
+  /** The management key: from Claude's environment, else the one saved in Mousse for this origin. */
   managementKey: string | undefined
+  /** Where `managementKey` came from (default `environment`). */
+  keySource?: 'environment' | 'saved'
   fetch?: ProxyFetch
   signal?: AbortSignal
   timeouts?: { detectMs?: number; readMs?: number; totalMs?: number }
@@ -232,19 +268,28 @@ export async function readLocalProxyClaudeUsage(options: ProxyUsageOptions): Pro
   if (!origin) return undefined
   const fetchImpl = options.fetch ?? cappedFetch
   if (!(await isProxy(origin, options, fetchImpl))) return undefined
-  const unavailable = (message: string = PROXY_LIMITS_UNAVAILABLE): ProxyUsage => ({ status: 'unavailable', windows: [], message, source: LOCAL_PROXY_SOURCE })
   const key = options.managementKey?.trim()
+  const proxy: UsageProxyState = { address: proxyAddress(origin), key: key ? options.keySource ?? 'environment' : 'none' }
+  const unavailable = (message: string = PROXY_LIMITS_UNAVAILABLE, problem?: UsageProxyState['problem']): ProxyUsage =>
+    ({ status: 'unavailable', windows: [], message, source: LOCAL_PROXY_SOURCE, proxy: problem ? { ...proxy, problem } : proxy })
   if (!key) return unavailable(`${PROXY_LIMITS_UNAVAILABLE}. Set ${PROXY_KEY_VARIABLES[0]} to show them.`)
   const deadline = AbortSignal.timeout(options.timeouts?.totalMs ?? PROXY_TOTAL_TIMEOUT_MS)
   const reads: ProxyUsageOptions = { ...options, signal: options.signal ? AbortSignal.any([options.signal, deadline]) : deadline }
   try {
     const listed = await management(fetchImpl, origin, key, ['/credentials', '/auth-files'], { method: 'GET' }, reads)
+    if (listed.status === 401 || listed.status === 403) return unavailable(PROXY_LIMITS_UNAVAILABLE, 'rejected')
     if (listed.status !== 200) return unavailable()
     const accounts = claudeProxyAccounts(listed.body)
     if (!accounts.length) return unavailable()
     const several = accounts.length > 1
     const windows: ProviderUsageWindow[] = []
+    const groups: UsageAccount[] = []
     for (const [index, account] of accounts.entries()) {
+      // A disabled sign-in or an API key has no plan limits to read: it is listed, not asked.
+      if (account.state !== 'active') {
+        groups.push(proxyClaudeAccount(account, index, undefined))
+        continue
+      }
       const call = {
         auth_index: account.authIndex,
         method: 'GET',
@@ -254,10 +299,33 @@ export async function readLocalProxyClaudeUsage(options: ProxyUsageOptions): Pro
       const reply = await management(fetchImpl, origin, key, ['/requests/api-call', '/api-call'], { method: 'POST', body: JSON.stringify(call) }, reads)
       const upstream = reply.status === 200 ? proxyApiCallBody(reply.body) : undefined
       if (upstream?.status === 200) windows.push(...proxyClaudeWindows(upstream.body, account, index, several))
+      groups.push(proxyClaudeAccount(account, index, upstream))
     }
-    return windows.length ? { status: 'available', windows, source: LOCAL_PROXY_SOURCE } : unavailable()
+    // The flat windows (labelled by account when there are several) serve text readers; the page groups by account.
+    if (!windows.length) return several ? { ...unavailable(), accounts: groups } : unavailable()
+    return { status: 'available', windows, source: LOCAL_PROXY_SOURCE, proxy, ...(several ? { accounts: groups } : {}) }
   } catch {
     // A timeout or a dropped connection: the proxy is there but said nothing usable.
-    return unavailable()
+    return unavailable(PROXY_LIMITS_UNAVAILABLE, 'unreachable')
+  }
+}
+
+/**
+ * Whether the proxy Claude Code's base URL points at accepts `key`: one management call, nothing
+ * read beyond its status. Only a local or private CLIProxyAPI is ever sent the key.
+ */
+export async function checkProxyKey(options: { baseUrl: string | undefined; key: string; fetch?: ProxyFetch; signal?: AbortSignal; timeoutMs?: number }): Promise<UsageProxyKeyResult> {
+  const origin = localProxyOrigin(options.baseUrl)
+  const key = options.key.trim()
+  if (!origin || !key) return { ok: false, reason: 'no_proxy' }
+  const fetchImpl = options.fetch ?? cappedFetch
+  const read: ProxyUsageOptions = { baseUrl: options.baseUrl, managementKey: key, ...(options.signal ? { signal: options.signal } : {}), timeouts: { readMs: options.timeoutMs ?? PROXY_READ_TIMEOUT_MS } }
+  try {
+    if (!(await isProxy(origin, read, fetchImpl))) return { ok: false, reason: 'no_proxy' }
+    const { status } = await management(fetchImpl, origin, key, ['/credentials', '/auth-files'], { method: 'GET' }, read)
+    if (status === 200) return { ok: true }
+    return { ok: false, reason: status === 401 || status === 403 ? 'rejected' : 'unreachable' }
+  } catch {
+    return { ok: false, reason: 'unreachable' }
   }
 }

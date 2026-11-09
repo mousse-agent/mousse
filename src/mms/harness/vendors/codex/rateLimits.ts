@@ -24,6 +24,13 @@ function windowLabel(window: RateLimitWindow, slot: 'primary' | 'secondary'): st
   return slot === 'primary' ? 'Usage limit' : 'Secondary usage limit'
 }
 
+/** The plan a snapshot's limits belong to, named as ChatGPT does ("Plus", "Pro"), when Codex says. */
+export function snapshotPlan(snapshot: RateLimitSnapshot | null | undefined): string | undefined {
+  const plan = snapshot?.planType
+  if (typeof plan !== 'string' || !/^[a-z_]{1,32}$/i.test(plan) || plan === 'unknown') return undefined
+  return plan.split('_').map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ')
+}
+
 /** The usage page's windows for a snapshot: what is left of each limit and when it resets. */
 export function usageWindows(snapshot: RateLimitSnapshot | null | undefined): ProviderUsageWindow[] {
   return (['primary', 'secondary'] as const).flatMap((slot) => {

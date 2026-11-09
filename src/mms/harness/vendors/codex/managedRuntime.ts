@@ -9,7 +9,7 @@ import { ChatGptAuth, type ChatGptAuthOptions, type ChatGptStatus } from '../../
 import type { ChatGptModel } from '../../chatgpt/models'
 import type { AuthReading, DriverContext, DriverRuntime, RuntimeUsage } from '../../driver'
 import type { RateLimitSnapshot } from './protocol'
-import { reportedUsageWindows } from './rateLimits'
+import { reportedUsageWindows, snapshotPlan } from './rateLimits'
 import { chatgptTokenBroker, type ChatGptTokenBroker } from './broker'
 import { CodexInstallation } from './installation'
 import { CODEX_MANAGED_VERSION } from './release'
@@ -94,16 +94,43 @@ export function managedAuthReading(status: ChatGptStatus, subject: string | unde
 }
 
 /**
- * A managed entry's usage: the windows of the snapshot Codex last sent during one of the plan's
- * turns (`account/rateLimits/updated`), dated, with ChatGPT's own page beside it.
+ * A managed entry's usage: the windows of a snapshot of the plan's limits, with ChatGPT's own page
+ * beside it. A snapshot read just now (`live`) is undated; one Codex sent on an earlier turn
+ * (`account/rateLimits/updated`) says when.
  */
-export function managedCodexUsage(signedIn: boolean, reported: { snapshot: RateLimitSnapshot; at: number } | undefined, nowMs: number): RuntimeUsage {
+export function managedCodexUsage(signedIn: boolean, reported: { snapshot: RateLimitSnapshot; at: number } | undefined, nowMs: number, options: { live?: boolean } = {}): RuntimeUsage {
   const link = { manageUrl: CHATGPT_USAGE_URL }
   if (!signedIn) return { status: 'unavailable', windows: [], message: 'Sign in with ChatGPT to see limits.', ...link }
   if (!reported) return { status: 'unavailable', windows: [], message: 'Limits show after the next turn.', ...link }
   const windows = reportedUsageWindows(reported.snapshot, nowMs)
   if (!windows.length) return { status: 'unavailable', windows: [], message: 'No limits reported for this plan.', ...link }
-  return { status: 'available', windows, readAt: new Date(reported.at).toISOString(), ...link }
+  const plan = snapshotPlan(reported.snapshot)
+  return { status: 'available', windows, ...(plan ? { plan } : {}), ...(options.live ? {} : { readAt: new Date(reported.at).toISOString() }), ...link }
+}
+
+/** A turn's snapshot younger than this is shown as it is; an older one is read again. */
+export const REPORTED_LIMITS_FRESH_MS = 5 * 60_000
+
+/** The user's own Codex CLI (the profile's built-in Codex service), as far as reading limits goes. */
+export type UserCodexLimits = Pick<CodexProviderService, 'status' | 'account' | 'rateLimits'>
+
+/**
+ * The plan's limits read now through the user's own Codex CLI and its stored sign-in
+ * (`account/rateLimits/read`: Codex asks its own backend; Mousse calls nothing itself), only when
+ * that sign-in is the same ChatGPT account as the managed one (by email). Undefined otherwise or
+ * when the read fails, so another account's limits are never shown here.
+ */
+export async function userCodexLimits(userCodex: UserCodexLimits | undefined, email: string | null | undefined, signal?: AbortSignal): Promise<{ snapshot: RateLimitSnapshot; at: number } | undefined> {
+  const wanted = email?.trim().toLowerCase()
+  if (!userCodex || !wanted) return undefined
+  try {
+    await userCodex.status()
+    if (signal?.aborted || userCodex.account()?.subject !== `chatgpt:${wanted}`) return undefined
+    const read = await userCodex.rateLimits(signal)
+    return read.live ? { snapshot: read.snapshot, at: read.at } : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function modelOption(model: ChatGptModel): LlmModelOption {
@@ -161,6 +188,8 @@ export interface ManagedCodexDependencies {
   service?: ConstructorParameters<typeof CodexProviderService>[2]
   helper?: (endpoint: string, leaseId: string) => CliCommand
   baseUrl?: string
+  /** The user's own Codex CLI, to read the plan's limits when it is signed in to the same account. */
+  userCodex?: () => UserCodexLimits
 }
 
 export function createManagedCodexRuntime(context: DriverContext, deps: ManagedCodexDependencies = {}): DriverRuntime {
@@ -294,11 +323,19 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
       return reading
     },
     identity: async () => auth.identity(),
-    // OpenAI publishes no usage API for ChatGPT plan use and asks apps not to call its web backend:
-    // the meter shows the limits Codex itself reported on the plan's last turn (no request of its own).
-    usage: async () => {
-      const signedIn = auth.status().state === 'signed_in'
-      return managedCodexUsage(signedIn, signedIn ? codex.reportedRateLimits(auth.identity()) : undefined, Date.now())
+    // Mousse calls no ChatGPT backend itself: the limits are the ones Codex reported on the plan's
+    // last turn while fresh, else read now by the user's own Codex CLI for the same account, else
+    // the last snapshot, dated.
+    usage: async (signal) => {
+      const status = auth.status()
+      if (status.state !== 'signed_in') return managedCodexUsage(false, undefined, Date.now())
+      const identity = auth.identity()
+      const reported = codex.reportedRateLimits(identity)
+      if (reported && Date.now() - reported.at < REPORTED_LIMITS_FRESH_MS) return managedCodexUsage(true, reported, Date.now())
+      const live = await userCodexLimits(deps.userCodex?.(), status.email, signal)
+      if (!live) return managedCodexUsage(true, reported, Date.now())
+      codex.keepRateLimits(live.snapshot, identity)
+      return managedCodexUsage(true, live, Date.now(), { live: true })
     },
     refreshModels: async () => void (await codex.refreshModels()),
     signIn: (session, _cwd, method) => auth.signIn(session, method),

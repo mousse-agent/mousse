@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import { userCodexLimitsReader } from '../src/mms/harness/drivers/codex'
 import { LoginSession } from '../src/mms/providers/LoginSession'
 import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 import {
@@ -800,6 +801,33 @@ describe('a usage limit on a Codex turn', () => {
     await chat(service, 'H1 + request')
     expect(server.methods().filter((method) => method === 'thread/start')).toHaveLength(1)
     expect(server.messages.filter((message) => message.method === 'turn/start').map((message) => (message.params as { threadId: string }).threadId)).toEqual(['thr-1', 'thr-1'])
+  })
+})
+
+describe("the managed entry's reader of the user's own Codex CLI", () => {
+  const limits = { primary: { usedPercent: 30, windowDurationMins: 300, resetsAt: 1_900_000_000 }, secondary: { usedPercent: 12, windowDurationMins: 10_080, resetsAt: 1_900_100_000 }, rateLimitReachedType: null }
+
+  it('reads the account and its limits live, whatever the built-in entry says, and keeps its settings in the entry state folder', async () => {
+    // The built-in entry is signed out (or removed) in Mousse: the reader does not ask it.
+    signedOut = true
+    const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { result: { rateLimits: limits } } : chatgpt))
+    const stateDir = join(home, 'harness', 'codex_managed')
+    const reader = userCodexLimitsReader({ profileHome: home, questions, stateDir, instanceId: 'codex:managed' }, () => binary, server.launch)
+    services.push(reader)
+    expect((await reader.status()).state).toBe('connected')
+    expect(reader.account()?.subject).toBe('chatgpt:me@example.com')
+    expect(await reader.rateLimits()).toMatchObject({ live: true, snapshot: { primary: limits.primary, secondary: limits.secondary } })
+    // It reads; it never starts a thread or a turn.
+    expect(server.methods().filter((method) => method.startsWith('thread/') || method.startsWith('turn/'))).toEqual([])
+    expect(readFileSync(join(stateDir, 'user-codex-limits', 'settings.json'), 'utf8')).not.toContain('me@example.com')
+  })
+
+  it('with no Codex program to run, it reads nothing', async () => {
+    const server = scriptedServer(() => chatgpt)
+    const reader = userCodexLimitsReader({ profileHome: home, questions, stateDir: join(home, 'state'), instanceId: 'codex:managed' }, () => undefined, server.launch)
+    services.push(reader)
+    expect((await reader.status()).state).toBe('missing_binary')
+    expect(server.launches).toHaveLength(0)
   })
 })
 

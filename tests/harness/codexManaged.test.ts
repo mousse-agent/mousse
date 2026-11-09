@@ -7,7 +7,7 @@ import { runChatgptToken } from '../../src/cli/fastpath/chatgptToken'
 import { ChatGptAuth } from '../../src/mms/harness/chatgpt/chatgptAuth'
 import { ChatGptTokenBroker } from '../../src/mms/harness/vendors/codex/broker'
 import type { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
-import { createManagedCodexRuntime, MANAGED_MODEL_PROVIDER } from '../../src/mms/harness/vendors/codex/managedRuntime'
+import { createManagedCodexRuntime, MANAGED_MODEL_PROVIDER, type ManagedCodexDependencies } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import type { DriverContext } from '../../src/mms/harness/driver'
 import { decodeCodexConfig } from '../../src/mms/harness/drivers/codex'
 import { instanceEnv } from '../../src/mms/harness/env'
@@ -118,7 +118,7 @@ afterEach(async () => {
   await issuer.stop()
 })
 
-function setup(shared?: { profileHome: string; installationHome: string }, serviceDeps: Record<string, unknown> = {}) {
+function setup(shared?: { profileHome: string; installationHome: string }, serviceDeps: Record<string, unknown> = {}, extra: Pick<ManagedCodexDependencies, 'userCodex'> = {}) {
   const { profileHome, installationHome } = shared ?? homes()
   const instanceId = 'codex:managed'
   const stateDir = join(profileHome, 'harness', 'codex-managed')
@@ -158,6 +158,7 @@ function setup(shared?: { profileHome: string; installationHome: string }, servi
     broker,
     auth: (options) => (auth = new ChatGptAuth({ ...options, endpoints: issuer.endpoints, codec: plainCodec })),
     service: { launch: server.launch, ...serviceDeps },
+    ...extra,
     helper: (endpoint, leaseId) => {
       helpers.push({ endpoint, leaseId })
       return { command: '/opt/mousse-cli', args: ['--cli', 'engine', 'chatgpt-token', endpoint, leaseId], env: { MOUSSE_CLI: '1' } }
@@ -221,6 +222,34 @@ describe('managed Codex: launch', () => {
     })
     expect(server.launches).toHaveLength(0)
     expect(issuer.modelRequests).toHaveLength(requests)
+  })
+
+  it("reads the plan's limits now through the user's own Codex CLI when it is the same ChatGPT account, and never another account's", async () => {
+    const snapshot = { primary: { usedPercent: 30, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, secondary: { usedPercent: 10, windowDurationMins: 10_080, resetsAt: Math.floor(Date.now() / 1000) + 86_400 } }
+    let email = 'A@example.com'
+    const rateLimits = vi.fn(async () => ({ snapshot, at: Date.now(), live: true }))
+    const userCodex = { status: vi.fn(async () => ({}) as never), account: () => ({ subject: `chatgpt:${email.toLowerCase()}` }), rateLimits }
+    const { runtime, auth, server } = setup(undefined, {}, { userCodex: () => userCodex })
+    await signIn(issuer, auth, alice)
+    const usage = await runtime.usage!(new AbortController().signal)
+    expect(usage).toMatchObject({ status: 'available', manageUrl: CHATGPT_USAGE_URL })
+    expect(usage.windows.map((window) => [window.label, window.remainingPercent])).toEqual([['5-hour limit', 70], ['Weekly limit', 90]])
+    expect(usage.readAt).toBeUndefined()
+    // The managed Codex itself is not started for it.
+    expect(server.launches).toHaveLength(0)
+    // Another account in the terminal: its limits are not this entry's. The reading kept a moment ago stands.
+    email = 'someone-else@example.com'
+    rateLimits.mockClear()
+    expect(await runtime.usage!(new AbortController().signal)).toMatchObject({ status: 'available' })
+    expect(rateLimits).not.toHaveBeenCalled()
+  })
+
+  it('without a matching Codex CLI it still says limits come after the next turn', async () => {
+    const userCodex = { status: async () => ({}) as never, account: () => ({ subject: 'chatgpt:other@example.com' }), rateLimits: vi.fn() }
+    const { runtime, auth } = setup(undefined, {}, { userCodex: () => userCodex })
+    await signIn(issuer, auth, alice)
+    expect(await runtime.usage!(new AbortController().signal)).toMatchObject({ status: 'unavailable', message: 'Limits show after the next turn.' })
+    expect(userCodex.rateLimits).not.toHaveBeenCalled()
   })
 
   it('refuses to launch while signed out', async () => {
