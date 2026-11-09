@@ -29,6 +29,30 @@ describe('Go to latest', () => {
     expect(list).toMatch(/"chat-jump absolute left-1\/2 [^"]*-translate-x-1\/2"/)
   })
 
+  it('is a quiet pill: chevron and "Go to latest" in muted text on a subtle fill, no border', () => {
+    const jump = rule(polish, '.chat-jump')
+    expect(jump).toContain('border: 0')
+    expect(jump).toContain('border-radius: 999px')
+    expect(jump).toContain('color: var(--text-secondary)')
+    expect(jump).toMatch(/background: color-mix\(in srgb, var\(--text-primary\) \d+%, var\(--surface-base\)\)/)
+    const hover = rule(polish, '.chat-jump:hover')
+    expect(hover).toContain('color: var(--text-primary)')
+    expect(hover).toMatch(/background: color-mix/)
+    const list = readFileSync(new URL('../../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
+    expect(list).toMatch(/<IconChevronDown className="chat-jump-icon"[^>]*\/>\s*<span>Go to latest<\/span>/)
+  })
+
+  it('stays hidden while the view follows the end, fading out and taking no input', () => {
+    const list = readFileSync(new URL('../../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
+    expect(list).toContain('const showJumpButton = !isPinned && normalizedMessages.length > 0;')
+    expect(list).toContain('data-hidden={showJumpButton ? undefined : "true"}')
+    expect(list).toContain('inert={!showJumpButton}')
+    const hidden = rule(polish, '.chat-jump[data-hidden]')
+    expect(hidden).toContain('opacity: 0')
+    expect(hidden).toContain('pointer-events: none')
+    expect(rule(polish, '.chat-jump')).toMatch(/transition:\s*opacity var\(--ui-dur\)/)
+  })
+
   it('lets the transcript run down to the composer, fading only in the last few px above it', () => {
     const mask = rule(polish, '.chat:not(.chat--empty) .an-message-list')
     // `100% - stack - Npx` from the top is N px above the composer.

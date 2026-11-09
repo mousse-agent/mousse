@@ -65,6 +65,10 @@ html[data-theme='light'] {
   --an-tool-color: var(--text-primary);
   --an-tool-color-muted: var(--text-secondary);
   --an-input-placeholder-color: var(--text-secondary);
+  /* Subtle and muted text are one colour here, so the running shimmer gets its own pair: a light resting
+     grey with a dark band sweeping it (agent-ui.css, thinking-icon.css). */
+  --an-shimmer-base: color-mix(in srgb, var(--text-primary) 48%, var(--surface-base));
+  --an-shimmer-peak: var(--text-primary);
   --syntax-keyword: #cf222e;
   --syntax-string: #0a3069;
   --syntax-number: #0550ae;
@@ -83,6 +87,8 @@ html[data-theme='light'] {
     --an-tool-color: var(--text-primary);
     --an-tool-color-muted: var(--text-secondary);
     --an-input-placeholder-color: var(--text-secondary);
+    --an-shimmer-base: color-mix(in srgb, var(--text-primary) 48%, var(--surface-base));
+    --an-shimmer-peak: var(--text-primary);
     --syntax-keyword: #cf222e;
     --syntax-string: #0a3069;
     --syntax-number: #0550ae;

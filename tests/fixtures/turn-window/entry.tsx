@@ -423,9 +423,9 @@ const qa = {
     return { start, samples, endGap: endGap(), jumpVisible: qa.jumpVisible() }
   },
   frames,
-  jumpVisible: () => Boolean(document.querySelector('[aria-label="Go to latest"]')),
+  jumpVisible: () => Boolean(document.querySelector('.chat-jump:not([data-hidden])')),
   clickJump() {
-    document.querySelector<HTMLButtonElement>('[aria-label="Go to latest"]')!.click()
+    document.querySelector<HTMLButtonElement>('.chat-jump:not([data-hidden])')!.click()
   },
   markerClick(index: number) {
     document.querySelector<HTMLButtonElement>(`[data-prompt-marker-id="u-${index}"]`)!.click()
