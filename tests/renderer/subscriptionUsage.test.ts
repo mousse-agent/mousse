@@ -5,7 +5,7 @@ import type { ProviderUsage, ProvidersUsageResponse } from '../../src/shared/pro
 import { SubscriptionUsageView } from '../../src/renderer/components/SubscriptionUsagePage'
 import { DelayedLoader, LOADER_DELAY_MS } from '../../src/renderer/components/ui/DelayedLoader'
 import { ALL_COMPUTERS, THIS_COMPUTER, usageRows, usageSelection, type ComputerUsage } from '../../src/renderer/lib/subscriptionUsage'
-import { formatCountdown, resetTooltip, summarizeAccounts } from '../../src/renderer/lib/subscriptionUsage'
+import { formatCountdown, nextResetGain, resetsLabel, resetsTooltip, resetTooltip, summarizeAccounts, totalResets } from '../../src/renderer/lib/subscriptionUsage'
 import { activeAccountsLabel } from '../../src/renderer/components/UsageAccountsView'
 import { formatResetLine, orderUsageWindows, remainingNow, remainingPercent, shortUsageNote, usageReadAtLabel, usageReadingTime, usageRedMix } from '../../src/renderer/lib/subscriptionUsage'
 
@@ -44,12 +44,15 @@ describe('a usage window', () => {
     expect([usageRedMix(100), usageRedMix(80), usageRedMix(35), usageRedMix(30), usageRedMix(5), usageRedMix(0)]).toEqual([0, 0, 0, 8, 47, 55])
   })
 
-  it('counts down, not by weekday: 45m, 1h 12m, 3d, 3d 4h', () => {
+  it('counts down, not by weekday: 45m, 1h 12m; from a day on always with hours (1d 0h, 3d 0h, 6d 23h)', () => {
     expect(formatCountdown(45)).toBe('45m')
     expect(formatCountdown(72)).toBe('1h 12m')
-    expect(formatCountdown(3 * 1440)).toBe('3d')
+    expect(formatCountdown(23 * 60 + 59)).toBe('23h 59m')
+    expect(formatCountdown(1440)).toBe('1d 0h')
+    expect(formatCountdown(3 * 1440)).toBe('3d 0h')
+    expect(formatCountdown(3 * 1440 + 59)).toBe('3d 0h')
     expect(formatCountdown(3 * 1440 + 4 * 60 + 20)).toBe('3d 4h')
-    expect(formatCountdown(3 * 1440 + 4 * 60, { short: true })).toBe('3d')
+    expect(formatCountdown(6 * 1440 + 23 * 60 + 59)).toBe('6d 23h')
   })
 
   it('says when it resets as a countdown, with the exact time in the tooltip', () => {
@@ -148,7 +151,7 @@ describe('limits across several accounts', () => {
   ]
 
   it('averages what is left over the active accounts that report each limit, and takes the soonest reset', () => {
-    expect(summarizeAccounts(accounts, now)).toEqual([
+    expect(summarizeAccounts(accounts, now).map(({ gain: _gain, ...summary }) => summary)).toEqual([
       { id: 'five_hour', heading: '5-hour', label: '5-hour · all accounts', accounts: 3, remaining: 67, resetsAt: at(1) },
       { id: 'seven_day', heading: 'Weekly', label: 'Weekly · all accounts', accounts: 3, remaining: 50, resetsAt: at(10) },
       { id: 'model_fable', heading: 'Weekly · Fable', label: 'Weekly · Fable · 2 accounts', accounts: 2, remaining: 30, resetsAt: at(60) }
@@ -163,6 +166,74 @@ describe('limits across several accounts', () => {
 
   it('with every account failing there is nothing to sum', () => {
     expect(summarizeAccounts([accounts[3]!], now)).toEqual([])
+  })
+})
+
+describe('resets available', () => {
+  const now = Date.parse('2026-11-09T12:00:00Z')
+  const chatgpt = (resets: ProviderUsage['resets']): ProviderUsage => ({ id: 'codex:chatgpt-subscription', label: 'ChatGPT subscription', plan: 'Plus', status: 'available', windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 60 }], ...(resets ? { resets } : {}) })
+
+  it('a chip "2 resets" beside the plan, each credit and its expiry in the tooltip', () => {
+    const resets = { available: 2, credits: [{ title: 'Weekly limit reset', type: 'weekly', expiresAt: '2026-11-14T12:00:00Z' }, { title: '5-hour reset', type: 'five_hour', expiresAt: '2026-11-09T14:30:00Z' }] }
+    const html = view({ now, usage: response([chatgpt(resets)]) })
+    expect(text(html)).toContain('ChatGPT subscription Plus 2 resets')
+    expect(resetsTooltip(resets, now)).toBe('Weekly limit reset · weekly · expires in 5d 0h\n5-hour reset · five_hour · expires in 2h 30m')
+  })
+
+  it('nothing at 0 or when absent', () => {
+    expect(view({ now, usage: response([chatgpt({ available: 0 })]) })).not.toContain('usage-resets')
+    expect(view({ now, usage: response([chatgpt(undefined)]) })).not.toContain('usage-resets')
+    expect([resetsLabel({ available: 1 }), resetsLabel({ available: 0 }), resetsLabel(undefined)]).toEqual(['1 reset', undefined, undefined])
+  })
+
+  it('several accounts: a badge after each name that has some, and the total in the header', () => {
+    const accounts = [
+      { id: 'a', label: 'a@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 50 }], resets: { available: 2 } },
+      { id: 'b', label: 'b@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 70 }], resets: { available: 1 } },
+      { id: 'c', label: 'c@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 90 }] }
+    ]
+    expect(totalResets(accounts)).toBe(3)
+    const html = view({ now, usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts }]) })
+    expect(text(html)).toContain('3 resets across accounts')
+    expect(text(html)).toContain('a@example.com 2 resets')
+    expect(html.match(/data-testid="usage-resets"/g)).toHaveLength(2)
+  })
+})
+
+describe('what the next reset gives back', () => {
+  const now = Date.parse('2026-11-09T12:00:00Z')
+  const at = (minutes: number) => new Date(now + minutes * 60_000).toISOString()
+  const entry = (label: string, left: number, minutes?: number) => ({ label, window: { remainingPercent: left, ...(minutes !== undefined ? { resetsAt: at(minutes) } : {}) } })
+
+  it('one account of five resetting: its used share over all five (mitra at 55% → +9%)', () => {
+    const gain = nextResetGain([entry('mitra@example.com', 55, 8 * 60 + 24), entry('b', 70, 3000), entry('c', 80, 4000), entry('d', 60, 5000), entry('e', 90, 6000)], now)
+    expect(gain).toEqual({ percent: 9, at: at(8 * 60 + 24), accounts: [{ label: 'mitra@example.com', at: at(8 * 60 + 24) }] })
+  })
+
+  it('accounts resetting within a minute of each other reset together', () => {
+    const gain = nextResetGain([entry('a', 40, 44), entry('b', 60, 44.5), entry('c', 80, 300)], now)
+    // (60 + 40) / 3 = 33.3 → +33%, from the two that reset together.
+    expect(gain).toMatchObject({ percent: 33, at: at(44) })
+    expect(gain?.accounts.map((account) => account.label)).toEqual(['a', 'b'])
+  })
+
+  it('all resetting together lift the average to 100%', () => {
+    expect(nextResetGain([entry('a', 20, 60), entry('b', 50, 60)], now)?.percent).toBe(65)
+  })
+
+  it('a reset that rounds to 0% is skipped for the next one; with none ahead there is nothing', () => {
+    const gain = nextResetGain([entry('full', 99.6, 30), entry('b', 50, 120), entry('c', 100), entry('d', 100)], now)
+    expect(gain).toMatchObject({ percent: 13, at: at(120) })
+    expect(nextResetGain([entry('a', 100, 30), entry('b', 99.8, 60)], now)).toBeUndefined()
+    expect(nextResetGain([], now)).toBeUndefined()
+  })
+
+  it('the summary says "+24% in 44m", or "no change soon"', () => {
+    const one = (left: number, minutes: number) => ({ id: 'x', label: 'x@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: left, resetsAt: new Date(Date.now() + minutes * 60_000 + 30_000).toISOString() }] })
+    const pair = (lefts: [number, number]) => [{ ...one(lefts[0], 44), id: 'a' }, { ...one(lefts[1], 300), id: 'b' }]
+    const card = (accounts: ProviderUsage['accounts']) => view({ now: Date.now(), usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts }]) })
+    expect(text(card(pair([52, 70])))).toContain('+24% in 44m')
+    expect(text(card(pair([100, 100])))).toContain('no change soon')
   })
 })
 
@@ -203,6 +274,28 @@ describe('several accounts in one card', () => {
     expect(html).not.toContain('data-testid="usage-account"')
     expect(text(html)).not.toContain('me@example.com')
     expect(windows(html)).toEqual(['58', '69', '36'])
+  })
+})
+
+describe('a credit balance (AI Gateway)', () => {
+  const gateway = (patch: Partial<ProviderUsage>): ProviderUsage => ({ id: 'vercel-ai-gateway', label: 'Vercel AI Gateway', status: 'available', windows: [], ...patch })
+
+  it('is a slim row in Other usage: what is left and what was spent, with no bar when there is no limit', () => {
+    const html = view({ usage: response([gateway({ credit: { balanceUsd: 12.4, usedUsd: 37.6 } })]) })
+    expect(text(html)).toContain('Vercel AI Gateway $12.40 left · $37.60 used')
+    expect(html).toContain('data-testid="usage-other-row"')
+    expect(html).not.toContain('role="meter"')
+  })
+
+  it('draws a mini bar against a known limit', () => {
+    const html = view({ usage: response([gateway({ credit: { balanceUsd: 25, usedUsd: 75, limitUsd: 100 } })]) })
+    expect(html).toMatch(/role="meter"[^>]*aria-valuenow="25"/)
+  })
+
+  it('a rejected key or an unreachable gateway goes to Needs attention', () => {
+    const html = view({ usage: response([gateway({ status: 'error', message: 'Key rejected', problem: 'key_rejected' })]) })
+    expect(text(html)).toContain('Needs attention · 1')
+    expect(html).toContain('data-testid="usage-attention-chip"')
   })
 })
 

@@ -1,4 +1,4 @@
-import type { ProviderUsage, ProviderUsageWindow, UsageAccount } from '../../shared/providerAuth'
+import type { ProviderUsage, ProviderUsageWindow, UsageAccount, UsageResets } from '../../shared/providerAuth'
 
 /**
  * The share of a window that is left, as the provider reported it: a whole percent from 0 to 100,
@@ -48,14 +48,14 @@ export function orderUsageWindows<T extends Pick<ProviderUsageWindow, 'id'>>(win
 }
 
 /**
- * Time left as a countdown: "45m" or "1h 12m" under a day; "3d 4h" from a day on, or "3d" when the
- * hours are none or there is no room (`short`).
+ * Time left as a countdown: "45m" or "1h 12m" under a day; from a day on, days and hours always
+ * ("1d 0h", "3d 4h", "6d 23h"), never days alone.
  */
-export function formatCountdown(totalMinutes: number, options: { short?: boolean } = {}): string {
+export function formatCountdown(totalMinutes: number): string {
   const minutes = Math.max(0, Math.floor(totalMinutes))
   const days = Math.floor(minutes / 1440)
   const hours = Math.floor((minutes % 1440) / 60)
-  if (days > 0) return hours && !options.short ? `${days}d ${hours}h` : `${days}d`
+  if (days > 0) return `${days}d ${hours}h`
   if (hours > 0) return `${hours}h ${minutes % 60}m`
   return `${minutes}m`
 }
@@ -103,6 +103,41 @@ export interface UsageLimitSummary {
   remaining?: number
   /** The soonest reset still ahead among them. */
   resetsAt?: string
+  /** What the next reset that changes anything gives back to the pooled share left. */
+  gain?: UsageResetGain
+}
+
+/** A reset's effect on the pooled share left: the accounts that reset then, and how much they add. */
+export interface UsageResetGain {
+  /** Percentage points the average gains, a whole number above 0. */
+  percent: number
+  /** When they reset (the earliest of the group). */
+  at: string
+  /** The accounts that reset then, each to 100% left. */
+  accounts: Array<{ label: string; at: string }>
+}
+
+/** Resets this close together count as one moment. */
+const RESET_GROUP_MS = 60_000
+
+/**
+ * What the soonest reset gives back across the accounts reporting a limit: at that moment every
+ * account resetting then goes to 100% left, so the average left rises by the sum of their used shares
+ * over all the accounts. A reset that would add nothing (it rounds to 0%) is skipped for the next one.
+ */
+export function nextResetGain(entries: ReadonlyArray<{ label: string; window: Pick<ProviderUsageWindow, 'remainingPercent' | 'resetsAt'> }>, now: number): UsageResetGain | undefined {
+  const known = entries.map((entry) => ({ ...entry, left: remainingNow(entry.window, now), at: entry.window.resetsAt ? Date.parse(entry.window.resetsAt) : Number.NaN }))
+  const total = known.length
+  if (!total) return undefined
+  const ahead = known.filter((entry) => entry.left !== undefined && Number.isFinite(entry.at) && entry.at > now).sort((a, b) => a.at - b.at)
+  for (let index = 0; index < ahead.length;) {
+    const start = ahead[index]!.at
+    const group = ahead.filter((entry) => entry.at >= start && entry.at - start <= RESET_GROUP_MS)
+    index += group.length
+    const percent = Math.round(group.reduce((sum, entry) => sum + (100 - entry.left!), 0) / total)
+    if (percent > 0) return { percent, at: new Date(start).toISOString(), accounts: group.map((entry) => ({ label: entry.label, at: new Date(entry.at).toISOString() })) }
+  }
+  return undefined
 }
 
 function limitHeading(window: Pick<ProviderUsageWindow, 'id' | 'label'>): string {
@@ -127,13 +162,15 @@ export function summarizeAccounts(accounts: readonly UsageAccount[], now: number
       .sort((a, b) => Date.parse(a) - Date.parse(b))
     const heading = limitHeading(first)
     const count = reporting.length
+    const gain = nextResetGain(active.flatMap((account) => account.windows.filter((window) => window.id === first.id).map((window) => ({ label: account.label, window }))), now)
     return {
       id: first.id,
       heading,
       label: `${heading} · ${count === active.length ? 'all accounts' : `${count} account${count === 1 ? '' : 's'}`}`,
       accounts: count,
       ...(lefts.length ? { remaining: Math.round(lefts.reduce((sum, left) => sum + left, 0) / lefts.length) } : {}),
-      ...(resets[0] ? { resetsAt: resets[0] } : {})
+      ...(resets[0] ? { resetsAt: resets[0] } : {}),
+      ...(gain ? { gain } : {})
     }
   })
 }
@@ -143,6 +180,32 @@ export function accountHue(id: string): number {
   let hash = 0
   for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
   return hash % 360
+}
+
+/** "2 resets", "1 reset"; undefined at none, so nothing is shown. */
+export function resetsLabel(resets: Pick<UsageResets, 'available'> | undefined): string | undefined {
+  if (!resets || !Number.isInteger(resets.available) || resets.available <= 0) return undefined
+  return `${resets.available} reset${resets.available === 1 ? '' : 's'}`
+}
+
+/** The chip's tooltip: one line per credit, "<title> · <type> · expires in 5d", from what the provider says. */
+export function resetsTooltip(resets: UsageResets, now: number): string | undefined {
+  const lines = (resets.credits ?? []).map((credit) => {
+    const at = credit.expiresAt ? Date.parse(credit.expiresAt) : Number.NaN
+    const expiry = Number.isNaN(at) ? undefined : at <= now ? 'expired' : `expires in ${formatCountdown(Math.floor((at - now) / 60_000))}`
+    return [credit.title, credit.type, expiry].filter(Boolean).join(' · ')
+  }).filter(Boolean)
+  return lines.length ? lines.join('\n') : undefined
+}
+
+/** The resets of several accounts together, for "3 resets across accounts". */
+export function totalResets(accounts: ReadonlyArray<{ resets?: UsageResets }>): number {
+  return accounts.reduce((sum, account) => sum + (account.resets && Number.isInteger(account.resets.available) && account.resets.available > 0 ? account.resets.available : 0), 0)
+}
+
+/** A USD amount as the page shows it: "$12.40", "$1,250.00". */
+export function formatUsd(amount: number): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)
 }
 
 /** The clock time of a reading, for "Showing usage from 14:05". */

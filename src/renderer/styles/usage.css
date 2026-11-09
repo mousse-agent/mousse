@@ -380,6 +380,12 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   font-variant-numeric: tabular-nums;
 }
 
+/* What the next reset gives back: the gain in the foreground, softly green; the rest muted. */
+.usage-summary-gain {
+  color: color-mix(in srgb, var(--success, var(--text-primary)) 55%, var(--text-primary));
+  font-weight: 500;
+}
+
 .usage-summary-value {
   font-size: 20px;
   font-weight: 600;
@@ -467,9 +473,10 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 
 .usage-table-cell-top {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--space-8);
+  gap: 0 var(--space-6, 6px);
   font-variant-numeric: tabular-nums;
 }
 
@@ -479,6 +486,7 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 
 .usage-table-cell-reset {
   font-size: 11px;
+  letter-spacing: -0.01em;
   white-space: nowrap;
 }
 
@@ -515,4 +523,279 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   .usage-table {
     gap: var(--space-12);
   }
+}
+
+/* Limit resets available: a small muted chip, a background, no border. */
+.usage-resets-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-6, 6px);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-table-account .usage-resets-chip {
+  margin-left: var(--space-4);
+}
+
+/* Other usage and Needs attention: compact lists under one header row each; a background, no border. */
+.usage-section {
+  margin-top: var(--space-16);
+  border-radius: var(--ui-card-radius);
+  background: var(--settings-surface);
+}
+
+.usage-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6, 6px);
+  width: 100%;
+  padding: var(--space-8) var(--space-12);
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--settings-fs-small);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.usage-section-head:hover {
+  background: var(--ui-hover);
+}
+
+/* No ring: a click leaves nothing behind, and the keyboard's focus is the same soft highlight as hover. */
+.usage-section-head:focus {
+  outline: none;
+}
+
+.usage-section-head:focus-visible {
+  outline: none;
+  background: var(--ui-hover);
+}
+
+/* The chevron turns with the list: Collapse's open and close durations and easings. */
+.usage-section-chevron {
+  margin-left: auto;
+  color: var(--text-secondary);
+  transition: transform calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease-close);
+}
+
+.usage-section[data-open='true'] .usage-section-chevron {
+  transform: rotate(180deg);
+  transition: transform calc(160ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
+}
+
+/* A row's place in its list: a one-cell grid whose row grows from 0fr when a provider joins a list that is
+   already open (`is-new`, set once at mount, so it never plays again). */
+.usage-row-slot {
+  display: grid;
+  grid-template-rows: 1fr;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.usage-row-slot.is-new {
+  animation: usage-row-grow calc(160ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease) both;
+}
+
+.usage-row-slot-clip {
+  min-width: 0;
+  min-height: 0;
+  overflow: clip;
+  overflow-clip-margin: 4px;
+}
+
+@keyframes usage-row-grow {
+  from { grid-template-rows: 0fr; opacity: 0; }
+}
+
+/* A row's own content fades in once, when it takes the place of its skeleton; the slot does not move. */
+.usage-row-slot-clip.is-filled {
+  animation: usage-row-fade calc(160ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease) both;
+}
+
+@keyframes usage-row-fade {
+  from { opacity: 0; }
+}
+
+[data-motion='off'] .usage-row-slot,
+[data-motion='off'] .usage-row-slot-clip,
+[data-motion='off'] .usage-section-chevron {
+  animation: none;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-row-slot,
+  .usage-row-slot-clip,
+  .usage-section-chevron {
+    animation: none;
+    transition: none;
+  }
+}
+
+.usage-section-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--space-12) var(--space-8);
+}
+
+.usage-slim-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  min-height: 30px;
+  font-size: var(--settings-fs-small);
+}
+
+.usage-slim-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-slim-figure {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-8);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-slim-bar {
+  width: 64px;
+}
+
+/* Needs attention reads quieter than the rest, the whole card at one strength whatever the pointer or the
+   motion is doing. */
+.usage-section.is-dimmed {
+  opacity: 0.6;
+}
+
+.usage-attention-row.is-faint {
+  opacity: 0.75;
+}
+
+/* The header chip that leads to Needs attention: muted, a background, no border. */
+.usage-attention-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.usage-attention-chip:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* Placeholders while a provider's usage is on the way: the size of what replaces them, so nothing jumps. */
+.usage-skeleton {
+  display: inline-block;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  animation: usage-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.usage-skeleton-label { width: 96px; height: 10px; }
+.usage-skeleton-value { width: 48px; height: 10px; }
+.usage-skeleton-big { width: 72px; height: 18px; }
+.usage-skeleton-bar { width: 100%; height: 8px; }
+.usage-skeleton-cellbar { width: 100%; height: 5px; }
+.usage-skeleton-reset { width: 120px; height: 9px; }
+.usage-skeleton-figure { width: 110px; height: 10px; }
+
+@keyframes usage-skeleton-pulse {
+  50% { opacity: 0.45; }
+}
+
+/* A provider settling into its section fades in rather than jumping. */
+.usage-enter {
+  animation: usage-enter calc(180ms * var(--ui-motion-scale, 1)) ease-out both;
+}
+
+@keyframes usage-enter {
+  from { opacity: 0; transform: translateY(2px); }
+}
+
+[data-motion='off'] .usage-enter,
+[data-motion='off'] .usage-skeleton {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-enter,
+  .usage-skeleton {
+    animation: none;
+  }
+}
+
+/* A row's "…": there on hover or focus, and while its menu is open. */
+.usage-row-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--ui-dur-fast, 120ms) ease;
+}
+
+.usage-slim-row:hover .usage-row-menu-btn,
+.usage-slim-row:focus-within .usage-row-menu-btn,
+.usage-row-menu-btn[aria-expanded='true'] {
+  opacity: 1;
+}
+
+.usage-row-menu-btn:hover,
+.usage-row-menu-btn:focus-visible,
+.usage-row-menu-btn[aria-expanded='true'] {
+  outline: none;
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* As wide as its items, not the composer menu's 280px, so it covers little of the rows around it. */
+.composer-workspace-menu.usage-row-menu {
+  width: max-content;
+  min-width: 160px;
+  padding: 4px;
+}
+
+/* Hidden rows, shown on request: dimmed. */
+.usage-row-slot.is-hidden {
+  opacity: 0.5;
+}
+
+.usage-hidden-footer {
+  margin: var(--space-12) 0 0;
+  font-size: var(--settings-fs-small);
+  text-align: center;
 }
