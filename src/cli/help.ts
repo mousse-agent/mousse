@@ -21,6 +21,7 @@ Usage:
   mousse-cli engine fsck                     Check Run Engine state for inconsistencies
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
+  mousse-cli storage export-json             Write threads back as JSON before a downgrade
   mousse-cli relay serve                    Run a self-hosted relay in the foreground
   mousse-cli net <subcommand>               Network identity, transports and recovery
   mousse-cli bridge <subcommand>            Link and control my devices
@@ -200,6 +201,14 @@ export const CONFIG_HELP = `Usage:
   mousse-cli config providers [--provider <id>] [--model <id>] [--api-key <key>]
 `
 
+export const STORAGE_HELP = `Usage:
+  mousse-cli storage export-json [--thread <id>]
+                                      Write threads kept in thread.db back as the JSON
+                                      files older versions read. Run it before going
+                                      back to an older version; the database is kept
+                                      beside the files.
+`
+
 export const SERVICE_HELP = `Usage:
   mousse-cli service run              Run MMS in the foreground (headless)
   mousse-cli service start            Spawn detached service run (pidfile)
@@ -240,6 +249,8 @@ export function commandHelp(command: string): string | null {
       return ENGINE_HELP
     case 'config':
       return CONFIG_HELP
+    case 'storage':
+      return STORAGE_HELP
     case 'service':
       return SERVICE_HELP
     case 'relay':

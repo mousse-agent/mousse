@@ -9,6 +9,7 @@ import type { Project, Thread } from '../../shared/types'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { measureTree, skipKey, type Measurement } from './diskMeasure'
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
+import { readThreadRecord, threadRecordPath } from '../data/threadRecords'
 
 const SCAN_BUDGET_MS = 20_000
 const SCAN_ENTRY_BUDGET = 1_000_000
@@ -646,7 +647,8 @@ export class StorageUsageService {
       const paths = [text(object(await readJson(join(record.location, 'workspace.json')))?.worktreePath)]
       owed += 2
       for (const name of ['agents.json', 'mousse-agent-sessions.json']) {
-        const rows = await readJson(join(record.location, name))
+        const recordPath = threadRecordPath(record.location, name)
+        const rows = recordPath.includes('thread.db#') ? await readThreadRecord(recordPath).catch(() => undefined) : await readJson(recordPath)
         owed += 2
         if (Array.isArray(rows)) for (const row of rows.slice(0, 500)) paths.push(text(object(row)?.worktreePath))
       }

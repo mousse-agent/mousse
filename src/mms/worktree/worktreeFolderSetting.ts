@@ -4,6 +4,7 @@ import type { WorktreeFolderEntry } from '../../shared/settings'
 import type { WorktreeFolderStatus } from '../../shared/storage'
 import type { SettingsStore } from '../settings/SettingsStore'
 import { checkWorktreeFolder, folderConnected, setWorktreeFolders, worktreeFolderStillNeeded } from './worktreeLayout'
+import { readThreadRecord, threadRecordPath } from '../data/threadRecords'
 
 /** What Settings → Storage shows of the worktree folder. Each folder is looked at once its volume answers, never waited on. */
 export async function worktreeFolderStatus(settings: SettingsStore, home: string): Promise<WorktreeFolderStatus> {
@@ -49,7 +50,8 @@ export async function recordedWorktreePaths(store: { list(): Array<{ location: s
     const workspace = await read(join(record.location, 'workspace.json')) as { worktreePath?: unknown } | undefined
     add(workspace?.worktreePath)
     for (const name of ['agents.json', 'mousse-agent-sessions.json']) {
-      const rows = await read(join(record.location, name))
+      const recordPath = threadRecordPath(record.location, name)
+      const rows = recordPath.includes('thread.db#') ? await readThreadRecord(recordPath).catch(() => undefined) : await read(recordPath)
       if (Array.isArray(rows)) for (const row of rows) add((row as { worktreePath?: unknown } | null)?.worktreePath)
     }
     const episodes = await read(join(record.location, 'agent-episodes.json')) as { episodes?: Array<{ binding?: { worktreePath?: unknown } }> } | undefined

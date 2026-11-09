@@ -764,7 +764,7 @@ export class StorageCleanupService {
 
   private async activityAt(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata, head: string): Promise<number> {
     const times: number[] = [Date.parse(this.deps.threads.getThread(record.taskId)?.createdAt ?? record.createdAt)]
-    for (const name of ['messages.json', 'workspace.json']) {
+    for (const name of ['messages.json', 'workspace.json', 'thread.db', 'thread.db-wal']) {
       try { times.push(statSync(join(record.location, name)).mtimeMs) } catch { /* No such file: it contributes nothing. */ }
     }
     const journal = new ThreadJournal(record.location, { readOnly: true }).list()

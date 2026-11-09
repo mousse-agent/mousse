@@ -10,6 +10,8 @@ export interface MousseFeatureFlags {
   conversationBranches: boolean
   codeRevertRedo: boolean
   threadTrashGc: boolean
+  /** Threads kept in one SQLite database per thread (`docs/thread-storage.md`). */
+  sqliteThreadStore: boolean
 }
 
 export const DEFAULT_FEATURE_FLAGS: MousseFeatureFlags = {
@@ -23,7 +25,8 @@ export const DEFAULT_FEATURE_FLAGS: MousseFeatureFlags = {
   latestTurnUndo: false,
   conversationBranches: false,
   codeRevertRedo: false,
-  threadTrashGc: false
+  threadTrashGc: false,
+  sqliteThreadStore: false
 }
 
 const PREDECESSORS: Array<[keyof MousseFeatureFlags, keyof MousseFeatureFlags]> = [

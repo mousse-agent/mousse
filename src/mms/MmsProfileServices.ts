@@ -473,6 +473,7 @@ export class MmsProfileServices {
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
     })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
+    this.threads.setSqliteStoreEnabled(this.config.get().features.sqliteThreadStore)
     this.applets = new AppletStore(homeDir, id => this.threads.getThreadDir(id))
     this.projects.setThreadStore(this.threads)
     this.platform = new MmsProfilePlatform(this)
@@ -1118,7 +1119,7 @@ export class MmsProfileServices {
           try { this.personalBots?.afterTrash(this.lifecycleOwnedTasks(record.taskId).map((task) => task.taskId)) } catch (error) { console.warn('bot activations could not be ended after the trash', { error: error instanceof Error ? error.message : String(error) }) }
         }
       },
-      quiesceDisk: () => this.storageUsage.pause(),
+      quiesceDisk: () => { this.threads.quiesceAllThreadStorage(); return this.storageUsage.pause() },
       beforePurgeRemoval: async (record) => {
         // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
         // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
@@ -1214,7 +1215,7 @@ export class MmsProfileServices {
       browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
       // A run that freed space has made the cached numbers wrong.
       onRunComplete: (report) => { if (report.counts.removed > 0) this.storageUsage.rescanSoon() },
-      quiesceDisk: () => this.storageUsage.pause()
+      quiesceDisk: () => { this.threads.quiesceAllThreadStorage(); return this.storageUsage.pause() }
     })
     this.storageUsage = new StorageUsageService({
       store: this.threads.lifecycleStore,
@@ -2245,7 +2246,8 @@ export class MmsProfileServices {
       ['personal bots close', () => this.personalBots?.close()],
       ['bots database close', () => this.botStore?.close()],
       ['automations database close', () => this.automationRuns?.close()],
-      ['run engine database close', () => this.runEngine.store.db.close()]
+      ['run engine database close', () => this.runEngine.store.db.close()],
+      ['thread databases close', () => this.threads.closeThreadStorage()]
     ]
     for (const [what, close] of closes) {
       try {

@@ -2041,6 +2041,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const thread = ctx.mms.threads.getThread(threadId)
       if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      // A thread kept in thread.db is read off the event loop first, so loading its session below finds it in memory.
+      await ctx.mms.threads.warmThread(threadId)
       const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
       const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
       // `transcript: false` is a routed reader that already holds the messages and the queue on its stream.
@@ -2080,6 +2082,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const before = asString(p.before, 'before', 256)
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: MESSAGES_PAGE_MAX }) ?? MESSAGES_PAGE_DEFAULT
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      await ctx.mms.threads.warmThread(threadId)
       const page = messagesBefore(ctx.mms.orchestrator.getMessages(threadId), before, limit, ROUTED_MESSAGES_PAGE_BYTES)
       if (!page) throw new DomainRpcError('message_not_found', 'That message is not in this thread.', { threadId, before })
       // Images are loaded one at a time when they are shown (`thread.messageImage`).
@@ -4852,6 +4855,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { report: ctx.mms.storageCleanup.lastReport() }
     // Totals by project, thread and kind, from the cache (a scan only on `refresh` or the first call). Ids and names, never a path.
     // A remote caller's params are validated to `{}`, so only a local client can force a rescan.
+    case 'storage.exportThreadJson': {
+      // Before going back to a build without thread.db: each thread's data is written back as its JSON files.
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Exporting threads is only available on this computer.')
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asOptionalString(p.threadId, 256)
+      const ids = threadId ? [threadId] : ctx.mms.threads.listAllThreads().map((thread) => thread.id)
+      if (threadId && !ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const results: Array<{ threadId: string; exported: boolean; error?: string }> = []
+      for (const id of ids) {
+        try {
+          results.push({ threadId: id, exported: ctx.mms.threads.exportThreadToJson(id).exported })
+        } catch (error) {
+          results.push({ threadId: id, exported: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      return { results }
+    }
     case 'storage.usage': {
       const p = isObject(params) ? params : {}
       const usage = await ctx.mms.storageUsage.measure({ refresh: asOptionalBoolean(p.refresh, 'refresh') === true })

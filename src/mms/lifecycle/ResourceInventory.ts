@@ -13,6 +13,7 @@ import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
+import { readThreadRecordSync, threadRecordFile, threadRecordPath } from '../data/threadRecords'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -272,14 +273,25 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
     seenPaths.add(path)
     const id = digest(path)
     try {
+      const file = threadRecordFile(path)
       let stat: ReturnType<typeof lstatSync>
-      try { stat = lstatSync(path) }
+      try { stat = lstatSync(file) }
       catch (error) { if (!required && (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
       // Read records only. Symlinked/malformed sources never become ownership authority.
-      if (!relative(store.profileHome, path).startsWith('..')) assertLifecyclePath(store.profileHome, path)
-      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error('Source is not a bounded regular record')
-      const raw = readFileSync(path, 'utf8')
-      const data: unknown = JSON.parse(raw)
+      if (!relative(store.profileHome, file).startsWith('..')) assertLifecyclePath(store.profileHome, file)
+      const inDatabase = file !== path
+      if (stat.isSymbolicLink() || !stat.isFile() || (!inDatabase && stat.size > 32 * 1024 * 1024)) throw new Error('Source is not a bounded regular record')
+      let raw: string
+      let data: unknown
+      if (inDatabase) {
+        const record = readThreadRecordSync(path)
+        if (!record) { if (!required) return undefined; throw new Error('Record is missing') }
+        raw = record.raw
+        data = record.data
+      } else {
+        raw = readFileSync(path, 'utf8')
+        data = JSON.parse(raw)
+      }
       const value: ResourceSource = { id, path, digest: digest(raw), status: 'verified' }
       result.sources.push(value)
       return { source: value, data }
@@ -382,7 +394,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
       if (['conflicted', 'recovery_required', 'provisioning'].includes(String(value?.lifecycle))) resource('worktree', text(value?.worktreePath), workspace.source.id, value?.lifecycle === 'conflicted' ? 'conflict' : 'recovery', 'Workspace operation has not settled', task.taskId, repositoryId)
     }
     for (const name of ['agents.json', 'mousse-agent-sessions.json']) {
-      const found = source(join(task.location, name))
+      const found = source(threadRecordPath(task.location, name))
       if (!found) continue
       if (!Array.isArray(found.data)) { result.blockers.push(`Invalid ${name} collection`); continue }
       for (const agent of recordRows(found.data, name)) {
@@ -493,7 +505,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
     // lists the refs themselves.
     for (const entry of latest.values()) if (!settlesItself(String(entry.data.operationType)) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
     // Attachments are retained associations. No blob is unlinked in this phase.
-    const messages = source(join(task.location, 'messages.json'))
+    const messages = source(threadRecordPath(task.location, 'messages.json'))
     if (messages) {
       const walk = (value: unknown, depth = 0): void => {
         if (depth > 40) { result.blockers.push('Attachment graph exceeds supported nesting'); return }

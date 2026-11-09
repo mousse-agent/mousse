@@ -34,6 +34,7 @@ import { restoreCommands, restoreShell, type RestoreKind, type RestoreShell } fr
 import { retentionWindowText } from '../../shared/undoRetention'
 import { gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type DeletePlace, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
+import { readThreadRecordSync, threadRecordFile, threadRecordFolder, threadRecordName } from '../data/threadRecords'
 
 /** The lifecycle Git helpers, also reachable from here for existing callers. */
 export { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
@@ -419,7 +420,7 @@ export class WorktreeRetirementService {
    */
   ownedBranch(sourcePath: string, worktreePath: string): string | undefined {
     try {
-      const value: unknown = JSON.parse(readFileSync(sourcePath, 'utf8'))
+      const value: unknown = readThreadRecordSync(sourcePath)?.data
       const record = (row: unknown): row is { worktreePath: string; branch: string } => Boolean(row) && typeof row === 'object' && (row as { worktreePath?: unknown }).worktreePath === worktreePath && typeof (row as { branch?: unknown }).branch === 'string'
       const episodes = value && typeof value === 'object' && Array.isArray((value as { episodes?: unknown }).episodes) ? (value as { episodes: Array<{ binding?: unknown }> }).episodes.map((episode) => episode.binding) : []
       return [...(Array.isArray(value) ? value : [value]), ...episodes].find(record)?.branch
@@ -1677,9 +1678,11 @@ export class WorktreeRetirementService {
     let sourcePath = input.sourcePath
     for (const location of task.locations) { const rel = relative(location, sourcePath); if (rel && !rel.startsWith('..') && !isAbsolute(rel)) { sourcePath = join(task.location, rel); break } }
     const insideTask = !relative(task.location, sourcePath).startsWith('..') && !isAbsolute(relative(task.location, sourcePath))
-    if (insideTask) assertLifecyclePath(task.location, sourcePath)
-    else assertLifecyclePath(this.store.profileHome, sourcePath)
-    const value: unknown = JSON.parse(readFileSync(sourcePath, 'utf8'))
+    if (insideTask) assertLifecyclePath(task.location, threadRecordFile(sourcePath))
+    else assertLifecyclePath(this.store.profileHome, threadRecordFile(sourcePath))
+    const record = readThreadRecordSync(sourcePath)
+    if (!record) throw new Error('Workspace owner source is missing')
+    const value: unknown = record.data
     if (!input.repositoryId || !/^[a-f0-9]{32}$/.test(input.repositoryId)) throw new Error('Workspace source requires verified repository identity')
     const installationHome = basename(dirname(this.store.profileHome)) === 'profiles' ? dirname(dirname(this.store.profileHome)) : this.store.profileHome
     const owns = (row: Record<string, unknown>): boolean => row.worktreePath === input.worktreePath && row.branch === input.branch
@@ -1725,7 +1728,7 @@ export class WorktreeRetirementService {
       owned = Boolean(episode && WorktreeIdentity.forAgent(installationHome, episode.id) && isAgentWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId, agentId: episode.id }))
       baseSha = episode?.binding.baseSha
       resultSha = episode?.result?.resultSha
-    } else if (insideTask && dirname(sourcePath) === task.location && ['agents.json', 'mousse-agent-sessions.json'].includes(basename(sourcePath)) && Array.isArray(value)) {
+    } else if (insideTask && threadRecordFolder(sourcePath) === task.location && ['agents.json', 'mousse-agent-sessions.json'].includes(threadRecordName(sourcePath)) && Array.isArray(value)) {
       owned = value.some((row) => row && typeof row === 'object' && owns(row) && typeof (row.agentId ?? row.id) === 'string' && input.branch === `mousse/agent/${row.agentId ?? row.id}` && WorktreeIdentity.forAgent(installationHome, row.agentId ?? row.id) && isAgentWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId!, agentId: String(row.agentId ?? row.id) }))
     } else if (!insideTask && dirname(sourcePath) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces') && value && typeof value === 'object' && !Array.isArray(value)) {
       const row = value as Record<string, unknown>

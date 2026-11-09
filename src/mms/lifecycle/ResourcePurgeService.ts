@@ -24,6 +24,7 @@ import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { isKeptFilesItem, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
+import { threadRecordName } from '../data/threadRecords'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
@@ -405,7 +406,7 @@ export class ResourcePurgeService {
         let manifest = existsSync(manifestPath) ? this.retirement.load(manifestPath) : undefined
         if (await present(resource.identity)) {
           const sources = inventory.sources.filter((source) => resource.sourceIds.includes(source.id))
-          const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
+          const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(threadRecordName(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
           const current = await readInCheckout(resource.identity, ['branch', '--show-current'])
           // The owner's record names the branch; the checkout may be on another one the agent switched to.
