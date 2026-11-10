@@ -304,7 +304,8 @@ CREATE TABLE bot_work_notes(
   bot_id TEXT NOT NULL,
   text TEXT NOT NULL,
   at TEXT NOT NULL,
-  applied_at TEXT
+  applied_at TEXT,
+  from_message TEXT
 ) STRICT;
 CREATE INDEX bot_work_notes_pending ON bot_work_notes(activation_id, applied_at);
 `
@@ -1342,8 +1343,9 @@ export class BotStore {
 
   // -- Notes to work (bot_work_notes, v6): what the owner added while a piece of work ran -------------------------
 
-  addWorkNote(activationId: string, botId: string, text: string): void {
-    this.run('INSERT INTO bot_work_notes(activation_id, bot_id, text, at) VALUES(?, ?, ?, ?)', activationId, botId, text, this.now())
+  /** `fromMessage`: the owner's message the note came from, so forgetting that message removes the note too. */
+  addWorkNote(activationId: string, botId: string, text: string, fromMessage?: string): void {
+    this.run('INSERT INTO bot_work_notes(activation_id, bot_id, text, at, from_message) VALUES(?, ?, ?, ?, ?)', activationId, botId, text, this.now(), fromMessage ?? null)
   }
 
   /** The notes a piece of work has not been given yet, oldest first. */

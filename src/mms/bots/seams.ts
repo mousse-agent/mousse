@@ -67,7 +67,8 @@ export interface BotToolHost {
     start(botId: string, from: string, input: { title: string; brief: string; key: string }): Promise<BotWorkStarted>
     list(botId: string): BotWorkList
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
-    note(botId: string, workId: string, note: string): 'noted' | 'held' | 'ended' | 'not_found'
+    /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
+    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found'
   }
   /** One-off reminders: said at a time, or work started then. */
   reminders: {

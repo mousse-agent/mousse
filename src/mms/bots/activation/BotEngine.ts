@@ -225,6 +225,9 @@ export const MAX_WAITING_REMINDERS = 50
 const MAX_REMINDER_AHEAD_MS = 366 * 24 * 60 * 60_000
 /** The longest the reminder timer waits before it looks again (a far timer would overflow, and clocks move). */
 const REMINDER_REARM_MS = 6 * 60 * 60_000
+/** The outcome chips of `work_start` (`chips.ts`): a chat turn that shows one handed work off. */
+const WORK_STARTED_CHIPS: ReadonlySet<string> = new Set(['started', 'will start'])
+
 /** How long a reminder that failed to be said waits before it is tried again. */
 const REMINDER_RETRY_MS = 60_000
 /** A reminder said later than this (Mousse was off) says what time it was for. */
@@ -2707,8 +2710,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
       !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
-    // A chat reply that says the same short thing twice (a line before a tool call and again after it) says it once.
-    const body = row.lane === 'chat' ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
+    // A chat turn that handed work off and says its one line twice (before the work_start call and after it) says it
+    // once. Any other reply is posted as written.
+    const handedOff = row.lane === 'chat' && chips.some((chip) => WORK_STARTED_CHIPS.has(chip.text))
+    const body = handedOff ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
     // Only the last turn of a run reports; an earlier one (work that went on with the owner's notes) is an update.
     const report = row.lane === 'run' && row.status === 'done' && (this.store.lastMainDispatch(row.id)?.n ?? dispatch.n) === dispatch.n
     if (!body && !chips.length && !asks.length && !report) return
@@ -3905,7 +3910,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       start: (botId, from, input) => this.startWork(botId, from, input),
       list: (botId) => this.listWork(botId),
       stop: (botId, workId) => this.stopWork(botId, workId),
-      note: (botId, workId, note) => this.noteWork(botId, workId, note)
+      note: (botId, workId, note, from) => this.noteWork(botId, workId, note, from)
     },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
@@ -3999,7 +4004,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `work_note`: something the owner added, for work that runs or waits. Waiting work gets it with its request;
    * running work gets it when its current turn ends, before it reports (`advance`). Ended work can't take it.
    */
-  noteWork(botId: string, workId: string, note: string): 'noted' | 'held' | 'ended' | 'not_found' {
+  noteWork(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' {
     const text = note.trim().slice(0, MAX_WORK_NOTE_CHARS)
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
@@ -4008,7 +4013,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!current || ENDED_ACTIVATION_STATUSES.has(current.status)) return 'ended' as const
       // Only work that will take it: waiting, or running. Paused or blocked work may never continue.
       if (!['queued', 'running', 'waiting_grant'].includes(current.status)) return 'held' as const
-      this.store.addWorkNote(workId, botId, text)
+      // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
+      this.store.addWorkNote(workId, botId, text, from ? this.ownerMessageOf(from) : undefined)
       return 'noted' as const
     })
   }
@@ -4102,6 +4108,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const late = now.getTime() - Date.parse(reminder.dueAt) > REMINDER_LATE_MS
     let couldNot: string | undefined
+    // The pass works from a list read before it began: one cancelled or forgotten since is not said or started.
+    // Nothing awaits between this read and the work's insert below, so a cancel can't slip in between.
+    if (this.store.reminder(reminder.id)?.status !== 'waiting') return
     if (reminder.work) {
       try {
         const summary = await this.enqueue(reminder.botId, `reminder:${reminder.id}`, { kind: 'work', input: late ? `${reminder.work.brief}\n\n(This was due at ${clockTime(reminder.dueAt)}; Mousse was off then.)` : reminder.work.brief, title: reminder.work.title, ...(reminder.replyTo ? { replyTo: reminder.replyTo } : {}), from: reminder.id }, 'run')

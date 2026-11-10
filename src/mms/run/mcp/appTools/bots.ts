@@ -402,7 +402,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(CHAT_ONLY)
         if (typeof args.workId !== 'string' || !args.workId || typeof args.note !== 'string' || !args.note.trim()) return error('work_note needs a work id and the note.')
-        const result = call.deps.host.work.note(call.botId, args.workId, args.note)
+        const result = call.deps.host.work.note(call.botId, args.workId, args.note, call.activationId)
         call.deps.activity?.onAppResult(call.activity, 'work_note', { result })
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
         if (result === 'ended') return json({ result, note: 'That work already finished, so it never saw this. Start new work for it if it still matters.' })

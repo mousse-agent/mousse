@@ -299,3 +299,51 @@ describe('a chat reply says a short thing once', () => {
     expect(sayOnce(list)).toBe(list)
   })
 })
+
+describe('third review (docs/plans/bot-always-free.md)', () => {
+  it('a work reminder cancelled while the pass delivers another is not started', async () => {
+    const turn = await chat('Two morning jobs', 'm1')
+    const due = new Date(f.clock.now + 60_000).toISOString()
+    const a = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: due, text: 'Job A.', work: { title: 'A', brief: 'Do A.' } })
+    const b = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: due, text: 'Job B.', work: { title: 'B', brief: 'Do B.' } })
+    await finish(f, turn.payload, 'completed', { text: 'Both set.' })
+    // While A's work is being started, the owner cancels B.
+    const engine = f.bots as unknown as { enqueue: (...args: unknown[]) => Promise<unknown> }
+    const enqueue = engine.enqueue.bind(engine)
+    engine.enqueue = async (...args: unknown[]) => {
+      const started = await enqueue(...args)
+      f.bots.tools.reminders.cancel(botId, b.reminderId)
+      return started
+    }
+    f.clock.now += 2 * 60_000
+    await f.bots.deliverDueReminders()
+    const titles = f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work').map((row) => (row.trigger as { title: string }).title)
+    expect(titles).toEqual(['A'])
+    expect(f.store.reminder(a.reminderId)!.status).toBe('delivered')
+    expect(f.store.reminder(b.reminderId)!.status).toBe('cancelled')
+  })
+
+  it('forgetting a follow-up message removes the note it passed to work, and its copy in the prompt', async () => {
+    const first = await chat('Research clinics near me', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Clinics', brief: 'Find clinics.', key: 'k' })
+    await finish(f, first.payload, 'completed', { text: 'On it.' })
+    const work = await start(f, workId)
+    const second = await chat('Only ones that treat my condition X-17', 'm2')
+    expect(f.bots.tools.work.note(botId, workId, 'Only clinics treating condition X-17.', second.activation.id)).toBe('noted')
+    await finish(f, second.payload, 'completed', { text: 'Passed on.' })
+    await finish(f, work.payload, 'completed', { text: 'Five clinics.' })
+    expect(f.store.dispatch(workId, 2)!.prompt.text).toContain('X-17')
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+    f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${second.message.id}`, who: 'owner', text: second.message.text }))
+    const row = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${second.message.id}`)!
+    memory.forget(botId, { refs: [`j${row.seq as number}`], by: 'owner_ui' })
+    expect(JSON.stringify(f.store.all('SELECT text FROM bot_work_notes'))).not.toContain('X-17')
+    expect(f.store.dispatch(workId, 2)!.prompt.text).not.toContain('X-17')
+  })
+
+  it('a chat reply that started no work is posted as written, even when two paragraphs open alike', async () => {
+    const turn = await chat('When are the trains?', 'm1')
+    await finish(f, turn.payload, 'completed', { text: 'The train leaves at 09:00 from Central.\n\nThe train leaves at 10:00 from Riverside.' })
+    expect(chatOf(f, botId).at(-1)!.text).toBe('The train leaves at 09:00 from Central.\n\nThe train leaves at 10:00 from Riverside.')
+  })
+})

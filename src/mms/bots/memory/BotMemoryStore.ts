@@ -928,6 +928,15 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
       redactJournal(`bm:${row.message_id}`)
     }
   }
+  // A note the forgotten message passed to work: gone from the note and from the prompt that carried it.
+  if (has('bot_work_notes')) {
+    const notes = tx.statement('SELECT activation_id, text FROM bot_work_notes WHERE bot_id = ? AND from_message = ?').all(botId, messageId) as Array<{ activation_id: string; text: string }>
+    for (const note of notes) {
+      if (has('bot_dispatches') && note.text.trim())
+        tx.statement("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.text', replace(json_extract(prompt_json, '$.text'), ?, ?)) WHERE activation_id = ?").run(note.text, text, note.activation_id)
+      tx.statement('UPDATE bot_work_notes SET text = ? WHERE bot_id = ? AND from_message = ?').run(text, botId, messageId)
+    }
+  }
   if (has('bot_activations')) {
     const work = tx.statement("SELECT id, status FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'work' AND json_extract(trigger_json, '$.replyTo') = ?").all(botId, messageId) as Array<{ id: string; status: string }>
     for (const row of work) {
