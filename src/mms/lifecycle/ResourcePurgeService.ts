@@ -143,6 +143,16 @@ async function registrationOf(commonDir: string, worktree: string): Promise<Work
  */
 export interface PurgeInput { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean; authorization?: 'expiry'; keepWork?: boolean }
 
+/**
+ * Turns a delete's purge ledger into one that keeps the work: its worktree and ref items not yet removed stay, and so do
+ * its snapshots (`keptWork`). One whose reviewed files were already cleared is only an empty checkout left to unregister,
+ * and that finishes.
+ */
+function keepPendingWork(record: TaskLifecycleRecord): void {
+  for (const item of record.purge!.items) if (item.status === 'pending' && keptOnDelete(item) && item.discardState !== 'cleared') item.status = 'retained'
+  record.purge!.keptWork = true
+}
+
 /** External purge ledger survives deletion of every task-owned source. No Git object pruning. */
 export interface RetireTrashedOptions {
   recheck?: (worktreePath: string) => string | undefined | Promise<string | undefined>
@@ -306,6 +316,35 @@ export class ResourcePurgeService {
       this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
     })
   }
+  /**
+   * At start, before recovery resumes anything: every delete an older version began and a stop cut short (a purge
+   * started, not by an expiry, and not yet keeping the work) keeps the thread's worktrees, branches, refs and snapshots
+   * now, as a delete does. Only an expiry's purge resumes as it began.
+   *
+   * `skip` names every such delete that could not be set to keep the work (its ledger could not be written, or another
+   * process holds it): recovery must not resume it this time, since it would resume as the older version planned and
+   * remove the work. It stays pending as it is, and the next start tries again.
+   */
+  keepWorkOfInterruptedDeletes(): { kept: string[]; skip: Set<string>; failed: Array<{ taskId: string; error: string }> } {
+    const kept: string[] = [], skip = new Set<string>(), failed: Array<{ taskId: string; error: string }> = []
+    for (const record of this.store.list()) {
+      if (record.state !== 'purge-started' || !record.purge || record.purge.expired || record.purge.keptWork) continue
+      try {
+        if (record.cleanupOwner && isOwnerLive(record.cleanupOwner)) throw new Error('Another process holds this delete')
+        this.store.enableCleanupWriter()
+        this.store.update(record.taskId, (current) => {
+          if (current.state === 'purge-started' && current.purge && !current.purge.expired && !current.purge.keptWork) keepPendingWork(current)
+        })
+        // Read back: only a ledger that now says so keeps the work.
+        if (this.store.require(record.taskId).purge?.keptWork !== true) throw new Error('The delete was not set to keep the work')
+        kept.push(record.taskId)
+      } catch (error) {
+        skip.add(record.taskId)
+        failed.push({ taskId: record.taskId, error: (error as Error).message })
+      }
+    }
+    return { kept, skip, failed }
+  }
   /** `taskId` and the threads it owns; one trashed on its own keeps its own choice, and one deleted for good is gone. */
   private owned(taskId: string): TaskLifecycleRecord[] {
     const records = this.store.list(), ids = new Set([taskId])
@@ -370,10 +409,12 @@ export class ResourcePurgeService {
     // A dry run does not hydrate runtimes; the caller asks the cheap idle lookup instead.
     if (!readOnly) this.hooks.assertIdle(taskId)
     const tasks = this.owned(taskId), ownedIds = new Set(tasks.map((task) => task.taskId))
-    const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0 }
+    // The mode is signed with the rest: a preview that keeps the work authorizes only a purge that keeps it.
+    const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0, ...(keepWork ? { keepWork: true as const } : {}) }
     let peers: Awaited<ReturnType<ResourcePurgeService['peers']>>
     try { peers = await this.peers(ownedIds) } catch (error) { preview.blockers.push((error as Error).message); return this.sign(preview) }
-    let inventory = await buildResourceInventory(this.store, record)
+    // Worktrees a delete keeps are not verified, so one that can't be checked blocks nothing; what is removed still is.
+    let inventory = await buildResourceInventory(this.store, record, { keepWork })
     preview.blockers.push(...inventory.blockers)
     if (inventory.blockers.length || inventory.sources.some((source) => source.status !== 'verified')) return this.sign(preview)
     const repositories = new Map<string, string>()
@@ -514,7 +555,7 @@ export class ResourcePurgeService {
     preview.items.push(...folderRefs)
     const plannedRefs = new Set(folderRefs.map((item) => item.identity))
     // Preparation adds explicit reconstruction pins. Refresh rather than omitting their cleanup.
-    inventory = await buildResourceInventory(this.store, this.store.require(taskId))
+    inventory = await buildResourceInventory(this.store, this.store.require(taskId), { keepWork })
     for (const resource of inventory.resources) {
       if (!ownedIds.has(resource.ownerTaskId)) continue
       if (resource.kind === 'worktree' || resource.kind === 'agent-session' || resource.kind === 'artifact') continue
@@ -621,6 +662,7 @@ export class ResourcePurgeService {
         const keepWork = input.keepWork === true && !expiry
         const preview = await this.previewOwned(input.taskId, false, keepWork)
         if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
+        // A preview made in the other mode (keeping the work, or not) has another digest, and is refused here too.
         if (preview.digest !== input.previewDigest || input.expectedGeneration !== preview.generation) throw purgeErrors.create('resource_purge_preview_stale')
         if (expiry && this.hooks.expired?.(record) !== true) throw purgeErrors.create('resource_purge_not_expired')
         const discardAuthorized = Boolean(input.human && input.discard) || expiry
@@ -638,13 +680,9 @@ export class ResourcePurgeService {
         })
         await this.hooks.onBoundary?.(record)
       } else if (input.keepWork === true && record.purge && !record.purge.expired && !record.purge.keptWork) {
-        // A delete an older version began, cut short, still lists the thread's worktrees and refs: resumed by Delete, they
-        // stay now too. One whose reviewed files were already cleared is only an empty checkout left to unregister, and that
-        // finishes.
-        record = this.store.update(input.taskId, (current) => {
-          for (const item of current.purge!.items) if (item.status === 'pending' && keptOnDelete(item) && item.discardState !== 'cleared') item.status = 'retained'
-          current.purge!.keptWork = true
-        })
+        // A delete an older version began, cut short and resumed by Delete keeps the thread's work now too.
+        this.store.enableCleanupWriter()
+        record = this.store.update(input.taskId, (current) => { keepPendingWork(current) })
       }
       if (!record.purge) throw new Error('Purge recovery ledger is absent')
       await this.hooks.beforeRemoval?.(record)

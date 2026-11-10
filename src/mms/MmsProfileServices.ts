@@ -1048,7 +1048,7 @@ export class MmsProfileServices {
       purge: { preview: (taskId, options) => this.lifecycle.cleanup.preview(taskId, options), purge: (input) => this.lifecycle.cleanup.purge(input) },
       getThread: (threadId) => this.threads.getThread(threadId),
       listThreads: () => this.threads.listAllThreads(),
-      trash: (threadId, operationId, expectedGeneration) => this.trashThread(threadId, operationId, expectedGeneration),
+      trash: (threadId, operationId, expectedGeneration, keepWork) => this.trashThread(threadId, operationId, expectedGeneration, keepWork),
       restore: (threadId) => this.restoreThread(threadId),
       archive: (threadId) => this.archiveIfStartedByPerson(threadId)
     })
@@ -1073,7 +1073,8 @@ export class MmsProfileServices {
             'Cannot trash thread: an owned workflow is still active or waiting'
           )
         }
-        const inventory = await buildResourceInventory(this.threads.lifecycleStore, record)
+        // A delete that keeps the work does not verify the worktrees it keeps.
+        const inventory = await buildResourceInventory(this.threads.lifecycleStore, record, { keepWork: record.operations.at(-1)?.keepWork === true })
         if (inventory.blockers.length)
           throw new ResourceLifecycleError('ambiguous', `Resource ownership is not established: ${inventory.blockers.join('; ')}`)
         // The trash was accepted for exactly these threads (fresh operation, current generation) and
@@ -1377,18 +1378,20 @@ export class MmsProfileServices {
   async trashThread(
     taskId: string,
     operationId?: string,
-    expectedGeneration?: number
+    expectedGeneration?: number,
+    keepWork?: boolean
   ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
-    // The trash is a step of a delete: the purge that follows removes the checkout, so it is not retired first.
+    // The trash is a step of a delete: the checkout is not retired first. A delete that keeps the work does not verify it.
     await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
-      expectedGeneration
+      expectedGeneration,
+      ...(keepWork ? { keepWork: true } : {})
     })
     return this.threads.lifecycleStore.require(taskId)
   }
@@ -1753,7 +1756,12 @@ export class MmsProfileServices {
   async initialize(): Promise<void> {
     // The chosen worktree folders that are connected, with what Mousse made in them, before anything recovers or runs Git there.
     await refreshWorktreeFolders()
-    await this.lifecycle.recoverAll()
+    // A delete an older version cut short keeps the thread's work before recovery resumes it; only an expiry's goes on.
+    const keeping = this.lifecycle.cleanup.keepWorkOfInterruptedDeletes()
+    if (keeping.kept.length) console.warn('deletes cut short keep their threads’ worktrees and refs', { threads: keeping.kept })
+    // One that could not be set to keep the work is left pending, untouched, and never resumed as it began; the next start tries again.
+    if (keeping.failed.length) console.warn('deletes cut short could not be set to keep their work; left pending until the next start', { failed: keeping.failed })
+    await this.lifecycle.recoverAll(keeping.skip)
     // After the trash operations a crash left are finished: once, what was in the old trash comes back, archived.
     // Only then is a thread still in the trash a delete that was cut short, and it is finished.
     try {

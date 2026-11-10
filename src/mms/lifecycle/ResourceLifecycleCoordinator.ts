@@ -10,7 +10,8 @@ import { buildResourceInventory } from './ResourceInventory'
 import { ResourcePurgeService } from './ResourcePurgeService'
 import { renameFolder } from './renameFolder'
 
-export interface LifecycleRequest { taskId: string; operationId: string; expectedGeneration?: number }
+/** `keepWork`: a trash that is a step of a delete keeping the thread's work (`LifecycleOperation.keepWork`). */
+export interface LifecycleRequest { taskId: string; operationId: string; expectedGeneration?: number; keepWork?: boolean }
 export interface ResourceLifecycleHooks {
   /** Atomic with installing the fence. Reject active work before affecting its writes. */
   assertCanTrash?(record: TaskLifecycleRecord): void
@@ -68,9 +69,11 @@ export class ResourceLifecycleCoordinator {
     if (!operation || ['completed', 'rejected'].includes(operation.phase)) return record
     return this.run(operation.kind, { taskId, operationId: operation.id, expectedGeneration: operation.expectedGeneration })
   }
-  async recoverAll(): Promise<Array<{ taskId: string; record?: TaskLifecycleRecord; error?: string }>> {
+  /** `skip`: tasks left exactly as they are this time (a delete that could not be set to keep the work). */
+  async recoverAll(skip: ReadonlySet<string> = new Set()): Promise<Array<{ taskId: string; record?: TaskLifecycleRecord; error?: string }>> {
     const results: Array<{ taskId: string; record?: TaskLifecycleRecord; error?: string }> = []
     for (const record of this.store.list()) {
+      if (skip.has(record.taskId)) { results.push({ taskId: record.taskId, record, error: 'Left pending until the next start' }); continue }
       try { results.push({ taskId: record.taskId, record: await this.recover(record.taskId) }) }
       catch (error) { results.push({ taskId: record.taskId, error: (error as Error).message }) }
     }
@@ -98,7 +101,9 @@ export class ResourceLifecycleCoordinator {
         const to = kind === 'trash'
           ? join(this.store.profileHome, 'trash', 'threads', `${record.taskId}-${createHash('sha256').update(request.operationId).digest('hex').slice(0, 20)}`)
           : record.originalLocation
-        record.operations.push({ id: request.operationId, kind, expectedGeneration: record.generation, phase: 'fenced', from: record.location, to, startedAt: new Date().toISOString() })
+        // A restore puts back what a trash keeping the work moved, without verifying the worktrees that trash did not.
+        const keepWork = kind === 'trash' ? request.keepWork === true : record.operations.filter((item) => item.kind === 'trash').at(-1)?.keepWork === true
+        record.operations.push({ id: request.operationId, kind, expectedGeneration: record.generation, phase: 'fenced', from: record.location, to, startedAt: new Date().toISOString(), ...(keepWork ? { keepWork: true as const } : {}) })
         if (!record.locations.some((path) => pathsEqual(path, to))) record.locations.push(to)
         record.state = kind === 'trash' ? 'draining' : 'restore-moving'
       }
@@ -118,7 +123,7 @@ export class ResourceLifecycleCoordinator {
         await this.hooks.onPhase?.(record, 'fenced')
         try {
           if (kind === 'trash') await this.store.withDrainWrites(request.taskId, request.operationId, () => this.hooks.drain(record))
-          const inventory = await (this.hooks.inventory?.(record) ?? buildResourceInventory(this.store, record))
+          const inventory = await (this.hooks.inventory?.(record) ?? buildResourceInventory(this.store, record, { keepWork: operation.keepWork === true }))
           validateResourceInventory(inventory)
           if (inventory.profileId !== record.profileId || inventory.taskId !== record.taskId || inventory.generation !== record.generation) throw new ResourceLifecycleError('stale', 'Inventory has a different lifecycle owner or generation')
           if (inventory.blockers.length || inventory.sources.some((source) => source.status !== 'verified')) throw new ResourceLifecycleError('ambiguous', `Resource ownership is not established: ${inventory.blockers.join('; ') || 'unknown source'}`)
