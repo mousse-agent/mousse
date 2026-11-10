@@ -75,7 +75,7 @@ import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
-import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
+import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { errorText, readableError, sendErrorLine } from '../lib/errorText'
 import { showToast } from './ui/Toast'
 import { editablePrompt, PromptUndoNotice } from './PromptUndoControls'
@@ -275,12 +275,13 @@ export function OrchestratorChat() {
   // The profile's default model, once settings are read; undefined until then.
   const [profileDefault, setProfileDefault] = useState<PickerSelection | undefined>(undefined)
   // The model the composer shows as the chat's own: the thread's, or for a chat whose thread is still to be made,
-  // the one picked for it, else its project's remembered model while the picker offers it (it is not checked
-  // before the picker has a list). Without one the composer shows the profile's default.
+  // the one picked for it, else its project's remembered model while the picker lists that model (its instance is on
+  // for the project and the model is not hidden; unknown until the provider snapshots arrive). Without one the
+  // composer shows the profile's default, as the daemon falls back to it, and a send stamps what is shown.
   const rememberedModel = remembered?.model
   const rememberedOffered = useMemo(
-    () => rememberedModel && (providers.length === 0 || pickerOffers(rememberedModel, providers)) ? rememberedModel : undefined,
-    [rememberedModel, providers]
+    () => rememberedModel && providerSnapshots && pickerListsModel(rememberedModel, providers) ? rememberedModel : undefined,
+    [rememberedModel, providerSnapshots, providers]
   )
   const selectionThreadModel = createsThread && !remoteNode ? (pendingModel ?? rememberedOffered) : activeThreadModelOverride
   // With no thread model and no default the picker offers, the composer starts on the first ready
@@ -1247,9 +1248,15 @@ export function OrchestratorChat() {
         if (!stillVisible()) return
         if (updated) useAppStore.getState().upsertThread(updated)
       }
-      // The same for a permission mode picked before the thread existed.
-      if (blankPermissionMode) {
-        const updated = await window.mousse.threads.setPermissionMode(id, blankPermissionMode)
+      // The first turn runs in the permission mode the composer showed. A thread this send made gets that mode
+      // whenever it would otherwise run in another one: picked for this chat, or its project's remembered mode. A
+      // mode picked for a chat on another computer goes there as picked; a reused empty thread already has its own.
+      const madeMode = useAppStore.getState().threads.find((entry) => entry.id === id)?.permissionMode
+      const runMode = remoteDraft
+        ? blankPermissionMode
+        : createsThread && (madeMode ?? defaultPermissionMode) !== permissionMode ? permissionMode : undefined
+      if (runMode) {
+        const updated = await window.mousse.threads.setPermissionMode(id, runMode)
         if (!stillVisible()) return
         setBlankPermissionMode(undefined)
         if (updated) useAppStore.getState().upsertThread(updated)

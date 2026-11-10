@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LlmProviderOption, MousseSettings } from '../../src/shared/settings'
 import type { Project, Thread } from '../../src/shared/types'
+import { model, snapshot } from '../providerSnapshotFixture'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -27,6 +28,8 @@ let root: Root
 let host: HTMLElement
 let reads: { get: number; getOptions: number }
 let settingsListeners: Array<(value: MousseSettings) => void>
+/** Answers a test gives on top of the stub, by section (`threads`, `orchestrator`). */
+let bridge: Record<string, Record<string, unknown>>
 
 /**
  * `window.mousse` for the composer: settings, options and skills answer (a new object on every call, as
@@ -53,7 +56,8 @@ function stubBridge(): void {
         return () => { settingsListeners = settingsListeners.filter((entry) => entry !== listener) }
       }
     }),
-    skills: section({ list: () => Promise.resolve({ skills: [] }) })
+    skills: section({ list: () => Promise.resolve({ skills: [] }) }),
+    ...Object.fromEntries(Object.entries(bridge).map(([name, overrides]) => [name, section(overrides)]))
   }
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy(sections, {
     get: (target, key) => {
@@ -73,6 +77,7 @@ beforeEach(async () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   reads = { get: 0, getOptions: 0 }
   settingsListeners = []
+  bridge = {}
   stubBridge()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   useAppStore.setState({ profileId: 'prf_test', profileReady: true, workspaceReady: true })
@@ -90,7 +95,15 @@ afterEach(() => {
 
 const project = (id: string, newThread?: Project['newThread']): Project => ({ id, name: id, path: `/work/${id}`, createdAt: '', order: 0, ...(newThread ? { newThread } : {}) })
 
+/** Claude Code as the daemon lists it for each project: Opus 5.5 and Sonnet 5.5, Sonnet hidden when asked. */
+async function listModels(projectIds: string[], options: { sonnetHidden?: boolean } = {}): Promise<void> {
+  const { useProviderSnapshotsStore } = await import('../../src/renderer/lib/providerSnapshots')
+  const snapshots = [snapshot({ caps: { toolControl: 'exact' }, models: { entries: [model('opus', { label: 'Opus 5.5' }), model('sonnet', { label: 'Sonnet 5.5', hidden: options.sonnetHidden === true })], source: 'live' } })]
+  useProviderSnapshotsStore.setState({ profileId: 'prf_test', scopes: Object.fromEntries(projectIds.map((id) => [`project:${id}`, { snapshots, loading: false }])) })
+}
+
 async function showBlankChat(projectId: string): Promise<void> {
+  await listModels(['remembers', 'fresh'])
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   useAppStore.setState({
     activeThreadId: null,
@@ -127,5 +140,120 @@ describe('the thread list in the store', () => {
     const thread = { id: 't1', name: 'New Chat', projectId: 'remembers', createdAt: '', updatedAt: '2026-11-10T00:00:00Z' } as Thread
     expect(sameThreadSnapshot([thread], [{ ...thread }])).toBe(true)
     expect(sameThreadSnapshot([thread], [{ ...thread, permissionMode: 'full' }])).toBe(false)
+  })
+})
+
+/** Types into the composer and presses Enter. */
+async function send(text: string): Promise<void> {
+  const input = host.querySelector<HTMLTextAreaElement>('.composer-input')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, text)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+  await settle()
+}
+
+/** A thread as the daemon returns it. */
+const threadRow = (id: string, patch: Partial<Thread> = {}): Thread =>
+  ({ id, name: 'New Chat', projectId: 'remembers', createdAt: '2026-11-10T00:00:00Z', updatedAt: '2026-11-10T00:00:00Z', ...patch }) as Thread
+
+const OPUS = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
+
+/**
+ * The daemon side of a first send: `threads.create` returns `made`, the setters echo what they set, and the send is
+ * accepted. Calls are recorded in order, so a test can check what the first turn runs with.
+ */
+function daemonForSend(made: Thread) {
+  const calls: Array<[string, ...unknown[]]> = []
+  let current = made
+  bridge.threads = {
+    create: vi.fn(async (...args: unknown[]) => { calls.push(['create', ...args]); return current }),
+    select: vi.fn(async () => undefined),
+    setModel: vi.fn(async (id: string, value: Thread['modelOverride']) => { calls.push(['setModel', id, value]); current = { ...current, modelOverride: value }; return current }),
+    setPermissionMode: vi.fn(async (id: string, mode: Thread['permissionMode']) => { calls.push(['setPermissionMode', id, mode]); current = { ...current, permissionMode: mode }; return current }),
+    setWorktreeEnabled: vi.fn(async (id: string, enabled: boolean) => { calls.push(['setWorktreeEnabled', id, enabled]); current = { ...current, worktreeEnabled: enabled }; return current })
+  }
+  bridge.orchestrator = {
+    sendToThread: vi.fn(async () => { calls.push(['send', current.permissionMode, current.modelOverride?.model]); return { message: '', actions: [] } }),
+    isTurnActive: vi.fn(async () => false)
+  }
+  stubBridge()
+  return { calls, sentWith: () => calls.find((call) => call[0] === 'send')?.slice(1) }
+}
+
+async function mountComposer(): Promise<void> {
+  const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
+  await act(async () => root.render(createElement(OrchestratorChat)))
+  await settle()
+}
+
+describe('the first send of a new chat runs with what the composer shows', () => {
+  it('a worktree from another branch makes a new thread, so an older empty Ask thread shows and runs in the project mode', async () => {
+    // Another thread in the project remembered Full access; this older empty thread was set to Ask.
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [project('remembers', { permissionMode: 'full' })],
+      threads: [threadRow('older', { permissionMode: 'ask', worktreeEnabled: true, modelOverride: OPUS })],
+      activeThreadId: 'older',
+      messages: [],
+      composerWorkspaceDrafts: {}
+    })
+    // The composer's create asks for no remembered choices: the daemon makes the thread on the profile defaults.
+    const daemon = daemonForSend(threadRow('made', { worktreeEnabled: true, modelOverride: OPUS }))
+    await mountComposer()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    // Another base branch means the send makes a new thread: the composer now shows what that one runs in.
+    await act(async () => { useAppStore.getState().setComposerWorkspaceDraft('older', { projectId: 'remembers', worktreeEnabled: true, baseBranch: 'feature' }) })
+    await settle()
+    expect(permissionChip()).toBe('Permissions: Full access')
+
+    await send('Fix the parser')
+    const create = daemon.calls.find((call) => call[0] === 'create')!
+    expect(create[3]).toMatchObject({ worktreeEnabled: true, baseBranch: 'feature' })
+    expect(create[3]).not.toHaveProperty('rememberedChoices')
+    expect(daemon.sentWith()).toEqual(['full', 'opus'])
+  })
+
+  it('a mode picked for the new chat runs, even when the new thread comes back in another one', async () => {
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [project('remembers', { permissionMode: 'full' })],
+      threads: [], activeThreadId: null, messages: [],
+      composerWorkspaceDrafts: { __blank__: { projectId: 'remembers', worktreeEnabled: true } }
+    })
+    // The worst case: the new thread comes back in Full access.
+    const daemon = daemonForSend(threadRow('made', { permissionMode: 'full', worktreeEnabled: true, modelOverride: OPUS }))
+    await mountComposer()
+    expect(permissionChip()).toBe('Permissions: Full access')
+    await act(async () => { host.querySelector<HTMLButtonElement>('.composer-permission-chip')!.click() })
+    await act(async () => { [...document.querySelectorAll<HTMLButtonElement>('.composer-permission-mode')].find((row) => row.textContent?.includes('Ask before acting'))!.click() })
+    await settle()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+  })
+
+  it('a remembered model that is hidden is not shown, and the first send keeps the daemon fallback instead of stamping it back', async () => {
+    // Sonnet was remembered, then hidden in Settings → Providers; Claude Code itself is still on.
+    await listModels(['remembers'], { sonnetHidden: true })
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [project('remembers', { model: { ...OPUS, model: 'sonnet' } })],
+      threads: [], activeThreadId: null, messages: [],
+      composerWorkspaceDrafts: { __blank__: { projectId: 'remembers', worktreeEnabled: true } }
+    })
+    // The daemon falls back to the profile default for the new thread.
+    const daemon = daemonForSend(threadRow('made', { worktreeEnabled: true, modelOverride: OPUS }))
+    await mountComposer()
+    expect(modelButton()).toBe('Model: Opus 5.5')
+
+    await send('Fix the parser')
+    expect(daemon.calls.some((call) => call[0] === 'setModel')).toBe(false)
+    expect(daemon.sentWith()?.[1]).toBe('opus')
   })
 })

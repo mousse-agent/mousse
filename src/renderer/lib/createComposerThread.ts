@@ -18,20 +18,27 @@ export async function createComposerThread(deps: {
   return deps.stillVisible() ? thread.id : null
 }
 
+/** The branch a new worktree starts from when it is not the project folder's own: made on this computer, in a project. */
+export function composerBaseBranch(workspace: { projectId?: string; worktreeEnabled?: boolean; node?: string; baseBranch?: string }): string | undefined {
+  return workspace.projectId && workspace.worktreeEnabled && !workspace.node && workspace.baseBranch ? workspace.baseBranch : undefined
+}
+
 /**
  * Whether sending the new chat makes a thread instead of using the empty one shown. An empty thread is reused only
  * where the chat is to run: the same computer, the same project, and the same mode (Private is fixed when a thread
- * is created). A worktree from another branch also takes a new thread (`prepareComposerThread`).
+ * is created). A worktree from another branch also takes a new thread, since only a new thread can carry it. The
+ * composer and `prepareComposerThread` both ask this, so what the composer shows is what the send makes.
  */
 export function composerCreatesThread(
   thread: Pick<Thread, 'projectId' | 'node' | 'localOnly'> | undefined,
-  workspace: { projectId?: string; node?: string; localOnly?: boolean }
+  workspace: { projectId?: string; worktreeEnabled?: boolean; node?: string; localOnly?: boolean; baseBranch?: string }
 ): boolean {
   return (
     !thread ||
     thread.projectId !== workspace.projectId ||
     (thread.node ?? undefined) !== (workspace.node ?? undefined) ||
-    Boolean(thread.localOnly) !== Boolean(workspace.localOnly)
+    Boolean(thread.localOnly) !== Boolean(workspace.localOnly) ||
+    composerBaseBranch(workspace) !== undefined
   )
 }
 
@@ -58,9 +65,8 @@ export async function prepareComposerThread(deps: {
   // The expiry counts from now, when the chat is created; a chat on another computer has none (it is set there).
   const expiresAt = workspace.expiryMs !== undefined && !workspace.node ? new Date((deps.now?.() ?? Date.now()) + workspace.expiryMs).toISOString() : undefined
   const expiry = expiresAt ? { expiresAt, ...(workspace.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}
-  // A worktree from another branch is made on this computer, and only a new thread can carry it.
-  const baseBranch = enabled && !workspace.node && workspace.baseBranch ? workspace.baseBranch : undefined
-  if (!thread || composerCreatesThread(thread, workspace) || baseBranch) {
+  const baseBranch = composerBaseBranch(workspace)
+  if (!thread || composerCreatesThread(thread, workspace)) {
     return createComposerThread({
       ...deps,
       create: () =>

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../src/shared/types'
-import { createComposerThread, prepareComposerThread } from '../src/renderer/lib/createComposerThread'
+import { composerCreatesThread, createComposerThread, prepareComposerThread } from '../src/renderer/lib/createComposerThread'
 
 describe('blank composer thread creation', () => {
   const thread = { id: 'created-thread' } as Thread
@@ -267,5 +267,19 @@ describe('a new worktree from another branch', () => {
     expect(create).toHaveBeenLastCalledWith('p1', { worktreeEnabled: false })
     await prepareComposerThread({ ...deps(create), workspace: { projectId: 'p1', worktreeEnabled: true, node: 'nod_mac' as never, baseBranch: 'feat/x' } })
     expect(create).toHaveBeenLastCalledWith('p1', { worktreeEnabled: true, node: 'nod_mac' })
+  })
+})
+
+describe('whether a send makes a new thread', () => {
+  const empty = { projectId: 'p' }
+  it('reuses the empty thread only where the chat runs, and never for a worktree from another branch', () => {
+    expect(composerCreatesThread(empty, { projectId: 'p', worktreeEnabled: true })).toBe(false)
+    expect(composerCreatesThread(undefined, { projectId: 'p' })).toBe(true)
+    expect(composerCreatesThread(empty, { projectId: 'q' })).toBe(true)
+    expect(composerCreatesThread(empty, { projectId: 'p', localOnly: true })).toBe(true)
+    // Another base branch: only a new thread can carry it (the composer shows that thread's choices).
+    expect(composerCreatesThread(empty, { projectId: 'p', worktreeEnabled: true, baseBranch: 'feature' })).toBe(true)
+    // A base branch counts only for a new worktree on this computer.
+    expect(composerCreatesThread(empty, { projectId: 'p', worktreeEnabled: false, baseBranch: 'feature' })).toBe(false)
   })
 })

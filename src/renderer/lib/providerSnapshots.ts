@@ -606,6 +606,16 @@ export function pickerOffers(selection: { instanceId?: string; llmProvider: stri
 }
 
 /**
+ * Whether the picker lists this very model: its instance is offered and the model is among that instance's models.
+ * With snapshots, a hidden model and an instance turned off (here or for the project) are not listed.
+ */
+export function pickerListsModel(selection: { instanceId?: string; llmProvider: string; model: string }, providers: readonly PickerProvider[]): boolean {
+  if (!selection.model) return false
+  const id = pickerIdFor(selection, providers)
+  return providers.some((provider) => provider.id === id && provider.models.some((model) => model.id === selection.model))
+}
+
+/**
  * The model a composer picks by itself: only on this computer, for a thread without a model of its
  * own, once the profile default is read and the picker does not offer it. A model or default chosen
  * by hand always wins.
