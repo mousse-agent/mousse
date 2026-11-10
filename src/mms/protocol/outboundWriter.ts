@@ -1,5 +1,5 @@
 import type { Socket } from 'node:net'
-import { writeBatchedFrame, writeConnectionEventFrame } from './connectionEventWriter'
+import { waitForDrain, writeBatchedFrame, writeConnectionEventFrame } from './connectionEventWriter'
 import { MMS_PROTOCOL_MAX_ENVELOPE_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES } from './types'
 
 /** Frames waiting to be written to one peer before it is disconnected as too slow. */
@@ -112,6 +112,9 @@ export class OutboundWriter {
     const activeSignal = AbortSignal.any([entry.signal, AbortSignal.timeout(60_000)])
     for (const frame of entry.frames()) {
       if (entry.flush) {
+        // Batched frames before it may still be in Node's buffer; the bound below is for the event's own frame.
+        // Without a pending drain Node holds less than its high-water mark, far below the bound.
+        if (this.socket.writableNeedDrain) await waitForDrain(this.socket, activeSignal)
         if (this.socket.writableLength + frame.length > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES) throw new Error('Outbound socket backlog exceeded')
         await writeConnectionEventFrame(this.socket, frame, activeSignal)
       } else {

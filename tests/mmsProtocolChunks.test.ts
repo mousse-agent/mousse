@@ -7,7 +7,7 @@ import { OUTBOUND_BATCH_BYTES } from '../src/mms/protocol/connectionEventWriter'
 import { supersedingKey } from '../src/mms/protocol/server'
 import { FrameDecoder } from '../src/mms/protocol/framing'
 import { parseEnvelope } from '../src/mms/protocol/validators'
-import { MMS_PROTOCOL_CHUNK_BYTES, MMS_PROTOCOL_MAX_ENVELOPE_BYTES, type ProtocolEnvelopeChunk } from '../src/mms/protocol/types'
+import { MMS_PROTOCOL_CHUNK_BYTES, MMS_PROTOCOL_MAX_ENVELOPE_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES, type ProtocolEnvelopeChunk } from '../src/mms/protocol/types'
 
 function chunks(value: unknown): ProtocolEnvelopeChunk[] {
   const decoder = new FrameDecoder()
@@ -204,6 +204,62 @@ describe('outbound producer limits', () => {
   })
 })
 
+describe('batched and flushed frames together', () => {
+  const turn = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+
+  it('a connection event after a large unchunked frame waits for the drain and keeps the connection', async () => {
+    const socket = bufferingSocket()
+    const failure = vi.fn()
+    const writer = new OutboundWriter(socket, failure)
+    // A frame close to the outbound bound, as an older window without envelope chunks is sent.
+    const large = MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES - 1024
+    const batch = writer.enqueue(large, () => [Buffer.alloc(large)])!
+    const event = writer.enqueue(64 * 1024, () => [Buffer.alloc(64 * 1024)], undefined, undefined, { flush: true })!
+    await batch
+    await turn()
+    // The event waits for the large frame to leave Node's buffer instead of failing the bound.
+    expect(socket.write).toHaveBeenCalledTimes(1)
+    socket.flush()
+    await turn()
+    expect(socket.write).toHaveBeenCalledTimes(2)
+    socket.flush()
+    await event
+    expect(failure).not.toHaveBeenCalled()
+    expect(socket.destroy).not.toHaveBeenCalled()
+    writer.close()
+  })
+
+  it('a chunked envelope over the batch size pauses for a drain partway and arrives whole, in order', async () => {
+    const socket = bufferingSocket()
+    const writer = new OutboundWriter(socket, vi.fn())
+    const value = { kind: 'event', type: 'large.update', sequence: 1, data: { text: 'x'.repeat(1536 * 1024) } }
+    const body = Buffer.from(JSON.stringify(value))
+    const total = [...envelopeFrames(body, true)].length
+    expect(total).toBeGreaterThan(3)
+    let settled = false
+    const operation = writer.enqueue(body.length, () => envelopeFrames(body, true))!
+    void operation.then(() => { settled = true })
+    await turn()
+    const beforeDrain = socket.write.mock.calls.length
+    expect(beforeDrain).toBeGreaterThan(0)
+    expect(beforeDrain).toBeLessThan(total)
+    while (!settled) {
+      socket.flush()
+      await turn()
+    }
+    const decoder = new FrameDecoder()
+    const assembler = new EnvelopeAssembler(() => {})
+    let result: unknown = null
+    for (const [frame] of socket.write.mock.calls) {
+      decoder.push(frame as Buffer)
+      for (const raw of decoder.shiftAll()) result = assembler.accept(parseEnvelope(raw) as ProtocolEnvelopeChunk)
+    }
+    expect(socket.write).toHaveBeenCalledTimes(total)
+    expect(result).toEqual(value)
+    writer.close()
+  })
+})
+
 describe('superseding events', () => {
   const event = (type: string, data: unknown, threadId?: string) => ({ kind: 'event', type, sequence: 1, data, ...(threadId ? { threadId } : {}), profileId: 'p' })
   it('keys a message update by its thread and message', () => {
@@ -225,13 +281,16 @@ describe('superseding events', () => {
 function bufferingSocket(): Socket & { write: ReturnType<typeof vi.fn>; flush: () => void } {
   const socket = new EventEmitter() as EventEmitter & { destroyed: boolean; writableLength: number; writableNeedDrain: boolean; write: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn>; flush: () => void }
   Object.assign(socket, { destroyed: false, writableLength: 0, writableNeedDrain: false, destroy: vi.fn() })
-  socket.write = vi.fn((frame: Buffer) => {
+  const callbacks: Array<() => void> = []
+  socket.write = vi.fn((frame: Buffer, callback?: () => void) => {
     socket.writableLength += frame.length
+    if (callback) callbacks.push(callback)
     if (socket.writableLength >= 16 * 1024) socket.writableNeedDrain = true
     return !socket.writableNeedDrain
   })
   socket.flush = () => {
     socket.writableLength = 0
+    for (const callback of callbacks.splice(0)) callback()
     if (!socket.writableNeedDrain) return
     socket.writableNeedDrain = false
     socket.emit('drain')

@@ -26,7 +26,8 @@ export async function writeBatchedFrame(socket: Socket, frame: Buffer, signal: A
   socket.write(frame)
 }
 
-function waitForDrain(socket: Socket, signal: AbortSignal): Promise<void> {
+/** Waits until Node has handed everything it holds for the peer to the system (after a write that returned false). */
+export function waitForDrain(socket: Socket, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
       clearTimeout(timer)
