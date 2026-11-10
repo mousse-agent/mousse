@@ -12,6 +12,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import { AsyncLocalStorage } from 'async_hooks'
 import { EventEmitter } from 'events'
 import type { WebContents } from 'electron'
+import type { ThreadActivitySnapshot } from '../../shared/types'
 import type { AttachedBrowserCommand, AttachedBrowserCommandHandler } from '../../mms/protocol/connectionCommands'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { BROWSER_VIEWER_CAPABILITY } from '../../shared/browser/host'
@@ -564,6 +565,26 @@ export class GuiMmsController extends EventEmitter {
     session.client.clearResnapshotFlag()
     try {
       return await session.client.request<ThreadSnapshotResult>('thread.snapshot', { threadId, newest: GUI_SNAPSHOT_NEWEST })
+    } catch (error) {
+      if (needed) session.client.markResnapshotNeeded()
+      throw error
+    }
+  }
+
+  /**
+   * What every thread is doing, through one window's profile-bound session. With `clearsGap` this read is
+   * the window's whole resnapshot (no thread is open), so it clears the gap flag like `snapshotThreadForSender`.
+   */
+  async activityForSender(senderId: number, clearsGap = false): Promise<ThreadActivitySnapshot> {
+    const session = this.windowSessions.get(senderId)
+    if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
+    const needed = clearsGap && session.client.requiresResnapshot
+    if (clearsGap) session.client.clearResnapshotFlag()
+    try {
+      const result = await session.client.request<{ activity?: ThreadActivitySnapshot }>('activity.snapshot')
+      const activity = result?.activity
+      if (!activity || typeof activity !== 'object' || Array.isArray(activity)) throw new Error('activity.snapshot returned no activity')
+      return activity
     } catch (error) {
       if (needed) session.client.markResnapshotNeeded()
       throw error
