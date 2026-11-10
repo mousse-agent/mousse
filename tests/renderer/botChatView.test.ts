@@ -446,13 +446,15 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       message(5, { id: 'b3', kind: 'run_report', text: 'The Q7 is the pick.', replyTo: { id: 'o1', author: 'owner', text: 'Research vacuums' } })
     ]
     await open(inbox)
-    const quotes = [...transcript().querySelectorAll('.bot-reply-quote')].map((quote) => quote.textContent)
-    expect(quotes).toEqual(['YouResearch vacuums'])
+    // The owner's own message carries no name: its tint (data-author) says whose it is.
+    const quotes = [...transcript().querySelectorAll('.bot-reply-quote')]
+    expect(quotes.map((quote) => [quote.getAttribute('data-author'), quote.textContent, quote.getAttribute('aria-label')])).toEqual([['owner', 'Research vacuums', 'Replying to your message: Research vacuums']])
     expect(transcript().querySelector('[data-message-id="b3"] .bot-reply-quote')).not.toBeNull()
 
     // Replying to an older message: the sent message shows what it answers.
     await click(transcript().querySelector('[data-message-id="b2"] .bot-reply-button'))
-    expect(host.querySelector('.bot-replying')!.textContent).toBe('Replying to Inbox helperAdded.')
+    const replying = host.querySelector('.bot-replying')!
+    expect([replying.getAttribute('data-author'), replying.textContent, replying.getAttribute('aria-label')]).toEqual(['bot', 'Inbox helperAdded.', "Replying to Inbox helper's message: Added."])
     await click(button("Don't reply to this message"))
     expect(host.querySelector('.bot-replying')).toBeNull()
     await click(transcript().querySelector('[data-message-id="b1"] .bot-reply-button'))

@@ -1,6 +1,7 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { CircleAlert, Loader2, Paperclip, Reply, X } from '../../lib/icons'
 import type { BotChatMessage, BotChatQuote, BotChip, BotError, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { MarkdownPreview } from '../editors/MarkdownPreview'
@@ -53,11 +54,27 @@ function showMessage(id: string): void {
   window.setTimeout(() => element.classList.remove('is-shown'), 1400)
 }
 
+/** Whose message a quote is, in its label: the owner's or the bot's. */
+const quoteOwner = (quote: BotChatQuote, botName: string) => (quote.author === 'owner' ? 'your message' : `${botName}'s message`)
+/** A quote's one line: the message's first line, "Files" for files alone, or that it was removed. */
+const quoteLine = (quote: BotChatQuote) => (quote.gone ? 'This message was removed.' : quote.text || 'Files')
+
+/**
+ * A quote's mark and line, shared by the quote in the transcript and the one above the composer. The owner's
+ * messages are told by the accent tint and the bot's by its own colour (styles/bots.css); only the bot's carry a name.
+ */
+function QuoteLine({ quote, botName }: { quote: BotChatQuote; botName: string }) {
+  return <>
+    <Reply size={14} className="bot-quote-mark" aria-hidden />
+    {quote.author === 'bot' && <strong>{botName}</strong>}
+    <span>{quoteLine(quote)}</span>
+  </>
+}
+
 /** The quote above a message that answers an earlier one, not the one right above it: who wrote it and its first line. */
 export function BotReplyQuote({ quote, botName }: { quote: BotChatQuote; botName: string }) {
-  return <button type="button" className="bot-reply-quote" disabled={quote.gone} onClick={() => showMessage(quote.id)} aria-label={`Replying to ${quote.author === 'owner' ? 'your message' : `${botName}'s message`}: ${quote.text}`}>
-    <strong>{quote.author === 'owner' ? 'You' : botName}</strong>
-    <span>{quote.gone ? 'This message was removed.' : quote.text || 'Files'}</span>
+  return <button type="button" className="bot-quote bot-reply-quote" data-author={quote.author} disabled={quote.gone} onClick={() => showMessage(quote.id)} aria-label={`Replying to ${quoteOwner(quote, botName)}: ${quoteLine(quote)}`}>
+    <QuoteLine quote={quote} botName={botName} />
   </button>
 }
 
@@ -221,7 +238,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const lastPrompt = () => [...pending, ...messages].reverse().find((message) => message.author === 'owner' && message.text)?.text
 
   return <>
-    <section className="chat-conversation bot-conversation">
+    {/* The bot's colour tints the quotes of its messages. */}
+    <section className="chat-conversation bot-conversation" style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={() => useBotsStore.setState({ aboutOpen: !aboutOpen })}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={40} view="head" />
@@ -256,9 +274,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />
           {!!work.length && <ul className="bot-work" aria-label={`${bot.name}'s work`}>{work.map((item) => <WorkLine key={item.id} botId={bot.id} item={item} />)}</ul>}
-          {replying && <div className="bot-replying" role="status">
-            <Reply size={14} aria-hidden />
-            <div><strong>Replying to {replying.author === 'owner' ? 'yourself' : bot.name}</strong><span>{replying.text || 'Files'}</span></div>
+          {replying && <div className="bot-quote bot-replying" data-author={replying.author} role="status" aria-label={`Replying to ${quoteOwner(replying, bot.name)}: ${quoteLine(replying)}`}>
+            <QuoteLine quote={replying} botName={bot.name} />
             <button type="button" aria-label="Don't reply to this message" title="Cancel reply" onClick={() => store().setReplyingTo(bot.id, null)}><X size={14} aria-hidden /></button>
           </div>}
           {/* A bot picks its own model: no model picker, context ring, permission mode, commands or skills. */}
