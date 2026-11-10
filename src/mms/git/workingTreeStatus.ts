@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, readlinkSync, type BigIntStats } from 'node:fs'
 import { lstat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
 import { GitPolicyError } from './gitPolicy'
 import { READ_ONLY_GIT_ENV } from './readOnlyGit'
@@ -127,7 +127,7 @@ function fileSignature(stats: BigIntStats): string {
  * refreshes the index, so a file whose times changed but whose content did not stays "modified" to `diff-files` for
  * good, and without this every status read hashed it again: thousands of files after a checkout by another tool. A
  * file is taken as unchanged without hashing only while its stat data is exactly what it was, against the same index
- * entry, which is how Git's own index decides it, and while nothing that decides how Git converts content changed
+ * entry, which is how Git's own index decides it, and while nothing that decides how Git converts its content changed
  * (its {@link conversionSteps} fingerprint).
  */
 const verifiedUnchanged = new Map<string, { sha: string; signature: string; fingerprint: string }>()
@@ -148,44 +148,89 @@ function rememberUnchanged(path: string, sha: string, signature: string, fingerp
   verifiedUnchanged.set(path, { sha, signature, fingerprint })
 }
 
-/** The value of `key` (lower case, as `config --list` prints it) in a `git config --null --list` listing; the last one wins. */
-function configValue(listing: string, key: string): string | null {
-  let value: string | null = null
-  for (const entry of listing.split('\0')) {
-    const newline = entry.indexOf('\n')
-    const name = newline < 0 ? entry : entry.slice(0, newline)
-    if (name.toLowerCase() === key) value = newline < 0 ? 'true' : entry.slice(newline + 1)
+interface ConfigEntry { scope: string; origin: string; key: string; value: string }
+
+/** A `git config --null --show-scope --show-origin --list` listing: scope, origin, then `key\nvalue`, each ended by NUL. */
+function parseConfigListing(listing: string): ConfigEntry[] {
+  const fields = listing.split('\0')
+  const entries: ConfigEntry[] = []
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const pair = fields[index + 2]!
+    const newline = pair.indexOf('\n')
+    entries.push({
+      scope: fields[index]!,
+      origin: fields[index + 1]!,
+      key: (newline < 0 ? pair : pair.slice(0, newline)).toLowerCase(),
+      value: newline < 0 ? 'true' : pair.slice(newline + 1)
+    })
   }
-  return value
+  return entries
 }
 
-/** The user's own attributes file: `core.attributesFile`, else Git's default under the config home. */
-function globalAttributesFile(listing: string): string {
-  const configured = configValue(listing, 'core.attributesfile')
+/** The user's own attributes file, for a Git too old for `git var GIT_ATTR_GLOBAL`: `core.attributesFile`, else Git's default under the config home. */
+function globalAttributesFallback(config: readonly ConfigEntry[]): string {
+  const configured = config.filter((entry) => entry.key === 'core.attributesfile').at(-1)?.value
   const home = process.env.HOME || homedir()
   if (configured) return configured.startsWith('~/') ? join(home, configured.slice(2)) : configured
   return process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, 'git', 'attributes') : join(home, '.config', 'git', 'attributes')
 }
 
 /**
- * A fingerprint of everything that decides what `hash-object` makes of a file's content, read in `cwd`: every config
- * value Git sees (`core.autocrlf`, `core.eol`, `core.safecrlf`, `filter.*`, encodings, from every scope), the settings
- * Mousse adds to its own commands, the stat data of each `.gitattributes` in the tree, `info/attributes` and the user's
- * attributes file, and the index's (which `core.autocrlf` consults, and which every commit and stage rewrites). Null
- * when a read it needs failed: nothing is then taken from, or added to, the memory of unchanged files.
+ * The system's attributes file, for a Git too old for `git var GIT_ATTR_SYSTEM`: `gitattributes` beside the system
+ * config file (both live in `$(prefix)/etc`). Null when Git reads no system config file to find it by.
  */
-function* conversionSteps(cwd: string): Generator<Step, string | null, string[]> {
-  const [listing, paths, attributes, settings] = yield [
-    { args: ['config', '--null', '--list'], optional: true },
-    { args: ['rev-parse', '--git-path', 'info/attributes', '--git-path', 'index'], optional: true },
-    { args: ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.gitattributes', '*/.gitattributes'], optional: true },
+function systemAttributesFallback(config: readonly ConfigEntry[]): string | null {
+  const origin = config.find((entry) => entry.scope === 'system' && entry.origin.startsWith('file:'))?.origin
+  return origin ? join(dirname(origin.slice('file:'.length)), 'gitattributes') : null
+}
+
+/** The folders from `top` down to `cwd`, both included; just `top` when `cwd` is not inside it. */
+function foldersDownTo(top: string, cwd: string): string[] {
+  const inside = relative(top, cwd)
+  if (inside.startsWith('..') || isAbsolute(inside)) return [top]
+  const folders = [top]
+  for (const part of inside.split(sep).filter(Boolean)) folders.push(join(folders.at(-1)!, part))
+  return folders
+}
+
+/** The folders of a path relative to `cwd` (with `/`), from its first folder down to its own. */
+function foldersOf(path: string): string[] {
+  const parts = path.split('/')
+  return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/'))
+}
+
+/**
+ * A fingerprint, for each of `paths` (relative to `cwd`), of everything that decides what `hash-object` makes of its
+ * content: every config value Git sees (`core.autocrlf`, `core.eol`, `core.safecrlf`, `filter.*`, encodings, from every
+ * scope, and where each comes from), the settings Mousse adds to its own commands, and the stat data of the attributes
+ * files Git reads for it: the system's and the user's, `info/attributes`, and the `.gitattributes` of every folder from
+ * the top of the repository down to the file's own, tracked, untracked or ignored. The index's stat data is in it too:
+ * `core.autocrlf` consults the index, and every commit and stage rewrites it. Null when a read it needs failed, or the
+ * system's attributes file cannot be named: nothing is then taken from, or added to, the memory of unchanged files.
+ */
+function* conversionSteps(cwd: string, paths: readonly string[]): Generator<Step, ((path: string) => string) | null, string[]> {
+  const [listing, where, system, global, settings] = yield [
+    { args: ['config', '--null', '--show-scope', '--show-origin', '--list'], optional: true },
+    { args: ['rev-parse', '--show-toplevel', '--git-path', 'info/attributes', '--git-path', 'index'], optional: true },
+    { args: ['var', 'GIT_ATTR_SYSTEM'], optional: true },
+    { args: ['var', 'GIT_ATTR_GLOBAL'], optional: true },
     { programSettings: true }
   ]
-  const gitPaths = paths!.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  if (!listing || gitPaths.length !== 2) return null
-  const files = [...gitPaths, globalAttributesFile(listing!), ...attributes!.split('\0').filter(Boolean)]
-  const [signatures] = yield [{ stat: files }]
-  return createHash('sha256').update([listing, settings, files.join('\0'), signatures].join('\u0001')).digest('hex')
+  const lines = where!.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (!listing || lines.length !== 3) return null
+  const [top, ...gitFiles] = lines
+  const config = parseConfigListing(listing)
+  const systemFile = system!.trim() || systemAttributesFallback(config)
+  if (!systemFile) return null
+  const globalFile = global!.trim() || globalAttributesFallback(config)
+  // Above `cwd` the folders are every file's; below it, each file has its own.
+  const shared = [...gitFiles, systemFile, globalFile, ...foldersDownTo(resolve(cwd, top!), resolve(cwd)).map((folder) => join(folder, '.gitattributes'))]
+  const folders = [...new Set(paths.flatMap(foldersOf))]
+  const [sharedSignatures, folderSignatures] = yield [{ stat: shared }, { stat: folders.map((folder) => `${folder}/.gitattributes`) }]
+  const base = createHash('sha256').update([listing, settings, shared.join('\0'), sharedSignatures].join('\u0001')).digest('hex')
+  const signatures = folderSignatures!.split('\n')
+  const byFolder = new Map(folders.map((folder, index) => [folder, signatures[index] ?? '']))
+  return (path) => createHash('sha256').update(base).update(foldersOf(path).map((folder) => `${folder}\u0002${byFolder.get(folder) ?? ''}`).join('\u0001')).digest('hex')
 }
 
 /** For tests: forget which files were found unchanged. */
@@ -230,16 +275,17 @@ function* unchangedSteps(cwd: string, records: readonly RawRecord[], objectForma
   // Taken before the stat data is read, so a write after the read is never remembered as the state that was hashed.
   const hashedAt = Date.now()
   // Read before the files' stat data and the hashes, so a change to the settings after it is never remembered as theirs.
-  const fingerprint = yield* conversionSteps(cwd)
+  const fingerprintOf = yield* conversionSteps(cwd, files.map((record) => record.path))
   const [statOutput] = yield [{ stat: files.map((record) => record.path) }]
   const signatures = statOutput!.split('\n')
-  const toHash: Array<{ record: RawRecord; path: string; signature: string }> = []
+  const toHash: Array<{ record: RawRecord; path: string; signature: string; fingerprint: string | null }> = []
   files.forEach((record, index) => {
     const path = resolve(cwd, record.path)
     const signature = signatures[index] ?? ''
+    const fingerprint = fingerprintOf?.(record.path) ?? null
     const known = verifiedUnchanged.get(path)
     if (fingerprint !== null && signature && known?.sha === record.srcSha && known.signature === signature && known.fingerprint === fingerprint) unchanged.add(record.path)
-    else toHash.push({ record, path, signature })
+    else toHash.push({ record, path, signature, fingerprint })
   })
   const batches: Array<typeof toHash> = []
   for (let start = 0; start < toHash.length; start += HASH_BATCH) batches.push(toHash.slice(start, start + HASH_BATCH))
@@ -249,7 +295,7 @@ function* unchangedSteps(cwd: string, records: readonly RawRecord[], objectForma
     const outputs = yield group.map((batch) => ({ args: ['hash-object', '--', ...batch.map(({ record }) => record.path)], optional: true }))
     group.forEach((batch, batchIndex) => {
       const hashes = outputs[batchIndex]!.split(/\r?\n/)
-      batch.forEach(({ record, path, signature }, index) => {
+      batch.forEach(({ record, path, signature, fingerprint }, index) => {
         if (hashes[index]?.trim() !== record.srcSha) return
         unchanged.add(record.path)
         if (fingerprint !== null) rememberUnchanged(path, record.srcSha, signature, fingerprint, hashedAt)

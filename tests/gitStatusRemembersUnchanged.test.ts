@@ -1,16 +1,23 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// Counts the `hash-object` runs the status read makes, without changing what they do.
-const hashRuns = vi.hoisted(() => ({ count: 0 }))
+// Counts the `hash-object` runs the status read makes, without changing what they do. `systemAttributes`, when set,
+// is the answer to `git var GIT_ATTR_SYSTEM`: the real file is the installation's, which a test must not write.
+const hashRuns = vi.hoisted(() => ({ count: 0, systemAttributes: null as string | null }))
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   const execFile = ((...args: Parameters<typeof actual.execFile>) => {
     const argv = args[1]
     if (Array.isArray(argv) && argv.includes('hash-object')) hashRuns.count += 1
+    const callback = args.at(-1)
+    if (hashRuns.systemAttributes && Array.isArray(argv) && argv.at(-1) === 'GIT_ATTR_SYSTEM' && typeof callback === 'function') {
+      const answer = `${hashRuns.systemAttributes}\n`
+      setImmediate(() => (callback as (error: null, stdout: string, stderr: string) => void)(null, answer, ''))
+      return undefined as unknown as ReturnType<typeof actual.execFile>
+    }
     return (actual.execFile as (...values: unknown[]) => unknown)(...args)
   }) as typeof actual.execFile
   return { ...actual, execFile }
@@ -26,8 +33,8 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-/** A repository with `count` committed files whose times were then moved, so only their content says they are unchanged. */
-function touchedRepository(count: number, text = (index: number) => `line ${index}\n`): string {
+/** A new repository with nothing committed. */
+function emptyRepository(): string {
   const cwd = mkdtempSync(join(tmpdir(), 'mousse-status-memory-'))
   roots.push(cwd)
   git(cwd, 'init', '-q', '-b', 'main')
@@ -36,6 +43,12 @@ function touchedRepository(count: number, text = (index: number) => `line ${inde
   git(cwd, 'config', 'commit.gpgsign', 'false')
   // Git for Windows turns it on for the whole system; the files are committed exactly as written.
   git(cwd, 'config', 'core.autocrlf', 'false')
+  return cwd
+}
+
+/** A repository with `count` committed files whose times were then moved, so only their content says they are unchanged. */
+function touchedRepository(count: number, text = (index: number) => `line ${index}\n`): string {
+  const cwd = emptyRepository()
   for (let index = 0; index < count; index++) writeFileSync(join(cwd, `file-${index}.txt`), text(index))
   git(cwd, 'add', '-A')
   git(cwd, 'commit', '-qm', 'base')
@@ -46,6 +59,7 @@ function touchedRepository(count: number, text = (index: number) => `line ${inde
 beforeEach(() => {
   clearVerifiedUnchanged()
   hashRuns.count = 0
+  hashRuns.systemAttributes = null
 })
 
 afterEach(() => {
@@ -114,6 +128,44 @@ describe('What the status read remembers ends when Git would convert content dif
     expect(hashRuns.count).toBe(3)
     expect(read.find((entry) => entry.path === 'file-0.txt')).toEqual({ path: 'file-0.txt', index: '', workdir: 'M' })
     expect(read).toEqual(await fresh(cwd))
+  })
+
+  it('reads a file again when an ignored, untracked .gitattributes appears or changes in its folder', async () => {
+    const cwd = emptyRepository()
+    mkdirSync(join(cwd, 'sub'))
+    writeFileSync(join(cwd, 'sub', 'file.txt'), 'one\r\ntwo\r\n')
+    writeFileSync(join(cwd, 'other.txt'), 'one\r\ntwo\r\n')
+    // The attributes file in `sub` is ignored, so it is never tracked, and Git still reads it.
+    writeFileSync(join(cwd, '.gitignore'), 'sub/.gitattributes\n')
+    git(cwd, 'add', '-A')
+    git(cwd, 'commit', '-qm', 'base')
+    for (const name of ['sub/file.txt', 'other.txt', '.gitignore']) utimesSync(join(cwd, name), OLD, OLD)
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 60_000 })
+    expect(await readWorkingTreeStatus(cwd)).toEqual([])
+    expect(await readWorkingTreeStatus(cwd)).toEqual([])
+    expect(hashRuns.count).toBe(1)
+
+    writeFileSync(join(cwd, 'sub', '.gitattributes'), '*.txt text\n')
+    // Asked without `git status`, which would refresh the index and so change the fingerprint another way.
+    expect(git(cwd, 'check-ignore', 'sub/.gitattributes')).toBe('sub/.gitattributes')
+    hashRuns.count = 0
+    const read = await readWorkingTreeStatus(cwd)
+    // Only the file under it is hashed again; the other keeps its proof.
+    expect(hashRuns.count).toBe(1)
+    expect(read).toEqual([{ path: 'sub/file.txt', index: '', workdir: 'M' }])
+    expect(read).toEqual(await fresh(cwd))
+  })
+
+  it('reads the file again when the system attributes file Git names changes', async () => {
+    const system = join(mkdtempSync(join(tmpdir(), 'mousse-system-attributes-')), 'gitattributes')
+    roots.push(dirname(system))
+    writeFileSync(system, '# none\n')
+    utimesSync(system, OLD, OLD)
+    hashRuns.systemAttributes = system
+    const cwd = await rememberedCrlf()
+    writeFileSync(system, '*.txt text\n')
+    await readWorkingTreeStatus(cwd)
+    expect(hashRuns.count).toBe(2)
   })
 
   it('reads the file again when a filter is set up', async () => {
