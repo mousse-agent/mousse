@@ -26,6 +26,19 @@
   transition: width calc(180ms * var(--ui-motion-scale)) ease, margin-left calc(180ms * var(--ui-motion-scale)) ease;
 }
 
+/* Go to latest floats over the full-width scroller, so it would stay at the pane's middle while the
+   composer moves left. Both columns are centred in the pane minus the reservation, so the pill takes
+   the same centre (the composer's max width cancels out) and follows the card's fade. */
+.sidebar.sidebar-full .chat-jump {
+  left: calc((100% - var(--side-card-reserved, 0px)) / 2);
+  transition:
+    opacity var(--ui-dur) ease,
+    transform var(--ui-dur) ease,
+    background-color var(--ui-dur) ease,
+    color var(--ui-dur) ease,
+    left calc(180ms * var(--ui-motion-scale)) ease;
+}
+
 /* The app panel opens by narrowing this aside while the card fades out pinned to
    the old width, so the card hangs over the panel's edge. The aside is a stacking
    context (backdrop-filter) and the panel comes later in the DOM, so by default
@@ -144,6 +157,14 @@
   .sidebar.sidebar-full .an-message-list > div,
   .sidebar.sidebar-full .chat-input-area {
     transition: none;
+  }
+
+  .sidebar.sidebar-full .chat-jump {
+    transition:
+      opacity var(--ui-dur) ease,
+      transform var(--ui-dur) ease,
+      background-color var(--ui-dur) ease,
+      color var(--ui-dur) ease;
   }
 }
 
