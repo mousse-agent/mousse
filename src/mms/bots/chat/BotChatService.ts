@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../shared/bots/personal/chat'
 import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
+import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotComputerChoice } from '../../../shared/bots/personal/methods'
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
@@ -323,6 +324,20 @@ export class BotChatService {
     const message = await this.engine.answerAsk(botId, askId, answer)
     if (!message) throw new BotEngineError('ask_not_found', 'No such ask.')
     return { message }
+  }
+
+  /**
+   * The checks `answer` makes before it changes anything, without answering: for a caller that must refuse plainly
+   * (a phone), and the ask's kind (`export_memory` needs a folder picker on this computer).
+   */
+  askKind(botId: string, askId: string): 'permission' | 'export_memory' {
+    this.engine.definitionOf(botId)
+    const escalation = this.store.escalation(askId)
+    if (!escalation || escalation.botId !== botId) throw new BotEngineError('ask_not_found', 'No such ask.')
+    if (escalation.status !== 'open') throw new BotEngineError('ask_answered', 'This was already answered.')
+    if (escalation.mode === 'wall' && this.store.activation(escalation.activationId)?.status === 'running')
+      throw new BotEngineError('ask_not_ready', 'Wait until the bot finishes its message.')
+    return isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission'
   }
 
   /** `bots.permissions.revoke`: About → Can use → Remove narrows the grant (no consent needed). */

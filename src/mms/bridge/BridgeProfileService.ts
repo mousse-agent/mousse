@@ -25,6 +25,7 @@ import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource } from './remote/MmsListsSource'
 import { remoteListMethods } from './remote/RemoteLists'
+import { remoteBotMethods } from './remote/RemoteBots'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
@@ -382,6 +383,12 @@ export class BridgeProfileService {
       },
       chats: () => services.platform.chats
     }))
+      rt.rpc.register({
+        ...method,
+        handle: (params, context) => this.track(method.handle(params, context))
+      })
+    // The owner's personal bots, from a phone: their chats, asks and pause, and a new bot.
+    for (const method of remoteBotMethods({ bots: () => services.personalBots?.service ?? undefined }))
       rt.rpc.register({
         ...method,
         handle: (params, context) => this.track(method.handle(params, context))
