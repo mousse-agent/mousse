@@ -22,7 +22,6 @@ import {
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_CHUNK_BYTES,
   MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
-  MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS,
   MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
@@ -46,6 +45,12 @@ import type { ConnectionCommandRouter } from './connectionCommands'
 import { INTEGRATION_CAPABILITY } from '../../shared/integrationPlatform'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import { OutboundWriter } from './outboundWriter'
+import {
+  MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS,
+  MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES,
+  keepsResponseForReplay,
+  replayEntryFor
+} from './replayCache'
 import { envelopeFrames } from './envelopeChunks'
 import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../run/delegation/subagentEvents'
@@ -105,7 +110,7 @@ interface ClientSession {
   bindingChain: Promise<void>
   /** In-flight request ids (same frame must not execute twice). */
   inFlightIds: Set<string>
-  /** Bounded completed response cache for deterministic duplicate-id handling. */
+  /** Answers of completed changes, bounded, so a repeated id is not run twice (`replayCache.ts`). */
   completedResponses: Map<string, ProtocolResponse>
   completedResponseSizes: Map<string, number>
   completedResponseBytes: number
@@ -920,7 +925,7 @@ export class MmsProtocolServer {
       return
     }
 
-    // Deterministic duplicate-id handling: replay completed, reject in-flight.
+    // Duplicate ids: replay a completed change, reject one in flight; a completed read runs again.
     const cached = session.completedResponses.get(v.req.id)
     if (cached) {
       this.sendRaw(session, cached)
@@ -948,7 +953,7 @@ export class MmsProtocolServer {
         error: { code: 'backpressure', message: 'Too many pending requests' }
       }
       this.sendRaw(session, res)
-      this.cacheCompleted(session, res)
+      this.cacheCompleted(session, res, v.req.method)
       return
     }
 
@@ -977,7 +982,7 @@ export class MmsProtocolServer {
           session.inFlightIds.delete(v.req.id)
           session.pending = Math.max(0, session.pending - 1)
           if (response && !session.closed) {
-            this.cacheCompleted(session, response)
+            this.cacheCompleted(session, response, v.req.method)
           }
         }
       })
@@ -1114,7 +1119,7 @@ export class MmsProtocolServer {
       session.inFlightIds.delete(reqId)
       session.pending = Math.max(0, session.pending - 1)
       if (response && !session.closed) {
-        this.cacheCompleted(session, response)
+        this.cacheCompleted(session, response, method)
       }
     }
   }
@@ -1200,14 +1205,20 @@ export class MmsProtocolServer {
     return res
   }
 
-  private cacheCompleted(session: ClientSession, res: ProtocolResponse): void {
-    const bytes = Buffer.byteLength(JSON.stringify(res), 'utf8')
+  /**
+   * Keep the answer of a completed change so the same id sent again gets it instead of a second run.
+   * Reads are not kept (sent again, they run again); see `replayCache.ts`.
+   */
+  private cacheCompleted(session: ClientSession, res: ProtocolResponse, method: string): void {
+    if (!keepsResponseForReplay(method)) return
+    const { entry, bytes } = replayEntryFor(res)
     session.completedResponseBytes -= session.completedResponseSizes.get(res.id) ?? 0
-    session.completedResponses.set(res.id, res)
+    session.completedResponses.delete(res.id)
+    session.completedResponses.set(res.id, entry)
     session.completedResponseSizes.set(res.id, bytes)
     session.completedResponseBytes += bytes
     while (session.completedResponses.size > MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS ||
-           session.completedResponseBytes > 2 * MMS_PROTOCOL_MAX_ENVELOPE_BYTES) {
+           session.completedResponseBytes > MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES) {
       const first = session.completedResponses.keys().next().value
       if (first === undefined) break
       session.completedResponses.delete(first)

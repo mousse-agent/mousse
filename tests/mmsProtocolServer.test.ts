@@ -9,6 +9,8 @@ import { LocalMmsClient } from '../src/mms/protocol/client'
 import { EventSequenceRing } from '../src/mms/protocol/eventRing'
 import { encodeFrame, FrameDecoder } from '../src/mms/protocol/framing'
 import { MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
+import { MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS, MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES, NON_REPLAYED_METHODS, keepsResponseForReplay } from '../src/mms/protocol/replayCache'
+import { ROUTED_METHODS } from '../src/shared/bridge/routed'
 import { parseEnvelope, validateHello, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
 import { scriptTurns } from './net/bridge/hub/fixture'
 
@@ -737,14 +739,67 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
-  it('bounds retained duplicate response bodies by bytes as well as request count', () => {
+  it('keeps answers of changes for replay, but not reads or large bodies', () => {
     const cache = { completedResponses: new Map(), completedResponseSizes: new Map(), completedResponseBytes: 0 }
-    const cacheCompleted = (server as unknown as { cacheCompleted: (session: typeof cache, response: unknown) => void }).cacheCompleted.bind(server)
-    const body = 'x'.repeat(20 * 1024 * 1024)
-    for (let index = 0; index < 4; index++) cacheCompleted(cache, { kind: 'res', id: String(index), ok: true, result: body })
-    expect(cache.completedResponseBytes).toBeLessThanOrEqual(64 * 1024 * 1024)
-    expect([...cache.completedResponses.keys()]).toEqual(['1', '2', '3'])
-    expect(cache.completedResponseSizes.size).toBe(3)
+    const cacheCompleted = (server as unknown as { cacheCompleted: (session: typeof cache, response: unknown, method: string) => void }).cacheCompleted.bind(server)
+    const image = 'x'.repeat(2 * 1024 * 1024)
+    for (let index = 0; index < 30; index++) cacheCompleted(cache, { kind: 'res', id: `img-${index}`, ok: true, result: { data: image } }, 'thread.messageImage')
+    cacheCompleted(cache, { kind: 'res', id: 'get', ok: true, result: { id: 't' } }, 'threads.get')
+    expect(cache.completedResponses.size).toBe(0)
+
+    cacheCompleted(cache, { kind: 'res', id: 'send', ok: true, result: { queued: true } }, 'orchestrator.send')
+    expect(cache.completedResponses.get('send')).toEqual({ kind: 'res', id: 'send', ok: true, result: { queued: true } })
+
+    cacheCompleted(cache, { kind: 'res', id: 'big', ok: true, result: image }, 'orchestrator.send')
+    const marker = cache.completedResponses.get('big') as { ok: boolean; error?: { code: string } }
+    expect(marker.ok).toBe(false)
+    expect(marker.error?.code).toBe('duplicate_request')
+    expect(cache.completedResponseSizes.get('big')).toBeLessThan(1024)
+
+    for (let index = 0; index < 200; index++) cacheCompleted(cache, { kind: 'res', id: `w-${index}`, ok: true, result: 'y'.repeat(200 * 1024) }, 'threads.rename')
+    expect(cache.completedResponses.size).toBeLessThanOrEqual(MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS)
+    expect(cache.completedResponseBytes).toBeLessThanOrEqual(MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES)
+    expect(cache.completedResponseSizes.size).toBe(cache.completedResponses.size)
+    expect(cache.completedResponses.has('w-199')).toBe(true)
+  })
+
+  it('keeps every routed change for replay and skips only reads', () => {
+    for (const [method, row] of Object.entries(ROUTED_METHODS)) {
+      expect(keepsResponseForReplay(method), method).toBe(row.capability !== 'read')
+    }
+    for (const method of NON_REPLAYED_METHODS) {
+      const row = ROUTED_METHODS[method]
+      if (row) expect(row.capability, method).toBe('read')
+    }
+    // A method nobody listed is treated as a change.
+    expect(keepsResponseForReplay('someDomain.newMutation')).toBe(true)
+    expect(keepsResponseForReplay('events.subscribe')).toBe(true)
+  })
+
+  it('runs a read sent again with the same id', async () => {
+    const results = await new Promise<Array<{ ok: boolean }>>((resolve, reject) => {
+      const socket = createConnection(endpoint)
+      const dec = new FrameDecoder()
+      const out: Array<{ ok: boolean }> = []
+      const timer = setTimeout(() => { socket.destroy(); reject(new Error('timeout')) }, 10_000)
+      socket.on('connect', () => socket.write(encodeFrame({ kind: 'hello', protocolVersion: MMS_PROTOCOL_VERSION, ownerToken, clientType: 'test' })))
+      socket.on('data', (chunk) => {
+        dec.push(chunk)
+        for (const frame of dec.shiftAll()) {
+          const env = parseEnvelope(frame)
+          if (env?.kind === 'hello_ok') socket.write(encodeFrame({ kind: 'req', id: 'h', method: 'health' }))
+          if (env?.kind === 'res' && env.id === 'h') {
+            out.push({ ok: env.ok })
+            if (out.length === 1) socket.write(encodeFrame({ kind: 'req', id: 'h', method: 'health' }))
+            else { clearTimeout(timer); socket.destroy(); resolve(out) }
+          }
+        }
+      })
+      socket.on('error', reject)
+    })
+    expect(results).toEqual([{ ok: true }, { ok: true }])
+    const sessions = [...(server as unknown as { clients: Map<string, { completedResponses: Map<string, unknown> }> }).clients.values()]
+    for (const session of sessions) expect(session.completedResponses.has('h')).toBe(false)
   })
 
   it('snapshot includes claimed, connectionFailed, and lifecycle turn state', async () => {
