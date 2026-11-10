@@ -10,6 +10,8 @@ import {
   faceDrawSide,
   IDLE_LIVE_SECONDS,
   LOST_CONTEXT_TIMEOUT_MS,
+  PENDING_POLL_MS,
+  PENDING_TIMEOUT_MS,
   resetSharedFaceRenderer,
   SAMPLE_BUDGET,
   sharedFaceRendererStatus,
@@ -24,7 +26,12 @@ import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
 let root: Root
 let host: HTMLElement
-let webgl: 'none' | 'throws' = 'none'
+let webgl: 'none' | 'throws' | 'software' = 'none'
+/** A WebGL context that Chromium hands out in software (its unsafe SwiftShader). */
+const softwareContext = {
+  getExtension: (name: string) => (name === 'WEBGL_debug_renderer_info' ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : null),
+  getParameter: () => 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)'
+}
 let reducedMotion = false
 
 const contexts = new WeakMap<HTMLCanvasElement, CanvasRenderingContext2D>()
@@ -40,6 +47,7 @@ beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement, kind: string) {
     if (kind === '2d') return fake2d(this)
     if (webgl === 'throws') throw new Error('no GPU process')
+    if (webgl === 'software') return softwareContext as unknown as WebGLRenderingContext
     return null
   } as typeof HTMLCanvasElement.prototype.getContext)
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: reducedMotion && query.includes('reduce'), media: query, addEventListener() {}, removeEventListener() {} }))
@@ -244,6 +252,98 @@ describe('BotFace fallback', () => {
     fake.tick(LOST_CONTEXT_TIMEOUT_MS)
     expect(renderer.status()).toBe('ready')
     expect(fake.draws).toHaveLength(2)
+    renderer.dispose()
+  })
+
+  it('draws the still face when WebGL is refused as software', () => {
+    webgl = 'software'
+    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
+    expect(sharedFaceRendererStatus()).toBe('unavailable')
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+    expect(host.querySelector('canvas')).toBeNull()
+  })
+
+  it('draws the still face when the shader is still compiling after the timeout, even with no tick, and the live face once it compiles', () => {
+    let status: ReturnType<FaceGpu['status']> = 'pending'
+    // Off screen as far as the observer knows, so no tick runs to look at the compile.
+    const fake = fakeEnv({ observer: true, status: () => status })
+    resetSharedFaceRenderer(() => fake.env)
+    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
+    expect(sharedFaceRendererStatus()).toBe('pending')
+    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+    fake.tick(PENDING_TIMEOUT_MS - 1)
+    expect(host.querySelector('svg.bot-face-still')).toBeNull()
+    fake.tick(1)
+    expect(sharedFaceRendererStatus()).toBe('failed')
+    expect(host.querySelector('canvas')).toBeNull()
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+    expect(fake.pending()).toBe(0)
+    // Still compiling: it stays still and looks again.
+    fake.tick(PENDING_POLL_MS)
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+    status = 'ready'
+    fake.tick(PENDING_POLL_MS)
+    expect(sharedFaceRendererStatus()).toBe('ready')
+    expect(host.querySelector('svg.bot-face-still')).toBeNull()
+    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+    expect(fake.timers()).toBe(0)
+  })
+
+  it('draws the still face when a compile that timed out then fails', () => {
+    let status: ReturnType<FaceGpu['status']> = 'pending'
+    const fake = fakeEnv({ status: () => status })
+    resetSharedFaceRenderer(() => fake.env)
+    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
+    fake.tick(PENDING_TIMEOUT_MS)
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+    status = 'failed'
+    fake.tick(PENDING_POLL_MS)
+    expect(sharedFaceRendererStatus()).toBe('failed')
+    expect(fake.timers()).toBe(0)
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+  })
+
+  it('keeps the live face when the shader compiles in time', () => {
+    const fake = fakeEnv()
+    resetSharedFaceRenderer(() => fake.env)
+    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
+    fake.tick()
+    expect(sharedFaceRendererStatus()).toBe('ready')
+    expect(fake.timers()).toBe(0)
+    fake.tick(PENDING_TIMEOUT_MS)
+    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+  })
+
+  it('draws the still face when the first frame reads back empty', () => {
+    const fake = fakeEnv()
+    resetSharedFaceRenderer(() => fake.env)
+    const readBack = vi.fn((_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }))
+    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(function (this: HTMLCanvasElement, kind: string) {
+      if (kind !== '2d') return null
+      const ctx = fake2d(this) as unknown as Record<string, unknown>
+      ctx.getImageData = readBack
+      return ctx as unknown as CanvasRenderingContext2D
+    } as typeof HTMLCanvasElement.prototype.getContext)
+    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
+    fake.tick()
+    expect(fake.draws).toHaveLength(1)
+    expect(readBack).toHaveBeenCalledTimes(1)
+    expect(sharedFaceRendererStatus()).toBe('failed')
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+  })
+
+  it('reads back only the first frame, and keeps a face that has pixels', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    const canvas = document.createElement('canvas')
+    const readBack = vi.fn((_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }))
+    ;(fake2d(canvas) as unknown as Record<string, unknown>).getImageData = readBack
+    renderer.register(canvas, spec({ state: 'working' }))
+    fake.tick()
+    fake.tick()
+    expect(fake.draws.length).toBeGreaterThan(1)
+    expect(readBack).toHaveBeenCalledTimes(1)
+    expect(renderer.status()).toBe('ready')
     renderer.dispose()
   })
 

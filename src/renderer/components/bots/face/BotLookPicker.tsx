@@ -20,10 +20,10 @@ import { BotFace } from './BotFace'
 import './face.css'
 
 /**
- * Picks a bot's look (bot-ui §4.2): a large live preview with Shuffle under it, the character
- * (mouse or Mousse), the eight colours, the eight eye shapes and the 12 accessories, each shown on
- * the chosen character in the chosen colour. Unknown stored values show, and are picked, as the
- * default.
+ * Picks a bot's look (bot-ui §4.2): a large live preview with Shuffle and the character (mouse or
+ * Mousse) under it; beside them the eight colours, the eight eye shapes and the 12 accessories, each
+ * shown on the chosen character in the chosen colour. Tiles show the face alone, named by their
+ * tooltip. Unknown stored values show, and are picked, as the default.
  */
 export interface BotLookPickerProps {
   look: BotLook
@@ -34,7 +34,8 @@ export interface BotLookPickerProps {
 }
 
 const PREVIEW_SIZE = 112
-const THUMB_SIZE = 40
+/** Tiles show the face only; the name is the tile's tooltip and accessible name. */
+const THUMB_SIZE = 36
 
 export const BOT_COLOUR_LABELS: Record<(typeof BOT_COLOURS)[number], string> = {
   coral: 'Coral',
@@ -88,8 +89,6 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
           <Shuffle size={14} aria-hidden />
           Shuffle
         </button>
-      </div>
-      <div className="bot-look-picker__options">
         <div className="bot-look-picker__label" id={`${id}-kind`}>Character</div>
         <RadioRow
           className="bot-look-picker__kinds"
@@ -103,11 +102,12 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
             content: (
               <>
                 <BotFace look={withKindAndEyes(current, next, eyes)} state="idle" size={THUMB_SIZE} view="head" still />
-                <span>{BOT_KIND_LABELS[next]}</span>
               </>
             )
           })}
         />
+      </div>
+      <div className="bot-look-picker__options">
         <div className="bot-look-picker__label" id={`${id}-colour`}>Colour</div>
         <RadioRow
           className="bot-look-picker__colours"
@@ -118,7 +118,8 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
           render={(colour) => ({
             label: BOT_COLOUR_LABELS[colour],
             className: 'bot-look-picker__swatch',
-            style: { background: BOT_COLOUR_HEX[colour] },
+            // The picked swatch's ring takes the swatch's own colour (currentColor), not white.
+            style: { background: BOT_COLOUR_HEX[colour], color: BOT_COLOUR_HEX[colour] },
             content: null
           })}
         />
@@ -135,7 +136,6 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
             content: (
               <>
                 <BotFace look={withKindAndEyes(current, kind, next)} state="idle" size={THUMB_SIZE} view="head" still />
-                <span>{BOT_EYES_LABELS[next]}</span>
               </>
             )
           })}
@@ -153,7 +153,6 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
             content: (
               <>
                 <BotFace look={{ ...current, accessory }} state="idle" size={THUMB_SIZE} view="head" still />
-                <span>{BOT_ACCESSORY_LABELS[accessory]}</span>
               </>
             )
           })}

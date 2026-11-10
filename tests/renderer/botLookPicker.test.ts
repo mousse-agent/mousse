@@ -53,7 +53,9 @@ describe('BotLookPicker', () => {
       expect(face.getAttribute('data-accessory')).toBe(radio.dataset.value)
       expect(face.getAttribute('data-view')).toBe('head')
     }
-    expect(radios(accessories!)[9]!.querySelector('span')?.textContent).toBe('Scarf')
+    expect(radios(accessories!)[9]!.getAttribute('title')).toBe('Scarf')
+    // Tiles show the face alone; the name is the tooltip.
+    expect(radios(accessories!)[9]!.querySelector(':scope > span:not(.bot-face)')).toBeNull()
     expect(checked(colours!)?.getAttribute('aria-label')).toBe('Teal')
     expect(checked(accessories!)?.getAttribute('aria-label')).toBe('Headphones')
     expect([...host.querySelectorAll('button')].some((button) => button.textContent === 'Shuffle')).toBe(true)

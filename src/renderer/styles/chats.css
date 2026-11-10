@@ -66,7 +66,8 @@
 .chat-error { color: var(--error, #e79090); font-size: 12px; line-height: 1.5; }
 .chat-composer-error { padding: 0 20px; }
 .chat-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; background: #0008; display: grid; place-items: center; }
-.chat-dialog { width: min(420px, calc(100vw - 40px)); max-height: 85vh; overflow: auto; border: 1px solid rgba(var(--accent-pale-rgb), .2); border-radius: 14px; background: var(--bg-secondary, #201d23); color: var(--text-primary); padding: 20px; box-shadow: 0 18px 60px #0005; }
+/* The edge and shadow every app dialog has (.modal): no light border. */
+.chat-dialog { width: min(420px, calc(100vw - 40px)); max-height: 85vh; overflow: auto; border: 0; border-radius: 14px; background: var(--bg-secondary, #201d23); color: var(--text-primary); padding: 20px; box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop); }
 .chat-dialog-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 .chat-dialog h2 { font-size: 17px; margin: 0; }
 .chat-dialog button { color: inherit; }

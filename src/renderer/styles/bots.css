@@ -62,7 +62,8 @@
 .bot-new-label { display: block; font-size: 12px; color: var(--text-secondary); margin: 0 0 10px; }
 .bot-new-label-gap { margin-top: 12px; }
 .chat-dialog .bot-new-name, .chat-dialog .bot-new-text { display: block; width: 100%; padding: 9px 12px; margin-bottom: 16px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.5; }
-.chat-dialog .bot-new-text { min-height: 84px; resize: none; margin-bottom: 0; }
+.chat-dialog .bot-new-text { min-height: 76px; resize: none; margin-bottom: 0; }
+.bot-dialog .chat-dialog-heading { margin-bottom: 14px; }
 .chat-dialog .bot-new-name::placeholder, .chat-dialog .bot-new-text::placeholder { color: var(--text-secondary); }
 .bot-new-foot { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
 .bot-new-foot .chat-primary-button { margin-left: auto; padding: 9px 16px; display: inline-flex; align-items: center; gap: 6px; }

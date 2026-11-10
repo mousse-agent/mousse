@@ -28,6 +28,9 @@ import { MICE_FRAGMENT_SHADER, MICE_UNIFORMS, MICE_VERTEX_SHADER, type MiceUnifo
  *   idle or paused, and a few seconds after the window lost focus in any state; a busy face moves
  *   again when the window has focus.
  *
+ * Faces never stay blank: a shader that has not compiled within `PENDING_TIMEOUT_MS`, a refused or
+ * software context, and a first frame that reads back empty all make the faces draw the still fallback.
+ *
  * To measure: `faceRendererStats()` (in development also `window.__mousseFaceStats(measureGpu?)`)
  * reports the time per drawing tick. With `measureGpu`, `gpuMs` is the GPU time of each tick's
  * draws, from a timer query (`EXT_disjoint_timer_query`) where there is one. Without it, each
@@ -127,6 +130,14 @@ export const IDLE_LIVE_SECONDS = 6
 export const UNFOCUSED_LIVE_SECONDS = 3
 /** A lost context not back within this long fails: the faces draw the still fallback. */
 export const LOST_CONTEXT_TIMEOUT_MS = 5_000
+/**
+ * A shader still compiling after this long counts as failed, so the faces draw the still fallback
+ * instead of nothing. ANGLE's Direct3D 11 backend on Windows can take far longer than this to compile
+ * the ray-marching shader. The compile goes on: when it finishes, the faces draw live again.
+ */
+export const PENDING_TIMEOUT_MS = 3_000
+/** How often a timed-out compile is checked again. */
+export const PENDING_POLL_MS = 1_000
 
 /** Seconds between frames, by state. */
 const FRAME_INTERVAL: Record<BotFaceState, number> = {
@@ -190,6 +201,12 @@ export class FaceRenderer {
   private ready = false
   /** Cancels the wait for a lost context to come back. */
   private cancelLostTimer: (() => void) | null = null
+  /** Cancels the next check of a compile that is still pending. */
+  private cancelPendingTimer: (() => void) | null = null
+  /** The shader took longer than `PENDING_TIMEOUT_MS`: the faces draw still until it is ready. */
+  private timedOut = false
+  /** Whether the first drawn face has been read back to check that it is not empty. */
+  private verified = false
   private readonly onVisibility = () => this.schedule()
   private readonly stopRatioWatch: (() => void) | null
   private readonly stopFocusWatch: (() => void) | null
@@ -211,8 +228,11 @@ export class FaceRenderer {
       this.cancelLostTimer?.()
       this.cancelLostTimer = null
       for (const slot of this.slots.values()) slot.dirty = true
+      // The restored context compiles the shader again, which may take as long as the first compile.
+      if (this.gpu?.status() === 'pending') this.startPendingTimer()
       this.schedule()
     })
+    this.startPendingTimer()
     const Observer = env.IntersectionObserver
     this.observer = Observer && this.gpu
       ? new Observer((entries) => {
@@ -240,7 +260,7 @@ export class FaceRenderer {
   }
 
   status(): FaceRendererStatus {
-    if (this.failed) return 'failed'
+    if (this.failed || this.timedOut) return 'failed'
     return this.ready ? 'ready' : 'pending'
   }
 
@@ -252,7 +272,7 @@ export class FaceRenderer {
 
   /** Starts drawing into `canvas`. Null when the canvas has no 2D context or WebGL failed. */
   register(canvas: HTMLCanvasElement, spec: FaceSpec): FaceHandle | null {
-    if (this.failed) return null
+    if (this.failed || this.timedOut) return null
     let ctx: CanvasRenderingContext2D | null = null
     try {
       ctx = canvas.getContext('2d')
@@ -309,6 +329,8 @@ export class FaceRenderer {
     this.stop()
     this.cancelLostTimer?.()
     this.cancelLostTimer = null
+    this.cancelPendingTimer?.()
+    this.cancelPendingTimer = null
     this.observer?.disconnect()
     this.env.document?.removeEventListener('visibilitychange', this.onVisibility)
     this.stopRatioWatch?.()
@@ -360,7 +382,7 @@ export class FaceRenderer {
 
   /** Whether any face wants a frame, now or later. */
   private wanted(): boolean {
-    if (this.failed || this.hidden()) return false
+    if (this.failed || this.timedOut || this.hidden()) return false
     const t = this.env.now() / 1000
     for (const slot of this.slots.values()) if (slot.visible && (slot.dirty || !slot.drawnStill || !this.still(slot, t))) return true
     return false
@@ -379,6 +401,70 @@ export class FaceRenderer {
 
   private notify(): void {
     for (const listener of [...this.listeners]) listener()
+  }
+
+  /** Fails for good: the faces draw the still fallback. */
+  private fail(): void {
+    if (this.failed) return
+    this.failed = true
+    this.cancelPendingTimer?.()
+    this.cancelPendingTimer = null
+    this.stop()
+    this.notify()
+  }
+
+  /** The shader is ready. From a tick, that tick draws; after a timeout, every face draws again. */
+  private becomeReady(fromTick = false): void {
+    this.cancelPendingTimer?.()
+    this.cancelPendingTimer = null
+    if (this.ready && !this.timedOut) return
+    const wasTimedOut = this.timedOut
+    this.ready = true
+    this.timedOut = false
+    if (wasTimedOut) for (const slot of this.slots.values()) slot.dirty = true
+    this.notify()
+    if (!fromTick) this.schedule()
+  }
+
+  /** Gives the shader `PENDING_TIMEOUT_MS` to become ready, whether or not any tick runs meanwhile. */
+  private startPendingTimer(): void {
+    if (this.failed || !this.env.setTimer) return
+    this.cancelPendingTimer?.()
+    this.cancelPendingTimer = this.env.setTimer(this.checkPending, PENDING_TIMEOUT_MS)
+  }
+
+  /** Still compiling: draw the still fallback, and look again until the compile ends. */
+  private readonly checkPending = (): void => {
+    this.cancelPendingTimer = null
+    const gpu = this.gpu
+    if (!gpu || this.failed || (this.ready && !this.timedOut)) return
+    const status = gpu.status()
+    if (status === 'ready') return this.becomeReady()
+    if (status === 'failed') return this.fail()
+    if (status === 'lost') this.lost()
+    if (!this.timedOut) {
+      this.timedOut = true
+      this.stop()
+      this.notify()
+    }
+    this.cancelPendingTimer = this.env.setTimer?.(this.checkPending, PENDING_POLL_MS) ?? null
+  }
+
+  /**
+   * Reads back the first face drawn: a face with no visible pixel means the GPU draws nothing here
+   * (it reports ready but its frames come out empty), so the faces draw the still fallback instead.
+   */
+  private verifyDrawn(slot: Slot): void {
+    this.verified = true
+    if (typeof slot.ctx.getImageData !== 'function') return
+    let data: Uint8ClampedArray
+    try {
+      data = slot.ctx.getImageData(0, 0, slot.px, slot.px).data
+    } catch {
+      return
+    }
+    for (let i = 3; i < data.length; i += 4) if (data[i] !== 0) return
+    this.fail()
   }
 
   /** The context is lost: not ready until it is back, and failed when it does not come back in time. */
@@ -403,21 +489,14 @@ export class FaceRenderer {
     const gpu = this.gpu
     if (!gpu || this.failed || this.hidden()) return
     const gpuStatus = gpu.status()
-    if (gpuStatus === 'failed') {
-      this.failed = true
-      this.notify()
-      return
-    }
+    if (gpuStatus === 'failed') return this.fail()
     if (gpuStatus !== 'ready') {
       // Compiling: check again next frame. Lost: wait for onRestored.
       if (gpuStatus === 'pending') this.schedule()
       else this.lost()
       return
     }
-    if (!this.ready) {
-      this.ready = true
-      this.notify()
-    }
+    if (!this.ready) this.becomeReady(true)
     const t = nowMs / 1000
     if (t - this.lastDraw < MIN_TICK) {
       this.schedule()
@@ -476,6 +555,7 @@ export class FaceRenderer {
       const started = this.env.now()
       if (this.measureGpu) this.measure(gpu, () => this.drawJobs(gpu, jobs))
       else this.drawJobs(gpu, jobs)
+      if (!this.verified) this.verifyDrawn(jobs[0]!.slot)
       const ms = this.env.now() - started
       this.stat.ticks++
       this.stat.lastFaces = jobs.length
@@ -630,6 +710,8 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       context.attachShader(program, shader(context.FRAGMENT_SHADER, MICE_FRAGMENT_SHADER))
       context.bindAttribLocation(program, 0, 'a')
       context.linkProgram(program)
+      // Send the compile to the GPU process now; a detached canvas is never composited, which would flush it.
+      context.flush()
       const buffer = context.createBuffer()
       context.bindBuffer(context.ARRAY_BUFFER, buffer)
       context.bufferData(context.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), context.STATIC_DRAW)
