@@ -60,6 +60,9 @@ const frames = (count: number) => new Promise<void>((done) => {
       // Where the transcript's text starts, and where the rail ends (viewport px).
       textLeft: Math.round(column.getBoundingClientRect().left + parseFloat(getComputedStyle(column).paddingLeft)),
       railRight: ticks ? Math.round(ticks.getBoundingClientRect().right) : null,
+      // Where the pane starts, and where the rail starts (viewport px).
+      paneLeft: Math.round((list.parentElement ?? list).getBoundingClientRect().left),
+      railLeft: ticks ? Math.round(ticks.getBoundingClientRect().left) : null,
       scrolls: list.scrollHeight > list.clientHeight,
     }
   },

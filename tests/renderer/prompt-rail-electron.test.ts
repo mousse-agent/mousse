@@ -8,14 +8,15 @@ import electron from 'electron'
 import { expect, it } from 'vitest'
 import { build as viteBuild } from 'vite'
 
-type Rail = { ticks: number; textLeft: number; railRight: number | null; scrolls: boolean }
+type Rail = { ticks: number; textLeft: number; railRight: number | null; paneLeft: number; railLeft: number | null; scrolls: boolean }
 
-/** The rail shows one dash per prompt and ends just left of the transcript's text (the 8px gap). */
+/** The rail shows one dash per prompt, close to the pane's left edge, and stays clear of the transcript's text. */
 const beside = (rail: Rail, prompts: number) => {
   expect(rail.ticks).toBe(prompts)
-  expect(rail.railRight).not.toBeNull()
-  expect(rail.textLeft - rail.railRight!).toBeGreaterThanOrEqual(0)
-  expect(rail.textLeft - rail.railRight!).toBeLessThanOrEqual(12)
+  expect(rail.railLeft).not.toBeNull()
+  expect(rail.railLeft! - rail.paneLeft).toBeGreaterThanOrEqual(0)
+  expect(rail.railLeft! - rail.paneLeft).toBeLessThanOrEqual(16)
+  expect(rail.textLeft - rail.railRight!).toBeGreaterThanOrEqual(8)
 }
 
 it('shows the prompt rail in every thread with two or more prompts and keeps it beside the moving column', async () => {
