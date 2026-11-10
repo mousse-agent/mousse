@@ -374,6 +374,58 @@ describe('persisted sidebar ordering', () => {
       })
     })
 
+    // Review repro: B renames an existing thread after A computed its new thread's order. Another process would wait for
+    // A's lock; a second store in this process enters it (the lock is re-entrant per process), the closest a test gets.
+    it("shows another store's rename made while this store was computing a new thread's order", () => {
+      withTemporaryMousseHome((root) => {
+        const { a, b, project } = twoStores(root)
+        const existing = a.createThread('Existing', project.id)
+        a.listAllThreads()
+        const store = a as unknown as { projectOrderUnderLock: (id: string, trusted: boolean) => number }
+        const order = store.projectOrderUnderLock.bind(a)
+        vi.spyOn(store, 'projectOrderUnderLock').mockImplementationOnce((id: string, trusted: boolean) => {
+          const next = order(id, trusted)
+          b.updateThreadMeta(existing.id, { name: 'Renamed by B' })
+          return next
+        })
+        a.createThread('New', project.id)
+        expect(a.listThreads(project.id).find((entry) => entry.id === existing.id)?.name).toBe('Renamed by B')
+      })
+    })
+
+    // Review repro: B finishes a create after A wrote its thread, before A records the project's new revision.
+    it("lists another store's thread made just before this store records its write", () => {
+      withTemporaryMousseHome((root) => {
+        const { a, b, project } = twoStores(root)
+        a.createThread('First', project.id)
+        a.listAllThreads()
+        const store = a as unknown as {
+          publishListRevision: (id: string, phase: 'pending' | 'done') => string
+          groupSignature: (id?: string) => string | undefined
+        }
+        const publish = store.publishListRevision.bind(a)
+        const signature = store.groupSignature.bind(a)
+        let published = false
+        let made: { id: string; order: number } | undefined
+        vi.spyOn(store, 'publishListRevision').mockImplementation((id: string, phase: 'pending' | 'done') => {
+          const token = publish(id, phase)
+          if (phase === 'done') published = true
+          return token
+        })
+        // B's create lands after A published its revision and before A reads the signature it records.
+        vi.spyOn(store, 'groupSignature').mockImplementation((id?: string) => {
+          if (published && !made && id === project.id) made = b.createThread('Made by B', project.id)
+          return signature(id)
+        })
+        const mine = a.createThread('Mine', project.id)
+        vi.restoreAllMocks()
+        const listed = a.listThreads(project.id)
+        expect(listed.some((entry) => entry.id === made!.id)).toBe(true)
+        expect(new Set(listed.map((entry) => entry.order)).size).toBe(listed.length)
+        expect(mine.order).not.toBe(made!.order)
+      })
+    })
+
     it('does not reuse a list while another writer left the revision pending', () => {
       withTemporaryMousseHome((root) => {
         const { a, project } = twoStores(root)

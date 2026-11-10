@@ -29,9 +29,11 @@ describe('thread lists on a file system that cannot tell writes apart', () => {
       const indexReads = vi.spyOn(store, 'readStandaloneIndex')
       a.createThread('Second', project.id)
       a.createThread('Loose second')
+      // The creates took their orders from disk; the listing reads the groups again.
+      expect(a.listThreads(project.id).map((thread) => thread.name)).toEqual(['Second', 'First'])
+      expect(a.listThreads().map((thread) => thread.name)).toEqual(['Loose second', 'Loose'])
       expect(scans).toHaveBeenCalled()
       expect(indexReads).toHaveBeenCalled()
-      expect(a.listThreads(project.id).map((thread) => thread.name)).toEqual(['Second', 'First'])
     } finally {
       if (previousHome === undefined) delete process.env.MOUSSE_HOME
       else process.env.MOUSSE_HOME = previousHome
