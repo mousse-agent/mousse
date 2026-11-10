@@ -28,7 +28,7 @@ import type { PolicySnapshot, StoragePolicyStore } from './StoragePolicyStore'
 import type { StorageSweepClock } from './sweepClock'
 import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRetirementService'
 import { expireSnapshotTrash } from '../workspace/SnapshotWorkspace'
-import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
+import { expireTrashedSnapshotRefs, trashRemovedProjectStores } from '../actions/SnapshotRefReleaseService'
 import { WorktreeManager } from '../worktree/WorktreeManager'
 import { CLEANUP_QUIET_MS, cleanupRecordFor, DELETING_NAME, listCleanupRecords, onlyInFolderAsync, resumeCleanupAsync, type CleanupRecord } from '../worktree/verifiedCleanup'
 import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
@@ -1007,6 +1007,8 @@ export class StorageCleanupService {
    */
   private async snapshotTrashItems(now: number): Promise<StorageCleanupItem[]> {
     const items: StorageCleanupItem[] = []
+    const moved = trashRemovedProjectStores()
+    if (moved) items.push({ rule: 'trash', label: 'Snapshot stores of removed projects', bytes: 0, outcome: 'removed', reason: `${moved} moved to the trash` })
     for (const entry of expireSnapshotTrash(now)) {
       if (!entry.removed && entry.reason === 'Waiting in the trash') continue
       items.push({ rule: 'trash', label: `Snapshot store in the trash (${entry.name})`, bytes: 0, outcome: entry.removed ? 'removed' : 'kept', reason: entry.reason })
