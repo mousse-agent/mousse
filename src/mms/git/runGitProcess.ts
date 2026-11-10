@@ -34,7 +34,7 @@ export function gitWorkCancelled(): boolean {
 }
 
 /** Git commands a cancellation leaves to finish: they write refs, whose lock files Git does not clear after a stop. */
-const REF_WRITERS = new Set(['update-ref', 'symbolic-ref', 'pack-refs', 'branch', 'tag', 'commit', 'gc'])
+const REF_WRITERS = new Set(['update-ref', 'symbolic-ref', 'pack-refs', 'branch', 'tag', 'commit'])
 
 /**
  * The output limit for a read whose output grows with the repository: its index, a tree, its refs, changed or untracked
