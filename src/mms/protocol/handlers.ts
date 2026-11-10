@@ -2712,7 +2712,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'queue.list': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      ctx.mms.orchestrator.getOrCreateSession(threadId)
+      // A window asks for the queue of every thread it switches to. That loads no session: a session holds the whole
+      // thread, and nothing releases it, so browsing threads kept every one of them in memory.
+      if (ctx.mms.threads.lifecycleStore?.get(threadId)) ctx.mms.threads.assertThreadAdmission(threadId)
       // Read from disk (after an agent command a crash left unfinished is finished): the queue a change that names
       // the revision is checked against. `open` is false while a merge-back keeps the queue from taking messages.
       const snapshot = ctx.mms.orchestrator.queueSnapshot(threadId)

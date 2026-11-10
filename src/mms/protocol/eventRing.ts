@@ -5,10 +5,28 @@
 import type { ProtocolEvent } from './types'
 import { MMS_PROTOCOL_REPLAY_RING_SIZE } from './types'
 
+/**
+ * Events that carry the whole state of what they name, keyed by that thing: a newer one makes an older one with the
+ * same key useless for replay. A streaming reply sends its whole message about 20 times a second, so without this the
+ * ring held hundreds of copies of the same growing reply, thinking or tool output (several MB per turn) long after
+ * the turn ended.
+ */
+function supersededKey(type: string, data: unknown, threadId?: string): string | undefined {
+  if (type === 'threads.updated') return type
+  if (type !== 'thread.message-updated') return undefined
+  const id = (data as { message?: { id?: unknown } } | null | undefined)?.message?.id
+  return typeof id === 'string' ? `${type}\0${threadId ?? ''}\0${id}` : undefined
+}
+
 export class EventSequenceRing {
   private sequence = 0
   private readonly ring: ProtocolEvent[] = []
   private readonly maxSize: number
+  /** The newest retained event per `supersededKey`. */
+  private readonly latest = new Map<string, ProtocolEvent>()
+  private readonly keys = new WeakMap<ProtocolEvent, string>()
+  /** The newest sequence dropped for space; replay from before it has a gap. Superseded events leave no gap. */
+  private evictedThrough = 0
 
   constructor(maxSize = MMS_PROTOCOL_REPLAY_RING_SIZE) {
     this.maxSize = maxSize
@@ -16,6 +34,11 @@ export class EventSequenceRing {
 
   get currentSequence(): number {
     return this.sequence
+  }
+
+  /** Number of retained events. */
+  get size(): number {
+    return this.ring.length
   }
 
   /** Append an event; returns the assigned sequence. */
@@ -30,9 +53,22 @@ export class EventSequenceRing {
       data,
       ts: new Date().toISOString()
     }
+    const key = supersededKey(type, data, threadId)
+    if (key !== undefined) {
+      const older = this.latest.get(key)
+      if (older) {
+        const index = this.ring.lastIndexOf(older)
+        if (index !== -1) this.ring.splice(index, 1)
+      }
+      this.latest.set(key, event)
+      this.keys.set(event, key)
+    }
     this.ring.push(event)
     while (this.ring.length > this.maxSize) {
-      this.ring.shift()
+      const evicted = this.ring.shift()!
+      this.evictedThrough = evicted.sequence
+      const evictedKey = this.keys.get(evicted)
+      if (evictedKey !== undefined && this.latest.get(evictedKey) === evicted) this.latest.delete(evictedKey)
     }
     return event
   }
@@ -45,8 +81,7 @@ export class EventSequenceRing {
     if (this.ring.length === 0) {
       return { gap: false, events: [] }
     }
-    const oldest = this.ring[0].sequence
-    if (afterSeq < oldest - 1) {
+    if (afterSeq < this.evictedThrough) {
       return { gap: true, events: [...this.ring] }
     }
     return {

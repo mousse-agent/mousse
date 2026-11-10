@@ -6,7 +6,7 @@ import { build, version as esbuildVersion } from 'esbuild'
 const CACHE_VERSION = 1
 const CONFIG_FILES = [
   'package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.node.json',
-  'scripts/cached-build.mjs', 'scripts/build-cli.mjs', 'scripts/build-browser-worker.mjs'
+  'scripts/cached-build.mjs', 'scripts/build-cli.mjs', 'scripts/build-browser-worker.mjs', 'scripts/ascii-source.mjs'
 ]
 
 function digest(path) {

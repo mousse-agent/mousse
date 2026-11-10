@@ -3,6 +3,7 @@ import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { asciiSourcePlugin } from './scripts/ascii-source.mjs'
 
 const mousseVersion: string = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8')).version
 const rendererPort = process.env.MOUSSE_RENDERER_PORT ? Number(process.env.MOUSSE_RENDERER_PORT) : 5713
@@ -21,6 +22,7 @@ export default defineConfig({
     build: {
       rollupOptions: {
         plugins: [
+          asciiSourcePlugin(),
           {
             name: 'normalize-highlight-js-external',
             renderChunk(code) {
@@ -52,6 +54,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
+        plugins: [asciiSourcePlugin()],
         input: {
           index: resolve(__dirname, 'src/preload/index.ts')
         }
@@ -93,6 +96,7 @@ export default defineConfig({
       // too, and nothing restyles when a chunk arrives.
       cssCodeSplit: false,
       rollupOptions: {
+        plugins: [asciiSourcePlugin()],
         input: {
           index: resolve(__dirname, 'src/renderer/index.html')
         }

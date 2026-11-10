@@ -111,6 +111,8 @@ it('persists Claude measurements, populates response metadata and counts usage a
     main.orchestrator.markThreadRestored(thread.id)
     const measured = await main.orchestrator.getContextUsage({ draftInput: '', mode: 'agent' }, thread.id)
     expect(measured).toMatchObject({ source: 'measured', limit: 200000, modelName: 'claude-opus-official', processedTokens: 370 })
+    // Measured from storage: the thread stays unloaded.
+    expect(main.orchestrator.hasSession(thread.id)).toBe(false)
     expect(measured.categories[0]).toMatchObject({ tokens: 50 })
     expect(main.lineEditStats.getUsageSnapshot().turns).toHaveLength(2)
     expect(main.lineEditStats.getUsageSnapshot().totals).toMatchObject({ input: 200, output: 40, tokens: 740 })
