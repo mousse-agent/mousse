@@ -15,7 +15,8 @@ import { SearchTool } from "./search-tool";
 import { QuestionTool } from "../question/question-tool";
 import { AnsweredQuestionsTool } from "../question/answered-questions-tool";
 import { QuickActionTool } from "./quick-action-tool";
-import { SubagentTool } from "./SubagentCard";
+import { NativeSubagentCard, SubagentTool } from "./SubagentCard";
+import { useSubagentCard } from "./subagent-cards-context";
 import type { CustomToolRendererProps } from "../types";
 
 export type ToolRendererProps = {
@@ -39,6 +40,28 @@ function deriveToolStatus(
 /** "Failed Read"; a title that already says the call failed is kept. */
 export function failedToolTitle(title: string, toolName: string): string {
   return /^(failed|couldn't|could not)/i.test(title) ? title : `Failed ${toolName}`;
+}
+
+/**
+ * A runtime's own subagent call (Claude Code's `Agent`/`Task`). One the transcript draws as a card
+ * (a call at the top of the conversation) is that card; a call a subagent made keeps its row.
+ */
+function AgentTool({ part, nestedTools, chatStatus }: { part: any; nestedTools?: any[]; chatStatus?: string }) {
+  const card = useSubagentCard(part.toolCallId);
+  if (card?.native) return <NativeSubagentCard card={card} nestedTools={nestedTools ?? []} chatStatus={chatStatus} />;
+  const labelBase = part.type === "tool-Agent" ? "Agent" : "Task";
+  return (
+    <ToolGroup
+      part={part}
+      nestedTools={nestedTools}
+      chatStatus={chatStatus}
+      icon={<IconSparkles size={18} />}
+      completeLabel={`${labelBase} completed`}
+      shimmerLabel={`Running ${labelBase.toLowerCase()}`}
+      interruptedLabel={`${labelBase} interrupted`}
+      defaultOpen={false}
+    />
+  );
 }
 
 export const ToolRenderer = memo(function ToolRenderer({
@@ -75,19 +98,7 @@ export const ToolRenderer = memo(function ToolRenderer({
       return <SubagentTool part={part} chatStatus={chatStatus} />;
     case "tool-Task":
     case "tool-Agent":
-      const labelBase = part.type === "tool-Agent" ? "Agent" : "Task";
-      return (
-        <ToolGroup
-          part={part}
-          nestedTools={nestedTools}
-          chatStatus={chatStatus}
-          icon={<IconSparkles size={18} />}
-          completeLabel={`${labelBase} completed`}
-          shimmerLabel={`Running ${labelBase.toLowerCase()}`}
-          interruptedLabel={`${labelBase} interrupted`}
-          defaultOpen={false}
-        />
-      );
+      return <AgentTool part={part} nestedTools={nestedTools} chatStatus={chatStatus} />;
     case "tool-Thinking":
       return <ThinkingTool part={part} />;
     case "tool-Note":

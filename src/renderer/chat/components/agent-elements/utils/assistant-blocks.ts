@@ -65,6 +65,8 @@ export type AssistantMessageAnalysis = {
    */
   cardsOnly: boolean;
   cardParts: ToolPartBase[];
+  /** The calls a card's subagent made (a runtime's own subagent holds them), by the card's call id. */
+  cardNestedTools?: ReadonlyMap<string, ToolPartBase[]>;
 };
 
 const NO_CARD_IDS: ReadonlySet<string> = new Set();
@@ -117,6 +119,7 @@ export function analyzeAssistantMessage(
 
   const toolItems: AssistantToolItem[] = [];
   const cardParts: ToolPartBase[] = [];
+  const cardNestedTools = new Map<string, ToolPartBase[]>();
   for (const part of parts) {
     if (isTextPart(part)) {
       if (part.text) return notGroupable;
@@ -133,6 +136,8 @@ export function analyzeAssistantMessage(
     }
     if (part.toolCallId && cardIds.has(part.toolCallId)) {
       cardParts.push(part);
+      const nested = nestedToolsMap.get(part.toolCallId);
+      if (nested) cardNestedTools.set(part.toolCallId, nested);
       continue;
     }
     const toolCallId = part.toolCallId;
@@ -147,7 +152,7 @@ export function analyzeAssistantMessage(
   if (cardParts.length > 0) {
     // Cards and other rows in one message render as the message itself.
     return toolItems.length === 0
-      ? { toolsOnly: false, toolItems: [], cardsOnly: true, cardParts }
+      ? { toolsOnly: false, toolItems: [], cardsOnly: true, cardParts, ...(cardNestedTools.size > 0 ? { cardNestedTools } : {}) }
       : notGroupable;
   }
   if (toolItems.length === 0) return notGroupable;

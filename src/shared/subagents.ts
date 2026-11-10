@@ -102,6 +102,18 @@ export interface SubagentNoticeItem {
   fullyShown: boolean
 }
 
+/**
+ * One provider background task (a Claude Code background agent or shell) a continuation message reports:
+ * the message Claude's own turn opens with when such a task finished. The app shows it as a notice row,
+ * or on the task's subagent card, and never reads the message text.
+ */
+export interface BackgroundTaskNoticeItem {
+  /** The provider's task id: a background agent's row carries it as `nativeId`. */
+  taskId: string
+  /** What the provider calls the task ("Map design language", "Install dependencies"), when it named it. */
+  description?: string
+}
+
 export interface SubagentsUpdatedEvent {
   parentThreadId: string
 }

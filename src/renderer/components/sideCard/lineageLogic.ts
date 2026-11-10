@@ -1,5 +1,6 @@
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { formatAgo } from '../../lib/formatAgo'
+import type { SubagentCardModel } from '../../chat/adapters/subagentCards'
 
 /** Finished rows shown, once their group is open, before the list asks to be expanded. */
 export const LINEAGE_COLLAPSED_COUNT = 5
@@ -8,6 +9,34 @@ export const LINEAGE_COLLAPSED_COUNT = 5
 export const LINEAGE_RUNNING_COUNT = 3
 
 type LineageSubagent = Pick<SubagentSummary, 'childThreadId' | 'state' | 'createdAt' | 'updatedAt'>
+
+/**
+ * One row of Lineage: a Mousse subagent, or one the thread's runtime started with its own tool (`native`,
+ * Claude Code's `Agent`). A native one has no thread: `childThreadId` is the call's message id, and its row
+ * shows its card in the conversation instead of opening a thread.
+ */
+export type LineageEntry = Pick<SubagentSummary, 'childThreadId' | 'state' | 'createdAt' | 'updatedAt' | 'title' | 'provider' | 'model' | 'waitingOn' | 'computer'> & {
+  native?: boolean
+}
+
+function isoOf(ms: number | null): string {
+  return ms === null ? '' : new Date(ms).toISOString()
+}
+
+/** The Lineage row of a native subagent's card: its kind of agent stands where a Mousse subagent's model would. */
+export function nativeLineageEntry(card: Pick<SubagentCardModel, 'toolCallId' | 'state' | 'title' | 'createdAt' | 'completedAt' | 'native'>): LineageEntry {
+  return {
+    childThreadId: card.toolCallId,
+    state: card.state,
+    title: card.title,
+    provider: null,
+    model: card.native?.agentType ?? null,
+    waitingOn: [],
+    createdAt: isoOf(card.createdAt),
+    updatedAt: isoOf(card.completedAt ?? card.createdAt),
+    native: true
+  }
+}
 
 function timeOf(value: string | undefined): number {
   if (!value) return 0

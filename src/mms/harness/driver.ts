@@ -161,8 +161,29 @@ export interface DriverContext {
 export interface LiveProcessHost {
   backgroundWork?(threadId: string, active: boolean): void
   /** The host runs it as a run of the thread, whose turn names `info.id` as its continuation. */
-  continuationStarted?(threadId: string, info: { id: string; taskIds: string[]; summaries: string[] }): void
+  continuationStarted?(threadId: string, info: ContinuationInfo): void
   notice?(threadId: string, text: string): void
+  /** A task a tool call started (a background agent or shell) ended, possibly after the call's turn settled. */
+  taskEnded?(threadId: string, info: ProviderTaskEnd): void
+}
+
+/** A turn the runtime started on its own because background tasks finished: the tasks, and what they said. */
+export interface ContinuationInfo {
+  id: string
+  taskIds: string[]
+  summaries: string[]
+  /** The tasks with the names the runtime gave them; absent from a runtime that does not name them. */
+  tasks?: Array<{ taskId: string; description?: string }>
+}
+
+/** The end a runtime reported for the task a tool call started (`toolUseId` is the call's id). */
+export interface ProviderTaskEnd {
+  toolUseId: string
+  taskId: string
+  /** The runtime's word for the outcome: `completed`, `failed`, `stopped`. */
+  status: string
+  summary?: string
+  durationMs?: number
 }
 
 /**

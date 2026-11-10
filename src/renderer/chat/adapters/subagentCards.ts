@@ -50,6 +50,8 @@ export interface SubagentCardModel {
   createdAt: number | null
   completedAt: number | null
   error?: string
+  /** Set on a subagent the runtime started with its own tool (Claude Code's `Agent`): it has no thread to open. */
+  native?: import('./nativeSubagents').NativeSubagentInfo
 }
 
 type Part = { type?: unknown; toolCallId?: unknown; state?: unknown; input?: unknown; output?: unknown; subagentTool?: unknown }

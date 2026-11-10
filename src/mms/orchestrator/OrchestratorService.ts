@@ -98,7 +98,8 @@ import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow } from '../run/restartNote'
 import { ThreadResidency } from './ThreadResidency'
 import { isDeepStrictEqual } from 'node:util'
-import type { OneShotTask } from '../harness/driver'
+import type { ContinuationInfo, OneShotTask, ProviderTaskEnd } from '../harness/driver'
+import { ACTIVITY_DESCRIPTION_CHARS, BACKGROUND_SUMMARY, type AgentActivityItem } from '../../shared/agentActivity'
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
@@ -115,7 +116,7 @@ import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } fro
 import { RemoteSubagents } from './RemoteSubagents'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
 import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
-import { isRunningSubagent, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
+import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
@@ -832,6 +833,8 @@ interface ContinuationTurnPayload {
   /** Names the turn Claude started (`ClaudeLiveHost.continuationStarted`) that this run is for. */
   continuationId: string
   note: string
+  /** The tasks the turn reports, shown as a notice instead of the note; absent on payloads written before it. */
+  backgroundNotice?: BackgroundTaskNoticeItem[]
 }
 
 /** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
@@ -861,6 +864,41 @@ function shortTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
   if (tokens >= 1000) return `${Math.round(tokens / 1000)}K`
   return String(tokens)
+}
+
+/** The tasks a continuation reports, for the notice its opening message carries. */
+function backgroundNoticeOf(info: ContinuationInfo): BackgroundTaskNoticeItem[] {
+  const named = new Map((info.tasks ?? []).map((task) => [task.taskId, task.description]))
+  return info.taskIds.map((taskId) => {
+    const description = named.get(taskId)?.slice(0, ACTIVITY_DESCRIPTION_CHARS)
+    return { taskId, ...(description ? { description } : {}) }
+  })
+}
+
+/**
+ * The row of a call whose task ended after its turn settled: done, failed or stopped, with the task's own
+ * summary and duration. Undefined unless the row is one a settled turn left "in the background".
+ */
+function settledBackgroundEnd(activity: AgentActivityItem, end: ProviderTaskEnd): AgentActivityItem | undefined {
+  if (activity.kind !== 'subagent' && activity.kind !== 'command') return undefined
+  if (activity.status !== 'done' || activity.summary !== BACKGROUND_SUMMARY) return undefined
+  if (activity.nativeId && activity.nativeId !== end.taskId) return undefined
+  const clean = end.summary?.replace(/\s+/g, ' ').trim()
+  const summary = clean ? (clean.length > ACTIVITY_DESCRIPTION_CHARS ? `${clean.slice(0, ACTIVITY_DESCRIPTION_CHARS - 1)}…` : clean) : undefined
+  const { summary: _summary, interruptedBy: _by, ...rest } = activity as AgentActivityItem & { interruptedBy?: unknown }
+  const outcome =
+    end.status === 'failed'
+      ? { status: 'failed' as const }
+      : end.status === 'stopped'
+        ? { status: 'interrupted' as const, interruptedBy: 'stop' as const }
+        : { status: 'done' as const }
+  return {
+    ...rest,
+    ...outcome,
+    summary: summary ?? (outcome.status === 'interrupted' ? 'Stopped' : outcome.status === 'failed' ? 'Failed' : 'Finished'),
+    ...(end.durationMs !== undefined ? { durationMs: end.durationMs } : {}),
+    endedAt: new Date().toISOString()
+  } as AgentActivityItem
 }
 
 function isContinuationTurnPayload(payload: unknown): payload is ContinuationTurnPayload {
@@ -1597,7 +1635,8 @@ export class OrchestratorService extends EventEmitter {
     this.harness.setLiveHost({
       backgroundWork: (threadId, active) => this.setProviderBackgroundWork(threadId, active),
       continuationStarted: (threadId, info) => this.startProviderContinuation(threadId, info),
-      notice: (threadId, text) => this.noteProviderNotice(threadId, text)
+      notice: (threadId, text) => this.noteProviderNotice(threadId, text),
+      taskEnded: (threadId, info) => this.noteProviderTaskEnded(threadId, info)
     })
   }
   /**
@@ -2161,6 +2200,30 @@ export class OrchestratorService extends EventEmitter {
     if (!active) this.runEngine?.store.settleHold(threadId)
   }
 
+  /**
+   * A provider task a tool call started ended after that call's turn settled. The turn closed the row as
+   * still running in the background (`BACKGROUND_SUMMARY`); it now says how the task ended. A row the turn
+   * that is still running holds open, or one that already has its outcome, is left to that turn.
+   */
+  private noteProviderTaskEnded(threadId: string, info: ProviderTaskEnd): void {
+    try {
+      const session = this.sessions.get(threadId)
+      if (!session || session.deleted) return
+      this.sessionAls.run(session, () => {
+        const index = session.messages.findIndex((message) => message.activity?.callId === info.toolUseId)
+        const message = index >= 0 ? session.messages[index] : undefined
+        const updated = message?.activity ? settledBackgroundEnd(message.activity, info) : undefined
+        if (!message || !updated) return
+        const next: ChatMessage = { ...message, activity: updated }
+        session.messages[index] = next
+        this.emitMessageUpdated(next)
+        this.persist(true)
+      })
+    } catch (error) {
+      console.warn('a background task end could not be shown', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   /** A line in a thread from outside a turn, such as work an older version left unfinished. */
   noteThreadNotice(threadId: string, text: string): void { this.noteProviderNotice(threadId, text) }
 
@@ -2209,7 +2272,7 @@ export class OrchestratorService extends EventEmitter {
    * `turn.start` effect are written in the engine; the effect runs the turn when the thread is free.
    * A host that cannot record the run throws, and the provider reads and drops the turn instead.
    */
-  private startProviderContinuation(threadId: string, info: { id: string; taskIds: string[]; summaries: string[] }): void {
+  private startProviderContinuation(threadId: string, info: ContinuationInfo): void {
     const engine = this.runEngine
     if (!engine || !this.effectsEnabled()) throw new Error('Continuation turns need the run engine worker')
     const note = info.summaries.length
@@ -2231,7 +2294,8 @@ export class OrchestratorService extends EventEmitter {
     void engine.dispatch({ kind: 'send', threadId, clientRequestId: `continuation:${info.id}`, source: 'provider-continuation' })
       .then((result) => {
         if (result.status !== 'accepted') throw new Error(result.reason)
-        const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, continuationId: info.id, note }
+        const backgroundNotice = backgroundNoticeOf(info)
+        const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, continuationId: info.id, note, ...(backgroundNotice.length ? { backgroundNotice } : {}) }
         engine.outbox.enqueue({ effectId: `effect:${result.runId}:turn.start:1`, threadId, runId: result.runId, kind: 'turn.start', payload })
       })
       .catch((error: unknown) => {
@@ -2345,7 +2409,7 @@ export class OrchestratorService extends EventEmitter {
         { content: payload.note, mode: getLastUserChatMode(session.messages) ?? 'agent' },
         false,
         true,
-        { source: 'provider-continuation', runId: payload.runId, externalSignal: signal, continuationId: payload.continuationId, admissionHeld: Boolean(hold?.reserved) || passedThrough }
+        { source: 'provider-continuation', runId: payload.runId, externalSignal: signal, continuationId: payload.continuationId, admissionHeld: Boolean(hold?.reserved) || passedThrough, ...(payload.backgroundNotice?.length ? { backgroundNotice: payload.backgroundNotice } : {}) }
       )
     } catch (error) {
       const run = engine.getRun(payload.runId)
@@ -8860,7 +8924,8 @@ export class OrchestratorService extends EventEmitter {
     permissionMode?: PermissionMode,
     scheduled?: ScheduledTurnRef,
     approvalNote?: string,
-    agent?: AgentOrigin
+    agent?: AgentOrigin,
+    backgroundNotice?: BackgroundTaskNoticeItem[]
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -8919,6 +8984,7 @@ export class OrchestratorService extends EventEmitter {
       queueItemId: queueItemId || undefined,
       workflowInvocationId: workflowRun?.invocationId,
       ...(subagentNotice?.length ? { subagentNotice } : {}),
+      ...(backgroundNotice?.length ? { backgroundNotice } : {}),
       // A job's prompt is not something the person typed; the thread can say whose it is.
       ...(scheduled ? { scheduled: { jobId: scheduled.jobId, ...(scheduled.jobName ? { jobName: scheduled.jobName } : {}) } } : {}),
       // A message another thread's agent wrote is stored as that agent's, never as something a person typed.
@@ -10073,6 +10139,8 @@ export class OrchestratorService extends EventEmitter {
       runId?: string
       /** The subagent results this turn's message delivers (a wake, a queued steer). */
       subagentNotice?: SubagentNoticeItem[]
+      /** The provider background tasks a continuation's message reports. */
+      backgroundNotice?: BackgroundTaskNoticeItem[]
       /** The turn the provider started that this run is for (`provider-continuation`). */
       continuationId?: string
       /** A mode this turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
@@ -10353,6 +10421,7 @@ export class OrchestratorService extends EventEmitter {
       onUserInputAccepted?: () => void
       runId?: string
       subagentNotice?: SubagentNoticeItem[]
+      backgroundNotice?: BackgroundTaskNoticeItem[]
       continuationId?: string
       permissionMode?: PermissionMode
       refuseQueue?: boolean
@@ -10645,7 +10714,8 @@ export class OrchestratorService extends EventEmitter {
             turnPermission,
             opts?.schedule,
             approvalNote,
-            opts?.agent
+            opts?.agent,
+            opts?.backgroundNotice
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)

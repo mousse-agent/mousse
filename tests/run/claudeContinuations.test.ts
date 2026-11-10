@@ -161,6 +161,40 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(s.reconciler.runOnce().wakes.wakes).toEqual([])
   })
 
+  it('a background agent\'s late report updates the row its turn left in the background, and the continuation names the task', async () => {
+    const s = await scene()
+    // The Builder's turn launched a background agent and settled: its row says it runs in the background.
+    const session = s.d.orch.getOrCreateSession(s.childThread)
+    const row = {
+      id: 'agent-row',
+      role: 'system' as const,
+      kind: 'mcp_tool_call' as const,
+      content: '',
+      timestamp: new Date().toISOString(),
+      toolCall: { title: 'Agent', summary: 'Agent', details: [], status: 'complete' as const },
+      activity: { id: 'agent-row', callId: 'toolu_agent', toolName: 'Agent', status: 'done' as const, kind: 'subagent' as const, description: 'Map design language', nativeId: 'build-1', background: true, summary: 'Running in the background', startedAt: new Date().toISOString(), endedAt: new Date().toISOString() }
+    }
+    session.messages.push(row as never)
+
+    s.cli.last.emit(
+      { ...notification('build-1'), tool_use_id: 'toolu_agent', usage: { duration_ms: 42_000 } },
+      textDelta('The report is in.'),
+      resultFrame({ text: 'The report is in.', origin: 'task-notification' })
+    )
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation' && run.status === 'completed'), 'the continuation run')
+
+    const updated = session.messages.find((message) => message.id === 'agent-row')!
+    expect(updated.activity).toMatchObject({ status: 'done', summary: 'task build-1 completed', durationMs: 42_000, nativeId: 'build-1' })
+    // The message that opens Claude's own turn names the task, so the app shows a notice, not a message the user wrote.
+    const opener = session.messages.find((message) => message.role === 'user' && message.content.startsWith('A background task finished'))
+    expect(opener?.backgroundNotice).toEqual([{ taskId: 'build-1', description: 'task build-1' }])
+
+    // A second report for the same call changes nothing: the row already has its outcome.
+    s.cli.last.emit({ ...notification('build-1', 'failed'), tool_use_id: 'toolu_agent' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(session.messages.find((message) => message.id === 'agent-row')!.activity).toMatchObject({ status: 'done', summary: 'task build-1 completed' })
+  })
+
   it('a wake with no model turn ends the continuation run, and the task settles with the subagent\'s last words', async () => {
     const s = await scene()
     s.cli.last.emit(notification('build-1'), resultFrame({ text: '', origin: 'task-notification', numTurns: 0 }))
