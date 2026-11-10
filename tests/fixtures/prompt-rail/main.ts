@@ -10,7 +10,7 @@ runWithoutGpu({ app, BrowserWindow })
 app.on('window-all-closed', () => {})
 setTimeout(() => app.exit(1), 60000).unref()
 
-type Rail = { ticks: number; textLeft: number; railRight: number | null; scrolls: boolean }
+type Rail = { ticks: number; textLeft: number; railRight: number | null; paneLeft: number; railLeft: number | null; scrolls: boolean }
 
 async function main() {
   await app.whenReady()

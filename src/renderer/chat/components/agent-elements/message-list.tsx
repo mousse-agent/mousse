@@ -744,23 +744,23 @@ export type PromptMarkerLayout = {
 };
 
 
-/** Width of the tick column (`.chat-prompt-ticks`) and its gap to the transcript text. */
+/** Width of the tick column (`.chat-prompt-ticks`), its distance from the pane's left edge, and the least gap it keeps to the transcript text. */
 const PROMPT_RAIL_WIDTH = 40;
+const PROMPT_RAIL_EDGE = 12;
 const PROMPT_RAIL_GAP = 8;
 /** The rail shows once the thread has this many prompts to move between, however short the thread is. */
 const PROMPT_RAIL_MIN_PROMPTS = 2;
 
 /**
- * Where the rail sits (px from the left of the list), right beside the transcript's text, or null when
- * the thread has a single prompt or the gutter is too narrow for the rail to stay clear of the text.
+ * Where the rail sits (px from the left of the list): close to the pane's left edge, or null when the
+ * thread has a single prompt or the gutter is too narrow for the rail to stay clear of the text.
  */
 export function promptRailLeft({ textLeft, prompts }: {
   textLeft: number;
   prompts: number;
 }): number | null {
   if (prompts < PROMPT_RAIL_MIN_PROMPTS) return null;
-  const left = Math.round(textLeft - PROMPT_RAIL_GAP - PROMPT_RAIL_WIDTH);
-  return left >= 4 ? left : null;
+  return textLeft - PROMPT_RAIL_EDGE - PROMPT_RAIL_WIDTH >= PROMPT_RAIL_GAP ? PROMPT_RAIL_EDGE : null;
 }
 
 /**
