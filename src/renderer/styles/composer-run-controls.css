@@ -40,12 +40,6 @@
   overflow: visible;
 }
 
-/* The rail sits on the pinned bottom edge, so its icons stay under the pointer while the list beside
-   them changes height. */
-.model-picker-panel.is-fixed.has-rail .model-picker-rail {
-  justify-content: safe flex-end;
-}
-
 /* A notch tighter than the shared menu rows: about 30px a model or level. */
 .model-picker-panel.is-fixed .model-picker-search {
   --settings-control-h: 26px;
