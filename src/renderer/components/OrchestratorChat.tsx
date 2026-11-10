@@ -91,7 +91,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, pendingThreadRow, settlePendingThreadRow } from '../lib/pendingThreadRows'
+import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
@@ -1142,19 +1142,34 @@ export function OrchestratorChat() {
     let targetThreadId = activeThreadId
     // A quick action may already be preparing this new chat; a second send would create another thread.
     if (startingBlank && isWorkspacePending(useAppStore.getState())) return
+    // Held from the click, without a render: a quick action or a second Send for this chat is refused until it ends.
+    const releaseHold = startingBlank ? holdNewChat(profileId, activeThreadId) : undefined
+    if (startingBlank && !releaseHold) return
     if (startingBlank) blankSendPending.current = true
-    const lockWorkspace = () => useAppStore.getState().setWorkspacePending(profileId, activeThreadId, true)
+    // Only this send's own lock is cleared, never one a quick action set.
+    let locked = false
+    const lockWorkspace = () => {
+      locked = true
+      useAppStore.getState().setWorkspacePending(profileId, activeThreadId, true)
+    }
     const releaseWorkspacePending = () => {
       if (!startingBlank) return
       blankSendPending.current = false
+      releaseHold?.()
+      if (!locked) return
+      locked = false
       const store = useAppStore.getState()
       store.setWorkspacePending(profileId, activeThreadId, false)
       store.setWorkspacePending(profileId, targetThreadId, false)
     }
     const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
+    let pendingRow: PendingThreadRow | undefined
+    // What was typed while the row's frame was drawn (the composer is not locked yet): kept when the send clears it.
+    let typedMeanwhile = ''
+    try {
     // The thread this send starts is listed now, before anything below awaits: the sidebar paints its row in the next
     // frame, named from the prompt and Working, and the thread's own row takes its place when the service lists it.
-    const pendingRow = startingBlank
+    pendingRow = startingBlank
       ? pendingThreadRow({
         profileId,
         text: input,
@@ -1165,17 +1180,13 @@ export function OrchestratorChat() {
         threads: useAppStore.getState().threads
       })
       : undefined
-    if (pendingRow) addPendingThreadRow(pendingRow)
-    // Locking the composer redraws the whole chat, so with a pending row it waits for the row's frame (the ref above
-    // already stops a second send).
-    else if (startingBlank) lockWorkspace()
-    let firstMessageWent = false
-    try {
-    // The row's frame is drawn before the rest of the send renders anything or calls the service.
     if (pendingRow) {
+      addPendingThreadRow(pendingRow)
+      // Locking the composer redraws the whole chat, so it waits for the row's frame; the hold above stops a second send.
       await afterNextPaint()
       lockWorkspace()
-    }
+      typedMeanwhile = typedAfterSend(input, useAppStore.getState().composerDrafts[activeThreadId ?? '__blank__'] ?? '')
+    } else if (startingBlank) lockWorkspace()
     const resolutionProfile = profileId
     const resolutionThread = activeThreadId
     const resolvedReferences = await resolveChatReferences(references)
@@ -1261,6 +1272,12 @@ export function OrchestratorChat() {
       const computer = workspace.node ? pickedDeviceName : 'this computer'
       let made: Thread | undefined
       const actions = composerThreadActions()
+      const row = pendingRow
+      // A thread made after the composer moved on is listed as made until the service pushes it.
+      const listIfMissing = (thread: Thread) => {
+        const store = useAppStore.getState()
+        if (store.profileId === profileId && !store.threads.some((entry) => entry.id === thread.id)) store.upsertThread(thread)
+      }
       // Apply this draft's workspace before sending; a project change creates a
       // new hidden draft instead of moving another thread's transcript storage.
       // A thread made on this computer is made with the shown model and permission mode, so nothing is left to set.
@@ -1270,7 +1287,7 @@ export function OrchestratorChat() {
         started: true,
         ...actions,
         // The pending row becomes the made thread's row, whatever the composer shows by the time it is made.
-        ...(pendingRow ? { create: async (...args: Parameters<typeof actions.create>) => claimPendingThreadRow(pendingRow.key, await actions.create(...args)) } : {}),
+        ...(row ? { create: async (...args: Parameters<typeof actions.create>) => claimPendingThreadRow(row.key, await actions.create(...args), listIfMissing) } : {}),
         shown: { ...(wanted ? { model: wanted } : {}), ...(!remoteDraft ? { permissionMode } : {}) },
         picked,
         stillVisible,
@@ -1371,7 +1388,7 @@ export function OrchestratorChat() {
       browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
       resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     }
-    firstMessageWent = true
+    if (typedMeanwhile) setInput(typedMeanwhile)
     const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound)
     if (sent === false && stillVisible()) {
       restoreUnsent()
@@ -1388,14 +1405,9 @@ export function OrchestratorChat() {
     } finally {
       releaseWorkspacePending()
       // Sent (this lasts the first turn) or not: the thread list lists the thread from now on. A send that stopped
-      // first (a failed create, a refusal shown above the composer, which keeps the prompt) takes the row away,
-      // unless the service had made the thread already.
-      if (pendingRow) {
-        settlePendingThreadRow(pendingRow.key, (thread) => {
-          const store = useAppStore.getState()
-          if (!firstMessageWent && store.profileId === profileId && !store.threads.some((entry) => entry.id === thread.id)) store.upsertThread(thread)
-        })
-      }
+      // first (a failed create, a refusal shown above the composer, which keeps the prompt) takes the row away; a
+      // thread the service made already is listed (claimed above).
+      if (pendingRow) dropPendingThreadRows([pendingRow.key])
     }
   }
 

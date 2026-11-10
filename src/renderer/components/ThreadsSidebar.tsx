@@ -22,7 +22,7 @@ import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
-import { isPendingRowId, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
+import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast, showUndoToast } from '../lib/actionToast'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
@@ -396,10 +396,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const shownProfileId = useAppStore((s) => s.profileId)
   const pendingRows = usePendingThreadRows((s) => s.rows)
   const pendingRowKeys = usePendingThreadRows((s) => s.rowKeys)
-  const { threads, activity: threadActivity, openRowId: activeThreadId, rowKeys } = useMemo(
-    () => withPendingRows(listedInStore, pendingRows.filter((row) => row.profileId === shownProfileId), storeActivity, storeActiveThreadId, pendingRowKeys),
-    [listedInStore, pendingRows, shownProfileId, storeActivity, storeActiveThreadId, pendingRowKeys]
+  const { threads, activity: threadActivity, openRowId: activeThreadId, rowKeys, unmade: unmadeRows } = useMemo(
+    // A bot's chat thread is never taken for a pending send's thread.
+    () => withPendingRows(listedInStore, pendingRows.filter((row) => row.profileId === shownProfileId), storeActivity, storeActiveThreadId, pendingRowKeys, agentThreadIds),
+    [listedInStore, pendingRows, shownProfileId, storeActivity, storeActiveThreadId, pendingRowKeys, agentThreadIds]
   )
+  // A pending row goes once the service shows the same (its thread listed, named and with a state); its key a minute on.
+  useEffect(() => {
+    dropPendingThreadRows(servedPendingRows(pendingRows, listedInStore, storeActivity))
+    pruneRowKeys(new Set(listedInStore.map((thread) => thread.id)))
+  }, [pendingRows, listedInStore, storeActivity])
   const turnStates = useAppStore((s) => s.turnStates)
   const approvalThreads = useThreadsAwaitingApproval()
 
@@ -829,7 +835,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (!dragged?.feed || dragged.id === target) return
     suppressClick.current = true
     window.setTimeout(() => { suppressClick.current = false }, 0)
-    setThreadFeedOrder(arrangeThreadFeed(feedThreads.map((thread) => thread.id), dragged.id, target, after))
+    setThreadFeedOrder(arrangeThreadFeed(feedThreads.flatMap((thread) => (unmadeRows.has(thread.id) ? [] : [thread.id])), dragged.id, target, after))
   }
 
   const reorderBefore = async (target: DraggedSidebarItem) => {
@@ -1216,7 +1222,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     const isArchived = Boolean(thread.settledAt)
     // A pending row whose thread the service has not made yet: it is the open one already, and has nothing to act on.
-    const unmade = isPendingRowId(thread.id)
+    const unmade = unmadeRows.has(thread.id)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
     // A row already named (a pending send's, from its prompt) shows its name, not a placeholder.
     const isGeneratingTitle = pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name)
@@ -1243,6 +1249,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // Double-click on the title renames; focus goes back to the row afterwards.
     const renameFromTitle = (event: React.MouseEvent<HTMLElement>) => {
       event.stopPropagation()
+      if (unmade) return
       startRename({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe, returnFocus: event.currentTarget.closest('button') })
     }
     // In the tree the row's own buttons leave the Tab order: the tree is one stop, and the row menu has them all.
@@ -1300,7 +1307,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         }}
 
         onDragOver={(event) => {
-          if (inNeedsMe || !canDropOn(dragItem)) return
+          // Nothing drops onto a row the service has not made yet.
+          if (inNeedsMe || unmade || !canDropOn(dragItem)) return
           event.preventDefault()
           if (!feed) return
           event.stopPropagation()
@@ -1311,7 +1319,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
-          if (inNeedsMe) return
+          if (inNeedsMe || unmade) return
           if (feed) dropFeedThread(thread.id, dropsAfter(event))
           else void reorderBefore(dragItem)
         }}
@@ -1922,7 +1930,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             event.preventDefault()
             const rows = event.currentTarget.querySelectorAll('.threads-sidebar-thread-container')
             const bottom = rows[rows.length - 1]?.getBoundingClientRect().bottom
-            const last = feedThreads[feedThreads.length - 1]
+            const last = [...feedThreads].reverse().find((thread) => !unmadeRows.has(thread.id))
             if (last && bottom !== undefined && event.clientY > bottom && (feedDrop?.id !== last.id || !feedDrop.after)) {
               setFeedDrop({ id: last.id, after: true })
             }
