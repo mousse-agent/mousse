@@ -106,6 +106,38 @@ describe('GuiMmsController lifecycle', () => {
     } finally {await gui.stop()}
   })
 
+  it("reads every thread's status for a window whose replay no longer holds it; with no thread open the read ends the gap", async () => {
+    const gui = new GuiMmsController({homeDir:home,disableAutoStart:true,endpointOverride:endpoint,ownerTokenOverride:ownerToken})
+    const sender = Object.assign(new EventEmitter(), {id:989,isDestroyed:()=>false}) as unknown as WebContents
+    await gui.start()
+    try {
+      const thread = await gui.request<{ thread: { id: string } }>('threads.create', { name: 'Finished' })
+      mms.threadRuntimes.setActivity(thread.thread.id, 'completed')
+      // A long reply's events push the last status out of the replay ring.
+      const ring = (server as unknown as {ringFor:(profileId:string)=>{push:(type:string,data:unknown)=>unknown}}).ringFor(mms.profileId)
+      for (let i = 0; i < 600; i += 1) ring.push('test.filler', { i })
+      const replayed: string[] = []
+      gui.on('window-event', ({ event }: { event: { type: string } }) => { replayed.push(event.type) })
+      await gui.prepareWindow(sender)
+      expect(replayed.filter((type) => type === 'activity' || type === 'activity.snapshot')).toEqual([])
+
+      const internals = gui as unknown as {windowSessions:Map<number,{client:import('../src/mms/protocol/client').LocalMmsClient}>}
+      const client = internals.windowSessions.get(sender.id)!.client
+      expect(client.requiresResnapshot).toBe(true)
+      // A read for a window with a thread open leaves the gap to that thread's snapshot.
+      expect(await gui.activityForSender(sender.id)).toMatchObject({ [thread.thread.id]: 'completed' })
+      expect(client.requiresResnapshot).toBe(true)
+      expect(await gui.activityForSender(sender.id, true)).toMatchObject({ [thread.thread.id]: 'completed' })
+      expect(client.requiresResnapshot).toBe(false)
+
+      // A failed read keeps the gap.
+      client.markResnapshotNeeded()
+      vi.spyOn(client, 'request').mockRejectedValueOnce(new Error('lost'))
+      await expect(gui.activityForSender(sender.id, true)).rejects.toThrow('lost')
+      expect(client.requiresResnapshot).toBe(true)
+    } finally {await gui.stop()}
+  })
+
   it('connects when daemon is already running (no ownership)', async () => {
     const gui = new GuiMmsController({
       homeDir: home,
