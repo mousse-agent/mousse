@@ -9,10 +9,11 @@
    Selectors use child combinators so a nested group (a folder in a tree) keeps its own state.
    Durations match COLLAPSE_OPEN_MS / COLLAPSE_CLOSE_MS / COLLAPSE_STAGGER_MS. */
 
-/* Open: a strong ease-out. Close: a milder ease-out, so the short close still shows its middle frames
-   instead of finishing in its first third. */
+/* Open and close share one mild ease-out (quadratic), so each step of the short motion is small. A strong
+   ease-out (quintic) moved the height about 80% in the first three frames at 60Hz and then barely at all,
+   which read as a low frame rate. With this curve no 60Hz frame moves more than about a fifth of the way. */
 :root {
-  --ui-collapse-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ui-collapse-ease: cubic-bezier(0.5, 1, 0.89, 1);
   --ui-collapse-ease-close: cubic-bezier(0.5, 1, 0.89, 1);
 }
 

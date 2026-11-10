@@ -1,6 +1,20 @@
 /* Subscription usage page (components/SubscriptionUsagePage.tsx). It uses the
    Settings primitives (one group surface per provider, settings-icon-btn); the
    tokens come from .settings-scope in settings.css. */
+
+/* The page's slot beside the rail (App.tsx) shares its opaque fill with Automations (automations-page.css).
+   With acrylic on, Usage instead shows the window's glass like Settings: the .app tint, no fill of its own.
+   It never blurs what is behind it: under its own fill the blur was invisible, and on the glass it would
+   blur the window tint again. */
+.app .usage-rail-page {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+html[data-acrylic='true'] .app .usage-rail-page {
+  background: transparent;
+}
+
 .subscription-usage-page {
   display: flex;
   flex-direction: column;
