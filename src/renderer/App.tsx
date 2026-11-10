@@ -31,7 +31,7 @@ import { DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKe
 import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './lib/panelSplit'
 import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
-import { useAppStore } from './stores/appStore'
+import { useAppStore, withNewerTimes } from './stores/appStore'
 import { useViewSwap } from './lib/motion'
 import { normalizeRunSettings } from '../shared/settings'
 import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
@@ -237,7 +237,7 @@ export default function App() {
       if (isOlderThreadList(version, heldThreadList)) return
       if (version) heldThreadList = version
       threadListRevision += 1
-      setThreads(threads)
+      setThreads(withNewerTimes(threads, useAppStore.getState().threads))
     }
 
     const refreshThreads = async (): Promise<void> => {
@@ -255,7 +255,7 @@ export default function App() {
         // Never let an older list request overwrite a newer live event, nor a list older than the one held.
         if (isCurrentProfile() && requestedAtRevision === threadListRevision && !isOlderThreadList(version, heldThreadList)) {
           if (version) heldThreadList = version
-          setThreads(threads)
+          setThreads(withNewerTimes(threads, useAppStore.getState().threads))
         }
       } catch {
         // Reconnect handling will retry; keep the last good sidebar snapshot.

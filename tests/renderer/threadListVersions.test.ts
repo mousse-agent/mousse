@@ -32,6 +32,9 @@ vi.mock('../../src/renderer/commands/useCommandShortcuts', () => ({ useCommandSh
 
 /** Every bridge call stays pending, except the thread list subscription, which the test drives. */
 let pushList: ((threads: unknown[], version?: { epoch: string; seq: number; generation?: number }) => void) | undefined
+let pushTouches: ((touches: Array<{ id: string; updatedAt: string }>) => void) | undefined
+/** The window's own list read (the fallback, on focus); a test answers it when it wants to. */
+let readList: (() => Promise<unknown>) | undefined
 function bridge(): unknown {
   const pending: Record<string, unknown> & (() => void) = Object.assign(() => {}, {})
   pending.then = () => pending
@@ -41,6 +44,8 @@ function bridge(): unknown {
     get: (_target, key) => {
       if (key === 'then') return undefined
       if (path === 'threads' && key === 'onUpdated') return (listener: typeof pushList) => { pushList = listener; return () => { pushList = undefined } }
+      if (path === 'threads' && key === 'onTouched') return (listener: typeof pushTouches) => { pushTouches = listener; return () => { pushTouches = undefined } }
+      if (path === 'threads' && key === 'listAllVersioned' && readList) return readList
       return node(String(key))
     },
     apply: () => pending
@@ -63,6 +68,7 @@ beforeEach(() => {
   root = createRoot(host)
 })
 afterEach(() => {
+  readList = undefined
   act(() => root.unmount())
   host.remove()
   vi.unstubAllGlobals()
@@ -107,6 +113,30 @@ describe('the thread list a window holds', () => {
     expect(names()).toEqual(['Local rename', 'Remote'])
     act(() => pushList!([row('a', 'Local rename'), row('n:b', 'Remote renamed')], { epoch: 'A', seq: 9, generation: 1 }))
     expect(names()).toEqual(['Local rename', 'Remote renamed'])
+  })
+
+  // Review repro: a fallback read answers with time T1, a save pushes T2 as a touch, then the read's list lands.
+  it("keeps a row's newer time when a list read before a touch lands after it", async () => {
+    const t1 = '2026-11-10T10:00:00.000Z'
+    const t2 = '2026-11-10T10:05:00.000Z'
+    let answer!: (list: unknown) => void
+    readList = () => new Promise((resolve) => { answer = resolve })
+    act(() => root.render(createElement(App)))
+    act(() => pushList!([{ ...row('a', 'A'), updatedAt: t1 }, row('b', 'B')], { epoch: 'A', seq: 4, generation: 1 }))
+    // The window regains focus and reads its list; the service answers with what it had then.
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    // A save moves the thread's time before that answer arrives.
+    act(() => pushTouches!([{ id: 'a', updatedAt: t2 }]))
+    expect(useAppStore.getState().threads.find((entry) => entry.id === 'a')?.updatedAt).toBe(t2)
+    await act(async () => { answer({ threads: [{ ...row('a', 'A'), updatedAt: t1 }, row('b', 'B'), row('c', 'C')], version: { epoch: 'A', seq: 4, generation: 1 } }) })
+    const threads = useAppStore.getState().threads
+    expect(threads.map((entry) => entry.id)).toEqual(['a', 'b', 'c'])
+    expect(threads.find((entry) => entry.id === 'a')?.updatedAt).toBe(t2)
+    // A pushed list taken before the touch keeps the newer time too; a later time in a list still applies.
+    act(() => pushList!([{ ...row('a', 'A'), updatedAt: t1 }, row('b', 'B'), row('c', 'C')], { epoch: 'A', seq: 5, generation: 1 }))
+    expect(useAppStore.getState().threads.find((entry) => entry.id === 'a')?.updatedAt).toBe(t2)
+    act(() => pushList!([{ ...row('a', 'A'), updatedAt: '2026-11-10T10:09:00.000Z' }], { epoch: 'A', seq: 6, generation: 1 }))
+    expect(useAppStore.getState().threads.map((entry) => [entry.id, entry.updatedAt])).toEqual([['a', '2026-11-10T10:09:00.000Z']])
   })
 
   it("takes a restarted service's lists, and a list with no version, as they come", async () => {
