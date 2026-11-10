@@ -2,7 +2,8 @@
    picker (raised material, strong hairline, the specular top light, glint and sheen from polish.css,
    the menu drop shadow), over the same dim and blur as the other dialogs (--ui-dialog-*). It opens
    with a quick fade and a slight rise, and closes with a shorter fade; both follow Animation speed
-   and reduced motion. */
+   and reduced motion. While it is open, the empty thread's glow rests (AmbientGlow), so the blur
+   behind the palette is not drawn again on every frame. */
 .thread-search-overlay {
   position: fixed;
   inset: 0;
@@ -33,13 +34,19 @@
   animation: thread-search-in calc(140ms * var(--ui-motion-scale)) cubic-bezier(0.2, 0.9, 0.3, 1) both;
 }
 
+/* The close fades one layer, the overlay, and the dialog fades with it; the dialog itself only settles
+   back in scale. The blur drops as the close starts: a full-window backdrop-filter under a changing
+   opacity is drawn again on every frame, which left the fade one or two frames. The curve is an ease-out
+   (as in collapse.css): an ease-in held the dialog almost unchanged until its last frames. */
 .thread-search-overlay.is-closing {
   pointer-events: none;
-  animation: thread-search-dim-out calc(90ms * var(--ui-motion-scale)) ease-in both;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  animation: thread-search-dim-out calc(120ms * var(--ui-motion-scale)) cubic-bezier(0.5, 1, 0.89, 1) both;
 }
 
 .thread-search-overlay.is-closing .thread-search-dialog {
-  animation: thread-search-out calc(90ms * var(--ui-motion-scale)) ease-in both;
+  animation: thread-search-out calc(120ms * var(--ui-motion-scale)) cubic-bezier(0.5, 1, 0.89, 1) both;
 }
 
 @keyframes thread-search-dim-in {
@@ -58,10 +65,7 @@
 }
 
 @keyframes thread-search-out {
-  to {
-    opacity: 0;
-    transform: scale(0.985);
-  }
+  to { transform: scale(0.985); }
 }
 
 .thread-search-input-row {

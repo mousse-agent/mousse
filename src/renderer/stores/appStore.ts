@@ -152,7 +152,7 @@ interface AppState {
   setShortcuts: (shortcuts: ShortcutOverrides) => void
   /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
-  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). */
+  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). Kept on close. */
   paletteMode: PaletteMode
   setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
   threadsSidebarView: 'projects' | 'threads' | 'chats'
@@ -451,7 +451,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
   paletteOpen: false,
   paletteMode: 'all',
-  setPaletteOpen: (paletteOpen, mode = 'all') => set({ paletteOpen, paletteMode: mode }),
+  // Closing keeps the mode, so the fading palette keeps its rows; each opening sets it again.
+  setPaletteOpen: (paletteOpen, mode = 'all') => set(paletteOpen ? { paletteOpen, paletteMode: mode } : { paletteOpen }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
