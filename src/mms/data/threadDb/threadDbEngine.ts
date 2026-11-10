@@ -296,6 +296,17 @@ export class ThreadDbEngine {
     return loadFrom(this.open(dir).db, dir)
   }
 
+  /** The thread's info and small state values (agents, tasks, headers) without its rows: no transcript is read. */
+  state(dir: string): { info: DbInfo; state: DbStateRow[] } {
+    const { db } = this.open(dir)
+    db.exec('BEGIN')
+    try {
+      return { info: readInfo(db), state: db.prepare('SELECT key, payload FROM state').all() as unknown as DbStateRow[] }
+    } finally {
+      db.exec('COMMIT')
+    }
+  }
+
   summary(dir: string): ThreadDbSummary {
     const connection = this.open(dir)
     const info = readInfo(connection.db)

@@ -43,6 +43,8 @@ interface Row {
   hasBlobs?: boolean
   /** Blobs it refers to that could not be read; their references are kept while the row shows their placeholders. */
   lost?: BlobPath[]
+  /** Roughly what the row holds, in characters of payload (blobs read back included), for the cache's byte cap. */
+  size: number
 }
 
 /** What this store remembers about an object or array it handed out or saved. */
@@ -75,6 +77,15 @@ interface Entry {
   collections: Map<string, Row[]>
   state: Map<string, Skeleton>
   usedAt: number
+  /** The sum of its rows' and state's sizes. */
+  bytes: number
+  stateBytes: number
+}
+
+function entryBytes(collections: Map<string, Row[]>, stateBytes: number): number {
+  let bytes = stateBytes
+  for (const rows of collections.values()) for (const row of rows) bytes += row.size
+  return bytes
 }
 
 /** The parts of a thread a save replaces; a part left out keeps what is stored. */
@@ -100,7 +111,9 @@ function sortRows(rows: Row[]): void {
   rows.sort((a, b) => a.ord - b.ord || a.rid - b.rid)
 }
 
-const MAX_CACHED_THREADS = 64
+/** At most this many threads are kept in memory, and at most `MAX_CACHED_BYTES` of payload between them. */
+export const MAX_CACHED_THREADS = 64
+export const MAX_CACHED_BYTES = 48 * 1024 * 1024
 /** How often a save also collects unused blobs, at the least. */
 const COLLECT_INTERVAL_MS = 60 * 60_000
 
@@ -112,9 +125,14 @@ export class ThreadDbStore {
   private readonly observed = new Map<string, { dbId: string; seq: number }>()
   /** Loads a save or synchronous read had to do without a warm copy; tests assert entry points never cause one. */
   coldLoads = 0
+  /** Reads of a thread's small state that did not load the thread (it was not in memory). */
+  stateReads = 0
   lastSave?: SaveStats
+  private cachedBytes = 0
+  /** Whether a thread folder's data is held by a loaded session (set by the thread store). */
+  pinned?: (dir: string) => boolean
 
-  constructor(readonly client: ThreadDbClient) {}
+  constructor(readonly client: ThreadDbClient, private readonly limits: { threads: number; bytes: number } = { threads: MAX_CACHED_THREADS, bytes: MAX_CACHED_BYTES }) {}
 
   static usesDb(dir: string): boolean {
     return existsSync(join(dir, THREAD_DB_FILE))
@@ -132,18 +150,54 @@ export class ThreadDbStore {
       const value = JSON.parse(row.payload) as unknown
       let rows = collections.get(row.coll)
       if (!rows) collections.set(row.coll, (rows = []))
-      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: horizon === undefined || row.seq > horizon, hasBlobs: row.hasBlobs, lost: row.missing })
+      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: horizon === undefined || row.seq > horizon, hasBlobs: row.hasBlobs, lost: row.missing, size: row.payload.length })
     }
     for (const rows of collections.values()) sortRows(rows)
     const state = new Map<string, Skeleton>(load.state.map((row) => [row.key, skeletonOf(JSON.parse(row.payload)) ?? null]))
-    return { info: load.info, collections, state, usedAt: Date.now() }
+    const stateBytes = load.state.reduce((sum, row) => sum + row.payload.length, 0)
+    return { info: load.info, collections, state, usedAt: Date.now(), bytes: entryBytes(collections, stateBytes), stateBytes }
   }
 
   private remember(dir: string, entry: Entry): Entry {
-    this.entries.delete(dir)
+    this.drop(dir)
     this.entries.set(dir, entry)
-    while (this.entries.size > MAX_CACHED_THREADS) this.entries.delete(this.entries.keys().next().value!)
+    this.cachedBytes += entry.bytes
+    this.trim(dir)
     return entry
+  }
+
+  private drop(dir: string): void {
+    const entry = this.entries.get(dir)
+    if (!entry) return
+    this.cachedBytes -= entry.bytes
+    this.entries.delete(dir)
+  }
+
+  /** An entry's size changed (a save, another writer's rows). */
+  private resize(dir: string, entry: Entry, bytes: number): void {
+    if (this.entries.get(dir) === entry) this.cachedBytes += bytes - entry.bytes
+    entry.bytes = bytes
+    this.trim(dir)
+  }
+
+  /**
+   * Drops the least recently used threads past the caps, never `keep` (the one in use). The byte cap passes over
+   * threads `pinned` says are loaded elsewhere: their text is shared with whoever holds it, so dropping them frees
+   * little and the next save would read them again on the event loop.
+   */
+  private trim(keep: string): void {
+    if (this.entries.size <= this.limits.threads && this.cachedBytes <= this.limits.bytes) return
+    for (const dir of [...this.entries.keys()]) {
+      const overCount = this.entries.size > this.limits.threads
+      if (!overCount && this.cachedBytes <= this.limits.bytes) return
+      if (dir === keep) continue
+      if (overCount || !this.pinned?.(dir)) this.drop(dir)
+    }
+  }
+
+  /** How many threads are in memory and their payload, for tests and diagnostics. */
+  cacheStats(): { threads: number; bytes: number } {
+    return { threads: this.entries.size, bytes: this.cachedBytes }
   }
 
   private applyChanges(entry: Entry, changes: DbChanges): void {
@@ -160,7 +214,7 @@ export class ThreadDbStore {
       if (!rows) entry.collections.set(row.coll, (rows = []))
       const index = rows.findIndex((existing) => existing.rid === row.rid)
       // An edit by another process changes a row this process may well know; only a new row is unseen.
-      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: index >= 0 ? rows[index]!.unseen : true, hasBlobs: row.hasBlobs, lost: row.missing }
+      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: index >= 0 ? rows[index]!.unseen : true, hasBlobs: row.hasBlobs, lost: row.missing, size: row.payload.length }
       if (index >= 0) rows[index] = next
       else rows.push(next)
       touched.add(row.coll)
@@ -184,8 +238,11 @@ export class ThreadDbStore {
       const changes = this.client.callSync('changes', dir, entry.info.seq, entry.info.epoch)
       if (changes.reset) return this.remember(dir, this.entryFrom(dir, changes))
       this.applyChanges(entry, changes)
+      this.resize(dir, entry, entryBytes(entry.collections, entry.stateBytes))
     }
     entry.usedAt = Date.now()
+    this.entries.delete(dir)
+    this.entries.set(dir, entry)
     return entry
   }
 
@@ -203,11 +260,12 @@ export class ThreadDbStore {
   }
 
   forget(dir: string): void {
-    this.entries.delete(dir)
+    this.drop(dir)
   }
 
   forgetAll(): void {
     this.entries.clear()
+    this.cachedBytes = 0
   }
 
   /** What `loadThreadData` returns: new objects every time, each known by its row. */
@@ -230,12 +288,29 @@ export class ThreadDbStore {
     return lazy
   }
 
-  /** Small state values (agents, tasks, session headers) without building the transcript. */
+  /**
+   * Small state values (agents, tasks, session headers) without building the transcript. A thread not in memory is
+   * read from its state table alone and is not kept: the restart pass reads this for every thread nobody opened.
+   */
   readState(dir: string): { agents: unknown[]; tasks: unknown[]; sessions: number } {
-    const entry = this.fresh(dir)
+    let get: (key: string) => unknown
+    if (this.entries.has(dir)) {
+      const entry = this.fresh(dir)
+      get = (key) => {
+        const skel = entry.state.get(key)
+        return skel === undefined ? undefined : fromSkeleton<unknown>(skel)
+      }
+    } else {
+      this.stateReads += 1
+      const rows = new Map(this.client.callSync('state', dir).state.map((row) => [row.key, row.payload]))
+      get = (key) => {
+        const payload = rows.get(key)
+        return payload === undefined ? undefined : (JSON.parse(payload) as unknown)
+      }
+    }
     const list = (key: string): unknown[] => {
-      const skel = entry.state.get(key)
-      return Array.isArray(skel) ? fromSkeleton<unknown[]>(skel) : []
+      const value = get(key)
+      return Array.isArray(value) ? value : []
     }
     return { agents: list('agents'), tasks: list('tasks'), sessions: list('sessions').length }
   }
@@ -540,12 +615,12 @@ export class ThreadDbStore {
       if (row) {
         const same = sameAsSkeleton(item, row.skel)
         if (same && row.ord === ord) {
-          planned.push({ item, rid: row.rid, ord, skel: row.skel, seq: row.seq, hasBlobs: row.hasBlobs, lost: row.lost })
+          planned.push({ item, rid: row.rid, ord, skel: row.skel, seq: row.seq, hasBlobs: row.hasBlobs, lost: row.lost, size: row.size })
           continue
         }
         if (same) {
           plan.request.updates.push({ rid: row.rid, coll, ord })
-          planned.push({ item, rid: row.rid, ord, skel: row.skel, hasBlobs: row.hasBlobs, lost: row.lost })
+          planned.push({ item, rid: row.rid, ord, skel: row.skel, hasBlobs: row.hasBlobs, lost: row.lost, size: row.size })
           continue
         }
         // The payload is the skeleton serialized, so what is written and what is remembered can never differ.
@@ -553,23 +628,25 @@ export class ThreadDbStore {
         const encoded = this.encode(skel, row.lost, plan)
         if (row.hasBlobs) plan.request.collectBlobs = true
         plan.request.updates.push({ rid: row.rid, coll, ord, payload: encoded.payload, blobPaths: encoded.blobPaths })
-        planned.push({ item, rid: row.rid, ord, skel, hasBlobs: encoded.blobPaths !== null, lost: encoded.kept })
+        planned.push({ item, rid: row.rid, ord, skel, hasBlobs: encoded.blobPaths !== null, lost: encoded.kept, size: encoded.size })
       } else {
         const skel = skeletonOf(item) ?? null
         const encoded = this.encode(skel, formerLost[j], plan)
         const tmp = plan.request.inserts.length
         plan.request.inserts.push({ tmp, coll, ord, payload: encoded.payload, blobPaths: encoded.blobPaths })
-        planned.push({ item, tmp, ord, skel, hasBlobs: encoded.blobPaths !== null, lost: encoded.kept })
+        planned.push({ item, tmp, ord, skel, hasBlobs: encoded.blobPaths !== null, lost: encoded.kept, size: encoded.size })
       }
     }
     plan.collections.set(coll, { planned, survivors, items })
   }
 
   /** A row's payload with images and long text moved to blobs, and the blobs added to the save. */
-  private encode(skel: Skeleton, lost: BlobPath[] | undefined, plan: Plan): { payload: string; blobPaths: string | null; kept?: BlobPath[] } {
+  private encode(skel: Skeleton, lost: BlobPath[] | undefined, plan: Plan): { payload: string; blobPaths: string | null; kept?: BlobPath[]; size: number } {
     const encoded = encodeRow(skel, lost)
     plan.bytes += encoded.payload.length
+    let size = encoded.payload.length
     for (const blob of encoded.blobs) {
+      size += blob.data.length
       if (plan.blobHashes.has(blob.sha256)) continue
       plan.blobHashes.add(blob.sha256)
       ;(plan.request.blobs ??= []).push(blob)
@@ -577,7 +654,7 @@ export class ThreadDbStore {
     }
     // References still missing their blob, kept so a later save keeps them too.
     const kept = encoded.paths?.filter((ref) => lost?.some((missing) => missing.sha256 === ref.sha256 && missing.kind === ref.kind))
-    return { payload: encoded.payload, blobPaths: encoded.paths ? JSON.stringify(encoded.paths) : null, kept: kept?.length ? kept : undefined }
+    return { payload: encoded.payload, blobPaths: encoded.paths ? JSON.stringify(encoded.paths) : null, kept: kept?.length ? kept : undefined, size }
   }
 
   /** After a save, each list is known to hold exactly the rows it was saved with, and each object its row. */
@@ -607,7 +684,7 @@ export class ThreadDbStore {
       const rows: Row[] = planned.map((slot) => {
         const rid = slot.rid ?? rids[slot.tmp!]!
         // Unchanged rows keep their sequence; written ones (and moved ones) take this save's.
-        return { rid, ord: slot.ord, id: rowId(coll, slot.item), skel: slot.skel, seq: slot.seq ?? info.seq, hasBlobs: slot.hasBlobs, lost: slot.lost }
+        return { rid, ord: slot.ord, id: rowId(coll, slot.item), skel: slot.skel, seq: slot.seq ?? info.seq, hasBlobs: slot.hasBlobs, lost: slot.lost, size: slot.size }
       })
       for (const survivor of survivors) {
         const moved = plan.moved.get(survivor.rid)
@@ -623,6 +700,7 @@ export class ThreadDbStore {
     }
     entry.info = info
     this.registerObjects(entry, plan, rids)
+    this.resize(dir, entry, entryBytes(entry.collections, entry.stateBytes))
     // A save that left nothing unseen in place means this process has seen the thread up to here.
     const unseenLeft = [...entry.collections.values()].some((rows) => rows.some((row) => row.unseen))
     if (!unseenLeft && entry.info.dbId === this.observed.get(dir)?.dbId) this.observed.set(dir, { dbId: entry.info.dbId, seq: info.seq })
@@ -630,7 +708,7 @@ export class ThreadDbStore {
 }
 
 /** `seq` is set for a row left exactly as it was. */
-interface PlannedRow { item: unknown; rid?: number; tmp?: number; ord: number; skel: Skeleton; seq?: number; hasBlobs?: boolean; lost?: BlobPath[] }
+interface PlannedRow { item: unknown; rid?: number; tmp?: number; ord: number; skel: Skeleton; seq?: number; hasBlobs?: boolean; lost?: BlobPath[]; size: number }
 
 interface Plan {
   request: SaveRequest

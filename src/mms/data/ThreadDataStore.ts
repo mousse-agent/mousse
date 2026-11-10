@@ -373,9 +373,30 @@ export class ThreadDataStore extends EventEmitter {
   private sqliteOverride?: boolean
   private threadDbStore?: ThreadDbStore
 
+  /** Thread folders loaded whole, by the thread that owns them, for `setThreadsInUse`. */
+  private readonly loadedDirs = new Map<string, string>()
+  private threadsInUse?: (threadId: string) => boolean
+
   private threadDb(): ThreadDbStore {
-    if (!this.threadDbStore) this.threadDbStore = new ThreadDbStore(sharedThreadDbClient())
+    if (!this.threadDbStore) {
+      this.threadDbStore = new ThreadDbStore(sharedThreadDbClient())
+      this.threadDbStore.pinned = (dir) => {
+        const id = this.loadedDirs.get(dir)
+        return id !== undefined && Boolean(this.threadsInUse?.(id))
+      }
+    }
     return this.threadDbStore
+  }
+
+  /** Says which threads a loaded session holds; the thread database cache keeps them past its byte cap. */
+  setThreadsInUse(inUse: (threadId: string) => boolean): void {
+    this.threadsInUse = inUse
+  }
+
+  /** Thread database cache size, for diagnostics and tests. */
+  threadDbCacheStats(): { threads: number; bytes: number; coldLoads: number; stateReads: number } {
+    const store = this.threadDbStore
+    return store ? { ...store.cacheStats(), coldLoads: store.coldLoads, stateReads: store.stateReads } : { threads: 0, bytes: 0, coldLoads: 0, stateReads: 0 }
   }
 
   /** True when the thread keeps its history in `thread.db`. */
@@ -1760,6 +1781,7 @@ export class ThreadDataStore extends EventEmitter {
   private loadThreadDataFromDir(threadDir: string, id: string): ThreadData {
     if (ThreadDbStore.usesDb(threadDir)) {
       this.checkForDowngradeWrites(threadDir, id)
+      this.loadedDirs.set(threadDir, id)
       return { ...this.threadDb().load(threadDir), messageQueue: this.readMessageQueueFile(threadDir, id) }
     }
     this.settleGenerations(threadDir, id)
