@@ -16,6 +16,7 @@ import {
   writeFileSync
 } from 'fs'
 import { basename, join } from 'path'
+import { cacheSignature } from './FileSignature'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4, v5 as uuidv5, validate as uuidValidate, version as uuidVersion } from 'uuid'
 import type {
@@ -667,19 +668,22 @@ export class ThreadDataStore extends EventEmitter {
     return join(this.homeDir, 'thread-list-revisions', `${basename(this.storageLayout.repositoryRoot(projectId))}.rev`)
   }
 
-  private groupSignature(projectId?: string): string {
-    const stamp = (path: string): string => {
-      const stat = statSync(path, { throwIfNoEntry: false })
-      return stat ? `${stat.mtimeMs}:${stat.size}:${stat.ino}` : '-'
+  /** Undefined on a file system whose stats cannot be trusted to change (`cacheSignature`): the group is read every time. */
+  private groupSignature(projectId?: string): string | undefined {
+    const stamp = (path: string): string | undefined => {
+      const stat = statSync(path, { bigint: true, throwIfNoEntry: false })
+      return stat ? cacheSignature(stat) : '-'
     }
     if (!projectId) return stamp(join(this.homeDir, 'threads-index.json'))
+    const folder = stamp(this.storageLayout.repositoryRoot(projectId))
+    if (folder === undefined) return undefined
     let revision = '-'
     try {
       revision = readFileSync(this.listRevisionPath(projectId), 'utf8')
     } catch {
       // No metadata written there since the revisions began: the folder alone tells.
     }
-    return `${stamp(this.storageLayout.repositoryRoot(projectId))}|${revision}`
+    return `${folder}|${revision}`
   }
 
   /** Replaces a project's list revision after a thread's metadata there was written. */
@@ -696,7 +700,8 @@ export class ThreadDataStore extends EventEmitter {
 
   private recordGroupSignature(projectId?: string): void {
     const cached = projectId ? this.projectListCache.has(projectId) : this.standaloneListCache !== null
-    if (cached) this.groupSignatures.set(projectId ?? '', this.groupSignature(projectId))
+    const signature = cached ? this.groupSignature(projectId) : undefined
+    if (signature !== undefined) this.groupSignatures.set(projectId ?? '', signature)
     else this.groupSignatures.delete(projectId ?? '')
   }
 
@@ -1953,7 +1958,11 @@ export class ThreadDataStore extends EventEmitter {
     const inSync = recorded !== undefined && recorded === this.groupSignature(group.projectId)
     atomicWriteJsonSync(filePath, value)
     if (group.projectId) this.bumpListRevision(group.projectId)
-    if (inSync) this.groupSignatures.set(key, this.groupSignature(group.projectId))
+    if (inSync) {
+      const signature = this.groupSignature(group.projectId)
+      if (signature !== undefined) this.groupSignatures.set(key, signature)
+      else this.groupSignatures.delete(key)
+    }
   }
 
   /**
