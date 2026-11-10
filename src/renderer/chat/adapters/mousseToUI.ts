@@ -533,6 +533,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // The turn a person on another of the user's computers sent says so (the sender is kept on the run, not on the message).
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
+    // A message from a person other than the account's owner names them (the daemon stamped it; absent for the owner).
+    if (msg.role === 'user' && msg.author) base.metadata = { ...(base.metadata as object | undefined), author: { user: msg.author.user, name: msg.author.displayName } }
     const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.
