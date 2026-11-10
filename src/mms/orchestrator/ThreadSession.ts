@@ -73,6 +73,8 @@ export class ThreadSession {
    * as the turn has ended. Cleared with the admission.
    */
   stopping = false
+  /** The messages a person sent while the stopped turn still ended, in the order sent (`stopping`). */
+  sentAfterStop: string[] = []
   /**
    * Ends the waits of a turn that is still being set up (its worktree, the snapshot it starts from) when a Stop comes
    * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.

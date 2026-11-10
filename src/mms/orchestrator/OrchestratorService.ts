@@ -7630,6 +7630,22 @@ export class OrchestratorService extends EventEmitter {
     return { ok: true }
   }
 
+  /**
+   * A person's message sent while their stopped turn still ends: it joins the messages sent since the Stop, in the order
+   * they were sent, and that group goes ahead of what was queued before the Stop. They run once the turn has ended.
+   */
+  private queueAfterStop(session: ThreadSession, itemId: string): void {
+    session.sentAfterStop.push(itemId)
+    const order = (items: QueuedMessage[]): QueuedMessage[] => {
+      const pending = listPendingQueue(items).filter((entry) => !entry.internal).map((entry) => entry.id)
+      const first = session.sentAfterStop.filter((id) => pending.includes(id))
+      return reorderQueuedMessages(items, [...first, ...pending.filter((id) => !first.includes(id))])
+    }
+    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, order) : order(session.queue)
+    this.emitQueueUpdated(session.threadId, session.queue)
+    session.drainAfterSettle = true
+  }
+
   /** Moves a person's pending message to the front of the thread's queue, under the queue lock. */
   private moveQueueItemToFront(session: ThreadSession, itemId: string, expectedRevision?: string): void {
     const toFront = (items: QueuedMessage[]): QueuedMessage[] => {
@@ -9661,12 +9677,12 @@ export class OrchestratorService extends EventEmitter {
       // The same for a compaction that ended in between: its drain may have run before the item was saved.
       if (heldByCompaction) this.drainQueueAfterCompaction(threadId)
       // A person's message sent once their Stop showed the thread stopped, while the stopped turn still ends (its
-      // checkpoint): it is what they want next, so it goes first and runs as soon as that turn has ended. What they
-      // queued before the Stop stays queued behind it, as a Stop always kept it.
+      // checkpoint): it is what they want next, so it runs as soon as that turn has ended, after what they sent since the
+      // Stop and ahead of what they queued before it, which a Stop always kept.
       if (this.isStopping(threadId) && !opts?.forceQueue && !opts?.agent && !opts?.delegation && !opts?.schedule && !opts?.bindDelivery && !reuseLastUser &&
         opts?.source !== 'wake' && !externalLease && !waitingOnUser && !heldByPause && !heldByCompaction) {
         try {
-          this.sendNowAfterTurn(session, item.id)
+          this.queueAfterStop(session, item.id)
         } catch (error) {
           logDebug('OrchestratorService', 'a message sent after a Stop could not go first', error, { threadId })
         }
@@ -9910,7 +9926,10 @@ export class OrchestratorService extends EventEmitter {
       session.turnAdmitted = true
     }
     // A new turn is not the stopped one, unless a Stop already reached it while it was admitted.
-    if (!session.abortRequested) session.stopping = false
+    if (!session.abortRequested) {
+      session.stopping = false
+      session.sentAfterStop = []
+    }
     let turnResponse: OrchestratorResponse | undefined
     let turnFailure: unknown
     // While a scheduled occurrence's turn runs, its thread's end-of-work notice is the automation's to give (Tell me).
@@ -9943,6 +9962,7 @@ export class OrchestratorService extends EventEmitter {
       session.admissionRunId = undefined
       session.abortRequested = false
       session.stopping = false
+      session.sentAfterStop = []
       this.effectWorker?.notify()
       // Post-turn drains are deferred to here: while admission is held the drain would see a
       // running turn and skip, stranding queued messages.

@@ -146,6 +146,22 @@ describe('Stop latency', () => {
     expect(w.adapter.turns[2]!.prompt).toContain('queued before the Stop')
   })
 
+  it('runs several messages sent after the Stop in the order they were sent, all ahead of what was queued before it', async () => {
+    const w = world()
+    await w.d.orch.send(HOLD, false, { threadId: w.thread.id, clientRequestId: 'hold', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.holding, 'the turn to reach the provider')
+    await w.d.orch.send('queued before the Stop', false, { threadId: w.thread.id, clientRequestId: 'before', awaitMode: 'ack' })
+
+    await w.d.orch.stopThread(w.thread.id, 'user')
+    await w.d.orch.send('A sent after the Stop', false, { threadId: w.thread.id, clientRequestId: 'a', awaitMode: 'ack' })
+    await w.d.orch.send('B sent after the Stop', false, { threadId: w.thread.id, clientRequestId: 'b', awaitMode: 'ack' })
+    expect(w.pending()).toEqual(['A sent after the Stop', 'B sent after the Stop', 'queued before the Stop'])
+
+    w.adapter.release()
+    await waitFor(() => w.adapter.turns.length === 4 && !w.running() && w.pending().length === 0, 'every queued message to run')
+    expect(w.adapter.turns.slice(1).map((turn) => turn.prompt.match(/A sent|B sent|queued before/)?.[0])).toEqual(['A sent', 'B sent', 'queued before'])
+  })
+
   it('leaves a message sent with Queue queued behind a stopped turn, as before', async () => {
     const w = world()
     await w.d.orch.send(HOLD, false, { threadId: w.thread.id, clientRequestId: 'hold', awaitMode: 'ack' })
