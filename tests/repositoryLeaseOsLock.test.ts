@@ -53,9 +53,10 @@ beforeAll(() => {
   buildSync({ entryPoints: [join(work, 'child.ts')], bundle: true, platform: 'node', format: 'esm', outfile: script, logLevel: 'silent', banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" } })
 })
 
-afterEach(() => {
-  for (const child of children.splice(0)) child.kill('SIGKILL')
-  while (dirs.length > 1) rmSync(dirs.pop()!, { recursive: true, force: true })
+afterEach(async () => {
+  // A killed holder lets go of its files only once it has exited (on Windows, its open handles hold the folder).
+  await Promise.all(children.splice(0).map((made) => { made.kill('SIGKILL'); return exited(made) }))
+  while (dirs.length > 1) rmSync(dirs.pop()!, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 function child(args: string[]): ChildProcess {
