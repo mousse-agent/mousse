@@ -124,7 +124,8 @@ it('enforces current same-user capabilities for cached results and denies invali
   await f.connect()
   expect(
     await executeBridgeHubLocal(f.hub(), 'bridge.hub.threads', { target: f.targetNode })
-  ).toEqual({ threads: [] })
+  // Thread lists carry the answering daemon's list version (#819), so a window can drop an older one.
+  ).toEqual({ threads: [], version: { epoch: expect.any(String), seq: expect.any(Number) } })
   await expect(
     executeBridgeHubLocal(f.hub(), 'bridge.hub.send', {
       ref: { nodeId: f.targetNode, entityId: 'thread' },
