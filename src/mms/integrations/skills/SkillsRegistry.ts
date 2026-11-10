@@ -192,8 +192,8 @@ export class SkillsRegistry {
     const diagnostics: IntegrationDiagnostic[] = []
     try {
       const skillFiles = await findSkillFiles(source.path)
-      // Read together: one wait for the folder's files, not one per file. Results keep the files' order.
-      for (const parsed of await Promise.all(skillFiles.map((skillPath) => this.readSkillDescriptor(source, skillPath)))) {
+      // Read together, up to `SKILL_SCAN_CONCURRENCY` at a time. Results keep the files' order.
+      for (const parsed of await Promise.all(skillFiles.map((skillPath) => scanSlot(() => this.readSkillDescriptor(source, skillPath))))) {
         if (parsed.skill) skills.push(parsed.skill)
         diagnostics.push(...parsed.diagnostics)
       }
@@ -387,9 +387,37 @@ export class SkillsRegistry {
   }
 }
 
+/**
+ * Folder listings and SKILL.md reads that may be open at once, for every scan in the process
+ * together. The shared Skills folders hold thousands of entries; reading them all at once would
+ * run out of file handles (256 by default on macOS).
+ */
+export const SKILL_SCAN_CONCURRENCY = 16
+
+/** Runs `task` once fewer than `max` tasks it was given are running; the others wait in call order. */
+function concurrencyLimit(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const waiting: Array<() => void> = []
+  return async (task) => {
+    if (active < max) active++
+    else await new Promise<void>((resolve) => waiting.push(resolve))
+    try {
+      return await task()
+    } finally {
+      // A waiting task takes the slot over; otherwise it is free again.
+      const next = waiting.shift()
+      if (next) next()
+      else active--
+    }
+  }
+}
+
+const scanSlot = concurrencyLimit(SKILL_SCAN_CONCURRENCY)
+
 async function findSkillFiles(rootPath: string): Promise<string[]> {
-  const entries = await readdir(rootPath, { withFileTypes: true })
-  // Subfolders are read together, one wait per level rather than per folder; results keep the entries' order.
+  // A slot is held for the listing only, never while subfolders are read, so the recursion cannot wait on itself.
+  const entries = await scanSlot(() => readdir(rootPath, { withFileTypes: true }))
+  // Subfolders are read together, up to `SKILL_SCAN_CONCURRENCY` at a time; results keep the entries' order.
   const found: Array<string[] | Promise<string[]>> = []
 
   for (const entry of entries) {
