@@ -146,14 +146,14 @@ export type MessageListProps = {
 
 const SCROLL_THRESHOLD = 80;
 /**
- * The space under the newest text while a reply is in progress: about two lines above the
+ * The space under the newest text while a reply is in progress: about three lines above the
  * composer (with the list's end padding). A finished last turn's toolbar takes the same space,
  * since it overlaps that padding by the rest of its height, so the text does not move when the
  * reply ends.
  */
-const REPLY_GAP_CLASS = "h-[28px]";
+const REPLY_GAP_CLASS = "h-[44px]";
 const TURN_TOOLBAR_CLASS = "h-[48px] flex items-start w-full";
-const LAST_TURN_TOOLBAR_CLASS = `${TURN_TOOLBAR_CLASS} -mb-5`;
+const LAST_TURN_TOOLBAR_CLASS = `${TURN_TOOLBAR_CLASS} -mb-1`;
 const timeFormatter = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -1738,7 +1738,7 @@ export const MessageList = memo(function MessageList({
     return isStreaming && !getLastAssistantHasContent(normalizedMessages);
   }, [isStreaming, normalizedMessages, turns]);
   // A small, fixed gap under the reply in progress (REPLY_GAP_CLASS), so the
-  // newest text sits about two lines above the composer, never a share of the
+  // newest text sits about three lines above the composer, never a share of the
   // viewport. The last turn's toolbar takes its place when the reply ends; a
   // last turn without one (only tool calls, or stopped before any text) keeps
   // the gap, so the end of the reply moves nothing.
