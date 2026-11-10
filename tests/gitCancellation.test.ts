@@ -237,11 +237,35 @@ describe('StoppedGitTree', () => {
     expect(await tree.alive()).toBe(false)
   })
 
-  it('on Windows, kills nothing when the pid at the stop is not the command by its creation time', async () => {
-    const killed = script([at(100, 7, 3_600_000)])
-    await StoppedGitTree.stop(command(100), spawnedAt)
+  it('neither tracks nor (on Windows) kills a pid whose creation time is present and not the command\'s', async () => {
+    const killed = script([at(100, 7, 3_600_000), at(101, 100, 3_600_001)])
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
     // Off Windows the command's own group is killed before the list is read (its id goes to no other group while it lives).
     expect(killed).toEqual(process.platform === 'win32' ? [] : [100])
+    expect(tree.pids()).toEqual([])
+    expect(await tree.alive()).toBe(false)
+  })
+
+  it('kills the command and keeps watching it by pid when its creation time cannot be read', async () => {
+    // No creation time for the command (Windows without CreationDate; a `ps` whose lstart does not parse), and a member
+    // of its group: neither can be disproved, so both keep the lock until they are gone.
+    const unread = { started: 'Mo 10 Nov 12:00:00 2026' }
+    const killed = script(
+      [{ pid: 100, ppid: 1, pgid: 100, ...unread }, { pid: 101, ppid: 100, pgid: 100, started: 'later' }],
+      [{ pid: 101, ppid: 100, pgid: 100, started: 'later' }],
+      []
+    )
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
+    expect(killed).toEqual([100])
+    expect(tree.pids().sort()).toEqual([100, 101])
+    expect(await tree.alive()).toBe(true)
+    expect(await tree.alive()).toBe(false)
+  })
+
+  it('kills the command when the list at the stop cannot be read, as its handle shows it running', async () => {
+    const killed = script(undefined, [])
+    await StoppedGitTree.stop(command(100), spawnedAt)
+    expect(killed).toEqual([100])
   })
 
   it('counts a zombie as exited', async () => {

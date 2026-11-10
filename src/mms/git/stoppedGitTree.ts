@@ -7,7 +7,9 @@
  * that.
  *
  * The command is known by its pid and when it was created, which must fall within {@link SPAWN_ANCHOR_SLACK_MS} of when
- * Mousse started it (the anchor): a pid the system gave to another program since is never taken for it. Its
+ * Mousse started it (the anchor): a pid the system gave to another program since is never taken for it. A creation time
+ * that cannot be read cannot disprove it: such a process is taken for the command (and watched by its pid alone), so
+ * the lock is kept and the command still killed. Its
  * descendants are the processes whose parent is in the tree (same pid and creation time) and that were created after
  * that parent; Windows keeps a child's parent pid after the parent ends, so a program whose old parent had the
  * command's pid is never taken in.
@@ -38,6 +40,9 @@ export interface ProcessEntry {
 /** How far from the moment Mousse started the command its creation time may be (`ps` reports it to the second). */
 export const SPAWN_ANCHOR_SLACK_MS = 2_000
 
+/** `ps` in the C locale, so `lstart` is always in the one form `Date.parse` reads. */
+const PS_ENV = { ...process.env, LC_ALL: 'C', LANG: 'C' }
+
 /** Windows file time (100 ns since 1601) in ms since the epoch. */
 function fileTimeMs(fileTime: number): number {
   return fileTime / 10_000 - 11_644_473_600_000
@@ -66,7 +71,7 @@ function readTable(): Promise<ProcessEntry[] | undefined> {
     // `lstart` last: it holds spaces. Creation times to the second, as `ps` reports them on Linux and macOS.
     : ['ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat=,lstart=']]
   return new Promise((done) => {
-    execFile(file, args as string[], { windowsHide: true, timeout: PROCESS_LIST_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' }, (error, stdout) => {
+    execFile(file, args as string[], { windowsHide: true, timeout: PROCESS_LIST_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8', ...(windows ? {} : { env: PS_ENV }) }, (error, stdout) => {
       if (error) { done(undefined); return }
       const entries: ProcessEntry[] = []
       for (const line of stdout.split(/\r?\n/)) {
@@ -103,7 +108,7 @@ export function readProcessStart(pid: number): Promise<number | null> {
     ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}'; if ($p -and $p.CreationDate) { $p.CreationDate.ToUniversalTime().ToString('o') }`]]
     : ['ps', ['-o', 'lstart=', '-p', String(Math.trunc(pid))]]
   return new Promise((done) => {
-    execFile(file, args as string[], { windowsHide: true, timeout: 10_000, encoding: 'utf8' }, (error, stdout) => {
+    execFile(file, args as string[], { windowsHide: true, timeout: 10_000, encoding: 'utf8', ...(process.platform === 'win32' ? {} : { env: PS_ENV }) }, (error, stdout) => {
       const at = error ? Number.NaN : Date.parse(stdout.trim())
       done(Number.isFinite(at) ? at : null)
     })
@@ -114,13 +119,13 @@ export function readProcessStart(pid: number): Promise<number | null> {
  * The one kill, at the stop, while the command runs and so is certainly the process Mousse started: off Windows its
  * process group (it leads it); on Windows `taskkill /T` from it (not waited for) and its own handle.
  */
-function killAtStop(child: ChildProcess, rootConfirmed: boolean): void {
+function killAtStop(child: ChildProcess, rootDisproved: boolean): void {
   const pid = child.pid
   if (!pid || child.exitCode !== null || child.signalCode !== null) return
-  // On Windows the pid `taskkill` opens must still be the command's: its creation time was just checked against the
-  // anchor (`rootConfirmed`), and Mousse's handle shows it running, right before `taskkill` starts. What is left is the
-  // window named at the top of this file.
-  if (process.platform === 'win32' && !rootConfirmed) return
+  // On Windows the pid `taskkill` opens must still be the command's: Mousse's handle shows it running, and the list just
+  // read did not show another creation time for it (`rootDisproved`; a list or a creation time that could not be read
+  // disproves nothing, and the handle is trusted as before). What is left is the window named at the top of this file.
+  if (process.platform === 'win32' && rootDisproved) return
   if (gitStopProbe.kill) { gitStopProbe.kill(pid, process.platform !== 'win32'); return }
   if (process.platform === 'win32') {
     // `taskkill /T` walks the tree from the command, so the command must still run while it does: its own handle is used
@@ -146,9 +151,17 @@ export class StoppedGitTree {
     this.tracked.set(root, undefined)
   }
 
-  /** Whether `entry` is the command: its pid, created within {@link SPAWN_ANCHOR_SLACK_MS} of when Mousse started it. */
+  /**
+   * Whether `entry` is the command: its pid, and a creation time within {@link SPAWN_ANCHOR_SLACK_MS} of when Mousse
+   * started it. One whose creation time cannot be read cannot be disproved, and counts.
+   */
   private isRoot(entry: ProcessEntry | undefined): entry is ProcessEntry {
-    return entry !== undefined && entry.pid === this.root && entry.startedMs !== undefined && Math.abs(entry.startedMs - this.spawnedAt) <= SPAWN_ANCHOR_SLACK_MS
+    return entry !== undefined && entry.pid === this.root && !this.disproved(entry)
+  }
+
+  /** Whether `entry` has a creation time, and it is not the command's. */
+  private disproved(entry: ProcessEntry): boolean {
+    return entry.startedMs !== undefined && Math.abs(entry.startedMs - this.spawnedAt) > SPAWN_ANCHOR_SLACK_MS
   }
 
   /** The pids of the command's processes being watched (the command's own until its processes were listed). */
@@ -165,11 +178,13 @@ export class StoppedGitTree {
     const tree = new StoppedGitTree(child.pid!, spawnedAt)
     if (process.platform === 'win32') {
       const table = await readProcessEntries()
-      // Killed only when the list shows the command, by its anchored creation time.
-      killAtStop(child, tree.isRoot(table?.find((entry) => entry.pid === child.pid)))
+      // Not killed when the list shows another creation time for the command's pid; killed otherwise, as Mousse's handle
+      // shows it running.
+      const listed = table?.find((entry) => entry.pid === child.pid)
+      killAtStop(child, listed !== undefined && tree.disproved(listed))
       if (table) tree.note(table)
     } else {
-      killAtStop(child, true)
+      killAtStop(child, false)
       const table = await readProcessEntries()
       if (table) tree.note(table)
     }
