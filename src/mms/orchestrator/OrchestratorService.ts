@@ -7550,6 +7550,12 @@ export class OrchestratorService extends EventEmitter {
     const session = this.getOrCreateSession(threadId)
     if (session.queue.find((entry) => entry.id === itemId)?.inboxIds?.length)
       throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
+    // Send now is idempotent per message: a second one (a double click, a retried request) while the running turn
+    // already holds the message, or has read it and not yet acknowledged it, changes nothing. Handing it over again
+    // would give the turn the text twice and show it twice.
+    const live = session.activeTurn
+    if (live && !live.abort.signal.aborted && (live.pendingSteer.some((entry) => entry.itemId === itemId) || session.drainedExternalSteerIds.has(itemId)))
+      return { ok: true }
     const localActive = session.isTurnActive()
     const externalActive = this.isThreadLeaseHeldExternally(
       threadId,
@@ -7655,6 +7661,8 @@ export class OrchestratorService extends EventEmitter {
       assertQueueRevision(items, expectedRevision)
       const pending = listPendingQueue(items).filter((entry) => !entry.internal)
       const item = pending.find((entry) => entry.id === itemId)
+      // Already sent now into a turn that ended (a Stop) before it read it: the drain puts it first as it demotes it.
+      if (item?.state === 'steering') return items
       if (!item || item.state !== 'pending') throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
       if (pending[0]?.id === itemId) return items
       return reorderQueuedMessages(items, [itemId, ...pending.map((entry) => entry.id).filter((id) => id !== itemId)])
@@ -9176,10 +9184,11 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Promoted queue items whose text the turn never read. One under the queue lock, so no reader sees a half-way
-   * state: an item still `steering` on disk is demoted in place (it keeps its place, origin and mode ceiling and
-   * is no longer bound to a run); an item that is gone, because an acknowledgement for a drain that was handed back
-   * dropped it, is queued again from its entry with the entry's ceiling and origin. An item that already is a
-   * pending or claimed message is left alone. Each runs exactly once, as a turn of its own narrowed at admission.
+   * state: an item still `steering` on disk is demoted (it keeps its origin and mode ceiling and is no longer bound
+   * to a run); an item that is gone, because an acknowledgement for a drain that was handed back dropped it, is
+   * queued again from its entry with the entry's ceiling and origin. Both go to the front of the queue: they were
+   * sent now, so they run next, not after what was queued behind them. An item that already is a pending or claimed
+   * message is left alone. Each runs exactly once, as a turn of its own narrowed at admission.
    * Best-effort: settlement must not fail.
    */
   private settleUnreadItems(session: ThreadSession, entries: SteerEntry[], mode: ChatMode): void {
@@ -9187,10 +9196,16 @@ export class OrchestratorService extends EventEmitter {
     const apply = (items: QueuedMessage[]): QueuedMessage[] => {
       const byId = new Map(items.map((item) => [item.id, item]))
       const steering = entries.filter((entry) => byId.get(entry.itemId!)?.state === 'steering').map((entry) => entry.itemId!)
-      let next = steering.length ? demoteSteerItems(items, steering) : items
+      let next = items
+      // An entry stands for one item, however often it was handed to the turn.
+      const seen = new Set<string>()
+      const requeued: string[] = []
       for (const entry of entries) {
-        if (byId.has(entry.itemId!)) continue
-        next = enqueueMessage(next, {
+        if (byId.has(entry.itemId!) || seen.has(entry.itemId!)) continue
+        seen.add(entry.itemId!)
+        const added = enqueueMessage(next, {
+          // Queued as the steer it was, then demoted with the others below.
+          intent: 'steer',
           threadId,
           content: entry.text,
           // The message as it was: its own chat mode (a plan turn stays one) and its images, not the thread's latest mode.
@@ -9199,9 +9214,13 @@ export class OrchestratorService extends EventEmitter {
           source: 'steer-followup',
           ...(entry.permissionMode ? { permissionMode: entry.permissionMode } : {}),
           ...(entry.origin ? { origin: entry.origin } : {})
-        }).items
+        })
+        next = added.items
+        requeued.push(added.item.id)
       }
-      return next
+      // They were sent now: they go next, ahead of what was queued, in the order they were steered.
+      const back = [...steering, ...requeued]
+      return back.length ? demoteSteerItems(next, back, { toFront: true }) : next
     }
     try {
       if (this.threadStore) session.queue = mutateDurableQueue(this.threadStore, threadId, apply)
@@ -11399,8 +11418,8 @@ export class OrchestratorService extends EventEmitter {
     }
     if (revert.length) {
       try {
-        if (this.threadStore) session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) => demoteSteerItems(disk, revert))
-        else session.queue = demoteSteerItems(session.queue, revert)
+        if (this.threadStore) session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) => demoteSteerItems(disk, revert, { toFront: true }))
+        else session.queue = demoteSteerItems(session.queue, revert, { toFront: true })
         this.emitQueueUpdated(session.threadId, session.queue)
       } catch (error) {
         // Nothing was taken from them: they stay as they are and are met by the next drain or demoted at the next claim.
@@ -11533,7 +11552,7 @@ export class OrchestratorService extends EventEmitter {
             isOwnerLive: (claim) => isProcessAlive(claim.ownerPid),
             isAccepted: (item) => acceptedIds.has(item.id)
           }).items
-          const demoted = demoteSteerItems(dropSteerItems(cleaned, [...acceptedSteerIds]))
+          const demoted = demoteSteerItems(dropSteerItems(cleaned, [...acceptedSteerIds]), undefined, { toFront: true })
           // The queue is held while the thread is paused (only the continue message of the pause goes), and while a
           // compaction runs. Read here, under the queue lock the hold is saved under.
           const held = this.pausedHoldsQueue(threadId, demoted) || this.compactionHoldsQueue(threadId)
@@ -11542,7 +11561,7 @@ export class OrchestratorService extends EventEmitter {
           return result.items
         })
       } else {
-        const demoted = demoteSteerItems(session.queue)
+        const demoted = demoteSteerItems(session.queue, undefined, { toFront: true })
         const held = this.pausedHoldsQueue(session.threadId, demoted) || this.compactionHoldsQueue(session.threadId)
         const result = held ? { items: demoted, claimed: null } : claimNextNormal(demoted, claimOwner)
         session.queue = result.items
@@ -13121,7 +13140,7 @@ export class OrchestratorService extends EventEmitter {
           onTurnSettled: (aborted) => {
             wasAborted = aborted
             try {
-              mutateDurableQueue(threadStore, threadId, (disk) => demoteSteerItems(disk))
+              mutateDurableQueue(threadStore, threadId, (disk) => demoteSteerItems(disk, undefined, { toFront: true }))
             } catch {
               // Best-effort while this turn still owns the execution lease.
             }

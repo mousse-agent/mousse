@@ -310,8 +310,14 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     }
   }, [threadId, loadQueue, markBusy, changeScope])
 
+  // Send now requests in flight, by item: a second click before the first answers (and before the button shows
+  // busy) sends nothing more.
+  const steering = useRef(new Set<string>())
   const steer = useCallback(async (itemId: string) => {
     if (!threadId) return
+    const key = `${threadId}\n${itemId}`
+    if (steering.current.has(key)) return
+    steering.current.add(key)
     const live = changeScope(threadId)
     const refused = 'Could not send it now; the reply may have ended. The message is still queued.'
     markBusy(itemId, true)
@@ -331,6 +337,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       setError(readableError(err, refused))
       void loadQueue(threadId)
     } finally {
+      steering.current.delete(key)
       if (live()) markBusy(itemId, false)
     }
   }, [threadId, loadQueue, markBusy, changeScope])
