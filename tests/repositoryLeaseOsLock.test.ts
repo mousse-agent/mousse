@@ -278,7 +278,8 @@ describe('the repository lease, round 2', () => {
     mkdirSync(metadataDir, { recursive: true })
     return { commonDir: metadataDir, key: metadataDir, worktreePath: metadataDir, metadataDir, capability: { allowed: true } } as RepositoryIdentity
   }
-  const olderLease = (pid: number, acquiredAt: Date): string => JSON.stringify({ pid, processInstanceId: 'older', token: `older-${pid}`, acquiredAt: acquiredAt.toISOString(), heartbeatAt: acquiredAt.toISOString() })
+  const olderLease = (pid: number, acquiredAt: Date, heartbeatAt = acquiredAt): string => JSON.stringify({ pid, processInstanceId: 'older', token: `older-${pid}`, acquiredAt: acquiredAt.toISOString(), heartbeatAt: heartbeatAt.toISOString() })
+  const ago = (ms: number): Date => new Date(Date.now() - ms)
 
   it("takes over an older Mousse's lease whose pid another program got since it was taken", async () => {
     const root = repo(); const identity = resolveRepositoryIdentity(root)
@@ -292,8 +293,23 @@ describe('the repository lease, round 2', () => {
   it("takes over at once an older Mousse's lease taken before the computer last started", async () => {
     const root = repo(); const identity = resolveRepositoryIdentity(root)
     const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' }); children.push(other)
-    writeFileSync(getRepositoryLeasePath(identity), olderLease(other.pid!, new Date(Date.now() - uptime() * 1000 - 24 * 60 * 60_000)))
+    // Refreshed a minute ago: past older builds' 30 s, well inside the 6 h ceiling, so only the boot rule decides.
+    writeFileSync(getRepositoryLeasePath(identity), olderLease(other.pid!, ago(uptime() * 1000 + 24 * 60 * 60_000), ago(60_000)))
     expect(await acquires(identity)).toBeLessThan(2_000)
+  }, 30_000)
+
+  it("keeps a recently refreshed older Mousse's lease that only a clock step makes look reused or older than the boot", async () => {
+    const root = repo(); const identity = resolveRepositoryIdentity(root); const path = getRepositoryLeasePath(identity)
+    // Its process started after the lease's `acquiredAt` (as after the clock stepped back), and the lease reads as
+    // taken before the boot (as after a step forward); its heartbeat is 5 s old, as a live holder's is.
+    const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' }); children.push(other)
+    writeFileSync(path, olderLease(other.pid!, ago(60 * 60_000), ago(5_000)))
+    await busy(identity, { maxWaitMs: 3_000 })
+    writeFileSync(path, olderLease(other.pid!, ago(uptime() * 1000 + 60 * 60_000), ago(5_000)))
+    await busy(identity, { maxWaitMs: 1_000 })
+    // Once it is not refreshed for more than 30 s, the rules apply.
+    writeFileSync(path, olderLease(other.pid!, ago(60 * 60_000), ago(31_000)))
+    expect(await acquires(identity)).toBeLessThan(5_000)
   }, 30_000)
 
   it("takes over an older Mousse's lease not refreshed for over six hours, and keeps a younger one of a live process", async () => {

@@ -287,10 +287,13 @@ function leaseFound(path: string, staleAfterMs: number): { remove: boolean; hold
   if (locallyHeldTokens.has(owner.token)) return { remove: false, holder: holderOf(owner) }
   if (owner.osLock) return { remove: true }
   if (!isOwnerLive(owner)) return { remove: true }
-  if (Date.now() - Date.parse(owner.heartbeatAt) > OLDER_BUILD_LEASE_CEILING_MS) return { remove: true }
-  // A pid that lives is the lease's process only if that process was running when the lease was taken.
+  const heartbeatAge = Date.now() - Date.parse(owner.heartbeatAt)
+  if (heartbeatAge > OLDER_BUILD_LEASE_CEILING_MS) return { remove: true }
+  // A pid that lives is the lease's process only if that process was running when the lease was taken. These rules
+  // compare clock readings taken at different times, so a clock step could make a live holder look reused: they apply
+  // only to a lease not refreshed for the 30 s after which older builds take it over themselves.
   const acquired = Date.parse(owner.acquiredAt)
-  if (Number.isFinite(acquired)) {
+  if (Number.isFinite(acquired) && heartbeatAge > DEFAULT_REPOSITORY_LEASE_STALE_MS) {
     if (acquired < bootedAt() - 60_000) return { remove: true }
     const started = processStart(owner.pid)
     if (typeof started === 'number' && started > acquired + 2_000) return { remove: true }
