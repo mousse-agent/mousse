@@ -22,6 +22,26 @@ function settle(code: string, language: string): Promise<Result> {
   })
 }
 
+/**
+ * One code block as Streamdown drives it: each new text is a new request with its own callback, and
+ * the block shows the latest of the synchronous answer and any callback.
+ */
+function block(language: string) {
+  const state = { code: '', shown: null as Result | null, delivered: [] as Array<{ result: Result; code: string }> }
+  return {
+    state,
+    ask(code: string) {
+      state.code = code
+      const sync = codeHighlighter.highlight({ code, language: language as never, themes }, (result) => {
+        state.delivered.push({ result, code: state.code })
+        state.shown = result
+      })
+      if (sync) state.shown = sync
+      return sync
+    }
+  }
+}
+
 afterEach(() => stopRenderCounts())
 
 describe('a code block streaming in', () => {
@@ -30,12 +50,11 @@ describe('a code block streaming in', () => {
     const first = await settle(code, 'rust')
     expect(first.tokens.some(coloured)).toBe(true)
     const counts = startRenderCounts()
-    // Each delivered result, with the text the block had reached when it arrived.
-    const delivered: Array<{ result: Result; latest: string }> = []
+    const live = block('rust')
     const deltas = 40
     for (let i = 0; i < deltas; i++) {
       code += i % 3 === 2 ? `    println!("{}", rows[${i % 3}]);\n` : `    let v${i} = ${i};`
-      const shown = codeHighlighter.highlight({ code, language: 'rust' as never, themes }, (result) => delivered.push({ result, latest: code }))
+      const shown = live.ask(code)
       // Every delta is on screen at once, and the lines coloured before keep their colours.
       expect(shown).not.toBeNull()
       expect(flat(shown!)).toBe(code)
@@ -47,24 +66,68 @@ describe('a code block streaming in', () => {
     expect(counts.tokenize ?? 0).toBeLessThanOrEqual(deltas / 5)
     await sleep(STREAMING_TOKENIZE_MS * 3)
     // Every result carries the whole text the block had reached when it arrived: no frame goes back to shorter text.
-    expect(delivered.length).toBeGreaterThan(0)
-    for (const { result, latest } of delivered) expect(flat(result)).toBe(latest)
-    expect(flat(delivered.at(-1)!.result)).toBe(code)
-    expect(delivered.at(-1)!.result.tokens.filter(coloured).length).toBeGreaterThan(5)
+    expect(live.state.delivered.length).toBeGreaterThan(0)
+    for (const { result, code: reached } of live.state.delivered) expect(flat(result)).toBe(reached)
+    expect(flat(live.state.shown!)).toBe(code)
+    expect(live.state.shown!.tokens.filter(coloured).length).toBeGreaterThan(5)
   })
 
-  it('grows a late first result to the text the block has since reached', async () => {
+  it('answers a late first pass with the text the block has since reached', async () => {
+    const live = block('go')
     const start = 'package main\n\nfunc main() {\n'
     const later = start + '\tx := 1\n'
-    const firstDelivered = new Promise<Result>((resolve) => {
-      codeHighlighter.highlight({ code: start, language: 'go' as never, themes }, resolve)
-    })
+    expect(live.ask(start)).toBeNull()
     // The block grows before its first pass ends: it shows plain, with all of its text.
-    const shown = codeHighlighter.highlight({ code: later, language: 'go' as never, themes }, () => {})
-    expect(shown).not.toBeNull()
+    const shown = live.ask(later)
     expect(flat(shown!)).toBe(later)
-    // The first pass ends: the block gets colours with its newer text, never the shorter one.
-    expect(flat(await firstDelivered)).toBe(later)
+    await sleep(STREAMING_TOKENIZE_MS * 3)
+    expect(live.state.delivered.length).toBeGreaterThan(0)
+    for (const { result } of live.state.delivered) expect(flat(result)).toBe(later)
+    expect(live.state.shown!.tokens.some(coloured)).toBe(true)
+  })
+
+  it('keeps two blocks of the same language apart', async () => {
+    const a = block('java')
+    const b = block('java')
+    let codeA = 'class A {\n'
+    let codeB = 'interface B {\n'
+    a.ask(codeA)
+    b.ask(codeB)
+    for (let i = 0; i < 20; i++) {
+      codeA += `  int a${i} = ${i};\n`
+      codeB += `  void b${i}();\n`
+      const shownA = a.ask(codeA)
+      const shownB = b.ask(codeB)
+      if (shownA) expect(flat(shownA)).toBe(codeA)
+      if (shownB) expect(flat(shownB)).toBe(codeB)
+      await sleep(15)
+    }
+    await sleep(STREAMING_TOKENIZE_MS * 3)
+    // Each block only ever got its own text, at the length it had reached.
+    for (const { result, code } of a.state.delivered) expect(flat(result)).toBe(code)
+    for (const { result, code } of b.state.delivered) expect(flat(result)).toBe(code)
+    expect(flat(a.state.shown!)).toBe(codeA)
+    expect(flat(b.state.shown!)).toBe(codeB)
+  })
+
+  it('keeps the throttle when an older block of the same language is drawn again', async () => {
+    const older = 'int main(void) {\n  return 0;\n}\n'
+    await settle(older, 'c')
+    let code = '#include <stdio.h>\n'
+    await settle(code, 'c')
+    const counts = startRenderCounts()
+    const live = block('c')
+    const deltas = 30
+    for (let i = 0; i < deltas; i++) {
+      code += `int v${i} = ${i};\n`
+      live.ask(code)
+      // A row scrolled back into view draws its finished block again.
+      codeHighlighter.highlight({ code: older, language: 'c' as never, themes }, () => {})
+      await sleep(10)
+    }
+    expect(counts.tokenize ?? 0).toBeLessThanOrEqual(deltas / 5)
+    await sleep(STREAMING_TOKENIZE_MS * 3)
+    expect(flat(live.state.shown!)).toBe(code)
   })
 })
 
@@ -73,19 +136,17 @@ describe('a block that reaches its final text from the cache', () => {
     // The same fence twice in a reply: the second copy's final text is in the cache already.
     const full = 'def main():\n    rows = [1, 2, 3]\n    for row in rows:\n        print(row)\n'
     await settle(full, 'python')
-    const partial = full.slice(0, 20)
-    await settle(partial, 'python')
-    const delivered: Result[] = []
-    // The copy grows past its first pass; a throttled pass for this text is now waiting.
-    const grown = full.slice(0, 40)
-    codeHighlighter.highlight({ code: grown, language: 'python' as never, themes }, (result) => delivered.push(result))
+    const live = block('python')
+    live.ask(full.slice(0, 20))
+    await sleep(STREAMING_TOKENIZE_MS * 2)
+    // The copy grows; a throttled pass for this text is now waiting.
+    live.ask(full.slice(0, 40))
     // It reaches its final text, which the cache answers at once.
-    const final = codeHighlighter.highlight({ code: full, language: 'python' as never, themes })
-    expect(flat(final!)).toBe(full)
+    expect(flat(live.ask(full)!)).toBe(full)
     await sleep(STREAMING_TOKENIZE_MS * 3)
-    // The late pass for the shorter text delivers the final text, not the shorter one.
-    expect(delivered.length).toBeGreaterThan(0)
-    for (const result of delivered) expect(flat(result)).toBe(full)
+    // The late pass for the shorter text never shows: the block keeps its final text.
+    expect(flat(live.state.shown!)).toBe(full)
+    for (const { result, code } of live.state.delivered) expect(flat(result)).toBe(code)
   })
 })
 
