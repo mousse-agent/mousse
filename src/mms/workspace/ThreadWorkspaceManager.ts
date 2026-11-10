@@ -19,7 +19,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
 import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
-import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
+import { acquireRepositoryLease, RepositoryLeaseBusyError, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import {
   releaseExecutionLeaseHandle,
@@ -86,6 +86,22 @@ async function pathExists(path: string): Promise<boolean> {
 async function untrustedSafety(repositoryRoot: string): Promise<string[]> {
   const { safety } = await safeWorktreeGit(repositoryRoot)
   return [...safety, '-c', 'submodule.recurse=false']
+}
+
+/**
+ * How long a thread's worktree is waited for while another Mousse operation uses its repository. A thread whose start
+ * waits longer fails with {@link REPOSITORY_BUSY_TEXT} instead of looking busy for good.
+ */
+export const WORKSPACE_REPOSITORY_WAIT_MS = 2 * 60_000
+export const REPOSITORY_BUSY_TEXT = 'Another Mousse operation is still using this repository, so this thread could not start. Try again in a moment.'
+
+/** The repository's lease for a thread's worktree, waited for at most {@link WORKSPACE_REPOSITORY_WAIT_MS}. */
+async function acquireWorkspaceRepositoryLease(identity: RepositoryIdentity, signal: AbortSignal | undefined): Promise<RepositoryLeaseHandle> {
+  try {
+    return await acquireRepositoryLease(identity, { signal, maxWaitMs: WORKSPACE_REPOSITORY_WAIT_MS })
+  } catch (error) {
+    throw error instanceof RepositoryLeaseBusyError ? new RepositoryLeaseBusyError(REPOSITORY_BUSY_TEXT) : error
+  }
 }
 
 const CORE_WORKTREE_REFUSAL = 'This repository sets core.worktree, so a worktree cannot hold its own safety configuration.'
@@ -369,7 +385,7 @@ export class ThreadWorkspaceManager {
       if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
       threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-provision', signal })
       const identity = await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true })
-      repositoryLease = await acquireRepositoryLease(identity, { signal })
+      repositoryLease = await acquireWorkspaceRepositoryLease(identity, signal)
       // Another waiter may have provisioned while this call was acquiring ownership.
       const provisioned = this.load()
       if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
@@ -521,7 +537,7 @@ export class ThreadWorkspaceManager {
     try {
       if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
       threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
-      repositoryLease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), { signal })
+      repositoryLease = await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), signal)
       if (verified.lifecycle === 'ready') {
         const ready = await this.verify(metadata)
         if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')

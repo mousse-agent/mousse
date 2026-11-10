@@ -1,12 +1,12 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { buildSync } from 'esbuild'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
-import { acquireRepositoryLease, getRepositoryLeasePath, RepositoryLeaseAbortedError } from '../src/mms/git/RepositoryLease'
+import { acquireRepositoryLease, getRepositoryLeasePath, RepositoryLeaseAbortedError, RepositoryLeaseBusyError } from '../src/mms/git/RepositoryLease'
 
 const dirs: string[] = []
 function repo(): string {
@@ -47,6 +47,36 @@ describe('RepositoryLease', () => {
     await expect(waiting).rejects.toBeInstanceOf(RepositoryLeaseAbortedError); expect(first.release()).toBe(true)
     writeFileSync(getRepositoryLeasePath(identity), JSON.stringify({ pid: 2147000000, processInstanceId: 'dead', token: 'dead', acquiredAt: new Date(0).toISOString(), heartbeatAt: new Date(0).toISOString() }))
     const recovered = await acquireRepositoryLease(identity); expect(existsSync(getRepositoryLeasePath(identity))).toBe(true); recovered.release()
+  })
+  it('lets the next caller in this process go when the lease file was removed or taken over while held', async () => {
+    const identity = resolveRepositoryIdentity(repo()); const path = getRepositoryLeasePath(identity)
+    const first = await acquireRepositoryLease(identity)
+    const waiting = acquireRepositoryLease(identity, { retryDelayMs: 2, maxWaitMs: 5_000 })
+    // Something removed the file while it was held (another process reclaimed it as stale, then let it go).
+    unlinkSync(path)
+    expect(first.release()).toBe(false)
+    const second = await waiting
+    // Another process took the file over while it was held; its owner is gone by the time anyone looks again.
+    const third = acquireRepositoryLease(identity, { retryDelayMs: 2, maxWaitMs: 5_000 })
+    writeFileSync(path, JSON.stringify({ pid: 2147000000, processInstanceId: 'other', token: 'other', acquiredAt: new Date(0).toISOString(), heartbeatAt: new Date(0).toISOString() }))
+    expect(second.release()).toBe(false)
+    expect((await third).release()).toBe(true)
+  })
+  it('takes over a lease file left unreadable for longer than the stale window', async () => {
+    const identity = resolveRepositoryIdentity(repo()); const path = getRepositoryLeasePath(identity)
+    writeFileSync(path, '{"pid":')
+    await expect(acquireRepositoryLease(identity, { retryDelayMs: 2, maxWaitMs: 100 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
+    const old = new Date(Date.now() - 60_000); utimesSync(path, old, old)
+    const lease = await acquireRepositoryLease(identity, { retryDelayMs: 2, maxWaitMs: 5_000 })
+    expect(lease.release()).toBe(true)
+  })
+  it('ends a wait that runs past maxWaitMs as busy, and an aborted wait as aborted', async () => {
+    const identity = resolveRepositoryIdentity(repo()); const first = await acquireRepositoryLease(identity)
+    await expect(acquireRepositoryLease(identity, { maxWaitMs: 50 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
+    const controller = new AbortController(); const aborted = acquireRepositoryLease(identity, { maxWaitMs: 5_000, signal: controller.signal }); controller.abort()
+    await expect(aborted).rejects.toBeInstanceOf(RepositoryLeaseAbortedError)
+    expect(first.release()).toBe(true)
+    expect((await acquireRepositoryLease(identity, { maxWaitMs: 5_000 })).release()).toBe(true)
   })
 })
 
