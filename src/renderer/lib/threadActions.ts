@@ -105,6 +105,8 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   // Decided from the store as it is now, with nothing awaited first.
   const store = useAppStore.getState()
   const profileId = store.profileId
+  // A project just added (Add project) may not be listed in this window yet when the create answers.
+  const listedBefore = store.projects.some((project) => project.id === projectId)
   const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
   const remembered = usableRemembered(rememberedChoiceOf(store.projects, projectId), projectId)
   if (empty && matchesRememberedChoices(empty, remembered)) {
@@ -112,10 +114,12 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
     return
   }
   const thread = await window.mousse.threads.create(undefined, projectId, { rememberedChoices: true })
-  // Read again after the create: another profile shown meanwhile gets nothing from this one, and a newer copy of the
-  // thread the service already pushed is kept (the push can come before the reply, or after the first message).
+  // Read again after the create: another profile shown meanwhile gets nothing from this one, a project removed meanwhile
+  // gets nothing either, and a newer copy of the thread the service already pushed is kept (the push can come before
+  // the reply, or after the first message). A project not listed yet when this began is not taken as removed.
   const current = useAppStore.getState()
-  if (current.profileId !== profileId || !current.projects.some((project) => project.id === projectId)) return
+  if (current.profileId !== profileId) return
+  if (listedBefore && !current.projects.some((project) => project.id === projectId)) return
   if (!current.threads.some((entry) => entry.id === thread.id)) current.upsertThread(thread)
   await selectThread(thread.id)
 }

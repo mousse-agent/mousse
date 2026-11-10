@@ -19,6 +19,7 @@ import { registerNavigationGuard } from '../src/renderer/services/navigationGuar
 import { useChatNavigationStore } from '../src/renderer/stores/chatNavigationStore'
 import { buildPaletteGroups, eligibleCommands, flattenGroups, type PaletteItem } from '../src/renderer/commands/paletteItems'
 import { useAppStore } from '../src/renderer/stores/appStore'
+import { createAndSelectProjectThread } from '../src/renderer/lib/threadActions'
 import type { KeyInput } from '../src/shared/commands'
 import type { Project, Thread } from '../src/shared/types'
 
@@ -420,7 +421,31 @@ describe('opening a thread from the palette', () => {
 
     chooseCommandPaletteItem({ kind: 'project', key: 'project:p1', id: 'p1', title: 'Mousse', detail: 'Project' })
     await vi.waitFor(() => expect(win.mousse.threads.select).toHaveBeenCalledWith('draft-1'))
-    expect(win.mousse.threads.create).toHaveBeenCalledWith(undefined, 'p1')
+    expect(win.mousse.threads.create).toHaveBeenCalledWith(undefined, 'p1', { rememberedChoices: true })
+  })
+
+  // Add project, then start a thread: the new project is often not in this window's list yet when the create answers.
+  it('opens the new thread of a project this window does not list yet', async () => {
+    const { win } = stubWindow(composer())
+    useAppStore.setState({ projects: [] })
+    const draft = thread('draft-2', 'New Thread', { projectId: 'p-new', startedAt: undefined })
+    win.mousse.threads.create.mockResolvedValue(draft)
+
+    await createAndSelectProjectThread('p-new')
+    expect(win.mousse.threads.select).toHaveBeenCalledWith('draft-2')
+  })
+
+  it('opens nothing when the project was removed while the thread was being made', async () => {
+    const { win } = stubWindow(composer())
+    useAppStore.setState({ projects: [{ id: 'p-gone', name: 'Gone', path: 'C:/gone' } as never] })
+    const draft = thread('draft-3', 'New Thread', { projectId: 'p-gone', startedAt: undefined })
+    win.mousse.threads.create.mockImplementation(async () => {
+      useAppStore.setState({ projects: [] })
+      return draft
+    })
+
+    await createAndSelectProjectThread('p-gone')
+    expect(win.mousse.threads.select).not.toHaveBeenCalled()
   })
 })
 
