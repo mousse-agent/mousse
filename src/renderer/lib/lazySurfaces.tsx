@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import { LoadFailed, lazyNamed, preloadWhenIdle } from './lazyComponent'
+import { LoadFailed, lazyNamed, preloadWhenIdle, type LoadFailedProps } from './lazyComponent'
 import { Modal } from '../components/ui/Modal'
 import { useAppStore } from '../stores/appStore'
 import { useBotsStore } from '../stores/botsStore'
@@ -13,21 +13,21 @@ import { useBotsStore } from '../stores/botsStore'
  */
 
 /** Settings is an overlay: a failed load shows in a dialog that also closes it, and nothing while closed. */
-function SettingsLoadFailed({ retry }: { retry: () => void }) {
+function SettingsLoadFailed({ retry, reload }: LoadFailedProps) {
   const open = useAppStore((state) => state.settingsOpen)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
-  return <Modal open={open} title="Settings" onClose={() => setSettingsOpen(false)}><LoadFailed retry={retry} /></Modal>
+  return <Modal open={open} title="Settings" onClose={() => setSettingsOpen(false)}><LoadFailed retry={retry} reload={reload} /></Modal>
 }
 
 /** The Automations page is mounted while hidden; a failed load keeps its hidden shell. */
-function AutomationsLoadFailed({ retry }: { retry: () => void }) {
+function AutomationsLoadFailed({ retry, reload }: LoadFailedProps) {
   const open = useAppStore((state) => state.scheduledOpen)
-  return <div className="automations-page" hidden={!open}><LoadFailed retry={retry} /></div>
+  return <div className="automations-page" hidden={!open}><LoadFailed retry={retry} reload={reload} /></div>
 }
 
-function NewBotLoadFailed({ retry }: { retry: () => void }) {
+function NewBotLoadFailed({ retry, reload }: LoadFailedProps) {
   const close = useBotsStore((state) => state.closeNewBot)
-  return <Modal open title="New bot" onClose={close}><LoadFailed retry={retry} /></Modal>
+  return <Modal open title="New bot" onClose={close}><LoadFailed retry={retry} reload={reload} /></Modal>
 }
 
 export const SettingsPage = lazyNamed(() => import('../components/SettingsPage'), 'SettingsPage', SettingsLoadFailed)
@@ -72,7 +72,7 @@ let preloaded = false
 export function preloadSplitSurfaces(): void {
   if (preloaded) return
   preloaded = true
-  preloadWhenIdle([
+  void preloadWhenIdle([
     warmKeptPanel('terminal', ProjectTerminalPanel.preload),
     warmKeptPanel('files', FilesPanel.preload),
     warmKeptPanel('browser', BrowserPanel.preload),

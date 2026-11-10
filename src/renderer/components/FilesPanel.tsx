@@ -8,6 +8,8 @@ import { useCommand } from '../commands/commandRegistry'
 import { useActiveProjectLocation, useFilesRoot } from '../hooks/useActiveProjectPath'
 import type { FileGrepMatch } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import { registerAutosaveFlush } from '../services/reloadWindow'
+import { fileLinksListening } from '../services/fileLinks'
 import { useMonacoCodeFont } from '../lib/monacoCodeFont'
 import { fileWorkspaceScope, useFileWorkspaceStore } from '../stores/filesStore'
 import { SerializedAutosave, normalizeWorkspacePath, reconcileExternalContent } from '../utils/fileWorkspace'
@@ -430,7 +432,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       })().catch((error) => console.error('Failed to open file link', error))
     }
     window.addEventListener('mousse:open-file', onOpenFile)
-    return () => window.removeEventListener('mousse:open-file', onOpenFile)
+    // Links that arrived before this tab mounted (or while its chunk failed to load) come now.
+    const stopListening = fileLinksListening()
+    return () => {
+      stopListening()
+      window.removeEventListener('mousse:open-file', onOpenFile)
+    }
   }, [filesRoot, loadFile])
 
   useEffect(() => {
@@ -483,6 +490,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       monaco.editor.getModel(monaco.Uri.parse(key))?.dispose()
     }
   }, [files, selectedKey])
+
+  // A reload the person chooses (lib/lazyComponent) saves what autosave is holding first.
+  useEffect(() => registerAutosaveFlush(() => Promise.all(Object.keys(filesRef.current).map((key) => flushPath(key)))), [flushPath])
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {

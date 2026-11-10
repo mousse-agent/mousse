@@ -1,7 +1,18 @@
 import { Component, lazy, useReducer, type ComponentProps, type ComponentType, type ReactNode } from 'react'
+import { reloadWindow } from '../services/reloadWindow'
 
-/** What a split-out component shows when its chunk failed to load; `retry` loads it again. */
-export type LoadFailedView = ComponentType<{ retry: () => void }>
+export interface LoadFailedProps {
+  /** Loads the chunk again. */
+  retry: () => void
+  /**
+   * Present once a Retry has failed too: something the chunk imports may have failed, which only a reload of the
+   * window repairs. Saves pending edits and asks before discarding unsaved ones.
+   */
+  reload?: () => void
+}
+
+/** What a split-out component shows when its chunk failed to load. */
+export type LoadFailedView = ComponentType<LoadFailedProps>
 
 export type PreloadableComponent<C extends ComponentType<any>> = ComponentType<ComponentProps<C>> & {
   /** Starts loading the module; the same promise serves later renders. A failed load is retried next time. */
@@ -29,10 +40,11 @@ export function failedChunkUrl(error: unknown, base: string = document.baseURI):
 }
 
 /** The default failed state: one short line in place of the component. */
-export function LoadFailed({ retry }: { retry: () => void }) {
+export function LoadFailed({ retry, reload }: LoadFailedProps) {
   return (
     <div className="lazy-load-failed" role="alert">
       Couldn't load. <button type="button" className="lazy-load-failed-retry" onClick={retry}>Retry</button>
+      {reload && <>{' · '}<button type="button" className="lazy-load-failed-retry" onClick={reload}>Reload window</button></>}
     </div>
   )
 }
@@ -43,23 +55,29 @@ interface BoundaryProps {
   children: ReactNode
 }
 
-/** Catches a chunk that did not load; anything else the component throws goes on to the boundaries above. */
-class LoadBoundary extends Component<BoundaryProps, { error: unknown }> {
-  state: { error: unknown } = { error: null }
+/**
+ * Catches a chunk that did not load; anything else the component throws goes on to the boundaries above. A load
+ * that fails again after a Retry also offers to reload the window. Only the person reloads it.
+ */
+class LoadBoundary extends Component<BoundaryProps, { error: unknown; retried: boolean }> {
+  state: { error: unknown; retried: boolean } = { error: null, retried: false }
 
   static getDerivedStateFromError(error: unknown) {
     return { error }
   }
 
   render() {
-    const { error } = this.state
+    const { error, retried } = this.state
     if (error === null) return this.props.children
     if (typeof error !== 'object' || !loadFailures.has(error)) throw error
     const Failed = this.props.failed
-    return <Failed retry={() => {
-      this.props.onRetry()
-      this.setState({ error: null })
-    }} />
+    return <Failed
+      retry={() => {
+        this.props.onRetry()
+        this.setState({ error: null, retried: true })
+      }}
+      reload={retried ? () => { void reloadWindow() } : undefined}
+    />
   }
 }
 
@@ -123,15 +141,24 @@ const idle = (): Promise<void> => new Promise((resolve) => {
   else setTimeout(resolve, 50)
 })
 
+/** How long the warm-up waits for one module before going on to the next; the slow one keeps loading. */
+const PRELOAD_STEP_DEADLINE_MS = 10_000
+
 /**
  * Loads split-out modules one at a time while the renderer is idle, after the window has painted, so the first
- * paint never waits for them and opening them later is instant. Failures are left for the real render to retry.
+ * paint never waits for them and opening them later is instant. A module that has not loaded within the deadline
+ * does not hold up the rest. Failures are left for the real render to retry.
  */
-export function preloadWhenIdle(loaders: ReadonlyArray<() => Promise<unknown>>): void {
-  void (async () => {
+export function preloadWhenIdle(loaders: ReadonlyArray<() => Promise<unknown>>, deadlineMs = PRELOAD_STEP_DEADLINE_MS): Promise<void> {
+  return (async () => {
     for (const load of loaders) {
       await idle()
-      await load().catch(() => undefined)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        Promise.resolve().then(load).catch(() => undefined),
+        new Promise((done) => { timer = setTimeout(done, deadlineMs) })
+      ])
+      clearTimeout(timer)
     }
   })()
 }

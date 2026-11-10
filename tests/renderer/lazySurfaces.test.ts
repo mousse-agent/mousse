@@ -32,21 +32,29 @@ vi.mock('../../src/renderer/components/SubscriptionUsagePage', () => ({ Subscrip
 vi.mock('../../src/renderer/components/chats/ChatWorkspace', () => ({ ChatWorkspace: stub('chats') }))
 vi.mock('../../src/renderer/components/bots/NewBotDialog', () => ({ NewBotDialogHost: stub('new-bot') }))
 vi.mock('../../src/renderer/components/SettingsPage', () => ({ SettingsPage: stub('settings') }))
-// The Files tab handles file links once it has mounted.
+// The Files tab handles file links once it has mounted, as the real one does.
 const fileLinks = vi.hoisted(() => [] as unknown[])
 vi.mock('../../src/renderer/components/FilesPanel', async () => {
   const { createElement: element, useEffect } = await import('react')
+  const { fileLinksListening } = await import('../../src/renderer/services/fileLinks')
   return {
     FilesPanel: () => {
       useEffect(() => {
         const open = (event: Event) => { fileLinks.push((event as CustomEvent).detail) }
         window.addEventListener('mousse:open-file', open)
-        return () => window.removeEventListener('mousse:open-file', open)
+        const stop = fileLinksListening()
+        return () => { stop(); window.removeEventListener('mousse:open-file', open) }
       }, [])
       return element('div', { 'data-testid': 'files' })
     }
   }
 })
+// Reloading is the person's choice; here it only records that it was asked for.
+const reloads = vi.hoisted(() => ({ count: 0 }))
+vi.mock('../../src/renderer/services/reloadWindow', () => ({
+  reloadWindow: async () => { reloads.count += 1; return true },
+  registerAutosaveFlush: () => () => {}
+}))
 vi.mock('../../src/renderer/components/ProjectTerminalPanel', () => ({ ProjectTerminalPanel: stub('terminal') }))
 vi.mock('../../src/renderer/components/BrowserPanel', () => ({ BrowserPanel: stub('browser') }))
 vi.mock('../../src/renderer/components/changes/ChangesPanel', () => ({ ChangesPanel: stub('changes') }))
@@ -71,7 +79,7 @@ const { MainViewPanel } = await import('../../src/renderer/components/MainViewPa
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const surfaces = await import('../../src/renderer/lib/lazySurfaces')
-const { failedChunkUrl, lazyNamed } = await import('../../src/renderer/lib/lazyComponent')
+const { failedChunkUrl, lazyNamed, preloadWhenIdle } = await import('../../src/renderer/lib/lazyComponent')
 
 let host: HTMLDivElement
 let root: Root
@@ -100,6 +108,7 @@ beforeEach(() => {
   useBotsStore.setState({ newBotOpen: false })
   surfaces.useKeptPanels.setState({ files: false, terminal: false, browser: false })
   fileLinks.length = 0
+  reloads.count = 0
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -277,6 +286,31 @@ describe('a chunk that fails to load', () => {
     expect(failedChunkUrl(failed('https://example.com/assets/evil.js'), base)).toBeUndefined()
     expect(failedChunkUrl(new Error('offline'), base)).toBeUndefined()
     expect(failedChunkUrl('not an error', base)).toBeUndefined()
+  })
+
+  it('offers Reload window once a Retry has failed too, and reloads only when it is clicked', async () => {
+    const Page = lazyNamed(async (): Promise<{ Page: () => null }> => { throw new Error('offline') }, 'Page')
+    const buttons = () => [...host.querySelectorAll('[role="alert"] button')].map((button) => button.textContent)
+    act(() => root.render(createElement(Suspense, { fallback: null }, createElement(Page))))
+    await settle()
+    // The first failure: Retry only.
+    expect(buttons()).toEqual(['Retry'])
+    act(() => { host.querySelector<HTMLButtonElement>('.lazy-load-failed-retry')!.click() })
+    await settle()
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("Couldn't load. Retry · Reload window")
+    expect(reloads.count).toBe(0)
+    act(() => { [...host.querySelectorAll<HTMLButtonElement>('[role="alert"] button')].find((button) => button.textContent === 'Reload window')!.click() })
+    expect(reloads.count).toBe(1)
+  })
+
+  it('the warm-up goes on past a module that does not load in time', async () => {
+    const loaded: string[] = []
+    const done = preloadWhenIdle([
+      () => new Promise(() => {}),
+      async () => { loaded.push('next') }
+    ], 30)
+    await done
+    expect(loaded).toEqual(['next'])
   })
 
   it('a chunk that keeps failing is imported once per Retry, not in a loop', async () => {

@@ -1,45 +1,30 @@
 import { useInboxShowsThread } from './automations/inbox/inboxStore'
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect } from 'react'
 // Each surface is its own chunk, loaded when the panel first draws it and preloaded once the window has painted.
 import { BrowserPanel, ChangesPanel, DocumentPanel, FilesPanel, ProjectTerminalPanel, PullRequestPanel, mountKeptPanel, useKeptPanel } from '../lib/lazySurfaces'
 // Shared markdown rules, once loaded here with the Documents panel: kept in place so the stylesheet's order holds.
 import '../styles/chat-markdown.css'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { useAppStore } from '../stores/appStore'
+import { fileLinksHandled, holdFileLink } from '../services/fileLinks'
 import { surfaceTabItems } from '../lib/surfaces'
 import { OpenSurfacePicker } from './OpenSurfaceMenu'
 import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 
-/** Runs `onMount` after the components before it in the same Suspense boundary have mounted. */
-function AfterMount({ onMount }: { onMount: () => void }) {
-  useEffect(onMount, [onMount])
-  return null
-}
-
 /**
- * The Files tab handles file links (`mousse:open-file`). Until it has mounted, this keeps the links that arrive,
- * mounts the tab, and sends them again once it is listening.
+ * File links that arrive before the Files tab is listening (not mounted yet, or its chunk failed to load) are held
+ * in services/fileLinks and mount the tab; the tab takes them once its own listener is in place.
  */
-function useFileLinksBeforeFilesMount() {
-  const [listening, setListening] = useState(false)
-  const listeningRef = useRef(false)
-  const queued = useRef<unknown[]>([])
+function useHeldFileLinks() {
   useEffect(() => {
-    if (listening) return
     const hold = (event: Event) => {
-      if (listeningRef.current) return
-      queued.current.push((event as CustomEvent).detail)
+      if (fileLinksHandled()) return
+      holdFileLink((event as CustomEvent).detail)
       mountKeptPanel('files')
     }
     window.addEventListener('mousse:open-file', hold)
     return () => window.removeEventListener('mousse:open-file', hold)
-  }, [listening])
-  const [onFilesMounted] = useState(() => () => {
-    listeningRef.current = true
-    setListening(true)
-    for (const detail of queued.current.splice(0)) window.dispatchEvent(new CustomEvent('mousse:open-file', { detail }))
-  })
-  return onFilesMounted
+  }, [])
 }
 
 /**
@@ -76,7 +61,7 @@ export function MainViewPanel({ open = true }: { open?: boolean }) {
   const filesMounted = useKeptPanel('files', mainView === 'files' && visible)
   const terminalMounted = useKeptPanel('terminal', (mainView === 'terminal' && visible) || terminals.length > 0)
   const browserMounted = useKeptPanel('browser', (mainView === 'browser' && visible) || browsers.length > 0)
-  const onFilesMounted = useFileLinksBeforeFilesMount()
+  useHeldFileLinks()
 
   const transientPanel = (() => {
     if (!mainAreaOpen || overlayOpen) return null
@@ -95,7 +80,7 @@ export function MainViewPanel({ open = true }: { open?: boolean }) {
           tree and editor unmount until it shows again; they come back with their open folders, scroll and selection.
           While a surface's chunk loads its pane stays empty: the pane itself keeps its size. */}
       <KeepMounted active={mainView === 'files'} className="keep-mounted-pane">
-        {filesMounted && <Suspense fallback={null}><FilesPanel showing={mainView === 'files' && visible} /><AfterMount onMount={onFilesMounted} /></Suspense>}
+        {filesMounted && <Suspense fallback={null}><FilesPanel showing={mainView === 'files' && visible} /></Suspense>}
       </KeepMounted>
       <KeepMounted active={mainView === 'terminal'} className="keep-mounted-pane">
         {terminalMounted && <Suspense fallback={null}><ProjectTerminalPanel /></Suspense>}
