@@ -428,6 +428,47 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     }
   })
 
+  it('a window that stops reading gets the latest message once, sees the gap and stays connected', async () => {
+    const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await client.connect()
+    try {
+      await client.subscribe(0)
+      const internal = server as unknown as {
+        ringFor(profileId: string): EventSequenceRing
+        emitToSubscribers(event: ReturnType<EventSequenceRing['push']>, profileId: string): void
+      }
+      const contents: string[] = []
+      client.onEvent((event) => {
+        if (event.type === 'thread.message-updated') contents.push((event.data as { message: { content: string } }).message.content)
+      })
+      const update = (content: string): void =>
+        internal.emitToSubscribers(internal.ringFor(mms.profileId).push('thread.message-updated', { message: { id: 'reply', content } }, 'thread-1'), mms.profileId)
+      // The reply has started and the window is up to date.
+      update('start')
+      await vi.waitFor(() => expect(contents).toEqual(['start']))
+      expect(client.requiresResnapshot).toBe(false)
+      // The window stops reading while the reply streams: 60 updates of about 100 KB, one per turn of the event loop.
+      const socket = (client as unknown as { socket: Socket }).socket
+      socket.pause()
+      const steps = 60
+      for (let step = 0; step < steps; step++) {
+        update(`${'x'.repeat(100_000)}${step}`)
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      socket.resume()
+      await vi.waitFor(() => expect(contents.at(-1)?.endsWith(String(steps - 1))).toBe(true))
+      // The updates still waiting were replaced by the latest one.
+      expect(contents.length).toBeLessThan(steps + 1)
+      // The skipped sequences are a gap, which makes the window refresh its open thread.
+      expect(client.requiresResnapshot).toBe(true)
+      expect(client.connected).toBe(true)
+      await expect(client.request('health')).resolves.toBeDefined()
+    } finally {
+      await client.close()
+    }
+  })
+
   it('new instance forces resnapshot (sequence regression)', async () => {
     const client = new LocalMmsClient({
       homeDir: home,

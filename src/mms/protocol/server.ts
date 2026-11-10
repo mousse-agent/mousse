@@ -1376,7 +1376,7 @@ export class MmsProtocolServer {
     const combined = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal
     const operation = session.writer.enqueue(frame.length, () => [frame], combined, () => {
       if (!valid()) throw new DomainRpcError('connection_closed', 'Display profile binding changed')
-    })
+    }, { flush: true })
     if (!operation) {
       session.connectionEventPending--
       return Promise.reject(new DomainRpcError('connection_closed', 'Display write backlog exceeded'))
@@ -1406,7 +1406,9 @@ export class MmsProtocolServer {
       let chunked = session.authenticated && session.capabilities.has(MMS_PROTOCOL_CHUNK_CAPABILITY) &&
         isObject(value) && (value.kind === 'res' || value.kind === 'event') && body.length > MMS_PROTOCOL_CHUNK_BYTES
       const limit = chunked ? MMS_PROTOCOL_MAX_ENVELOPE_BYTES : Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES - 4)
+      let supersedes = supersedingKey(value)
       if (body.length > limit) {
+        supersedes = undefined
         if (isObject(value) && value.kind === 'res') {
           body = Buffer.from(JSON.stringify({ kind: 'res', id: value.id, ok: false,
             error: { code: 'response_too_large', message: chunked ? 'Response exceeds the supported transfer limit.' : 'Response exceeds this client’s transport limit. Update Mousse to receive large threads.',
@@ -1417,7 +1419,7 @@ export class MmsProtocolServer {
         } else throw new FrameTooLargeError(body.length, limit)
         chunked = false
       }
-      const operation = session.writer.enqueue(body.length, () => envelopeFrames(body, chunked))
+      const operation = session.writer.enqueue(body.length, () => envelopeFrames(body, chunked), undefined, undefined, { supersedes })
       operation?.catch(() => {})
       return operation !== null
     } catch {
@@ -1467,6 +1469,21 @@ export class MmsProtocolServer {
       /* ignore */
     }
   }
+}
+
+/**
+ * What an event carries the whole current state of, for the outbound queue to replace an older
+ * one still waiting: a message's latest content, the thread list, the activity of every thread.
+ * The client then sees a gap in sequences and refreshes its open thread, as after any gap.
+ */
+export function supersedingKey(value: unknown): string | undefined {
+  if (!isObject(value) || value.kind !== 'event') return undefined
+  const event = value as unknown as ProtocolEvent
+  const scope = `${event.profileId ?? ''}\u0000${event.threadId ?? ''}`
+  if (event.type === 'threads.updated' || event.type === 'activity.snapshot') return `${event.type}\u0000${event.profileId ?? ''}`
+  if (event.type !== 'thread.message-updated') return undefined
+  const id = (event.data as { message?: { id?: unknown } } | null)?.message?.id
+  return typeof id === 'string' && event.threadId ? `${event.type}\u0000${scope}\u0000${id}` : undefined
 }
 
 /** Additive classification is sent only to peers requesting errors.v1. */
