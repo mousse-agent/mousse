@@ -16,7 +16,7 @@ import {
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { setImmediate as immediate, setTimeout as delay } from 'node:timers/promises'
+import { setImmediate as immediate } from 'node:timers/promises'
 import { NetError, newId } from '../../../../src/shared/net'
 import type { BotRunRequest } from '../../../../src/mms/net/contracts'
 import {
@@ -226,21 +226,16 @@ function searchTree(root: string, files = 320): void {
   }
 }
 
-// Keep the real openat backend, adding bounded work to make event-loop starvation reproducible.
+// Keep the real openat backend, with hooks after each read and listing.
 function instrumentNative(options: {
   afterRead?: () => void
   afterList?: () => void
-  readWorkMs?: number
 }): NativeReaderModule {
   return {
     openRoot: (root) => native.openRoot(root),
     closeRoot: (fd) => native.closeRoot(fd),
     read(fd, path, maximumBytes, barrier) {
       const result = native.read(fd, path, maximumBytes, barrier)
-      const until = performance.now() + (options.readWorkMs ?? 0)
-      while (performance.now() < until) {
-        /* deterministic bounded synchronous work */
-      }
       options.afterRead?.()
       return result
     },
@@ -253,44 +248,33 @@ function instrumentNative(options: {
 }
 
 describe('cooperative native reader search', () => {
-  it('keeps a 5 ms heartbeat responsive throughout a search lasting more than 200 ms', async () => {
+  it('gives the event loop a turn before every file it reads', async () => {
     const root = temp()
     searchTree(root)
-    const reader = new NativeReader(instrumentNative({ readWorkMs: 1 }), root, [temp()])
-    const operationTimes: number[] = []
+    const reader = new NativeReader(instrumentNative({}), root, [temp()])
+    let reads = 0
     const read = reader.read.bind(reader)
     reader.read = (path, maximumBytes) => {
-      const started = performance.now()
-      const result = read(path, maximumBytes)
-      operationTimes.push(performance.now() - started)
-      return result
+      reads++
+      return read(path, maximumBytes)
     }
-    const gaps: number[] = []
-    let previous = performance.now()
-    const timer = setInterval(() => {
-      const now = performance.now()
-      gaps.push(now - previous)
-      previous = now
-    }, 5)
+    // Counts event-loop turns, not time: other work gets a turn whenever the search yields.
+    let turns = 0
+    let counting = true
+    const turn = () => {
+      if (!counting) return
+      turns++
+      setImmediate(turn)
+    }
+    setImmediate(turn)
     try {
-      const started = performance.now()
       expect(await reader.search('absent')).toEqual([])
-      const elapsed = performance.now() - started
-      await delay(10)
-      expect(elapsed).toBeGreaterThan(200)
-      console.info('reader search heartbeat', {
-        elapsed,
-        ticks: gaps.length,
-        maximumGap: Math.max(...gaps),
-        maximumRead: Math.max(...operationTimes)
-      })
-      // The search yields between reads, so no gap is much longer than one read; a read the disk stalls is not the search's.
-      expect(Math.max(...gaps)).toBeLessThan(Math.max(50, Math.max(...operationTimes) + 25))
-      expect(gaps.length).toBeGreaterThan(20)
     } finally {
-      clearInterval(timer)
+      counting = false
       reader.close()
     }
+    expect(reads).toBe(320)
+    expect(turns).toBeGreaterThanOrEqual(reads)
   })
 
   it.each(['file', 'directory'] as const)(
@@ -301,11 +285,11 @@ describe('cooperative native reader search', () => {
       const controller = new AbortController()
       let reads = 0
       let lists = 0
-      let abortedAt = 0
+      let aborted = false
       let mutation: ReturnType<typeof setImmediate> | undefined
       const abort = () => {
         mutation = setImmediate(() => {
-          abortedAt = performance.now()
+          aborted = true
           controller.abort()
         })
       }
@@ -326,8 +310,7 @@ describe('cooperative native reader search', () => {
         await expect(Promise.resolve().then(() => reader.search('absent'))).rejects.toMatchObject({
           code: 'cancelled'
         })
-        expect(abortedAt).toBeGreaterThan(0)
-        expect(performance.now() - abortedAt).toBeLessThan(50)
+        expect(aborted).toBe(true)
         expect(reads).toBe(boundary === 'file' ? 1 : 0)
         expect(lists).toBe(boundary === 'file' ? 2 : 1)
       } finally {

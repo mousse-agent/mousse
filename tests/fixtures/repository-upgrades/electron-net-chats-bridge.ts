@@ -1,4 +1,5 @@
 import {app,BrowserWindow} from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import {createHash,randomUUID} from 'node:crypto'
 import {readFileSync,readdirSync,writeFileSync} from 'node:fs'
 import {join} from 'node:path'
@@ -13,7 +14,7 @@ import type {ChatNetworkBinding,NetworkChatConversation} from '../../../src/shar
 import type {NetStatus} from '../../../src/shared/net/local'
 
 const config=JSON.parse(readFileSync(process.env.MOUSSE_GUI_NET_CONFIG!,'utf8')) as {home:string;endpoint:string;ownerToken:string;preload:string;evidence:string;userData:string;ownerProfile:string;memberProfile:string;ownerProfileHome:string;memberProfileHome:string;agentId:string;passphrase:string}
-app.setPath('userData',config.userData);app.disableHardwareAcceleration()
+app.setPath('userData',config.userData);runWithoutGpu({ app, BrowserWindow })
 const timer=setTimeout(()=>app.exit(2),60000);timer.unref()
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
 async function run(){

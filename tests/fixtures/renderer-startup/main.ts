@@ -1,10 +1,11 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const directory = process.env.MOUSSE_RENDERER_STARTUP_DIRECTORY!
 app.setPath('userData', join(directory, 'user-data'))
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 app.on('window-all-closed', () => {})
 setTimeout(() => app.exit(1), 15000).unref()
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms))
@@ -19,6 +20,13 @@ async function main() {
     for (let index = 0; index < 100; index++) { if (await execute<boolean>(code)) return; await delay(20) }
     throw new Error(`Startup condition timed out: ${code}; ${JSON.stringify(await execute('({calls:window.qa?.calls,errors:window.qa?.errors,text:document.body.innerText})'))}; ${rendererErrors.join('\n')}`)
   }
+  // Reads settled styles: with reduced motion every property still transitions for 0.01 ms (global.css), so wait for
+  // every running transition to end. Spinners are animations, not transitions, and are left alone.
+  const settle = () => execute(`(async () => {
+    await new Promise(done => requestAnimationFrame(done))
+    await Promise.all(document.getAnimations().filter(animation => animation instanceof CSSTransition).map(animation => animation.finished.catch(() => undefined)))
+    await new Promise(done => requestAnimationFrame(done))
+  })()`)
   try {
     await window.loadFile(join(directory, 'index.html'))
     await until("!!document.querySelector('.navigation-rail') && qa.calls.filter(row=>row.method==='profiles.status').length>=2")
@@ -45,6 +53,7 @@ async function main() {
     const acrylic = []
     for (const [theme, intensity] of [['blacksphere-plus', 20], ['blacksphere-plus', 90], ['github-dark', 55], ['light', 55]]) {
       await execute(`qa.acrylic(${JSON.stringify(theme)},${intensity})`)
+      await settle()
       acrylic.push(await execute(`(() => {
         const style = element => ({background:getComputedStyle(element).backgroundColor,image:getComputedStyle(element).backgroundImage});
         const divider = getComputedStyle(document.querySelector('.resizer')).backgroundColor;
@@ -59,6 +68,7 @@ async function main() {
       const visiblePages = `document.querySelectorAll('.settings-page:not([hidden]),.automations-page:not([hidden])').length`
       if (page === 'settings') {
         await until(`document.querySelector('.app').inert && !document.querySelector('.settings-page').hidden`)
+        await settle()
         overlays.push(await execute(`(() => {
           const workspace=document.querySelector('.app'),page=document.querySelector('.overlay-page:not([hidden])');
           return {workspaceVisibility:getComputedStyle(workspace).visibility,workspaceInert:workspace.inert,workspaceSize:{width:workspace.offsetWidth,height:workspace.offsetHeight},visiblePages:${visiblePages},headerBackground:getComputedStyle(page.querySelector('.overlay-titlebar')).backgroundColor,workspaceRetained:retainedWorkspace===document.querySelector('.startup-transcript')};
@@ -66,6 +76,7 @@ async function main() {
       } else {
         // Rail pages replace the workspace inside the shell; the chrome and navigation stay live.
         await until(`!document.querySelector('.app').inert && !document.querySelector('.${page}-page').hidden`)
+        await settle()
         railPages.push(await execute(`(() => {
           const app=document.querySelector('.app'),page=document.querySelector('.${page}-page');
           return {appVisibility:getComputedStyle(app).visibility,appInert:app.inert,insideShell:app.contains(page),workspaceDisplay:getComputedStyle(document.querySelector('.app-workspace')).display,navigationVisible:getComputedStyle(document.querySelector('.navigation-rail')).display!=='none',visiblePages:${visiblePages},workspaceRetained:retainedWorkspace===document.querySelector('.startup-transcript')};
@@ -74,6 +85,7 @@ async function main() {
     }
     await execute('qa.overlay("scheduled",false)')
     await until('!document.querySelector(".app").inert && getComputedStyle(document.querySelector(".app-workspace")).display !== "none"')
+    await settle()
     const restored = await execute('({visibility:getComputedStyle(document.querySelector(".app")).visibility,inert:document.querySelector(".app").inert,retained:retainedWorkspace===document.querySelector(".startup-transcript")})')
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ before, failed, after, hydrated, acrylic, overlays, railPages, restored, workspaceSize, rendererErrors }))
   } finally { window.destroy() }

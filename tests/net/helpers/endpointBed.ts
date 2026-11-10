@@ -281,3 +281,39 @@ export async function until(
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
 }
+
+/**
+ * Watches the host stop a device's programs, in turns of the event loop and without a clock. A forced end must
+ * start the kill and return before it finishes; a kill that held the thread would finish in the turn it started.
+ */
+export function watchKills(host: ProcessHost): {
+  calls: Array<{ startedAt: number; endedAt?: number }>
+  stop(): void
+} {
+  let turns = 0
+  let counting = true
+  const spin = (): void => {
+    if (!counting) return
+    turns++
+    setImmediate(spin)
+  }
+  setImmediate(spin)
+  const calls: Array<{ startedAt: number; endedAt?: number }> = []
+  const original = host.killScope.bind(host)
+  ;(host as { killScope: ProcessHost['killScope'] }).killScope = async (scope) => {
+    const call: { startedAt: number; endedAt?: number } = { startedAt: turns }
+    calls.push(call)
+    try {
+      return await original(scope)
+    } finally {
+      call.endedAt = turns
+    }
+  }
+  return {
+    calls,
+    stop: () => {
+      counting = false
+      ;(host as { killScope: ProcessHost['killScope'] }).killScope = original
+    }
+  }
+}

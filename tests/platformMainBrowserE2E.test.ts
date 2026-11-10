@@ -260,9 +260,8 @@ describe('main-agent existing in-app browser pipeline', () => {
       const published = main.platform.workflowDefinitions.publish({ definitionId: workflowId,
         expectedDraftSemanticHash: draft.semanticHash, expectedHeadRevisionId: null })
       const buildDir = join(root, 'bundle'); mkdirSync(buildDir, { recursive: true })
-      const script = join(buildDir, 'launch.mjs')
+      const script = resolve('tests/fixtures/agent-platform/main-browser-e2e/launch.mjs')
       const payload = join(buildDir, 'electron-main.mjs')
-      writeFileSync(script, "import {app} from 'electron';\ntry { await import('./electron-main.mjs') } catch (error) { console.error(error); app.exit(1) }\n")
       await build({ entryPoints: [resolve('tests/fixtures/agent-platform/main-browser-e2e/electron-main.ts')], outfile: payload,
         bundle: true, platform: 'node', format: 'esm', packages: 'external', logLevel: 'silent',
         banner: { js: "import {createRequire as __fixtureCreateRequire} from 'node:module'; const require = __fixtureCreateRequire(import.meta.url);" } })
@@ -274,7 +273,7 @@ describe('main-agent existing in-app browser pipeline', () => {
         userData: join(root, 'electron'), evidence }))
       const env = { ...process.env, MOUSSE_E2E_CONFIG: config }; delete env.ELECTRON_RUN_AS_NODE
       const result = await new Promise<{ code: number | null; stderr: string }>((done, reject) => {
-        child = spawn(electron as unknown as string, [script], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+        child = spawn(electron as unknown as string, [script, payload], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
         let stderr = ''
         let timedOut = false
         const timer = setTimeout(() => {

@@ -19,6 +19,7 @@ import {
   run,
   sshKeyPair,
   until,
+  watchKills,
   type Bed,
   type SshClient
 } from '../helpers/endpointBed'
@@ -667,11 +668,13 @@ describe.skipIf(!unix)('ending a connection', () => {
     const session = await b.connect()
     const { plain, detached } = await startPrograms(b, session, 'forced')
     expect(await alive(detached)).toBe(true)
-    const before = Date.now()
+    const kills = watchKills(b.host)
     session.connection.end(true)
-    // Not waited for: the call returns at once, and the programs go shortly after.
-    expect(Date.now() - before).toBeLessThan(250)
+    // Not waited for: the kill has started and the call returned before it finished; the programs go shortly after.
+    expect(kills.calls).toHaveLength(1)
+    expect(kills.calls[0]!.endedAt).toBeUndefined()
     await until(async () => !(await alive(plain)) && !(await alive(detached)), 8_000)
+    kills.stop()
   })
 
   it('stops a program of an earlier connection that is already closed, and nothing of another device', async () => {
@@ -781,21 +784,18 @@ describe.skipIf(!unix)('ending a connection', () => {
         () => undefined
       )
     await until(async () => (await readdir(pids)).length === 12)
-    let worst = 0
-    let last = Date.now()
-    const timer = setInterval(() => {
-      const now = Date.now()
-      worst = Math.max(worst, now - last)
-      last = now
-    }, 5)
+    const kills = watchKills(b.host)
     session.connection.end(true)
+    expect(kills.calls).toHaveLength(1)
+    expect(kills.calls[0]!.endedAt).toBeUndefined()
     await until(async () => {
       const list = await Promise.all(
         (await readdir(pids)).map(async (name) => Number(await readFile(join(pids, name), 'utf8')))
       )
-      return !(await Promise.all(list.map(alive))).some(Boolean)
+      return !(await Promise.all(list.map(alive))).some(Boolean) && kills.calls[0]!.endedAt !== undefined
     }, 8_000)
-    clearInterval(timer)
-    expect(worst).toBeLessThan(500)
+    kills.stop()
+    // The loop came round while the twelve were stopped: the kill never held the thread from start to end.
+    expect(kills.calls[0]!.endedAt!).toBeGreaterThan(kills.calls[0]!.startedAt)
   })
 })

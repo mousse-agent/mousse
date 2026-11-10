@@ -4,11 +4,14 @@ import { app, BrowserWindow } from 'electron'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
+import { runWithoutGpu } from './electronWithoutGpu.mjs'
 
 const config = JSON.parse(readFileSync(process.env.MOUSSE_FULL_SHELL_CONFIG, 'utf8'))
 // GUI startup can relaunch this same Electron entrypoint in CLI/daemon mode.
 // The actual app handles that mode; the UI driver must not stop its daemon.
 const isCli = process.argv.includes('--cli')
+// Also in the --cli relaunch (the daemon): it opens no window, and the GPU stays off there too.
+runWithoutGpu({ app, BrowserWindow })
 if (!isCli) { keepWindowsOffScreen(); exitWithParent() }
 const timer = isCli ? undefined : setTimeout(() => { console.error('Full application driver timed out'); app.exit(1) }, 55_000)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -52,7 +55,9 @@ async function check() {
   writeFileSync(config.evidence, JSON.stringify({ actualMain: config.mainEntry, cycles: 2, transcriptUndo: true, transcriptRedo: true, taskBytesUndo: true, taskBytesRedo: true, primaryPreserved: true }))
 }
 
-await import(pathToFileURL(config.mainEntry).href)
+// A main entry that fails to load (no build in out/, a broken bundle) exits here: left alone, Electron shows
+// its error dialog, a real window, until the test times out.
+try { await import(pathToFileURL(config.mainEntry).href) } catch (error) { console.error(error); app.exit(1) }
 // Electron delays ready until its ESM entrypoint finishes evaluating.
 if (!isCli) void check().then(() => {
   clearTimeout(timer)

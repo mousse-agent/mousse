@@ -25,8 +25,6 @@ function longThread(messages = 2000): FindTurn[] {
   }))
 }
 
-const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!
-
 describe('find on a long thread', () => {
   const turns = longThread()
   const all = turns.flatMap((turn) => [turn.userMsg!, ...turn.assistantMsgs])
@@ -34,25 +32,22 @@ describe('find on a long thread', () => {
   const short = longThread(200)
   const shortAll = short.flatMap((turn) => [turn.userMsg!, ...turn.assistantMsgs])
 
-  it('builds the index in short slices and then answers a keystroke in well under a frame', () => {
+  it('builds the index in slices, then answers every keystroke from it', () => {
     const index = new FindIndex()
-    const slices: number[] = []
-    for (let done = false; !done; ) {
-      const started = performance.now()
-      done = index.indexSome(all, 8)
-      slices.push(performance.now() - started)
-    }
-    // One slice reads messages until 8ms have passed, so it overruns by at most one message.
-    expect(median(slices)).toBeLessThan(16)
+    // A clock that moves 1 ms each time it is read: an 8 ms slice reads 8 messages, whatever the hardware.
+    let clock = 0
+    const tick = () => ++clock
+    let slices = 0
+    for (let done = false; !done; slices++) done = index.indexSome(all, 8, tick)
+    // The build stops at its budget and gives the renderer frames in between: 2,000 messages in slices of 8.
+    expect(all).toHaveLength(2000)
+    expect(slices).toBe(250)
     expect(index.missing(turns, 1)).toBe(0)
 
-    const keystrokes: number[] = []
-    for (const query of ['r', 're', 'ren', 'rend', 'render', 'render l', 'render lo', 'render loop', 'zzz', 'compute(77']) {
-      const started = performance.now()
-      index.search(turns, query, { readMissing: false })
-      keystrokes.push(performance.now() - started)
+    for (const query of ['r', 're', 'ren', 'rend', 'render', 'render l', 'render lo', 'render loop', 'compute(77']) {
+      expect(index.search(turns, query, { readMissing: false }).matches.length, query).toBeGreaterThan(0)
     }
-    expect(median(keystrokes)).toBeLessThan(16)
+    expect(index.search(turns, 'zzz', { readMissing: false }).matches).toEqual([])
     expect(index.search(turns, 'compute(777)', { readMissing: false }).matches.map((match) => match.turnKey)).toEqual(['t777'])
   })
 

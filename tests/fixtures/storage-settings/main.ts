@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
@@ -6,7 +7,7 @@ const directory = process.env.MOUSSE_STORAGE_SETTINGS_DIRECTORY!
 // Set to a folder to also save light and dark screenshots of the page before the scripted run.
 const shots = process.env.MOUSSE_STORAGE_SETTINGS_SHOTS
 app.setPath('userData', join(directory, 'user-data'))
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 

@@ -556,10 +556,9 @@ describe('hidden Electron live webview fixture', () => {
       MOUSSE_ATTACHED_PAGE_HTML: resolve(fixtureDir, 'site', 'page.html')
     }
     delete env.ELECTRON_RUN_AS_NODE
-    const electronPath = String(electron)
     const stderr: string[] = []
     const code = await new Promise<number>((resolveExit, reject) => {
-      const child = spawn(electronPath, [resolve(buildDir, 'main.mjs')], {
+      const child = spawn(electron as unknown as string, [resolve(buildDir, 'main.mjs')], {
         cwd: resolve(fixtureDir, '../../../..'),
         env,
         windowsHide: true,

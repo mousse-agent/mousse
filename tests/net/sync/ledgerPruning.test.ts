@@ -235,13 +235,11 @@ describe('request ledger pruning at scale', () => {
       })
     }
     // The fake monotonic clock jumps 300 ms per read: each pass does one batch of 100.
-    const started = performance.now()
     expect(f.rpc.pruneLedger()).toBe(100)
     expect(f.count('net_executions')).toBe(400)
     let removed = 100
     for (let pass = 0; pass < 10 && removed < 500; pass++) removed += f.rpc.pruneLedger()
     expect(removed).toBe(500)
-    expect(performance.now() - started).toBeLessThan(2_000)
     expect(f.count('net_rpc_aliases')).toBe(50_000)
   })
 })

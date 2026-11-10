@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../../electronWithoutGpu.mjs'
 import { createServer, type AddressInfo } from 'node:http'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -23,8 +24,7 @@ if (!evidencePath || !artifactRoot || !userData || !hostHtml || !pageHtml) {
 }
 
 app.setPath('userData', userData)
-app.disableHardwareAcceleration()
-app.commandLine.appendSwitch('disable-gpu')
+runWithoutGpu({ app, BrowserWindow })
 app.commandLine.appendSwitch('in-process-gpu')
 setTimeout(() => {
   process.stderr.write('Attached electron fixture timed out\n')

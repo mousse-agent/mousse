@@ -4,8 +4,11 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
+import { runWithoutGpu } from './electronWithoutGpu.mjs'
 const config = JSON.parse(readFileSync(process.env.MOUSSE_FULL_SHELL_CONFIG, 'utf8'))
 const isCli = process.argv.includes('--cli')
+// Also in the --cli relaunch (the daemon): it opens no window, and the GPU stays off there too.
+runWithoutGpu({ app, BrowserWindow })
 if (!isCli) { keepWindowsOffScreen(); exitWithParent() }
 const timer = isCli ? undefined : setTimeout(() => { console.error('Lifecycle full shell timed out'); app.exit(1) }, 140000)
 const delay = (ms) => new Promise((done) => setTimeout(done, ms))
@@ -96,7 +99,9 @@ async function check() {
   proof.primaryPreserved = true; await screenshot('04-delete-complete')
   writeFileSync(config.evidence, JSON.stringify(proof, null, 2))
 }
-await import(pathToFileURL(config.mainEntry).href)
+// A main entry that fails to load (no build in out/, a broken bundle) exits here: left alone, Electron shows
+// its error dialog, a real window, until the test times out.
+try { await import(pathToFileURL(config.mainEntry).href) } catch (error) { console.error(error); app.exit(1) }
 if (!isCli) void check().then(() => { clearTimeout(timer); app.quit() }, async (error) => {
   console.error(`Lifecycle stage: ${stage}`, error)
   const win = BrowserWindow.getAllWindows().find((item) => item.webContents.getURL().endsWith('/renderer/index.html'))

@@ -1,10 +1,11 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, session } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const directory = process.env.MOUSSE_PROFILE_FOOTER_DIRECTORY!
 app.setPath('userData', join(directory, 'user-data'))
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 app.on('window-all-closed', () => {})
 setTimeout(() => app.exit(1), 60000).unref()
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms))
@@ -12,7 +13,6 @@ const delay = (ms: number) => new Promise(done => setTimeout(done, ms))
 async function main() {
   await app.whenReady(); app.dock?.hide()
   // I deny external requests so the webfont check proves offline loading.
-  const { session } = await import('electron')
   session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_details, done) => done({ cancel: true }))
   const window = new BrowserWindow({ show: false, width: 900, height: 700, useContentSize: true, webPreferences: { offscreen: true, backgroundThrottling: false, contextIsolation: true, nodeIntegration: false, sandbox: true } })
   const execute = <T,>(code: string): Promise<T> => window.webContents.executeJavaScript(code)

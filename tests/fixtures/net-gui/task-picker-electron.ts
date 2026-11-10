@@ -1,7 +1,9 @@
 import { app,BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { readFileSync,writeFileSync } from 'node:fs'
 const config=JSON.parse(readFileSync(process.env.MOUSSE_TASK_PICKER_FIXTURE!,'utf8'))
 app.setPath('userData',config.userData)
+runWithoutGpu({ app, BrowserWindow })
 void(async()=>{
 await app.whenReady()
 const window=new BrowserWindow({show:false,webPreferences:{contextIsolation:true,nodeIntegration:false,sandbox:true}})
@@ -97,6 +99,6 @@ try{
   await wait(`!document.querySelector('select[aria-label="Saved task"]').disabled`)
   await check(`!document.body.textContent.includes('${original.taskId}')&&!document.body.textContent.includes('ORIGINAL INPUT')&&!document.body.textContent.includes('verified-commit')`)
   writeFileSync(config.evidence,JSON.stringify({ok:true,initialCalls,durableCalls,pageCalls,prepareCalls,lateDiscarded:true,originalFrozen:prepareCalls.every((call:any)=>JSON.stringify(call.params)===JSON.stringify(prepareCalls[0].params)),allPreparations,secondOriginal,terminalReset:true,rollbackCleared:true}))
-  window.close();app.exit(0)
+  window.destroy();app.exit(0)
 }catch(error){writeFileSync(config.evidence,JSON.stringify({ok:false,error:String(error),view:await run(`({devices:[...document.querySelectorAll('select[aria-label="Task device"] option')].map(option=>option.value),fields:[...document.querySelectorAll('input,textarea')].map(field=>field.value),buttons:[...document.querySelectorAll('button')].map(button=>({text:button.textContent,disabled:button.disabled}))})`)}));window.destroy();app.exit(1)}
 })().catch(error=>{writeFileSync(config.evidence,JSON.stringify({ok:false,error:String(error)}));app.exit(1)})

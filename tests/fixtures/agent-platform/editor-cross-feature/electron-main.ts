@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
+import { runWithoutGpu } from '../../electronWithoutGpu.mjs'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { GuiMmsController } from '../../../../src/main/mms/GuiMmsController'
 
@@ -9,7 +10,7 @@ interface Config {
 }
 const config = JSON.parse(readFileSync(process.env.MOUSSE_EDITOR_CROSS_CONFIG!, 'utf8')) as Config
 app.setPath('userData', config.userData)
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 let stage = 'startup'
 const timeout = setTimeout(() => {
   writeFileSync(config.evidence, JSON.stringify({ ok: false, message: `Timed out during ${stage}` }))

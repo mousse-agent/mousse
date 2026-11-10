@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { GuiMmsController } from '../../../src/main/mms/GuiMmsController'
 import { registerGuiIpc } from '../../../src/main/ipc/registerGuiIpc'
@@ -9,7 +10,7 @@ const config = JSON.parse(readFileSync(process.env.MOUSSE_ERROR_BRIDGE_CONFIG!, 
   home: string; endpoint: string; ownerToken: string; preload: string; evidence: string; userData: string
 }
 app.setPath('userData', config.userData)
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 const timer = setTimeout(() => app.exit(2), 30_000)
 timer.unref()
 

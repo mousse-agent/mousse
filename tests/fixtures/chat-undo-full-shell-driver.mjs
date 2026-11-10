@@ -4,9 +4,12 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
+import { runWithoutGpu } from './electronWithoutGpu.mjs'
 
 const config = JSON.parse(readFileSync(process.env.MOUSSE_CHAT_UNDO_CONFIG, 'utf8'))
 const cli = process.argv.includes('--cli')
+// Also in the --cli relaunch (the daemon): it opens no window, and the GPU stays off there too.
+runWithoutGpu({ app, BrowserWindow })
 if (!cli) { keepWindowsOffScreen(); exitWithParent() }
 const timer = cli ? undefined : setTimeout(() => { console.error('Chat Undo driver timed out'); app.exit(1) }, 55_000)
 async function until(read, accept, label) {
@@ -80,5 +83,7 @@ async function run() {
   }
   writeFileSync(config.evidence, JSON.stringify({ phase: config.phase, actualMessageToolbar: true, nativeContextExact: true, unchangedFiles: true, restartRedo: config.phase === 'restart' }))
 }
-await import(pathToFileURL(config.mainEntry).href)
+// A main entry that fails to load (no build in out/, a broken bundle) exits here: left alone, Electron shows
+// its error dialog, a real window, until the test times out.
+try { await import(pathToFileURL(config.mainEntry).href) } catch (error) { console.error(error); app.exit(1) }
 if (!cli) void run().then(() => { clearTimeout(timer); app.quit() }, error => { console.error(error); clearTimeout(timer); app.exit(1) })
