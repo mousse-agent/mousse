@@ -57,6 +57,10 @@ import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../run/delegation/subagentEvents'
 import type { ThreadEvent } from '../run/types'
 
+/** `threads.touched`: at most one per thread in this long, and touches due together wait this long to share an event. */
+export const TOUCH_INTERVAL_MS = 3_000
+const TOUCH_COALESCE_MS = 250
+
 
 export interface ProtocolServerOptions {
   mms: MousseMainService
@@ -425,6 +429,51 @@ export class MmsProtocolServer {
       pushThreadsUpdated(threadId)
     }
     onEmitter(services.threads, 'list-changed', (change: { id?: string } | undefined) => threadListChanged(change?.id))
+    // A save that moved only a thread's time: windows hear it as `threads.touched` ({ touches: [{ id, updatedAt }] }),
+    // at most once every TOUCH_INTERVAL_MS per thread, and every thread due at that moment in one event. A turn that
+    // starts or ends, and an approval that waits or is answered, send the thread's held time at once.
+    const touchPending = new Map<string, string>()
+    const touchSentAt = new Map<string, number>()
+    let touchTimer: ReturnType<typeof setTimeout> | undefined
+    const flushTouches = (now = Date.now(), force?: string): void => {
+      touchTimer = undefined
+      const touches: Array<{ id: string; updatedAt: string }> = []
+      let next: number | undefined
+      for (const [id, updatedAt] of touchPending) {
+        const due = (touchSentAt.get(id) ?? 0) + TOUCH_INTERVAL_MS
+        if (id === force || due <= now) {
+          touches.push({ id, updatedAt })
+          touchPending.delete(id)
+          touchSentAt.set(id, now)
+        } else if (next === undefined || due < next) next = due
+      }
+      if (touches.length) emitToSubscribers(this.ring.push('threads.touched', { touches }, touches.length === 1 ? touches[0].id : undefined))
+      if (next !== undefined) touchTimer = setTimeout(() => flushTouches(), Math.max(TOUCH_COALESCE_MS, next - now))
+    }
+    const touched = (touch: { id: string; updatedAt: string }): void => {
+      touchPending.set(touch.id, touch.updatedAt)
+      if (!touchTimer) {
+        const due = (touchSentAt.get(touch.id) ?? 0) + TOUCH_INTERVAL_MS
+        touchTimer = setTimeout(() => flushTouches(), Math.max(TOUCH_COALESCE_MS, due - Date.now()))
+      }
+    }
+    const touchNow = (threadId?: string): void => {
+      if (!threadId || !touchPending.has(threadId)) return
+      if (touchTimer) clearTimeout(touchTimer)
+      flushTouches(Date.now(), threadId)
+    }
+    onEmitter(services.threads, 'touched', touched)
+    for (const event of ['turn-started', 'turn-completed', 'turn-interrupted', 'turn-failed', 'turn-paused', 'turn-aborted'])
+      onOrch(event, (payload: { threadId?: string }) => touchNow(payload?.threadId))
+    if (services.questions) {
+      onEmitter(services.questions as unknown as { on: Function; off: Function }, 'pending', (payload: { threadId?: string }) => touchNow(payload?.threadId))
+      onEmitter(services.questions as unknown as { on: Function; off: Function }, 'cleared', (payload: { threadId?: string }) => touchNow(payload?.threadId))
+    }
+    disposers.push(() => {
+      if (touchTimer) clearTimeout(touchTimer)
+      touchTimer = undefined
+      touchPending.clear()
+    })
     onEmitter(services.events, 'threads:updated', () => threadListChanged())
     disposers.push(() => {
       if (this.threadListPushers.get(services.profileId) === pushThreadsUpdated) this.threadListPushers.delete(services.profileId)

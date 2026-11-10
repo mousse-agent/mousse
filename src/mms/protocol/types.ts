@@ -515,6 +515,7 @@ export type ProtocolEventType =
   | 'run.interrupted-on-boot'
   | 'projects.updated'
   | 'threads.updated'
+  | 'threads.touched'
   | 'pullRequests.updated'
   | 'git.selectionChanged'
   | 'thread.title-generation-failed'

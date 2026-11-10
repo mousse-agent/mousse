@@ -13,13 +13,28 @@ export type BroadcastFn = (channel: string, data: unknown) => void
  * snapshot (a push or a `threads.list` reply), so the window can drop one older than a list it already holds;
  * the bare list otherwise.
  */
-export function threadListPayload(data: unknown): unknown {
-  const value = data as { threads?: unknown; version?: unknown } | null
-  if (!value || Array.isArray(value) || !Array.isArray(value.threads)) return value
+export function threadListPayload(data: unknown, list: 'threads' | 'all' = 'threads'): unknown {
+  const value = data as { threads?: unknown; all?: unknown; version?: unknown } | null
+  if (!value || Array.isArray(value) || !Array.isArray(value[list])) return value
   const version = value.version as { epoch?: unknown; seq?: unknown } | undefined
   return version && typeof version.epoch === 'string' && typeof version.seq === 'number'
-    ? { threads: value.threads, version: { epoch: version.epoch, seq: version.seq } }
-    : value.threads
+    ? { threads: value[list], version: { epoch: version.epoch, seq: version.seq, generation: listGeneration(version.epoch) } }
+    : value[list]
+}
+
+/**
+ * Each service store's list epoch, numbered in the order this process first saw it. A store that replaced another (the
+ * service restarted, or a profile's services were made again) is first seen later, so it always has the higher number;
+ * a list a retired store sent, arriving late, carries the lower one and is dropped by the window.
+ */
+const epochGenerations = new Map<string, number>()
+export function listGeneration(epoch: string): number {
+  let generation = epochGenerations.get(epoch)
+  if (generation === undefined) {
+    generation = epochGenerations.size + 1
+    epochGenerations.set(epoch, generation)
+  }
+  return generation
 }
 
 /**
@@ -50,6 +65,12 @@ export function bridgeProtocolEvent(
     }
     case 'threads.updated': {
       broadcast('threads:updated', threadListPayload(event.data))
+      return true
+    }
+    // Saves that moved only threads' times (`threads.touched`): the window patches those rows.
+    case 'threads.touched': {
+      const touches = (event.data as { touches?: unknown } | null)?.touches
+      if (Array.isArray(touches)) broadcast('threads:touched', touches)
       return true
     }
     case 'subagents.updated': {

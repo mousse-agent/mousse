@@ -379,7 +379,13 @@ export class ThreadRouter implements ThreadRouterPort {
   ): Record<string, unknown> {
     const { services } = this.options
     const out = { ...result }
-    if (RESULT_WITH_THREADS.has(method)) out.threads = listedThreadsFor(ctx, services.threads.listAllThreads())
+    // A list version names a snapshot of one daemon's store: the other computer's means nothing to this one's windows.
+    delete out.version
+    if (RESULT_WITH_THREADS.has(method)) {
+      const { threads, version } = services.threads.listAllThreadsVersioned()
+      out.threads = listedThreadsFor(ctx, threads)
+      out.version = version
+    }
     if (RESULT_WITH_PROJECTS.has(method)) out.projects = listedProjectsFor(ctx, services.projects.listProjects())
     return out
   }

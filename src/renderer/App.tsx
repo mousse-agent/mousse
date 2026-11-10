@@ -249,9 +249,12 @@ export default function App() {
       threadRefreshInFlight = true
       const requestedAtRevision = threadListRevision
       try {
-        const threads = await window.mousse.threads.listAll()
-        // Never let an older list request overwrite a newer live event.
-        if (isCurrentProfile() && requestedAtRevision === threadListRevision) {
+        const { threads, version } = window.mousse.threads.listAllVersioned
+          ? await window.mousse.threads.listAllVersioned()
+          : { threads: await window.mousse.threads.listAll(), version: undefined }
+        // Never let an older list request overwrite a newer live event, nor a list older than the one held.
+        if (isCurrentProfile() && requestedAtRevision === threadListRevision && !isOlderThreadList(version, heldThreadList)) {
+          if (version) heldThreadList = version
           setThreads(threads)
         }
       } catch {
@@ -331,6 +334,8 @@ export default function App() {
       window.mousse.tasks.onUpdated(applyIfCurrent(setTasks)),
       window.mousse.projects.onUpdated(applyIfCurrent(setProjects)),
       window.mousse.threads.onUpdated(applyThreadList),
+      // A save moved only threads' times: those rows move ("Needs me", recent threads, row ages) without a whole list.
+      window.mousse.threads.onTouched?.(applyIfCurrent(useAppStore.getState().applyThreadTouches)) ?? (() => undefined),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
       // and other main-driven selection without showing the previous transcript.
       window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id))),

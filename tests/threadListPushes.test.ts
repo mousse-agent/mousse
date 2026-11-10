@@ -44,7 +44,11 @@ describe('windows hear of list changes once, as pushes', () => {
     await other?.close()
     await server?.stop()
     await mms?.stop()
-    rmSync(home, { recursive: true, force: true })
+    try {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    } catch {
+      // Windows can hold a thread database open a moment after stop; the temporary folder is left behind.
+    }
     delete process.env.MOUSSE_HOME
   })
 
@@ -131,6 +135,29 @@ describe('windows hear of list changes once, as pushes', () => {
     const store = await listsAfter(seen, async () => { mms.threads.setThreadPinned(quiet.id, true) })
     expect(store).toHaveLength(1)
     expect(store[0].find((entry) => entry.id === quiet.id)?.pinnedAt).toBeTruthy()
+  })
+
+  it('sends a save that moved only a thread time as a small, throttled push, and at once when a turn ends', async () => {
+    const thread = mms.threads.createThread('Busy', undefined, undefined, { started: true })
+    const message = (id: string) => ({ id, role: 'assistant' as const, content: id, timestamp: new Date().toISOString() })
+    mms.threads.saveThreadData(thread.id, { messages: [message('m1')], agents: [], tasks: [] })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const from = seen.length
+    const lists = () => seen.slice(from).filter((event) => event.type === 'threads.updated').length
+    const touches = () => seen.slice(from).filter((event) => event.type === 'threads.touched').map((event) => (event.data as { touches: Array<{ id: string; updatedAt: string }> }).touches)
+    mms.threads.saveThreadData(thread.id, { messages: [message('m1'), message('m2')], agents: [], tasks: [] })
+    await vi.waitFor(() => expect(touches().length).toBe(1), { timeout: 2000 })
+    expect(touches()[0]).toEqual([{ id: thread.id, updatedAt: mms.threads.getThread(thread.id)!.updatedAt }])
+    // More saves within the interval wait: no second push yet, and never the whole list.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    mms.threads.saveThreadData(thread.id, { messages: [message('m1'), message('m2'), message('m3')], agents: [], tasks: [] })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(touches().length).toBe(1)
+    // The turn ends: its held time goes out at once.
+    mms.orchestrator.emit('turn-completed', { threadId: thread.id })
+    await vi.waitFor(() => expect(touches().length).toBe(2), { timeout: 1000 })
+    expect(touches()[1][0].updatedAt).toBe(mms.threads.getThread(thread.id)!.updatedAt)
+    expect(lists()).toBe(0)
   })
 
   it('tells windows when a chat changes, once for several changes together', async () => {

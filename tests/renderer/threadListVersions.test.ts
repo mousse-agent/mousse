@@ -31,7 +31,7 @@ vi.mock('../../src/renderer/commands/useCommandShortcuts', () => ({ useCommandSh
 
 
 /** Every bridge call stays pending, except the thread list subscription, which the test drives. */
-let pushList: ((threads: unknown[], version?: { epoch: string; seq: number }) => void) | undefined
+let pushList: ((threads: unknown[], version?: { epoch: string; seq: number; generation?: number }) => void) | undefined
 function bridge(): unknown {
   const pending: Record<string, unknown> & (() => void) = Object.assign(() => {}, {})
   pending.then = () => pending
@@ -84,6 +84,29 @@ describe('the thread list a window holds', () => {
     // A newer one applies.
     act(() => pushList!([row('a', 'Renamed'), row('b', 'New')], { epoch: 'service-1', seq: 9 }))
     expect(names()).toEqual(['Renamed', 'New'])
+  })
+
+  // Review repro: A40, then the restarted service's B1, then a late A39 from the retired one.
+  it("drops a late list of a retired service once a newer service's list was taken", async () => {
+    act(() => root.render(createElement(App)))
+    act(() => pushList!([row('a', 'Old service, last list')], { epoch: 'A', seq: 40, generation: 1 }))
+    act(() => pushList!([row('a', 'New service')], { epoch: 'B', seq: 1, generation: 2 }))
+    expect(names()).toEqual(['New service'])
+    act(() => pushList!([row('a', 'Old service, late list')], { epoch: 'A', seq: 39, generation: 1 }))
+    expect(names()).toEqual(['New service'])
+    // The new service's own next list applies.
+    act(() => pushList!([row('a', 'New service, later')], { epoch: 'B', seq: 2, generation: 2 }))
+    expect(names()).toEqual(['New service, later'])
+  })
+
+  it('orders a routed call reply like a push: an older one is dropped, a newer one applies', async () => {
+    act(() => root.render(createElement(App)))
+    // The push for a local rename arrives first; the reply to a routed call, read before it, lands after.
+    act(() => pushList!([row('a', 'Local rename'), row('n:b', 'Remote')], { epoch: 'A', seq: 7, generation: 1 }))
+    act(() => pushList!([row('a', 'Before the rename'), row('n:b', 'Remote')], { epoch: 'A', seq: 5, generation: 1 }))
+    expect(names()).toEqual(['Local rename', 'Remote'])
+    act(() => pushList!([row('a', 'Local rename'), row('n:b', 'Remote renamed')], { epoch: 'A', seq: 9, generation: 1 }))
+    expect(names()).toEqual(['Local rename', 'Remote renamed'])
   })
 
   it("takes a restarted service's lists, and a list with no version, as they come", async () => {

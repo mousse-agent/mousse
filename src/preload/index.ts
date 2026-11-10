@@ -857,6 +857,11 @@ const api = {
     initialize: (): Promise<void> => ipcRenderer.invoke('threads:initialize'),
     list: (): Promise<Thread[]> => ipcRenderer.invoke('threads:list'),
     listAll: (): Promise<Thread[]> => ipcRenderer.invoke('threads:listAll'),
+    /** `listAll` with the snapshot's version (`ThreadListVersion`) when the service gave one. */
+    listAllVersioned: async (): Promise<{ threads: Thread[]; version?: ThreadListVersion }> => {
+      const data = await ipcRenderer.invoke('threads:listAllVersioned') as Thread[] | { threads: Thread[]; version: ThreadListVersion }
+      return Array.isArray(data) ? { threads: data } : data
+    },
     active: (): Promise<string | null> => ipcRenderer.invoke('threads:active'),
     getActivity: (): Promise<ThreadActivitySnapshot> => ipcRenderer.invoke('threads:activity'),
     /**
@@ -923,6 +928,12 @@ const api = {
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
     search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
       ipcRenderer.invoke('threads:search', query, limit),
+    /** Saves that moved only these threads' `updatedAt` (`threads.touched`), throttled by the service. */
+    onTouched: (cb: (touches: Array<{ id: string; updatedAt: string }>) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, touches: Array<{ id: string; updatedAt: string }>) => cb(touches)
+      ipcRenderer.on('threads:touched', handler)
+      return () => ipcRenderer.removeListener('threads:touched', handler)
+    },
     /** `version` names the service's snapshot when it has one (`ThreadListVersion`): an older one is dropped. */
     onUpdated: (cb: (threads: Thread[], version?: ThreadListVersion) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, data: Thread[] | { threads: Thread[]; version: ThreadListVersion }) =>

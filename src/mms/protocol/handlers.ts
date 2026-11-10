@@ -2075,8 +2075,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(namedMode && picked.has('permissionMode') ? { permissionMode: namedMode as PermissionMode } : {})
       }
       if (Object.keys(named).length) rememberPick(ctx, thread.id, named)
-      const threads = listedThreadsFor(ctx, ctx.mms.threads.listAllThreads())
-      return { thread, threads }
+      const { threads: inventory, version } = ctx.mms.threads.listAllThreadsVersioned()
+      const threads = listedThreadsFor(ctx, inventory)
+      return { thread, threads, version }
     }
     case 'threads.delete': {
       const p = isObject(params) ? params : {}
@@ -2090,8 +2091,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           operationId: asOptionalString(p.operationId, 256),
           expectedGeneration: lifecycleExpectedGeneration(p)
         })
-        const threads = ctx.mms.threads.listAllThreads()
-        return { threads: listedThreadsFor(ctx, threads), lifecycle: lifecycleForReply(lifecycle) }
+        const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
+        return { threads: listedThreadsFor(ctx, threads), version, lifecycle: lifecycleForReply(lifecycle) }
       } finally {
         // Also after a refusal: a thread put back in Archived shows there again.
         ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
@@ -2103,9 +2104,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const name = asString(p.name, 'name', 512)
       // The person's name: Mousse never renames the thread on its own again.
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name, titleSource: 'user' })
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.clearContext': {
       // `/clear`: its own run, like an Undo, so no turn starts while the context is replaced.
@@ -2148,9 +2149,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const pinned = asOptionalBoolean(p.pinned, 'pinned') === true
       const thread = ctx.mms.threads.setThreadPinned(threadId, pinned)
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.settle': {
       const p = isObject(params) ? params : {}
@@ -2165,9 +2166,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
         })
       }
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.reorder': {
       const p = isObject(params) ? params : {}
@@ -2180,11 +2181,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const reorderedHere = !(merged && (isQualifiedId(projectId) || !threadIds.length))
       const threads = reorderedHere ? ctx.mms.threads.reorderThreads(projectId, threadIds) : []
       merged?.reorder(given)
-      const all = ctx.mms.threads.listAllThreads()
+      const { threads: all, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads: all })
       return {
         threads: listedThreadsFor(ctx, threads, all, { projectId: projectId ?? null }),
-        all: listedThreadsFor(ctx, all)
+        all: listedThreadsFor(ctx, all),
+        version
       }
     }
     case 'threads.search': {
@@ -2361,9 +2363,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const now = ctx.mms.threads.getThread(threadId)
       const renamedMeanwhile = Boolean(before && now && (now.name !== before.name || (now.titleSource === 'user' && before.titleSource !== 'user')))
       const thread = renamedMeanwhile ? now! : ctx.mms.threads.updateThreadMeta(threadId, { name: title, titleSource: 'final' })
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.setModel': {
       const p = isObject(params) ? params : {}
@@ -2383,9 +2385,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         rememberPick(ctx, threadId, { model: next })
       }
       const thread = ctx.mms.threads.getThread(threadId)
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, modelOverride: next, threads: listedThreadsFor(ctx, threads) }
+      return { thread, modelOverride: next, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.setWorktreeEnabled': {
       const p = isObject(params) ? params : {}
@@ -2401,9 +2403,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
       if (pickedCheckout) rememberPick(ctx, threadId, { worktreeEnabled: enabled })
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.setPermissionMode': {
       const p = isObject(params) ? params : {}
@@ -2417,9 +2419,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const caller = ctx.connection?.bridgeCaller
       const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined)
       rememberPick(ctx, threadId, { permissionMode: mode })
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.setExpiry': {
       // When the thread deletes itself for good (`Thread.expiresAt`), or null to keep it. A subagent follows its root.
@@ -2439,9 +2441,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         expiryStopsRun: expiresAt !== null && asOptionalBoolean(p.stopsRun, 'stopsRun') === true ? true : undefined
       }, { touch: false })
       ctx.mms.threadExpiry?.reschedule()
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread: updated, threads: listedThreadsFor(ctx, threads) }
+      return { thread: updated, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'threads.approvalRules': {
       // The thread's "Always for this thread" rules (SPEC §17.8). Not exposed on the Bridge.
@@ -4918,9 +4920,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       // The same pull request keeps its watch; another one starts unwatched (a watch belongs to the pull request it began on).
       const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true)
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'pullRequests.list': {
       const p = isObject(params) ? params : {}
@@ -4964,7 +4966,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true,
           allowWorktreeConfig: asOptionalBoolean(p.allowWorktreeConfig, 'allowWorktreeConfig') === true
         }, gitUserAction(ctx, 'Start thread from pull request')))
-        return { ...started, threads: listedThreadsFor(ctx, ctx.mms.threads.listAllThreads()) }
+        const { threads: inventory, version } = ctx.mms.threads.listAllThreadsVersioned()
+        return { ...started, threads: listedThreadsFor(ctx, inventory), version }
       } finally {
         // Also after a failure: a thread made and removed, or kept in the trash, must not linger in a client's list.
         ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
@@ -4987,9 +4990,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { pullRequest: undefined })
       // A watch cannot outlive the link it watches through; it ends with its line.
       ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: listedThreadsFor(ctx, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
     case 'pullRequests.watch': {
       // Turns a thread's watch of its pull request off, or on to notify (a line in the thread). A watch never wakes the agent.
@@ -5014,9 +5017,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (error instanceof PullRequestWatchError) throw new DomainRpcError(error.code, error.message, { threadId })
         throw error
       }
-      const threads = ctx.mms.threads.listAllThreads()
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { status, thread: ctx.mms.threads.getThread(threadId), threads: listedThreadsFor(ctx, threads) }
+      return { status, thread: ctx.mms.threads.getThread(threadId), threads: listedThreadsFor(ctx, threads), version }
     }
     case 'pullRequests.watchStatus': {
       const p = isObject(params) ? params : {}

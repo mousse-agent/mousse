@@ -275,6 +275,8 @@ interface AppState {
   setThreads: (threads: Thread[]) => void
   /** Merge one thread meta into the sidebar list (model/rename/pin without full rescan). */
   upsertThread: (thread: Thread) => void
+  /** Moves listed threads' `updatedAt` forward (`threads.touched`); an older or unknown one changes nothing. */
+  applyThreadTouches: (touches: ReadonlyArray<{ id: string; updatedAt: string }>) => void
   setThreadActivity: (activity: ThreadActivitySnapshot) => void
   setTurnState: (state: TurnState) => void
   setTurnSnapshot: (snap: TurnStateSnapshot) => void
@@ -761,6 +763,18 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       const threads = s.threads.slice()
       threads[idx] = thread
       return { threads }
+    }),
+  applyThreadTouches: (touches) =>
+    set((s) => {
+      let threads: Thread[] | undefined
+      for (const touch of touches) {
+        const index = s.threads.findIndex((entry) => entry.id === touch.id)
+        const current = index === -1 ? undefined : (threads ?? s.threads)[index]
+        if (!current || !(Date.parse(touch.updatedAt) > Date.parse(current.updatedAt))) continue
+        threads ??= s.threads.slice()
+        threads[index] = { ...current, updatedAt: touch.updatedAt }
+      }
+      return threads ? { threads } : s
     }),
   setThreadActivity: (threadActivity) => set({ threadActivity }),
   setMainView: (mainView) => set({ mainView, sidebarMode: 'projects' }),

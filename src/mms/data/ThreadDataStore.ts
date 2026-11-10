@@ -1444,6 +1444,7 @@ export class ThreadDataStore extends EventEmitter {
       if (options.throttle && !starting && Date.now() - lastWrite < META_TOUCH_INTERVAL_MS) {
         this.pendingMetaTouch.set(threadDir, now)
         this.patchListCache(meta)
+        this.emitTouched(meta)
         return
       }
       this.writeJsonAtomic(metaPath, meta)
@@ -1452,11 +1453,22 @@ export class ThreadDataStore extends EventEmitter {
       if (!meta.projectId) this.updateStandaloneIndexEntry(meta)
       // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
       this.patchListCache(meta)
-      // A thread's first message lists it; a later save changes nothing a list shows but its time.
+      // A thread's first message lists it; a later save changes only its time, which windows hear in a small push.
       if (starting) this.emit('list-changed', { id: meta.id })
+      else this.emitTouched(meta)
     } catch {
       // Corrupt meta: do not overwrite with a stale reconstructed fallback.
     }
+  }
+
+  /**
+   * A save moved a thread's `updatedAt` and nothing else a list shows (`touched`). The protocol server sends these
+   * as a small, throttled `threads.touched`, so "Needs me", the recent-threads order and row ages follow saves without
+   * the whole list. A personal bot's threads are never listed, so their times are not sent either.
+   */
+  private emitTouched(meta: ThreadMeta): void {
+    if (meta.botOwned) return
+    this.emit('touched', { id: meta.id, updatedAt: meta.updatedAt })
   }
 
   private readonly metaTouchedAt = new Map<string, number>()
