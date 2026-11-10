@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import { tmpdir } from 'os'
@@ -308,6 +308,84 @@ describe('persisted sidebar ordering', () => {
         a.createThread('Second', project.id)
         expect(scans).not.toHaveBeenCalled()
         expect(a.listThreads(project.id).find((entry) => entry.id === thread.id)?.name).toBe('Renamed')
+      })
+    })
+
+    // Review repro 1: the signature was taken after the scan, so a thread added during it was certified as absent.
+    it('reads the group again when the other store adds a thread while this one is reading it', () => {
+      withTemporaryMousseHome((root) => {
+        const { a, b, project } = twoStores(root)
+        a.createThread('First', project.id)
+        const store = a as unknown as { scanProjectThreads: (path: string) => unknown; invalidateListCache: () => void }
+        store.invalidateListCache()
+        const scan = store.scanProjectThreads.bind(a)
+        let added: { id: string; order: number } | undefined
+        vi.spyOn(store, 'scanProjectThreads').mockImplementationOnce((path: string) => {
+          const read = scan(path)
+          added = b.createThread('Added mid-read', project.id)
+          return read
+        })
+        a.listThreads(project.id)
+        const next = a.createThread('Next', project.id)
+        expect(a.listThreads(project.id).some((entry) => entry.id === added!.id)).toBe(true)
+        expect(next.order).toBeLessThan(added!.order)
+      })
+    })
+
+    // Review repro 2: only the group a create touched was checked, so another project's new thread stayed missing.
+    it("lists another project's new thread in the full list after a create in a different project", () => {
+      withTemporaryMousseHome((root) => {
+        const projectsA = new ProjectManager()
+        const a = new ThreadDataStore(projectsA)
+        projectsA.setThreadStore(a)
+        const project = projectsA.openProject(join(root, 'proj'))
+        const other = projectsA.openProject(join(root, 'other'))
+        const projectsB = new ProjectManager()
+        const b = new ThreadDataStore(projectsB)
+        projectsB.setThreadStore(b)
+        a.createThread('In P', project.id)
+        a.createThread('In Q', other.id)
+        a.listAllThreads()
+        const fromB = b.createThread('B in Q', other.id)
+        a.createThread('A again in P', project.id)
+        expect(a.listAllThreads().some((entry) => entry.id === fromB.id)).toBe(true)
+        // A fallback read with nothing created in between finds it too.
+        const looseFromB = b.createThread('B loose')
+        expect(a.listAllThreads().some((entry) => entry.id === looseFromB.id)).toBe(true)
+      })
+    })
+
+    // Review repro 3: an unusable revision path read as "no revision", and a failed revision write was invisible to others.
+    it('never reuses a list over a revision it cannot read, and a write that cannot publish one changes nothing', () => {
+      withTemporaryMousseHome((root) => {
+        const { a, b, project } = twoStores(root)
+        const thread = a.createThread('Before', project.id)
+        a.listAllThreads()
+        // The revision's path becomes a folder: it can be neither read nor written.
+        const revision = (a as unknown as { listRevisionPath: (id: string) => string }).listRevisionPath(project.id)
+        rmSync(revision, { force: true })
+        mkdirSync(revision)
+        expect(() => b.updateThreadMeta(thread.id, { name: 'After' })).toThrow(/thread list revision/)
+        expect(JSON.parse(readFileSync(join(a.getThreadDir(thread.id), 'meta.json'), 'utf8')).name).toBe('Before')
+        // A rename written without going through a store (a writer that could not publish) shows: the list is read again.
+        const metaPath = join(a.getThreadDir(thread.id), 'meta.json')
+        writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(readFileSync(metaPath, 'utf8')), name: 'Written anyway' }))
+        expect(a.listThreads(project.id).find((entry) => entry.id === thread.id)?.name).toBe('Written anyway')
+      })
+    })
+
+    it('does not reuse a list while another writer left the revision pending', () => {
+      withTemporaryMousseHome((root) => {
+        const { a, project } = twoStores(root)
+        const thread = a.createThread('Before', project.id)
+        a.listAllThreads()
+        const revision = (a as unknown as { listRevisionPath: (id: string) => string }).listRevisionPath(project.id)
+        // Another process marked it pending and wrote the metadata, then stopped before marking it done.
+        writeFileSync(revision, 'pending:' + randomUUID())
+        const metaPath = join(a.getThreadDir(thread.id), 'meta.json')
+        writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(readFileSync(metaPath, 'utf8')), name: 'Half-finished writer' }))
+        a.createThread('Next', project.id)
+        expect(a.listThreads(project.id).find((entry) => entry.id === thread.id)?.name).toBe('Half-finished writer')
       })
     })
   })

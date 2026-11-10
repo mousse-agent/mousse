@@ -625,6 +625,7 @@ export class ThreadDataStore extends EventEmitter {
 
   private invalidateListCache(): void {
     this.groupSignatures.clear()
+    this.groupFolders.clear()
     this.dirCache.clear()
     this.listCache = null
     this.listCacheProjectsKey = null
@@ -651,8 +652,41 @@ export class ThreadDataStore extends EventEmitter {
       const cached = this.projectListCache.get(thread.projectId)
       if (cached) this.projectListCache.set(thread.projectId, withThread(cached))
     }
-    // This create's own writes moved the group's files; what is on disk is again what the list holds.
-    this.recordGroupSignature(thread.projectId)
+    // The standalone index was kept in step by the write itself (`writeJsonAtomic`). A project's folder changed with
+    // the new thread's directory, so its list is certified again only when nothing else changed meanwhile.
+    if (thread.projectId) this.certifyAfterOwnCreate(thread.projectId, basename(this.storageLayout.repositoryThreadDir(thread.projectId, thread.id)))
+  }
+
+  /**
+   * After this store made a thread in a project, its cached list is trusted again only if the project's revision is
+   * still the one this store wrote last and the folder holds exactly the thread directories it held when the list was
+   * read, plus the new one. Anything another process did meanwhile fails one of the two, and the list is read again.
+   */
+  private certifyAfterOwnCreate(projectId: string, createdDir: string): void {
+    const known = this.groupFolders.get(projectId)
+    const wrote = this.lastRevisionWritten.get(projectId)
+    let revision: string | undefined
+    try { revision = readFileSync(this.listRevisionPath(projectId), 'utf8') } catch { revision = undefined }
+    const now = this.folderEntries(projectId)
+    const expected = known ? new Set([...known, createdDir]) : undefined
+    const same = Boolean(expected && now && now.size === expected.size && [...now].every((name) => expected.has(name)))
+    const signature = same && wrote !== undefined && revision === wrote ? this.groupSignature(projectId) : undefined
+    if (signature !== undefined && this.projectListCache.has(projectId)) {
+      this.groupSignatures.set(projectId, signature)
+      this.groupFolders.set(projectId, now!)
+    } else {
+      this.groupSignatures.delete(projectId)
+      this.groupFolders.delete(projectId)
+    }
+  }
+
+  /** The thread directories in a project's folder; empty when it has none yet, undefined when it cannot be read. */
+  private folderEntries(projectId: string): Set<string> | undefined {
+    try {
+      return new Set(readdirSync(this.storageLayout.repositoryRoot(projectId), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name))
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? new Set() : undefined
+    }
   }
 
   /**
@@ -661,8 +695,17 @@ export class ThreadDataStore extends EventEmitter {
    * every metadata write of a thread there replaces, in this process or another. Two reads per create; a stat
    * of every thread's `meta.json` cost about 0.6 ms each on Windows. A hand edit of one `meta.json` that
    * changes neither shows when the list is next read from disk.
+   *
+   * A revision is written `pending:<id>` before the metadata write and `done:<id>` after it. A revision that is
+   * pending (a writer that has not finished, or could not finish) or cannot be read gives no signature, so no
+   * process reuses that project's list until a write finishes cleanly; a write that cannot mark its revision
+   * pending fails before it changes anything (`publishListRevision`).
    */
   private readonly groupSignatures = new Map<string, string>()
+  /** A project's thread directories when its cached list was certified, for `certifyAfterOwnCreate`. */
+  private readonly groupFolders = new Map<string, Set<string>>()
+  /** The revision this store last wrote for a project (`done:<id>`). */
+  private readonly lastRevisionWritten = new Map<string, string>()
 
   private listRevisionPath(projectId: string): string {
     return join(this.homeDir, 'thread-list-revisions', `${basename(this.storageLayout.repositoryRoot(projectId))}.rev`)
@@ -680,44 +723,84 @@ export class ThreadDataStore extends EventEmitter {
     let revision = '-'
     try {
       revision = readFileSync(this.listRevisionPath(projectId), 'utf8')
-    } catch {
-      // No metadata written there since the revisions began: the folder alone tells.
+    } catch (error) {
+      // No metadata written there since the revisions began: the folder alone tells. Any other failure: unknown.
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') return undefined
     }
+    if (revision !== '-' && !revision.startsWith('done:')) return undefined
     return `${folder}|${revision}`
   }
 
-  /** Replaces a project's list revision after a thread's metadata there was written. */
-  private bumpListRevision(projectId: string): void {
+  /**
+   * Replaces a project's list revision with `<phase>:<id>`. Throws when it cannot, after a few tries for a reader
+   * holding the file open (a Windows sharing violation).
+   */
+  private publishListRevision(projectId: string, phase: 'pending' | 'done'): void {
     const path = this.listRevisionPath(projectId)
-    try {
-      mkdirSync(join(this.homeDir, 'thread-list-revisions'), { recursive: true })
-      writeFileSync(path, uuidv4())
-    } catch {
-      // Without it the next create reads the project from disk: slower, never stale.
-      this.groupSignatures.delete(projectId)
+    let lastError: unknown
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        mkdirSync(join(this.homeDir, 'thread-list-revisions'), { recursive: true })
+        const content = `${phase}:${uuidv4()}`
+        writeFileSync(path, content)
+        this.lastRevisionWritten.set(projectId, content)
+        return
+      } catch (error) {
+        lastError = error
+        const code = (error as NodeJS.ErrnoException)?.code
+        if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'EACCES') break
+        const until = Date.now() + 20 * (attempt + 1)
+        while (Date.now() < until) { /* a short, bounded wait for the reader to let go */ }
+      }
     }
-  }
-
-  private recordGroupSignature(projectId?: string): void {
-    const cached = projectId ? this.projectListCache.has(projectId) : this.standaloneListCache !== null
-    const signature = cached ? this.groupSignature(projectId) : undefined
-    if (signature !== undefined) this.groupSignatures.set(projectId ?? '', signature)
-    else this.groupSignatures.delete(projectId ?? '')
+    throw new Error(`The thread list revision ${path} could not be written: ${lastError instanceof Error ? lastError.message : String(lastError)}`)
   }
 
   private dropGroupCache(projectId?: string): void {
     this.listCache = null
     this.groupSignatures.delete(projectId ?? '')
+    if (projectId) this.groupFolders.delete(projectId)
     if (projectId) this.projectListCache.delete(projectId)
     else this.standaloneListCache = null
   }
 
   /** Reads a cached group from disk again when its files changed since it was read (see `groupSignatures`). */
   private refreshGroupIfChanged(projectId?: string): void {
-    const recorded = this.groupSignatures.get(projectId ?? '')
+    if (this.groupStale(projectId)) this.dropGroupCache(projectId)
+  }
+
+  /** A cached group whose files changed since it was read, or whose list was never certified by a signature. */
+  private groupStale(projectId?: string): boolean {
     const cached = projectId ? this.projectListCache.has(projectId) : this.standaloneListCache !== null
-    if (!cached) return
-    if (recorded === undefined || recorded !== this.groupSignature(projectId)) this.dropGroupCache(projectId)
+    if (!cached) return false
+    const recorded = this.groupSignatures.get(projectId ?? '')
+    return recorded === undefined || recorded !== this.groupSignature(projectId)
+  }
+
+  /**
+   * Reads a group from disk with a signature that held for the whole read: taken before and after, and read again
+   * when something changed it meanwhile (another process adding a thread mid-scan). After three tries the list is
+   * kept without a signature, so it is read again next time.
+   */
+  private readGroup(projectId: string | undefined, read: () => Thread[]): Thread[] {
+    let threads: Thread[] = []
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const before = this.groupSignature(projectId)
+      const entries = projectId ? this.folderEntries(projectId) : undefined
+      threads = read()
+      const after = this.groupSignature(projectId)
+      if (before !== undefined && before === after) {
+        this.groupSignatures.set(projectId ?? '', before)
+        if (projectId && entries) this.groupFolders.set(projectId, entries)
+        else if (projectId) this.groupFolders.delete(projectId)
+        return threads
+      }
+      this.groupSignatures.delete(projectId ?? '')
+      if (projectId) this.groupFolders.delete(projectId)
+      // Without a trusted signature at all (an untrusted file system, a pending revision) another read cannot help.
+      if (before === undefined || after === undefined) return threads
+    }
+    return threads
   }
 
   /** Replace one thread in the warm cache (avoids full rescan after meta updates). */
@@ -1014,20 +1097,20 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   listThreads(projectId?: string): Thread[] {
+    // A cached group is reused only while its files are as they were when it was read.
+    this.refreshGroupIfChanged(projectId)
     if (projectId) {
       const cached = this.projectListCache.get(projectId)
       if (cached) return cached
       const project = this.projectManager.getProject(projectId)
       if (!project) return []
-      const threads = this.scanProjectThreads(project.path)
+      const threads = this.readGroup(projectId, () => this.scanProjectThreads(project.path))
       this.projectListCache.set(projectId, threads)
-      this.recordGroupSignature(projectId)
       return threads
     }
     if (this.standaloneListCache) return this.standaloneListCache
-    const standalone = this.readStandaloneIndex()
+    const standalone = this.readGroup(undefined, () => this.readStandaloneIndex())
     this.standaloneListCache = standalone
-    this.recordGroupSignature()
     return standalone
   }
 
@@ -1044,8 +1127,11 @@ export class ThreadDataStore extends EventEmitter {
   listAllThreads(): Thread[] {
     this.listSeq += 1
     const projectsKey = this.projectsCacheKey()
+    // Every group is checked, not only one a create touched: another process may have changed any of them.
     if (this.listCache && this.listCacheProjectsKey === projectsKey) {
-      return this.listCache
+      const stale = [undefined, ...this.projectManager.listProjects().map((project) => project.id)].filter((id) => this.groupStale(id))
+      if (!stale.length) return this.listCache
+      for (const id of stale) this.dropGroupCache(id)
     }
     // Project set/path changed — drop per-project caches so we do not reuse
     // threads scanned from a previous project path for the same id.
@@ -1884,7 +1970,7 @@ export class ThreadDataStore extends EventEmitter {
     const threads = this.scanThreadDirectory(dataDir, projectPath)
     return this.ensureThreadOrders(threads, (ordered) => {
       for (const thread of ordered) {
-        this.writeJsonAtomic(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), thread)
+        this.writeJsonAtomic(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), thread, { repair: true })
       }
     })
   }
@@ -1942,7 +2028,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /** Same-directory durable replacement with file and parent-directory fsync. */
-  private writeJsonAtomic(filePath: string, value: unknown): void {
+  private writeJsonAtomic(filePath: string, value: unknown, options: { repair?: boolean } = {}): void {
     // A thread's meta.json or the standalone index: a write to a group's list, which moves its signature. When
     // the cached list matched the disk before, it still does (every writer here patches or clears the cache).
     const meta = basename(filePath) === 'meta.json' && value && typeof value === 'object' && typeof (value as Thread).id === 'string'
@@ -1956,8 +2042,28 @@ export class ThreadDataStore extends EventEmitter {
     const key = group.projectId ?? ''
     const recorded = this.groupSignatures.get(key)
     const inSync = recorded !== undefined && recorded === this.groupSignature(group.projectId)
+    if (group.projectId) {
+      // Marked pending first: a process that reads the project meanwhile, or after a write that could not finish its
+      // revision, does not reuse its list. A write that cannot even mark it fails here, before anything changed. A
+      // repair made while reading the list (an order or start time filled in) goes ahead without it; that read is not
+      // reused either.
+      try {
+        this.publishListRevision(group.projectId, 'pending')
+      } catch (error) {
+        this.dropGroupCache(group.projectId)
+        if (!options.repair) throw error
+      }
+    }
     atomicWriteJsonSync(filePath, value)
-    if (group.projectId) this.bumpListRevision(group.projectId)
+    if (group.projectId) {
+      try {
+        this.publishListRevision(group.projectId, 'done')
+      } catch {
+        // The revision stays pending: no process reuses this project's list until a later write finishes.
+        this.dropGroupCache(group.projectId)
+        return
+      }
+    }
     if (inSync) {
       const signature = this.groupSignature(group.projectId)
       if (signature !== undefined) this.groupSignatures.set(key, signature)
