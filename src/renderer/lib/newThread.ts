@@ -1,6 +1,9 @@
 import type { NodeId } from '../../shared/net'
 import { isThreadStarted } from '../../shared/threadTitle'
-import { isTurnActivePhase, type Project, type TurnPhase } from '../../shared/types'
+import type { PermissionMode } from '../../shared/permissionMode'
+import type { ModelOverride } from '../../shared/providerInstances'
+import { isTurnActivePhase, type NewThreadChoice, type Project, type TurnPhase } from '../../shared/types'
+import { useAppStore } from '../stores/appStore'
 
 /**
  * Where a new chat will run: the project it starts in and whether that is a fresh worktree.
@@ -27,6 +30,18 @@ export interface ComposerWorkspace {
    * branch (`threads.create`'s `baseBranch`). Absent: the folder's HEAD, as a daemon without the field does anyway.
    */
   baseBranch?: string
+  /** The person chose the checkout (worktree or the project's folder), so a send remembers it for the project. */
+  worktreePicked?: true
+  /** A model picked for the new chat, applied when a send makes its thread (and remembered for the project). */
+  model?: ModelOverride
+  /** A permission mode picked for the new chat, applied when a send makes its thread (and remembered for the project). */
+  permissionMode?: PermissionMode
+}
+
+/** The draft without the picks made for its chat (after a send applied them, or when its project or computer changes). */
+export function withoutPicks(workspace: ComposerWorkspace): ComposerWorkspace {
+  const { worktreePicked: _checkout, model: _model, permissionMode: _mode, ...rest } = workspace
+  return rest
 }
 
 /**
@@ -42,18 +57,34 @@ export function isNewEmptyThread(
   return !activeThreadId || Boolean(thread && !isThreadStarted(thread) && messageCount === 0)
 }
 
+/** The projects a new thread's remembered choices are read from. */
+export type ProjectChoices = readonly Pick<Project, 'id' | 'newThread'>[]
+
+/** What a new thread in `projectId` starts with, as last picked in one of the project's threads (`Project.newThread`). */
+export function rememberedChoiceOf(projects: ProjectChoices, projectId: string | undefined): NewThreadChoice | undefined {
+  return projectId ? projects.find((project) => project.id === projectId)?.newThread : undefined
+}
+
+/**
+ * Whether a new thread in `projectId` starts in a new worktree: the project's remembered choice, else the global default
+ * for new checkouts (`runs.newThreadWorktree`; yes until settings are read).
+ */
+export function newThreadWorktree(projects: ProjectChoices, projectId: string | undefined, fallback = useAppStore.getState().newThreadWorktree): boolean {
+  return rememberedChoiceOf(projects, projectId)?.worktreeEnabled ?? fallback
+}
+
 /**
  * The workspace draft for the new chat, falling back to what the thread already has. A thread that never
- * chose (`worktreeEnabled` unset) takes `worktreeByDefault`, the "Start new threads in a worktree" setting.
+ * chose (`worktreeEnabled` unset) takes its project's remembered checkout (`newThreadWorktree`).
  */
 export function composerWorkspaceFor(
   draft: ComposerWorkspace | undefined,
   thread: { projectId?: string; worktreeEnabled?: boolean; node?: string; localOnly?: boolean } | undefined,
-  worktreeByDefault: boolean
+  projects: ProjectChoices
 ): ComposerWorkspace {
   return draft ?? {
     projectId: thread?.projectId,
-    worktreeEnabled: thread?.worktreeEnabled ?? worktreeByDefault,
+    worktreeEnabled: thread?.worktreeEnabled ?? newThreadWorktree(projects, thread?.projectId),
     // An empty thread that was created on another computer is a chat for it.
     ...(thread?.node ? { node: thread.node as NodeId } : {}),
     ...(thread?.localOnly ? { localOnly: true } : {})
@@ -67,9 +98,9 @@ export function composerWorkspaceFor(
 export function localWorkspaceFor(
   draft: ComposerWorkspace | undefined,
   thread: { projectId?: string; worktreeEnabled?: boolean; node?: string; localOnly?: boolean } | undefined,
-  worktreeByDefault: boolean
+  projects: ProjectChoices
 ): ComposerWorkspace {
-  const workspace = composerWorkspaceFor(draft, thread, worktreeByDefault)
+  const workspace = composerWorkspaceFor(draft, thread, projects)
   return workspace.node ? { worktreeEnabled: false } : workspace
 }
 
@@ -142,12 +173,14 @@ function withExpiryOf(workspace: ComposerWorkspace): Pick<ComposerWorkspace, 'ex
 }
 
 /**
- * The draft after picking a project in the toolbar: the worktree choice only counts with a project, and the
- * computer, Private and the expiry stay. A project of this computer replaces the one remembered for another.
+ * The draft after picking a project in the toolbar: it takes that project's remembered checkout (which only counts
+ * with a project), and the computer, Private and the expiry stay. A project of this computer replaces the one
+ * remembered for another.
  */
-export function workspaceWithProject(workspace: ComposerWorkspace, projectId: string | undefined): ComposerWorkspace {
-  const { localProjectId: _remembered, baseBranch: _branch, ...rest } = workspace
-  return { ...rest, projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled) }
+export function workspaceWithProject(workspace: ComposerWorkspace, projectId: string | undefined, projects: ProjectChoices): ComposerWorkspace {
+  // Another project shows its own remembered choices: what was picked for the previous one goes.
+  const { localProjectId: _remembered, baseBranch: _branch, ...rest } = withoutPicks(workspace)
+  return { ...rest, projectId, worktreeEnabled: Boolean(projectId && newThreadWorktree(projects, projectId)) }
 }
 
 /** The draft with an expiry picked by hand (`ms` from creation, or null for never). */

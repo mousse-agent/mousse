@@ -79,6 +79,8 @@ interface ThreadMeta {
   updatedAt: string
   modelOverride?: ModelOverride
   permissionMode?: PermissionMode
+  /** `Thread.settingsRevision`. */
+  settingsRevision?: number
   lineage?: ThreadLineage
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
@@ -203,9 +205,12 @@ export interface ThreadSearchOptions {
 }
 
 /** A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field. */
-function readThreadMeta<T extends { modelOverride?: ModelOverride }>(path: string): T {
+function readThreadMeta<T extends { modelOverride?: ModelOverride; settingsRevision?: number }>(path: string): T {
   const meta = JSON.parse(readFileSync(path, 'utf-8')) as T
-  return meta?.modelOverride ? { ...meta, modelOverride: upgradeSelection(meta.modelOverride) } : meta
+  if (!meta || typeof meta !== 'object') return meta
+  // A thread saved before the settings revision existed is at 0: said, so no reader has to guess it.
+  const revised = typeof meta.settingsRevision === 'number' ? meta : { ...meta, settingsRevision: 0 }
+  return revised.modelOverride ? { ...revised, modelOverride: upgradeSelection(revised.modelOverride) } : revised
 }
 
 export class ThreadDataStore extends EventEmitter {
@@ -709,6 +714,7 @@ export class ThreadDataStore extends EventEmitter {
     if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
+    meta.settingsRevision = 0
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
     if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
@@ -1039,6 +1045,8 @@ export class ThreadDataStore extends EventEmitter {
     const updated: Thread = {
       ...thread,
       ...partial,
+      // Every write of the model or the permission mode, by any route, moves the revision on (`ifRevision`).
+      ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (thread.settingsRevision ?? 0) + 1 } : {}),
       updatedAt: opts.touch === false ? thread.updatedAt : new Date().toISOString()
     }
 

@@ -287,11 +287,13 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'acknowledgeUncertain',
       ROUTED_STAGED_KEY,
       'refuseWhilePaused',
-      'conversationBranchId'
+      'conversationBranchId',
+      'expect'
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
     // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
-    { required: ['content'], ...staging(['content', 'images']), version: 4, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4 } }
+    // Version 5: `expect`, the model, mode and settings revision the sender saw; the owner runs nothing on other ones.
+    { required: ['content'], ...staging(['content', 'images']), version: 5, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5 } }
   ),
   'orchestrator.steer': chat(
     'thread',
@@ -340,10 +342,12 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       required: ['itemId']
     }
   ),
-  'threads.setModel': chat('thread', ['threadId', 'model']),
+  // `ifRevision` (version 2): applied only while the thread's settings revision is that one. An owner from before it is
+  // never sent the call without it: the caller refuses it as outdated (`RoutedClient.unsupportedKey`).
+  'threads.setModel': chat('thread', ['threadId', 'model', 'ifRevision'], { version: 2, since: { ifRevision: 2 } }),
   // Version 2 accepts `mode: 'auto'` (issue #419); a caller sends an older owner `accept_edits` instead
   // (`routedParamsForOwner`).
-  'threads.setPermissionMode': chat('thread', ['threadId', 'mode'], { required: ['mode'], version: 2 }),
+  'threads.setPermissionMode': chat('thread', ['threadId', 'mode', 'ifRevision'], { required: ['mode'], version: 3, since: { ifRevision: 3 } }),
   'threads.clearApprovalRules': chat('thread', ['threadId', 'ruleId']),
   'runs.resumeNow': chat('thread', ['threadId', 'runId'], {
     required: ['runId'],

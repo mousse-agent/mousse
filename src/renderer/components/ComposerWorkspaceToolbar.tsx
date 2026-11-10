@@ -140,7 +140,7 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
                 data-project-id={entry.id}
                 title={'path' in entry ? entry.path : undefined}
                 onClick={() => {
-                  onChange(workspaceWithProject(workspace, entry.id || undefined))
+                  onChange(workspaceWithProject(workspace, entry.id || undefined, projects))
                   menu.close()
                 }}
               >
@@ -287,7 +287,7 @@ export function workspaceWithBranch(workspace: ComposerWorkspace, branch: string
 /** The draft after picking a mode: the current checkout is always on its own branch. */
 export function workspaceWithMode(workspace: ComposerWorkspace, worktree: boolean): ComposerWorkspace {
   const { baseBranch, ...rest } = workspace
-  return worktree ? { ...rest, worktreeEnabled: true, ...(baseBranch ? { baseBranch } : {}) } : { ...rest, worktreeEnabled: false }
+  return worktree ? { ...rest, worktreeEnabled: true, worktreePicked: true, ...(baseBranch ? { baseBranch } : {}) } : { ...rest, worktreeEnabled: false, worktreePicked: true }
 }
 
 /**

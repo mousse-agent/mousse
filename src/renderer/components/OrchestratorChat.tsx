@@ -11,7 +11,9 @@ import type {
   ContextUsageSnapshot,
   PlanCardMetadata,
   QueuedMessage,
-  SkillChatMode
+  SendExpectation,
+  SkillChatMode,
+  Thread
 } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
@@ -62,8 +64,9 @@ import {
 import '../chat/components/agent-elements/agent-ui.css'
 import type { NodeId } from '../../shared/net'
 import { qualifyId } from '../../shared/threadRef'
-import { prepareComposerThread } from '../lib/createComposerThread'
-import { openRemoteProject, remoteErrorMessage, remotePermissionCeiling, remotePermissionView, workspaceOnDevice } from '../lib/remoteComputers'
+import { composerCreatesThread, prepareComposerThread } from '../lib/createComposerThread'
+import { boundSendRefusal, errorCodeOf, needsSetup, setupRefusalLine, type ThreadSetup } from '../lib/threadSetup'
+import { openRemoteProject, refreshRemoteComposerOptions, remoteErrorMessage, remotePermissionCeiling, remotePermissionView, workspaceOnDevice } from '../lib/remoteComputers'
 import { UNKNOWN_COMPUTER_NAME, useComputer } from '../lib/computers'
 import { useRemoteComposerOptions, useRunOnDevices } from '../hooks/useRunOnDevices'
 import { localProjectsOf } from '../hooks/useLocalProjects'
@@ -75,7 +78,7 @@ import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
-import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
+import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { errorText, readableError, sendErrorLine } from '../lib/errorText'
 import { showToast } from './ui/Toast'
 import { editablePrompt, PromptUndoNotice } from './PromptUndoControls'
@@ -86,7 +89,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -174,18 +177,18 @@ export function OrchestratorChat() {
     s.threads.find((thread) => thread.id === s.activeThreadId)
   )
   const threads = useAppStore((s) => s.threads)
-  // The profile default, and the pick made on a blank composer before its thread exists.
+  // The profile default.
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
-  const [blankPermissionMode, setBlankPermissionMode] = useState<PermissionMode | undefined>(undefined)
-  const permissionMode = activeThread?.permissionMode ?? (activeThreadId ? undefined : blankPermissionMode) ?? defaultPermissionMode
   const permissionCeiling = permissionCeilingOf(activeThread, threads, defaultPermissionMode)
   const projects = useAppStore((s) => s.projects)
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
-  const worktreeByDefault = useAppStore((s) => s.worktreeByDefault)
   const privateThreadExpiry = useAppStore((s) => s.privateThreadExpiry)
   const privateDefaultMs = privateThreadExpiry === 'never' ? undefined : expiryPresetMs(privateThreadExpiry)
-  const workspace = composerWorkspaceFor(workspaceDraft, activeThread, worktreeByDefault)
+  const workspace = composerWorkspaceFor(workspaceDraft, activeThread, projects)
+  // What was picked for this new chat, kept with its draft (so quick actions see it too) until a send applies it.
+  const pickedMode = workspace.permissionMode
+  const pickedModel = workspace.model
   const localName = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
   const { devices: runOnDevices, notSharing, refresh: refreshRunOnDevices } = useRunOnDevices()
   const pickedDeviceName = runOnLabel(localName, runOnDevices, workspace.node)
@@ -193,6 +196,13 @@ export function OrchestratorChat() {
   const workspacePending = useAppStore(isWorkspacePending)
   const workspaceLocked = useAppStore(isComposerWorkspaceLocked)
   const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length)
+  // A new chat whose thread a send still has to make (none yet, or the empty one shown is of another project or
+  // computer): it shows what its project remembers from the last pick there, and a pick waits with the draft.
+  const createsThread = newChat && composerCreatesThread(activeThread, workspace)
+  const remembered = createsThread && !workspace.node ? rememberedChoiceOf(projects, workspace.projectId) : undefined
+  const permissionMode = createsThread
+    ? pickedMode ?? remembered?.permissionMode ?? defaultPermissionMode
+    : activeThread?.permissionMode ?? defaultPermissionMode
   // Picked once per chat, so it holds while typing; another chat may get another line.
   const emptyHeadline = useMemo(() => emptyThreadHeadline(new Date(), activeThreadId ?? '__blank__'), [activeThreadId])
   const browserElements = useAppStore(
@@ -261,11 +271,21 @@ export function OrchestratorChat() {
   const [selectedModelId, setSelectedModelId] = useState(() => activeThreadModelOverride ? pickerModelId(activeThreadModelOverride) : '')
   // The profile's default model, once settings are read; undefined until then.
   const [profileDefault, setProfileDefault] = useState<PickerSelection | undefined>(undefined)
+  // The model the composer shows as the chat's own: the thread's, or for a chat whose thread is still to be made,
+  // the one picked for it, else its project's remembered model while the picker lists that model (its instance is on
+  // for the project and the model is not hidden; unknown until the provider snapshots arrive). Without one the
+  // composer shows the profile's default, as the daemon falls back to it, and a send stamps what is shown.
+  const rememberedModel = remembered?.model
+  const rememberedOffered = useMemo(
+    () => rememberedModel && providerSnapshots && pickerListsModel(rememberedModel, providers) ? rememberedModel : undefined,
+    [rememberedModel, providerSnapshots, providers]
+  )
+  const selectionThreadModel = createsThread && !remoteNode ? (pickedModel ?? rememberedOffered) : activeThreadModelOverride
   // With no thread model and no default the picker offers, the composer starts on the first ready
   // provider's model, and a send stamps it on the thread.
   const autoModel = useMemo(
-    () => composerAutoModel({ remote: Boolean(remoteNode), threadModel: activeThreadModelOverride, profileDefault, providers }),
-    [remoteNode, activeThreadModelOverride, profileDefault, providers]
+    () => composerAutoModel({ remote: Boolean(remoteNode), threadModel: selectionThreadModel, profileDefault, providers }),
+    [remoteNode, selectionThreadModel, profileDefault, providers]
   )
   // Also re-applied after a settings refresh puts the unusable default back.
   useEffect(() => {
@@ -599,7 +619,7 @@ export function OrchestratorChat() {
         : compaction
     )
     // The thread's model, else the one the composer starts on; with neither yet, the shown model stays.
-    const selectedModel = composerSelection({ threadModel: activeThreadModelOverride, profileDefault: settings.provider, providers: providersRef.current })
+    const selectedModel = composerSelection({ threadModel: selectionThreadModel, profileDefault: settings.provider, providers: providersRef.current })
     setProfileDefault((current) =>
       current?.llmProvider === settings.provider.llmProvider &&
       current.instanceId === settings.provider.instanceId &&
@@ -625,7 +645,7 @@ export function OrchestratorChat() {
     )
     // activeThreadId: project-scoped skills follow the active thread, so a
     // snapshot fetched for another thread goes stale on switch.
-  }, [activeThreadModelOverride, activeThreadId, profileReady, profileId])
+  }, [selectionThreadModel, activeThreadId, profileReady, profileId])
 
   // Picking a computer swaps the picker to its default model (or its first usable one, as on this
   // computer); coming back restores this computer's. A thread of another computer shows the model it
@@ -654,9 +674,11 @@ export function OrchestratorChat() {
     wasRemoteRef.current = false
     void refreshSelectionRef.current()
   }, [remoteNode])
+  // The local empty thread behind a draft for that computer is not the chat; a thread already made there is.
+  const remoteThreadModel = activeThread && (activeThread.node ?? undefined) === remoteNode ? activeThreadModelOverride : undefined
   useEffect(() => {
     if (!remoteNode || !remoteOptions.loaded) return
-    const own = remoteDraft ? undefined : activeThreadModelOverride
+    const own = pickedModel ?? remoteThreadModel
     const remote = remoteDefaultRef.current
     const known = remote?.llmProvider ? { ...remote, llmProvider: remote.llmProvider } : undefined
     const pick = own ?? (known && pickerOffers(known, providersRef.current) ? known : fallbackModel(providersRef.current))
@@ -670,7 +692,7 @@ export function OrchestratorChat() {
       context,
       shown: pick ? selectionKey({ instanceId: pick.instanceId, llmProvider: pick.llmProvider, pickerId: pickerModelId(pick) }) : selectionKey({ llmProvider: '', pickerId: '' })
     }
-  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefaultKey, activeThreadModelOverride, providers])
+  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefaultKey, remoteThreadModel, pickedModel, providers])
 
   useEffect(() => {
     void refreshSelection()
@@ -834,7 +856,9 @@ export function OrchestratorChat() {
       /** Puts the staged text, files and references back, for a message that turns out not to have arrived. */
       onUnsent?: () => void,
       /** The conversation branch the message must land on (an edited prompt's); refused on another. */
-      conversationBranchId?: string
+      conversationBranchId?: string,
+      /** The settings the composer showed, which the turn must run on (a new chat's first send). */
+      expect?: SendExpectation
     ) => {
       if (!content && !(images && images.length)) return
 
@@ -852,7 +876,8 @@ export function OrchestratorChat() {
         content: content || (images?.length ? '[Image attachment]' : ''),
         mode,
         images,
-        ...(conversationBranchId ? { conversationBranchId } : {})
+        ...(conversationBranchId ? { conversationBranchId } : {}),
+        ...(expect ? { expect } : {})
       }
       // Paint an ordinary send before IPC/disk/provider work. The App event handler swaps this
       // row for the durable message by matching its content; stale hydration snapshots retain it.
@@ -957,7 +982,14 @@ export function OrchestratorChat() {
         // answer (a timeout, another computer that did not confirm) keeps its id, so sending it again replays it.
         sendIds.current.settle(signature, requestId, isOutcomeUncertain(error) ? 'unknown' : 'refused')
         if (!stillVisible()) return
-        setSendError(sendErrorLine(error))
+        setSendError(boundSendRefusal(error, Boolean(expect)) ?? sendErrorLine(error))
+        // Settings changed since they were shown: the composer shows what the thread really runs now, and for a thread of
+        // another computer that computer's default mode and this device's limit too, which the thread may run in.
+        if (errorCodeOf(error) === 'thread_settings_changed' && targetThreadId) {
+          void window.mousse.threads.get(targetThreadId).then((thread) => { if (thread && stillVisible()) useAppStore.getState().upsertThread(thread) }).catch(() => undefined)
+          const node = useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)?.node
+          if (node) void refreshRemoteComposerOptions(node as NodeId).catch(() => undefined)
+        }
         const changes = pendingChangesDetails(error)
         setSendChanges(changes ? { line: sendErrorLine(error), message: errorText(error), details: changes } : null)
         if (isOutcomeUncertain(error) && targetThreadId) {
@@ -1181,15 +1213,30 @@ export function OrchestratorChat() {
       if (!stillVisible()) return
     }
 
+    // What the first turn of a new chat is bound to (`expect`): the daemon runs nothing on other settings.
+    let bound: SendExpectation | undefined
     if (newChat) {
+      // What the composer shows at this click, read before anything below awaits.
+      const wanted = selectedProviderId && selectedModelId
+        ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
+        : undefined
+      const shownMode = shownPermissionMode
+      const shownThread = activeThread
+      const picked: Array<'model' | 'permissionMode'> = [...(pickedModel ? ['model' as const] : []), ...(pickedMode ? ['permissionMode' as const] : [])]
+      const computer = workspace.node ? pickedDeviceName : 'this computer'
+      let made: Thread | undefined
       // Apply this draft's workspace before sending; a project change creates a
       // new hidden draft instead of moving another thread's transcript storage.
+      // A thread made on this computer is made with the shown model and permission mode, so nothing is left to set.
       const id = await prepareComposerThread({
         thread: activeThread,
         workspace,
         ...composerThreadActions(),
+        shown: { ...(wanted ? { model: wanted } : {}), ...(!remoteDraft ? { permissionMode } : {}) },
+        picked,
         stillVisible,
         activate: (thread) => {
+          made = thread
           const store = useAppStore.getState()
           store.upsertThread(thread)
           // Move the staged prompt and media with this draft when its project changes.
@@ -1211,27 +1258,40 @@ export function OrchestratorChat() {
       })
       if (!id) return
       if (!stillVisible()) return
-      // Blank composer keeps model in local state only. Stamp it onto the new
-      // thread before the first turn so the pick survives without touching the
-      // shared settings default used by other threads.
-      // Skipped when the new thread already has exactly that model (account, model and level): on
-      // another computer each call is a round trip the first message would wait for.
-      const wanted = selectedProviderId && selectedModelId
-        ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
-        : undefined
-      const stamped = useAppStore.getState().threads.find((entry) => entry.id === id)?.modelOverride
-      if (wanted && !sameModel(stamped, wanted)) {
-        const updated = await window.mousse.threads.setModel(id, wanted)
+      // The thread as read once: what its creation answered, else the empty thread shown at the click. Never the store
+      // after an await, where another window's update would stand in for what was shown. Without a revision, it is
+      // read from the computer that runs it first.
+      let base: Thread | undefined = made ?? (shownThread?.id === id ? shownThread : undefined)
+      if (typeof base?.settingsRevision !== 'number') {
+        const fresh = await window.mousse.threads.get(id).catch(() => null)
         if (!stillVisible()) return
-        if (updated) useAppStore.getState().upsertThread(updated)
+        if (!fresh || typeof fresh.settingsRevision !== 'number') {
+          setSendError(setupRefusalLine(fresh ? 'computer_outdated' : 'failed', computer))
+          return
+        }
+        base = fresh
       }
-      // The same for a permission mode picked before the thread existed.
-      if (blankPermissionMode) {
-        const updated = await window.mousse.threads.setPermissionMode(id, blankPermissionMode)
+      let revision = base.settingsRevision!
+      // In this same send, the thread is given what was picked for it and it lacks (the shown model on a thread made on
+      // another computer, and a mode picked for it there), each set only on the revision this send last read. Any refusal
+      // sends nothing, drops the picks, and leaves the composer showing what the thread really has.
+      const setup: ThreadSetup = {
+        ...(wanted && !sameModel(base.modelOverride, wanted) ? { model: wanted } : {}),
+        ...(remoteDraft && pickedMode && base.permissionMode !== pickedMode ? { permissionMode: pickedMode } : {})
+      }
+      if (needsSetup(setup)) {
+        const result = await window.mousse.threads.applySettings(id, setup, revision)
         if (!stillVisible()) return
-        setBlankPermissionMode(undefined)
-        if (updated) useAppStore.getState().upsertThread(updated)
+        if (result.thread) useAppStore.getState().upsertThread(result.thread)
+        const draft = useAppStore.getState().composerWorkspaceDrafts[id]
+        if (draft) useAppStore.getState().setComposerWorkspaceDraft(id, withoutPicks(draft))
+        if (!result.ok || typeof result.thread?.settingsRevision !== 'number') {
+          setSendError(setupRefusalLine(result.ok ? 'computer_outdated' : result.code, computer))
+          return
+        }
+        revision = result.thread.settingsRevision
       }
+      bound = { permissionMode: shownMode, ...(wanted ? { model: wanted } : {}), settingsRevision: revision }
     } else if (autoModel && activeThreadId) {
       // A thread without a model of its own would run on the unusable default: give it the shown one.
       const updated = await window.mousse.threads.setModel(activeThreadId, autoModel)
@@ -1253,7 +1313,7 @@ export function OrchestratorChat() {
       browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
       resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     }
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent)
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound)
     if (sent === false && stillVisible()) {
       restoreUnsent()
     } else if (sent !== 'uncertain') {
@@ -1280,11 +1340,13 @@ export function OrchestratorChat() {
     // Stored as the model and its level apart; no level is the model's default.
     const pick = pickedSelection(modelId)
 
-    // Persist as last-used default for new threads. Existing chats keep their
-    // own modelOverride, which is stamped at create time from this value.
-    if (!activeThreadId) {
-      // A chat for another computer takes its model there; this computer's default stays as it is.
-      if (!remoteDraft) {
+    // A chat whose thread is still to be made keeps the pick until a send stamps it on the new thread, which
+    // also makes it what the project's next new thread starts with.
+    if (createsThread || !activeThreadId || remoteDraft) {
+      setComposerWorkspaceDraft(activeThreadId, { ...workspace, model: { ...instance, ...pick } })
+      // Without a project it is the last-used default for new threads at once, as a send would make it. A chat for
+      // another computer takes its model there; this computer's default stays as it is.
+      if (!remoteDraft && !workspace.projectId) {
         // The new default wins over the automatic model at once, not after settings reply.
         setProfileDefault({ ...instance, model: pick.model })
         void window.mousse.settings.set({
@@ -1293,8 +1355,6 @@ export function OrchestratorChat() {
       }
       return
     }
-    // The empty local thread behind a remote draft is not the chat; its model is not the other computer's pick.
-    if (remoteDraft) return
 
     // Optimistic local meta so the composer badge updates before IPC returns.
     const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
@@ -1354,9 +1414,10 @@ export function OrchestratorChat() {
 
   // Applies from the next turn; a running turn and a pending approval keep what they were asked under.
   const handlePermissionSelect = async (mode: PermissionMode) => {
-    // A chat for another computer has no thread there yet: the pick waits with the draft, and goes to the new thread.
-    if (!activeThreadId || remoteDraft) {
-      setBlankPermissionMode(mode)
+    // A chat whose thread is still to be made (here or on another computer): the pick waits with the draft, and goes
+    // to the new thread.
+    if (createsThread || remoteDraft || !activeThreadId) {
+      setComposerWorkspaceDraft(activeThreadId, { ...workspace, permissionMode: mode })
       return
     }
     const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
@@ -1376,7 +1437,7 @@ export function OrchestratorChat() {
   const remoteComputer = useComputer(remoteNode)
   const remoteMode = remoteNode
     ? remotePermissionView({
-        threadMode: remoteDraft ? blankPermissionMode : activeThread?.permissionMode,
+        threadMode: pickedMode ?? (activeThread && (activeThread.node ?? undefined) === remoteNode ? activeThread.permissionMode : undefined),
         permission: remoteOptions.loaded ? remoteOptions.permission : undefined
       })
     : undefined

@@ -122,7 +122,7 @@ describe('new thread settings row', () => {
     expect(workspaceItem(false).getAttribute('aria-checked')).toBe('true')
     expect(workspaceItem(true).getAttribute('aria-checked')).toBe('false')
     act(() => workspaceItem(true).click())
-    expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: true })
+    expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: true, worktreePicked: true })
   })
 
   it('goes back to the current checkout from a worktree', async () => {
@@ -130,7 +130,7 @@ describe('new thread settings row', () => {
     expect(workspaceButton()!.textContent).toBe('master (new)')
     await act(async () => workspaceButton()!.click())
     act(() => workspaceItem(false).click())
-    expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: false })
+    expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: false, worktreePicked: true })
   })
 
   it('labels the button with the branch: the checkout branch, or the worktree base marked (new)', () => {
@@ -146,7 +146,7 @@ describe('new thread settings row', () => {
     mockGit({ isRepo: false })
     const { onChange } = await renderSettled({ projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' })
     expect(workspaceButton()).toBeNull()
-    expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: false })
+    expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: false, worktreePicked: true })
     // The row keeps the computer on the left and Private / Delete after on the right, with nothing between.
     expect(host.querySelector('.new-thread-row-start')!.children).toHaveLength(1)
   })
@@ -182,8 +182,9 @@ describe('new thread settings row', () => {
     // The folder's own branch is sent as nothing, so a daemon without the field does the same.
     expect(workspaceWithBranch({ ...checkout, worktreeEnabled: true, baseBranch: 'feat/x' }, 'master', 'master')).toEqual({ projectId: 'p1', worktreeEnabled: true })
     expect(workspaceWithBranch(checkout, 'master', 'master')).toEqual(checkout)
-    expect(workspaceWithMode({ projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' }, false)).toEqual(checkout)
-    expect(workspaceWithMode({ projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' }, true)).toEqual({ projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' })
+    // A mode chosen here is the person's pick, which a send remembers for the project.
+    expect(workspaceWithMode({ projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' }, false)).toEqual({ ...checkout, worktreePicked: true })
+    expect(workspaceWithMode({ projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' }, true)).toEqual({ projectId: 'p1', worktreeEnabled: true, worktreePicked: true, baseBranch: 'feat/x' })
   })
 
   it('lists the branches above the modes; a branch pick keeps the menu open, a mode pick closes it', async () => {

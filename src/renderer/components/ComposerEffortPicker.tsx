@@ -284,7 +284,7 @@ export function PermissionChip({ control }: { control: PermissionControl }) {
     <button
       ref={buttonRef}
       type="button"
-      className={`composer-icon-btn composer-permission-chip${open ? ' open' : ''}${choice.shown === 'full' ? ' is-full' : ''}`}
+      className={`composer-icon-btn composer-permission-chip${open ? ' open' : ''}`}
       aria-haspopup="menu"
       aria-expanded={open}
       aria-label={limit ? `${label}. ${limit}` : label}

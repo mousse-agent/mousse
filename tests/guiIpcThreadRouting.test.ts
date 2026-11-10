@@ -208,8 +208,28 @@ describe('a chat is created on another computer', () => {
     expect(sent('threads.create').map((call) => call.params)).toEqual([
       { name: 'Fix it', projectId: project, worktreeEnabled: true, node: NODE },
       { name: 'Fix it', projectId: undefined, worktreeEnabled: false },
-      // No choice made: none is sent, so the thread takes the "Start new threads in a worktree" setting.
+      // No choice made: none is sent, and the daemon decides.
       { name: 'New Chat', projectId: undefined }
+    ])
+  })
+
+  it("asks for the project's remembered choices only on this computer", async () => {
+    await invoke('threads:create', undefined, 'project-1', { rememberedChoices: true })
+    await invoke('threads:create', undefined, qualifyId(NODE, 'project-1'), { rememberedChoices: true, node: NODE })
+    expect(sent('threads.create').map((call) => call.params)).toEqual([
+      { name: 'New Chat', projectId: 'project-1', rememberedChoices: true },
+      // Another computer is never asked: its create refuses keys it does not know.
+      { name: 'New Chat', projectId: qualifyId(NODE, 'project-1'), node: NODE }
+    ])
+  })
+
+  it('makes a thread here with the model and mode the composer shows; another computer gets them set afterwards', async () => {
+    const model = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
+    await invoke('threads:create', undefined, 'project-1', { worktreeEnabled: true, model, permissionMode: 'ask' })
+    await invoke('threads:create', undefined, qualifyId(NODE, 'project-1'), { worktreeEnabled: true, model, permissionMode: 'ask', node: NODE })
+    expect(sent('threads.create').map((call) => call.params)).toEqual([
+      { name: 'New Chat', projectId: 'project-1', worktreeEnabled: true, model, permissionMode: 'ask' },
+      { name: 'New Chat', projectId: qualifyId(NODE, 'project-1'), worktreeEnabled: true, node: NODE }
     ])
   })
 })
@@ -362,5 +382,50 @@ describe('editing a queued message', () => {
     )
     await expect(invoke('queue:edit', REMOTE, 'q1', 'Fix the tests first', 'Fix the tests')).resolves.toEqual({ item: saved })
     expect(sent('queue.edit').map((call) => (call.params as { expectedRevision?: string }).expectedRevision)).toEqual(['rev-1', 'rev-2'])
+  })
+})
+
+describe("a new chat's settings on another computer (threads:applySettings)", () => {
+  const model = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
+  /** Answers the conditional sets in order from `answers`, and `threads.get` with the thread as it now is. */
+  function owner(answers: Array<(params: { ifRevision?: number }) => unknown>, now: unknown = { id: REMOTE, permissionMode: 'ask', settingsRevision: 7 }) {
+    const queue = [...answers]
+    request.mockImplementation(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      if (method === 'threads.get') return { thread: now }
+      return queue.shift()!(params as { ifRevision?: number })
+    })
+  }
+
+  it('sets the model and then the mode, each on the revision the last one returned', async () => {
+    owner([
+      () => ({ thread: { id: REMOTE, settingsRevision: 1 } }),
+      () => ({ thread: { id: REMOTE, permissionMode: 'ask', settingsRevision: 2 } })
+    ])
+    expect(await invoke('threads:applySettings', REMOTE, { model, permissionMode: 'ask' }, 0)).toEqual({ ok: true, thread: { id: REMOTE, permissionMode: 'ask', settingsRevision: 2 } })
+    expect(sent('threads.setModel').map((call) => call.params)).toEqual([{ threadId: REMOTE, model, ifRevision: 0 }])
+    expect(sent('threads.setPermissionMode').map((call) => call.params)).toEqual([{ threadId: REMOTE, mode: 'ask', ifRevision: 1 }])
+  })
+
+  it('race: a mode set elsewhere during the model set refuses the mode, and answers with the thread as it now is', async () => {
+    owner([
+      () => ({ thread: { id: REMOTE, settingsRevision: 1 } }),
+      () => { throw new MmsProtocolError('thread_settings_changed', "This thread's model or permissions changed since it was read.") }
+    ])
+    expect(await invoke('threads:applySettings', REMOTE, { model, permissionMode: 'full' }, 0)).toEqual({
+      ok: false,
+      code: 'thread_settings_changed',
+      message: "This thread's model or permissions changed since it was read.",
+      thread: { id: REMOTE, permissionMode: 'ask', settingsRevision: 7 }
+    })
+  })
+
+  it('an older computer is refused before anything is set there, and so is one that answers without a revision', async () => {
+    owner([() => { throw new MmsProtocolError('computer_outdated', 'Update Mousse on Studio to do this.') }])
+    expect(await invoke('threads:applySettings', REMOTE, { permissionMode: 'ask' }, 0)).toMatchObject({ ok: false, code: 'computer_outdated' })
+    owner([() => ({ thread: { id: REMOTE } })])
+    expect(await invoke('threads:applySettings', REMOTE, { model, permissionMode: 'ask' }, 0)).toMatchObject({ ok: false, code: 'computer_outdated' })
+    // The mode was never sent after the answer without a revision.
+    expect(sent('threads.setPermissionMode')).toHaveLength(1)
   })
 })

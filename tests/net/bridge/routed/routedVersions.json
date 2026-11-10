@@ -350,8 +350,8 @@
     "security": "926c4af141d1208d"
   },
   "orchestrator.send": {
-    "version": 4,
-    "digest": "40a60ebc71e0a1de",
+    "version": 5,
+    "digest": "333c0a6e15e72b03",
     "security": "1447c39a3cdfbf97"
   },
   "orchestrator.steer": {
@@ -785,13 +785,13 @@
     "security": "ceacd93869361a7a"
   },
   "threads.setModel": {
-    "version": 1,
-    "digest": "d0a0070c3a0aa90f",
+    "version": 2,
+    "digest": "4403c6a7e66e0387",
     "security": "926c4af141d1208d"
   },
   "threads.setPermissionMode": {
-    "version": 2,
-    "digest": "4ec36e005f81decc",
+    "version": 3,
+    "digest": "26518b30dd41da60",
     "security": "926c4af141d1208d"
   },
   "threads.settle": {

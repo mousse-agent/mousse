@@ -23,6 +23,7 @@ import {
   isComposerWorkspaceLocked,
   isNewEmptyThread,
   localProjectIdOf,
+  newThreadWorktree,
   localWorkspaceFor,
   workspaceOnOtherComputer,
   workspaceOnThisComputer
@@ -68,20 +69,25 @@ describe('isNewEmptyThread', () => {
 })
 
 describe('composerWorkspaceFor', () => {
+  // Project q's new threads start in its folder; project r has no remembered choice.
+  const projects = [{ id: 'q', newThread: { worktreeEnabled: false } }, { id: 'r' }]
+
   it('prefers the draft and otherwise falls back to the thread', () => {
-    expect(composerWorkspaceFor({ projectId: 'p', worktreeEnabled: true }, thread({ projectId: 'q' }), false))
+    expect(composerWorkspaceFor({ projectId: 'p', worktreeEnabled: true }, thread({ projectId: 'q' }), projects))
       .toEqual({ projectId: 'p', worktreeEnabled: true })
-    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q', worktreeEnabled: true }), false))
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q', worktreeEnabled: true }), projects))
       .toEqual({ projectId: 'q', worktreeEnabled: true })
-    expect(composerWorkspaceFor(undefined, undefined, false)).toEqual({ projectId: undefined, worktreeEnabled: false })
   })
 
-  it('takes the "Start new threads in a worktree" setting until the thread or draft chooses', () => {
-    expect(composerWorkspaceFor(undefined, undefined, true)).toEqual({ projectId: undefined, worktreeEnabled: true })
-    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q' }), true)).toEqual({ projectId: 'q', worktreeEnabled: true })
-    // A thread that chose its project's folder keeps it, whatever the setting says.
-    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q', worktreeEnabled: false }), true)).toEqual({ projectId: 'q', worktreeEnabled: false })
-    expect(composerWorkspaceFor({ projectId: 'q', worktreeEnabled: false }, thread({ projectId: 'q' }), true)).toEqual({ projectId: 'q', worktreeEnabled: false })
+  it("takes the project's remembered checkout until the thread or draft chooses, and a new worktree without one", () => {
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q' }), projects)).toEqual({ projectId: 'q', worktreeEnabled: false })
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'r' }), projects)).toEqual({ projectId: 'r', worktreeEnabled: true })
+    expect(newThreadWorktree(projects, 'q')).toBe(false)
+    expect(newThreadWorktree(projects, 'r')).toBe(true)
+    expect(newThreadWorktree(projects, 'missing')).toBe(true)
+    // A thread that chose keeps it, whatever the project remembers.
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'r', worktreeEnabled: false }), projects)).toEqual({ projectId: 'r', worktreeEnabled: false })
+    expect(composerWorkspaceFor({ projectId: 'q', worktreeEnabled: true }, thread({ projectId: 'q' }), projects)).toEqual({ projectId: 'q', worktreeEnabled: true })
   })
 })
 
@@ -139,12 +145,13 @@ describe('picking where a new chat runs', () => {
   })
 
   it('does not use another computer\'s project ids for work that runs here', () => {
-    expect(localWorkspaceFor({ projectId: 'y', worktreeEnabled: true, node }, undefined, false)).toEqual({ worktreeEnabled: false })
-    expect(localWorkspaceFor({ projectId: 'a', worktreeEnabled: true }, undefined, false)).toEqual({ projectId: 'a', worktreeEnabled: true })
-    expect(localWorkspaceFor(undefined, thread({ projectId: 'q' }), false)).toEqual({ projectId: 'q', worktreeEnabled: false })
+    const folder = [{ id: 'q', newThread: { worktreeEnabled: false } }, { id: 'node-1:q', newThread: { worktreeEnabled: false } }]
+    expect(localWorkspaceFor({ projectId: 'y', worktreeEnabled: true, node }, undefined, folder)).toEqual({ worktreeEnabled: false })
+    expect(localWorkspaceFor({ projectId: 'a', worktreeEnabled: true }, undefined, folder)).toEqual({ projectId: 'a', worktreeEnabled: true })
+    expect(localWorkspaceFor(undefined, thread({ projectId: 'q' }), folder)).toEqual({ projectId: 'q', worktreeEnabled: false })
     // An empty chat that was created on another computer is a chat for it.
-    expect(localWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }), false)).toEqual({ worktreeEnabled: false })
-    expect(composerWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }), false)).toEqual({ projectId: 'node-1:q', worktreeEnabled: false, node })
+    expect(localWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }), folder)).toEqual({ worktreeEnabled: false })
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }), folder)).toEqual({ projectId: 'node-1:q', worktreeEnabled: false, node })
   })
 })
 
@@ -285,14 +292,14 @@ describe('device menu options', () => {
   })
 
   it('writes a choice into the draft and keeps the project', () => {
-    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p', worktreeEnabled: true })
-    expect(workspaceDraftForChoice({ projectId: 'p', worktreeEnabled: true }, 'checkout')).toEqual({ projectId: 'p', worktreeEnabled: false })
+    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p', worktreeEnabled: true, worktreePicked: true })
+    expect(workspaceDraftForChoice({ projectId: 'p', worktreeEnabled: true }, 'checkout')).toEqual({ projectId: 'p', worktreeEnabled: false, worktreePicked: true })
     expect(activeWorkspaceChoice({ projectId: 'p', worktreeEnabled: true })).toBe('worktree')
   })
 
   it('keeps the picked computer when a workspace choice is made', () => {
     expect(workspaceDraftForChoice({ ...workspace, node: 'node-1' as Device['node'], localProjectId: 'l' }, 'worktree'))
-      .toEqual({ projectId: 'p', worktreeEnabled: true, node: 'node-1', localProjectId: 'l' })
+      .toEqual({ projectId: 'p', worktreeEnabled: true, worktreePicked: true, node: 'node-1', localProjectId: 'l' })
   })
 })
 
@@ -421,7 +428,7 @@ describe('device menu stylesheet', () => {
 describe('a private draft in the side card (issue #672)', () => {
   it('keeps Private when a checkout choice is picked, and offers no other computer', () => {
     const workspace = { projectId: 'p1', worktreeEnabled: false, localOnly: true }
-    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p1', worktreeEnabled: true, localOnly: true })
+    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p1', worktreeEnabled: true, worktreePicked: true, localOnly: true })
     const devices = [device({ node: 'big' as Device['node'], name: 'Studio', kind: 'computer' })]
     expect(buildDeviceMenu({ localName: 'Mac', devices, workspace: { ...workspace, localOnly: false } }).runOn).not.toBeNull()
     expect(buildDeviceMenu({ localName: 'Mac', devices, workspace }).runOn).toBeNull()

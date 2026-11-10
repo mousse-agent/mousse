@@ -597,6 +597,17 @@ export interface OrchestratorSendOptions {
   schedule?: ScheduledTurnRef
   /** Called right after the run is admitted (accepted and new), before it is queued or started. */
   onAdmitted?: (runId: string) => void
+  /**
+   * Daemon-only: a send bound to the settings its sender saw (`expect`) never waits in the queue, where it would run later
+   * on whatever the thread has then. One that would queue is refused (`thread_busy`), as an edited prompt is: before its
+   * run exists when the thread is busy at admission, and with its run cancelled when the turn could not start later.
+   */
+  refuseQueue?: boolean
+  /**
+   * Daemon-only: compares a bound send's `expect` with the thread again, inside the engine's admission under the
+   * thread's lock, right before the run is committed; it throws `thread_settings_changed` when anything changed.
+   */
+  bindCheck?: () => void
 }
 
 /** Options of `runRemoteTurn`. */
@@ -780,6 +791,8 @@ interface TurnStartRequest {
   subagentNotice?: SubagentNoticeItem[]
   /** A mode the turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
   permissionMode?: PermissionMode
+  /** A bound send (`OrchestratorSendOptions.refuseQueue`): a turn that cannot start now is refused, never queued. */
+  refuseQueue?: boolean
   /** A scheduled turn's model and origin; JSON-safe, so a `turn.start` effect keeps them across a restart. */
   modelOverride?: ModelOverride
   origin?: TurnOrigin
@@ -4064,6 +4077,7 @@ export class OrchestratorService extends EventEmitter {
         admissionHeld,
         subagentNotice: payload.subagentNotice,
         ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
+        ...(payload.refuseQueue ? { refuseQueue: true } : {}),
         modelOverride: payload.modelOverride,
         origin: payload.origin,
         schedule: payload.schedule,
@@ -4230,6 +4244,7 @@ export class OrchestratorService extends EventEmitter {
           externalSignal: signal,
           subagentNotice: payload.subagentNotice,
           ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
+          ...(payload.refuseQueue ? { refuseQueue: true } : {}),
           modelOverride: payload.modelOverride,
           origin: payload.origin,
           schedule: payload.schedule,
@@ -4905,7 +4920,14 @@ export class OrchestratorService extends EventEmitter {
         // A continuation whose original cannot be read: the strictest mode, never the thread's own.
         if (!earlier) return 'ask'
       } else if (run.source === 'provider-continuation') {
-        earlier = engine.listRuns(threadId).filter((candidate) => candidate.ordinal < run.ordinal).sort((a, b) => b.ordinal - a.ordinal)[0]
+        // The run whose work it carries on is the latest earlier run that bound a turn: a run refused or cancelled
+        // before it started ran nothing and authorizes nothing, so it is passed over. None found: the strictest mode.
+        const executed = engine.listRuns(threadId)
+          .filter((candidate) => candidate.ordinal < run.ordinal)
+          .sort((a, b) => b.ordinal - a.ordinal)
+          .map((candidate) => engine.bindingForRun(candidate.runId))
+          .find((binding) => binding !== undefined && binding !== null)
+        return executed ? executed.policy.permissionMode ?? 'ask' : 'ask'
       }
       const binding = earlier ? engine.bindingForRun(earlier.runId) : undefined
       return binding ? binding.policy.permissionMode ?? 'ask' : undefined
@@ -9300,6 +9322,18 @@ export class OrchestratorService extends EventEmitter {
     return this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
   }
 
+  /**
+   * Whether a bound send would have to wait instead of starting, decided at admission before its run exists: a turn runs
+   * or holds the admission, another process holds the thread's lease, the send asks to queue, a usage-limit pause would
+   * hold it, or a compaction holds the queue.
+   */
+  private busyForBoundSend(session: ThreadSession, threadId: string, forceQueue: boolean, queueBehindPause: boolean): boolean {
+    if (forceQueue || session.isTurnRunning() || session.turnAdmitted || this.runEngine?.getActiveRun(threadId)) return true
+    if ((queueBehindPause && this.hasPausedRun(threadId)) || this.compactionHoldsQueue(threadId)) return true
+    this.reclaimStaleThreadLease(threadId)
+    return this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
+  }
+
   private hasPausedRun(threadId: string): boolean {
     try {
       return Boolean(this.runEngine?.store.getPausedRun(threadId))
@@ -9440,6 +9474,11 @@ export class OrchestratorService extends EventEmitter {
     // Only a new message is checked: a replay of an accepted request returns its run as it was.
     const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
       ? () => {
+          // A bound send: compared again here, under the thread's lock and before its run is committed, and refused
+          // before it is a run when the thread is busy, where it would only wait in the queue.
+          opts?.bindCheck?.()
+          if (opts?.refuseQueue && this.busyForBoundSend(session, threadId, opts?.forceQueue === true, queueBehindPause))
+            throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
           // Inside the engine's admission, before a run exists: a question or approval waiting on the thread
           // refuses a message an agent sent (it never answers one for the user, and never piles up behind it).
           if (opts?.refuseWhileAsking && this.questions.listPendingForThread(threadId).length > 0)
@@ -9568,7 +9607,7 @@ export class OrchestratorService extends EventEmitter {
     const heldByCompaction = !session.isTurnRunning() && this.compactionHoldsQueue(threadId)
 
     if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause || heldByCompaction) {
-      if (expectedBranch) {
+      if (expectedBranch || opts?.refuseQueue) {
         const busy = new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
         if (run) this.cancelOrphanedAdmission(run.runId, busy.message)
         throw busy
@@ -9607,6 +9646,7 @@ export class OrchestratorService extends EventEmitter {
         displayUserMessage: opts?.source !== 'wake',
         source: opts?.source,
         ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+        ...(opts?.refuseQueue ? { refuseQueue: true } : {}),
         ...(opts?.modelOverride ? { modelOverride: opts.modelOverride } : {}),
         ...(opts?.origin ? { origin: opts.origin } : {}),
         ...(opts?.schedule ? { schedule: opts.schedule } : {}),
@@ -9632,7 +9672,8 @@ export class OrchestratorService extends EventEmitter {
         origin: opts?.origin,
         schedule: opts?.schedule,
         ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {}),
-        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
+        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+        ...(opts?.refuseQueue ? { refuseQueue: true } : {})
       })
     } catch (error) {
       if (!run) throw error
@@ -9790,6 +9831,8 @@ export class OrchestratorService extends EventEmitter {
       continuationId?: string
       /** A mode this turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
       permissionMode?: PermissionMode
+      /** A bound send: a turn that cannot start now is refused with its run cancelled, never queued. */
+      refuseQueue?: boolean
       /** A bot dispatch (PR 6 §4): its policy, authority and scratch folder. */
       bot?: PreparedBotTurn
       /** How the turn's binding answers tool approvals, when the caller fixes it. */
@@ -10059,6 +10102,7 @@ export class OrchestratorService extends EventEmitter {
       subagentNotice?: SubagentNoticeItem[]
       continuationId?: string
       permissionMode?: PermissionMode
+      refuseQueue?: boolean
       bot?: PreparedBotTurn
       approvals?: RunPolicy['approvals']
     }
@@ -10088,6 +10132,15 @@ export class OrchestratorService extends EventEmitter {
     const requeueUnstarted = (): OrchestratorResponse => {
       // An edited prompt never waits in the queue, where nothing would check its branch: it is refused instead.
       if (expectedBranchOf(input)) throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
+      // Nor does a bound send, which would run later on whatever the thread has then: its run ends unstarted.
+      if (opts?.refuseQueue) {
+        if (opts.runId) this.markRun(opts.runId, (engine, id) => {
+          const current = engine.getRun(id)
+          if (current && !TERMINAL_RUN_STATUSES.has(current.status)) engine.markTerminal(id, 'cancelled', { error: 'cancelled_before_start' })
+        })
+        if (queueItemId) this.completeSessionClaim(session, queueItemId, claimOwnerToken)
+        throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
+      }
       if (queueItemId) {
         const released = this.releaseSessionClaim(session, queueItemId, claimOwnerToken)
         return { message: '', actions: [], queued: true, queueItem: released ?? undefined }

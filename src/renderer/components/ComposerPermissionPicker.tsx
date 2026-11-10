@@ -86,7 +86,7 @@ export function permissionChoice(control: Omit<PermissionControl, 'onSelect'>): 
 /**
  * The permission menu: one row per mode, strictest first, each with its icon, name and what it does
  * on this agent in one line, so every choice reads without hovering. The chosen row is filled and
- * checked; Full access has the warning tint on its icon. A mode that cannot be picked stays, dimmed,
+ * checked; every mode has the same neutral icon. A mode that cannot be picked stays, dimmed,
  * and its line says why.
  */
 export function PermissionModeSection({ control, choice, onPicked }: {
@@ -117,7 +117,7 @@ export function PermissionModeSection({ control, choice, onPicked }: {
         aria-checked={on}
         aria-disabled={why ? true : undefined}
         aria-label={`${name}. ${line}`}
-        className={`composer-permission-mode${on ? ' selected' : ''}${why ? ' is-disabled' : ''}${entry === 'full' ? ' is-full' : ''}`}
+        className={`composer-permission-mode${on ? ' selected' : ''}${why ? ' is-disabled' : ''}`}
         onClick={() => {
           if (why) return
           onPicked()

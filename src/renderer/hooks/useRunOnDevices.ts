@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { NodeId } from '../../shared/net'
 import { notSharingNodes, refreshComputers, useComputers } from '../lib/computers'
 import type { Device } from '../lib/netDevices'
-import { cachedRemoteComposerOptions, readRemoteComposerOptions, type RemoteComposerOptions } from '../lib/remoteComputers'
+import { cachedRemoteComposerOptions, onRemoteComposerOptionsRead, readRemoteComposerOptions, type RemoteComposerOptions } from '../lib/remoteComputers'
 import { useAppStore } from '../stores/appStore'
 
 /**
@@ -59,9 +59,11 @@ export function useRemoteComposerOptions(node: NodeId | undefined): RemoteCompos
       )
     }
     read()
-    // What that computer lets this device do can change while the chat is open; coming back to the window asks again.
+    // What that computer lets this device do can change while the chat is open; coming back to the window asks again,
+    // and so does a send there refused because it changed.
     window.addEventListener('focus', read)
-    return () => { cancelled = true; clearTimeout(timer); window.removeEventListener('focus', read) }
+    const offRead = onRemoteComposerOptionsRead((readNode, options) => { if (!cancelled && readNode === node) setState({ node, options }) })
+    return () => { cancelled = true; clearTimeout(timer); window.removeEventListener('focus', read); offRead() }
   }, [node])
   const options = state && state.node === node ? state.options : node ? cachedRemoteComposerOptions(node) : undefined
   return node && options

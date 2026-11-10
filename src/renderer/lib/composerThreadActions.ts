@@ -1,3 +1,5 @@
+import type { PermissionMode } from '../../shared/permissionMode'
+import type { ModelOverride } from '../../shared/providerInstances'
 import type { Thread } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 
@@ -7,9 +9,10 @@ import { useAppStore } from '../stores/appStore'
  */
 export function composerThreadActions() {
   return {
-    create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }) =>
+    create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; model?: ModelOverride; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'>; rememberedChoices?: boolean }) =>
       window.mousse.threads.create(undefined, projectId, opts),
-    setWorktreeEnabled: (id: string, enabled: boolean) => window.mousse.threads.setWorktreeEnabled(id, enabled),
+    setWorktreeEnabled: (id: string, enabled: boolean, picked?: boolean) =>
+      picked ? window.mousse.threads.setWorktreeEnabled(id, enabled, true) : window.mousse.threads.setWorktreeEnabled(id, enabled),
     setExpiry: (id: string, expiresAt: string, stopsRun: boolean) => window.mousse.threads.setExpiry(id, expiresAt, stopsRun),
     update: (thread: Thread) => useAppStore.getState().upsertThread(thread),
     select: (id: string) => window.mousse.threads.select(id)

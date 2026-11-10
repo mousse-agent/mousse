@@ -249,16 +249,11 @@
   box-shadow: var(--ui-specular), var(--ui-focus-ring);
 }
 
-/* Permission chip: the thread's mode as an icon left of the model button. Neutral for every mode but
-   Full access, whose icon takes the warning colour; the chip itself is never filled with colour. */
+/* Permission chip: the thread's mode as an icon left of the model button, the same dim neutral for every mode,
+   Full access included; the chip itself is never filled with colour. */
 .composer-permission-chip.open {
   background: var(--ui-hover);
   color: var(--text-primary);
-}
-
-.composer-permission-chip.is-full,
-.composer-permission-chip.is-full:hover:not(:disabled) {
-  color: var(--warning);
 }
 
 .composer-permission-chip:focus-visible {
@@ -267,7 +262,7 @@
 }
 
 /* Its menu: one row per mode, icon left, name over a one-line description, a check on the chosen one,
-   which also takes the neutral fill. The only colour is Full access's warning icon. */
+   which also takes the neutral fill. No mode takes a colour of its own. */
 .composer-mode-menu.composer-permission-menu {
   width: min(340px, calc(100vw - 16px));
   max-height: calc(100vh - 16px);
@@ -319,10 +314,6 @@
   flex: 0 0 auto;
   margin-top: 2px;
   color: var(--text-secondary);
-}
-
-.composer-permission-mode.is-full .composer-permission-mode-icon {
-  color: var(--warning);
 }
 
 .composer-permission-mode-text {

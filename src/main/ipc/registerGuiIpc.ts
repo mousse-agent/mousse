@@ -353,12 +353,14 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   mode?: unknown
   images?: unknown
   conversationBranchId?: string
+  expect?: unknown
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
     requestId: request.requestId,
     ...(typeof request.conversationBranchId === 'string' ? { conversationBranchId: request.conversationBranchId } : {}),
+    ...(request.expect && typeof request.expect === 'object' ? { expect: request.expect } : {}),
     mode: request.mode,
     images: request.images
   }
@@ -1204,7 +1206,8 @@ export function registerGuiIpc(
           mode: body.mode,
           images: body.images,
           source: 'gui',
-          ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {})
+          ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {}),
+          ...(body.expect ? { expect: body.expect } : {})
         }
       )
       if (result.heldByPause) {
@@ -1688,7 +1691,7 @@ export function registerGuiIpc(
   }
 
   /** `opts.node`: create the chat on another of the user's computers; the daemon sends the call there. */
-  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string } | undefined) => ({
+  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> } | undefined) => ({
     name: name?.trim() || 'New Chat',
     projectId,
     ...(typeof opts?.worktreeEnabled === 'boolean' ? { worktreeEnabled: opts.worktreeEnabled } : {}),
@@ -1697,10 +1700,17 @@ export function registerGuiIpc(
     ...(opts?.localOnly === true ? { localOnly: true } : {}),
     ...(typeof opts?.expiresAt === 'string' ? { expiresAt: opts.expiresAt, ...(opts.expiryStopsRun === true ? { expiryStopsRun: true } : {}) } : {}),
     // A worktree started from another branch is made on this computer only.
-    ...(typeof opts?.baseBranch === 'string' && opts.baseBranch && !opts.node ? { baseBranch: opts.baseBranch } : {})
+    ...(typeof opts?.baseBranch === 'string' && opts.baseBranch && !opts.node ? { baseBranch: opts.baseBranch } : {}),
+    // A new chat of this window takes its project's remembered choices; another computer is never asked to.
+    ...(opts?.rememberedChoices === true && !opts.node ? { rememberedChoices: true } : {}),
+    // The model and mode the composer shows; another computer's create takes neither, so they are set there afterwards.
+    ...(opts?.model && !opts.node ? { model: opts.model } : {}),
+    ...(typeof opts?.permissionMode === 'string' && !opts.node ? { permissionMode: opts.permissionMode } : {}),
+    // Which of them the person picked, so only those are remembered for the project.
+    ...(Array.isArray(opts?.picked) && opts.picked.length && !opts.node ? { picked: opts.picked } : {})
   })
 
-  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }) => {
+  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.create',
       createParams(name, projectId, opts)
@@ -1711,7 +1721,7 @@ export function registerGuiIpc(
 
   registerHandler(
     'threads:createAndSelect',
-    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }) => {
+    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }) => {
       const res = await guiMms.request<{ thread: { id: string }; threads: unknown[] }>(
         'threads.create',
         createParams(name, projectId, opts)
@@ -1850,13 +1860,48 @@ export function registerGuiIpc(
     broadcast('threads:updated', res.threads)
     return res.thread
   })
-  registerHandler('threads:setWorktreeEnabled', async (_e, threadId: string, enabled: boolean) => {
+  // One thread as the computer that runs it has it now (its settings revision included), or null.
+  registerHandler('threads:get', async (_e, threadId: string) => {
+    const res = await guiMms.request<{ thread?: unknown }>('threads.get', { threadId })
+    return res.thread ?? null
+  })
+  registerHandler('threads:setWorktreeEnabled', async (_e, threadId: string, enabled: boolean, picked?: boolean) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.setWorktreeEnabled',
-      { threadId, enabled }
+      // Another computer does not remember this computer's picks, and its row takes no `picked`.
+      { threadId, enabled, ...(picked === true && !isQualifiedId(threadId) ? { picked: true } : {}) }
     )
     broadcast('threads:updated', res.threads)
     return res.thread
+  })
+  /**
+   * Gives a new chat's thread the model and then the permission mode its composer showed, each only while the thread's
+   * settings revision is still the one the window last had (`ifRevision`): the one `threads.create` returned, then the one
+   * each set returned. Nothing is retried. Any refusal (a change made elsewhere meanwhile, a computer too old to take
+   * `ifRevision`, any other failure) stops it and answers with the code and the thread as it now is, so the window shows
+   * what the thread really has and sends nothing.
+   */
+  registerHandler('threads:applySettings', async (_e, threadId: string, settings: { model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode }, ifRevision: number) => {
+    let revision = ifRevision
+    let thread: { settingsRevision?: number } | undefined
+    const set = async (method: 'threads.setModel' | 'threads.setPermissionMode', params: Record<string, unknown>) => {
+      const res = await guiMms.request<{ thread: { settingsRevision?: number }; threads?: unknown[] }>(method, { threadId, ...params, ifRevision: revision })
+      if (Array.isArray(res.threads)) broadcast('threads:updated', res.threads)
+      // A computer that took `ifRevision` answers with the new revision; without it, the next set can't be conditional.
+      if (typeof res.thread?.settingsRevision !== 'number') throw Object.assign(new Error('The computer did not say which revision it applied.'), { code: 'computer_outdated' })
+      thread = res.thread
+      revision = res.thread.settingsRevision
+    }
+    try {
+      if (settings.model) await set('threads.setModel', { model: settings.model })
+      if (settings.permissionMode) await set('threads.setPermissionMode', { mode: settings.permissionMode })
+      return { ok: true, ...(thread ? { thread } : {}) }
+    } catch (error) {
+      const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'failed'
+      let current: unknown
+      try { current = (await guiMms.request<{ thread: unknown }>('threads.get', { threadId })).thread } catch { current = undefined }
+      return { ok: false, code, message: error instanceof Error ? error.message : String(error), ...(current ? { thread: current } : {}) }
+    }
   })
   registerHandler('threads:setPermissionMode', async (_e, threadId: string, mode: PermissionMode) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(

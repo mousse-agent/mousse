@@ -95,6 +95,9 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.settledAt !== right.settledAt ||
       left.startedAt !== right.startedAt ||
       left.worktreeEnabled !== right.worktreeEnabled ||
+      // Saved without touching `updatedAt`, so it is compared on its own (a new thread gets its project's mode so).
+      left.permissionMode !== right.permissionMode ||
+      left.settingsRevision !== right.settingsRevision ||
       // A thread of another computer going offline (or coming back) changes its row.
       left.node !== right.node ||
       left.offline !== right.offline ||
@@ -200,13 +203,12 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** The profile's "Start new threads in a worktree" setting: the worktree choice of a draft that has not made one. */
-  worktreeByDefault: boolean
-  setWorktreeByDefault: (worktreeByDefault: boolean) => void
   /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
   privateThreadExpiry: ExpiryPreset | 'never'
+  /** Where a new thread in a project with no remembered checkout starts (`runs.newThreadWorktree`). */
+  newThreadWorktree: boolean
   /** The new-chat defaults from Settings → Runs. */
-  setRunDefaults: (runs: Pick<RunSettings, 'worktreeByDefault' | 'privateThreadExpiry'>) => void
+  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry' | 'newThreadWorktree'>) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -500,10 +502,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
-  worktreeByDefault: true,
-  setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
   privateThreadExpiry: 'never',
-  setRunDefaults: ({ worktreeByDefault, privateThreadExpiry }) => set({ worktreeByDefault, privateThreadExpiry }),
+  newThreadWorktree: true,
+  setRunDefaults: ({ privateThreadExpiry, newThreadWorktree }) => set({ privateThreadExpiry, newThreadWorktree }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)

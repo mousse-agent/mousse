@@ -843,6 +843,44 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(w.d.store.getThread(w.other.id)?.permissionMode).toBe('full')
     })
 
+    it('a provider continuation passes over a run refused before it ran: it stays at the mode of the run that did, at most Ask', async () => {
+      const seen: Record<string, unknown> = {}
+      const w = asks(async (input, mcp) => {
+        if (input.threadId === w.parent.id) seen.send = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'work' }))
+        return 'ok'
+      })
+      await w.attach()
+      // A: bound to Ask (an agent narrowed it); it would leave a background task behind.
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      const a = seen.send as { runId: string }
+      await waitFor(() => w.d.engine.getRun(a.runId)?.status === 'completed', 'run A')
+      expect(w.d.engine.bindingForRun(a.runId)?.policy.permissionMode).toBe('ask')
+      // The thread is set to Full access for future work.
+      expect(w.d.store.getThread(w.other.id)?.permissionMode).toBe('full')
+      // B: a send refused as busy after its run was admitted: cancelled, never bound.
+      const b = await w.d.engine.dispatch({ kind: 'send', threadId: w.other.id, clientRequestId: 'refused', source: 'gui' })
+      if (b.status !== 'accepted') throw new Error('send rejected')
+      w.d.engine.markTerminal(b.runId, 'cancelled', { error: 'cancelled_before_start' })
+      expect(w.d.engine.bindingForRun(b.runId)).toBeFalsy()
+      // C: the turn A's background task starts.
+      const c = await w.d.engine.dispatch({ kind: 'send', threadId: w.other.id, clientRequestId: 'provider-c', source: 'provider-continuation' })
+      if (c.status !== 'accepted') throw new Error('send rejected')
+      const helper = w.d.orch as unknown as { continuedPermissionMode(runId: string, threadId: string): string | undefined }
+      expect(helper.continuedPermissionMode(c.runId, w.other.id)).toBe('ask')
+    })
+
+    it('a provider continuation with no earlier run that bound a turn takes the strictest mode', async () => {
+      const w = asks(async () => 'ok')
+      await w.attach()
+      const refused = await w.d.engine.dispatch({ kind: 'send', threadId: w.other.id, clientRequestId: 'refused-only', source: 'gui' })
+      if (refused.status !== 'accepted') throw new Error('send rejected')
+      w.d.engine.markTerminal(refused.runId, 'cancelled', { error: 'cancelled_before_start' })
+      const c = await w.d.engine.dispatch({ kind: 'send', threadId: w.other.id, clientRequestId: 'provider-only', source: 'provider-continuation' })
+      if (c.status !== 'accepted') throw new Error('send rejected')
+      const helper = w.d.orch as unknown as { continuedPermissionMode(runId: string, threadId: string): string | undefined }
+      expect(helper.continuedPermissionMode(c.runId, w.other.id)).toBe('ask')
+    })
+
     it('a recipient that continues a subagent it already had cannot widen the sender\'s mode: the follow-up runs `ask`', async () => {
       const seen: Record<string, unknown> = {}
       const w = asks(async (input, mcp, d) => {

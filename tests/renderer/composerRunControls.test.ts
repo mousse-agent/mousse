@@ -447,9 +447,10 @@ describe('composer model picker', () => {
     expect(document.activeElement).toBe(permissionButton())
   })
 
-  it('tints only Full access, and names a limit in the tooltip', () => {
+  it('shows Full access as plainly as every other mode, and names a limit in the tooltip', () => {
     render({ mode: 'full', open: false })
-    expect(permissionButton().classList.contains('is-full')).toBe(true)
+    expect(permissionButton().getAttribute('title')).toBe('Permissions: Full access')
+    expect(permissionButton().classList.contains('is-full')).toBe(false)
     act(() => root.unmount())
     root = createRoot(host)
     render({ mode: 'accept_edits', ceiling: 'accept_edits', open: false })
@@ -474,8 +475,8 @@ describe('composer model picker', () => {
     expect(selected.map(modeName)).toEqual(['Ask before acting'])
     expect(selected[0]!.classList.contains('selected')).toBe(true)
     expect(modes().map((mode) => Boolean(mode.querySelector('.composer-permission-mode-check svg')))).toEqual([true, false, false, false])
-    // Only Full access carries the warning tint.
-    expect(modes().map((mode) => mode.classList.contains('is-full'))).toEqual([false, false, false, true])
+    // No mode carries a tint of its own.
+    expect(modes().map((mode) => mode.classList.contains('is-full'))).toEqual([false, false, false, false])
     expect(permissionMenu()!.querySelector('.composer-mode-menu-heading')).toBeNull()
     act(() => modes()[3]!.click())
     expect(onPermission).toHaveBeenCalledWith('full')

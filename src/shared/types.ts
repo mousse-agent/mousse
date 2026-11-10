@@ -525,6 +525,18 @@ export interface OrchestratorSendRequest {
    * the thread's lease; a thread on another branch by then refuses the message (`conversation_branch_changed`).
    */
   conversationBranchId?: string
+  /**
+   * What the sender showed for the thread: the turn runs only on these (the mode with the device limit applied), and the
+   * daemon refuses the send (`thread_settings_changed`, with the current values) when the thread runs anything else.
+   */
+  expect?: SendExpectation
+}
+
+/** The model, permission mode and (when known) settings revision a send is bound to (`OrchestratorSendRequest.expect`). */
+export interface SendExpectation {
+  model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
+  permissionMode: PermissionMode
+  settingsRevision?: number
 }
 
 export type OrchestratorSendInput = string | OrchestratorSendRequest
@@ -1193,6 +1205,17 @@ export interface PtyCreateResult {
   ptyId: string
 }
 
+/**
+ * What a new thread in a project starts with: the model, permission mode and checkout (new worktree or the
+ * project's folder) last picked from a window in one of the project's threads. A field never picked follows the
+ * profile's default (the last model used, the default permission mode, a new worktree).
+ */
+export interface NewThreadChoice {
+  model?: ModelOverride
+  permissionMode?: PermissionMode
+  worktreeEnabled?: boolean
+}
+
 export interface Project {
   id: string
   name: string
@@ -1224,6 +1247,8 @@ export interface Project {
   iconDetectedAt?: string
   /** The version of the detection rules that looked; a result of older rules is looked for again at once. */
   iconDetector?: number
+  /** What a new thread here starts with, as last picked in one of its threads; absent until a pick. */
+  newThread?: NewThreadChoice
 }
 
 /**
@@ -1361,6 +1386,11 @@ export interface Thread {
   modelOverride?: ModelOverride
   /** How much the agent may do without asking; absent means the profile default. */
   permissionMode?: PermissionMode
+  /**
+   * Raised by one on every write of `modelOverride` or `permissionMode`, whatever made it; absent is 0. A caller that
+   * read the thread sends it as `ifRevision`, and the change applies only while it is still current.
+   */
+  settingsRevision?: number
   /**
    * Whether this thread works in its own git worktree. `false` runs it on the project's
    * folder. Unset means no choice was recorded: the composer shows the "Start new threads in a

@@ -1025,10 +1025,10 @@ function assertPermissionsPatch(value: unknown): void {
 function assertRunsPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.runs')
   for (const key of Object.keys(patch)) {
-    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'worktreeByDefault' && key !== 'privateThreadExpiry') throw new Error(`partial.runs.${key} is not allowed`)
+    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry') throw new Error(`partial.runs.${key} is not allowed`)
   }
-  if (patch.worktreeByDefault !== undefined && typeof patch.worktreeByDefault !== 'boolean')
-    throw new Error('partial.runs.worktreeByDefault must be a boolean')
+  if (patch.newThreadWorktree !== undefined && typeof patch.newThreadWorktree !== 'boolean')
+    throw new Error('partial.runs.newThreadWorktree must be a boolean')
   if (patch.privateThreadExpiry !== undefined && patch.privateThreadExpiry !== 'never' && !isExpiryPreset(patch.privateThreadExpiry))
     throw new Error('partial.runs.privateThreadExpiry must be never, 1h, 24h, 7d or 30d')
   if (patch.resumeAfterUsageLimit !== undefined && typeof patch.resumeAfterUsageLimit !== 'boolean')

@@ -2,7 +2,7 @@ import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/setti
 import { EXPIRY_PRESETS } from '../../../shared/threadExpiry'
 import { Pause } from '../../lib/icons'
 import { Select } from '../ui/Select'
-import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { SettingsGroup, SettingsRow } from './SettingsRow'
 
 /** How many automatic resumes in a row a person can choose. A value saved by hand outside these stays listed. */
 export const USAGE_LIMIT_CAP_CHOICES = [1, 3, 5] as const
@@ -19,8 +19,8 @@ function capLabel(cap: number): string {
 }
 
 /**
- * Settings → General → Runs: where new threads start, and whether a run paused by a usage limit continues by
- * itself, and how often in a row. Resuming is one select: Off, or how many times in a row. Off keeps the
+ * Settings → General → Runs: whether a run paused by a usage limit continues by itself, and how often in a row,
+ * and when new private threads delete themselves. Resuming is one select: Off, or how many times in a row. Off keeps the
  * saved count, so turning it back on offers the same one.
  */
 export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['runs']; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
@@ -31,18 +31,6 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
     : 'A run paused by a usage limit waits until you press Try now.'
   return (
     <SettingsGroup title="Runs" icon={Pause}>
-      <SettingsRow
-        title="Start new threads in a worktree"
-        anchor="general-worktree-default"
-        description={<span title="Each new thread in a project gets its own Git worktree, so its changes stay apart from the project folder until you publish them. A new thread can still change this from the composer before its first message.">New threads in a project work in their own worktree.</span>}
-        control={
-          <Switch
-            label="Start new threads in a worktree"
-            checked={runs.worktreeByDefault}
-            onChange={(worktreeByDefault) => void onUpdate({ runs: { ...runs, worktreeByDefault } })}
-          />
-        }
-      />
       <SettingsRow
         title="Resume after usage limits reset"
         anchor="general-resume"

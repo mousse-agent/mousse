@@ -395,7 +395,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const approvalThreads = useThreadsAwaitingApproval()
 
   const upsertThread = useAppStore((s) => s.upsertThread)
-  const worktreeByDefault = useAppStore((s) => s.worktreeByDefault)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   // The project the user last opened or closed. Only that group animates; one revealed for the thread
@@ -683,7 +682,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const openProject = () => runWithToast('add the project', async () => {
     const project = await window.mousse.projects.open()
     if (!project) return
-    const thread = await window.mousse.threads.create(undefined, project.id)
+    const thread = await window.mousse.threads.create(undefined, project.id, { rememberedChoices: true })
     // Keep the project relationship available synchronously. The daemon also
     // broadcasts the full list, but that event can arrive after the user sends
     // the first message from the newly selected composer.
@@ -1196,7 +1195,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
     const isGeneratingTitle = pendingTitleIds.has(thread.id)
     const statusNode = renderThreadStatus(thread.id)
-    const worktree = worktreeMark(thread, worktreeByDefault)
+    const worktree = worktreeMark(thread, projects)
     const showTrailing = Boolean(statusNode || worktree || thread.node)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined

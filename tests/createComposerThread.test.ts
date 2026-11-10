@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../src/shared/types'
-import { createComposerThread, prepareComposerThread } from '../src/renderer/lib/createComposerThread'
+import { composerCreatesThread, createComposerThread, prepareComposerThread } from '../src/renderer/lib/createComposerThread'
 
 describe('blank composer thread creation', () => {
   const thread = { id: 'created-thread' } as Thread
@@ -196,6 +196,16 @@ describe('blank composer thread on another computer', () => {
     expect(back.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: false })
   })
 
+  it('makes a thread here with the shown model and mode, and leaves them to be set afterwards on another computer', async () => {
+    const shown = { model: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }, permissionMode: 'ask' as const }
+    const here = setup(undefined, { projectId: 'project-a', worktreeEnabled: true })
+    await prepareComposerThread({ ...here, shown })
+    expect(here.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true, ...shown })
+    const there = setup(undefined)
+    await prepareComposerThread({ ...there, shown })
+    expect(there.create).toHaveBeenCalledWith(remoteProject, { worktreeEnabled: true, node })
+  })
+
   it('reuses an empty chat that is already on the picked computer and in its project', async () => {
     const deps = setup({ id: `${node}:draft`, node, projectId: remoteProject, worktreeEnabled: true } as Thread)
     expect(await prepareComposerThread(deps)).toBe(`${node}:draft`)
@@ -267,5 +277,19 @@ describe('a new worktree from another branch', () => {
     expect(create).toHaveBeenLastCalledWith('p1', { worktreeEnabled: false })
     await prepareComposerThread({ ...deps(create), workspace: { projectId: 'p1', worktreeEnabled: true, node: 'nod_mac' as never, baseBranch: 'feat/x' } })
     expect(create).toHaveBeenLastCalledWith('p1', { worktreeEnabled: true, node: 'nod_mac' })
+  })
+})
+
+describe('whether a send makes a new thread', () => {
+  const empty = { projectId: 'p' }
+  it('reuses the empty thread only where the chat runs, and never for a worktree from another branch', () => {
+    expect(composerCreatesThread(empty, { projectId: 'p', worktreeEnabled: true })).toBe(false)
+    expect(composerCreatesThread(undefined, { projectId: 'p' })).toBe(true)
+    expect(composerCreatesThread(empty, { projectId: 'q' })).toBe(true)
+    expect(composerCreatesThread(empty, { projectId: 'p', localOnly: true })).toBe(true)
+    // Another base branch: only a new thread can carry it (the composer shows that thread's choices).
+    expect(composerCreatesThread(empty, { projectId: 'p', worktreeEnabled: true, baseBranch: 'feature' })).toBe(true)
+    // A base branch counts only for a new worktree on this computer.
+    expect(composerCreatesThread(empty, { projectId: 'p', worktreeEnabled: false, baseBranch: 'feature' })).toBe(false)
   })
 })
