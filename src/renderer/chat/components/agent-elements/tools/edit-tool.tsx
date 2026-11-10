@@ -1,4 +1,4 @@
-import React, { lazy, memo, Suspense, useContext } from "react";
+import React, { memo, Suspense, useContext } from "react";
 import type { FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
@@ -15,6 +15,7 @@ import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
 import { openFileInPanel } from "../../../../utils/chatLinks";
 import { openTurnInChanges } from "../../../../components/changes/openChanges";
 import { useAppStore } from "../../../../stores/appStore";
+import { lazyNamed } from "../../../../lib/lazyComponent";
 import { TurnIdContext } from "../turn-context";
 
 /** What one file's diff is drawn from. */
@@ -213,12 +214,12 @@ function fileFromRawCall(
 
 /**
  * One file's diff, drawn by the diff library in its own chunk: it loads on the first open row (or the idle
- * preload after startup), not with the app. Rendered only while its row is open, so a collapsed row costs no diff
+ * preload after startup), not with the app; if it fails to load, the row shows "Couldn't load. Retry" in its place.
+ * Rendered only while its row is open, so a collapsed row costs no diff
  * and no theme watcher.
  */
-const loadEditDiff = () => import("./edit-diff");
-const EditDiff = lazy(async () => ({ default: (await loadEditDiff()).EditDiff }));
-export const preloadEditDiff = (): Promise<unknown> => loadEditDiff();
+const EditDiff = lazyNamed(() => import("./edit-diff"), "EditDiff");
+export const preloadEditDiff = (): Promise<unknown> => EditDiff.preload();
 
 function Stat({ added, removed }: { added: number; removed: number }) {
   if (added === 0 && removed === 0) return null;

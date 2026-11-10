@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   existsSync,
@@ -228,6 +229,53 @@ export async function productBuild(options: { nativeReader?: boolean } = {}): Pr
     browserWorker,
     buildEntry: (source, relativeOutput) => productEntry(root, name, source, relativeOutput)
   }
+}
+
+/**
+ * The app's production `electron-vite build` output (`main/`, `preload/`, `renderer/`) for the current source tree,
+ * built once into the shared cache. Like `productBuild`, nothing reads or writes the checkout's `out` directory, so
+ * a checkout that was never built, or was built from older sources, cannot decide the result.
+ */
+export async function appBuild(): Promise<string> {
+  const root = cacheRoot()
+  const key = sha256(JSON.stringify({
+    ...runtimeContext(),
+    sources: sourceTreeDigest(),
+    viteConfig: fileDigest(join(projectRoot, 'electron.vite.config.ts'))
+  })).slice(0, 20)
+  const name = `app-${key}`
+  const directory = join(root, name)
+  if (!existsSync(join(directory, 'manifest.json'))) {
+    await withLock(join(root, `${name}.lock`), async () => {
+      if (existsSync(join(directory, 'manifest.json'))) return
+      const temporary = join(root, `${name}.building-${process.pid}`)
+      rmSync(temporary, { recursive: true, force: true })
+      try {
+        // A child process: Vite reads NODE_ENV, which the test runner sets to `test`, to choose a production build.
+        const env: NodeJS.ProcessEnv = { ...process.env }
+        delete env.NODE_ENV
+        delete env.ELECTRON_RUN_AS_NODE
+        const result = await new Promise<{ code: number | null; output: string }>((done, fail) => {
+          const child = spawn(process.execPath, [join(projectRoot, 'node_modules', 'electron-vite', 'bin', 'electron-vite.js'),
+            'build', '--outDir', temporary, '--logLevel', 'warn'], { cwd: projectRoot, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+          let output = ''
+          const keep = (bytes: Buffer) => { output = (output + bytes.toString()).slice(-8000) }
+          child.stdout.on('data', keep)
+          child.stderr.on('data', keep)
+          child.once('error', fail)
+          child.once('exit', (code) => done({ code, output }))
+        })
+        if (result.code !== 0) throw new Error(`electron-vite build failed (${result.code}):\n${result.output}`)
+        writeFileSync(join(temporary, 'manifest.json'), JSON.stringify({ key, builtAt: new Date().toISOString() }))
+        publish(temporary, directory)
+      } catch (error) {
+        rmSync(temporary, { recursive: true, force: true })
+        throw error
+      }
+    })
+    pruneStale(root, name, 'app-')
+  }
+  return directory
 }
 
 /**

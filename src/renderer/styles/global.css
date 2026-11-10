@@ -488,6 +488,26 @@ html.platform-darwin .overlay-titlebar {
   overflow: hidden;
 }
 
+/* A split-out page or panel whose chunk did not load (lib/lazyComponent.tsx). */
+.lazy-load-failed {
+  padding: 12px 14px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.lazy-load-failed-retry {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.lazy-load-failed-retry:hover {
+  text-decoration: underline;
+}
+
 .overlay-page[hidden] {
   display: none !important;
 }

@@ -26,6 +26,8 @@ vi.mock('../../src/renderer/components/changes/ChangesPanel', () => ({ ChangesPa
 vi.mock('../../src/renderer/components/PullRequestPanel', () => ({ PullRequestPanel: () => createElement('div', { className: 'pr-stub' }) }))
 
 const { MainViewPanel } = await import('../../src/renderer/components/MainViewPanel')
+// The Files tab is its own chunk; load it first, as the idle warm-up after the first paint does.
+await (await import('../../src/renderer/lib/lazySurfaces')).FilesPanel.preload()
 
 const HOME_ROWS = 557
 const homeEntries: FileEntry[] = Array.from({ length: HOME_ROWS }, (_, index) => {

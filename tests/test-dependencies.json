@@ -40,6 +40,7 @@
         "tests/promptMarkers.test.ts",
         "tests/net/chats/gui-*.test.ts",
         "tests/platformMainBundleImports.test.ts",
+        "tests/rendererEntryBudget.test.ts",
         "tests/*Css*.test.ts",
         "tests/*css*.test.ts",
         "tests/harness/boundary.test.ts",
