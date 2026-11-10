@@ -43,6 +43,13 @@ export class SkillsRegistry {
   private discoveryCache = new Map<string, { snapshot: SkillsRegistrySnapshot; fetchedAt: number }>()
   /** Shared (user-wide) Skills folders, scanned once for every project. */
   private sharedScans = new Map<string, ScannedSource>()
+  /**
+   * Shared scans still running. The first turns of threads started together each discover at once,
+   * before any scan has finished; they wait for the same one instead of each walking the folders.
+   */
+  private sharedScanning = new Map<string, Promise<ScannedSource>>()
+  /** Changes on invalidation, so a scan that started before it is not kept. */
+  private sharedGeneration = 0
   private static readonly DISCOVERY_TTL_MS = 30_000
   static readonly MAX_DISCOVERY_ENTRIES = 16
   private readonly context: IntegrationRuntimeContext
@@ -54,6 +61,8 @@ export class SkillsRegistry {
   invalidateDiscoveryCache(): void {
     this.discoveryCache.clear()
     this.sharedScans.clear()
+    this.sharedScanning.clear()
+    this.sharedGeneration++
   }
 
   async refresh(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
@@ -164,9 +173,18 @@ export class SkillsRegistry {
     const key = `${source.source}:${source.profileId ?? ''}:${source.path}`
     const cached = this.sharedScans.get(key)
     if (cached && !refresh && Date.now() - cached.fetchedAt < SkillsRegistry.DISCOVERY_TTL_MS) return cached
-    const scanned = await this.scanSource(source)
-    this.sharedScans.set(key, scanned)
-    return scanned
+    const running = refresh ? undefined : this.sharedScanning.get(key)
+    if (running) return running
+    const generation = this.sharedGeneration
+    const scan = this.scanSource(source).then((scanned) => {
+      if (generation === this.sharedGeneration) this.sharedScans.set(key, scanned)
+      return scanned
+    })
+    this.sharedScanning.set(key, scan)
+    void scan.finally(() => {
+      if (this.sharedScanning.get(key) === scan) this.sharedScanning.delete(key)
+    }).catch(() => {})
+    return scan
   }
 
   private async scanSource(source: SkillSourceDescriptor): Promise<ScannedSource> {
@@ -174,8 +192,8 @@ export class SkillsRegistry {
     const diagnostics: IntegrationDiagnostic[] = []
     try {
       const skillFiles = await findSkillFiles(source.path)
-      for (const skillPath of skillFiles) {
-        const parsed = await this.readSkillDescriptor(source, skillPath)
+      // Read together, up to `SKILL_SCAN_CONCURRENCY` at a time. Results keep the files' order.
+      for (const parsed of await Promise.all(skillFiles.map((skillPath) => scanSlot(() => this.readSkillDescriptor(source, skillPath))))) {
         if (parsed.skill) skills.push(parsed.skill)
         diagnostics.push(...parsed.diagnostics)
       }
@@ -369,9 +387,38 @@ export class SkillsRegistry {
   }
 }
 
+/**
+ * Folder listings and SKILL.md reads that may be open at once, for every scan in the process
+ * together. The shared Skills folders hold thousands of entries; reading them all at once would
+ * run out of file handles (256 by default on macOS).
+ */
+export const SKILL_SCAN_CONCURRENCY = 16
+
+/** Runs `task` once fewer than `max` tasks it was given are running; the others wait in call order. */
+function concurrencyLimit(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const waiting: Array<() => void> = []
+  return async (task) => {
+    if (active < max) active++
+    else await new Promise<void>((resolve) => waiting.push(resolve))
+    try {
+      return await task()
+    } finally {
+      // A waiting task takes the slot over; otherwise it is free again.
+      const next = waiting.shift()
+      if (next) next()
+      else active--
+    }
+  }
+}
+
+const scanSlot = concurrencyLimit(SKILL_SCAN_CONCURRENCY)
+
 async function findSkillFiles(rootPath: string): Promise<string[]> {
-  const entries = await readdir(rootPath, { withFileTypes: true })
-  const files: string[] = []
+  // A slot is held for the listing only, never while subfolders are read, so the recursion cannot wait on itself.
+  const entries = await scanSlot(() => readdir(rootPath, { withFileTypes: true }))
+  // Subfolders are read together, up to `SKILL_SCAN_CONCURRENCY` at a time; results keep the entries' order.
+  const found: Array<string[] | Promise<string[]>> = []
 
   for (const entry of entries) {
     if (entry.isSymbolicLink() || entry.name === '.' || entry.name === '..') continue
@@ -382,15 +429,15 @@ async function findSkillFiles(rootPath: string): Promise<string[]> {
       continue
     }
     if (entry.isFile() && entry.name === 'SKILL.md') {
-      files.push(entryPath)
+      found.push([entryPath])
       continue
     }
     if (entry.isDirectory()) {
-      files.push(...(await findSkillFiles(entryPath)))
+      found.push(findSkillFiles(entryPath))
     }
   }
 
-  return files
+  return (await Promise.all(found)).flat()
 }
 
 function compatibilityValue(
