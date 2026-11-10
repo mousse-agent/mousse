@@ -71,7 +71,9 @@ const NET_ERROR_WORDS: Record<string, string> = {
   route_unreachable: 'none of your other devices can be reached right now',
   peer_offline: 'a device is offline',
   keystore_locked: 'the network keys are locked',
-  deadline_exceeded: 'a device did not answer in time'
+  deadline_exceeded: 'a device did not answer in time',
+  // This computer's device pass lapsed; the computer that manages your devices renews it once they meet.
+  bad_delegation: 'waiting for your other computer to reconnect this one'
 }
 
 /** A Net error code in words a person can read; a code this build does not know has its underscores taken out. */
@@ -153,6 +155,34 @@ export function deviceLine(device: Device, now: number): string {
   if (device.policy && !device.policy.blocked && isComputer(device) && worksOnThreads(device) && device.policy.editor)
     parts.push('editor connections on')
   if (device.policy?.blocked) parts.push('blocked on this computer')
+  return parts.join(' · ')
+}
+
+/**
+ * This computer's device pass lapsed (it was away too long): its own connections fail with
+ * `bad_delegation`, or another computer refuses it for that. It comes back by itself once the
+ * computer that manages your devices renews it, so the page says "Reconnecting", not an error.
+ */
+export function passLapsed(status?: Pick<NetStatus, 'error' | 'peers'>): boolean {
+  if (!status) return false
+  return status.error === 'bad_delegation' || (status.peers ?? []).some((peer) => peer.error === 'bad_delegation')
+}
+
+/**
+ * The short line under a device's name in the device list: online or last seen, then only what
+ * needs attention. Signed out of Mousse ID, devices reach each other only nearby, so it says that.
+ */
+export function deviceListLine(device: Device, now: number, { signedOut = false }: { signedOut?: boolean } = {}): string {
+  const online = device.state === 'open'
+  const parts = [online ? (signedOut ? 'Nearby' : 'Online') : device.state === 'connecting' ? 'Connecting' : signedOut ? 'Not nearby' : 'Offline']
+  if (!online) {
+    const seen = lastSeenLabel(device.lastSeenAt, now)
+    if (seen) parts.push(seen)
+  }
+  if (isIncompatible(device)) parts.push('incompatible version')
+  else if (device.olderThanThis) parts.push('older version')
+  if (device.policy?.blocked) parts.push('blocked on this computer')
+  if (device.sshOffer) parts.push('offers an SSH route')
   return parts.join(' · ')
 }
 

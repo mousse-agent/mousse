@@ -1,9 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { AlertTriangle, Bot, CircleCheck, Download, Gauge, Laptop, Monitor, MonitorSmartphone, MoreHorizontal, Pencil, Plus, RefreshCw, ShieldCheck, ShieldOff, Smartphone, Trash2, Undo2, type LucideIcon } from '../lib/icons'
+import { AlertTriangle, ChevronDown, ChevronRight, CircleCheck, Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Server, Smartphone, type LucideIcon } from '../lib/icons'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
-import { AddDeviceChooser, InviteComputerDialog, RouteBack, addDeviceRoutes, type AddDeviceRouteId, type Invitation } from './devices/AddDeviceDialog'
+import { InviteComputerDialog, addDeviceRoutes, type AddDeviceRouteId, type Invitation } from './devices/AddDeviceDialog'
 import { MousseIdAccount } from './MousseIdAccount'
+import { AddPhoneDialog, EnrollmentRequestRow, useEnrollmentRequests } from './MousseIdSection'
+import { RowMenu } from './integrations/RowMenu'
+import { phonesBlocked } from '../lib/plusEnrollment'
 import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
 import { EditorSshSettings } from './devices/EditorSshSettings'
 import { RenameEndpointDialog, UndoSetupDialog, UpdateRemoteDialog } from './devices/SshRecordDialogs'
@@ -16,7 +19,8 @@ import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
 import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { describePermissionMode } from '../../shared/permissionMode'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
@@ -66,46 +70,18 @@ function addonLine(manifest: TransportManifest, live?: Transport): string {
   return step.command ? `${step.title}: ${step.command}` : step.title
 }
 
-interface MenuItem { label: string; icon: LucideIcon; danger?: boolean; onSelect: () => void }
+/** What a device is, in the list: its glyph and one word. A machine set up over SSH says so. */
+function deviceKind(device: Device, record?: SshRecordView): { icon: LucideIcon; label: string } {
+  if (device.kind === 'phone') return { icon: Smartphone, label: 'Phone' }
+  if (record) return { icon: Server, label: 'Remote machine · SSH' }
+  if (device.kind === 'unknown') return { icon: MonitorSmartphone, label: 'Unknown device' }
+  return { icon: Laptop, label: 'Computer' }
+}
 
-/** Overflow menu on a device row. */
-function DeviceMenu({ name, disabled, items }: { name: string; disabled: boolean; items: MenuItem[] }) {
-  const [open, setOpen] = useState(false)
-  const root = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const down = (event: MouseEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
-    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
-    document.addEventListener('mousedown', down)
-    document.addEventListener('keydown', key)
-    return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key) }
-  }, [open])
-  return (
-    <div ref={root} className="devices-menu">
-      <button
-        type="button"
-        className="settings-icon-btn devices-menu-btn"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={`More actions for ${name}`}
-        title="More actions"
-        disabled={disabled}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <MoreHorizontal size={14} />
-      </button>
-      {open && (
-        <div className="devices-menu-panel" role="menu">
-          {items.map((item) => (
-            <button key={item.label} type="button" role="menuitem" className={item.danger ? 'devices-menu-item danger' : 'devices-menu-item'} onClick={() => { setOpen(false); item.onSelect() }}>
-              <item.icon size={16} aria-hidden="true" />
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
+/** "Agigo", "Agigo or Agiro", "Agigo, Agiro or Agira". */
+function orList(names: string[]): string {
+  if (names.length < 2) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}`
 }
 
 export function NetDevicesSection() {
@@ -116,11 +92,13 @@ export function NetDevicesSection() {
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
   // Add device: the choice of routes, then the invitation or join form.
-  const [addStep, setAddStep] = useState<'choose' | 'invite' | 'join'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
+  const [addStep, setAddStep] = useState<'invite' | 'join' | 'phone'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
   const [records, setRecords] = useState<NetAddonRecords>({}), [saved, setSaved] = useState<Record<string, unknown>>({}), [notice, setNotice] = useState(''), [servePort, setServePort] = useState('47890'), [serveDialog, setServeDialog] = useState<{ wasOn: boolean }>()
   const [sshRecords, setSshRecords] = useState<SshRecordView[]>([]), [sshSetup, setSshSetup] = useState<{ setupId?: string }>(), [approving, setApproving] = useState<Device & { sshOffer: { endpoint: string } }>()
   const [recordDialog, setRecordDialog] = useState<{ kind: 'undo' | 'rename' | 'update'; record: SshRecordView; name: string }>()
   const [limits, setLimits] = useState<Device>()
+  // The one device whose detail (permissions, activity, Block, Remove) is open.
+  const [openNode, setOpenNode] = useState<string>()
   // A grant that opens this computer's threads to another is confirmed with what it opens.
   const [granting, setGranting] = useState<{ device: Device; kind: 'grant' | 'computer' }>()
   const nameEdited = useRef(false)
@@ -164,7 +142,8 @@ export function NetDevicesSection() {
     catch (cause) {
       if (alive.current) {
         const message = String((cause as Error)?.message ?? cause)
-        setError(message)
+        // A lapsed device pass is told by the Reconnecting note, in plain words.
+        setError((cause as { code?: unknown })?.code === 'bad_delegation' ? '' : message)
         if (method === 'net.init' && (cause as { code?: unknown })?.code === 'keystore_locked') { setKeychainRefusal(message); await reload().catch(() => undefined) }
         if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) }
       }
@@ -225,7 +204,7 @@ export function NetDevicesSection() {
   // A device asked for from elsewhere in the app (an editor that needs SSH to it) is brought into view and marked for a moment.
   const [picked, setPicked] = useState<string>()
   useEffect(() => {
-    const pick = () => { const node = takePendingDevice(); if (node) setPicked(node) }
+    const pick = () => { const node = takePendingDevice(); if (node) { setPicked(node); setOpenNode(node) } }
     pick()
     window.addEventListener('mousse:settings-device', pick)
     return () => window.removeEventListener('mousse:settings-device', pick)
@@ -263,10 +242,9 @@ export function NetDevicesSection() {
 
   // "Add device" offers every route; one this device cannot take yet says what it needs first.
   const inviteReady = unlocked && !!status?.protected
-  const routes = addDeviceRoutes({ hasIdentity: !!self, unlocked, authority, protectedKeys: !!status?.protected })
   const closeAdd = () => { setAddStep(undefined); setInvitation(undefined); setJoinText(''); setPassphrase(''); setError('') }
-  const backToRoutes = () => { setInvitation(undefined); setJoinText(''); setPassphrase(''); setError(''); setAddStep('choose') }
   const chooseRoute = (route: AddDeviceRouteId) => {
+    setError('')
     if (route === 'ssh') { closeAdd(); setSshSetup({}) }
     else setAddStep(route)
   }
@@ -281,131 +259,313 @@ export function NetDevicesSection() {
     void action('bridge.join', { invite: joinText.trim(), name: name.trim(), passphrase }, () => { setJoinText(''); setAddStep(undefined) })
   }
 
-  // Mousse ID sign-in sits above This device; its Set up and Unlock bring the control it needs into view.
+  // Mousse ID sign-in sits at the top; its Set up and Unlock bring the control it needs into view, opening Advanced when it is there.
   const mousseId = useMousseIdAvailable()
+  const plus = useMousseIdStore((s) => s.plus)
   const focusSetUp = () => {
     const target = locked ? `${id}-passphrase` : !self ? `${id}-name` : !status?.enabled ? `${id}-networking` : `${id}-passphrase`
     const element = document.getElementById(target)
+    const details = element?.closest('details')
+    if (details) details.open = true
     element?.scrollIntoView({ block: 'center' })
     element?.focus()
   }
+
+  // This computer's device pass lapsed: it reads as Reconnecting, and comes back by itself.
+  const lapsed = passLapsed(status)
+  // Signed out of Mousse ID (in a build that has it): devices still sync with each other when nearby.
+  const signedOut = mousseId && !!status && !plus?.connected && !plus?.reconnecting && !lapsed
+  const phoneBlocked = phonesBlocked(status, plus)
+  const enrollment = useEnrollmentRequests(mousseId && !phoneBlocked, () => { reloadQuietly(); void useMousseIdStore.getState().refresh() })
+  const routes = addDeviceRoutes({ hasIdentity: !!self, unlocked, authority, protectedKeys: !!status?.protected, lapsed, ...(mousseId ? { phone: { blocked: phoneBlocked } } : {}) })
 
   const devicesDescription = !status ? undefined
     : !self ? (mousseId
       ? 'Sign in to Mousse ID above to join the computers signed in to it, or turn on networking to start a new set.'
       : 'Join devices you already use, or turn on networking to start a new set.')
       : !unlocked ? 'Unlock this device to see your other devices.'
-        : !authority ? 'Add devices from the computer that manages your devices.'
-          : !inviteReady ? 'Protect network keys to add devices.'
-            : undefined
+        : signedOut ? 'Nearby devices still sync with this one. The rest catch up when they’re back on the same network, or after you sign in.'
+          : undefined
+  // Setting this computer up comes first, so it stays on the page; once set up, it moves under Advanced.
+  const setupNeeded = !status || !self || !status.enabled || locked || needsPassphrase || !status.protected || !!status.restartRequired
+  const otherComputers = others.filter((device) => device.kind === 'computer').map((device) => device.name)
+  const checkNow = () => { reloadQuietly(); void useMousseIdStore.getState().refresh() }
+  const reconnectingNote = lapsed && (
+    <SettingsRow
+      indent
+      title="This computer’s pass to your devices ran out while it was away"
+      description={`Open Mousse on ${otherComputers.length ? orList(otherComputers) : 'your other computer'} and it is brought back in by itself, usually within a minute. Nothing to do here.`}
+      control={<button type="button" className="settings-btn" disabled={busy} onClick={checkNow}><RefreshCw size={14} />Check now</button>}
+    />
+  )
 
   const showAddons = !!status?.enabled && !!self && unlocked
   // Setups over SSH that stopped before the machine joined; they have no device row yet.
   const unfinished = sshRecords.filter((record) => record.phase !== 'done' && !record.node)
-  const deviceMenu = (device: Device): MenuItem[] => {
+  const now = Date.now()
+  const toggleOpen = (node: string) => setOpenNode((current) => (current === node ? undefined : node))
+
+  // This computer's own rows: naming it and turning networking on, then its keys.
+  const networkingRow = (
+    <SettingsRow
+      title="Networking"
+      anchor="devices-networking"
+      description={selfDevice?.name ? `${selfDevice.name} · ${networkingLine(status)}` : networkingLine(status)}
+      control={<Switch id={`${id}-networking`} checked={!!status?.enabled} label="Networking" disabled={busy || networkingLocked} onChange={toggleNetworking} />}
+    />
+  )
+  const thisComputerRows = <>
+    {!self && (
+      <SettingsRow
+        title="Device name"
+        anchor="devices-name"
+        htmlFor={`${id}-name`}
+        control={<input id={`${id}-name`} className="settings-input" value={name} maxLength={120} disabled={busy || !!status?.restartRequired} onChange={(event) => { nameEdited.current = true; setName(event.target.value) }} />}
+      />
+    )}
+    {needsPassphrase && (
+      <SettingsRow
+        title="Passphrase"
+        anchor="devices-passphrase"
+        htmlFor={`${id}-new-passphrase`}
+        description="Protects network keys instead of the keychain. You enter it after each restart."
+        control={
+          <form className="devices-inline-form" onSubmit={submitNewPassphrase}>
+            <input id={`${id}-new-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy || !!status?.restartRequired} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
+            <button type="submit" className="settings-btn" disabled={busy || networkingLocked}>Turn on</button>
+          </form>
+        }
+      />
+    )}
+    {networkingRow}
+    {status?.restartRequired && status.error === 'outcome_uncertain' && (
+      <p role="status" className="settings-muted devices-note">Some work is still draining; its original records are kept.</p>
+    )}
+    {/* Unlocking and protecting keys are next steps; keys already protected are only noted. */}
+    {self && (!status.protected || locked) && (
+      <SettingsRow
+        title={locked ? 'Unlock' : 'Passphrase'}
+        anchor="devices-passphrase"
+        htmlFor={`${id}-passphrase`}
+        description={locked ? 'Enter the passphrase for this device’s network keys' : 'Protect this device’s network keys with a passphrase'}
+        control={
+          <form className="devices-inline-form" onSubmit={submitPassphrase}>
+            <input id={`${id}-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy || !!status.restartRequired} onChange={(event) => setPassphrase(event.target.value)} autoComplete={locked ? 'current-password' : 'new-password'} />
+            <button type="submit" className="settings-btn" disabled={busy || !passphrase || !!status.restartRequired}>{locked ? 'Unlock' : 'Protect'}</button>
+          </form>
+        }
+      />
+    )}
+    {self && status.protected && !locked && <SettingsRow anchor="devices-passphrase" title="Network keys" description="Protected on this device" />}
+  </>
+
+  /** One device in the list: kind, name, and online or last seen. Its chevron opens its detail. */
+  const deviceRow = (device: Device) => {
     const record = sshRecordFor(device, sshRecords)
-    const open = (kind: 'undo' | 'rename' | 'update') => () => { if (record) setRecordDialog({ kind, record, name: device.name }) }
+    const kind = deviceKind(device, record)
+    const open = openNode === device.node
+    const selfLine = lapsed ? 'Reconnecting · waiting for your other computer to reconnect this one'
+      : !status?.enabled ? 'Networking off'
+        : signedOut ? 'Signed out · syncs with nearby devices' : 'Online'
+    const line = device.self ? [selfLine, device.version].filter(Boolean).join(' · ') : deviceListLine(device, now, { signedOut })
+    const classes = [picked === device.node ? 'devices-row-picked' : '', open ? 'devices-row-open' : ''].filter(Boolean).join(' ')
+    return (
+      <SettingsRow
+        key={device.node}
+        data-device-node={device.node}
+        // Search's "Let other computers work here" lands on this computer's row, whose detail has the switch.
+        {...(device.self ? { anchor: 'devices-inbound' } : {})}
+        className={classes || undefined}
+        // Signed out, devices that are not nearby are quiet.
+        disabled={signedOut && !device.self && device.state !== 'open'}
+        leading={<kind.icon size={16} />}
+        title={device.name}
+        titleAction={device.self ? <span className="devices-kind">This computer</span> : undefined}
+        description={<span title={routeDetails(device) || undefined}>{kind.label} · {line}</span>}
+        control={
+          <button
+            type="button"
+            className="settings-icon-btn devices-row-toggle"
+            aria-expanded={open}
+            aria-label={`${open ? 'Hide' : 'Show'} details for ${device.name}`}
+            title={open ? 'Hide details' : 'Show details'}
+            onClick={() => toggleOpen(device.node)}
+          >
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        }
+      />
+    )
+  }
+
+  /** This computer's detail: whether it works on your other computers' threads, and whether they may work here. */
+  const selfDetail = (device: Device) => [
+    self && status?.enabled && unlocked && !authority && (
+      <SettingsRow
+        key="self-works"
+        indent
+        title="Works on threads"
+        description={worksOnThreads(device)
+          ? <span title="This computer can open and change threads on your other computers that share them.">On · can work on your other computers’ threads</span>
+          : <span title="This computer cannot work on threads on your other computers, which is why theirs are not listed. The computer that manages your devices can turn it on for this one.">Off · the computer that manages your devices can turn it on</span>}
+      />
+    ),
+    self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
+      // Its own switch, apart from Networking: the short title is for scanning, the switch keeps the permission's full name.
+      <SettingsRow
+        key="self-inbound"
+        indent
+        title="Let other computers work here"
+        description={workOnThreads
+          ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device'
+          : 'Off · no other computer can open or change this computer’s threads'}
+        control={<Switch checked={workOnThreads} label="Let my other computers work on this computer's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+      />
+    ),
+    <SettingsRow key="self-networking" indent title="Connection" description={networkingLine(status)} />
+  ]
+
+  /** Another device's detail: its connection, what it may do here, what it did, then Block and Remove. */
+  const deviceDetail = (device: Device) => {
+    const offer = device.sshOffer, record = sshRecordFor(device, sshRecords)
     const blocked = !!device.policy?.blocked
+    const limitsButton = device.policy && isComputer(device) && (
+      <button type="button" className="settings-btn" disabled={busy} onClick={() => setLimits(device)}>Limits…</button>
+    )
+    const grantable = authority && canWorkOnThreads(device)
+    const open = (kind: 'undo' | 'rename' | 'update') => () => { if (record) setRecordDialog({ kind, record, name: device.name }) }
     return [
-      // Limits live on this computer, so they need no authority. A daemon from before them sends no policy.
-      ...(device.policy ? [
-        blocked
-          ? { label: 'Unblock', icon: ShieldCheck, onSelect: () => void action('bridge.policy', { node: device.node, blocked: false }) }
-          : { label: 'Block on this computer', icon: ShieldOff, danger: true, onSelect: () => void action('bridge.policy', { node: device.node, blocked: true }) },
-        ...(isComputer(device) ? [{ label: 'Limits on this computer…', icon: Gauge, onSelect: () => setLimits(device) }] : [])
-      ] : []),
-      // Only the device that owns the identity can sign a grant, and only to a device it knows is a
-      // computer. One it never recorded a kind for is asked about first.
-      ...(authority && canWorkOnThreads(device) ? [{
-        label: worksOnThreads(device) ? 'Turn off Works on threads' : 'Turn on Works on threads',
-        icon: Bot,
-        onSelect: () => worksOnThreads(device)
-          ? void action('bridge.setCaps', { node: device.node, caps: device.caps.filter((cap) => cap !== WORKS_ON_THREADS) })
-          : setGranting({ device, kind: 'grant' })
-      }] : []),
-      ...(authority && device.kind === 'unknown' ? [
-        { label: 'This is a computer', icon: Laptop, onSelect: () => setGranting({ device, kind: 'computer' }) },
-        { label: 'This is a phone', icon: Smartphone, onSelect: () => void action('bridge.setKind', { node: device.node, kind: 'phone' }) }
-      ] : []),
-      ...(record ? [{ label: 'Undo setup…', icon: Undo2, onSelect: open('undo') }, { label: 'Rename SSH endpoint…', icon: Pencil, onSelect: open('rename') }] : []),
-      ...(record?.owner === 'managed' ? [{ label: 'Update…', icon: Download, onSelect: open('update') }] : []),
-      ...(authority ? [{ label: 'Revoke…', icon: Trash2, danger: true, onSelect: () => setRevoking(device) }] : [])
+      <SettingsRow
+        key="connection"
+        indent
+        title="Connection"
+        description={<span title={routeDetails(device) || undefined}>{deviceLine(device, now)}{offer ? ' · offers an SSH route' : ''}</span>}
+        control={offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
+      />,
+      isIncompatible(device) && (
+        <SettingsRow key="incompatible" indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
+      ),
+      device.olderThanThis && (
+        <SettingsRow
+          key="older"
+          indent
+          title={device.version ? `Older than this device (${device.version})` : 'Older than this device'}
+          description={device.version ? `This device runs ${selfDevice?.version ?? 'a newer version'}.` : `${device.name} is too old to report its version${selfDevice?.version ? `; this device runs ${selfDevice.version}` : ''}.`}
+          control={record?.owner === 'managed'
+            ? <button type="button" className="settings-btn" onClick={() => setRecordDialog({ kind: 'update', record, name: device.name })}>Update…</button>
+            : selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
+        />
+      ),
+      // Only the device that owns the identity can sign a grant, and only to a device it knows is a computer.
+      authority && device.kind === 'unknown' && (
+        <SettingsRow
+          key="kind"
+          indent
+          title="What is this device?"
+          description="It never told this computer whether it is a computer or a phone"
+          control={<>
+            <button type="button" className="settings-btn" disabled={busy} onClick={() => setGranting({ device, kind: 'computer' })}><Laptop size={14} />This is a computer</button>
+            <button type="button" className="settings-btn" disabled={busy} onClick={() => void action('bridge.setKind', { node: device.node, kind: 'phone' })}><Smartphone size={14} />This is a phone</button>
+          </>}
+        />
+      ),
+      (grantable || limitsButton) && (
+        <SettingsRow
+          key="works"
+          indent
+          title="Works on threads"
+          description={worksOnThreads(device)
+            ? `On · can open and change this computer’s threads${device.policy && !blocked ? `, up to ${describePermissionMode(device.policy.maxPermissionMode)}` : ''}`
+            : grantable ? 'Off · can’t open or change this computer’s threads' : 'Off · the computer that manages your devices can turn it on'}
+          control={<>
+            {limitsButton}
+            {grantable && (
+              <Switch
+                checked={worksOnThreads(device)}
+                label={`Works on threads for ${device.name}`}
+                disabled={busy}
+                onChange={(next) => next
+                  ? setGranting({ device, kind: 'grant' })
+                  : void action('bridge.setCaps', { node: device.node, caps: device.caps.filter((cap) => cap !== WORKS_ON_THREADS) })}
+              />
+            )}
+          </>}
+        />
+      ),
+      // Terminals and editor connections from it, side by side, with a waiting ask answered here too.
+      device.policy && isComputer(device) && worksOnThreads(device) && !blocked && (
+        <DeviceAccessRows key="access" device={device} ask={pendingEditorAsk({ asks: editorAsks }, device.node)} onChanged={reloadQuietly} />
+      ),
+      // What it did here. A phone has none of this: it keeps the phone API.
+      device.policy && isComputer(device) && <DeviceActivityRows key="activity" device={device} />,
+      record && (
+        <SettingsRow
+          key="ssh"
+          indent
+          title="Set up over SSH"
+          description={<code className="devices-code">{record.endpoint}</code>}
+          control={<>
+            {record.owner === 'managed' && !device.olderThanThis && <button type="button" className="settings-btn" onClick={open('update')}>Update…</button>}
+            <button type="button" className="settings-btn" onClick={open('rename')}>Rename endpoint…</button>
+            <button type="button" className="settings-btn" onClick={open('undo')}>Undo setup…</button>
+          </>}
+        />
+      ),
+      // Limits and Block live on this computer, so they need no authority. A daemon from before them sends no policy.
+      device.policy && (
+        <SettingsRow
+          key="block"
+          indent
+          title={blocked ? 'Blocked on this computer' : 'Block on this computer'}
+          description={blocked ? `Every call from ${device.name} is refused here` : `Refuse every call from ${device.name} here, at once`}
+          control={<button type="button" className={blocked ? 'settings-btn' : 'settings-btn devices-block-btn'} disabled={busy} onClick={() => void action('bridge.policy', { node: device.node, blocked: !blocked })}>{blocked ? 'Unblock' : 'Block'}</button>}
+        />
+      ),
+      authority && (
+        <SettingsRow
+          key="remove"
+          indent
+          title="Remove from my devices"
+          description={`${device.name} will no longer connect to your other devices`}
+          control={<button type="button" className="settings-btn danger" disabled={busy} onClick={() => setRevoking(device)}>Remove…</button>}
+        />
+      )
     ]
   }
 
+  const listed = [...(selfDevice ? [selfDevice] : []), ...others]
+  const addMenu = (
+    // Search's "Add a phone" lands on this menu, which has the phone among its routes.
+    <span data-settings-anchor="account-phones">
+      <RowMenu
+        label="Add device"
+        buttonClassName="settings-btn"
+        disabled={busy || !!status?.restartRequired}
+        trigger={<><Plus size={14} aria-hidden="true" />Add device</>}
+        items={routes.map((route) => ({
+          label: route.title,
+          detail: route.blocked ?? route.detail,
+          disabled: !!route.blocked,
+          action: `add-${route.id}`,
+          onSelect: () => chooseRoute(route.id)
+        }))}
+      />
+    </span>
+  )
+
   return <>
-    {mousseId && <MousseIdAccount onSetUp={focusSetUp} />}
+    {mousseId
+      ? <MousseIdAccount onSetUp={focusSetUp} lapsed={lapsed}>{reconnectingNote}</MousseIdAccount>
+      : lapsed && <SettingsGroup className="devices-group">{reconnectingNote}</SettingsGroup>}
 
     {/* The passphrase row answers a refused keychain; its "locked" error would only repeat it. */}
     {error && !addStep && !(needsPassphrase && error === keychainRefusal) && <p role="alert" className="chat-error devices-error">{error}</p>}
 
-    <SettingsGroup title="This device" icon={Monitor} className="devices-group">
-      {!self && (
-        <SettingsRow
-          title="Device name"
-          anchor="devices-name"
-          htmlFor={`${id}-name`}
-          control={<input id={`${id}-name`} className="settings-input" value={name} maxLength={120} disabled={busy || !!status?.restartRequired} onChange={(event) => { nameEdited.current = true; setName(event.target.value) }} />}
-        />
-      )}
-      {needsPassphrase && (
-        <SettingsRow
-          title="Passphrase"
-          anchor="devices-passphrase"
-          htmlFor={`${id}-new-passphrase`}
-          description="Protects network keys instead of the keychain. You enter it after each restart."
-          control={
-            <form className="devices-inline-form" onSubmit={submitNewPassphrase}>
-              <input id={`${id}-new-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy || !!status?.restartRequired} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
-              <button type="submit" className="settings-btn" disabled={busy || networkingLocked}>Turn on</button>
-            </form>
-          }
-        />
-      )}
-      <SettingsRow
-        title="Networking"
-        anchor="devices-networking"
-        description={selfDevice?.name ? `${selfDevice.name} · ${networkingLine(status)}` : networkingLine(status)}
-        control={<Switch id={`${id}-networking`} checked={!!status?.enabled} label="Networking" disabled={busy || networkingLocked} onChange={toggleNetworking} />}
-      />
-      {status?.restartRequired && status.error === 'outcome_uncertain' && (
-        <p role="status" className="settings-muted devices-note">Some work is still draining; its original records are kept.</p>
-      )}
-      {self && status?.enabled && unlocked && !authority && selfDevice && (
-        <SettingsRow
-          title="Works on threads"
-          description={worksOnThreads(selfDevice)
-            ? <span title="This computer can open and change threads on your other computers that share them.">On · can work on your other computers’ threads</span>
-            : <span title="This computer cannot work on threads on your other computers, which is why theirs are not listed. The computer that manages your devices can turn it on for this one.">Off · the computer that manages your devices can turn it on</span>}
-        />
-      )}
-      {self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
-        // Its own switch, apart from Networking: the short title is for scanning, the switch keeps the permission's full name.
-        <SettingsRow
-          title="Let other computers work here"
-          anchor="devices-inbound"
-          description={workOnThreads
-            ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device below'
-            : 'Off · no other computer can open or change this computer’s threads'}
-          control={<Switch checked={workOnThreads} label="Let my other computers work on this computer's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
-        />
-      )}
-      {/* Unlocking and protecting keys are next steps, so they stay here; keys already protected are noted under Advanced. */}
-      {self && (!status.protected || locked) && (
-        <SettingsRow
-          title={locked ? 'Unlock' : 'Passphrase'}
-          anchor="devices-passphrase"
-          htmlFor={`${id}-passphrase`}
-          description={locked ? 'Enter the passphrase for this device’s network keys' : 'Protect this device’s network keys with a passphrase'}
-          control={
-            <form className="devices-inline-form" onSubmit={submitPassphrase}>
-              <input id={`${id}-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy || !!status.restartRequired} onChange={(event) => setPassphrase(event.target.value)} autoComplete={locked ? 'current-password' : 'new-password'} />
-              <button type="submit" className="settings-btn" disabled={busy || !passphrase || !!status.restartRequired}>{locked ? 'Unlock' : 'Protect'}</button>
-            </form>
-          }
-        />
-      )}
-    </SettingsGroup>
+    {setupNeeded && (
+      <SettingsGroup title="This computer" icon={Monitor} className="devices-group">
+        {thisComputerRows}
+      </SettingsGroup>
+    )}
 
     {status && (
       <SettingsGroup
@@ -414,78 +574,23 @@ export function NetDevicesSection() {
         icon={MonitorSmartphone}
         className="devices-group"
         description={devicesDescription}
-        action={
-          <button type="button" className="settings-btn" disabled={busy || !!status.restartRequired} onClick={() => { setError(''); setAddStep('choose') }}>
-            <Plus size={14} />Add device
-          </button>
-        }
+        action={addMenu}
       >
-        {others.map((device) => {
-          const items = deviceMenu(device), offer = device.sshOffer, record = sshRecordFor(device, sshRecords)
-          return [
-            <SettingsRow
-              key={device.node}
-              data-device-node={device.node}
-              className={picked === device.node ? 'devices-row-picked' : undefined}
-              title={device.name}
-              titleAction={device.kind === 'phone'
-                ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span>
-                : authority && device.kind === 'unknown'
-                  ? <span className="devices-kind" title="This device never told this computer what it is. Choose This is a computer or This is a phone in its menu.">Unknown device</span>
-                  : undefined}
-              description={<span title={routeDetails(device) || undefined}>{deviceLine(device, Date.now())}{offer ? ' · offers an SSH route' : ''}</span>}
-              control={<>
-                {offer && <button type="button" className="settings-btn" disabled={busy} onClick={() => setApproving({ ...device, sshOffer: offer })}>Use SSH route…</button>}
-                {items.length > 0 && <DeviceMenu name={device.name} disabled={busy} items={items} />}
-              </>}
-            />,
-            isIncompatible(device) && (
-              <SettingsRow key={`${device.node}-incompatible`} indent title="Incompatible version" description={`Update ${device.name} or this device so they can talk to each other.`} />
-            ),
-            device.olderThanThis && (
-              <SettingsRow
-                key={`${device.node}-older`}
-                indent
-                title={device.version ? `Older than this device (${device.version})` : 'Older than this device'}
-                description={device.version ? `This device runs ${selfDevice?.version ?? 'a newer version'}.` : `${device.name} is too old to report its version${selfDevice?.version ? `; this device runs ${selfDevice.version}` : ''}.`}
-                control={record?.owner === 'managed'
-                  ? <button type="button" className="settings-btn" onClick={() => setRecordDialog({ kind: 'update', record, name: device.name })}>Update…</button>
-                  : selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
-              />
-            ),
-            // Terminals and editor connections from it, side by side, with a waiting ask answered here too.
-            device.policy && isComputer(device) && worksOnThreads(device) && !device.policy.blocked && (
-              <DeviceAccessRows
-                key={`${device.node}-access`}
-                device={device}
-                ask={pendingEditorAsk({ asks: editorAsks }, device.node)}
-                onChanged={reloadQuietly}
-              />
-            ),
-            // What it did here, with its Block and limits beside it. A phone has none of this: it keeps the phone API.
-            device.policy && isComputer(device) && (
-              <DeviceActivityRows
-                key={`${device.node}-activity`}
-                device={device}
-                onLimits={() => setLimits(device)}
-                onBlock={(blocked) => void action('bridge.policy', { node: device.node, blocked })}
-              />
-            )
-          ]
-        })}
-        {self && unlocked && !others.length && <p className="settings-muted devices-note">No other devices yet.</p>}
-      </SettingsGroup>
-    )}
-
-    {status && <EditorSshSettings />}
-
-    {status && unfinished.length > 0 && (
-      <SettingsGroup title="Unfinished remote machine setups" className="devices-group">
+        {enrollment.requests.map((row) => (
+          <EnrollmentRequestRow key={row.id} row={row} busy={enrollment.busy} onDecide={(approve) => void enrollment.decide(row.id, approve)} />
+        ))}
+        {enrollment.error && <p role="alert" className="chat-error devices-error">{enrollment.error}</p>}
+        {listed.map((device) => [
+          deviceRow(device),
+          ...(openNode === device.node ? (device.self ? selfDetail(device) : deviceDetail(device)) : [])
+        ])}
+        {/* Setups over SSH that stopped before the machine joined; they have no device yet. */}
         {unfinished.map((record) => (
           <SettingsRow
             key={record.id}
+            leading={<Server size={16} />}
             title={record.endpoint}
-            description={SETUP_PHASE[record.phase]}
+            description={`Remote machine · SSH · ${SETUP_PHASE[record.phase]}`}
             control={record.phase === 'running'
               ? <button type="button" className="settings-btn" onClick={() => setSshSetup({ setupId: record.id })}>Show progress</button>
               : record.recoverable && <>
@@ -494,6 +599,7 @@ export function NetDevicesSection() {
               </>}
           />
         ))}
+        {self && unlocked && !others.length && !unfinished.length && <p className="settings-muted devices-note">No other devices yet.</p>}
       </SettingsGroup>
     )}
 
@@ -510,9 +616,9 @@ export function NetDevicesSection() {
 
     {status && (
       <SettingsAdvanced>
-        {self && status.protected && !locked && (
-          <SettingsGroup className="devices-group">
-            <SettingsRow anchor="devices-passphrase" title="Network keys" description="Protected on this device" />
+        {!setupNeeded && (
+          <SettingsGroup className="devices-group" title="This computer">
+            {thisComputerRows}
           </SettingsGroup>
         )}
 
@@ -605,6 +711,8 @@ export function NetDevicesSection() {
           </SettingsGroup>
         )}
 
+        <EditorSshSettings />
+
         <SettingsGroup
           anchor="devices-checks"
           title="Connection checks"
@@ -631,7 +739,7 @@ export function NetDevicesSection() {
       </SettingsAdvanced>
     )}
 
-    {addStep === 'choose' && <AddDeviceChooser routes={routes} onChoose={chooseRoute} onClose={closeAdd} />}
+    {addStep === 'phone' && <AddPhoneDialog onClose={closeAdd} />}
 
     {/* Joining needs the invitation, a name and a passphrase that protects this device's new keys. */}
     {addStep === 'join' && (
@@ -639,7 +747,6 @@ export function NetDevicesSection() {
         open
         title="Join with invitation"
         onClose={closeAdd}
-        headerStart={<RouteBack onBack={backToRoutes} />}
         footer={<button type="submit" form={`${id}-join`} className="settings-btn devices-dialog-btn primary" disabled={busy || !joinText.trim() || !passphrase || !name.trim()}>Join</button>}
       >
         <form id={`${id}-join`} className="devices-dialog" onSubmit={submitJoin}>
@@ -667,7 +774,6 @@ export function NetDevicesSection() {
         busy={busy}
         error={error}
         onCreate={createInvitation}
-        onBack={backToRoutes}
         onClose={closeAdd}
       />
     )}
@@ -705,9 +811,9 @@ export function NetDevicesSection() {
     {revoking && (
       <Modal
         open
-        title={`Revoke ${revoking.name}?`}
+        title={`Remove ${revoking.name} from your devices?`}
         onClose={() => setRevoking(undefined)}
-        footer={<button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { const node = revoking.node; setRevoking(undefined); void action('bridge.revoke', { node }) }}>Revoke</button>}
+        footer={<button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { const node = revoking.node; setRevoking(undefined); void action('bridge.revoke', { node }) }}>Remove</button>}
       >
         <p>{revoking.name} will no longer connect to your other devices.</p>
       </Modal>

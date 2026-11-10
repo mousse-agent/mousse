@@ -4,11 +4,13 @@ import {
   canWorkOnThreads,
   capabilityLabel,
   deviceLine,
+  deviceListLine,
   isComputer,
   isIncompatible,
   lastSeenLabel,
   netErrorWords,
   PAIRING_DISCLOSURE,
+  passLapsed,
   routeDetails,
   routeLabel,
   serveSettings,
@@ -279,5 +281,36 @@ describe('Net errors in words', () => {
   it('turns the codes a person sees on the Devices screen into sentences, and softens an unknown one', () => {
     expect(netErrorWords('route_unreachable')).toBe('none of your other devices can be reached right now')
     expect(netErrorWords('some_new_code')).toBe('some new code')
+  })
+})
+
+describe('deviceListLine', () => {
+  it('keeps the list to online or last seen, and only what needs attention', () => {
+    expect(deviceListLine(device({ version: '0.1.3', route: { transport: 'ssh', direction: 'out' } }), NOW)).toBe('Online')
+    expect(deviceListLine(device({ state: 'closed', lastSeenAt: NOW - 3 * 3600_000 }), NOW)).toBe('Offline · last seen 3h ago')
+    expect(deviceListLine(device({ state: 'closed', olderThanThis: true }), NOW)).toBe('Offline · older version')
+    expect(deviceListLine(device({ state: 'closed', error: 'incompatible_peer', olderThanThis: true }), NOW)).toBe('Offline · incompatible version')
+    expect(deviceListLine(device({ policy: { blocked: true, maxPermissionMode: 'accept_edits', terminal: false, editor: false } }), NOW)).toBe('Online · blocked on this computer')
+    expect(deviceListLine(device({ sshOffer: { endpoint: 'me@box' } }), NOW)).toBe('Online · offers an SSH route')
+  })
+
+  it('says Nearby or Not nearby while signed out of Mousse ID', () => {
+    expect(deviceListLine(device(), NOW, { signedOut: true })).toBe('Nearby')
+    expect(deviceListLine(device({ state: 'closed', lastSeenAt: NOW - 3 * 3600_000 }), NOW, { signedOut: true })).toBe('Not nearby · last seen 3h ago')
+  })
+})
+
+describe('passLapsed', () => {
+  const status = (patch: Record<string, unknown> = {}) => ({ peers: [], ...patch }) as Parameters<typeof passLapsed>[0]
+  it('reads a bad_delegation on this computer or from a peer as a lapsed device pass', () => {
+    expect(passLapsed(undefined)).toBe(false)
+    expect(passLapsed(status())).toBe(false)
+    expect(passLapsed(status({ error: 'bad_delegation' }))).toBe(true)
+    expect(passLapsed(status({ peers: [{ node: 'nod_a', state: 'closed', error: 'bad_delegation' }] }))).toBe(true)
+    expect(passLapsed(status({ peers: [{ node: 'nod_a', state: 'closed', error: 'route_unreachable' }] }))).toBe(false)
+  })
+
+  it('never shows the raw code', () => {
+    expect(netErrorWords('bad_delegation')).toBe('waiting for your other computer to reconnect this one')
   })
 })
