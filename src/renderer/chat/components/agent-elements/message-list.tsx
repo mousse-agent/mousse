@@ -32,7 +32,7 @@ import {
 } from "../../../utils/assistantMessageActions";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
-import { LiveThinkingRow } from "./tools/thinking-tool";
+import { TurnProgressRow, useTurnProgressState } from "./turn-progress";
 import {
   PermissionRequestRow,
   isPermissionRequestPart,
@@ -282,10 +282,24 @@ function TurnWorkStatus({
       : `${active ? "Working for" : "Worked for"} ${formatDurationLong(elapsedMs)}`;
   return (
     <div className="turn-work" data-find-ignore>
-      <div className="turn-work-label" title={longLabel}>{label}</div>
+      {active && !waitingLabel ? (
+        <LiveWorkLabel working={label} title={longLabel} />
+      ) : (
+        <div className="turn-work-label" title={longLabel}>{label}</div>
+      )}
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
   );
+}
+
+/**
+ * A running turn's header: Working, or what the run waits for when it is the person (an answer to its question).
+ * Only a running turn reads the thread's turn, so a finished one does not render again as it changes.
+ */
+function LiveWorkLabel({ working, title }: { working: string; title?: string }) {
+  // The tooltip goes with the label: a run waiting for an answer is not "Working for …".
+  if (useTurnProgressState()?.phase === "awaiting_input") return <div className="turn-work-label">Waiting for your answer</div>;
+  return <div className="turn-work-label" title={title}>{working}</div>;
 }
 
 function getTextFromParts(parts: unknown[], joiner: string): string {
@@ -2336,6 +2350,9 @@ const TurnRow = memo(function TurnRow({
                   });
                 })()}
                 </TurnIdContext.Provider>
+                {isTurnStreaming && (
+                  <TurnProgressRow messages={turn.assistantMsgs} awaitingSubagents={!isStreaming} />
+                )}
               </div>
               {!isTurnStreaming && (
                 <TurnEditSummary messages={turn.assistantMsgs} turnId={(turn.userMsg as { turnId?: string } | undefined)?.turnId} />
@@ -2381,7 +2398,7 @@ const TurnRow = memo(function TurnRow({
             durationMs={null}
           />
           <div className="turn-answer flex flex-col gap-3">
-            <LiveThinkingRow />
+            <TurnProgressRow messages={turn.assistantMsgs} standalone />
           </div>
         </div>
       )}

@@ -230,6 +230,8 @@ export class CodexAdapter implements ProviderAdapter {
       },
       onSession: ({ codexThreadId, turnId }) => {
         ctl.heartbeat()
+        // Codex answered turn/start (the session is named again with its turn): the model is next.
+        if (turnId) sink.status?.('waiting')
         providerRef = { ...providerRef, sessionId: codexThreadId, ...(turnId ? { nativeTurnId: turnId } : {}) }
         sink.providerRef(providerRef)
       }

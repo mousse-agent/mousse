@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { ThinkingIcon } from '../../src/renderer/lib/icons'
-import { LiveThinkingRow, ThinkingCollapsed } from '../../src/renderer/chat/components/agent-elements/tools/thinking-tool'
+import { ThinkingCollapsed } from '../../src/renderer/chat/components/agent-elements/tools/thinking-tool'
 
 const step = {
   id: 'thought-1',
@@ -31,10 +31,6 @@ describe('Thinking icon', () => {
     expect(thinkingIcon(html)).toContain('is-thinking')
   })
 
-  it('rotates on the row a turn shows before its first output', () => {
-    expect(thinkingIcon(renderToStaticMarkup(createElement(LiveThinkingRow)))).toContain('is-thinking')
-  })
-
   it('is still once the thought is done', () => {
     const html = renderToStaticMarkup(createElement(ThinkingCollapsed, { step, state: 'complete', onComplete: () => {} }))
     expect(thinkingIcon(html)).not.toBe('')
@@ -42,7 +38,7 @@ describe('Thinking icon', () => {
   })
 
   it('sweeps with the label shimmer: same period, set once on the row', () => {
-    const html = renderToStaticMarkup(createElement(LiveThinkingRow))
+    const html = renderToStaticMarkup(createElement(ThinkingCollapsed, { step, state: 'animating', onComplete: () => {} }))
     expect(html).toContain('--an-shimmer-duration:1.2s')
     expect(html).toMatch(/an-text-shimmer[^>]*animation-duration:1.2s/)
     const css = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')

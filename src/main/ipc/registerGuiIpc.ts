@@ -1,4 +1,3 @@
-import { resnapshotTurnState, type SnapshotTurn } from './resnapshotTurnState'
 import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
@@ -162,6 +161,7 @@ import type {
   QueueEditResult
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
+import { resnapshotTurnState } from '../mms/resnapshotTurnState'
 import { isQualifiedId, parseQualifiedId, unqualifyId } from '../../shared/threadRef'
 import type {
   CreatePullRequestResult,
@@ -1146,7 +1146,7 @@ export function registerGuiIpc(
       target('agents:updated', full.agents ?? [])
       target('tasks:updated', full.tasks ?? [])
       for (const q of full.pendingQuestions ?? []) target('orchestrator:questionsPending', { requestId: q.requestId, questions: q.questions, threadId: activeId, ...(q.approval ? { approval: q.approval } : {}) })
-      const state = resnapshotTurnState(activeId, snap as SnapshotTurn)
+      const state = resnapshotTurnState(activeId, snap, turnStateMapFor(binding.profileId).get(activeId))
       turnStateMapFor(binding.profileId).set(activeId, state)
       target('orchestrator:turn-state', state)
       target('turns:state', Object.fromEntries(turnStateMapFor(binding.profileId)))

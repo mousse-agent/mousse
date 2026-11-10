@@ -1141,6 +1141,25 @@ describe('CodexAdapter', () => {
     expect(stopCommands).toHaveBeenCalledWith([process.pid], [command], { list: expect.any(Function) })
   })
 
+  it('says the turn waits for the model once Codex answered turn/start, not when only its thread is known', async () => {
+    const seen: string[][] = []
+    const sink = recordingSink()
+    sink.status = (status) => void sink.calls.push(['status', status])
+    const statuses = () => sink.calls.filter(([name]) => name === 'status').map(([, value]) => String(value))
+    const client = {
+      configured: () => true,
+      chat: async (chatInput: { onSession?: (session: { codexThreadId: string; turnId?: string }) => void }) => {
+        chatInput.onSession?.({ codexThreadId: 'codex-thread' })
+        seen.push(statuses())
+        chatInput.onSession?.({ codexThreadId: 'codex-thread', turnId: 'turn-1' })
+        seen.push(statuses())
+        throw new Error('done')
+      }
+    } as unknown as CodexProviderService
+    await expect(new CodexAdapter(() => client).startTurn(input(), sink, control(), host())).rejects.toThrow('done')
+    expect(seen).toEqual([[], ['waiting']])
+  })
+
   it('fingerprints the thread a usage limit ended, and no other failure', async () => {
     const committed: Array<[string, string]> = []
     const client = (failure: Error) =>

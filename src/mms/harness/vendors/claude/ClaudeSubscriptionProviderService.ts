@@ -200,6 +200,10 @@ export type ClaudeSubscriptionChatInput = {
   continuationId?: string
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  /** What Claude is doing while it shows nothing (`TurnFrameSink.onStatus`). */
+  onStatus?: (status: 'waiting' | 'reasoning') => void
+  /** Claude Code tries a failed request again. */
+  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
@@ -2679,6 +2683,8 @@ export class ClaudeSubscriptionProviderService {
                 controller.signal.throwIfAborted()
               }
             }
+            // A process that is already up has the prompt now: the model is next. A new one says so at its first frame.
+            if (live.sessionId) frames.waiting()
           }
         } finally {
           hold?.()

@@ -168,9 +168,18 @@ export interface TurnSink {
   /** The adapter's live native transcript after each append (crash-safe checkpointing). */
   nativeMessages(messages: Message[], checkpoint?: NativeMessageCheckpoint): void
   compaction(phase: 'start' | 'complete' | 'unchanged'): void
-  retry(attempt: number): void
+  /**
+   * A failed provider request is tried again; `detail` says how many attempts there are and how long until this one
+   * starts, when the runtime says. `noResponse`: the provider answered nothing in time.
+   */
+  retry(attempt: number, detail?: { maxAttempts?: number; delayMs?: number; noResponse?: boolean }): void
   /** The provider produced output; a context-overflow retry is no longer safe. */
   progress(): void
+  /**
+   * What the provider is doing while it shows nothing: `waiting`, it has the request; `reasoning`, the model reasons
+   * and has shown none of it yet. Output (`progress`) ends either.
+   */
+  status?(status: 'waiting' | 'reasoning'): void
   /**
    * Token usage; the orchestrator adds it to the usage statistics, attributed to the latest
    * `providerMetrics` model.

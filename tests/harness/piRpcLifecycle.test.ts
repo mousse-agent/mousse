@@ -143,6 +143,48 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     expect(isRetriesExhausted(await run(engine, turn(exhausted, { threadId: 't2' })).catch((error: unknown) => error))).toBe(true)
   }, 30_000)
 
+  it('says the turn waits for the model at its first request only, and passes a retry on with its attempts and delay', async () => {
+    const { engine, project } = setup()
+    const cwd = project('p', { events: [
+      { type: 'turn_start' },
+      { type: 'auto_retry_start', attempt: 1, maxAttempts: 5, delayMs: 3000, errorMessage: '503' },
+      { type: 'turn_start' },
+      // A later request of the same turn (after a tool call) is not a new wait for the model.
+      { type: 'turn_start' },
+      { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop' } }
+    ] })
+    const t = turn(cwd)
+    const statuses: string[] = []
+    const retries: unknown[] = []
+    t.sink.status = (status) => void statuses.push(status)
+    t.sink.retry = (attempt, detail) => void retries.push({ attempt, ...detail })
+    await run(engine, t)
+    expect(statuses).toEqual(['waiting'])
+    expect(retries).toEqual([{ attempt: 1, maxAttempts: 5, delayMs: 3000 }])
+  }, 30_000)
+
+  it('reports output after a retry too, so the retry ends when the retried reply streams into the same row', async () => {
+    const { engine, project } = setup()
+    const delta = (text: string) => ({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text } })
+    const cwd = project('p', { events: [
+      { type: 'turn_start' },
+      { type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 0 } },
+      delta('Part'),
+      { type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 10, errorMessage: '503' },
+      { type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 0 } },
+      delta('The retried '),
+      delta('reply'),
+      { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'The retried reply' }], stopReason: 'stop' } }
+    ] })
+    const t = turn(cwd)
+    const order: string[] = []
+    t.sink.progress = () => void order.push('progress')
+    t.sink.retry = () => void order.push('retry')
+    await run(engine, t)
+    // Every output reports progress, the retried reply's included: one before the retry, three after it.
+    expect(order).toEqual(['progress', 'progress', 'retry', 'progress', 'progress', 'progress'])
+  }, 30_000)
+
   it('reports the prompt cache lifetime where Pi says how much it wrote for an hour, and none where it does not', async () => {
     const { engine, project } = setup()
     const answer = (usage: Record<string, number>) => ({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop', usage } })

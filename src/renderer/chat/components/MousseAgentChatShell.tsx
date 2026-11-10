@@ -17,6 +17,7 @@ import {
 } from './agent-elements/tools/quick-action-approval'
 import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
 import { TurnActionsContext, type TurnActions } from './agent-elements/turn-actions'
+import { TurnProgressContext, type TurnProgressState } from './agent-elements/turn-progress'
 import { QueuedMessages } from '../../components/QueuedMessages'
 import type { ThreadQueue } from '../../hooks/useThreadQueue'
 import './agent-elements/agent-ui.css'
@@ -100,6 +101,15 @@ export function MousseAgentChatShell({
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
+  // What the line under a running turn's Working reads: the turn's phase and step, and a Stop on its way.
+  const turnPhase = useAppStore(state => (threadId ? state.turnStates[threadId]?.phase : undefined))
+  const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
+  const stopping = useAppStore(state => Boolean(threadId && state.stopRequests[threadId]))
+  const turnUpdatedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.updatedAt : undefined))
+  const turnProgress = useMemo<TurnProgressState>(
+    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt }),
+    [turnPhase, turnStep, stopping, threadId, turnUpdatedAt]
+  )
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
@@ -121,6 +131,7 @@ export function MousseAgentChatShell({
       <SubagentCardsContext.Provider value={subagentCards}>
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
       <TurnActionsContext.Provider value={turnActions ?? null}>
+      <TurnProgressContext.Provider value={turnProgress}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -136,6 +147,7 @@ export function MousseAgentChatShell({
           enableImagePreview
           enableFind
         />
+      </TurnProgressContext.Provider>
       </TurnActionsContext.Provider>
       </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>

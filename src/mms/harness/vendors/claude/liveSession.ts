@@ -1190,6 +1190,9 @@ export class LiveSession<Turn = unknown> {
     // With no owner the frame is dropped (the call's row was closed when its turn settled).
     if ((frame.subtype === 'task_started' || frame.subtype === 'task_notification') && typeof frame.tool_use_id === 'string')
       this.notificationOwner()?.deliver(message)
+    // The process being ready (its first frame) is the open turn's, and so is a retry of a failed request, unless
+    // background agents run: a retry names no agent, and it may be theirs.
+    if (frame.subtype === 'init' || (frame.subtype === 'api_retry' && this.obligations.size === 0)) this.openRun()?.deliver(message)
   }
 
   /** Tells the owner a tool call's task ended, so a row its settled turn closed as "in the background" learns the outcome. */

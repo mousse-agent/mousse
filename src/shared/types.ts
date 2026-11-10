@@ -1509,8 +1509,25 @@ export interface TurnState {
   errorDescriptor?: import('./errors').AppErrorShape
   /** Set only while `phase` is `paused`. */
   pause?: TurnPause
+  /** What an active turn is doing that its phase does not say, for the live line under Working. Any phase change drops it. */
+  step?: TurnStep
 }
 export type TurnStateSnapshot = Record<string, TurnState>
+
+/** A step of an active turn that shows nothing in the transcript yet. */
+export type TurnStep =
+  /** The turn started; its provider has reported nothing yet (the runtime, its tools and Skills are being set up). */
+  | { kind: 'starting' }
+  /** The provider has the request and has sent nothing back yet. */
+  | { kind: 'waiting' }
+  /** The model reasons and has shown none of it yet. */
+  | { kind: 'reasoning' }
+  /**
+   * A failed provider request is tried again: attempt `attempt` (of `maxAttempts`), `delayMs` after the step was sent.
+   * A wait, not a time: a window on another computer counts it down on its own clock. `noResponse`: the provider sent
+   * nothing back in time (its own retry, outside the attempt count).
+   */
+  | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
