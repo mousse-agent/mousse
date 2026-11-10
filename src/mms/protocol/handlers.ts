@@ -42,7 +42,7 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
 import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
@@ -53,6 +53,7 @@ import { listClaimedQueue, listPendingQueue, QueueConflictError, QueueValidation
 import { describeQuestionAnswers, formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { ModelOverride } from '../../shared/providerInstances'
+import { projectRememberingPick, rememberedChoiceFor } from '../data/newThreadChoice'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
@@ -187,6 +188,33 @@ function withoutLocalOnlyKeys<T>(ctx: HandlerContext, byThread: Record<string, T
   const hidden = localOnlyThreadIds(ctx.mms.threads.listAllThreads())
   if (!hidden.size) return byThread
   return Object.fromEntries(Object.entries(byThread).filter(([threadId]) => !hidden.has(threadId)))
+}
+
+/** Remembers a person's pick in a thread for its project's next new thread (`Project.newThread`), and tells windows. */
+function rememberPick(ctx: HandlerContext, threadId: string, choice: NewThreadChoice): void {
+  const projectId = projectRememberingPick(ctx.connection, ctx.mms.threads.getThread(threadId), (id) => ctx.mms.projects.getProject(id))
+  if (!projectId || !ctx.mms.projects.rememberNewThreadChoice(projectId, choice)) return
+  ctx.emitEvent?.('projects.updated', { projects: ctx.mms.projects.listProjects() })
+}
+
+/**
+ * A remembered model as a new thread in the project would store it, after the checks `threads.setModel` makes: the
+ * instance exists and is on, is not retired or turned off for the project, and the model is not hidden. Throws otherwise.
+ */
+function usableProjectModel(ctx: HandlerContext, model: ModelOverride, projectId: string): ModelOverride {
+  const override = ctx.mms.providerInstances.overrideFor(model)
+  ctx.mms.harness?.resolveStored(override, { purpose: 'composer', scope: { kind: 'project', projectId } })
+  return { ...override, ...(model.name && override.model === model.model ? { name: model.name } : {}) }
+}
+
+/** Whether `check` passes without throwing. */
+function canUse(check: () => unknown): boolean {
+  try {
+    check()
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -1893,12 +1921,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
         worktreeStart = { sha, branch: baseBranch }
       }
-      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(worktreeStart ? { worktreeStart } : {}) })
+      // What the person last picked in this project's threads; what they never picked follows the profile's defaults.
+      const remembered = rememberedChoiceFor(ctx.connection, projectId ? ctx.mms.projects.getProject(projectId) : undefined, (model) => usableProjectModel(ctx, model, projectId!))
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled: worktreeEnabled ?? remembered.worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(worktreeStart ? { worktreeStart } : {}) })
       if (expiresAt) ctx.mms.threadExpiry?.reschedule()
+      // A remembered model that can no longer be used falls back to the profile's default, unless that one can't be used
+      // either: then the thread has no model of its own, and the composer offers the first ready one.
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
-      if (lastUsed) {
-        thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
+      const model = remembered.model ?? (remembered.unusableModel && lastUsed && !canUse(() => usableProjectModel(ctx, lastUsed, projectId!)) ? undefined : lastUsed)
+      if (model) {
+        thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: model })
       }
+      if (remembered.permissionMode) thread = ctx.mms.orchestrator.setThreadPermissionMode(thread.id, remembered.permissionMode)
+      // A window that names the checkout of a new thread in a project picked it in its composer.
+      if (worktreeEnabled !== undefined) rememberPick(ctx, thread.id, { worktreeEnabled })
       const threads = listedThreadsFor(ctx, ctx.mms.threads.listAllThreads())
       return { thread, threads }
     }
@@ -2218,6 +2254,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // The global default keeps the instance, so later default turns resolve the same agent.
         ctx.mms.settings.set({ provider: { instanceId: next.instanceId, llmProvider: next.llmProvider, model: next.model, effort: next.effort, name: next.name } })
         ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
+        // And the thread's project starts its next new thread on it.
+        rememberPick(ctx, threadId, { model: next })
       }
       const thread = ctx.mms.threads.getThread(threadId)
       const threads = ctx.mms.threads.listAllThreads()
@@ -2235,6 +2273,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
       }
       const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
+      rememberPick(ctx, threadId, { worktreeEnabled: enabled })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads) }
@@ -2249,6 +2288,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Applies from the next turn; a running turn and a pending question are not touched.
       const caller = ctx.connection?.bridgeCaller
       const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined)
+      rememberPick(ctx, threadId, { permissionMode: mode })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads) }

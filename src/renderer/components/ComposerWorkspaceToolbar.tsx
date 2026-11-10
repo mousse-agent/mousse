@@ -140,7 +140,7 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
                 data-project-id={entry.id}
                 title={'path' in entry ? entry.path : undefined}
                 onClick={() => {
-                  onChange(workspaceWithProject(workspace, entry.id || undefined))
+                  onChange(workspaceWithProject(workspace, entry.id || undefined, projects))
                   menu.close()
                 }}
               >

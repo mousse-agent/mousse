@@ -57,7 +57,7 @@ function preload(): unknown {
   })
 }
 
-const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode', 'worktreeByDefault'] as const
+const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode'] as const
 const appInitial = useAppStore.getInitialState()
 const appOriginal = Object.fromEntries(appKeys.map((key) => [key, appInitial[key]]))
 
@@ -418,16 +418,17 @@ describe('the open thread', () => {
 })
 
 describe('row marks', () => {
-  it('marks only a checkout that differs from the default for new threads', () => {
-    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: true }, true)).toBeUndefined()
-    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: false }, true)).toBe('Primary checkout')
-    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: true }, false)).toBe('Worktree')
-    expect(worktreeMark({ projectId: 'p1' }, false)).toBeUndefined()
-    expect(worktreeMark({ worktreeEnabled: false }, true)).toBeUndefined()
+  it("marks only a checkout that differs from where its project's new threads start", () => {
+    const worktrees = [{ id: 'p1' }]
+    const folder = [{ id: 'p1', newThread: { worktreeEnabled: false } }]
+    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: true }, worktrees)).toBeUndefined()
+    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: false }, worktrees)).toBe('Primary checkout')
+    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: true }, folder)).toBe('Worktree')
+    expect(worktreeMark({ projectId: 'p1' }, folder)).toBeUndefined()
+    expect(worktreeMark({ worktreeEnabled: false }, worktrees)).toBeUndefined()
   })
 
   it('shows the mark on the row with its name as the tooltip', () => {
-    useAppStore.setState({ worktreeByDefault: true })
     show([thread('a', 'Fix tests', { worktreeEnabled: true }), thread('b', 'Docs', { worktreeEnabled: false })], { active: 'a' })
     expect(row('a').querySelector('.threads-sidebar-worktree-icon')).toBeNull()
     expect(row('b').querySelector('.threads-sidebar-worktree-icon')?.getAttribute('title')).toBe('Primary checkout')

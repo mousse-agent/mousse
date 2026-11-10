@@ -1,0 +1,192 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
+import { ProjectManager } from '../src/mms/data/ProjectManager'
+import { migrateWorktreeDefaultSetting } from '../src/mms/data/newThreadChoice'
+import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
+import type { ModelOverride } from '../src/shared/providerInstances'
+import type { Thread } from '../src/shared/types'
+
+let home: string
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'mousse-new-thread-choice-')) })
+afterEach(() => { rmSync(home, { recursive: true, force: true }) })
+
+const OPUS: ModelOverride = { instanceId: 'claude', llmProvider: 'claude-code', model: 'claude-opus-5-5', effort: 'high' }
+const LAST_USED = { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-6.1' }
+
+/** A daemon context over a real project store and an in-memory thread store; `usable` decides which instances still work. */
+function daemon(options: { clientType?: 'gui' | 'cli' | 'bridge'; bridgeCaller?: object; usable?: (model: ModelOverride) => boolean } = {}) {
+  const projects = new ProjectManager(home)
+  const threads = new Map<string, Thread>()
+  let counter = 0
+  const usable = options.usable ?? (() => true)
+  const emitEvent = vi.fn()
+  const mms = {
+    projects,
+    threads: {
+      createThread: (name: string, projectId?: string, _path?: string, opts: { worktreeEnabled?: boolean } = {}) => {
+        const thread = { id: `t${++counter}`, name, projectId, createdAt: '', updatedAt: '', ...(opts.worktreeEnabled !== undefined ? { worktreeEnabled: opts.worktreeEnabled } : {}) } as Thread
+        threads.set(thread.id, thread)
+        return thread
+      },
+      getThread: (id: string) => threads.get(id),
+      updateThreadMeta: (id: string, patch: Partial<Thread>) => { const next = { ...threads.get(id)!, ...patch }; threads.set(id, next); return next },
+      setThreadWorktreeEnabled: (id: string, worktreeEnabled: boolean) => { const next = { ...threads.get(id)!, worktreeEnabled }; threads.set(id, next); return next },
+      getThreadDir: (id: string) => join(home, 'threads', id),
+      listAllThreads: () => [...threads.values()]
+    },
+    orchestrator: {
+      setThreadPermissionMode: (id: string, permissionMode: Thread['permissionMode']) => { const next = { ...threads.get(id)!, permissionMode }; threads.set(id, next); return next },
+      setThreadModelOverride: (id: string, model: ModelOverride | undefined) => { threads.set(id, { ...threads.get(id)!, modelOverride: model }); return model }
+    },
+    providerInstances: {
+      migrate: (model: ModelOverride) => model,
+      overrideFor: (model: ModelOverride) => {
+        if (!usable(model)) throw new Error(`Provider instance "${model.instanceId}" is turned off`)
+        return { instanceId: model.instanceId!, llmProvider: model.llmProvider, model: model.model, ...(model.effort ? { effort: model.effort } : {}) }
+      }
+    },
+    settings: { get: () => ({ provider: LAST_USED }), set: vi.fn() }
+  }
+  const ctx = {
+    mms,
+    globalSequence: () => 1,
+    emitEvent,
+    connection: { clientType: options.clientType ?? 'gui', ...(options.bridgeCaller ? { bridgeCaller: options.bridgeCaller } : {}) }
+  } as unknown as HandlerContext
+  const project = projects.openProject(join(home, 'app'))
+  const call = <T>(method: string, params: Record<string, unknown>) => dispatchMethod(ctx, method, params) as Promise<T>
+  const create = async (params: Record<string, unknown> = {}) => (await call<{ thread: Thread }>('threads.create', { name: 'New Chat', projectId: project.id, ...params })).thread
+  return { ctx, projects, project, threads, emitEvent, call, create, remembered: () => projects.getProject(project.id)?.newThread }
+}
+
+describe('new threads remember the choices last made in their project', () => {
+  it('a project with no choice starts on the profile defaults', async () => {
+    const { create } = daemon()
+    const thread = await create()
+    expect(thread.modelOverride).toEqual(LAST_USED)
+    expect(thread.permissionMode).toBeUndefined()
+    expect(thread.worktreeEnabled).toBeUndefined()
+  })
+
+  it('a pick in a window is remembered, and the next new thread in the project starts with it', async () => {
+    const { create, call, remembered, emitEvent, project } = daemon()
+    const first = await create()
+    await call('threads.setModel', { threadId: first.id, model: OPUS })
+    await call('threads.setPermissionMode', { threadId: first.id, mode: 'full' })
+    await call('threads.setWorktreeEnabled', { threadId: first.id, enabled: false })
+    expect(remembered()).toEqual({ model: OPUS, permissionMode: 'full', worktreeEnabled: false })
+    // Windows hear about it, so a new chat's composer shows it before its thread exists.
+    expect(emitEvent).toHaveBeenCalledWith('projects.updated', { projects: [expect.objectContaining({ id: project.id, newThread: remembered() })] })
+
+    const next = await create()
+    expect(next.modelOverride).toEqual(OPUS)
+    expect(next.permissionMode).toBe('full')
+    expect(next.worktreeEnabled).toBe(false)
+  })
+
+  it('the checkout a window names for a new thread is remembered, and wins over the remembered one', async () => {
+    const { create, remembered } = daemon()
+    expect((await create({ worktreeEnabled: false })).worktreeEnabled).toBe(false)
+    expect(remembered()).toEqual({ worktreeEnabled: false })
+    expect((await create({ worktreeEnabled: true })).worktreeEnabled).toBe(true)
+    expect(remembered()).toEqual({ worktreeEnabled: true })
+  })
+
+  it('a remembered model that can no longer be used falls back to the profile default, and the rest still applies', async () => {
+    let claudeOn = true
+    const { create, call } = daemon({ usable: (model) => model.instanceId !== 'claude' || claudeOn })
+    const first = await create()
+    await call('threads.setModel', { threadId: first.id, model: OPUS })
+    await call('threads.setPermissionMode', { threadId: first.id, mode: 'ask' })
+    claudeOn = false
+    const next = await create()
+    expect(next.modelOverride).toEqual(LAST_USED)
+    expect(next.permissionMode).toBe('ask')
+  })
+
+  it('when the profile default is that same unusable model, the thread gets no model of its own', async () => {
+    let claudeOn = true
+    const { create, call, ctx } = daemon({ usable: (model) => model.instanceId !== 'claude' || claudeOn })
+    const first = await create()
+    await call('threads.setModel', { threadId: first.id, model: OPUS })
+    ;(ctx.mms.settings as unknown as { get: () => unknown }).get = () => ({ provider: OPUS })
+    claudeOn = false
+    expect((await create()).modelOverride).toBeUndefined()
+  })
+
+  it('a project another computer or an agent works in neither remembers its picks nor hands them out', async () => {
+    const gui = daemon()
+    const first = await gui.create()
+    await gui.call('threads.setPermissionMode', { threadId: first.id, mode: 'full' })
+    expect(gui.remembered()).toEqual({ permissionMode: 'full' })
+
+    // Another computer (a routed call) creates threads on the profile defaults and its picks are not remembered.
+    const routed = { ...gui.ctx, connection: { clientType: 'bridge', bridgeCaller: { node: 'n1', user: 'u', maxPermissionMode: 'full' } } } as unknown as HandlerContext
+    const remote = (await dispatchMethod(routed, 'threads.create', { name: 'New Chat', projectId: gui.project.id }) as { thread: Thread }).thread
+    expect(remote.permissionMode).toBeUndefined()
+    await dispatchMethod(routed, 'threads.setPermissionMode', { threadId: remote.id, mode: 'ask' })
+    expect(gui.remembered()).toEqual({ permissionMode: 'full' })
+
+    // The CLI gets the project's choice for a new thread, but its changes are not a person's pick in a window.
+    const cli = { ...gui.ctx, connection: { clientType: 'cli' } } as unknown as HandlerContext
+    const viaCli = (await dispatchMethod(cli, 'threads.create', { name: 'New Chat', projectId: gui.project.id }) as { thread: Thread }).thread
+    expect(viaCli.permissionMode).toBe('full')
+    await dispatchMethod(cli, 'threads.setPermissionMode', { threadId: viaCli.id, mode: 'ask' })
+    expect(gui.remembered()).toEqual({ permissionMode: 'full' })
+
+    // A subagent's thread is an agent's, not a person's pick.
+    gui.threads.set(first.id, { ...gui.threads.get(first.id)!, lineage: { parentThreadId: 'p' } as Thread['lineage'] })
+    await gui.call('threads.setPermissionMode', { threadId: first.id, mode: 'ask' })
+    expect(gui.remembered()).toEqual({ permissionMode: 'full' })
+  })
+})
+
+describe('ProjectManager.rememberNewThreadChoice', () => {
+  it('merges a pick into the project, keeps it after a reload, and reports when nothing changed', () => {
+    const projects = new ProjectManager(home)
+    const project = projects.openProject(join(home, 'app'))
+    expect(projects.rememberNewThreadChoice(project.id, { permissionMode: 'full' })?.newThread).toEqual({ permissionMode: 'full' })
+    expect(projects.rememberNewThreadChoice(project.id, { worktreeEnabled: false })?.newThread).toEqual({ permissionMode: 'full', worktreeEnabled: false })
+    expect(projects.rememberNewThreadChoice(project.id, { permissionMode: 'full' })).toBeUndefined()
+    expect(projects.rememberNewThreadChoice('missing', { permissionMode: 'full' })).toBeUndefined()
+    expect(new ProjectManager(home).getProject(project.id)?.newThread).toEqual({ permissionMode: 'full', worktreeEnabled: false })
+  })
+})
+
+describe('the removed "Start new threads in a worktree" setting', () => {
+  const storedRuns = () => (JSON.parse(readFileSync(join(home, 'mousse.conf'), 'utf-8')) as { settings?: { runs?: Record<string, unknown> } }).settings?.runs
+
+  it('turned off, becomes the checkout choice of every project there was, once, and is removed', () => {
+    const config = MousseConfigStore.load(home)
+    config.updateSettingsSection({ runs: { resumeAfterUsageLimit: true, worktreeByDefault: false } as never })
+    const projects = new ProjectManager(home)
+    const kept = projects.openProject(join(home, 'kept'))
+    const plain = projects.openProject(join(home, 'plain'))
+    projects.rememberNewThreadChoice(kept.id, { worktreeEnabled: true })
+
+    migrateWorktreeDefaultSetting(config, projects)
+    expect(projects.getProject(plain.id)?.newThread).toEqual({ worktreeEnabled: false })
+    // A project that already chose keeps its choice.
+    expect(projects.getProject(kept.id)?.newThread).toEqual({ worktreeEnabled: true })
+    expect(storedRuns()).not.toHaveProperty('worktreeByDefault')
+    expect(storedRuns()?.resumeAfterUsageLimit).toBe(true)
+
+    // A project added later starts in a worktree, like any project with no choice; the migration does not run again.
+    const later = projects.openProject(join(home, 'later'))
+    migrateWorktreeDefaultSetting(MousseConfigStore.load(home), projects)
+    expect(projects.getProject(later.id)?.newThread).toBeUndefined()
+  })
+
+  it('left on, changes no project and is removed', () => {
+    const config = MousseConfigStore.load(home)
+    config.updateSettingsSection({ runs: { worktreeByDefault: true } as never })
+    const projects = new ProjectManager(home)
+    const project = projects.openProject(join(home, 'app'))
+    migrateWorktreeDefaultSetting(config, projects)
+    expect(projects.getProject(project.id)?.newThread).toBeUndefined()
+    expect(storedRuns()).not.toHaveProperty('worktreeByDefault')
+  })
+})

@@ -15,7 +15,7 @@ describe('Private in the new chat draft (issue #672)', () => {
   })
 
   it('reads an empty private thread as a private draft', () => {
-    expect(composerWorkspaceFor(undefined, { projectId: 'here', localOnly: true }, false)).toEqual({ projectId: 'here', worktreeEnabled: false, localOnly: true })
+    expect(composerWorkspaceFor(undefined, { projectId: 'here', localOnly: true }, [{ id: 'here', newThread: { worktreeEnabled: false } }])).toEqual({ projectId: 'here', worktreeEnabled: false, localOnly: true })
   })
 })
 
@@ -37,9 +37,12 @@ describe('expiry in the new chat draft (issue #672)', () => {
 })
 
 describe('picking a project in the new chat toolbar (issue #672)', () => {
-  it('keeps Private and the expiry, and the worktree choice only with a project', () => {
+  it("keeps Private and the expiry, and takes the picked project's remembered checkout, only with a project", () => {
     const draft = { projectId: 'a', worktreeEnabled: true, localOnly: true, expiryMs: 3_600_000, expiryStopsRun: true }
-    expect(workspaceWithProject(draft, 'b')).toEqual({ ...draft, projectId: 'b' })
-    expect(workspaceWithProject(draft, undefined)).toEqual({ ...draft, projectId: undefined, worktreeEnabled: false })
+    const projects = [{ id: 'a' }, { id: 'b' }, { id: 'c', newThread: { worktreeEnabled: false } }]
+    expect(workspaceWithProject(draft, 'b', projects)).toEqual({ ...draft, projectId: 'b' })
+    expect(workspaceWithProject(draft, 'c', projects)).toEqual({ ...draft, projectId: 'c', worktreeEnabled: false })
+    expect(workspaceWithProject({ ...draft, projectId: 'c', worktreeEnabled: false }, 'b', projects)).toEqual({ ...draft, projectId: 'b', worktreeEnabled: true })
+    expect(workspaceWithProject(draft, undefined, projects)).toEqual({ ...draft, projectId: undefined, worktreeEnabled: false })
   })
 })

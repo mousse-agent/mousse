@@ -19,6 +19,23 @@ export async function createComposerThread(deps: {
 }
 
 /**
+ * Whether sending the new chat makes a thread instead of using the empty one shown. An empty thread is reused only
+ * where the chat is to run: the same computer, the same project, and the same mode (Private is fixed when a thread
+ * is created). A worktree from another branch also takes a new thread (`prepareComposerThread`).
+ */
+export function composerCreatesThread(
+  thread: Pick<Thread, 'projectId' | 'node' | 'localOnly'> | undefined,
+  workspace: { projectId?: string; node?: string; localOnly?: boolean }
+): boolean {
+  return (
+    !thread ||
+    thread.projectId !== workspace.projectId ||
+    (thread.node ?? undefined) !== (workspace.node ?? undefined) ||
+    Boolean(thread.localOnly) !== Boolean(workspace.localOnly)
+  )
+}
+
+/**
  * Apply the blank composer's workspace selection before the first send. A chat for another computer is
  * created there (`node`), in that computer's project, and is then written to like any other thread.
  */
@@ -43,15 +60,7 @@ export async function prepareComposerThread(deps: {
   const expiry = expiresAt ? { expiresAt, ...(workspace.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}
   // A worktree from another branch is made on this computer, and only a new thread can carry it.
   const baseBranch = enabled && !workspace.node && workspace.baseBranch ? workspace.baseBranch : undefined
-  // An empty thread is reused only where the chat is to run: the same computer, the same project, and the
-  // same mode (Private is fixed when a thread is created).
-  if (
-    !thread ||
-    thread.projectId !== workspace.projectId ||
-    (thread.node ?? undefined) !== (workspace.node ?? undefined) ||
-    Boolean(thread.localOnly) !== Boolean(workspace.localOnly) ||
-    baseBranch
-  ) {
+  if (!thread || composerCreatesThread(thread, workspace) || baseBranch) {
     return createComposerThread({
       ...deps,
       create: () =>

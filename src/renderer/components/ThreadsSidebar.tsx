@@ -395,7 +395,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const approvalThreads = useThreadsAwaitingApproval()
 
   const upsertThread = useAppStore((s) => s.upsertThread)
-  const worktreeByDefault = useAppStore((s) => s.worktreeByDefault)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   // The project the user last opened or closed. Only that group animates; one revealed for the thread
@@ -1196,7 +1195,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
     const isGeneratingTitle = pendingTitleIds.has(thread.id)
     const statusNode = renderThreadStatus(thread.id)
-    const worktree = worktreeMark(thread, worktreeByDefault)
+    const worktree = worktreeMark(thread, projects)
     const showTrailing = Boolean(statusNode || worktree || thread.node)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined

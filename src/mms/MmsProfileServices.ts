@@ -35,6 +35,7 @@ import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
 import type { ChatMessage, ScheduledJob, Thread } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
+import { migrateWorktreeDefaultSetting } from './data/newThreadChoice'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
@@ -466,6 +467,8 @@ export class MmsProfileServices {
     this.ptyManager.setSendSink(terminalSink)
 
     this.projects = new ProjectManager(homeDir)
+    // Once: "Start new threads in a worktree" is gone; turned off, it becomes each existing project's checkout choice.
+    try { migrateWorktreeDefaultSetting(config, this.projects) } catch (error) { console.warn('the worktree setting could not be moved to projects', error instanceof Error ? error.message : String(error)) }
     // Projects added before Mousse recorded their repositories' own Git filters: recorded once, now.
     trustExistingProjectsOnce(homeDir, this.projects.listProjects().map((project) => project.path))
     this.threads = new ThreadDataStore(this.projects, homeDir, {

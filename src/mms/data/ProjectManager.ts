@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { basename, join } from 'path'
 import { v4 as uuidv4 } from 'uuid'
-import type { Project, Thread } from '../../shared/types'
+import type { NewThreadChoice, Project, Thread } from '../../shared/types'
 import type { ThreadDataStore } from './ThreadDataStore'
 import { atomicWriteJsonSync, quarantineUnreadableFileSync } from './AtomicFs'
 import { getMousseHomeDir } from './paths'
@@ -130,6 +130,31 @@ export class ProjectManager {
     project.iconDetectedAt = new Date().toISOString()
     project.iconDetector = PROJECT_ICON_DETECTOR_VERSION
     this.persist()
+  }
+
+  /**
+   * Remembers what was just picked in one of the project's threads, for the next new thread there
+   * (`Project.newThread`). Returns the project when the choice changed, undefined when it did not or there is no such project.
+   */
+  rememberNewThreadChoice(id: string, choice: NewThreadChoice): Project | undefined {
+    const project = this.getProject(id)
+    if (!project) return undefined
+    const next: NewThreadChoice = { ...project.newThread, ...choice }
+    if (JSON.stringify(next) === JSON.stringify(project.newThread ?? {})) return undefined
+    project.newThread = next
+    this.persist()
+    return project
+  }
+
+  /** Gives every project that has no checkout choice yet this one (the removed "Start new threads in a worktree" setting's). */
+  seedWorktreeChoice(worktreeEnabled: boolean): void {
+    let changed = false
+    for (const project of this.projects) {
+      if (typeof project.newThread?.worktreeEnabled === 'boolean') continue
+      project.newThread = { ...project.newThread, worktreeEnabled }
+      changed = true
+    }
+    if (changed) this.persist()
   }
 
   reorderProjects(projectIds: string[]): Project[] {

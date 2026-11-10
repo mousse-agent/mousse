@@ -44,7 +44,7 @@ export async function createAndSelectPrivateThread(): Promise<void> {
   const draft = store.composerWorkspaceDrafts[thread.id]
   if (!draft?.localOnly) {
     const defaultMs = store.privateThreadExpiry === 'never' ? undefined : expiryPresetMs(store.privateThreadExpiry)
-    const base = draft ?? composerWorkspaceFor(undefined, thread, store.worktreeByDefault)
+    const base = draft ?? composerWorkspaceFor(undefined, thread, store.projects)
     store.setComposerWorkspaceDraft(thread.id, workspaceWithPrivate(base, true, store.projects.filter((entry) => !entry.node), defaultMs))
   }
   await selectThread(thread.id)

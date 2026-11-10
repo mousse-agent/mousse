@@ -200,13 +200,10 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** The profile's "Start new threads in a worktree" setting: the worktree choice of a draft that has not made one. */
-  worktreeByDefault: boolean
-  setWorktreeByDefault: (worktreeByDefault: boolean) => void
   /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** The new-chat defaults from Settings → Runs. */
-  setRunDefaults: (runs: Pick<RunSettings, 'worktreeByDefault' | 'privateThreadExpiry'>) => void
+  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry'>) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -499,10 +496,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
-  worktreeByDefault: true,
-  setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
   privateThreadExpiry: 'never',
-  setRunDefaults: ({ worktreeByDefault, privateThreadExpiry }) => set({ worktreeByDefault, privateThreadExpiry }),
+  setRunDefaults: ({ privateThreadExpiry }) => set({ privateThreadExpiry }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)

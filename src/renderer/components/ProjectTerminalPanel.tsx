@@ -26,7 +26,7 @@ function opensWithComposerPick(threadId: string): boolean {
   if (state.activeThreadId !== threadId) return false
   const thread = state.threads.find((entry) => entry.id === threadId)
   if (!isNewEmptyThread(threadId, thread, state.messages.length)) return false
-  return !composerWorkspaceFor(state.composerWorkspaceDrafts[threadId], thread, state.worktreeByDefault).node
+  return !composerWorkspaceFor(state.composerWorkspaceDrafts[threadId], thread, state.projects).node
 }
 
 interface TerminalInstance {

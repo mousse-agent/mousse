@@ -126,7 +126,7 @@ describe('thread expiry', () => {
   }, 60_000)
 
   it('saves the Runs settings, the worktree default and the private chat expiry included', () => {
-    expect(asSettingsPartial({ runs: { resumeAfterUsageLimit: false, usageLimitPauseCap: 3, worktreeByDefault: false, privateThreadExpiry: '24h' } })).toBeTruthy()
+    expect(asSettingsPartial({ runs: { resumeAfterUsageLimit: false, usageLimitPauseCap: 3, privateThreadExpiry: '24h' } })).toBeTruthy()
     expect(() => asSettingsPartial({ runs: { privateThreadExpiry: '2h' } })).toThrow(/privateThreadExpiry/)
   })
 })

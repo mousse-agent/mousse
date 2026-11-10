@@ -347,14 +347,12 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
  * How runs behave after a provider's usage limit. With `resumeAfterUsageLimit` a paused run continues
  * by itself when the limit resets, at most `usageLimitPauseCap` times in a row on one thread; without
  * it the pause waits for Resume now. Read when a run pauses, never afterwards: turning it on does not
- * arm runs that are already paused.
- * `worktreeByDefault` is where a new chat in a project starts: its own worktree, or the project's
- * folder. Each new chat can change it from the composer before its first message.
+ * arm runs that are already paused. Where a new thread in a project starts (a new worktree or the
+ * project's folder) is the project's own remembered choice (`Project.newThread`), not a setting.
  */
 export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
-  worktreeByDefault: boolean
   /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
 }
@@ -370,7 +368,6 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
         ? cap
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
-    worktreeByDefault: raw?.worktreeByDefault !== false,
     privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never'
   }
 }

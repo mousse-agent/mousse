@@ -1193,6 +1193,17 @@ export interface PtyCreateResult {
   ptyId: string
 }
 
+/**
+ * What a new thread in a project starts with: the model, permission mode and checkout (new worktree or the
+ * project's folder) last picked from a window in one of the project's threads. A field never picked follows the
+ * profile's default (the last model used, the default permission mode, a new worktree).
+ */
+export interface NewThreadChoice {
+  model?: ModelOverride
+  permissionMode?: PermissionMode
+  worktreeEnabled?: boolean
+}
+
 export interface Project {
   id: string
   name: string
@@ -1224,6 +1235,8 @@ export interface Project {
   iconDetectedAt?: string
   /** The version of the detection rules that looked; a result of older rules is looked for again at once. */
   iconDetector?: number
+  /** What a new thread here starts with, as last picked in one of its threads; absent until a pick. */
+  newThread?: NewThreadChoice
 }
 
 /**
