@@ -450,6 +450,16 @@ export type ResponseMetadata = {
   tokensPerSecond?: number;
 };
 
+/**
+ * A finished turn shows its toolbar when it has text to copy or a reply's metadata. The list keeps
+ * the reply gap under a last turn without one, so neither ending a reply nor opening the thread
+ * moves the text.
+ */
+function finishedTurnHasToolbar(assistantMsgs: UIMessage[], showCopyToolbar: boolean): boolean {
+  if (assistantMsgs.some((message) => getResponseMetadata(message) !== undefined)) return true;
+  return showCopyToolbar && Boolean(getTextFromParts(assistantMsgs.flatMap((message) => message.parts ?? []), "\n\n").trim());
+}
+
 function getResponseMetadata(msg: UIMessage): ResponseMetadata | undefined {
   const raw = (msg as { metadata?: unknown }).metadata;
   if (!raw || typeof raw !== "object") return undefined;
@@ -1617,8 +1627,15 @@ export const MessageList = memo(function MessageList({
   }, [isStreaming, normalizedMessages, turns]);
   // A small, fixed gap under the reply in progress (REPLY_GAP_CLASS), so the
   // newest text sits about two lines above the composer, never a share of the
-  // viewport. The last turn's toolbar takes its place when the reply ends.
-  const showReplyGap = replyActive || showAwaitingReply || showPlanning;
+  // viewport. The last turn's toolbar takes its place when the reply ends; a
+  // last turn without one (only tool calls, or stopped before any text) keeps
+  // the gap, so the end of the reply moves nothing.
+  const lastTurnHasToolbar = useMemo(() => {
+    const last = turns[turns.length - 1];
+    return Boolean(last && last.assistantMsgs.length > 0 && finishedTurnHasToolbar(last.assistantMsgs, showCopyToolbar));
+  }, [turns, showCopyToolbar]);
+  const showReplyGap =
+    replyActive || showAwaitingReply || showPlanning || (turns.length > 0 && !lastTurnHasToolbar);
 
   // Follow live output while following the end: every streamed token / tool
   // update produces new `messages`, so snap to the bottom. Instant (not
@@ -1796,8 +1813,7 @@ export const MessageList = memo(function MessageList({
                     // creating large gaps between assistant turns.
                     const showToolbar =
                       !isTurnStreaming &&
-                      ((showCopyToolbar && Boolean(assistantText.trim())) ||
-                        turnMetadata !== undefined);
+                      finishedTurnHasToolbar(turn.assistantMsgs, showCopyToolbar);
                     const copyKey = `assistant-${turnKey}-all`;
                     const toolbarText = showCopyToolbar ? assistantText : "";
                     // Read aloud reads the answer, not the notes the agent wrote while it worked.

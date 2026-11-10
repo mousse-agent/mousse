@@ -88,6 +88,24 @@ describe('the gap under a streaming reply', () => {
     expect(toolbar!.className).toContain('-mb-5')
   })
 
+  it('stays when the reply ends without a toolbar to take its place, so nothing moves', () => {
+    // A reply of tool calls only: no text to copy, no metadata, so no toolbar.
+    const tools = { id: 'a1', role: 'assistant', parts: [{ type: 'tool-Bash', toolCallId: 't1', state: 'output-available', input: { command: 'ls' }, output: 'a.txt' }] } as unknown as UIMessage
+    render([ask('u1'), tools], 'streaming')
+    const during = gap()!.outerHTML
+    render([ask('u1'), tools], 'ready')
+    expect(toolbars()).toEqual([])
+    expect(gap()!.outerHTML).toBe(during)
+    expect(belowRows()).toEqual([gap()])
+  })
+
+  it('stays when a turn is stopped before the reply wrote anything', () => {
+    render([ask('u1')], 'streaming')
+    const during = gap()!.outerHTML
+    render([ask('u1')], 'ready')
+    expect(gap()!.outerHTML).toBe(during)
+  })
+
   it('leaves earlier turns their full toolbar, and no leftover space under a finished thread', () => {
     render([ask('u1'), answer('a1', 'Done streaming.'), ask('u2', 'And then?'), answer('a2', 'That is all.')], 'ready')
     expect(gap()).toBeNull()
