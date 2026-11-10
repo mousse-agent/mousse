@@ -18,7 +18,8 @@
  *   never see it as stale;
  * - a lease of theirs is never taken over while its process lives, however old its heartbeat; this build waits, and
  *   says who holds it. It is taken over when that process is gone, when the lease was taken before the computer last
- *   started, or when the process that has the pid now started after the lease was taken (the pid was reused);
+ *   started, when the process that has the pid now started after the lease was taken (the pid was reused), or when its
+ *   heartbeat is more than six hours old ({@link OLDER_BUILD_LEASE_CEILING_MS});
  * - they can still take a lease of this build over when its heartbeat is late (a long pause of this process), and they
  *   reclaim stale files without any lock among themselves. Neither can be prevented from here: upgrade or stop older
  *   Mousse builds that work in the same repositories.
@@ -31,7 +32,6 @@
  * written with one create-only write: a process that ends inside that write can leave it empty, and then the next holder
  * waits {@link UNFINISHED_LEASE_MS} for it, and older builds wait until it is removed.
  */
-import { execFile } from 'node:child_process'
 import { closeSync, existsSync, linkSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync, ftruncateSync, readSync, fsyncSync } from 'node:fs'
 import { uptime } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -41,6 +41,7 @@ import type { RepositoryIdentity } from './RepositoryIdentity'
 import { requireRepositoryMutationCapability } from './RepositoryIdentity'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { sqliteFilePath } from '../data/sqliteFilePath'
+import { readProcessStart } from './stoppedGitTree'
 
 export const REPOSITORY_LEASE_FILENAME = 'repository-mutation.lease'
 export const REPOSITORY_LOCK_FILENAME = 'repository-mutation.lock'
@@ -51,6 +52,8 @@ export const DEFAULT_REPOSITORY_LEASE_STALE_MS = 30_000
  * short this long after it was made was left by a process that ended inside that write.
  */
 export const UNFINISHED_LEASE_MS = 5_000
+/** An older build refreshes its lease only while an operation runs; one not refreshed for this long is no live holder's. */
+export const OLDER_BUILD_LEASE_CEILING_MS = 6 * 60 * 60_000
 /** How often a holder refreshes the lease file, well inside the 30 s stale window older builds use. */
 export const REPOSITORY_LEASE_HEARTBEAT_MS = 10_000
 /**
@@ -261,20 +264,9 @@ function processStart(pid: number): number | null | undefined {
   if (known && Date.now() - known.lookedAt < PROCESS_START_TTL_MS) return known.at
   if (!known || Date.now() - known.lookedAt >= PROCESS_START_TTL_MS) {
     processStarts.set(pid, { at: known?.at ?? null, lookedAt: Date.now() })
-    lookUpProcessStart(pid).then((at) => processStarts.set(pid, { at, lookedAt: Date.now() }), () => undefined)
+    readProcessStart(pid).then((at) => processStarts.set(pid, { at, lookedAt: Date.now() }), () => undefined)
   }
   return known ? known.at : undefined
-}
-function lookUpProcessStart(pid: number): Promise<number | null> {
-  const [file, args] = process.platform === 'win32'
-    ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`]]
-    : ['ps', ['-o', 'lstart=', '-p', String(pid)]]
-  return new Promise((done) => {
-    execFile(file, args as string[], { windowsHide: true, timeout: 10_000, encoding: 'utf8' }, (error, stdout) => {
-      const at = error ? Number.NaN : Date.parse(stdout.trim())
-      done(Number.isFinite(at) ? at : null)
-    })
-  })
 }
 
 /**
@@ -295,6 +287,7 @@ function leaseFound(path: string, staleAfterMs: number): { remove: boolean; hold
   if (locallyHeldTokens.has(owner.token)) return { remove: false, holder: holderOf(owner) }
   if (owner.osLock) return { remove: true }
   if (!isOwnerLive(owner)) return { remove: true }
+  if (Date.now() - Date.parse(owner.heartbeatAt) > OLDER_BUILD_LEASE_CEILING_MS) return { remove: true }
   // A pid that lives is the lease's process only if that process was running when the lease was taken.
   const acquired = Date.parse(owner.acquiredAt)
   if (Number.isFinite(acquired)) {

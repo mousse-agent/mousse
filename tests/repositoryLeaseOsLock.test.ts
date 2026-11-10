@@ -296,6 +296,21 @@ describe('the repository lease, round 2', () => {
     expect(await acquires(identity)).toBeLessThan(2_000)
   }, 30_000)
 
+  it("takes over an older Mousse's lease not refreshed for over six hours, and keeps a younger one of a live process", async () => {
+    const root = repo(); const identity = resolveRepositoryIdentity(root); const path = getRepositoryLeasePath(identity)
+    // A live process that was already running when the lease was taken, so only the heartbeat's age can decide.
+    const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' }); children.push(other)
+    await new Promise((done) => setTimeout(done, 2_500))
+    const lease = (heartbeatAgeMs: number) => {
+      const acquiredAt = new Date().toISOString()
+      return JSON.stringify({ pid: other.pid, processInstanceId: 'older', token: 'older', acquiredAt, heartbeatAt: new Date(Date.now() - heartbeatAgeMs).toISOString() })
+    }
+    writeFileSync(path, lease(5 * 60 * 60_000))
+    await busy(identity, { maxWaitMs: 3_000 })
+    writeFileSync(path, lease(7 * 60 * 60_000))
+    expect(await acquires(identity)).toBeLessThan(2_000)
+  }, 30_000)
+
   it('ends a wait with no limit of its own once the lock file stays unusable, and a later wait never reports that cause', async () => {
     const base = mkdtempSync(join(tmpdir(), 'mousse-lease-cap-')); dirs.push(base)
     const identity = identityAt(join(base, 'mousse'))
