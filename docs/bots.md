@@ -157,6 +157,16 @@ States are idle, working ("Waiting for internet" while it waits for it), needs y
 - **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, waiting for the internet, stops and chat failures never count.
 - **Resume** (`bots.personal.resume`) clears every pause, the failure count and the stuck error.
 
+## On a phone
+
+The owner's phones see and use the bots of a computer they reach through Bridge. Bots are the owner's, and so are the phones, so both the shared and the private lists stream carry them.
+
+- **Lists.** `bridge.lists.open` pushes `bots` beside `chats` (`ListsBot` in `src/mms/bridge/remote/MmsListsSource.ts`): each bot's summary as the Bots list has it, plus `activity`, the live chip of its chat activation (gone when the chip clears). The stream pushes again, debounced, on `bots.changed`, `bots.message` and `bots.activity`. Bots are listed whether or not there are chats; a computer whose bots can't be read lists none.
+- **Methods** (`src/mms/bridge/remote/RemoteBots.ts`, deny-default, exact keys): `bots.get` and `bots.chat.list` (read); `bots.chat.send`, `bots.chat.stop`, `bots.work.stop`, `bots.chat.markRead` and `bots.asks.answer` (chat); `bots.personal.pause`, `bots.personal.resume` and `bots.create` (write). Each calls the same `BotChatService` method as the desktop, with the same params and results.
+- **What a phone does not get.** No model, no instance id (an error's action keeps its kind and label; Sign in happens on the computer), no paths (an attachment keeps its name). A phone can't attach files, and a memory export ask is refused with "Answer this on the computer." because it needs a folder picker there.
+- **Sizes.** A phone's message is at most 32 KiB. A chat page is cut to the newest messages that fit one reply; the phone pages back with `beforeSeq`.
+- **Refusals.** An unknown bot, an ask that is gone, answered or not ready yet, and a memory export ask are plain errors, checked before anything changes, never an uncertain outcome. A message to a working bot queues as on the desktop; stopping work the bot no longer has returns `{ stopped: false }`.
+
 ## Runtimes that can hold a bot
 
 Bots run on the owner's own provider entries, the same ones their chats use, with the sign-ins they already have: Claude Code, Codex and Pi entries. Mousse adds no entry for bots. A runtime holds a bot when its driver says so (`HarnessDriver.botAuthority`) and `checkPolicy` admits the bot's policy (`src/mms/harness/policy.ts`). There are two ways to hold one:
@@ -196,6 +206,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Engine: activations, lanes, dispatch, walls and asks, usage pauses, waiting for the internet, delete | `src/mms/bots/activation/BotEngine.ts`, `src/mms/bots/activation/connectivity.ts` |
 | Bot UI daemon side: create, chat, About, and what clients see | `src/mms/bots/chat/` |
 | Daemon methods (`bots.personal.v2`) | `src/mms/bots/registerMethods.ts`, `src/shared/bots/personal/methods.ts` |
+| Phone methods and the bots in a phone's lists | `src/mms/bridge/remote/RemoteBots.ts`, `src/mms/bridge/remote/MmsListsSource.ts` |
 | Store, `bots.db` migrations | `src/mms/bots/store/BotStore.ts` |
 | Grant compile, authority | `src/mms/bots/grants/compile.ts`, `src/mms/bots/authority/botAuthority.ts` |
 | Model choice | `src/mms/bots/model/` |
