@@ -6,7 +6,7 @@ import {
 
 afterEach(() => vi.unstubAllGlobals())
 describe('native applet host overlay visibility', () => {
-  it('shares one observer and notifies hide/remount when a host menu opens/closes', () => {
+  it('shares one observer and re-checks hosts on page changes, including a menu opening and closing', () => {
     let changed: () => void = () => {}
     const disconnect = vi.fn()
     const observe = vi.fn()
@@ -27,20 +27,26 @@ describe('native applet host overlay visibility', () => {
       querySelectorAll: () =>
         menuOpen ? [{ getClientRects: () => [1], getAttribute: () => null }] : []
     })
-    const transitions: boolean[] = []
-    const unsub = subscribeAppletHostVisibility(() => transitions.push(appletHostBlocked()))
+    const seen: boolean[] = []
+    const unsub = subscribeAppletHostVisibility(() => seen.push(appletHostBlocked()))
     const other = subscribeAppletHostVisibility(() => {})
     frames.shift()!()
+    expect(seen).toEqual([false])
+    // Every batch of page changes re-checks the hosts, once per frame however many changes arrive.
     changed()
+    changed()
+    expect(frames).toHaveLength(1)
     frames.shift()!()
-    expect(transitions).toEqual([false])
+    expect(seen).toEqual([false, false])
     menuOpen = true
     changed()
     frames.shift()!()
     menuOpen = false
     changed()
     frames.shift()!()
-    expect(transitions).toEqual([false, true, false])
+    expect(seen).toEqual([false, false, true, false])
+    // Pages and panes show and hide through these attributes.
+    expect(observe.mock.calls[0][1].attributeFilter).toEqual(expect.arrayContaining(['hidden', 'inert', 'style', 'class']))
     expect(constructor).toHaveBeenCalledTimes(1)
     unsub()
     expect(disconnect).not.toHaveBeenCalled()

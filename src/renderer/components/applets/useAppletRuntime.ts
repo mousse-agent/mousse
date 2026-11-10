@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
-import { appletHostBlocked, subscribeAppletHostVisibility } from './hostVisibility'
+import { appletHostBlocked, appletHostShown, subscribeAppletHostVisibility } from './hostVisibility'
 
 /**
  * Where a preview sits. In the transcript it scrolls with the chat and stays above the composer; in the side panel
@@ -104,7 +104,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     const measure = async () => {
       frame = 0
       if (disposed || failed) return
-      if (document.visibilityState === 'hidden' || appletHostBlocked()) {
+      // A hidden window (minimized, or hidden to the tray) releases the applet; it starts again when shown.
+      if (document.visibilityState === 'hidden') {
         remove()
         return
       }
@@ -127,11 +128,15 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
           Math.min(window.innerHeight, composerTop, viewport?.bottom ?? window.innerHeight) -
           Math.max(0, viewport?.top ?? 0)
       }
-      const visible =
-        rect.bottom > clip.y &&
-        rect.top < clip.y + clip.height &&
-        rect.width > 0 &&
-        rect.height > 0
+      const area = {
+        x: Math.max(rect.left, clip.x),
+        y: Math.max(rect.top, clip.y),
+        width: Math.min(rect.right, clip.x + clip.width) - Math.max(rect.left, clip.x),
+        height: Math.min(rect.bottom, clip.y + clip.height) - Math.max(rect.top, clip.y)
+      }
+      // The native view draws above the whole page, so it shows only while its host really does: inside its clip,
+      // in the page, rendered, not in a replaced or covered part of the app, and with nothing drawn over it.
+      const visible = area.width > 0 && area.height > 0 && appletHostShown(node, area)
       if (!visible) {
         const id = runtime.current
         if (id && !parked) {
