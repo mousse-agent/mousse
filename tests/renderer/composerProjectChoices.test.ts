@@ -167,10 +167,12 @@ const OPUS = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 
  * The daemon side of a first send: `threads.create` returns `made`, the setters echo what they set, and the send is
  * accepted. Calls are recorded in order, so a test can check what the first turn runs with.
  */
-function daemonForSend(made: Thread, failures: { select?: number; setPermissionMode?: boolean } = {}) {
+function daemonForSend(made: Thread, failures: { select?: number; setPermissionMode?: boolean | number; setModel?: number; defaultMode?: Thread['permissionMode'] } = {}) {
   const calls: Array<[string, ...unknown[]]> = []
   let current = made
   let selectFailures = failures.select ?? 0
+  let modelFailures = failures.setModel ?? 0
+  let modeFailures = failures.setPermissionMode === true ? Infinity : failures.setPermissionMode || 0
   bridge.threads = {
     // Made with the model and permission mode the composer names, as the daemon does.
     create: vi.fn(async (...args: unknown[]) => {
@@ -183,17 +185,22 @@ function daemonForSend(made: Thread, failures: { select?: number; setPermissionM
     select: vi.fn(async () => {
       if (selectFailures > 0) { selectFailures -= 1; throw new Error('The service did not answer.') }
     }),
-    setModel: vi.fn(async (id: string, value: Thread['modelOverride']) => { calls.push(['setModel', id, value]); current = { ...current, modelOverride: value }; return current }),
+    setModel: vi.fn(async (id: string, value: Thread['modelOverride']) => {
+      calls.push(['setModel', id, value])
+      if (modelFailures > 0) { modelFailures -= 1; throw new Error('The other computer did not answer.') }
+      current = { ...current, modelOverride: value }
+      return current
+    }),
     setPermissionMode: vi.fn(async (id: string, mode: Thread['permissionMode']) => {
       calls.push(['setPermissionMode', id, mode])
-      if (failures.setPermissionMode) throw new Error('The service did not answer.')
+      if (modeFailures > 0) { modeFailures -= 1; throw new Error('The service did not answer.') }
       current = { ...current, permissionMode: mode }
       return current
     }),
     setWorktreeEnabled: vi.fn(async (id: string, enabled: boolean) => { calls.push(['setWorktreeEnabled', id, enabled]); current = { ...current, worktreeEnabled: enabled }; return current })
   }
   bridge.orchestrator = {
-    sendToThread: vi.fn(async () => { calls.push(['send', current.permissionMode, current.modelOverride?.model]); return { message: '', actions: [] } }),
+    sendToThread: vi.fn(async () => { calls.push(['send', current.permissionMode ?? failures.defaultMode, current.modelOverride?.model]); return { message: '', actions: [] } }),
     isTurnActive: vi.fn(async () => false)
   }
   stubBridge()
@@ -314,5 +321,63 @@ describe('a first send that fails after its thread was made (review reproduction
     expect(daemon.calls.find((call) => call[0] === 'create')?.[3]).toMatchObject({ permissionMode: 'ask' })
     expect(daemon.calls.some((call) => call[0] === 'setPermissionMode')).toBe(false)
     expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+  })
+})
+
+describe('a new chat on another computer whose setup fails after its thread was made (review reproduction)', () => {
+  const NODE = 'node-1'
+  /** A chat for another computer whose default is Full access; Ask is picked for it. */
+  async function askChatOnOtherComputer(failures: { setPermissionMode?: boolean | number; setModel?: number }) {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [{ ...project(`${NODE}:repo`), node: NODE }],
+      threads: [], activeThreadId: null, messages: [], pendingThreadSetup: {},
+      composerWorkspaceDrafts: { __blank__: { projectId: `${NODE}:repo`, worktreeEnabled: false, node: NODE as never } }
+    })
+    // That computer makes the thread with neither a model nor a mode of its own; it runs in Full access by default.
+    const daemon = daemonForSend(threadRow(`${NODE}:made`, { node: NODE, projectId: `${NODE}:repo` }), { ...failures, defaultMode: 'full' })
+    bridge.platformRequest = {
+      request: vi.fn(async (method: string) => method === 'bridge.hub.composerOptions'
+        ? { providers: [{ id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus 5.5' }] }], defaultModel: OPUS, permission: { defaultMode: 'full' } }
+        : new Promise(() => undefined))
+    }
+    stubBridge()
+    await mountComposer()
+    expect(permissionChip()).toBe('Permissions: Full access')
+    await act(async () => { host.querySelector<HTMLButtonElement>('.composer-permission-chip')!.click() })
+    await act(async () => { [...document.querySelectorAll<HTMLButtonElement>('.composer-permission-mode')].find((row) => row.textContent?.includes('Ask before acting'))!.click() })
+    await settle()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+    return daemon
+  }
+
+  it('the mode call fails after the thread was made: nothing is sent, and the retry sets Ask first, then sends in Ask', async () => {
+    const daemon = await askChatOnOtherComputer({ setPermissionMode: 1 })
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toBeUndefined()
+    expect(host.textContent).toContain('Nothing was sent')
+    // The chip still says what the thread will run in.
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    await send('Fix the parser')
+    expect(daemon.calls.filter((call) => call[0] === 'create')).toHaveLength(1)
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+  })
+
+  it('the model call fails first: the retry sets the model and Ask before sending', async () => {
+    const daemon = await askChatOnOtherComputer({ setModel: 1 })
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toBeUndefined()
+
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+  })
+
+  it('while the setup cannot be finished, every send stops with the error instead of running in the default', async () => {
+    const daemon = await askChatOnOtherComputer({ setPermissionMode: true })
+    await send('Fix the parser')
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toBeUndefined()
+    expect(host.textContent).toContain('Nothing was sent')
   })
 })
