@@ -68,6 +68,14 @@ export class ThreadSession {
   /** Stop requested after admission but before the turn created its abort controller. */
   abortRequested = false
   /**
+   * A person's Stop ended this thread's turn, which is still ending (its checkpoint and cleanup). The thread already
+   * shows stopped; the turn's own late phases are not shown, and a message sent meanwhile goes first and runs as soon
+   * as the turn has ended. Cleared with the admission.
+   */
+  stopping = false
+  /** The messages a person sent while the stopped turn still ended, in the order sent (`stopping`). */
+  sentAfterStop: string[] = []
+  /**
    * Ends the waits of a turn that is still being set up (its worktree, the snapshot it starts from) when a Stop comes
    * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.
    */

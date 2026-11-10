@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { stopThreadNow } from '../lib/stopThread'
 import { expiryPresetMs } from '../../shared/threadExpiry'
 import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
@@ -1042,7 +1043,9 @@ export function OrchestratorChat() {
   )
 
   const handleStop = useCallback(async () => {
-    await window.mousse.orchestrator.abort(activeThreadId ?? undefined)
+    // The thread shows stopped at the click; the daemon confirms it.
+    if (activeThreadId) await stopThreadNow(activeThreadId)
+    else await window.mousse.orchestrator.abort()
     await refreshTurnActive()
   }, [activeThreadId, refreshTurnActive])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.

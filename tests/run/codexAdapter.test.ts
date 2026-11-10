@@ -1070,7 +1070,7 @@ describe('CodexAdapter', () => {
       const adapter = new CodexAdapter(() => codex)
       await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
       await expect(adapter.stopThread('thread-1')).rejects.toThrow(`Codex's command ${COMMAND} (process 4242) could not be stopped`)
-      expect(stopCommands).toHaveBeenCalledWith([server.pid], [COMMAND])
+      expect(stopCommands).toHaveBeenCalledWith([server.pid], [COMMAND], { list: expect.any(Function) })
     })
 
     it('waits for a command Codex ends itself and kills nothing', async () => {
@@ -1097,6 +1097,46 @@ describe('CodexAdapter', () => {
       expect(await adapter.stopThread('thread-1')).toBe('not_active')
       expect(stopCommands).not.toHaveBeenCalled()
     })
+  })
+
+  // Stop latency: the process list (most of a second on Windows) is read at once, not after Codex's grace.
+  it('kills a stopped command as soon as the process list is read, without waiting for the grace', async () => {
+    const controller = new AbortController()
+    const command = 'node -e "setTimeout(() => {}, 300000)"'
+    const replay = transport(
+      [
+        ...handshake(),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
+        note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'commandExecution', id: 'cmd-1', command, status: 'inProgress' } }),
+        cue({ action: 'stop' }),
+        out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+        inn({ id: 6, result: {} }),
+        // Codex settles the turn and never reports the command as ended: it keeps it as a background terminal.
+        completed('interrupted')
+      ],
+      () => controller.abort(new Error('stopped by the user'))
+    )
+    const binary = join(home, 'codex')
+    writeFileSync(binary, '#!/bin/sh\nexit 0\n')
+    mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+    writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
+    const launch = replayCodexAppServer(replay)
+    const listed = [{ pid: 4242, ppid: process.pid, command }]
+    const listProcesses = vi.fn(async () => listed)
+    const stopCommands = vi.fn(async (_roots: readonly number[], _commands: readonly string[], ports?: { list?: () => Promise<unknown> }) => {
+      // The list Stop already read is the one the kill uses.
+      expect(await ports?.list?.()).toBe(listed)
+      return { killed: [listed[0]!], survivors: [] }
+    })
+    // A grace far longer than the test: the kill must not wait for it.
+    const codex = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid: process.pid }), listProcesses, stopCommands, stopGraceMs: 600_000 }, { launch: () => ({ binaryPath: binary }) })
+    services.push(codex)
+    const adapter = new CodexAdapter(() => codex)
+    await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
+    expect(await adapter.stopThread('thread-1')).toBe('stopped')
+    expect(listProcesses).toHaveBeenCalledTimes(1)
+    expect(stopCommands).toHaveBeenCalledWith([process.pid], [command], { list: expect.any(Function) })
   })
 
   it('fingerprints the thread a usage limit ended, and no other failure', async () => {

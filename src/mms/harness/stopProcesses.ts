@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { descendantsOf, killProcessTree, readProcessTable, readStartTime } from './processTree.mjs'
+import { anchoredTree, readProcessEntries, startDisproved, type ProcessEntry } from '../git/stoppedGitTree'
 
 /**
  * Stop's last resort for the commands an agent runs (issue #417). A runtime ends the command it is
@@ -223,42 +224,146 @@ export async function stopCommandProcesses(
 }
 
 /**
+ * What Mousse knows of a process it started, so a delayed kill never reaches another program that was given its pid
+ * since: when it was started (the anchor its creation time is checked against, `anchoredTree`), whether it has exited
+ * (from Mousse's own handle: a pid is not given to another process while that handle shows it running), and a kill
+ * through that handle.
+ */
+export interface SpawnedRoot {
+  spawnedAt?: number
+  /** True once the process exited, false while it runs, undefined when the handle cannot tell. */
+  exited?: () => boolean | undefined
+  /** Ends the process itself through Mousse's handle (no tree). */
+  kill?: () => void
+}
+
+/** The kill of one process of an anchored tree on Windows: by pid, without `/T` (its descendants were found by identity). */
+function killPid(pid: number): Promise<void> {
+  return run('taskkill', ['/PID', String(pid), '/F']).then(() => undefined, () => undefined)
+}
+
+/**
  * Ends the process `pid` a runtime was asked to close, if it has not ended by itself `graceMs` from
  * now: it and everything it started are killed. On POSIX the process groups below it are noted at
  * the call, so a command group the process left behind when it exited is killed too (its parent link
  * is gone by then). Resolves `ended` when nothing had to be killed, `killed` when everything was, and
  * `survived` when something is still running after the kill.
+ *
+ * With `root` (what Mousse knows of the process it started), the pid is never taken on trust after the grace:
+ * - a process its handle shows exited is not killed, whatever now has its pid;
+ * - right before the kill the process list is read, and a pid whose creation time is not the anchored one is left alone;
+ * - on Windows the tree is the root and the descendants found by identity (`anchoredTree`: parent with the same
+ *   creation time, created after it). Each descendant is checked again in a fresh list read right before the kills,
+ *   and skipped unless its pid still has the same creation time; the kills by pid all start at once, the root's through
+ *   its handle. Without a list, only the root is killed, through its handle.
  */
-export async function reapProcessTree(pid: number, options: TreeKillPorts & { graceMs?: number } = {}): Promise<'ended' | 'killed' | 'survived'> {
+export async function reapProcessTree(
+  pid: number,
+  options: TreeKillPorts & {
+    graceMs?: number
+    root?: SpawnedRoot
+    /** The process list read right before the kill (tests substitute it). */
+    table?: () => Promise<ProcessEntry[] | undefined>
+    /** Kills one process by pid on Windows (tests substitute it). */
+    killPid?: (pid: number) => Promise<void> | void
+  } = {}
+): Promise<'ended' | 'killed' | 'survived'> {
   const platform = options.platform ?? process.platform
   const isAlive = options.alive ?? alive
-  /** POSIX: the groups below `pid` now (its own, when it leads one), with their leader's start time when the leader is one of them. */
-  const groups = new Map<number, string | undefined>()
-  if (platform !== 'win32' && isAlive(pid)) {
-    const table = readProcessTable()
-    const own = table?.find((entry) => entry.pid === process.pid)?.pgid
-    const root = table?.find((entry) => entry.pid === pid)
-    for (const entry of table ? [...(root ? [root] : []), ...descendantsOf(table, pid)] : []) {
-      if (entry.pgid <= 1 || entry.pgid === own || groups.has(entry.pgid)) continue
-      groups.set(entry.pgid, entry.pgid === entry.pid ? readStartTime(entry.pid) : undefined)
-    }
-  }
+  const root = options.root
+  /** Whether the root is gone: by Mousse's handle when it can tell, else by its pid. */
+  const rootGone = (): boolean => root?.exited?.() ?? !isAlive(pid)
+  if (root) return reapAnchored(pid, root, rootGone, options, platform, isAlive)
+  const groups = platform !== 'win32' && isAlive(pid) ? noteGroups(pid) : new Map<number, string | undefined>()
   // Cheap checks while waiting; the start times are read once, after the grace.
-  await until(() => !isAlive(pid) && [...groups.keys()].every((pgid) => !groupAlive(pgid)), options.graceMs ?? STOP_GRACE_MS)
-  // A group whose leader runs with another start time is someone else's now.
-  const leftGroups = (): number[] =>
-    [...groups].filter(([pgid, started]) => groupAlive(pgid) && (started === undefined || !isAlive(pgid) || readStartTime(pgid) === started)).map(([pgid]) => pgid)
-  const rootLeft = isAlive(pid)
-  const groupsLeft = platform === 'win32' ? [] : leftGroups()
+  await until(() => rootGone() && [...groups.keys()].every((pgid) => !groupAlive(pgid)), options.graceMs ?? STOP_GRACE_MS)
+  const rootLeft = !rootGone()
+  const groupsLeft = platform === 'win32' ? [] : groupsStillTheirs(groups, isAlive)
   if (!rootLeft && groupsLeft.length === 0) return 'ended'
   if (rootLeft) await (options.killTree ?? ((target: number) => killTree(target, platform)))(pid)
-  for (const pgid of groupsLeft) {
+  killGroups(groupsLeft)
+  const gone = await until(() => rootGone() && (platform === 'win32' || groupsLeft.every((pgid) => !groupAlive(pgid))), options.settleMs ?? STOP_SETTLE_MS)
+  return gone ? 'killed' : 'survived'
+}
+
+/** POSIX: the groups below `pid` now (its own, when it leads one), with their leader's start time when the leader is one of them. */
+function noteGroups(pid: number): Map<number, string | undefined> {
+  const groups = new Map<number, string | undefined>()
+  const table = readProcessTable()
+  const own = table?.find((entry) => entry.pid === process.pid)?.pgid
+  const root = table?.find((entry) => entry.pid === pid)
+  for (const entry of table ? [...(root ? [root] : []), ...descendantsOf(table, pid)] : []) {
+    if (entry.pgid <= 1 || entry.pgid === own || groups.has(entry.pgid)) continue
+    groups.set(entry.pgid, entry.pgid === entry.pid ? readStartTime(entry.pid) : undefined)
+  }
+  return groups
+}
+
+/** The noted groups still running as theirs: a group whose leader runs with another start time is someone else's now. */
+function groupsStillTheirs(groups: Map<number, string | undefined>, isAlive: (pid: number) => boolean): number[] {
+  return [...groups].filter(([pgid, started]) => groupAlive(pgid) && (started === undefined || !isAlive(pgid) || readStartTime(pgid) === started)).map(([pgid]) => pgid)
+}
+
+function killGroups(groups: readonly number[]): void {
+  for (const pgid of groups) {
     try {
       process.kill(-pgid, 'SIGKILL')
     } catch {
       /* gone meanwhile */
     }
   }
-  const gone = await until(() => !isAlive(pid) && (platform === 'win32' || groupsLeft.every((pgid) => !groupAlive(pgid))), options.settleMs ?? STOP_SETTLE_MS)
+}
+
+/** `reapProcessTree` of a process Mousse started and knows (`SpawnedRoot`). */
+async function reapAnchored(
+  pid: number,
+  root: SpawnedRoot,
+  rootGone: () => boolean,
+  options: TreeKillPorts & { graceMs?: number; table?: () => Promise<ProcessEntry[] | undefined>; killPid?: (pid: number) => Promise<void> | void },
+  platform: NodeJS.Platform,
+  isAlive: (pid: number) => boolean
+): Promise<'ended' | 'killed' | 'survived'> {
+  const groups = platform !== 'win32' && !rootGone() ? noteGroups(pid) : new Map<number, string | undefined>()
+  await until(() => rootGone() && [...groups.keys()].every((pgid) => !groupAlive(pgid)), options.graceMs ?? STOP_GRACE_MS)
+  const groupsLeft = platform === 'win32' ? [] : groupsStillTheirs(groups, isAlive)
+  /** What was killed by pid, the root included when it was. */
+  const killed: number[] = []
+  if (!rootGone()) {
+    // Right before the kill: the pid must still be the process Mousse started. One with another creation time is not.
+    const table = await (options.table ?? readProcessEntries)()
+    const listed = table?.find((entry) => entry.pid === pid)
+    const disproved = root.spawnedAt !== undefined && listed !== undefined && startDisproved(listed, root.spawnedAt)
+    // The handle is asked again: the process may have exited while the list was read.
+    if (!disproved && !rootGone()) {
+      if (platform === 'win32' && root.spawnedAt !== undefined) {
+        const kill = options.killPid ?? killPid
+        // The descendants found by identity in that list. Without a list none is known for certain, and only the root is killed.
+        const found = table ? [...anchoredTree(table, pid, root.spawnedAt, 'win32')].filter(([target]) => target !== pid) : []
+        // A `taskkill` can take seconds, so they are not killed one after another from that list: a fresh list, shared by
+        // the kills, is read right before them, a descendant that is gone or whose pid now has another creation time is
+        // skipped (one whose creation time cannot be read cannot be confirmed, and is skipped too), and every kill starts
+        // at once. The root is killed through its handle meanwhile.
+        const fresh = found.length ? await (options.table ?? readProcessEntries)() : undefined
+        const now = new Map((fresh ?? []).map((entry) => [entry.pid, entry]))
+        const confirmed = found.filter(([target, started]) => started !== undefined && now.get(target)?.started === started)
+        const kills = confirmed.map(([target]) => Promise.resolve(kill(target)).catch(() => undefined))
+        killed.push(...confirmed.map(([target]) => target))
+        if (root.kill) root.kill()
+        else kills.push(Promise.resolve(kill(pid)).catch(() => undefined))
+        await Promise.all(kills)
+      } else {
+        // POSIX (the pid is the process while its handle shows it running), or a Windows process with no anchor: from the root.
+        await (options.killTree ?? ((target: number) => killTree(target, platform)))(pid)
+      }
+      killed.push(pid)
+    }
+  }
+  if (killed.length === 0 && groupsLeft.length === 0) return 'ended'
+  killGroups(groupsLeft)
+  const descendants = killed.filter((target) => target !== pid)
+  const gone = await until(
+    () => (!killed.includes(pid) || rootGone()) && descendants.every((target) => !isAlive(target)) && groupsLeft.every((pgid) => !groupAlive(pgid)),
+    options.settleMs ?? STOP_SETTLE_MS
+  )
   return gone ? 'killed' : 'survived'
 }

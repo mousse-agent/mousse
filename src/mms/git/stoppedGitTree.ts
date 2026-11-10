@@ -140,6 +140,46 @@ function killAtStop(child: ChildProcess, rootDisproved: boolean): void {
   try { process.kill(-pid, 'SIGKILL') } catch { child.kill('SIGKILL') }
 }
 
+/** Whether `entry` has a creation time, and it is not that of the process Mousse started at `spawnedAt`. */
+export function startDisproved(entry: ProcessEntry, spawnedAt: number): boolean {
+  return entry.startedMs !== undefined && Math.abs(entry.startedMs - spawnedAt) > SPAWN_ANCHOR_SLACK_MS
+}
+
+/**
+ * The processes of the tree Mousse started as `root` at `spawnedAt`, from one process list, by pid with each one's
+ * creation time. The root counts only with its anchored creation time (one that cannot be read cannot disprove it); a
+ * root that is gone or has another creation time leaves nothing found by its pid. A descendant counts when its parent is
+ * in the tree, as the same process in this list, and it was created after that parent; off Windows also a member of the
+ * root's process group while that group is still the root's.
+ */
+export function anchoredTree(table: ProcessEntry[], root: number, spawnedAt: number, platform: NodeJS.Platform = process.platform): Map<number, string | undefined> {
+  const tree = new Map<number, string | undefined>()
+  const byPid = new Map(table.map((entry) => [entry.pid, entry]))
+  const rootEntry = byPid.get(root)
+  if (rootEntry === undefined || startDisproved(rootEntry, spawnedAt)) {
+    // The root is gone. Off Windows its group may still have members: its id goes to no other group while one lives,
+    // unless another process now has the root's pid and leads a group of that id.
+    if (platform === 'win32' || rootEntry) return tree
+  } else {
+    tree.set(root, rootEntry.started)
+  }
+  const inTree = (entry: ProcessEntry): boolean => {
+    if (platform !== 'win32' && entry.pgid === root) return true
+    const parent = byPid.get(entry.ppid)
+    if (!parent || !tree.has(parent.pid) || tree.get(parent.pid) !== parent.started) return false
+    return parent.startedMs === undefined || entry.startedMs === undefined || entry.startedMs >= parent.startedMs
+  }
+  for (let grew = true; grew;) {
+    grew = false
+    for (const entry of table) {
+      if (tree.has(entry.pid) || !inTree(entry)) continue
+      tree.set(entry.pid, entry.started)
+      grew = true
+    }
+  }
+  return tree
+}
+
 export class StoppedGitTree {
   /** The processes seen at the stop, by pid, with when each was created (undefined when that could not be read). */
   private readonly tracked = new Map<number, string | undefined>()
@@ -151,17 +191,9 @@ export class StoppedGitTree {
     this.tracked.set(root, undefined)
   }
 
-  /**
-   * Whether `entry` is the command: its pid, and a creation time within {@link SPAWN_ANCHOR_SLACK_MS} of when Mousse
-   * started it. One whose creation time cannot be read cannot be disproved, and counts.
-   */
-  private isRoot(entry: ProcessEntry | undefined): entry is ProcessEntry {
-    return entry !== undefined && entry.pid === this.root && !this.disproved(entry)
-  }
-
   /** Whether `entry` has a creation time, and it is not the command's. */
   private disproved(entry: ProcessEntry): boolean {
-    return entry.startedMs !== undefined && Math.abs(entry.startedMs - this.spawnedAt) > SPAWN_ANCHOR_SLACK_MS
+    return startDisproved(entry, this.spawnedAt)
   }
 
   /** The pids of the command's processes being watched (the command's own until its processes were listed). */
@@ -201,30 +233,8 @@ export class StoppedGitTree {
   private note(table: ProcessEntry[]): void {
     if (this.known) return
     this.known = true
-    const byPid = new Map(table.map((entry) => [entry.pid, entry]))
     this.tracked.clear()
-    const root = byPid.get(this.root)
-    if (!this.isRoot(root)) {
-      // The command is gone. Off Windows its group may still have members: its id goes to no other group while one lives,
-      // unless another process now has the command's pid and leads a group of that id.
-      if (process.platform === 'win32' || root) return
-    } else {
-      this.tracked.set(this.root, root.started)
-    }
-    const inTree = (entry: ProcessEntry): boolean => {
-      if (process.platform !== 'win32' && entry.pgid === this.root) return true
-      const parent = byPid.get(entry.ppid)
-      if (!parent || !this.tracked.has(parent.pid) || this.tracked.get(parent.pid) !== parent.started) return false
-      return parent.startedMs === undefined || entry.startedMs === undefined || entry.startedMs >= parent.startedMs
-    }
-    for (let grew = true; grew;) {
-      grew = false
-      for (const entry of table) {
-        if (this.tracked.has(entry.pid) || !inTree(entry)) continue
-        this.tracked.set(entry.pid, entry.started)
-        grew = true
-      }
-    }
+    for (const [pid, started] of anchoredTree(table, this.root, this.spawnedAt)) this.tracked.set(pid, started)
   }
 
   /** A cheap look without listing (Windows): whether a watched pid is still there. True can be a reused pid; a list confirms. */

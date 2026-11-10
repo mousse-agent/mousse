@@ -26,6 +26,7 @@ import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
+import { applyDaemonTurnState, stoppedAtClick, type StopRequest } from '../lib/optimisticStop'
 import { DEFAULT_THREADS_SIDEBAR_WIDTH } from '../lib/resizerKeys'
 import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
@@ -188,6 +189,8 @@ interface AppState {
   subagentsByParent: Record<string, SubagentSummary[]>
   setSubagents: (parentThreadId: string, subagents: SubagentSummary[]) => void
   turnStates: TurnStateSnapshot
+  /** Stops shown before the daemon confirmed them, by thread (`lib/optimisticStop`). Not persisted. */
+  stopRequests: Record<string, StopRequest>
   mainView: MainView
   /** Surfaces the user opened in the side panel. Agents is added on its own. */
   openedSurfaceKinds: MainView[]
@@ -275,6 +278,16 @@ interface AppState {
   setThreadActivity: (activity: ThreadActivitySnapshot) => void
   setTurnState: (state: TurnState) => void
   setTurnSnapshot: (snap: TurnStateSnapshot) => void
+  /**
+   * Shows the thread's turn stopped at once, until the daemon confirms or contradicts it. Returns the request's
+   * `requestedAt`, or undefined when nothing runs.
+   */
+  markStopRequested: (threadId: string) => number | undefined
+  /**
+   * The Stop stopped nothing, or was never confirmed: the daemon's latest state of the thread is shown again. With
+   * `requestedAt`, only that request is reverted, not a later Stop's.
+   */
+  revertStopRequest: (threadId: string, requestedAt?: number) => void
   setMainView: (view: MainView) => void
   addProjectTerminalTab: (ownerThreadId: string | null) => string
   closeProjectTerminalTab: (tabId: string) => void
@@ -440,7 +453,7 @@ function savePersonalWorkspace(state: AppState): void {
   } catch { /* quota/private mode */ }
 }
 
-export const useAppStore = create<AppState>()(persist((set) => ({
+export const useAppStore = create<AppState>()(persist((set, get) => ({
   profileId: 'default',
   profileReady: false,
   workspaceReady: false,
@@ -481,6 +494,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setSubagents: (parentThreadId, subagents) =>
     set((s) => ({ subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: subagents } })),
   turnStates: {},
+  stopRequests: {},
   mainView: DEFAULT_MAIN_VIEW,
   openedSurfaceKinds: [],
   openSurfaceKind: (kind) => set((state) => ({
@@ -644,8 +658,47 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setSideCardFits: (sideCardFits) => set({ sideCardFits }),
   setSideCardOverlayOpen: (sideCardOverlayOpen) => set({ sideCardOverlayOpen }),
   setSideCardSectionCollapsed: (key, collapsed) => set((s) => ({ sideCardCollapsed: { ...s.sideCardCollapsed, [key]: collapsed } })),
-  setTurnState: (state) => set((s) => ({ turnStates: { ...s.turnStates, [state.threadId]: state } })),
-  setTurnSnapshot: (snap) => set({ turnStates: snap }),
+  setTurnState: (state) => set((s) => {
+    const request = s.stopRequests[state.threadId]
+    if (!request) return { turnStates: { ...s.turnStates, [state.threadId]: state } }
+    const next = applyDaemonTurnState(request, state)
+    const stopRequests = { ...s.stopRequests }
+    if (next.request) stopRequests[state.threadId] = next.request
+    else delete stopRequests[state.threadId]
+    return next.shown ? { stopRequests, turnStates: { ...s.turnStates, [state.threadId]: next.shown } } : { stopRequests }
+  }),
+  setTurnSnapshot: (snap) => set((s) => {
+    const turnStates = { ...snap }
+    const stopRequests: Record<string, StopRequest> = {}
+    for (const [threadId, request] of Object.entries(s.stopRequests)) {
+      const state = snap[threadId]
+      if (!state) continue
+      const next = applyDaemonTurnState(request, state)
+      if (next.request) {
+        stopRequests[threadId] = next.request
+        turnStates[threadId] = s.turnStates[threadId] ?? state
+      }
+    }
+    return { turnStates, stopRequests }
+  }),
+  markStopRequested: (threadId) => {
+    const current = get().turnStates[threadId]
+    const shown = stoppedAtClick(current)
+    if (!current || !shown) return undefined
+    const requestedAt = Date.now()
+    set((s) => ({
+      turnStates: { ...s.turnStates, [threadId]: shown },
+      stopRequests: { ...s.stopRequests, [threadId]: { turnId: current.turnId, daemon: current, requestedAt } }
+    }))
+    return requestedAt
+  },
+  revertStopRequest: (threadId, requestedAt) => set((s) => {
+    const request = s.stopRequests[threadId]
+    if (!request || (requestedAt !== undefined && request.requestedAt !== requestedAt)) return {}
+    const stopRequests = { ...s.stopRequests }
+    delete stopRequests[threadId]
+    return { stopRequests, turnStates: { ...s.turnStates, [threadId]: request.daemon } }
+  }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
   switchToThread: (id) =>
     set((s) => {
@@ -843,6 +896,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       threadActivity: {},
       subagentsByParent: {},
       turnStates: {},
+      stopRequests: {},
       documentTabs: [],
       activeDocumentTabId: null,
       documentsTabVisible: false,
