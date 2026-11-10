@@ -90,6 +90,7 @@ import {
 } from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
+import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy } from '../../adapter'
@@ -1671,8 +1672,10 @@ export class CodexProviderService {
    * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
    * commit message on the chosen model. It runs as one turn on an ephemeral Codex thread (never written
    * to Codex's history) with the system text as its base instructions, a read-only sandbox in a folder
-   * of its own, no approvals (any request is cancelled: no run owns the thread) and the user's MCP
-   * servers off where Codex can list them. The answer is the turn's last agent message. It never retries.
+   * of its own, no approvals (any request is refused: no run owns the thread), Codex's native tools and
+   * web search off, and every MCP server off (`codexOneShotConfig`); it is refused when the user's MCP
+   * servers cannot be listed. Any tool call Codex reports ends it, its turn interrupted. The answer is
+   * the turn's last agent message. It never retries.
    */
   async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
@@ -1683,13 +1686,16 @@ export class CodexProviderService {
     let conn: CodexConnection | undefined
     let turnId: string | undefined
     let ended = false
+    let lost: (() => void) | undefined
     try {
       if (this.checkDue()) await abortable(this.status(), signal)
       if (!this.configured())
         throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
       conn = await this.verifiedConnection(signal)
       const cwd = this.standaloneWorkspace('one-shot')
-      const userMcp = codexBotMcpOverrides((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers) ?? {}
+      const locked = codexOneShotConfig((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers)
+      if (!locked)
+        throw new AppError({ code: 'policy_unenforceable', message: 'Mousse could not read which MCP servers Codex has on, so it did not send this request.', errorInfo: { category: 'unavailable', retryable: false } })
       const { baseId } = parseThinkingSuffixFromModelId(spec.model)
       const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
       const model = baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}
@@ -1699,7 +1705,7 @@ export class CodexProviderService {
         sandbox: 'read-only',
         ...model,
         modelProvider: this.modelProvider,
-        config: { ...userMcp, model_provider: this.modelProvider },
+        config: { ...locked, model_provider: this.modelProvider },
         baseInstructions: spec.system,
         ephemeral: true
       }, { signal }))
@@ -1709,9 +1715,16 @@ export class CodexProviderService {
       // The turn's agent messages by item, and its end.
       const messages = new Map<string, string>()
       let done!: (turn: CodexTurn) => void
-      const completed = new Promise<CodexTurn>((resolve) => { done = resolve })
+      let refuse!: (reason: Error) => void
+      const completed = new Promise<CodexTurn>((resolve, reject) => { done = resolve; refuse = reject })
+      completed.catch(() => undefined)
       this.oneShots.set(threadId, (notification) => {
         spec.onActivity()
+        const started = notificationParams(notification, 'item/started')?.item
+        if (started && !CODEX_ONE_SHOT_ITEMS.has(started.type)) {
+          refuse(new AppError({ code: 'policy_unenforceable', message: `Codex tried to use a tool (${started.type}) in a request that runs none, so Mousse stopped it.`, errorInfo: { category: 'unavailable', retryable: false } }))
+          return
+        }
         const delta = notificationParams(notification, 'item/agentMessage/delta')
         if (delta) {
           messages.set(delta.itemId, (messages.get(delta.itemId) ?? '') + delta.delta)
@@ -1736,16 +1749,20 @@ export class CodexProviderService {
       })
       // Not tied to the signal: once sent, a stop has to interrupt the turn Codex started.
       turnId = turn.turn.id
-      const result = await abortable(Promise.race([completed, new Promise<never>((_resolve, reject) => {
-        const lost = (): void => reject(new Error('Codex stopped before it answered.'))
-        if (conn!.signal.aborted) lost()
-        else conn!.signal.addEventListener('abort', lost, { once: true })
-      })]), signal)
+      const connection = conn
+      const gone = new Promise<never>((_resolve, reject) => {
+        lost = (): void => reject(new Error('Codex stopped before it answered.'))
+        if (connection.signal.aborted) lost()
+        else connection.signal.addEventListener('abort', lost, { once: true })
+      })
+      gone.catch(() => undefined)
+      const result = await abortable(Promise.race([completed, gone]), signal)
       ended = true
       if (result.status === 'failed') throw new Error(this.redact(result.error?.message ?? 'Codex could not answer.'))
       if (result.status !== 'completed') throw new Error('Codex stopped before it answered.')
       return { text: [...messages.values()].pop() ?? '' }
     } finally {
+      if (lost) conn?.signal.removeEventListener('abort', lost)
       if (codexThreadId) this.oneShots.delete(codexThreadId)
       if (conn && codexThreadId && !conn.signal.aborted) {
         // A stopped request ends its turn on Codex's side too; then the thread is let go.

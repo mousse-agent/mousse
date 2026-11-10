@@ -355,18 +355,34 @@ describe('Claude Subscription native provider', () => {
   })
   it('a one-shot runs one turn with no tools and no saved session, and returns the answer', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
-    const { service, settings } = fixture((input) => {
+    const { service, settings, setLaunch, home } = fixture((input) => {
       inputs.push(input)
       return fakeQuery([{ type: 'stream_event', event: {} }, { ...result, result: 'Login redirect fix' }])
     })
+    // The user's Claude settings: a proxy sign-in in their `env`, and a hook that would run a command.
+    const configDir = join(home, 'claude-config')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(join(configDir, 'settings.json'), JSON.stringify({
+      env: { ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' },
+      hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo pwned' }] }] }
+    }))
+    setLaunch({ args: ['--verbose', '--plugin-dir', join(home, 'plugins')], env: { CLAUDE_CONFIG_DIR: configDir } })
     const onActivity = vi.fn()
     const answer = await service.oneShot({ model: 'sonnet:high', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
     expect(answer).toEqual({ text: 'Login redirect fix' })
     expect(inputs).toHaveLength(1)
     const { options, prompt } = inputs[0]!
     expect(prompt).toBe('Request: fix the login redirect')
-    expect(options).toMatchObject({ model: 'sonnet', systemPrompt: 'Name the chat.', tools: [], mcpServers: {}, strictMcpConfig: true, plugins: [], maxTurns: 1, persistSession: false })
+    expect(options).toMatchObject({ model: 'sonnet', effort: 'high', systemPrompt: 'Name the chat.', tools: [], allowedTools: [], mcpServers: {}, strictMcpConfig: true, plugins: [], maxTurns: 1, persistSession: false, permissionMode: 'default' })
     expect(options.resume).toBeUndefined()
+    // No settings file loads (no hook, plugin, MCP server or rule of the user's), hooks are off in the
+    // flag settings, none are passed in code, and none of the user's launch arguments are kept.
+    expect(options.settingSources).toEqual([])
+    expect(options.settings).toEqual({ disableAllHooks: true })
+    expect(options.hooks).toEqual({})
+    expect(options.extraArgs).toEqual({})
+    // The sign-in kept in the settings' `env` still reaches Claude Code.
+    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', CLAUDE_CONFIG_DIR: configDir })
     const denied = await options.canUseTool!('Bash', {}, { signal: new AbortController().signal, suggestions: [], toolUseID: 'x' } as never)
     expect(denied.behavior).toBe('deny')
     expect(onActivity).toHaveBeenCalledTimes(2)

@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events'
+import { EventEmitter, getEventListeners } from 'node:events'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,6 +18,7 @@ import {
   type CodexServiceOptions
 } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
+import { CODEX_ONE_SHOT_FEATURES_OFF } from '../src/mms/harness/vendors/codex/oneShot'
 
 type Message = { id?: number | string; method?: string; params?: unknown }
 type Reply = { result?: unknown; error?: { code: number; message: string } }
@@ -728,12 +729,16 @@ describe('CodexProviderService options (managed Codex)', () => {
   })
 
   describe('one-shot', () => {
-    /** A server whose turn sends `events` of the turn's thread, then the turn's end (none when `end` is null). */
-    function oneShotServer(events: Array<{ method: string; params: Record<string, unknown> }>, end: Turn | null = { status: 'completed' }) {
+    type Event = { method: string; params: Record<string, unknown> }
+    /**
+     * A server whose turn sends `events` of the turn's thread, then the turn's end (none when `end` is null).
+     * `config/read` answers with `mcp` (an error when null).
+     */
+    function oneShotServer(events: Event[], end: Turn | null = { status: 'completed' }, mcp: Record<string, unknown> | null = { github: {}, mousse: {}, 'mousse-relay': {}, off: { enabled: false } }) {
       const server = scriptedServer((message) => {
         const method = message.method!
         if (method === 'account/read') return chatgpt
-        if (method === 'config/read') return { result: { config: { mcp_servers: { github: {}, off: { enabled: false } } }, layers: [] } }
+        if (method === 'config/read') return mcp ? { result: { config: { mcp_servers: mcp }, layers: [] } } : { error: { code: -32603, message: 'config unreadable' } }
         if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
         if (method === 'turn/start') {
           const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
@@ -747,11 +752,17 @@ describe('CodexProviderService options (managed Codex)', () => {
       })
       return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
     }
+    const once = (service: CodexProviderService, signal = new AbortController().signal, onActivity: () => void = () => {}) =>
+      service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity }, signal)
+    /** The `abort` listeners on the service's app-server connection. */
+    const connectionListeners = (service: CodexProviderService) =>
+      getEventListeners((service as unknown as { app: { conn: { signal: AbortSignal } } }).app.conn.signal, 'abort').length
 
-    it('runs one turn on an ephemeral read-only thread and answers with the last agent message', async () => {
+    it('runs one turn on an ephemeral read-only thread with every native tool and MCP server off', async () => {
       const server = oneShotServer([
         { method: 'item/agentMessage/delta', params: { itemId: 'a', delta: 'Thinking' } },
         { method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Thinking about it' } } },
+        { method: 'item/started', params: { item: { type: 'reasoning', id: 'r' } } },
         { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'Login ' } },
         { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'redirect fix' } }
       ])
@@ -759,17 +770,23 @@ describe('CodexProviderService options (managed Codex)', () => {
       const onActivity = vi.fn()
       const answer = await service.oneShot({ model: 'gpt-x:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
       expect(answer).toEqual({ text: 'Login redirect fix' })
-      expect(server.requests('thread/start').map((message) => message.params)).toEqual([expect.objectContaining({
-        approvalPolicy: 'never',
-        sandbox: 'read-only',
-        model: 'gpt-x',
-        baseInstructions: 'Name the chat.',
-        ephemeral: true,
-        config: { 'mcp_servers.github.enabled': false, model_provider: 'openai' }
-      })])
+      const [start] = server.requests('thread/start').map((message) => message.params as Record<string, unknown>)
+      expect(start).toMatchObject({ approvalPolicy: 'never', sandbox: 'read-only', model: 'gpt-x', baseInstructions: 'Name the chat.', ephemeral: true })
+      // Every feature that adds a native tool is off, web search is off, and every MCP server the user
+      // has on is off, Mousse's own server names included.
+      expect(start!.config).toEqual({
+        ...Object.fromEntries(CODEX_ONE_SHOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false])),
+        web_search: 'disabled',
+        'mcp_servers.github.enabled': false,
+        'mcp_servers.mousse.enabled': false,
+        'mcp_servers.mousse-relay.enabled': false,
+        model_provider: 'openai'
+      })
+      expect(CODEX_ONE_SHOT_FEATURES_OFF).toEqual(expect.arrayContaining(['shell_tool', 'unified_exec', 'view_image', 'image_generation', 'multi_agent', 'multi_agent_v2', 'apps', 'plugins', 'hooks']))
       expect(server.requests('turn/start').map((message) => message.params)).toEqual([expect.objectContaining({
         threadId: 'thr-once',
         input: [{ type: 'text', text: 'Request: fix the login redirect', text_elements: [] }],
+        approvalPolicy: 'never',
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
         effort: 'low'
       })])
@@ -779,19 +796,72 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(server.requests('turn/interrupt')).toEqual([])
     })
 
+    it('is refused, with no thread started, when the MCP servers cannot be listed or one cannot be turned off', async () => {
+      const unreadable = oneShotServer([], { status: 'completed' }, null)
+      await expect(once(create(unreadable))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+      expect(unreadable.requests('thread/start')).toEqual([])
+      const unnamed = oneShotServer([], { status: 'completed' }, { 'my.server': {} })
+      await expect(once(create(unnamed))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+      expect(unnamed.requests('thread/start')).toEqual([])
+    })
+
+    it('ends as refused and interrupts the turn when Codex starts any tool', async () => {
+      for (const type of ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'collabAgentToolCall', 'dynamicToolCall']) {
+        const server = oneShotServer([{ method: 'item/started', params: { item: { type, id: 'tool-1' } } }], null)
+        await expect(once(create(server))).rejects.toMatchObject({ code: 'policy_unenforceable', message: expect.stringContaining(type) })
+        expect(server.requests('turn/interrupt').map((message) => message.params)).toEqual([{ threadId: 'thr-once', turnId: 'turn-1' }])
+        expect(server.requests('thread/unsubscribe')).toHaveLength(1)
+      }
+    })
+
     it('reports a failed turn, and a stop interrupts the turn and lets the thread go', async () => {
       const failed = create(oneShotServer([], { status: 'failed', error: { message: 'model not available' } }))
-      await expect(failed.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('model not available')
+      await expect(once(failed)).rejects.toThrow('model not available')
 
       const server = oneShotServer([{ method: 'turn/started', params: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }], null)
       const service = create(server)
       const stop = new AbortController()
       // Stopped once the turn runs (its first event), with no end coming.
       let events = 0
-      const running = service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity: () => { if (++events === 2) stop.abort(new Error('Stopped')) } }, stop.signal)
-      await expect(running).rejects.toThrow('Stopped')
+      await expect(once(service, stop.signal, () => { if (++events === 2) stop.abort(new Error('Stopped')) })).rejects.toThrow('Stopped')
       expect(server.requests('turn/interrupt').map((message) => message.params)).toEqual([{ threadId: 'thr-once', turnId: 'turn-1' }])
       expect(server.requests('thread/unsubscribe')).toHaveLength(1)
+    })
+
+    it('leaves no listener on the connection after an answer, a failure or a stop', async () => {
+      let mode: 'answer' | 'fail' | 'hold' = 'answer'
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        if (method === 'account/read') return chatgpt
+        if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
+        if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'turn/start') {
+          const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+          setImmediate(() => {
+            write('turn/started', { threadId: 'thr-once', turn: { id: 'turn-1', status: 'inProgress', error: null } })
+            if (mode === 'answer') write('turn/completed', { threadId: 'thr-once', turn: { id: 'turn-1', status: 'completed', error: null } })
+            if (mode === 'fail') write('turn/completed', { threadId: 'thr-once', turn: { id: 'turn-1', status: 'failed', error: { message: 'no' } } })
+          })
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        return { result: {} }
+      })
+      const service = create(server)
+      await service.status()
+      const baseline = connectionListeners(service)
+      for (let run = 0; run < 3; run += 1) {
+        mode = 'answer'
+        await once(service)
+        expect(connectionListeners(service)).toBe(baseline)
+        mode = 'fail'
+        await expect(once(service)).rejects.toThrow('no')
+        expect(connectionListeners(service)).toBe(baseline)
+        mode = 'hold'
+        const stop = new AbortController()
+        let events = 0
+        await expect(once(service, stop.signal, () => { if (++events === 2) stop.abort(new Error('Stopped')) })).rejects.toThrow('Stopped')
+        expect(connectionListeners(service)).toBe(baseline)
+      }
     })
   })
 

@@ -1016,9 +1016,9 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
-   * commit message on the chosen model. It starts Claude Code as model discovery does
-   * (`housekeepingOptions`) with its tools, MCP servers and plugins off, one turn, and no saved
-   * session, so it never shows in the user's `claude --resume`. It never retries.
+   * commit message on the chosen model (`oneShotOptions`): one turn, no tools, no saved session (it
+   * never shows in the user's `claude --resume`), and nothing of the user's setup that could run a
+   * command. It never retries.
    */
   async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
@@ -1036,20 +1036,11 @@ export class ClaudeSubscriptionProviderService {
       // A level the model does not offer runs at the model's default; Ultracode is a turn setting, not a level.
       const level = spec.effort ?? supportedEffortOf(spec.model, this.listedByClaude() ? this.models() : [], CLAUDE_EFFORTS)
       const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
-      const housekeeping = this.housekeepingOptions(this.standaloneWorkspace('one-shot'), controller)
       query = await this.createQuery(spec.prompt, {
-        ...housekeeping,
+        ...this.oneShotOptions(controller),
         model: baseId,
         ...(effort ? { effort } : {}),
-        systemPrompt: spec.system,
-        tools: [],
-        mcpServers: {},
-        strictMcpConfig: true,
-        plugins: [],
-        maxTurns: 1,
-        persistSession: false,
-        includePartialMessages: true,
-        canUseTool: async () => ({ behavior: 'deny', message: 'No tools run for a single request.' })
+        systemPrompt: spec.system
       })
       for await (const message of query) {
         spec.onActivity()
@@ -1064,6 +1055,38 @@ export class ClaudeSubscriptionProviderService {
       query?.close()
       signal.removeEventListener('abort', abort)
       this.controllers.delete(controller)
+    }
+  }
+  /**
+   * The options of a one-shot. Claude Code loads no settings files (`settingSources: []`), so no hook,
+   * plugin, MCP server, permission rule or CLAUDE.md of the user's or a project's applies; hooks are
+   * also switched off in the flag settings, with none passed in code. None of the user's launch
+   * arguments, no tools, one turn, no saved session, and any tool request is denied. The owner's entry
+   * keeps its sign-in: the `env` of the user's and the managed settings (where a proxy's address and
+   * token often live) is applied to its environment, as for a bot turn. A locked entry runs in its own
+   * folder and environment, as its model discovery does. Hooks an organisation's managed settings
+   * enforce still run: Claude Code gives no caller a switch over those.
+   */
+  private oneShotOptions(controller: AbortController): Options {
+    const base = this.dependencies.lockedEnv
+      ? this.housekeepingOptions(this.standaloneWorkspace('one-shot'), controller)
+      : this.options(this.standaloneWorkspace('one-shot'), controller, this.finalEnv(claudeEffectiveEnvironment(this.environment())))
+    return {
+      ...base,
+      settingSources: [],
+      settings: { disableAllHooks: true },
+      hooks: {},
+      plugins: [],
+      extraArgs: {},
+      mcpServers: {},
+      strictMcpConfig: true,
+      tools: [],
+      allowedTools: [],
+      permissionMode: 'default',
+      maxTurns: 1,
+      persistSession: false,
+      includePartialMessages: true,
+      canUseTool: async () => ({ behavior: 'deny', message: 'No tools run for a single request.' })
     }
   }
   /** The executable path, launch args and environment set in Settings → Providers. */
