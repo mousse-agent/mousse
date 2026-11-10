@@ -10,6 +10,11 @@ export type { QueueEditDraft }
 /** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
 export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
 export const QUEUE_LOAD_RETRY_CAP_MS = 5000
+/**
+ * How long a message sent now stays out of the list while the daemon still lists it as waiting (the turn it joins
+ * is still being set up). Past this it shows again, first in the queue, so it is never hidden for good.
+ */
+export const SENT_NOW_HIDE_MS = 15_000
 
 /** The composer's notice when an unsaved edit of a queued message went to the composer. */
 export const QUEUE_DRAFT_MOVED_NOTICE = 'Your edit is in the composer: the message had already started.'
@@ -313,6 +318,38 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // Send now requests in flight, by item: a second click before the first answers (and before the button shows
   // busy) sends nothing more.
   const steering = useRef(new Set<string>())
+  // Messages sent now leave the list at the click: the transcript shows them as sent. One that is refused comes
+  // back; one the daemon still lists as waiting (its turn is still being set up) comes back after a while.
+  const [sentNow, setSentNow] = useState<Readonly<Record<string, true>>>({})
+  const sentNowTimers = useRef(new Map<string, number>())
+  const unsend = useCallback((itemId: string) => {
+    const timer = sentNowTimers.current.get(itemId)
+    if (timer !== undefined) window.clearTimeout(timer)
+    sentNowTimers.current.delete(itemId)
+    setSentNow((current) => {
+      if (!current[itemId]) return current
+      const { [itemId]: _gone, ...rest } = current
+      return rest
+    })
+  }, [])
+  useEffect(() => () => {
+    for (const timer of sentNowTimers.current.values()) window.clearTimeout(timer)
+    sentNowTimers.current.clear()
+    setSentNow({})
+  }, [threadId])
+  // Gone from the daemon's list: nothing left to hide. Listed as waiting again after it was on its way (a Stop put
+  // it back first in the queue): it shows again at once.
+  const seenSteering = useRef(new Set<string>())
+  useEffect(() => {
+    for (const item of items) if (item.state === 'steering') seenSteering.current.add(item.id)
+    for (const id of Object.keys(sentNow)) {
+      const item = items.find((entry) => entry.id === id)
+      if (!item || (item.state === 'pending' && seenSteering.current.has(id))) {
+        seenSteering.current.delete(id)
+        unsend(id)
+      }
+    }
+  }, [items, sentNow, unsend])
   const steer = useCallback(async (itemId: string) => {
     if (!threadId) return
     const key = `${threadId}\n${itemId}`
@@ -321,26 +358,32 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     const live = changeScope(threadId)
     const refused = 'Could not send it now; the reply may have ended. The message is still queued.'
     markBusy(itemId, true)
+    setSentNow((current) => (current[itemId] ? current : { ...current, [itemId]: true }))
     setError(null)
     setNotice(null)
     try {
       const sent = await window.mousse.queue.promoteToSteer(threadId, itemId)
       if (!live()) return
       if (!sent.ok) {
+        unsend(itemId)
         setError(refused)
         void loadQueue(threadId)
-      } else if (sent.notice === 'compaction_finished') {
-        setNotice(COMPACTION_FINISHED_NOTICE)
+      } else {
+        if (sent.notice === 'compaction_finished') setNotice(COMPACTION_FINISHED_NOTICE)
+        const previous = sentNowTimers.current.get(itemId)
+        if (previous !== undefined) window.clearTimeout(previous)
+        sentNowTimers.current.set(itemId, window.setTimeout(() => unsend(itemId), SENT_NOW_HIDE_MS))
       }
     } catch (err) {
       if (!live()) return
+      unsend(itemId)
       setError(readableError(err, refused))
       void loadQueue(threadId)
     } finally {
       steering.current.delete(key)
       if (live()) markBusy(itemId, false)
     }
-  }, [threadId, loadQueue, markBusy, changeScope])
+  }, [threadId, loadQueue, markBusy, changeScope, unsend])
 
   // The editor stays open until the edit answers, so the item keeps its text until then. Its open edit learns the
   // outcome even when another thread is shown by then: saved closes it, anything else keeps the draft.
@@ -402,10 +445,11 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     if (thread && open) store.updateQueueEditDraft(thread, open.itemId, () => null)
   }, [])
 
+  // A message sent now (`steering`, or just clicked) shows in the transcript, in the reply it joined, not here.
   const shown = useMemo(() => [
     ...items,
     ...optimisticItems.filter((optimistic) => optimistic.threadId === threadId && !items.some((item) => item.id === optimistic.id))
-  ].filter((item) => !item.internal), [items, optimisticItems, threadId])
+  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id]), [items, optimisticItems, threadId, sentNow])
 
   return useMemo(
     () => ({ threadId, items: shown, busyIds, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit }),

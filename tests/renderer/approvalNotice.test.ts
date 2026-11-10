@@ -252,6 +252,23 @@ describe('a waiting approval above the composer', () => {
     expect(notice()).toBeNull()
   })
 
+  it('does not approve with a second Ctrl+Enter right after a steer, only once that moment has passed', async () => {
+    const { markSteerKey } = await import('../../src/renderer/lib/steerKey')
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+    try {
+      const daemon = await waiting()
+      markSteerKey()
+      // The same chord pressed again (the steer cleared the composer): it must not answer the request.
+      expect(runCommand('approval.allow', 'key')).toBe(false)
+      expect(daemon.answered).toEqual([])
+      now.mockReturnValue(1_000_000 + 5_000)
+      expect(runCommand('approval.allow', 'key')).toBe(true)
+      expect(daemon.answered).toEqual([['r1', { permission: 'allow' }]])
+    } finally {
+      now.mockRestore()
+    }
+  })
+
   it('approves with Ctrl+Enter while the composer is empty, and leaves the key to a composer with text', async () => {
     const daemon = await waiting()
     expect(runCommand('approval.allow', 'key')).toBe(true)
@@ -296,6 +313,19 @@ describe('chat navigation requests', () => {
     await act(async () => root.render(createElement(MessageList, { messages: [...base], status: 'ready' })))
     expect(useChatNavigationStore.getState().message).toBeNull()
     clock.mockRestore()
+  })
+
+  it('scrollToMessage finds a message steered into a reply, inside its Steer block', async () => {
+    const steeredIn = [
+      ...base,
+      { id: 's1', role: 'user', parts: [{ type: 'text', text: 'Use the id' }], metadata: { steered: true } } as UIMessage,
+      { id: 'a-after', role: 'assistant', parts: [{ type: 'text', text: 'Using the id' }] } as UIMessage
+    ]
+    await act(async () => root.render(createElement(MessageList, { messages: steeredIn, status: 'ready' })))
+    expect(host.querySelector('.steer-group [data-message-id="s1"]')).not.toBeNull()
+    act(() => scrollToMessage('s1'))
+    await vi.waitFor(() => expect(host.querySelector('[data-message-id="s1"]')!.classList.contains(LOCATED_CLASS)).toBe(true))
+    expect(useChatNavigationStore.getState().message).toBeNull()
   })
 
   it('focusPendingRequest waits for its thread and a row, then scrolls to the row', () => {

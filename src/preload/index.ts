@@ -316,7 +316,8 @@ const api = {
       ipcRenderer.invoke('orchestrator:pendingQuestions'),
     abort: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:abort', threadId),
-    steer: (text: string, threadId?: string): Promise<boolean> =>
+    /** `true`: the running turn takes it. `'queued'`: it could not, and is queued at the end instead. */
+    steer: (text: string, threadId?: string): Promise<boolean | 'queued'> =>
       ipcRenderer.invoke('orchestrator:steer', text, threadId),
     isTurnActive: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:isTurnActive', threadId),

@@ -21,6 +21,15 @@ export const textDelta = (text: string, uuid?: string, extra: Frame = {}): Frame
   ...extra
 })
 
+/** A new top-level assistant message starts (what Claude Code sends when it begins reading a steer). */
+export const messageStart = (uuid?: string): Frame => ({
+  type: 'stream_event',
+  session_id: SESSION,
+  parent_tool_use_id: null,
+  ...(uuid ? { user_message_uuid: uuid, user_message_uuids: [uuid] } : {}),
+  event: { type: 'message_start', message: { id: `msg-${uuid ?? 'next'}`, type: 'message', role: 'assistant', content: [] } }
+})
+
 export const toolStart = (id: string, name: string, uuid?: string): Frame => ({
   type: 'stream_event',
   session_id: SESSION,

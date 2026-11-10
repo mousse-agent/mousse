@@ -17,6 +17,7 @@ import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
 
+const NL = String.fromCharCode(10)
 const MODEL = { llmProvider: 'claude-subscription', model: 'vendor-model' }
 
 /** A provider whose turns take steers while they run, and hold until released or interrupted. */
@@ -134,6 +135,8 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     const queue = () => readDurableQueue(d.store, thread.id)
     const pending = () => d.orch.listQueue(thread.id).map((item) => item.content)
     const userMessages = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user').map((message) => message.content)
+    /** The person's messages as the transcript shows them (hidden copies left out). */
+    const shownUserMessages = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden).map((message) => message.content)
     const idle = async (label: string): Promise<void> => {
       await waitFor(() => !d.orch.isActiveTurnRunning(thread.id) && queue().length === 0 && d.engine.getActiveRun(thread.id) === null, label)
       // Nothing more starts once the queue is empty.
@@ -151,7 +154,7 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       expect(pending()).toEqual(['A', 'B', 'C'])
       return { first, a: a.queueItem!, b: b.queueItem!, c: c.queueItem! }
     }
-    return { d, adapter, thread, send, queue, pending, userMessages, idle, queuedBehindTurn }
+    return { d, adapter, thread, send, queue, pending, userMessages, shownUserMessages, idle, queuedBehindTurn }
   }
 
   /** Each text reached the provider once: as a turn's prompt or as a steer, never both, never twice. */
@@ -178,6 +181,46 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expect(w.adapter.steers).toEqual(['C'])
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
     expect(w.userMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('the steered message reaches the model while the turn still runs, not when it ends', async () => {
+    const w = world()
+    const { first, c } = await w.queuedBehindTurn()
+
+    const clicked = Date.now()
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    // The transcript shows it as sent at once, inside the running turn.
+    expect(w.shownUserMessages()).toEqual(['first', 'C'])
+    await waitFor(() => w.adapter.steers.length > 0, 'steer taken')
+    // Read within a moment of the click, while the first turn is still held open.
+    expect(Date.now() - clicked).toBeLessThan(2_000)
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.d.orch.isActiveTurnRunning(w.thread.id)).toBe(true)
+
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first', 'A', 'B'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('messages steered one after another reach the model together, in order, as one input', async () => {
+    const w = world()
+    const { first, a, b, c } = await w.queuedBehindTurn()
+
+    for (const item of [c, a, b]) expect(w.d.orch.promoteQueueItem(w.thread.id, item.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.steers.length > 0, 'steers taken')
+    expect(w.adapter.steers).toEqual(['C' + NL + 'A' + NL + 'B'])
+    expect(w.pending()).toEqual([])
+
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expectEachOnce(w.adapter, ['first', 'C' + NL + 'A' + NL + 'B'])
+    // One after another in the transcript, inside the first turn: one group.
+    const shown = w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => message.role === 'user' && !message.hidden)
+    expect(shown.map((message) => [message.content, Boolean(message.steered)])).toEqual([['first', false], ['C', true], ['A', true], ['B', true]])
   })
 
   it('a second Steer click on the same message changes nothing', async () => {
@@ -221,6 +264,8 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
     // A message sent now goes first: C runs before A and B, which keep their order.
     expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    // C shows once: as the prompt of its own turn, not also inside the turn that never read it.
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
   })
 
   it('Steer after Stop sends C first, as the next turn, and A and B follow once each', async () => {
@@ -238,6 +283,98 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
     if (outcome instanceof Error) expect(w.adapter.prompts).toEqual(['first', 'A', 'B', 'C'])
     else expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expect(w.shownUserMessages().filter((text) => text === 'C')).toHaveLength(1)
+  })
+
+
+  it('a steer typed in the composer that the turn never reads runs once, first, and shows once', async () => {
+    const w = world()
+    const { first } = await w.queuedBehindTurn()
+    w.adapter.takeSteers = false
+    expect(w.d.orch.steerThreadOrEnqueueExternal(w.thread.id, 'Z', { source: 'gui-steer' })).toMatchObject({ steered: true })
+    expect(w.shownUserMessages()).toEqual(['first', 'Z'])
+    // The turn ends as the steer lands, without reading it.
+    w.adapter.release('first')
+    await first
+    w.adapter.takeSteers = true
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first', 'Z', 'A', 'B', 'C'])
+    expectEachOnce(w.adapter, ['first', 'Z', 'A', 'B', 'C'])
+    expect(w.shownUserMessages()).toEqual(['first', 'Z', 'A', 'B', 'C'])
+  })
+
+  it('a steer typed in the composer is not lost by a Stop: it waits first in the queue, shown there, not in the stopped turn', async () => {
+    const w = world()
+    const { first } = await w.queuedBehindTurn()
+    w.adapter.takeSteers = false
+    expect(w.d.orch.steerThreadOrEnqueueExternal(w.thread.id, 'Z', { source: 'gui-steer' })).toMatchObject({ steered: true })
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    await w.d.orch.abortRun(runId, 'stop-1', w.thread.id)
+    await first
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    expect(w.shownUserMessages()).toEqual(['first'])
+    expect(w.d.orch.listQueue(w.thread.id).map((item) => [item.content, item.state])).toEqual([['Z', 'pending'], ['A', 'pending'], ['B', 'pending'], ['C', 'pending']])
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first'])
+  })
+
+  it('a queued message sent now that a Stop left unread is back first in the queue at once, shown there', async () => {
+    const w = world()
+    const { first, c } = await w.queuedBehindTurn()
+    w.adapter.takeSteers = false
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    await w.d.orch.abortRun(runId, 'stop-1', w.thread.id)
+    await first
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    expect(w.d.orch.listQueue(w.thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'pending'], ['A', 'pending'], ['B', 'pending']])
+    expect(w.shownUserMessages()).toEqual(['first'])
+  })
+
+  it('Stop while the turn is still being set up stops a message sent now too: it waits first in the queue, nothing runs', async () => {
+    const w = world()
+    // The turn is held in its setup (the wait for its folders) until released.
+    let release!: () => void
+    const held = new Promise<'ready'>((resolve) => { release = () => resolve('ready') })
+    const folders = vi.spyOn(w.d.orch as unknown as { waitForThreadFolders: () => Promise<string> }, 'waitForThreadFolders').mockReturnValueOnce(held)
+    const first = w.send('first')
+    await waitFor(() => w.d.orch.getOrCreateSession(w.thread.id).turnAdmitted, 'turn admitted')
+    const a = (await w.send('A')).queueItem!
+    const c = (await w.send('C')).queueItem!
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    expect(w.pending()).toEqual(['C', 'A'])
+    // Stop lands while the turn is set up, then the setup ends.
+    await w.d.orch.stopThread(w.thread.id, 'user')
+    release()
+    await first.catch(() => undefined)
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    // As after a Stop of a running turn: the message sent now waits first, and nothing runs until the person acts.
+    expect(w.adapter.prompts).toEqual([])
+    expect(w.adapter.steers).toEqual([])
+    expect(w.d.orch.listQueue(w.thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'pending'], ['A', 'pending']])
+    expect(w.shownUserMessages().filter((text) => text === 'C')).toEqual([])
+    folders.mockRestore()
+    void a
+  })
+
+  it('Steer once a stopped turn has ended sends the message now: it runs first, then the rest in order', async () => {
+    const w = world()
+    const { first, c } = await w.queuedBehindTurn()
+
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    await w.d.orch.abortRun(runId, 'stop-1', w.thread.id)
+    await first
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    // The queue waits after a Stop.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(w.adapter.prompts).toEqual(['first'])
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
   })
 
   it('Steer on C while the queue drains A runs every message once', async () => {

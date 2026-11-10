@@ -49,6 +49,7 @@ export type CommandId =
   | 'workflow.redo'
   | 'editor.save'
   | 'git.commit'
+  | 'composer.steer'
 
 /** Where a command is meant to run. A scoped command only exists while its surface is mounted. */
 export type CommandScope = 'global' | 'surface-picker' | 'model-picker' | 'workflow-editor'
@@ -505,6 +506,20 @@ export const COMMANDS: readonly CommandDefinition[] = [
     id: 'git.commit',
     title: 'Commit message: commit',
     category: 'Editor',
+    defaultBinding: `${MOD}+Enter`,
+    scope: 'global',
+    textInput: 'deny',
+    terminal: 'deny',
+    guest: 'deny',
+    fixed: true
+  },
+  {
+    // The composer and the queued messages handle this key themselves (`lib/steerKey.ts`): while a reply runs it
+    // sends the composer's text, or the focused queued message, into the reply now. Enter alone queues.
+    id: 'composer.steer',
+    title: 'Steer: send into the running reply',
+    category: 'Thread',
+    searchTerms: ['steer', 'send now', 'queue'],
     defaultBinding: `${MOD}+Enter`,
     scope: 'global',
     textInput: 'deny',

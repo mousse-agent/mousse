@@ -207,8 +207,17 @@ export function settleFinishedTurn(
   analyses: AssistantMessageAnalysis[],
 ): { order: number[]; analyses: AssistantMessageAnalysis[] } {
   const order = messages.map((_, index) => index);
-  let answer = -1;
+  // Messages steered into the turn (a person's rows inside it) split it: what was written before the last of
+  // them answered the earlier messages and stays as it was, where it was. Only what came after settles.
+  let from = 0;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isRecord(messages[index]!.metadata) && Array.isArray((messages[index]!.metadata as { steerGroup?: unknown }).steerGroup)) {
+      from = index + 1;
+      break;
+    }
+  }
+  let answer = -1;
+  for (let index = messages.length - 1; index >= from; index -= 1) {
     if (replyText(messages[index]!)) {
       answer = index;
       break;
@@ -217,7 +226,7 @@ export function settleFinishedTurn(
   if (answer === -1) return { order, analyses };
   const settled = analyses.map((analysis, index) => {
     const message = messages[index]!;
-    const text = index < answer ? replyText(message) : "";
+    const text = index < answer && index >= from ? replyText(message) : "";
     if (!text || !(message.parts ?? []).every(isTextPart)) return analysis;
     const part: ToolPartBase = {
       type: NOTE_PART_TYPE,

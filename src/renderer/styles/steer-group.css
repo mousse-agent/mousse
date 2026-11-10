@@ -1,0 +1,24 @@
+/* Messages steered into a running reply (SteerGroup): one block where they entered it, a quiet "Steer"
+   label over bubbles stacked tight. */
+.steer-group {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  margin: 4px 0;
+}
+
+.steer-group-label {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-end;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: color-mix(in oklab, var(--color-an-foreground-muted) 80%, transparent);
+}
+
+.steer-group-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

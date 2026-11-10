@@ -7,11 +7,13 @@ import { UserMessage } from '../chat/components/agent-elements/user-message'
 import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
 import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue'
 import { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
+import { formatBinding } from '../../shared/commands'
+import { useAppStore } from '../stores/appStore'
+import { isSteerKey, markSteerKey, STEER_BINDING, steerKeyRecently } from '../lib/steerKey'
 import '../styles/queued-messages.css'
 
 export { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
 
-const isSteering = (item: QueuedMessage) => item.intent === 'steer' || item.state === 'steering'
 
 /** Send now on the first message a compaction holds: it stops the compaction and sends with the full history. */
 export function skipCompactionLabel(historyTokens?: number): string {
@@ -136,6 +138,8 @@ function QueuedEditor({ draft, width, saving, canBeEmpty, changed, label, onDraf
  */
 export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
   const { items, busyIds, hold } = queue
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  const steerKey = formatBinding(STEER_BINDING, platform)
   // The open edit lives in the queue (by thread), so a switch to another thread and back keeps it.
   const editing = queue.editDraft
   // Drag to reorder starts only from the grip (`armedId`), so the text stays selectable. While dragging
@@ -248,13 +252,17 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
       {shown.map((item, index) => {
         const optimistic = isOptimisticQueueItem(item)
         const busy = optimistic || Boolean(busyIds[item.id])
-        const steering = isSteering(item)
         const last = index === shown.length - 1
         const canDrag = ids.length > 1 && !optimistic && !busy
         const edit = editing?.itemId === item.id ? editing : null
         // While a compaction holds the queue, the first message's Send now skips it.
         const skipsCompaction = hold !== null && item.id === firstHeldId
-        const sendLabel = steering ? 'Sending now…' : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : 'Send now'
+        // A pending steer item cannot be sent now: a subagent result that missed its turn runs as a turn of its own, and a
+        // steer sent into another process's reply is that process's to take.
+        const fixed = item.intent === 'steer'
+        const sendLabel = fixed
+          ? item.subagentNotice?.length || item.inboxIds?.length ? 'Runs as a turn of its own' : 'Sent into the running reply'
+          : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : `Steer: send now (${steerKey})`
         const label = !last ? null : hold
           ? <span className="queued-message-state is-held" title="Sends after compacting"><Loader2 size={12} className="animate-spin" aria-hidden="true" />Queued</span>
           : <span className="queued-message-state" title="Sends when the current reply ends">Queued</span>
@@ -264,6 +272,24 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
             role="listitem"
             className={['queued-message', dragId === item.id ? 'is-dragging' : '', edit ? 'is-editing' : ''].filter(Boolean).join(' ')}
             data-queued-id={item.id}
+            // Focusable, so the steer chord can send it now (from the item or one of its buttons).
+            tabIndex={edit ? undefined : 0}
+            aria-label={edit ? undefined : `Queued message. ${steerKey} sends it now.`}
+            onKeyDown={(event) => {
+              if (edit || busy || fixed || !isSteerKey(event, platform)) return
+              event.preventDefault()
+              event.stopPropagation()
+              // The chord pressed again a moment after a steer lands on the next message (focus moved there): it sends
+              // nothing, as the second click of a double click does not.
+              if (steerKeyRecently()) return
+              markSteerKey()
+              // This message leaves the list: focus moves on to the next queued one (or the one before, or the
+              // composer), never to the page, where the same chord would answer an approval.
+              const here = event.currentTarget
+              const next = [here.nextElementSibling, here.previousElementSibling].find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains('queued-message'))
+              ;(next ?? document.querySelector<HTMLElement>('textarea.composer-input'))?.focus()
+              void queue.steer(item.id)
+            }}
             draggable={armedId === item.id}
             onDragStart={(event) => onDragStart(event, item.id)}
             onDragOver={(event) => onDragOverItem(event, item.id)}
@@ -304,9 +330,11 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                       type="button"
                       className="queued-message-btn queued-message-send"
                       title={sendLabel}
-                      aria-label={steering ? 'Sending the queued message now' : skipsCompaction ? sendLabel : 'Send the queued message now'}
-                      disabled={busy || steering}
-                      onClick={() => void queue.steer(item.id)}
+                      aria-label={fixed || skipsCompaction ? sendLabel : 'Send the queued message now'}
+                      disabled={busy || fixed}
+                      // A message sent now leaves the list at the click, so the next one moves under the pointer:
+                      // the second click of a double click must not send that one too.
+                      onClick={(event) => { if (event.detail <= 1) void queue.steer(item.id) }}
                     >
                       <ArrowTurnForward size={14} strokeWidth={1.8} />
                     </button>

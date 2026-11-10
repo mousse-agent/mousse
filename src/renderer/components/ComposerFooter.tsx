@@ -17,8 +17,9 @@ import { formatBinding } from '../../shared/commands'
 import { useCommandBindings } from '../commands/commandRegistry'
 import { useAppStore } from '../stores/appStore'
 
-/** Alt+Enter in the composer while a run is going sends the text as a steer. */
-export const STEER_BINDING = 'Alt+Enter'
+import { STEER_BINDING } from '../lib/steerKey'
+
+export { STEER_BINDING, isSteerKey } from '../lib/steerKey'
 
 /** The model picker's fade-out, before the speed scale; matches its close animation in composer-run-controls.css. */
 const MODEL_PICKER_EXIT_MS = 90

@@ -1161,6 +1161,8 @@ export class OrchestratorService extends EventEmitter {
         if (!stops.size && this.definitionStops.get(request.threadId) === stops) this.definitionStops.delete(request.threadId)
         if (fenced) {
           session.turnAdmitted = false
+          // Messages sent now while this admission was set up stay first in the queue and drain from there.
+          session.steerOnStart = []
           session.abortRequested = false
         }
         // What queued behind the run runs once, now that the whole run settled; an agent chat that
@@ -1285,6 +1287,8 @@ export class OrchestratorService extends EventEmitter {
       } finally {
         if (!fenced) {
           session.turnAdmitted = false
+          // Messages sent now while this admission was set up stay first in the queue and drain from there.
+          session.steerOnStart = []
           session.abortRequested = false
         }
       }
@@ -2331,6 +2335,8 @@ export class OrchestratorService extends EventEmitter {
     if (!session) return
     if (session.turnAdmitted && !session.activeTurn) {
       session.turnAdmitted = false
+      // Messages sent now while this admission was set up stay first in the queue and drain from there.
+      session.steerOnStart = []
       session.admissionRunId = undefined
       session.abortRequested = false
     }
@@ -4458,6 +4464,8 @@ export class OrchestratorService extends EventEmitter {
     const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
     if (session && entry?.payload.admissionHeld && !session.activeTurn) {
       session.turnAdmitted = false
+      // Messages sent now while this admission was set up stay first in the queue and drain from there.
+      session.steerOnStart = []
       session.admissionRunId = undefined
       session.abortRequested = false
       if (session.drainAfterSettle) {
@@ -4487,6 +4495,8 @@ export class OrchestratorService extends EventEmitter {
     const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
     if (session && !session.activeTurn) {
       session.turnAdmitted = false
+      // Messages sent now while this admission was set up stay first in the queue and drain from there.
+      session.steerOnStart = []
       session.admissionRunId = undefined
     }
     if (!payload.queueItemId) {
@@ -4795,10 +4805,14 @@ export class OrchestratorService extends EventEmitter {
       }
     } catch (error) {
       session.turnAdmitted = false
+      // Messages sent now while this admission was set up stay first in the queue and drain from there.
+      session.steerOnStart = []
       session.admissionRunId = undefined
       throw error
     }
     session.turnAdmitted = false
+    // Messages sent now while this admission was set up stay first in the queue and drain from there.
+    session.steerOnStart = []
     session.admissionRunId = undefined
     this.completeSessionClaim(session, original.id, claimToken)
     this.releaseQueuedRows([original, rebuilt])
@@ -7762,6 +7776,8 @@ export class OrchestratorService extends EventEmitter {
     const live = session.activeTurn
     if (live && !live.abort.signal.aborted && (live.pendingSteer.some((entry) => entry.itemId === itemId) || session.drainedExternalSteerIds.has(itemId)))
       return { ok: true }
+    // Already waiting to join the turn being set up.
+    if (session.steerOnStart.includes(itemId) && session.turnAdmitted) return { ok: true }
     const localActive = session.isTurnActive()
     const externalActive = this.isThreadLeaseHeldExternally(
       threadId,
@@ -7770,12 +7786,16 @@ export class OrchestratorService extends EventEmitter {
     // A compaction (here, or in another process) has no turn to steer: Send now skips it and the message goes first,
     // with the full history.
     if (!localActive && !externalActive && this.compactionHoldsQueue(threadId)) return this.sendNowSkippingCompaction(session, itemId, opts?.expectedRevision)
-    // A turn that was stopped (or is still being set up) takes no steer, but it still holds the thread: Send now puts
-    // the message first, and it goes as the next turn once that turn has ended.
-    if (!localActive && !externalActive && session.isTurnRunning()) return this.sendNowAfterTurn(session, itemId, opts?.expectedRevision)
-    if (!localActive && !externalActive) {
-      throw new QueueValidationError('No active turn to steer on this thread.')
+    // A turn still being set up takes no steer yet: the message goes first and joins the turn as soon as it runs
+    // (`deliverSteersOnStart`). A turn that was stopped takes none at all, but it still holds the thread: the
+    // message goes first, and runs as the next turn once that turn has ended.
+    if (!localActive && !externalActive && session.isTurnRunning()) {
+      if (session.turnAdmitted && !session.activeTurn && !session.stopping && !session.abortRequested) return this.steerWhenStarted(session, itemId, opts?.expectedRevision)
+      return this.sendNowAfterTurn(session, itemId, opts?.expectedRevision)
     }
+    // Nothing runs (a Stop ended the turn, or it ended as the click landed): Send now is still immediate. The
+    // message goes first and its turn starts now; what was queued behind it follows in order.
+    if (!localActive && !externalActive) return this.sendNowIdle(session, itemId, opts?.expectedRevision)
     let item: QueuedMessage
     let promotedRunId: string | undefined
     let steerRunId: string | undefined
@@ -7843,6 +7863,90 @@ export class OrchestratorService extends EventEmitter {
     this.moveQueueItemToFront(session, itemId, expectedRevision)
     session.drainAfterSettle = true
     return { ok: true }
+  }
+
+  /** Send now with nothing running on the thread: the message goes first and its turn starts at once. */
+  private sendNowIdle(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
+    this.moveQueueItemToFront(session, itemId, expectedRevision)
+    this.scheduleQueueDrain(session)
+    return { ok: true }
+  }
+
+  /**
+   * Send now while the turn is still being set up (its worktree, its start snapshot): the message goes first, after
+   * any others sent now meanwhile, and joins the turn the moment it runs. It does not wait for that turn to end.
+   */
+  private steerWhenStarted(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
+    const order = (items: QueuedMessage[]): QueuedMessage[] => {
+      assertQueueRevision(items, expectedRevision)
+      const pending = listPendingQueue(items).filter((entry) => !entry.internal)
+      const item = pending.find((entry) => entry.id === itemId)
+      if (!item || item.state !== 'pending') throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
+      const first = [...session.steerOnStart, itemId].filter((id) => pending.some((entry) => entry.id === id))
+      return reorderQueuedMessages(items, [...first, ...pending.map((entry) => entry.id).filter((id) => !first.includes(id))])
+    }
+    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, order) : order(session.queue)
+    session.steerOnStart.push(itemId)
+    this.emitQueueUpdated(session.threadId, session.queue)
+    return { ok: true }
+  }
+
+  /**
+   * Hides the transcript copies of queued messages a turn was handed but never read. Each runs again as a turn of
+   * its own, whose prompt shows it; the copy inside the ended turn would show it twice.
+   */
+  private withdrawSteerEchoes(session: ThreadSession, entries: SteerEntry[]): void {
+    const echoes = new Set(entries.filter((entry) => entry.itemId && entry.echoId).map((entry) => entry.echoId!))
+    if (!echoes.size) return
+    let changed = false
+    session.messages.forEach((message, index) => {
+      if (!echoes.has(message.id) || message.hidden) return
+      session.messages[index] = { ...message, hidden: true }
+      changed = true
+    })
+    if (!changed) return
+    this.sessionAls.run(session, () => this.persist(true))
+    this.emitThreadMessages(session.threadId, session.messages, true)
+  }
+
+  /**
+   * Queued messages handed to a turn that was stopped before it read them: their copies in the turn go, and they are
+   * back first in the queue at once, pending and shown there, in the order they were sent. Nothing runs them until the
+   * person sends or sends now again. Best-effort: a Stop must not fail.
+   */
+  private returnUnreadSteerItems(session: ThreadSession, entries: SteerEntry[]): void {
+    this.withdrawSteerEchoes(session, entries)
+    const ids = [...new Set(entries.flatMap((entry) => (entry.itemId ? [entry.itemId] : [])))]
+    if (!ids.length) return
+    const apply = (items: QueuedMessage[]): QueuedMessage[] => {
+      const steering = ids.filter((id) => items.find((item) => item.id === id)?.state === 'steering')
+      return steering.length ? demoteSteerItems(items, steering, { toFront: true }) : items
+    }
+    try {
+      session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, apply) : apply(session.queue)
+      for (const id of ids) session.drainedExternalSteerIds.delete(id)
+      this.emitQueueUpdated(session.threadId, session.queue)
+    } catch (error) {
+      // They stay `steering`; the next drain puts them first.
+      console.warn('messages a stopped turn never read could not go back to the queue', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** The turn now runs: the messages sent now while it was set up join it, in the order they were sent. */
+  private deliverSteersOnStart(session: ThreadSession): void {
+    const ids = session.steerOnStart.splice(0)
+    // A Stop reached the turn while it was set up: nothing joins it, and nothing runs them after it, as after a Stop of
+    // a running turn. They wait first in the queue, in the order they were sent, until the person sends again.
+    if (session.activeTurn?.abort.signal.aborted || session.abortRequested || session.stopping) return
+    for (const itemId of ids) {
+      try {
+        if (!session.queue.some((entry) => entry.id === itemId && entry.state === 'pending')) continue
+        this.promoteQueueItem(session.threadId, itemId)
+      } catch (error) {
+        // It stays first in the queue and goes as the next turn.
+        console.warn('a message sent now could not join the turn that started', { threadId: session.threadId, itemId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
   }
 
   /**
@@ -9205,6 +9309,8 @@ export class OrchestratorService extends EventEmitter {
         stopped = true
       }
     } else if (active && !active.abort.signal.aborted && !(opts?.runId && active.runId && active.runId !== opts.runId)) {
+      // Queued messages sent now that the turn never read go back first in the queue; their copies in it go.
+      this.returnUnreadSteerItems(session, active.pendingSteer)
       active.pendingSteer = []
       active.abort.abort()
       stopped = true
@@ -9261,6 +9367,11 @@ export class OrchestratorService extends EventEmitter {
     paused = false
   ): void {
     const wasAborted = aborted || turn.abort.signal.aborted
+    // Queued messages handed to this turn that it never read run again as turns of their own: their copies inside
+    // this turn go. A stopped turn's go back first in the queue now (handed back after the Stop, say by a provider
+    // that was still delivering them).
+    if (wasAborted) this.returnUnreadSteerItems(session, turn.pendingSteer)
+    else this.withdrawSteerEchoes(session, turn.pendingSteer)
     const hadUnreadSteers = !wasAborted && turn.pendingSteer.length > 0
     if (hadUnreadSteers) {
       const pending = turn.pendingSteer
@@ -9511,13 +9622,14 @@ export class OrchestratorService extends EventEmitter {
       if (item?.runId && session.activeTurn.runId !== item.runId) return false
       // An agent's steer is remembered with its sender and the mode it may run in, and a promoted item with its
       // id and what it carried, so a turn that never reads it runs it as a turn of its own with the same limits.
-      session.activeTurn.pendingSteer.push({
+      const entry: SteerEntry = {
         text: trimmed,
         ...(item ? { itemId: item.id, ...(item.mode ? { mode: item.mode } : {}), ...(item.images?.length ? { images: item.images } : {}), ...(item.byAgent ? { byAgent: true as const } : {}) } : {}),
         ...(origin ? { origin } : {}),
         ...(origin || permissionMode ? { permissionMode: permissionMode ?? 'ask' } : {}),
         ...(sentFrom ? { sentFrom } : {})
-      })
+      }
+      session.activeTurn.pendingSteer.push(entry)
       if (carried) {
         (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
         // Marked before the turn can end: from here an unread steer is recoverable (`deliveryFailure`).
@@ -9528,7 +9640,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin)
+        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin).id
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -9556,6 +9668,22 @@ export class OrchestratorService extends EventEmitter {
     opts?: { source?: string; permissionMode?: PermissionMode; sentFrom?: { node: string } }
   ): { steered: boolean; queued: boolean; item?: QueuedMessage } {
     this.assertNotBotThread(threadId)
+    // A person's steer while a turn of this thread runs here is a queue item sent now: it is taken once, by its id,
+    // and a turn that never reads it (a Stop, the turn ending as it lands) puts it back first in the queue and takes
+    // its copy out of the turn, as for a queued message. A device's limit keeps the steer of its own below.
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    if (text.trim() && !opts?.permissionMode && session?.isTurnRunning() && !session.stopping && !session.abortRequested && !this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)) {
+      const item = this.enqueueForThread(threadId, { content: text.trim() }, {
+        source: opts?.source ?? 'steer',
+        ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {})
+      })
+      try {
+        if (this.promoteQueueItem(threadId, item.id).ok) return { steered: true, queued: false, item }
+      } catch (error) {
+        console.warn('a steer could not join the running turn; it is queued at the end, as a message sent with Enter is', { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+      return { steered: false, queued: true, item }
+    }
     if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom)) {
       return { steered: true, queued: false }
     }
@@ -10161,6 +10289,8 @@ export class OrchestratorService extends EventEmitter {
       if (opts?.queueItemId) this.releaseSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
       if (opts?.admissionHeld) {
         session.turnAdmitted = false
+        // Messages sent now while this admission was set up stay first in the queue and drain from there.
+        session.steerOnStart = []
         session.admissionRunId = undefined
         session.abortRequested = false
         this.effectWorker?.notify()
@@ -10211,6 +10341,12 @@ export class OrchestratorService extends EventEmitter {
       if (opts?.schedule && opts.runId && !requeued) this.reportScheduledOccurrence(session, opts.schedule, opts.runId, turnResponse)
       if (opts?.schedule) this.scheduledTurnThreads.delete(session.threadId)
       this.releaseSessionExecutionLease(session)
+      // Sent now while this turn was set up but it never ran: they are first in the queue. They go next when the
+      // turn ended on its own (it failed before it ran); after a Stop they wait for the person, as a stopped turn's do.
+      if (session.steerOnStart.length) {
+        if (!session.abortRequested && !session.stopping) session.drainAfterSettle = true
+        session.steerOnStart = []
+      }
       session.turnAdmitted = false
       session.admissionRunId = undefined
       session.abortRequested = false
@@ -10858,6 +10994,7 @@ export class OrchestratorService extends EventEmitter {
     this.applyRequestedAbort(session, turn)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
+    if (session.steerOnStart.length) this.deliverSteersOnStart(session)
 
     const stagedApplets: AppletSubmission[] = []
     let assistantText: string
@@ -11121,7 +11258,7 @@ export class OrchestratorService extends EventEmitter {
       const drained = new Map<string, { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
       let drains = 0
       let returnedAhead = 0
-      const drainEntry = (): { text: string; token: string } | undefined => {
+      const drainEntry = (): { text: string; token: string; cut: boolean } | undefined => {
         // A remote turn's steers, then the thread's own (and the durable queue's).
         const raw = opts?.externalDrainSteer?.()
         const external: SteerEntry[] = typeof raw === 'string' ? (raw.trim() ? [{ text: raw.trim() }] : []) : (raw ?? [])
@@ -11133,7 +11270,10 @@ export class OrchestratorService extends EventEmitter {
         // Each entry is kept as it was drained, identity and all, so a return restores them whole, never by cutting text apart.
         drained.set(token, { entries, carried: own?.carried ?? [] })
         returnedAhead = 0
-        return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token }
+        // A person's message must reach the model now; subagent results and an agent's steer may wait for its next step.
+        const notices = new Set((own?.carried ?? []).map((entry) => entry.text.trim()))
+        const cut = entries.some((steer) => !steer.origin && !steer.byAgent && !notices.has(steer.text.trim()))
+        return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut }
       }
       const turnControl: TurnControl = {
         drainSteer: () => drainEntry()?.text,
@@ -11910,6 +12050,8 @@ export class OrchestratorService extends EventEmitter {
           // The turn could not be handed on (before any effect took the admission): the item goes back to the queue
           // and the continuation, already admitted, is found again by its replay.
           session.turnAdmitted = false
+          // Messages sent now while this admission was set up stay first in the queue and drain from there.
+          session.steerOnStart = []
           session.admissionRunId = undefined
           throw error
         }
@@ -13404,6 +13546,8 @@ export class OrchestratorService extends EventEmitter {
       if (admittedSession) {
         this.releaseSessionExecutionLease(admittedSession)
         admittedSession.turnAdmitted = false
+        // Messages sent now while this admission was set up stay first in the queue and drain from there.
+        admittedSession.steerOnStart = []
         admittedSession.admissionRunId = undefined
         admittedSession.abortRequested = false
       }

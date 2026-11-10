@@ -225,8 +225,10 @@ export interface TurnControl {
   /**
    * `drainSteer` with a token naming this drain, for a provider that takes steers asynchronously and may
    * hand back several: `returnSteer(text, token)` then restores what that drain took and nothing else.
+   * `cut`: the drain holds a person's message, which the model must read now. A provider whose own steer
+   * waits for the current reply or command to end cuts the reply instead and continues with the text.
    */
-  drainSteerEntry?(): { text: string; token: string } | undefined
+  drainSteerEntry?(): { text: string; token: string; cut?: boolean } | undefined
   /** The provider took the drain `token` names; it will not be returned. */
   steerTaken?(token?: string): void
   /** Liveness touch; the orchestrator throttles the store write. */

@@ -101,6 +101,13 @@ import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
 
+/** A steer whose request got no answer: it may have reached the reply, so it is not sent again. */
+export const STEER_UNCONFIRMED = 'The steer was not confirmed. Checking whether it reached the reply…'
+/** The running turn could not take the steer: it was queued at the end instead. */
+export const STEER_QUEUED = 'The reply could not take that steer, so it was queued instead.'
+/** That steer did not arrive: its text is back in the composer. */
+export const STEER_NOT_ARRIVED = 'The steer did not reach the reply, so it is back in the composer.'
+
 /** Before the first measurement arrives: no capacity, so the composer shows no ring. */
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -868,7 +875,9 @@ export function OrchestratorChat() {
       /** The conversation branch the message must land on (an edited prompt's); refused on another. */
       conversationBranchId?: string,
       /** The settings the composer showed, which the turn must run on (a new chat's first send). */
-      expect?: SendExpectation
+      expect?: SendExpectation,
+      /** Steer: a message the running turn could not take yet (it is still being set up) is sent now once queued. */
+      steer?: boolean
     ) => {
       if (!content && !(images && images.length)) return
 
@@ -907,7 +916,8 @@ export function OrchestratorChat() {
           images
         })
       }
-      const optimisticQueueId = queuesNow && targetThreadId ? `optimistic:${crypto.randomUUID()}` : null
+      // A steered message is not painted in the queue: it is on its way into the reply.
+      const optimisticQueueId = queuesNow && targetThreadId && !steer ? `optimistic:${crypto.randomUUID()}` : null
       if (optimisticQueueId && targetThreadId) {
         setOptimisticQueueItems((current) => [...current, {
           id: optimisticQueueId,
@@ -956,6 +966,9 @@ export function OrchestratorChat() {
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
         }
+        // Steered while the turn could not take it: the queued message is sent now, by its id, so it joins the turn
+        // as soon as it can (or goes first), and never twice.
+        if (steer && result.queued && result.queueItem && targetThreadId === queue.threadId) void queue.steer(result.queueItem.id)
         // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
         // queue: it is shown there, not also in the transcript.
         if (result.queued && optimisticMessageId) {
@@ -1048,7 +1061,7 @@ export function OrchestratorChat() {
         return false
       }
     },
-    [activeThreadId, profileId, chatMode, loading, compactionRunning, setLoading]
+    [activeThreadId, profileId, chatMode, loading, compactionRunning, setLoading, queue.threadId, queue.steer]
   )
 
   const handleStop = useCallback(async () => {
@@ -1203,6 +1216,7 @@ export function OrchestratorChat() {
     // (`lib/slashCommands.ts`). The usage dialog intentionally contains every configured provider.
     const attached = images.length > 0 || attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || resolvedReferences.length > 0
     const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
+    let steerQueued = false
     if (command) {
       if (command.kind === 'done') {
         setInput('')
@@ -1216,13 +1230,55 @@ export function OrchestratorChat() {
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
-      // Alt+Enter during a run: the text goes into the running turn instead of the queue.
-      const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined)
-      if (steered) {
-        clearComposer()
+      // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue. The composer
+      // clears at once, as a send does: what is typed while this steer is on its way is the next message, and a clear
+      // when the steer answers would wipe it.
+      clearComposer(false)
+      const steerThread = activeThreadId
+      const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
+      let steered: boolean | 'queued' | 'uncertain'
+      try {
+        steered = await window.mousse.orchestrator.steer(trimmed, steerThread ?? undefined)
+      } catch {
+        // No answer: the steer may have reached the reply. It is not sent again (it would run twice); the thread is
+        // read again, and the text comes back to the composer only if it did not arrive.
+        steered = 'uncertain'
+      }
+      if (steered === 'uncertain') {
+        setSendError(STEER_UNCONFIRMED)
+        if (steerThread) {
+          void settleUncertainSend({
+            refresh: () => window.mousse.threads.select(steerThread),
+            arrived: async () =>
+              useAppStore.getState().messages.some((message) => message.role === 'user' && !seenBefore.has(message.id) && message.content.trim() === trimmed) ||
+              (await window.mousse.queue.list(steerThread)).some((item) => item.content.trim() === trimmed),
+            dropOptimistic: () => {}
+          }).then((outcome) => {
+            if (!stillVisible()) return
+            if (outcome === 'missing') {
+              setSendError(STEER_NOT_ARRIVED)
+              setInput((current) => current || input)
+            } else if (outcome === 'arrived') {
+              setSendError(null)
+              releaseComposerUrls()
+            }
+          })
+        }
         return
       }
-      // The turn ended meanwhile: send it like Enter would.
+      if (steered === 'queued') {
+        // Not steered: the running turn could not take it, so it waits at the end of the queue. Said, not hidden.
+        setSendError(STEER_QUEUED)
+        releaseComposerUrls()
+        return
+      }
+      if (steered) {
+        releaseComposerUrls()
+        return
+      }
+      // The turn cannot take it yet (it is still being set up, or it was stopped): it is queued and sent now, so it
+      // goes into the turn as soon as it runs, or first.
+      steerQueued = true
     }
 
     if (!text && images.length === 0) return
@@ -1389,7 +1445,7 @@ export function OrchestratorChat() {
       resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     }
     if (typedMeanwhile) setInput(typedMeanwhile)
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound)
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued)
     if (sent === false && stillVisible()) {
       restoreUnsent()
     } else if (sent !== 'uncertain') {

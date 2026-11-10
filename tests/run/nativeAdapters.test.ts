@@ -210,9 +210,10 @@ describe('ClaudeSubscriptionAdapter', () => {
       'text',
       'text',
       'text',
-      'steerAccepted',
+      // The steer closes the reply row and the thought: the reply goes on below the steered message.
       'thinking',
       'text',
+      'steerAccepted',
       'tool',
       'thinking',
       'thinking',

@@ -34,6 +34,10 @@ function Chat({ hold = null }: { hold?: QueueHold | null }) {
     createElement(QueuedMessages, { queue: thread }))
 }
 
+beforeEach(async () => {
+  ;(await import('../../src/renderer/lib/steerKey')).forgetSteerKey()
+})
+
 beforeEach(() => {
   host = document.createElement('div')
   document.body.append(host)
@@ -371,11 +375,84 @@ describe('queued messages in the conversation', () => {
     await act(async () => { send.click(); send.click() })
     expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
     expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'c')
+    // C leaves the queue at the click: the transcript shows it as sent, in the reply it joins.
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
     await act(async () => { answer() })
-    // The daemon's list is what shows: C is steering, A and B wait in order.
+    // The daemon lists C as steering until the reply reads it; it stays out of the queue, A and B wait in order.
     await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two'), queued('c', 'three', { intent: 'steer', state: 'steering' })] }) })
-    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b', 'c'])
-    expect(button('c', 'Sending')!.disabled).toBe(true)
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('a double click on Send now sends only the clicked message, not the one that moves under the pointer', async () => {
+    await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    await click(button('c', 'Send'))
+    // C left the list; the second click of the double click lands on B's button, which moved under the pointer.
+    await act(async () => { button('b', 'Send')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 2 })) })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'c')
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('shows a message sent now again at once when a Stop puts it back first in the queue', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two', { intent: 'steer', state: 'steering' })] }) })
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+    // The turn was stopped before it read B: the daemon lists it pending, first.
+    await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['b', 'a'])
+  })
+
+  it('offers no Send now on a steer another process takes, and says why', async () => {
+    await show([queued('a', 'one'), queued('s', 'steer elsewhere', { intent: 'steer' })])
+    const send = row('s').querySelector<HTMLButtonElement>('.queued-message-send')!
+    expect(send.disabled).toBe(true)
+    expect(send.title).toBe('Sent into the running reply')
+    expect(host.textContent).not.toContain('Sending now')
+  })
+
+  it('a second steer key press right after the first does not send the next queued message too', async () => {
+    await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    const row = rows().find((item) => item.dataset.queuedId === 'a')!
+    row.focus()
+    await key(row, { key: 'Enter', ctrlKey: true })
+    // Focus moved on to B; the same chord pressed again a moment later lands there.
+    const next = document.activeElement as HTMLElement
+    expect(next.dataset.queuedId).toBe('b')
+    await key(next, { key: 'Enter', ctrlKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'a')
+  })
+
+  it('puts a message back in the queue when Send now is refused', async () => {
+    api.promoteToSteer.mockRejectedValueOnce(new Error('No active turn to steer on this thread.'))
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('sends a focused queued message now with the steer key, once', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    const row = rows().find((item) => item.dataset.queuedId === 'b')!
+    row.focus()
+    await key(row, { key: 'Enter', ctrlKey: true })
+    await key(row, { key: 'Enter', ctrlKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'b')
+    // Focus moves on to the next queued message (here the first, as B was last), not to the page, where the same
+    // chord would answer an approval; and that is held off for a moment too.
+    expect(document.activeElement).toBe(rows().find((item) => item.dataset.queuedId === 'a'))
+    const { steerKeyRecently } = await import('../../src/renderer/lib/steerKey')
+    expect(steerKeyRecently()).toBe(true)
+    // Enter alone, or with another modifier, does nothing here.
+    await key(rows()[0]!, { key: 'Enter' })
+    await key(rows()[0]!, { key: 'Enter', ctrlKey: true, shiftKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the steer key in the Send now tooltip', async () => {
+    await show([queued('a', 'one')])
+    expect(button('a', 'Send')!.title).toBe('Steer: send now (Ctrl+Enter)')
   })
 
   it('shows a queued subagent result by what it reports, never by the text the model reads, and offers no edit', async () => {
@@ -608,7 +685,7 @@ describe('queued messages while a compaction runs', () => {
     expect(skip.title).toBe('Send now: skip compacting and keep the full 182K history')
     expect(skip.getAttribute('aria-label')).toBe(skip.title)
     // The others keep their usual actions.
-    expect(button('b', 'Send the queued message now')?.title).toBe('Send now')
+    expect(button('b', 'Send the queued message now')?.title).toBe('Steer: send now (Ctrl+Enter)')
     expect(button('b', 'Edit')).not.toBeNull()
     expect(button('b', 'Remove')).not.toBeNull()
     await click(skip)

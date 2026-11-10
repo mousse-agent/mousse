@@ -2433,8 +2433,12 @@ export class ClaudeSubscriptionProviderService {
         void live.steer(liveRun, steer).then((pushed) => {
           if (pushed) {
             input.steerTaken?.(drained?.token)
-            input.onSteer?.(steer)
-            frames.breakParagraph()
+            // Claude Code finishes sending the message it was writing until its cut lands: the steer takes its place
+            // in the reply where the next message starts, so the old message's last words stay above it.
+            frames.atNextMessage(() => {
+              input.onSteer?.(steer)
+              frames.breakParagraph()
+            })
           } else input.returnSteer?.(steer, drained?.token)
         }, () => cancel())
         return
@@ -2787,6 +2791,8 @@ export class ClaudeSubscriptionProviderService {
           if (frames.text) frames.text += '\n\n'
         }
       }
+      // A steer whose next message never started (the turn ended first) was still pushed: it is acknowledged now.
+      frames.flushNextMessage()
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
       const sessionId = frames.sessionId
@@ -2806,6 +2812,7 @@ export class ClaudeSubscriptionProviderService {
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
       throw error
     } finally {
+      frames.flushNextMessage()
       // Only this turn's controller: a live query is not the turn's to abort.
       controller.abort()
       // Background helpers keep calling tools after the turn ended, or was cancelled: they are checked by

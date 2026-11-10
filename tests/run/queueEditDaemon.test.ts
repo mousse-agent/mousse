@@ -362,7 +362,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(() => w.d.orch.editQueuedItem(w.other.id, a.id, { content: 'a2' }, stale)).toThrow(expect.objectContaining({ code: 'revision_mismatch' }))
       expect(() => w.d.orch.removeQueuedItem(w.other.id, a.id, stale)).toThrow(expect.objectContaining({ code: 'revision_mismatch' }))
       expect(() => w.d.orch.reorderQueue(w.other.id, [b.id, a.id], stale)).toThrow(expect.objectContaining({ code: 'revision_mismatch' }))
-      expect(() => w.d.orch.promoteQueueItemToSteer(w.other.id, a.id, stale)).toThrow(/No active turn|revision/)
+      expect(() => w.d.orch.promoteQueueItemToSteer(w.other.id, a.id, stale)).toThrow(expect.objectContaining({ code: 'revision_mismatch' }))
       expect(w.queue(w.other.id).map((item) => item.content)).toEqual(['a', 'b', 'c'])
       const now = w.d.orch.queueSnapshot(w.other.id)
       expect(now).toMatchObject({ open: true, items: expect.any(Array), claimed: [] })

@@ -12,7 +12,7 @@ export interface SlashCommandEnv {
   openUsage(): void
   stop(): Promise<void>
   /** Adds the text to the running turn; false when no turn took it. */
-  steer(text: string): Promise<boolean>
+  steer(text: string): Promise<boolean | 'queued'>
   newThread(title?: string): Promise<void>
   clearContext(threadId: string): Promise<void>
   compact(threadId: string, focus?: string): Promise<void>

@@ -217,6 +217,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       steerTaken: (token) => ctl.steerTaken?.(token),
       onSteer: (text) => {
         progress()
+        // The reply goes on below the steered message: what it wrote before keeps its row, above it.
+        streams.thinking.break()
+        streams.text.break()
         sink.steerAccepted(text)
       },
       onText: (text) => {

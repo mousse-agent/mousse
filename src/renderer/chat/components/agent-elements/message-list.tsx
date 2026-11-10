@@ -40,6 +40,7 @@ import {
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
 import { BackgroundNotice, SubagentNotice } from "./tools/SubagentNotice";
+import { SteerGroup } from "./steer-group";
 import { isRunningSubagent } from "../../../../shared/subagents";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
@@ -677,7 +678,7 @@ function MessageToolbar({
  * user wrote: they join the reply in progress, in place, with only their
  * structured notice kept (their text is what the model reads).
  */
-type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[] };
+export type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[] };
 
 /** A message that reports results (a subagent's, or the runtime's own background tasks): not something the user wrote. */
 function isResultNotice(msg: UIMessage | undefined): boolean {
@@ -687,11 +688,53 @@ function isResultNotice(msg: UIMessage | undefined): boolean {
 /** The empty-parts copy of a subagent-results message that joins a reply, one per message. */
 const noticeCopies = new WeakMap<UIMessage, UIMessage>();
 
-function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
+/** A user message sent into a reply already in progress (Steer): it joins that reply, not a turn of its own. */
+function isSteeredMessage(message: UIMessage): boolean {
+  return (message.metadata as { steered?: unknown } | undefined)?.steered === true;
+}
+
+/** The messages a steer group row stands for, or undefined when the row is not one. */
+export function readSteerGroup(message: UIMessage): UIMessage[] | undefined {
+  const group = (message.metadata as { steerGroup?: unknown } | undefined)?.steerGroup;
+  return Array.isArray(group) ? (group as UIMessage[]) : undefined;
+}
+
+/** Steer group rows by their first message, kept while their messages are the same objects (memoised rows). */
+const steerGroups = new WeakMap<UIMessage, UIMessage>();
+
+function steerGroupRow(members: UIMessage[]): UIMessage {
+  const first = members[0]!;
+  const cached = steerGroups.get(first);
+  const same = cached && readSteerGroup(cached)?.length === members.length &&
+    readSteerGroup(cached)!.every((message, index) => message === members[index]);
+  if (cached && same) return cached;
+  const row = {
+    id: `steer-group:${first.id}`,
+    role: "user",
+    parts: [],
+    metadata: { steerGroup: members },
+  } as unknown as UIMessage;
+  steerGroups.set(first, row);
+  return row;
+}
+
+export function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
+  // Messages steered into the reply one after another, with nothing of the reply between them: one block.
+  let steered: UIMessage[] = [];
+  const flushSteered = () => {
+    if (!steered.length || !current) return;
+    current.assistantMsgs.push(steerGroupRow(steered));
+    steered = [];
+  };
 
   for (const msg of messages) {
+    if (msg.role === "user" && current && isSteeredMessage(msg) && !isResultNotice(msg)) {
+      steered.push(msg);
+      continue;
+    }
+    flushSteered();
     if (msg.role === "user") {
       if (current && isResultNotice(msg)) {
         let copy = noticeCopies.get(msg);
@@ -709,6 +752,7 @@ function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
       current.assistantMsgs.push(msg);
     }
   }
+  flushSteered();
   if (current) turns.push(current);
   return turns;
 }
@@ -1585,8 +1629,15 @@ export const MessageList = memo(function MessageList({
       lastUserMessageId &&
       lastUserMessageId !== lastUserMessageIdRef.current
     ) {
-      dispatchFollow({ type: "new-turn" });
-      void virtualizationRef.current?.settleToEnd();
+      // A prompt the person just sent here takes them to the end. A turn the queue started (a queued
+      // message's turn) leaves a reader of earlier messages where they are; at the end, the end is followed.
+      const sentHere =
+        lastUserMessageId.startsWith("optimistic:") ||
+        turnKeyAliasRef.current.has(lastUserMessageId);
+      if (sentHere || followModeRef.current === "following-end") {
+        dispatchFollow({ type: "new-turn" });
+        void virtualizationRef.current?.settleToEnd();
+      }
       lastUserMessageIdRef.current = lastUserMessageId;
     }
   }, [lastUserMessageId, dispatchFollow]);
@@ -1656,7 +1707,8 @@ export const MessageList = memo(function MessageList({
       turns.map((turn, index) => ({
         key: resolveTurnKey(turn, index, turnKeyAliasRef.current),
         userMsg: turn.userMsg,
-        assistantMsgs: turn.assistantMsgs,
+        // A Steer block's messages are found as themselves, in the order they were sent.
+        assistantMsgs: turn.assistantMsgs.flatMap((message) => readSteerGroup(message) ?? [message]),
       })),
     [turns],
   );
@@ -1705,7 +1757,11 @@ export const MessageList = memo(function MessageList({
     }
     const { messageId } = messageRequest;
     const index = turns.findIndex(
-      (turn) => turn.userMsg?.id === messageId || turn.assistantMsgs.some((message) => message.id === messageId),
+      (turn) =>
+        turn.userMsg?.id === messageId ||
+        turn.assistantMsgs.some(
+          (message) => message.id === messageId || Boolean(readSteerGroup(message)?.some((steered) => steered.id === messageId)),
+        ),
     );
     const container = chatContainerRef.current;
     const rows = rowsRef.current;
@@ -2171,6 +2227,18 @@ const TurnRow = memo(function TurnRow({
                     if (segment.kind === "message") {
                       const msg =
                         answerMsgs[segment.msgIndex]!;
+                      const steeredGroup = readSteerGroup(msg);
+                      if (steeredGroup) {
+                        return (
+                          <SteerGroup
+                            key={msg.id}
+                            messages={steeredGroup}
+                            UserMessageComponent={CustomUserMessage}
+                            className={userMessageClassName}
+                            enableImagePreview={enableImagePreview}
+                          />
+                        );
+                      }
                       const notice = readSubagentNotice(msg);
                       if (notice) {
                         return (
