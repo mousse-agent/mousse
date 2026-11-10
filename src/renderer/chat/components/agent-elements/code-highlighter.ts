@@ -1,6 +1,7 @@
 import type { BundledLanguage, CodeHighlighterPlugin } from "streamdown";
 import type { HighlighterCore } from "shiki/core";
 import { bundledLanguages, bundledLanguagesInfo } from "shiki/langs";
+import { countRender } from "./render-counts";
 
 type HighlightOptions = Parameters<CodeHighlighterPlugin["highlight"]>[0];
 type HighlightResult = NonNullable<ReturnType<CodeHighlighterPlugin["highlight"]>>;
@@ -10,6 +11,8 @@ type ThemeInput = HighlightOptions["themes"][number];
 export const MAX_HIGHLIGHT_CHARS = 20_000;
 export const MAX_HIGHLIGHT_LINES = 500;
 const RESULT_CACHE_LIMIT = 100;
+/** While a code block streams in, it is tokenised again at most this often. */
+export const STREAMING_TOKENIZE_MS = 250;
 
 const PLAIN_LANGUAGE = "text";
 // Shiki treats these as "no grammar" without loading anything.
@@ -107,7 +110,134 @@ function cacheResult(key: string, result: HighlightResult): void {
   }
 }
 
-const pending = new Map<string, Set<(result: HighlightResult) => void>>();
+type Tokenized = { code: string; result: HighlightResult };
+type Line = HighlightResult["tokens"][number];
+type Notify = (result: HighlightResult) => void;
+
+/**
+ * One code block as it streams in. The plugin is never told which block asks, so a block is
+ * recognised by its text: a request whose code extends a stream's latest code is the same block
+ * growing. Everything here is per block, so one block never shows another's code or colours.
+ */
+type BlockStream = {
+  /** The latest code the block asked for. */
+  requested: string;
+  /** Its last tokenised text, which the growing block is drawn from. */
+  tokenized?: Tokenized;
+  /** The code of its first tokenisation, while that is under way. */
+  firstPass?: string;
+  /** A throttled tokenisation waiting to run, with the code it will tokenise. */
+  job?: { code: string };
+  /** Who waits for colours, with the code each one asked for. */
+  waiting: Map<Notify, string>;
+  touched: number;
+};
+
+/** The streams of one language and theme pair, newest last. A few are kept: one block streams at a time. */
+const streams = new Map<string, BlockStream[]>();
+const STREAMS_PER_FAMILY = 8;
+let touch = 0;
+
+/**
+ * The stream `code` belongs to: the one whose latest code it extends (the longest), or a new one
+ * when `create`. With `growing`, only a stream `code` makes longer.
+ */
+function streamFor(family: string, code: string, create: boolean, growing = false): BlockStream | undefined {
+  const list = streams.get(family) ?? [];
+  let found: BlockStream | undefined;
+  for (const stream of list) {
+    if (growing && stream.requested.length >= code.length) continue;
+    if (code.startsWith(stream.requested) && (!found || stream.requested.length > found.requested.length)) found = stream;
+  }
+  if (!found && create) {
+    found = { requested: code, waiting: new Map(), touched: 0 };
+    list.push(found);
+    if (list.length > STREAMS_PER_FAMILY) {
+      list.sort((a, b) => a.touched - b.touched);
+      list.splice(0, list.length - STREAMS_PER_FAMILY);
+    }
+    streams.set(family, list);
+  }
+  if (found) found.touched = ++touch;
+  return found;
+}
+
+function plainToken(content: string, offset: number): Line[number] {
+  return { content, color: "inherit", bgColor: "transparent", htmlStyle: {}, offset } as Line[number];
+}
+
+/**
+ * `code`, which starts with `previous.code`, drawn from the tokens of `previous`: its lines keep
+ * their colours, text added to its last line and new lines are plain. Nothing on screen loses its
+ * colour, and nothing changes height, while the whole block waits to be tokenised again.
+ */
+export function extendTokens(previous: Tokenized, code: string): HighlightResult {
+  const before = previous.code.split("\n");
+  const last = before.length - 1;
+  let offset = 0;
+  const tokens = code.split("\n").map((line, index) => {
+    const start = offset;
+    offset += line.length + 1;
+    const known = previous.result.tokens[index];
+    if (index < last && known) return known;
+    if (index === last && known) {
+      const added = line.slice(before[last]!.length);
+      return added ? [...known, plainToken(added, start + before[last]!.length)] : known;
+    }
+    return [plainToken(line, start)];
+  });
+  return { ...previous.result, tokens };
+}
+
+/**
+ * Delivers a block's result, tokenised from `code`. Streamdown never cancels a request, so only the
+ * block's latest request is answered: an earlier one would set the block back to shorter text. It
+ * gets the result when it asked for exactly `code`, or the result grown to its text when its text
+ * extends `code` (the cached result for that text when there is one). Nothing longer, and nothing
+ * of another block, is ever delivered.
+ */
+function deliver(family: string, stream: BlockStream, code: string, result: HighlightResult): void {
+  for (const [notify, asked] of stream.waiting) {
+    if (asked !== stream.requested) {
+      stream.waiting.delete(notify);
+      continue;
+    }
+    if (asked === code) {
+      stream.waiting.delete(notify);
+      notify(result);
+    } else if (asked.startsWith(code)) {
+      // A pass for the newer text is coming; this one only brings the colours it has.
+      if (!stream.job) stream.waiting.delete(notify);
+      notify(resultCache.get(`${family}\0${asked}`) ?? extendTokens({ code, result }, asked));
+    }
+  }
+}
+
+/** Tokenises a growing block at most every STREAMING_TOKENIZE_MS, always its latest text. */
+function tokenizeSoon(family: string, stream: BlockStream, code: string, lang: string, names: [string, string]): void {
+  if (stream.job) {
+    stream.job.code = code;
+    return;
+  }
+  const job = { code };
+  stream.job = job;
+  const timer = setTimeout(() => {
+    stream.job = undefined;
+    const run = job.code;
+    countRender("tokenize");
+    void tokenize(run, lang, names)
+      .then(
+        (result) => {
+          cacheResult(`${family}\0${run}`, result);
+          if (!stream.tokenized || run.length >= stream.tokenized.code.length) stream.tokenized = { code: run, result };
+          return result;
+        },
+        () => plainTokens(run),
+      )
+      .then((result) => deliver(family, stream, run, result));
+  }, STREAMING_TOKENIZE_MS);
+  (timer as { unref?: () => void }).unref?.();
+}
 
 async function tokenize(
   code: string,
@@ -145,34 +275,52 @@ export function createCodeHighlighter(
 
       const lang = resolveHighlightLanguage(language);
       const names: [string, string] = [themeName(requested[0]), themeName(requested[1])];
-      const key = `${lang}\0${names[0]}\0${names[1]}\0${code}`;
+      const family = `${lang}\0${names[0]}\0${names[1]}`;
+      const key = `${family}\0${code}`;
       const cached = resultCache.get(key);
       if (cached) {
         cacheResult(key, cached);
+        // A block that reaches text already tokenised (its final text, met before) moves on to it,
+        // so a late pass for its shorter text is not delivered. Another block's text leaves it.
+        const stream = streamFor(family, code, false, true);
+        if (stream) stream.requested = code;
         return cached;
       }
 
-      const waiting = pending.get(key);
-      if (waiting) {
-        if (callback) waiting.add(callback);
-        return null;
-      }
-      const callbacks = new Set<(result: HighlightResult) => void>();
-      if (callback) callbacks.add(callback);
-      pending.set(key, callbacks);
+      const stream = streamFor(family, code, true)!;
+      stream.requested = code;
+      if (callback) stream.waiting.set(callback, code);
 
+      // A fence still streaming in: drawn at once from its own last colours, and tokenised whole
+      // again at most every STREAMING_TOKENIZE_MS, instead of once per delta with the new text
+      // missing until each pass ends.
+      const tokenized = stream.tokenized;
+      if (tokenized && code.length > tokenized.code.length && code.startsWith(tokenized.code)) {
+        tokenizeSoon(family, stream, code, lang, names);
+        return extendTokens(tokenized, code);
+      }
+      // Its first pass is still under way: it has no colours yet, so its text shows plain.
+      if (stream.firstPass !== undefined && code !== stream.firstPass) {
+        tokenizeSoon(family, stream, code, lang, names);
+        return plainTokens(code);
+      }
+      if (stream.firstPass === code) return null;
+
+      stream.firstPass = code;
+      countRender("tokenize");
       void tokenize(code, lang, names)
         .then(
           (result) => {
             cacheResult(key, result);
+            if (!stream.tokenized || code.length >= stream.tokenized.code.length) stream.tokenized = { code, result };
             return result;
           },
           // A grammar or engine failure leaves the block as plain text.
           () => plainTokens(code),
         )
         .then((result) => {
-          pending.delete(key);
-          for (const notify of callbacks) notify(result);
+          if (stream.firstPass === code) stream.firstPass = undefined;
+          deliver(family, stream, code, result);
         });
       return null;
     },

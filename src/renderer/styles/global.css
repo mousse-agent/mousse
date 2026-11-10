@@ -237,6 +237,16 @@ html[data-theme='light'] {
 .an-message-list[data-following-end] {
   overflow-anchor: none;
 }
+/* A block that appears in a reply while it streams fades in. Opacity only, so nothing around it
+   moves; only the live reply has data-streaming, so opening a finished thread replays nothing. */
+.an-markdown[data-streaming] > div > * {
+  transition: opacity calc(240ms * var(--ui-motion-scale, 1)) ease-out;
+}
+@starting-style {
+  .an-markdown[data-streaming] > div > * {
+    opacity: 0;
+  }
+}
 
 /* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
    still win: unlayered author CSS would otherwise beat every layered

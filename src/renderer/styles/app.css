@@ -988,11 +988,6 @@ html.platform-darwin .titlebar-left {
   user-select: text;
 }
 
-.message-streaming {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .chat-messages {
   flex: 1;
   min-height: 0;
@@ -5779,48 +5774,6 @@ button.chat-user-image { background: color-mix(in oklab, var(--color-an-foregrou
   font-size: 14.5px;
   line-height: 1.55;
   letter-spacing: -0.01em;
-}
-
-.message-streaming::after {
-  content: '';
-  display: inline-block;
-  width: 2px;
-  height: 1em;
-  margin-left: 2px;
-  vertical-align: -0.15em;
-  background: var(--accent);
-  border-radius: 1px;
-  animation: streaming-caret 0.9s step-end infinite;
-}
-
-.streaming-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-  animation: streaming-fade-in calc(280ms * var(--ui-motion-scale)) ease;
-}
-
-.streaming-text::after {
-  content: '▍';
-  margin-left: 2px;
-  color: var(--accent);
-  animation: streaming-caret 0.9s step-end infinite;
-}
-
-@keyframes streaming-fade-in {
-  from { opacity: 0.35; }
-  to { opacity: 1; }
-}
-
-@keyframes streaming-caret {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
-}
-
-.message-streaming.streaming-text::after {
-  content: '▍';
-  width: auto;
-  height: auto;
-  background: transparent;
 }
 
 .shimmer-text {
