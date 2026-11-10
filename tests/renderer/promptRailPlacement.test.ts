@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { promptRailLeft } from '../../src/renderer/chat/components/agent-elements/message-list'
 
 describe('the jump-to-prompt rail', () => {
-  it('sits close to the pane's left edge', () => {
+  it("sits close to the pane's left edge", () => {
     expect(promptRailLeft({ textLeft: 300, prompts: 12 })).toBe(12)
   })
 
