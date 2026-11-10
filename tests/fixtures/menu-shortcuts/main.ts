@@ -1,4 +1,5 @@
 import { app, BrowserWindow, Menu } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { writeFileSync } from 'node:fs'
@@ -9,7 +10,7 @@ import type { CommandId, ShortcutOverrides } from '../../../src/shared/commands'
 
 const directory = process.env.MOUSSE_MENU_SHORTCUTS_DIRECTORY!
 app.setPath('userData', join(directory, 'user-data'))
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 
 const RECORDER = `<textarea id="field"></textarea><script>
   window.keys = []

@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../../electronWithoutGpu.mjs'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { GuiMmsController } from '../../../../src/main/mms/GuiMmsController'
 import type { WorkflowRunView } from '../../../../src/shared/workflowRunPlatform'
@@ -8,7 +9,7 @@ const config = JSON.parse(readFileSync(process.env.MOUSSE_E2E_CONFIG!, 'utf8')) 
   ready: string; close?: string; evidence: string; runId?: string
 }
 app.setPath('userData', config.userData)
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 const timeout = setTimeout(() => app.exit(2), 60_000)
 timeout.unref()
 

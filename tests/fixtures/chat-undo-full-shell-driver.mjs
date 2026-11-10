@@ -4,10 +4,11 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
+import { runWithoutGpu } from './electronWithoutGpu.mjs'
 
 const config = JSON.parse(readFileSync(process.env.MOUSSE_CHAT_UNDO_CONFIG, 'utf8'))
 const cli = process.argv.includes('--cli')
-if (!cli) { keepWindowsOffScreen(); exitWithParent() }
+if (!cli) { runWithoutGpu({ app, BrowserWindow }); keepWindowsOffScreen(); exitWithParent() }
 const timer = cli ? undefined : setTimeout(() => { console.error('Chat Undo driver timed out'); app.exit(1) }, 55_000)
 async function until(read, accept, label) {
   let value

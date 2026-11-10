@@ -1,11 +1,12 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const directory = process.env.MOUSSE_PROMPT_MARKERS_DIRECTORY!
 app.setPath('userData', join(directory, 'electron-user-data'))
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 app.on('window-all-closed', () => {})
 setTimeout(() => app.exit(1), 20000).unref()
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms))

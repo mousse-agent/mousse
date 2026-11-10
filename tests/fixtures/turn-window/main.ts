@@ -1,11 +1,12 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const directory = process.env.MOUSSE_TURN_WINDOW_DIRECTORY!
 app.setPath('userData', join(directory, 'electron-user-data'))
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 app.on('window-all-closed', () => {})
 setTimeout(() => app.exit(1), 150000).unref()
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms))
@@ -53,21 +54,20 @@ async function main() {
     }
 
     // 1. A long thread opens at the bottom and mounts only the rows around it, however long it is.
-    // Mount time is reported, not asserted: wall-clock is noise on shared CI. What it follows from, how much
-    // is mounted, is asserted instead.
-    const small = { mountMs: await execute<number>('qa.mount(100)') } as Record<string, number>
+    await execute('qa.mount(100)')
+    const small = {} as Record<string, number>
     small.messages = await execute<number>('qa.messageCount()')
     small.mounted = await execute<number>('qa.mountedTurns()')
     small.domNodes = await execute<number>('qa.domNodes()')
     small.textLength = await execute<number>('qa.textLength()')
-    const large = { mountMs: await execute<number>('qa.mount(1000)') } as Record<string, number>
+    await execute('qa.mount(1000)')
+    const large = {} as Record<string, number>
     await delay(300)
     await execute('qa.frames(3)')
     large.messages = await execute<number>('qa.messageCount()')
     large.mounted = await execute<number>('qa.mountedTurns()')
     large.domNodes = await execute<number>('qa.domNodes()')
     large.textLength = await execute<number>('qa.textLength()')
-    large.heapMB = await execute<number>('qa.heapMB()')
     const opened = await execute(`({
       mounted: qa.mountedTurns(), range: qa.mountedRange(), windowed: qa.windowed(), spacers: qa.spacers(),
       first: qa.isMounted(0), last: qa.isMounted(999), far: qa.isMounted(500),
@@ -280,8 +280,8 @@ async function main() {
     await execute('qa.frames(20)')
     const interrupted = { at: interruptedAt, later: await scrollTop(), top: await execute<number | null>('qa.promptTop(300)') }
 
-    // A scripted scroll across the thread, giant rows included: the longest gap between frames is reported, never asserted.
-    const longestFrameMs = await execute<number>('qa.scriptedScroll(40, 14000)')
+    // A scripted scroll across the thread, giant rows included.
+    await execute('qa.scriptedScroll(40, 14000)')
     const afterScripted = await execute('({ mounted: qa.mountedTurns(), first: qa.isMounted(0), last: qa.isMounted(qa.lastTurn()) })')
 
     // 7. Find: a match in a turn that is not mounted is found in the message data and landed on, and Enter and Shift+Enter wrap.
@@ -400,7 +400,7 @@ async function main() {
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({
       small, large, opened, positions, hold, held, codeHold, codeGrowth, up, down, afterSweeps, toolCards, nested, thinking, table,
       followGaps, leftEnd, readingAfterStream, jumpFrames, jumped, streamFar, farSentinel, streamInside, turnFrames, afterTurn,
-      markerFrames, marker, interrupted, longestFrameMs, afterScripted, ten, small40, grown,
+      markerFrames, marker, interrupted, afterScripted, ten, small40, grown,
       find: {
         opened: findOpened, focusFrames: findFocusFrames, farFrames: findFarFrames, far: findFar, manyFrames: findManyFrames, many: findMany,
         last: findLast, wrapFrames: findWrapFrames, wrapped: findWrapped, backFrames: findBackFrames, back: findBack, closed: findClosed,

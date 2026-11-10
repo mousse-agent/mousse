@@ -8,7 +8,7 @@ import electron from 'electron'
 import { expect, it } from 'vitest'
 import { build as viteBuild } from 'vite'
 
-type Mounted = { mountMs: number; messages: number; mounted: number; domNodes: number; textLength: number; heapMB?: number }
+type Mounted = { messages: number; mounted: number; domNodes: number; textLength: number }
 type Opened = {
   mounted: number; range: { first: number; last: number }; windowed: boolean; spacers: number
   first: boolean; last: boolean; far: boolean; endGap: number; scrollHeight: number; clientHeight: number
@@ -54,7 +54,7 @@ type Evidence = {
   turnFrames: number; afterTurn: { gap: number; mounted: number; range: { first: number; last: number } }
   markerFrames: number; marker: { top: number; mounted: boolean; count: number }
   interrupted: { at: number; later: number; top: number | null }
-  longestFrameMs: number; afterScripted: { mounted: number; first: boolean; last: boolean }
+  afterScripted: { mounted: number; first: boolean; last: boolean }
   ten: { windowed: boolean; mounted: number; spacers: number; overflow: number; start: number; afterGrowth: number; row: number }
   small40: { windowed: boolean; mounted: number; spacers: number }; grown: { windowed: boolean; mounted: number; gap: number }
   find: {
@@ -91,13 +91,6 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     exited = new Promise<number | null>((done, reject) => { child!.once('error', reject); child!.once('exit', done) })
     expect(await exited, output).toBe(0)
     const result = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8')) as Evidence
-    // Timings and sizes are reported for people to compare; only counts and positions are asserted, since wall-clock
-    // time on a shared runner says more about the runner than the list.
-    console.info(
-      `turn window: mount ${result.small.messages} messages ${result.small.mountMs.toFixed(0)} ms (${result.small.mounted} rows, ${result.small.domNodes} nodes), ` +
-      `${result.large.messages} messages ${result.large.mountMs.toFixed(0)} ms (${result.large.mounted} rows, ${result.large.domNodes} nodes, heap ${result.large.heapMB?.toFixed(0)} MB), ` +
-      `time ratio ${(result.large.mountMs / result.small.mountMs).toFixed(2)}, longest frame of a scripted scroll ${result.longestFrameMs.toFixed(0)} ms`,
-    )
     // The largest jump of the reading line while only the toolbar of the row above it was at the top edge (asserted below).
     const tail = [...result.up.tailDrift, ...result.down.tailDrift].map(Math.abs)
     console.info(`turn window: reading-line jump with only a row tail at the top edge: ${tail.length} samples, largest ${Math.max(0, ...tail).toFixed(0)} px`)

@@ -4,12 +4,13 @@ import { app, BrowserWindow } from 'electron'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
+import { runWithoutGpu } from './electronWithoutGpu.mjs'
 
 const config = JSON.parse(readFileSync(process.env.MOUSSE_FULL_SHELL_CONFIG, 'utf8'))
 // GUI startup can relaunch this same Electron entrypoint in CLI/daemon mode.
 // The actual app handles that mode; the UI driver must not stop its daemon.
 const isCli = process.argv.includes('--cli')
-if (!isCli) { keepWindowsOffScreen(); exitWithParent() }
+if (!isCli) { runWithoutGpu({ app, BrowserWindow }); keepWindowsOffScreen(); exitWithParent() }
 const timer = isCli ? undefined : setTimeout(() => { console.error('Full application driver timed out'); app.exit(1) }, 55_000)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 async function until(read, predicate, label) {

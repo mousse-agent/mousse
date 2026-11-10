@@ -236,18 +236,16 @@ const groupTriggers = (index: number) =>
 
 const qa = {
   /** Mounts `count` turns (two messages or more each); resolves once every thumbnail has decoded. */
-  async mount(count: number): Promise<number> {
+  async mount(count: number): Promise<void> {
     turnCount = count
     messages = Array.from({ length: count }, (_, index) => turnMessages(index)).flat()
     epoch += 1
     streaming = false
-    const started = performance.now()
     render()
     await frames(3)
     await Promise.all(
       Array.from(container().querySelectorAll('img'), (image) => (image.complete ? undefined : new Promise((done) => { image.onload = image.onerror = done }))),
     )
-    return performance.now() - started
   },
   messageCount: () => messages.length,
   mountedTurns: () => document.querySelectorAll('[data-turn-key]').length,
@@ -260,9 +258,8 @@ const qa = {
   },
   windowed: () => container().dataset.windowed === 'true',
   spacers: () => document.querySelectorAll('[data-spacer]').length,
-  /** Elements and text of the mounted transcript, and what the heap holds: reported, never asserted. */
+  /** Elements of the mounted transcript. */
   domNodes: () => container().querySelectorAll('*').length,
-  heapMB: () => ((performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0) / 1048576,
   /** Characters of mounted text: a collapsed 300,000-character thought adds none of its own. */
   textLength: () => container().textContent?.length ?? 0,
   scrollTo: (px: number) => {
@@ -479,21 +476,15 @@ const qa = {
     }
     return { drift, tailDrift, scrollHeightDelta: Math.abs(el.scrollHeight - startHeight) }
   },
-  /** Scrolls `steps` times by `px` from the top, one step per frame, and reports the longest gap between frames. */
-  async scriptedScroll(steps: number, px: number): Promise<number> {
+  /** Scrolls `steps` times by `px` from the top, one step per frame. */
+  async scriptedScroll(steps: number, px: number): Promise<void> {
     const el = container()
     el.scrollTop = 0
     await frames(2)
-    let longest = 0
-    let last = performance.now()
     for (let index = 0; index < steps; index += 1) {
       el.scrollTop += px
       await frame()
-      const now = performance.now()
-      longest = Math.max(longest, now - last)
-      last = now
     }
-    return longest
   },
   pickSentinel,
   /** Opens the find bar the way the command palette does. */

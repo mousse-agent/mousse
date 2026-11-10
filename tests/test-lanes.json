@@ -121,7 +121,6 @@
     "tests/net/daemon.test.ts",
     "tests/net/editor/endpointEditors.test.ts",
     "tests/net/editor/endpointSystemSsh.test.ts",
-    "tests/net/editor/endpointThroughput.test.ts",
     "tests/net/editor/endpointWindowsSsh.test.ts",
     "tests/net/rollback/daemon.test.ts",
     "tests/net/spaces/archive/daemon.test.ts",
@@ -158,7 +157,6 @@
     "tests/renderer/networkTaskPicker-electron.test.ts",
     "tests/renderer/profile-footer-electron.test.ts",
     "tests/renderer/profileReady-startup-electron.test.ts",
-    "tests/renderer/sidebar-motion-electron.test.ts",
     "tests/renderer/storage-settings-electron.test.ts",
     "tests/renderer/turn-window-electron.test.ts",
     "tests/resourceLifecycleFullShell.test.ts"

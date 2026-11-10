@@ -1,10 +1,11 @@
 import { app, BrowserWindow } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const directory = process.env.MOUSSE_RENDERER_STARTUP_DIRECTORY!
 app.setPath('userData', join(directory, 'user-data'))
-app.disableHardwareAcceleration()
+runWithoutGpu({ app, BrowserWindow })
 app.on('window-all-closed', () => {})
 setTimeout(() => app.exit(1), 15000).unref()
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms))

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, session } from 'electron'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
@@ -18,6 +19,7 @@ const runtimeRoot = join(output, 'runtime')
 const home = join(runtimeRoot, 'home')
 const preload = resolve(process.env.MOUSSE_PROFILE_PRODUCTION_PRELOAD ?? '')
 app.setPath('userData', join(runtimeRoot, 'electron-user-data'))
+runWithoutGpu({ app, BrowserWindow })
 setTimeout(() => { console.error('Production profile fixture timed out'); app.exit(1) }, 90_000).unref()
 
 const delay = (ms: number): Promise<void> => new Promise((resolveDelay) => setTimeout(resolveDelay, ms))

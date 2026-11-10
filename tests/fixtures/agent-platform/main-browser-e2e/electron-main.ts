@@ -1,4 +1,5 @@
 import { app, BrowserWindow, type WebContents } from 'electron'
+import { runWithoutGpu } from '../../electronWithoutGpu.mjs'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { AttachedBrowserHost } from '../../../../src/main/browser/AttachedBrowserHost'
 import { GuiMmsController } from '../../../../src/main/mms/GuiMmsController'
@@ -11,8 +12,7 @@ const config = JSON.parse(readFileSync(process.env.MOUSSE_E2E_CONFIG!, 'utf8')) 
   userData: string; evidence: string
 }
 app.setPath('userData', config.userData)
-app.disableHardwareAcceleration()
-app.commandLine.appendSwitch('disable-gpu')
+runWithoutGpu({ app, BrowserWindow })
 app.commandLine.appendSwitch('in-process-gpu')
 const timeout = setTimeout(() => app.exit(2), 90_000)
 timeout.unref()

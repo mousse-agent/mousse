@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { FileCredentialStore } from '../../../src/mms/providers/FileCredentialStore'
+import { runWithoutGpu } from '../electronWithoutGpu.mjs'
 
 const [phase, root] = process.argv.slice(2)
 if (!root || !['write', 'read', 'node-reject'].includes(phase)) throw new Error('Invalid vault fixture arguments')
@@ -29,8 +30,9 @@ if (phase === 'node-reject') {
   void probe().catch((error) => { console.error(error); process.exitCode = 1 })
 } else {
   const runtimeRequire = createRequire(typeof __filename === 'string' ? __filename : import.meta.url)
-  const { app } = runtimeRequire('electron') as typeof import('electron')
+  const { app, BrowserWindow } = runtimeRequire('electron') as typeof import('electron')
   app.setPath('userData', join(root, 'electron-user-data'))
+  runWithoutGpu({ app, BrowserWindow })
   void app.whenReady().then(probe).then(() => app.quit(), (error) => {
     console.error(error)
     app.exit(1)
