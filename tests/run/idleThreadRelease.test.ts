@@ -7,10 +7,13 @@
  * or Stop that meets a release runs exactly once; reloads at once share one session; a thread a window shows stays
  * loaded; a failed or interrupted release loses nothing; and the kill switch turns it all off.
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { join, resolve } from 'node:path'
+import { build } from 'esbuild'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { getCliBuildOptions } from '../../scripts/build-cli.mjs'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
@@ -392,12 +395,12 @@ describe('idle threads are released from memory and reload exactly as they were'
     expect(w.onDisk()).toContain('user:not saved yet')
   })
 
-  it('a crash in the middle of a release loses nothing: the restarted daemon has the transcript and the queue', async () => {
+  it('a release whose save is refused before it reaches the database, then a daemon ending without a clean stop: the restarted daemon has the saved transcript and the thread runs on once', async () => {
     const w = world()
     await w.send('first')
     await w.settled('first turn')
     w.d.orch.getOrCreateSession(w.thread.id).messages.push({ id: 'unsaved-1', role: 'user', content: 'owed', timestamp: new Date().toISOString() } as ChatMessage)
-    // The process dies inside the release's save, before its transaction commits.
+    // The save throws before anything is sent to the database (no transaction starts); the queue is empty.
     const client = (w.d.store as unknown as { threadDb(): { client: { callSync: (...args: unknown[]) => unknown } } }).threadDb().client
     const callSync = client.callSync.bind(client)
     client.callSync = (op: unknown, ...args: unknown[]) => {
@@ -411,12 +414,11 @@ describe('idle threads are released from memory and reload exactly as they were'
     await w.d.crash()
     daemons.splice(daemons.indexOf(w.d), 1)
 
-    // A new daemon on the same home: the transcript is the last one committed, and the thread runs on.
+    // A new daemon on the same home: the transcript is the last one saved, and the thread runs on.
     const adapter = new HoldingAdapter()
     const d = daemonAt(home!, adapter)
     d.orch.recoverAndDrainPendingQueues()
     expect(d.store.loadThreadData(w.thread.id).messages.map((message) => message.content)).toEqual(['first', 'reply to first'])
-    expect(readDurableQueue(d.store, w.thread.id)).toEqual([])
     await d.orch.send('after restart', false, { threadId: w.thread.id, clientRequestId: 'after-restart' })
     await waitFor(() => adapter.prompts.includes('after restart') && !d.orch.isActiveTurnRunning(w.thread.id), 'turn after restart')
     expect(adapter.prompts).toEqual(['after restart'])
@@ -554,3 +556,71 @@ describe('idle threads are released from memory and reload exactly as they were'
 })
 
 const LRU_WAIT = 2 * MINUTE
+
+/**
+ * A real process kill at the release save's transaction boundary. The daemon runs in a child process
+ * (`tests/support/idleReleaseCrashChild.ts`, bundled as the CLI is): thread A ran a turn and owes a save; thread B has a
+ * turn held and a message queued behind it. A's release starts and the child kills itself (SIGKILL) right before or
+ * right after the save's COMMIT. A daemon started on the same home then recovers.
+ */
+describe('a process killed inside a release', () => {
+  let bundle: string
+  let root: string
+  const homes: string[] = []
+
+  beforeAll(async () => {
+    const repo = resolve(__dirname, '..', '..')
+    // Beside the checkout, so the child resolves its packages from node_modules.
+    root = join(repo, 'out', 'test-builds', `idle-release-crash-${process.pid}`)
+    mkdirSync(root, { recursive: true })
+    bundle = join(root, 'child.mjs')
+    const options = getCliBuildOptions(repo)
+    await build({ ...options, entryPoints: [join(repo, 'tests', 'support', 'idleReleaseCrashChild.ts')], outfile: bundle, sourcemap: false, logLevel: 'silent', plugins: [] })
+  }, 180_000)
+
+  afterAll(() => {
+    for (const dir of [root, ...homes]) {
+      try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) } catch { /* the OS cleans up */ }
+    }
+  })
+
+  const runChild = (args: string[]) => {
+    const env: NodeJS.ProcessEnv = { ...process.env, MOUSSE_THREAD_DB_WORKER: 'inline' }
+    for (const key of Object.keys(env)) if (key.startsWith('VITEST')) delete env[key]
+    return spawnSync(process.execPath, [bundle, ...args], { cwd: root, env, encoding: 'utf-8', timeout: 60_000 })
+  }
+
+  for (const variant of ['before', 'after'] as const) {
+    it(`killed just ${variant} the COMMIT: the queued message survives and runs once, no turn runs twice, and the transcript is whole`, () => {
+      // Outside any repository: the child's test project must never resolve to this checkout's git repository.
+      const home = mkdtempSync(join(tmpdir(), `mousse-idle-crash-${variant}-`))
+      homes.push(home)
+      const outside = spawnSync('git', ['-C', home, 'rev-parse', '--git-dir'], { encoding: 'utf-8' })
+      expect(outside.status).not.toBe(0)
+      const killed = runChild(['first', home, variant])
+      expect(existsSync(join(home, 'error.txt')) ? readFileSync(join(home, 'error.txt'), 'utf-8') : '').toBe('')
+      // A was releasable when the sweep ran, and the process died inside that release.
+      expect(readFileSync(join(home, 'armed'), 'utf-8')).toBe('releasable')
+      expect(existsSync(join(home, 'survived'))).toBe(false)
+      expect(killed.status === 0).toBe(false)
+
+      const restarted = runChild(['restart', home])
+      expect(existsSync(join(home, 'error.txt')) ? readFileSync(join(home, 'error.txt'), 'utf-8') : '', restarted.stderr).toBe('')
+      expect(restarted.status).toBe(0)
+      const result = JSON.parse(readFileSync(join(home, 'result.json'), 'utf-8')) as { a: string[]; b: string[]; bQueue: number; bRuns: Array<{ clientRequestId: string | null; status: string }>; bActive: boolean }
+      // A: the last committed transcript. Before the COMMIT nothing of the release's save is on disk; after it, all is.
+      expect(result.a).toEqual(variant === 'before' ? ['a-first', 'reply to a-first'] : ['a-first', 'reply to a-first', 'a-owed'])
+      // B: the queued message survived the kill and ran once, after the restart.
+      expect(result.bQueue).toBe(0)
+      expect(result.b.filter((text) => text === 'b-queued')).toHaveLength(1)
+      const prompts = readFileSync(join(home, 'prompts.log'), 'utf-8').trim().split('\n')
+      expect(prompts.filter((line) => line === 'restart:b-queued')).toHaveLength(1)
+      expect(prompts.filter((line) => line.endsWith(':b-queued'))).toHaveLength(1)
+      // The turns the first process ran are not run again, the held one included.
+      expect(prompts.filter((line) => line.startsWith('restart:')).map((line) => line.slice('restart:'.length))).toEqual(['b-queued'])
+      // Exactly one run completed on B, the queued message's, and none is running.
+      expect(result.bActive).toBe(false)
+      expect(result.bRuns.filter((run) => run.status === 'completed')).toEqual([{ clientRequestId: 'b-2', status: 'completed' }])
+    }, 120_000)
+  }
+})

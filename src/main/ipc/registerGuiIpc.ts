@@ -1098,6 +1098,9 @@ export function registerGuiIpc(
     }
   })
 
+  // A window's replacement connection (after a daemon restart or a dropped connection) shows the daemon its thread again.
+  guiMms.setShownThreadSource?.((senderId) => presentationForSender(senderId).getActiveThreadId())
+
   // A window asks for a resnapshot on every event while its gap flag is set, which is a burst during
   // streaming. One snapshot runs at a time per window (and one more if asked meanwhile); one per
   // event filled the connection's request limit and failed unrelated calls.
