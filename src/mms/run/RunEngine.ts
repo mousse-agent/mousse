@@ -1774,6 +1774,22 @@ export class RunEngine extends EventEmitter {
     return this.store.listRuns(threadId, options)
   }
 
+  /**
+   * Why the thread still has engine work in flight, or undefined: a run that has not ended, an effect not yet
+   * done, an inbox row not acknowledged, an approval waiting, a handoff or context transfer not delivered, or a
+   * command holding the thread's lock. Indexed reads only; for releasing idle threads from memory.
+   */
+  threadWorkInFlight(threadId: string): string | undefined {
+    if (this.mutex.isLocked(threadId)) return 'thread lock held'
+    if (this.store.hasNonTerminalRun(threadId)) return 'run not ended'
+    if (this.outbox.listForThread(threadId, { status: 'pending' }).length || this.outbox.listForThread(threadId, { status: 'running' }).length) return 'effect not done'
+    if (this.inbox.listByStatus(threadId, 'pending').length || this.inbox.listByStatus(threadId, 'delivered').length) return 'inbox not acknowledged'
+    if (this.approvals.listPending(threadId).length) return 'approval waiting'
+    if (this.handoffs.pendingForThread(threadId)) return 'handoff pending'
+    if (this.transfers.listPending(threadId).length) return 'context transfer pending'
+    return undefined
+  }
+
   listEvents(threadId: string, options: { afterSeq?: number; limit?: number } = {}): ThreadEvent[] {
     return this.store.listEvents(threadId, options)
   }

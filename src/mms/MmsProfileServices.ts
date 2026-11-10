@@ -1992,6 +1992,9 @@ export class MmsProfileServices {
     this.threadRuntimes.restoreOnStartup()
     // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute.
     this.threads.startSearchIndexSweep()
+    // Idle threads leave memory and reload from disk when next needed; the feature flag is the kill switch.
+    this.orchestrator.residency?.setEnabled(() => this.config.get().features.releaseIdleThreads !== false)
+    this.orchestrator.residency?.start()
     // Threads still on JSON files move to thread.db in the background, one at a time.
     this.threads.startBackgroundImport()
     // Questions are memory-only — new process has none; document interrupted semantics.
@@ -2028,6 +2031,8 @@ export class MmsProfileServices {
     const id = threadId ?? this.orchestrator.getBoundThreadId()
     if (!id) return
     if (!this.threads.getThread(id)) return
+    // Only a loaded session has anything to save; a released thread is already on disk and is not loaded for it.
+    if (!this.orchestrator.hasSession(id)) return
 
     // Atomic RMW: merge live messages/llm with latest agents/tasks under one lock.
     this.threads.mutateThreadData(id, (current) => {

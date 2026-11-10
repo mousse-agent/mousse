@@ -1825,6 +1825,12 @@ export class ClaudeSubscriptionProviderService {
    * A process that has not exited by itself shortly after is killed with everything it started
    * (`reapClosed`).
    */
+  /** Whether the thread's Claude process is still open between turns (it closes itself after `LIVE_IDLE_CLOSE_MS`). */
+  hasLiveProcess(threadId: string): boolean {
+    const live = this.live.get(threadId)
+    return Boolean(live && !live.dead)
+  }
+
   stopThread(threadId: string): 'stopped' | 'not_active' {
     this.liveCommits.delete(threadId)
     const live = this.live.get(threadId)

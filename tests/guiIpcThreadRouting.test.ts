@@ -164,14 +164,19 @@ describe('selecting a thread on another computer', () => {
     ])
     calls.length = 0
     await invoke('threads:select', 'local-thread')
-    expect(calls.map((call) => call.params)).toEqual([{ threadId: OTHER_REMOTE, focused: false }, { threadId: 'local-thread' }])
+    // A thread of this computer is marked shown (it stays loaded in the daemon); nothing waits for that.
+    expect(calls.map((call) => call.params)).toEqual([{ threadId: OTHER_REMOTE, focused: false }, { threadId: 'local-thread', focused: true }, { threadId: 'local-thread' }])
   })
 
-  it('asks nothing extra for a thread of this computer', async () => {
+  it('marks a thread of this computer shown, and the one it leaves not shown, without waiting', async () => {
     await invoke('threads:select', 'local-a')
     await invoke('threads:select', 'local-b')
-    expect(sent('threads.focus')).toEqual([])
-    expect(calls.map((call) => call.method)).toEqual(['snapshot', 'snapshot'])
+    expect(sent('threads.focus').map((call) => call.params)).toEqual([
+      { threadId: 'local-a', focused: true },
+      { threadId: 'local-a', focused: false },
+      { threadId: 'local-b', focused: true }
+    ])
+    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'snapshot', 'threads.focus', 'threads.focus', 'snapshot'])
   })
 
   it('names the thread its waiting questions belong to, so a window showing another thread drops them', async () => {

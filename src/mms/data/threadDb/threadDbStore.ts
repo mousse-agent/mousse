@@ -401,6 +401,21 @@ export class ThreadDbStore {
     }
   }
 
+  /**
+   * Whether `save(dir, change)` would write anything: a dry run of the save's comparison, with nothing written or
+   * remembered. A save that has nothing to write still moves nothing, but a caller that must not move the thread's
+   * time (`updatedAt`) asks first.
+   */
+  unsaved(dir: string, change: ThreadDataChange): boolean {
+    const request = this.plan(this.fresh(dir), change).request
+    return request.inserts.length > 0 || request.updates.length > 0 || request.deletes.length > 0 || request.state.length > 0
+  }
+
+  /** Whether the thread stores a state value under `key` (`context`: it has a model context). */
+  hasState(dir: string, key: string): boolean {
+    return this.fresh(dir).state.has(key)
+  }
+
   private plan(entry: Entry, change: ThreadDataChange): Plan {
     const target = new Map<string, unknown[]>()
     const targetState = new Map<string, unknown | null>()

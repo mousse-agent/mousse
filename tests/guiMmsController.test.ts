@@ -106,6 +106,48 @@ describe('GuiMmsController lifecycle', () => {
     } finally {await gui.stop()}
   })
 
+  it('a window whose connection is replaced shows the daemon its thread again, so the idle thread stays loaded', async () => {
+    const gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
+    const sender = Object.assign(new EventEmitter(), { id: 989, isDestroyed: () => false }) as unknown as WebContents
+    await gui.start()
+    try {
+      const { thread } = await gui.request<{ thread: { id: string } }>('threads.create', { name: 'Shown' })
+      expect(mms.threads.usesThreadDb(thread.id)).toBe(true)
+      // Loaded and idle: nothing but the window keeps it.
+      mms.orchestrator.getOrCreateSession(thread.id)
+      let clock = Date.now()
+      mms.orchestrator.residency.now = () => clock
+      let shown: string | null = null
+      gui.setShownThreadSource(() => shown)
+      const internals = gui as unknown as { windowSessions: Map<number, { client: import('../src/mms/protocol/client').LocalMmsClient }> }
+
+      // The window selects the thread, as `threads:select` does.
+      await gui.prepareWindow(sender)
+      shown = thread.id
+      await gui.runWithSender(sender, () => gui.request('threads.focus', { threadId: thread.id, focused: true }))
+      await vi.waitFor(() => expect(mms.orchestrator.releaseHoldReason(thread.id)).toBe('shown in a window'))
+
+      // The window's connection drops (a daemon restart or a lost connection): the daemon forgets what it showed.
+      await internals.windowSessions.get(sender.id)!.client.close()
+      await vi.waitFor(() => expect(mms.orchestrator.releaseHoldReason(thread.id)).toBeUndefined())
+      // The window's next request opens a replacement connection. Nothing was selected again.
+      await gui.runWithSender(sender, () => gui.request('health'))
+      await vi.waitFor(() => expect(mms.orchestrator.releaseHoldReason(thread.id)).toBe('shown in a window'))
+      clock += 60 * 60_000
+      expect(mms.orchestrator.residency.sweepNow()).toEqual([])
+      expect(mms.orchestrator.hasSession(thread.id)).toBe(true)
+
+      // Control: a window that shows nothing does not hold it, and the idle thread is released.
+      shown = null
+      await internals.windowSessions.get(sender.id)!.client.close()
+      await gui.runWithSender(sender, () => gui.request('health'))
+      await vi.waitFor(() => expect(mms.orchestrator.releaseHoldReason(thread.id)).toBeUndefined())
+      // A window leaving a thread is a use: it goes once idle for the full time after that.
+      clock += 60 * 60_000
+      expect(mms.orchestrator.residency.sweepNow()).toEqual([thread.id])
+    } finally { await gui.stop() }
+  })
+
   it("reads every thread's status for a window whose replay no longer holds it; with no thread open the read ends the gap", async () => {
     const gui = new GuiMmsController({homeDir:home,disableAutoStart:true,endpointOverride:endpoint,ownerTokenOverride:ownerToken})
     const sender = Object.assign(new EventEmitter(), {id:989,isDestroyed:()=>false}) as unknown as WebContents

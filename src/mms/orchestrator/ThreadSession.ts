@@ -98,6 +98,8 @@ export class ThreadSession {
   queue: QueuedMessage[] = []
   /** When true, no further turns/drain may execute for this thread. */
   deleted = false
+  /** Released from memory (`ThreadResidency`): a use of this object is re-resolved to the thread's current session. */
+  released = false
   /** Project cwd for this thread (resolved path; never process.chdir). */
   projectCwd: string | null = null
   workspace: WorkspaceExecutionContext | null = null

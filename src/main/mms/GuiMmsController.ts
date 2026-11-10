@@ -48,6 +48,7 @@ import { CHAT_CAPABILITY } from '../../shared/chats'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import type { TrustedProfileBinding } from '../../mms/protocol/domainRegistry'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
+import { isQualifiedId } from '../../shared/threadRef'
 
 /** A window opens a thread at its newest messages; older ones load as it scrolls back (`thread.messages`). */
 const GUI_SNAPSHOT_NEWEST = 200
@@ -146,6 +147,8 @@ export class GuiMmsController extends EventEmitter {
   private state: GuiMmsConnectionState = 'idle'
   private quitting = false
   private reconnectAttempts = 0
+  /** The thread of this computer each window shows (`setShownThreadSource`). */
+  private shownThreadOf: ((senderId: number) => string | null) | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   /** The reconnect in progress; requests join it and `stop()` waits for it. */
   private reconnecting: Promise<boolean> | null = null
@@ -347,6 +350,15 @@ export class GuiMmsController extends EventEmitter {
     return this.senderAls.getStore()?.id ?? null
   }
 
+  /**
+   * Says which thread each window shows. Every new connection of a window (its first, and each one that replaces a
+   * closed one after a daemon restart or a dropped connection) tells the daemon again, so the thread stays loaded
+   * there (`threads.focus`); the daemon forgets a window's shown threads when its connection closes.
+   */
+  setShownThreadSource(source: ((senderId: number) => string | null) | null): void {
+    this.shownThreadOf = source
+  }
+
   getWindowBindingForSender(senderId: number): TrustedProfileBinding | null {
     const session = this.windowSessions.get(senderId)
     return !this.profileTransitions.has(senderId) && !session?.closing && session?.client.connected ? session.binding : null
@@ -463,6 +475,10 @@ export class GuiMmsController extends EventEmitter {
     this.windowEventUnsubs.set(sender.id, () => { unsubscribe(); unsubscribeConnection() })
     await windowClient.subscribe(0)
     await this.attachedBrowserHost?.acknowledgeClosed(sender)
+    // A thread of this computer the window already shows is shown again on this connection; nothing waits for it.
+    // Threads of other computers are focused through their router when they are selected.
+    const shown = this.shownThreadOf?.(sender.id)
+    if (shown && !isQualifiedId(shown)) void windowClient.request('threads.focus', { threadId: shown, focused: true }).catch(() => undefined)
     return session
     } catch (error) {
       if (!destroyed) sender.off('destroyed', onDestroyed)

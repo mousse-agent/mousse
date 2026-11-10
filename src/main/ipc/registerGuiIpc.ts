@@ -1098,6 +1098,9 @@ export function registerGuiIpc(
     }
   })
 
+  // A window's replacement connection (after a daemon restart or a dropped connection) shows the daemon its thread again.
+  guiMms.setShownThreadSource?.((senderId) => presentationForSender(senderId).getActiveThreadId())
+
   // A window asks for a resnapshot on every event while its gap flag is set, which is a burst during
   // streaming. One snapshot runs at a time per window (and one more if asked meanwhile); one per
   // event filled the connection's request limit and failed unrelated calls.
@@ -1644,6 +1647,12 @@ export function registerGuiIpc(
     if (previous && previous !== threadId && isQualifiedId(previous)) {
       void guiMms.request('threads.focus', { threadId: previous, focused: false }).catch(() => undefined)
     }
+    // A thread of this computer the window shows stays loaded in the daemon; the one left behind may be released
+    // once idle. Nothing waits for these.
+    if (previous && previous !== threadId && !isQualifiedId(previous)) {
+      void guiMms.request('threads.focus', { threadId: previous, focused: false }).catch(() => undefined)
+    }
+    if (!isQualifiedId(threadId)) void guiMms.request('threads.focus', { threadId, focused: true }).catch(() => undefined)
     if (isQualifiedId(threadId)) {
       try {
         await guiMms.request('threads.focus', { threadId, focused: true })

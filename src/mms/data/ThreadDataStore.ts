@@ -393,6 +393,30 @@ export class ThreadDataStore extends EventEmitter {
     this.threadsInUse = inUse
   }
 
+  /**
+   * Whether saving `change` would write anything to a thread kept in thread.db (a dry run; nothing is written). A JSON
+   * thread always reports true: it has no comparison to run.
+   */
+  threadDataUnsaved(id: string, change: ThreadDataChange): boolean {
+    const threadDir = this.getThreadDir(id)
+    if (!ThreadDbStore.usesDb(threadDir)) return true
+    return this.threadDb().unsaved(threadDir, change)
+  }
+
+  /** Whether a thread kept in thread.db stores a model context (a JSON thread reports true). */
+  threadDataHasContext(id: string): boolean {
+    const threadDir = this.getThreadDir(id)
+    if (!ThreadDbStore.usesDb(threadDir)) return true
+    return this.threadDb().hasState(threadDir, 'context')
+  }
+
+  /** Drops what this process holds in memory of a thread kept in thread.db; the next use reads it again. */
+  forgetThreadData(id: string): void {
+    const threadDir = this.getThreadDir(id)
+    this.loadedDirs.delete(threadDir)
+    if (ThreadDbStore.usesDb(threadDir)) this.threadDb().forget(threadDir)
+  }
+
   /** Thread database cache size, for diagnostics and tests. */
   threadDbCacheStats(): { threads: number; bytes: number; coldLoads: number; stateReads: number } {
     const store = this.threadDbStore
