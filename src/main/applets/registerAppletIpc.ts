@@ -49,6 +49,11 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
       watchedWindows.add(win)
       const senderId=event.sender.id
       win.once('closed',()=>{owners.get(senderId)?.manager.destroy();owners.delete(senderId)})
+      // Backstop: a reload, navigation or crashed page has no hosts left, so no applet view may stay drawn over it.
+      // The next applet request from the new page starts a fresh manager.
+      const pageGone=()=>{owners.get(senderId)?.manager.destroy();owners.delete(senderId)}
+      win.webContents.on('did-start-navigation',(details:{isMainFrame:boolean;isSameDocument:boolean})=>{if(details.isMainFrame&&!details.isSameDocument)pageGone()})
+      win.webContents.on('render-process-gone',pageGone)
     }
     return value
   }

@@ -1,4 +1,4 @@
-import { memo, useRef, type ReactNode } from 'react'
+import { memo, useRef, useState, type ReactNode } from 'react'
 import type { AppletReference } from '../../../shared/applets'
 import { useAppStore } from '../../stores/appStore'
 import './applets.css'
@@ -68,8 +68,12 @@ export function AppletConversationInput({ text, onAdd, onDismiss }: { text: stri
  * panel. Native guest content is mounted only over the measured preview; no generated code enters this DOM.
  */
 export const AppletCard = memo(function AppletCard({ reference }: { reference: AppletReference }) {
-  const threadId = useAppStore((s) => s.activeThreadId)
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
+  // The thread this row belongs to. Once another thread is open, the row may render once more before it goes, and must
+  // not show (or start) its applet over the new thread.
+  const [hostThreadId] = useState(activeThreadId)
+  const threadId = hostThreadId === activeThreadId ? activeThreadId : null
   const preview = useRef<HTMLDivElement>(null)
   const applet = useAppletRuntime(preview, { host: 'transcript', threadId, profileId, reference, enabled: true, restart: 0 })
   const { error, scrollImage, conversationInput, setConversationInput } = applet
