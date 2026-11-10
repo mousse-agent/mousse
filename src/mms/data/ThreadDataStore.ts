@@ -15,7 +15,7 @@ import {
   statSync,
   writeFileSync
 } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4, v5 as uuidv5, validate as uuidValidate, version as uuidVersion } from 'uuid'
 import type {
@@ -623,6 +623,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private invalidateListCache(): void {
+    this.groupSignatures.clear()
     this.dirCache.clear()
     this.listCache = null
     this.listCacheProjectsKey = null
@@ -637,15 +638,81 @@ export class ThreadDataStore extends EventEmitter {
    */
   private addToListCaches(thread: Thread): void {
     this.listCache = null
-    if (!this.isLifecycleVisible(thread.id)) return
+    if (!this.isLifecycleVisible(thread.id)) {
+      this.dropGroupCache(thread.projectId)
+      return
+    }
     const withThread = (threads: Thread[]): Thread[] =>
       this.sortThreads([...threads.filter((entry) => entry.id !== thread.id), { ...thread }])
     if (!thread.projectId) {
       if (this.standaloneListCache) this.standaloneListCache = withThread(this.standaloneListCache)
-      return
+    } else {
+      const cached = this.projectListCache.get(thread.projectId)
+      if (cached) this.projectListCache.set(thread.projectId, withThread(cached))
     }
-    const cached = this.projectListCache.get(thread.projectId)
-    if (cached) this.projectListCache.set(thread.projectId, withThread(cached))
+    // This create's own writes moved the group's files; what is on disk is again what the list holds.
+    this.recordGroupSignature(thread.projectId)
+  }
+
+  /**
+   * What a group's files looked like when its list was read. Standalone threads: the index. A project: its thread
+   * folder (a thread folder added, moved away or deleted changes it) and the project's list revision, a token
+   * every metadata write of a thread there replaces, in this process or another. Two reads per create; a stat
+   * of every thread's `meta.json` cost about 0.6 ms each on Windows. A hand edit of one `meta.json` that
+   * changes neither shows when the list is next read from disk.
+   */
+  private readonly groupSignatures = new Map<string, string>()
+
+  private listRevisionPath(projectId: string): string {
+    return join(this.homeDir, 'thread-list-revisions', `${basename(this.storageLayout.repositoryRoot(projectId))}.rev`)
+  }
+
+  private groupSignature(projectId?: string): string {
+    const stamp = (path: string): string => {
+      const stat = statSync(path, { throwIfNoEntry: false })
+      return stat ? `${stat.mtimeMs}:${stat.size}:${stat.ino}` : '-'
+    }
+    if (!projectId) return stamp(join(this.homeDir, 'threads-index.json'))
+    let revision = '-'
+    try {
+      revision = readFileSync(this.listRevisionPath(projectId), 'utf8')
+    } catch {
+      // No metadata written there since the revisions began: the folder alone tells.
+    }
+    return `${stamp(this.storageLayout.repositoryRoot(projectId))}|${revision}`
+  }
+
+  /** Replaces a project's list revision after a thread's metadata there was written. */
+  private bumpListRevision(projectId: string): void {
+    const path = this.listRevisionPath(projectId)
+    try {
+      mkdirSync(join(this.homeDir, 'thread-list-revisions'), { recursive: true })
+      writeFileSync(path, uuidv4())
+    } catch {
+      // Without it the next create reads the project from disk: slower, never stale.
+      this.groupSignatures.delete(projectId)
+    }
+  }
+
+  private recordGroupSignature(projectId?: string): void {
+    const cached = projectId ? this.projectListCache.has(projectId) : this.standaloneListCache !== null
+    if (cached) this.groupSignatures.set(projectId ?? '', this.groupSignature(projectId))
+    else this.groupSignatures.delete(projectId ?? '')
+  }
+
+  private dropGroupCache(projectId?: string): void {
+    this.listCache = null
+    this.groupSignatures.delete(projectId ?? '')
+    if (projectId) this.projectListCache.delete(projectId)
+    else this.standaloneListCache = null
+  }
+
+  /** Reads a cached group from disk again when its files changed since it was read (see `groupSignatures`). */
+  private refreshGroupIfChanged(projectId?: string): void {
+    const recorded = this.groupSignatures.get(projectId ?? '')
+    const cached = projectId ? this.projectListCache.has(projectId) : this.standaloneListCache !== null
+    if (!cached) return
+    if (recorded === undefined || recorded !== this.groupSignature(projectId)) this.dropGroupCache(projectId)
   }
 
   /** Replace one thread in the warm cache (avoids full rescan after meta updates). */
@@ -949,11 +1016,13 @@ export class ThreadDataStore extends EventEmitter {
       if (!project) return []
       const threads = this.scanProjectThreads(project.path)
       this.projectListCache.set(projectId, threads)
+      this.recordGroupSignature(projectId)
       return threads
     }
     if (this.standaloneListCache) return this.standaloneListCache
     const standalone = this.readStandaloneIndex()
     this.standaloneListCache = standalone
+    this.recordGroupSignature()
     return standalone
   }
 
@@ -1840,7 +1909,9 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private nextThreadOrder(projectId?: string): number {
-    // The group's warm list, read from disk only when it is not cached.
+    // The group's warm list, read from disk again when it is not cached or its files changed since, so a thread
+    // another process added is listed and the new order is below every order on disk.
+    this.refreshGroupIfChanged(projectId)
     const threads = this.listThreads(projectId)
     // A group that also holds rows of other computers starts below their first.
     const floor = this.remoteFloor?.(projectId)
@@ -1867,7 +1938,22 @@ export class ThreadDataStore extends EventEmitter {
 
   /** Same-directory durable replacement with file and parent-directory fsync. */
   private writeJsonAtomic(filePath: string, value: unknown): void {
+    // A thread's meta.json or the standalone index: a write to a group's list, which moves its signature. When
+    // the cached list matched the disk before, it still does (every writer here patches or clears the cache).
+    const meta = basename(filePath) === 'meta.json' && value && typeof value === 'object' && typeof (value as Thread).id === 'string'
+    const group: { projectId?: string } | undefined = filePath === join(this.homeDir, 'threads-index.json')
+      ? {}
+      : meta ? { projectId: (value as Thread).projectId } : undefined
+    if (!group) {
+      atomicWriteJsonSync(filePath, value)
+      return
+    }
+    const key = group.projectId ?? ''
+    const recorded = this.groupSignatures.get(key)
+    const inSync = recorded !== undefined && recorded === this.groupSignature(group.projectId)
     atomicWriteJsonSync(filePath, value)
+    if (group.projectId) this.bumpListRevision(group.projectId)
+    if (inSync) this.groupSignatures.set(key, this.groupSignature(group.projectId))
   }
 
   /**

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'fs'
-import { join } from 'path'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
+import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
@@ -224,6 +225,90 @@ describe('persisted sidebar ordering', () => {
       const indexReads = vi.spyOn(store, 'readStandaloneIndex')
       threads.listAllThreads()
       expect(indexReads).toHaveBeenCalled()
+    })
+  })
+
+  describe('lists another process changed on disk', () => {
+    // Each store is what one process holds: its own caches over the same files. B stands for the other process
+    // (another daemon session, the CLI, a restore from the trash); a hand edit of meta.json is checked too.
+    function twoStores(root: string) {
+      const projectsA = new ProjectManager()
+      const a = new ThreadDataStore(projectsA)
+      projectsA.setThreadStore(a)
+      const project = projectsA.openProject(join(root, 'proj'))
+      const projectsB = new ProjectManager()
+      const b = new ThreadDataStore(projectsB)
+      projectsB.setThreadStore(b)
+      return { a, b, project }
+    }
+    const names = (threads: { name: string }[]) => threads.map((thread) => thread.name)
+
+    it('lists threads the other store added, and orders a new one below every order on disk', () => {
+      withTemporaryMousseHome((root) => {
+        const { a, b, project } = twoStores(root)
+        a.createThread('A first', project.id)
+        a.createThread('A loose')
+        a.listAllThreads()
+        const fromB = b.createThread('B in project', project.id)
+        const looseFromB = b.createThread('B loose')
+
+        const mine = a.createThread('A second', project.id)
+        const mineLoose = a.createThread('A loose second')
+        expect(names(a.listThreads(project.id))).toEqual(['A second', 'B in project', 'A first'])
+        expect(names(a.listThreads())).toEqual(['A loose second', 'B loose', 'A loose'])
+        expect(mine.order).toBeLessThan(fromB.order)
+        expect(mineLoose.order).toBeLessThan(looseFromB.order)
+        const orders = a.listAllThreads().filter((thread) => thread.projectId === project.id).map((thread) => thread.order)
+        expect(new Set(orders).size).toBe(orders.length)
+      })
+    })
+
+    it('shows a thread the other store settled or discarded, at the next create', () => {
+      withTemporaryMousseHome((root) => {
+        const { a, b, project } = twoStores(root)
+        const done = a.createThread('Done', project.id)
+        const unused = a.createThread('Unused', project.id)
+        a.listAllThreads()
+        b.setThreadSettled(done.id, true)
+        b.discardUnusedThread(unused.id)
+
+        a.createThread('Next', project.id)
+        const listed = a.listThreads(project.id)
+        expect(listed.find((thread) => thread.id === done.id)?.settledAt).toBeTruthy()
+        expect(listed.some((thread) => thread.id === unused.id)).toBe(false)
+      })
+    })
+
+    it('lists a thread folder put there by hand (a restore from a backup) at the next create', () => {
+      withTemporaryMousseHome((root) => {
+        const { a, project } = twoStores(root)
+        const thread = a.createThread('Original', project.id)
+        a.listAllThreads()
+        // No Mousse writer: only the project's thread folder changes, not its list revision.
+        const copyId = randomUUID()
+        const copyDir = join(dirname(a.getThreadDir(thread.id)), copyId)
+        cpSync(a.getThreadDir(thread.id), copyDir, { recursive: true })
+        const metaPath = join(copyDir, 'meta.json')
+        writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(readFileSync(metaPath, 'utf8')), id: copyId, name: 'Restored by hand', order: -50 }))
+
+        const next = a.createThread('Next', project.id)
+        expect(a.listThreads(project.id).find((entry) => entry.id === copyId)?.name).toBe('Restored by hand')
+        expect(next.order).toBeLessThan(-50)
+      })
+    })
+
+    it('keeps the cached lists after its own writes, so a create after a rename reads nothing again', () => {
+      withTemporaryMousseHome((root) => {
+        const { a, project } = twoStores(root)
+        const thread = a.createThread('First', project.id)
+        a.listAllThreads()
+        a.updateThreadMeta(thread.id, { name: 'Renamed' })
+        a.setThreadPinned(thread.id, true)
+        const scans = vi.spyOn(a as unknown as { scanProjectThreads: () => unknown }, 'scanProjectThreads')
+        a.createThread('Second', project.id)
+        expect(scans).not.toHaveBeenCalled()
+        expect(a.listThreads(project.id).find((entry) => entry.id === thread.id)?.name).toBe('Renamed')
+      })
     })
   })
 })
