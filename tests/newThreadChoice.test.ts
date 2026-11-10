@@ -58,7 +58,8 @@ function daemon(options: { clientType?: 'gui' | 'cli' | 'bridge'; bridgeCaller?:
   } as unknown as HandlerContext
   const project = projects.openProject(join(home, 'app'))
   const call = <T>(method: string, params: Record<string, unknown>) => dispatchMethod(ctx, method, params) as Promise<T>
-  const create = async (params: Record<string, unknown> = {}) => (await call<{ thread: Thread }>('threads.create', { name: 'New Chat', projectId: project.id, ...params })).thread
+  // A new chat of the window, as the sidebar's New thread asks for one.
+  const create = async (params: Record<string, unknown> = {}) => (await call<{ thread: Thread }>('threads.create', { name: 'New Chat', projectId: project.id, rememberedChoices: true, ...params })).thread
   return { ctx, projects, project, threads, emitEvent, call, create, remembered: () => projects.getProject(project.id)?.newThread }
 }
 
@@ -117,6 +118,30 @@ describe('new threads remember the choices last made in their project', () => {
     expect((await create()).modelOverride).toBeUndefined()
   })
 
+  it('only a new chat a window asks for gets the remembered choices: the CLI, scripts and other computers get the defaults', async () => {
+    const gui = daemon()
+    const first = await gui.create()
+    await gui.call('threads.setPermissionMode', { threadId: first.id, mode: 'full' })
+    await gui.call('threads.setModel', { threadId: first.id, model: OPUS })
+    expect(gui.remembered()).toEqual({ permissionMode: 'full', model: OPUS })
+    const defaults = (thread: Thread) => {
+      expect(thread.permissionMode).toBeUndefined()
+      expect(thread.modelOverride).toEqual(LAST_USED)
+    }
+    // The CLI (or any script on the protocol) never inherits Full access, even when it asks.
+    const cli = { ...gui.ctx, connection: { clientType: 'cli' } } as unknown as HandlerContext
+    defaults((await dispatchMethod(cli, 'threads.create', { name: 'New Chat', projectId: gui.project.id }) as { thread: Thread }).thread)
+    const asked = (await dispatchMethod(cli, 'threads.create', { name: 'New Chat', projectId: gui.project.id, rememberedChoices: true }) as { thread: Thread }).thread
+    defaults(asked)
+    // It keeps what it passes.
+    expect((await dispatchMethod(cli, 'threads.create', { name: 'New Chat', projectId: gui.project.id, worktreeEnabled: true }) as { thread: Thread }).thread.worktreeEnabled).toBe(true)
+    // A window's create that does not ask (the composer, which sets what it shows itself) gets the defaults too.
+    defaults((await gui.call<{ thread: Thread }>('threads.create', { name: 'New Chat', projectId: gui.project.id })).thread)
+    // The CLI's changes are not a person's pick in a window.
+    await dispatchMethod(cli, 'threads.setPermissionMode', { threadId: asked.id, mode: 'ask' })
+    expect(gui.remembered()).toEqual({ permissionMode: 'full', model: OPUS })
+  })
+
   it('a project another computer or an agent works in neither remembers its picks nor hands them out', async () => {
     const gui = daemon()
     const first = await gui.create()
@@ -125,16 +150,9 @@ describe('new threads remember the choices last made in their project', () => {
 
     // Another computer (a routed call) creates threads on the profile defaults and its picks are not remembered.
     const routed = { ...gui.ctx, connection: { clientType: 'bridge', bridgeCaller: { node: 'n1', user: 'u', maxPermissionMode: 'full' } } } as unknown as HandlerContext
-    const remote = (await dispatchMethod(routed, 'threads.create', { name: 'New Chat', projectId: gui.project.id }) as { thread: Thread }).thread
+    const remote = (await dispatchMethod(routed, 'threads.create', { name: 'New Chat', projectId: gui.project.id, rememberedChoices: true }) as { thread: Thread }).thread
     expect(remote.permissionMode).toBeUndefined()
     await dispatchMethod(routed, 'threads.setPermissionMode', { threadId: remote.id, mode: 'ask' })
-    expect(gui.remembered()).toEqual({ permissionMode: 'full' })
-
-    // The CLI gets the project's choice for a new thread, but its changes are not a person's pick in a window.
-    const cli = { ...gui.ctx, connection: { clientType: 'cli' } } as unknown as HandlerContext
-    const viaCli = (await dispatchMethod(cli, 'threads.create', { name: 'New Chat', projectId: gui.project.id }) as { thread: Thread }).thread
-    expect(viaCli.permissionMode).toBe('full')
-    await dispatchMethod(cli, 'threads.setPermissionMode', { threadId: viaCli.id, mode: 'ask' })
     expect(gui.remembered()).toEqual({ permissionMode: 'full' })
 
     // A subagent's thread is an agent's, not a person's pick.

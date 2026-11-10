@@ -1921,8 +1921,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
         worktreeStart = { sha, branch: baseBranch }
       }
-      // What the person last picked in this project's threads; what they never picked follows the profile's defaults.
-      const remembered = rememberedChoiceFor(ctx.connection, projectId ? ctx.mms.projects.getProject(projectId) : undefined, (model) => usableProjectModel(ctx, model, projectId!))
+      // A new chat of a window starts with what the person last picked in this project's threads (what they never picked
+      // follows the profile's defaults). Any other creator keeps the values it passes, or the profile's defaults.
+      const askedForRemembered = asOptionalBoolean(p.rememberedChoices, 'rememberedChoices') === true
+      const remembered = rememberedChoiceFor(ctx.connection, projectId ? ctx.mms.projects.getProject(projectId) : undefined, askedForRemembered, (model) => usableProjectModel(ctx, model, projectId!))
       let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled: worktreeEnabled ?? remembered.worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(worktreeStart ? { worktreeStart } : {}) })
       if (expiresAt) ctx.mms.threadExpiry?.reschedule()
       // A remembered model that can no longer be used falls back to the profile's default, unless that one can't be used

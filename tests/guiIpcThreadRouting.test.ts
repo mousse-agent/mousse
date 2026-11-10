@@ -208,8 +208,18 @@ describe('a chat is created on another computer', () => {
     expect(sent('threads.create').map((call) => call.params)).toEqual([
       { name: 'Fix it', projectId: project, worktreeEnabled: true, node: NODE },
       { name: 'Fix it', projectId: undefined, worktreeEnabled: false },
-      // No choice made: none is sent, so the thread takes its project's remembered checkout.
+      // No choice made: none is sent, and the daemon decides.
       { name: 'New Chat', projectId: undefined }
+    ])
+  })
+
+  it("asks for the project's remembered choices only on this computer", async () => {
+    await invoke('threads:create', undefined, 'project-1', { rememberedChoices: true })
+    await invoke('threads:create', undefined, qualifyId(NODE, 'project-1'), { rememberedChoices: true, node: NODE })
+    expect(sent('threads.create').map((call) => call.params)).toEqual([
+      { name: 'New Chat', projectId: 'project-1', rememberedChoices: true },
+      // Another computer is never asked: its create refuses keys it does not know.
+      { name: 'New Chat', projectId: qualifyId(NODE, 'project-1'), node: NODE }
     ])
   })
 })

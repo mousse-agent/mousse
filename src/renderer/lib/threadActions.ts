@@ -50,10 +50,10 @@ export async function createAndSelectPrivateThread(): Promise<void> {
   await selectThread(thread.id)
 }
 
-/** Opens the newest empty draft thread of a project, or creates one there, and selects it. */
+/** Opens the newest empty draft thread of a project, or creates one there with the project's remembered choices, and selects it. */
 export async function createAndSelectProjectThread(projectId: string): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId) ?? await window.mousse.threads.create(undefined, projectId)
+  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId) ?? await window.mousse.threads.create(undefined, projectId, { rememberedChoices: true })
   // The daemon's threads:updated broadcast can arrive after the first message is sent.
   store.upsertThread(thread)
   await selectThread(thread.id)

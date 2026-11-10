@@ -33,18 +33,21 @@ export function projectRememberingPick(
 }
 
 /**
- * What a new thread made in `project` starts with: the project's remembered choice, for a thread a window or the
- * CLI on this computer creates. A remembered model it can no longer use (`usable` throws: its instance was removed,
+ * What a new thread made in `project` starts with: the project's remembered choice, only for a new chat a window on
+ * this computer asks for (`requested`, the `rememberedChoices` option). The CLI, scripts, agents and other computers
+ * get nothing from it, so a thread they create never inherits a mode such as Full access without anyone seeing it; they
+ * keep the values they pass, or the profile defaults. A remembered model it can no longer use (`usable` throws: its instance was removed,
  * turned off or retired, or the model is hidden) is left out and `unusableModel` is set, so the thread takes the
  * profile's default instead (when that one can be used).
  */
 export function rememberedChoiceFor(
   connection: Caller,
   project: Project | undefined,
+  requested: boolean,
   usable: (model: ModelOverride) => ModelOverride
 ): NewThreadChoice & { unusableModel?: true } {
-  const local = connection?.clientType === 'gui' || connection?.clientType === 'cli'
-  const choice = local && !connection?.bridgeCaller ? project?.newThread : undefined
+  const fromWindow = connection?.clientType === 'gui' && !connection.bridgeCaller
+  const choice = requested && fromWindow ? project?.newThread : undefined
   if (!choice) return {}
   let model: ModelOverride | undefined
   if (choice.model) {
