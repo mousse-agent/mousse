@@ -2707,7 +2707,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
       !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
-    const body = (text ?? '').trim()
+    // A chat reply that says the same short thing twice (a line before a tool call and again after it) says it once.
+    const body = row.lane === 'chat' ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
     // Only the last turn of a run reports; an earlier one (work that went on with the owner's notes) is an update.
     const report = row.lane === 'run' && row.status === 'done' && (this.store.lastMainDispatch(row.id)?.n ?? dispatch.n) === dispatch.n
     if (!body && !chips.length && !asks.length && !report) return
@@ -4421,6 +4422,17 @@ function defaultTimer(fn: () => void, ms: number): { clear(): void } {
 export function workOrder(a: Pick<BotActivationRow, 'status' | 'createdAt' | 'id'>, b: Pick<BotActivationRow, 'status' | 'createdAt' | 'id'>): number {
   const rank = (row: Pick<BotActivationRow, 'status'>) => (row.status === 'queued' ? 1 : 0)
   return rank(a) - rank(b) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
+}
+
+/**
+ * A short reply of two paragraphs that open the same way ("On it — checking…" written before a tool call, then
+ * "On it — checking … now." after it) keeps the last one. Anything longer, or saying different things, is left as it is.
+ */
+export function sayOnce(text: string): string {
+  const parts = text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean)
+  if (parts.length !== 2 || parts.some((part) => part.length > 240 || part.includes('\n'))) return text
+  const opening = (part: string) => part.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean).slice(0, 3).join(' ')
+  return opening(parts[0]!) && opening(parts[0]!) === opening(parts[1]!) ? parts[1]! : text
 }
 
 /** `text` cut to `max` characters at most, with an ellipsis when cut. */

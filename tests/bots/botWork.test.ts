@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
-import { BOT_FAILURE_PAUSE_STREAK } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_FAILURE_PAUSE_STREAK, sayOnce } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -287,5 +287,15 @@ describe('replies say what they answer', () => {
     const stray = await chat('About that', 'm3', foreign.id)
     expect(stray.message.replyTo).toBeUndefined()
     expect(stray.prepared.prompt).toBe('About that')
+  })
+})
+
+describe('a chat reply says a short thing once', () => {
+  it('keeps the last of two paragraphs that open the same way, and leaves anything else alone', () => {
+    expect(sayOnce('On it — checking the current GBP/EUR rate.\n\nOn it — checking the current GBP/EUR rate now.')).toBe('On it — checking the current GBP/EUR rate now.')
+    expect(sayOnce('Added.\n\nYour list now has 4 things.')).toBe('Added.\n\nYour list now has 4 things.')
+    expect(sayOnce('On it.')).toBe('On it.')
+    const list = 'Here is the plan:\n\n- one\n- two'
+    expect(sayOnce(list)).toBe(list)
   })
 })
