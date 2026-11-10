@@ -83,7 +83,11 @@ export async function withGitMutationLocks<T>(
     } finally {
       const survivors = scope?.survivorsGone()
       // Processes a stopped command left keep the repository locked until they are gone, however long; never released early.
-      if (survivors) void survivors.then(() => repositoryLease.release())
+      if (survivors) {
+        // Said in the lease file, so whoever waits is told what keeps it held.
+        repositoryLease.retainFor(scope!.survivorPids())
+        void survivors.then(() => repositoryLease.release())
+      }
       else repositoryLease.release()
     }
   } finally {

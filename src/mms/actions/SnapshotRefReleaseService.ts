@@ -185,6 +185,20 @@ export function trashProjectStoreWhenFree(projectId: string, home = getMousseHom
 }
 
 /**
+ * Moves to the trash every removed project's store no thread uses any more: the ones whose move failed earlier (their
+ * lock file was open) or that a restart interrupted. Storage cleanup runs it. Returns how many it moved.
+ */
+export function trashRemovedProjectStores(home = getMousseHomeDir()): number {
+  let projects: string[]
+  try { projects = readdirSync(join(home, 'project-data')) } catch { return 0 }
+  let moved = 0
+  for (const projectId of projects) {
+    try { if (trashProjectStoreIfUnused(projectId, home)) moved += 1 } catch { /* tried again on the next run */ }
+  }
+  return moved
+}
+
+/**
  * Empties the trash namespace of every project store: the preserved files of deleted threads, once they have waited
  * `SNAPSHOT_TRASH_QUIET_MS`, then collects the store's garbage. Returns the refs it deleted.
  */

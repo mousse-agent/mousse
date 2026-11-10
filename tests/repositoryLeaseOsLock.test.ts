@@ -10,15 +10,17 @@
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, uptime } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { buildSync } from 'esbuild'
-import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { resolveRepositoryIdentity, type RepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
-import { acquireRepositoryLease, getRepositoryLeasePath, getRepositoryLockPath, RepositoryLeaseBusyError } from '../src/mms/git/RepositoryLease'
+import { acquireRepositoryLease, getRepositoryLeasePath, getRepositoryLockPath, REPOSITORY_LEASE_TIMING, RepositoryLeaseBusyError } from '../src/mms/git/RepositoryLease'
+import { GIT_STOP_TIMING, gitStopProbe, runGitProcess } from '../src/mms/git/runGitProcess'
+import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
 import { sqliteFilePath } from '../src/mms/data/sqliteFilePath'
-import { STORE_TRASH_RETRY, trashProjectStoreWhenFree } from '../src/mms/actions/SnapshotRefReleaseService'
+import { STORE_TRASH_RETRY, trashProjectStoreWhenFree, trashRemovedProjectStores } from '../src/mms/actions/SnapshotRefReleaseService'
 import { snapshotTrashRoot } from '../src/mms/workspace/SnapshotWorkspace'
 
 const dirs: string[] = []
@@ -74,7 +76,13 @@ beforeAll(() => {
   buildSync({ entryPoints: [join(work, 'child.ts')], bundle: true, platform: 'node', format: 'esm', outfile: script, logLevel: 'silent', banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" } })
 })
 
+const leaseTiming = { ...REPOSITORY_LEASE_TIMING }
+const stopTiming = { ...GIT_STOP_TIMING }
 afterEach(async () => {
+  Object.assign(REPOSITORY_LEASE_TIMING, leaseTiming)
+  Object.assign(GIT_STOP_TIMING, stopTiming)
+  delete gitStopProbe.alive
+  vi.restoreAllMocks()
   // A killed holder lets go of its files only once it has exited (on Windows, its open handles hold the folder).
   await Promise.all(children.splice(0).map((made) => { made.kill('SIGKILL'); return exited(made) }))
   while (dirs.length > 1) rmSync(dirs.pop()!, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
@@ -258,5 +266,111 @@ describe('the repository lock file', () => {
       Object.assign(STORE_TRASH_RETRY, retry)
       try { waiter.close() } catch { /* closed */ }
     }
+  })
+})
+
+describe('the repository lease, round 2', () => {
+  const identityAt = (metadataDir: string): RepositoryIdentity => {
+    mkdirSync(metadataDir, { recursive: true })
+    return { commonDir: metadataDir, key: metadataDir, worktreePath: metadataDir, metadataDir, capability: { allowed: true } } as RepositoryIdentity
+  }
+  const olderLease = (pid: number, acquiredAt: Date): string => JSON.stringify({ pid, processInstanceId: 'older', token: `older-${pid}`, acquiredAt: acquiredAt.toISOString(), heartbeatAt: acquiredAt.toISOString() })
+
+  it("takes over an older Mousse's lease whose pid another program got since it was taken", async () => {
+    const root = repo(); const identity = resolveRepositoryIdentity(root)
+    // A program that started after the lease was taken, now holding the pid the lease names.
+    const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' }); children.push(other)
+    writeFileSync(getRepositoryLeasePath(identity), olderLease(other.pid!, new Date(Date.now() - 60 * 60_000)))
+    // The program's start is looked up without blocking; the lease goes once it is known.
+    expect(await acquires(identity)).toBeLessThan(5_000)
+  }, 30_000)
+
+  it("takes over at once an older Mousse's lease taken before the computer last started", async () => {
+    const root = repo(); const identity = resolveRepositoryIdentity(root)
+    const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' }); children.push(other)
+    writeFileSync(getRepositoryLeasePath(identity), olderLease(other.pid!, new Date(Date.now() - uptime() * 1000 - 24 * 60 * 60_000)))
+    expect(await acquires(identity)).toBeLessThan(2_000)
+  }, 30_000)
+
+  it('ends a wait with no limit of its own once the lock file stays unusable, and a later wait never reports that cause', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'mousse-lease-cap-')); dirs.push(base)
+    const identity = identityAt(join(base, 'mousse'))
+    REPOSITORY_LEASE_TIMING.unavailableLimitMs = 300
+    mkdirSync(getRepositoryLockPath(identity))
+    const begun = Date.now()
+    const error = await acquireRepositoryLease(identity, { retryDelayMs: 5 }).then(() => undefined, (failure: unknown) => failure)
+    expect(error).toBeInstanceOf(RepositoryLeaseBusyError)
+    expect(((error as Error).cause as { errcode?: number }).errcode! & 0xff).toBe(14)
+    expect(Date.now() - begun).toBeLessThan(3_000)
+    rmdirSync(getRepositoryLockPath(identity))
+    // Held here now: a wait that ends behind it names this process, and nothing of the earlier failure.
+    const lease = await acquireRepositoryLease(identity, { maxWaitMs: 5_000 })
+    const later = await busy(identity, { maxWaitMs: 200 })
+    expect(later.cause).toBeUndefined()
+    expect(later.message).not.toContain('could not be used')
+    lease.release()
+  })
+
+  it('publishes the lease whole where the file system has no hard links, and keeps no journal file while it holds', async () => {
+    const root = repo(); const identity = resolveRepositoryIdentity(root)
+    REPOSITORY_LEASE_TIMING.noHardLinks = true
+    const lease = await acquireRepositoryLease(identity, { maxWaitMs: 5_000 })
+    expect(JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8'))).toMatchObject({ osLock: true, token: lease.owner.token })
+    expect(readdirSync(identity.metadataDir).filter((name) => name.includes('.publish-') || name.endsWith('-journal'))).toEqual([])
+    expect(lease.release()).toBe(true)
+  })
+
+  it('stays held while a stopped Git command is still running: fresh for older builds, and says what to do', async () => {
+    const root = repo(); const identity = resolveRepositoryIdentity(root)
+    const threadDirectory = mkdtempSync(join(tmpdir(), 'mousse-lease-retained-')); dirs.push(threadDirectory)
+    Object.assign(REPOSITORY_LEASE_TIMING, { heartbeatMs: 100 })
+    Object.assign(GIT_STOP_TIMING, { exitWaitMs: 200, slowPollMs: 50, survivorLimitMs: 300 })
+    let lingering = true
+    gitStopProbe.alive = () => lingering
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 500)
+    const ran = await withGitMutationLocks(threadDirectory, root, 'test', () => runGitProcess(['-c', 'alias.slow=!sleep 30', 'slow'], { cwd: root, env: process.env }), undefined, undefined, controller.signal)
+    expect(ran.error?.code).toBe('ABORT_ERR')
+    const first = JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8')) as { heartbeatAt: string; stoppedGitPids?: number[] }
+    expect(first.stoppedGitPids?.length).toBeGreaterThan(0)
+    // Past the survivor limit the lease is still refreshed, and an older build never takes it.
+    await new Promise((done) => setTimeout(done, 700))
+    expect(logged).toHaveBeenCalled()
+    const later = JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8')) as { heartbeatAt: string }
+    expect(Date.parse(later.heartbeatAt)).toBeGreaterThan(Date.parse(first.heartbeatAt))
+    const older = child(['legacy-try', root, '300', '1500'])
+    expect(await said(older)).toBe('busy')
+    const error = await busy(identity, { maxWaitMs: 300 })
+    expect(error.message).toContain(`A stopped git command is still running (pid ${first.stoppedGitPids![0]}`)
+    expect(error.message).toContain('Close it or restart Mousse.')
+    lingering = false
+    await acquires(identity)
+  }, 30_000)
+
+  it.skipIf(process.platform === 'win32')('never holds a lock on a lock file that another took the place of while it waited', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'mousse-lease-inode-')); dirs.push(base)
+    const identity = identityAt(join(base, 'mousse'))
+    const first = await acquireRepositoryLease(identity, { maxWaitMs: 5_000 })
+    const waiting = acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 3_000 })
+    await new Promise((done) => setTimeout(done, 100))
+    // The file is replaced, and the new one is locked by someone else.
+    unlinkSync(getRepositoryLockPath(identity))
+    const other = new DatabaseSync(getRepositoryLockPath(identity), { timeout: 0 })
+    other.exec('BEGIN EXCLUSIVE')
+    first.release()
+    await expect(waiting).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
+    other.exec('ROLLBACK'); other.close()
+  })
+
+  it('moves the stores of removed projects that no thread uses to the trash when storage cleanup runs', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-lease-sweep-')); dirs.push(home)
+    const metadata = join(home, 'project-data', 'project-2', 'snapshots.git', 'mousse')
+    mkdirSync(metadata, { recursive: true })
+    writeFileSync(join(metadata, 'project-removed'), '')
+    mkdirSync(join(home, 'project-data', 'project-3', 'snapshots.git', 'mousse'), { recursive: true })
+    expect(trashRemovedProjectStores(home)).toBe(1)
+    expect(existsSync(join(home, 'project-data', 'project-2'))).toBe(false)
+    expect(existsSync(join(home, 'project-data', 'project-3'))).toBe(true)
   })
 })
