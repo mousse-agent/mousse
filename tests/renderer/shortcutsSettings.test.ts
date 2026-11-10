@@ -55,6 +55,8 @@ it('says where a scoped section works once, under its heading, and that the edit
   }
   // Undo, Redo, Save file and Commit message: commit.
   expect(count(markup, 'Set by the editor')).toBe(4)
+  // Steer is fixed too, but the composer owns it, not an editor.
+  expect(count(markup, 'Fixed shortcut')).toBe(1)
 })
 
 it('names rows briefly under their section and keeps the editor name out', () => {

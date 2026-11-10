@@ -49,11 +49,13 @@ export function sectionScope(rows: readonly ShortcutRow[]): CommandScope | null 
   return rows.every((row) => row.command.scope === scope) ? scope : null
 }
 
-/** What a row adds to its section: the editors own fixed keys, a scope its section does not share, a shadowing command. */
+/** What a row adds to its section: who owns a fixed key, a scope its section does not share, a shadowing command. */
 export function rowNotes(row: ShortcutRow, scopeOfSection: CommandScope | null): string[] {
   const { command } = row
   const notes = [
-    command.fixed ? 'Set by the editor' : command.scope === scopeOfSection ? null : SCOPE_NOTES[command.scope],
+    command.fixed
+      ? command.id === 'composer.steer' ? 'Fixed shortcut' : 'Set by the editor'
+      : command.scope === scopeOfSection ? null : SCOPE_NOTES[command.scope],
     row.shadowedBy ? `Not active while ${title(row.shadowedBy)} uses this shortcut` : null
   ]
   return notes.filter((note): note is string => Boolean(note))
