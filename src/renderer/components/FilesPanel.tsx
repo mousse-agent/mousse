@@ -14,7 +14,9 @@ import { SerializedAutosave, normalizeWorkspacePath, reconcileExternalContent } 
 import { isAssetView, isBinaryContent, languageForPath, viewKindForPath, type FileViewKind } from '../utils/fileEditor'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { MarkdownDocumentEditor } from './editors/MarkdownDocumentEditor'
+import type { MarkdownEditorViewMode } from './editors/markdownEditorState'
 import { FileTree, FileTreeToolbar } from './FileTree'
+import { FileTreeMemories } from './fileTreeState'
 import { FilesPathBar, type FilesPlaceItem } from './FilesPathBar'
 import { fileLocation, filesBrowseRoot, isAbsolutePath, joinFolder, normalizeFolderPath, pathInside, resolveTypedPath, samePath } from '../utils/filesBrowse'
 import { absoluteFilesPath } from '../utils/fileReference'
@@ -98,7 +100,15 @@ function assetSignature(data: ArrayLike<number>, mimeType: string): string {
   return `${mimeType}:${data.length}:${hash}`
 }
 
-export function FilesPanel() {
+interface FilesPanelProps {
+  /**
+   * Whether the panel is on screen. While it is not, the tree and the editor unmount and the panel keeps only what
+   * brings them back as they were: open files and their edits, the open folders, the scroll offsets and the selection.
+   */
+  showing?: boolean
+}
+
+export function FilesPanel({ showing = true }: FilesPanelProps) {
   const codeFont = useMonacoCodeFont()
   const profileId = useAppStore((s) => s.profileId)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
@@ -138,6 +148,8 @@ export function FilesPanel() {
   const [files, setFiles] = useState<Record<string, OpenFileState>>({})
   const [preview, setPreview] = useState<Record<string, boolean>>({})
   const [positions, setPositions] = useState<Record<string, { line: number; column: number }>>({})
+  /** Source or preview, per Markdown file; it outlives the editor, which unmounts while the panel is hidden. */
+  const [markdownViews, setMarkdownViews] = useState<Record<string, MarkdownEditorViewMode>>({})
   const [refreshKey, setRefreshKey] = useState(0)
   const [availableLanguageIds, setAvailableLanguageIds] = useState<Set<string>>(() => new Set(['plaintext']))
   const filesRef = useRef(files)
@@ -156,6 +168,9 @@ export function FilesPanel() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchRequest, setSearchRequest] = useState<FilesSearchOpenRequest>({ mode: 'files', nonce: 0 })
   const searchReturnFocus = useRef<HTMLElement | null>(null)
+  const treeMemories = useRef(new FileTreeMemories())
+  /** Editor models kept while the editor unmounts (with their undo and view state), by file key. */
+  const editorModels = useRef(new Set<string>())
 
   const openSearch = useCallback((mode: FilesSearchMode) => {
     const active = document.activeElement
@@ -450,6 +465,25 @@ export function FilesPanel() {
     for (const file of Object.values(filesRef.current)) if (file.assetUrl) URL.revokeObjectURL(file.assetUrl)
   }, [])
 
+  // The editor keeps a file's model when it unmounts; a closed file's model goes with it.
+  useEffect(() => {
+    setMarkdownViews((views) => {
+      const closed = Object.keys(views).filter((key) => !files[key])
+      if (closed.length === 0) return views
+      const next = { ...views }
+      for (const key of closed) delete next[key]
+      return next
+    })
+    const monaco = monacoRef.current
+    if (!monaco) return
+    if (selectedKey && editorRef.current?.getModel()) editorModels.current.add(selectedKey)
+    for (const key of editorModels.current) {
+      if (files[key]) continue
+      editorModels.current.delete(key)
+      monaco.editor.getModel(monaco.Uri.parse(key))?.dispose()
+    }
+  }, [files, selectedKey])
+
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!Object.values(filesRef.current).some((file) => file.content !== file.savedContent)) return
@@ -498,13 +532,19 @@ export function FilesPanel() {
     return true
   }, [closeFileInStore, fileKey, flushPath, replaceFiles, scope])
 
-  /** Puts focus on the file's row in the tree, or on the first row when that one is not shown. */
+  /**
+   * Puts focus on the file's row in the tree, or on the first drawn row when the tree does not show it. The tree draws
+   * only the rows on screen, so a row scrolled away is brought back first.
+   */
   const focusTreeRow = useCallback((path: string) => {
     const panel = panelRef.current
     const treePath = treePathOf(path)
     const rows = [...(panel?.querySelectorAll<HTMLElement>('.file-tree-row') ?? [])]
-    ;(rows.find((element) => element.dataset.path === treePath) ?? rows[0])?.focus()
-  }, [treePathOf])
+    const drawn = rows.find((element) => element.dataset.path === treePath)
+    if (drawn) { drawn.focus(); return }
+    if (treePath && treeMemories.current.get(`${navKey}|${browseRoot}`).requestFocus(treePath)) return
+    rows[0]?.focus()
+  }, [browseRoot, navKey, treePathOf])
 
   // With other files open the strip moves focus to the next tab. Closing the last one removes the strip and
   // the preview, so focus goes to the closed file's row in the tree.
@@ -585,11 +625,24 @@ export function FilesPanel() {
     monacoRef.current = monaco
     applyEditorTheme(monaco)
     instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void flushPath(selectedKeyRef.current))
+    // A kept model missed changes read from disk while the editor was away: take them, as one undoable edit.
+    const key = selectedKeyRef.current
+    const model = instance.getModel()
+    const content = key ? filesRef.current[key]?.content : undefined
+    if (key) editorModels.current.add(key)
+    if (model && content !== undefined && model.getValue() !== content) {
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: content }], () => null)
+    }
     const pending = pendingPosition.current
     if (pending?.path === selectedPath) {
       instance.setPosition({ lineNumber: Math.max(1, pending.line), column: Math.max(1, pending.column) })
       instance.revealLineInCenter(Math.max(1, pending.line)); instance.focus(); pendingPosition.current = null
     }
+  }
+
+  const onMarkdownMount: OnMount = (_instance, monaco) => {
+    monacoRef.current = monaco
+    if (selectedKeyRef.current) editorModels.current.add(selectedKeyRef.current)
   }
 
   // A saved file says nothing; only a state that needs attention or is in progress shows.
@@ -603,6 +656,8 @@ export function FilesPanel() {
   }, [selected])
 
   const supportsPreview = selected?.kind === 'html'
+
+  if (!showing) return null
 
   return (
     <div className="files-panel" ref={panelRef} onKeyDown={(event) => {
@@ -645,7 +700,7 @@ export function FilesPanel() {
         <div className="files-browse" hidden={searchShowsResults}>
           {browseRoot && <FilesPathBar path={browseRoot} canBrowse={!remote} quickPlaces={quickPlaces} loadDrives={loadDrives}
             onNavigate={navigate} onNavigateTyped={navigateTyped} editRequest={pathEditRequest} />}
-          <FileTree key={`${navKey}|${browseRoot}`} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
+          <FileTree key={`${navKey}|${browseRoot}`} memory={treeMemories.current.get(`${navKey}|${browseRoot}`)} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
             selectedPath={treePathOf(selectedPath)} refreshKey={refreshKey}
             onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(joinFolder(browseRoot, path), filesRoot))} />
         </div>
@@ -714,9 +769,9 @@ export function FilesPanel() {
           : selected && selected.kind === 'image' && selected.assetUrl ? <div className="files-asset-preview"><img src={selected.assetUrl} alt={selected.path} /></div>
           : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview"><video src={selected.assetUrl} controls /></div>
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
-          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selected.path} value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} defaultViewMode="preview" aria-label={selected.path} />
+          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
-          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
+          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
           : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}
       </div>}
     </div>

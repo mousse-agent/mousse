@@ -773,7 +773,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
           )}
           {noticeView}
         </>
-      ) : (
+      ) : !active ? null : (
+        // The pane keeps its layout while hidden, for live tabs; an empty one has nothing to keep.
         <div className="browser-empty-state" role="status">
           <MousseLogoOutline className="browser-empty-logo" />
           <p className="browser-empty-title">No tabs open</p>

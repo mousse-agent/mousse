@@ -11,9 +11,13 @@ import { surfaceTabItems } from '../lib/surfaces'
 import { OpenSurfacePicker } from './OpenSurfaceMenu'
 import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 
-export function MainViewPanel() {
+/**
+ * The panel area's tabs. `open` is false while the panel is closed: it then stays mounted, faded out, for terminals
+ * and browser guests, so every other tab draws nothing until it opens again.
+ */
+export function MainViewPanel({ open = true }: { open?: boolean }) {
   const selectedView = useAppStore((s) => s.mainView)
-  const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
+  const mainAreaOpen = useAppStore((s) => s.mainAreaOpen) && open
   // The Automations page covers the panel, except while it shows a run's thread (the panel then serves that thread).
   const inboxThread = useInboxShowsThread()
   const overlayOpen = useAppStore((s) => s.settingsOpen || s.usageOpen || (s.scheduledOpen && !inboxThread))
@@ -36,6 +40,7 @@ export function MainViewPanel() {
   const mainView = empty ? null : selectedView
 
   const transientPanel = (() => {
+    if (!mainAreaOpen || overlayOpen) return null
     if (empty) return <OpenSurfacePicker />
     switch (mainView) {
       case 'git': return <ChangesPanel />
@@ -47,9 +52,10 @@ export function MainViewPanel() {
 
   return (
     <KeepMountedStack>
-      {/* Editors and xterm retain unsaved/model state while another action tab is active. */}
+      {/* xterm keeps its scrollback while another tab shows. The Files tab keeps open files and their edits, but its
+          tree and editor unmount until it shows again; they come back with their open folders, scroll and selection. */}
       <KeepMounted active={mainView === 'files'} className="keep-mounted-pane">
-        <FilesPanel />
+        <FilesPanel showing={mainView === 'files' && mainAreaOpen && !overlayOpen} />
       </KeepMounted>
       <KeepMounted active={mainView === 'terminal'} className="keep-mounted-pane">
         <ProjectTerminalPanel />

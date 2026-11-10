@@ -25,6 +25,13 @@ export interface MarkdownDocumentEditorProps {
   viewMode?: MarkdownEditorViewMode
   defaultViewMode?: MarkdownEditorViewMode
   onViewModeChange?: (mode: MarkdownEditorViewMode) => void
+  /**
+   * Keep the source model when the editor unmounts, with its undo history and view state, under `path`.
+   * The owner disposes it once the document closes. A kept model that missed changes to `value` takes them on mount.
+   */
+  keepModel?: boolean
+  /** Called with the source editor once it is created. */
+  onEditorMount?: OnMount
   validationMessages?: MarkdownValidationMessage[]
   variableSuggestions?: MarkdownVariableSuggestion[]
   autoFocus?: boolean
@@ -52,6 +59,8 @@ export function MarkdownDocumentEditor({
   viewMode,
   defaultViewMode = 'source',
   onViewModeChange,
+  keepModel = false,
+  onEditorMount,
   validationMessages = [],
   variableSuggestions = [],
   autoFocus = false,
@@ -76,6 +85,8 @@ export function MarkdownDocumentEditor({
   const suggestionsRef = useRef(variableSuggestions)
   const onChangeRef = useRef(onChange)
   const readOnlyRef = useRef(readOnly)
+  const valueRef = useRef(value)
+  valueRef.current = value
 
   saveRef.current = onSave
   suggestionsRef.current = variableSuggestions
@@ -208,6 +219,12 @@ export function MarkdownDocumentEditor({
       }
     })
     editorInstance.onDidDispose(() => completion.dispose())
+    // A kept model missed changes made while the editor was away: take them, as one undoable edit.
+    const model = editorInstance.getModel()
+    if (keepModel && model && model.getValue() !== valueRef.current) {
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: valueRef.current }], () => null)
+    }
+    onEditorMount?.(editorInstance, monaco)
     if (autoFocus) editorInstance.focus()
   }
 
@@ -258,6 +275,7 @@ export function MarkdownDocumentEditor({
             value={value}
             language="markdown"
             theme={MOUSSE_EDITOR_THEME}
+            keepCurrentModel={keepModel}
             beforeMount={beforeMount}
             onMount={onMount}
             onChange={handleChange}

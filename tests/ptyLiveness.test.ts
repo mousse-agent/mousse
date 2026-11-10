@@ -88,7 +88,7 @@ describe('thread switching terminal lifecycle', () => {
     const mainPane = appSource.match(/<KeepMounted as="main"[\s\S]*?<\/KeepMounted>/)?.[0]
     expect(mainPane).toBeDefined()
     expect(mainPane).toMatch(/active=\{mainAreaOpen && layoutMode === 'projects'\}[^>]*\bpreserveLayout\b/)
-    expect(mainPane).toMatch(/<MainViewPanel\s*\/>/)
+    expect(mainPane).toMatch(/<MainViewPanel\b[^>]*\/>/)
   })
 
   it('keeps xterm mounted while switching app tabs so scrollback survives', () => {

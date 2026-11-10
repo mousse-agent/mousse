@@ -42,6 +42,8 @@ export function ProjectTerminalPanel() {
   const { root: terminalCwd } = useFilesRoot()
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const mainView = useAppStore((s) => s.mainView)
+  // The other computers' terminals are listed only while someone can see the list.
+  const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const tabs = useAppStore((s) => s.projectTerminalTabs)
   const activeByThread = useAppStore((s) => s.activeProjectTerminalTabByThread)
   const addProjectTerminalTab = useAppStore((s) => s.addProjectTerminalTab)
@@ -67,7 +69,7 @@ export function ProjectTerminalPanel() {
   const [holderStops, setHolderStops] = useState<Record<string, { busy: boolean; error?: string }>>({})
 
   useEffect(() => {
-    if (mainView !== 'terminal' || !activeThreadId || isQualifiedId(activeThreadId)) {
+    if (mainView !== 'terminal' || !mainAreaOpen || !activeThreadId || isQualifiedId(activeThreadId)) {
       setHolders([])
       return
     }
@@ -87,7 +89,7 @@ export function ProjectTerminalPanel() {
       cancelled = true
       clearInterval(timer)
     }
-  }, [mainView, activeThreadId])
+  }, [mainView, mainAreaOpen, activeThreadId])
 
   // What was said about one thread's terminal is not said about another's.
   useEffect(() => {

@@ -110,3 +110,19 @@ describe("an agent's browser tab", () => {
     expect(host.querySelector('.keep-mounted-layout-inactive webview')).not.toBeNull()
   })
 })
+
+describe('the browser tab without tabs', () => {
+  it('draws its empty state only while it shows, and keeps the logo across re-renders', async () => {
+    await render(() => createElement(BrowserPanel, { active: false }))
+    expect(host.querySelector('.browser-empty-state')).toBeNull()
+    // One component type for both renders, so the second updates the panel instead of mounting it again.
+    const Shown = () => createElement(BrowserPanel, { active: true })
+    await render(Shown)
+    const art = host.querySelector('.browser-empty-logo svg')
+    expect(art).not.toBeNull()
+    // React sets the inner HTML again for a new `__html` object; the same logo node means it was not redrawn.
+    act(() => useAppStore.setState({ turnStates: { thread_a: { threadId: 'thread_a', phase: 'completed' } } as never }))
+    await render(Shown)
+    expect(host.querySelector('.browser-empty-logo svg')).toBe(art)
+  })
+})
