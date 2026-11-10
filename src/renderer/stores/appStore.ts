@@ -30,6 +30,7 @@ import { DEFAULT_THREADS_SIDEBAR_WIDTH } from '../lib/resizerKeys'
 import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
 import { parseCursor } from '../../shared/pageCursor'
+import { isThreadStarted } from '../../shared/threadTitle'
 
 /** What the command palette leads with when it opens. */
 export type PaletteMode = 'all' | 'messages'
@@ -237,6 +238,13 @@ interface AppState {
   earlierByThread: Record<string, EarlierMessages>
   /** Puts a page of older messages in front of the shown transcript and records what is still left. */
   applyEarlierMessages: (threadId: string, messages: ChatMessage[], earlier: EarlierMessages | undefined) => void
+  /**
+   * The selected thread's transcript is still on its way: the switch found nothing cached and the thread has
+   * started, so an empty `messages` does not mean an empty thread. The chat holds back its empty page until it lands.
+   */
+  transcriptPending: boolean
+  /** The selected thread's transcript will not arrive (its select failed): stop waiting for it. */
+  settleTranscript: (threadId: string) => void
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
@@ -255,6 +263,7 @@ interface AppState {
   /**
    * Optimistic thread switch in one store update: highlight immediately and restore a
    * cached transcript when available so the chat does not flash empty on re-visits.
+   * Without one, `transcriptPending` holds back the empty page until the thread's view arrives.
    */
   switchToThread: (id: string) => void
   /** Apply daemon snapshot for the selected thread in a single paint. */
@@ -438,6 +447,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   sidebarMode: 'projects',
   setSidebarMode: (sidebarMode) => set({ sidebarMode }),
   messages: [],
+  transcriptPending: false,
+  settleTranscript: (threadId) =>
+    set((s) => (s.transcriptPending && s.activeThreadId === threadId ? { transcriptPending: false } : s)),
   agents: [],
   tasks: [],
   mainAreaWidth: null,
@@ -596,9 +608,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       if (snapshot.replace && s.activeThreadId && s.earlierByThread[s.activeThreadId]) {
         const earlierByThread = { ...s.earlierByThread }
         delete earlierByThread[s.activeThreadId]
-        return { messages, earlierByThread }
+        return { messages, earlierByThread, transcriptPending: false }
       }
-      return { messages }
+      return { messages, transcriptPending: false }
     }),
   addMessage: (message) =>
     set((s) => {
@@ -642,10 +654,13 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         rememberMessages(s.activeThreadId, s.messages)
       }
       const cached = takeCachedMessages(id)
+      // Nothing cached: a thread that never started is known to be empty; any other one waits for its view.
+      const target = s.threads.find((thread) => thread.id === id)
       return {
         sidebarMode: 'projects',
         activeThreadId: id,
         messages: cached ?? [],
+        transcriptPending: !cached && !(target && !isThreadStarted(target)),
         // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
         agents: [],
         tasks: [],
@@ -674,12 +689,13 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         if (next) earlierByThread[view.threadId] = next
         else delete earlierByThread[view.threadId]
       }
-      if (messagesUnchanged && agents === s.agents && tasks === s.tasks && earlierByThread === s.earlierByThread) return s
+      if (messagesUnchanged && agents === s.agents && tasks === s.tasks && earlierByThread === s.earlierByThread && !s.transcriptPending) return s
       return {
         messages: messagesUnchanged ? s.messages : reconciled,
         agents,
         tasks,
-        earlierByThread
+        earlierByThread,
+        transcriptPending: false
       }
     }),
   setProjects: (projects) => set({ projects }),
@@ -818,6 +834,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       ...next,
       queueDraftNotices: {},
       messages: [],
+      transcriptPending: false,
       agents: [],
       tasks: [],
       activeThreadId: null,

@@ -155,6 +155,7 @@ function sameModel(
 export function OrchestratorChat() {
   const messages = useAppStore((s) => s.messages)
   const loading = useAppStore((s) => s.loading)
+  const transcriptPending = useAppStore((s) => s.transcriptPending)
   const setLoading = useAppStore((s) => s.setLoading)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const chatMode = useAppStore((s) => s.chatMode)
@@ -1472,7 +1473,8 @@ export function OrchestratorChat() {
       })
   }
 
-  const emptyThread = shownMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  // A thread whose transcript is still loading is not empty: it shows the plain chat (no headline, logo or glow) until it lands.
+  const emptyThread = shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Delete after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading
   const newThreadKey = `${profileId}:${activeThreadId ?? '__blank__'}`
