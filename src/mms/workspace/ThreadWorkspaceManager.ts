@@ -100,7 +100,10 @@ async function acquireWorkspaceRepositoryLease(identity: RepositoryIdentity, sig
   try {
     return await acquireRepositoryLease(identity, { signal, maxWaitMs: WORKSPACE_REPOSITORY_WAIT_MS })
   } catch (error) {
-    throw error instanceof RepositoryLeaseBusyError ? new RepositoryLeaseBusyError(REPOSITORY_BUSY_TEXT) : error
+    if (!(error instanceof RepositoryLeaseBusyError)) throw error
+    // Who holds it, so a stuck holder can be found.
+    const held = error.holder ? ` It is held by process ${error.holder.pid}${error.holder.olderBuild ? ' (an older Mousse)' : ''} since ${error.holder.acquiredAt}.` : ''
+    throw new RepositoryLeaseBusyError(`${REPOSITORY_BUSY_TEXT}${held}`, { ...(error.holder ? { holder: error.holder } : {}), cause: error })
   }
 }
 

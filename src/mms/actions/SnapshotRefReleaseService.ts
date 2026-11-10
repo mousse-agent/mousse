@@ -160,7 +160,27 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
   } finally {
     lease.release()
     // The last thread of a removed project lets the store go to the trash, after the lease that lives in it is let go.
-    if (workspace.record.projectId) trashProjectStoreIfUnused(workspace.record.projectId)
+    if (workspace.record.projectId) trashProjectStoreWhenFree(workspace.record.projectId)
+  }
+}
+
+/** How often, and how far apart at first, a removed project's store is tried again when it could not be moved to the trash. */
+export const STORE_TRASH_RETRY = { attempts: 8, firstDelayMs: 1_000 }
+
+/**
+ * Moves a removed project's store to the trash once it is unused. On Windows a folder with an open file in it cannot be
+ * moved, and the repository lock in it is open while any process waits for it: the move is tried again later, waiting
+ * longer each time, and a store still not moved stays where it is, marked removed, and is named in the log.
+ */
+export function trashProjectStoreWhenFree(projectId: string, home = getMousseHomeDir(), attempt = 0): void {
+  try {
+    trashProjectStoreIfUnused(projectId, home)
+  } catch (error) {
+    if (attempt + 1 >= STORE_TRASH_RETRY.attempts) {
+      console.warn('a removed project\'s snapshot store could not be moved to the trash', { projectId, error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    setTimeout(() => trashProjectStoreWhenFree(projectId, home, attempt + 1), STORE_TRASH_RETRY.firstDelayMs * 2 ** attempt).unref()
   }
 }
 

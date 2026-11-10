@@ -1,39 +1,55 @@
 /**
- * Fair, abortable mutation lease shared by all worktrees of a repository, and by every Mousse process and home that
- * works in it (the installed app, development daemons, Mousse's own thread worktrees).
+ * Fair, abortable mutation lease of a repository, shared by every Mousse process that resolves the same metadata folder
+ * for it (`RepositoryIdentity.metadataDir`: the repository's own `mousse` folder when it can be written, else a folder
+ * under that process's home). All worktrees of the repository share it.
  *
- * Between processes the lease is an OS lock: an exclusive transaction an open SQLite connection holds on
- * `repository-mutation.lock` in the repository's metadata folder (`LockFileEx` on Windows, `fcntl` locks elsewhere).
- * The OS lets it go when the holder's process ends, however it ends, and never while that process holds it, so a live
- * holder is never taken over, however long it holds, and a killed one never holds the repository after it.
+ * Between processes of this build the lease is an OS lock: an exclusive transaction an open SQLite connection holds on
+ * `repository-mutation.lock` in the metadata folder (`LockFileEx` on Windows, `fcntl` locks elsewhere). The OS lets it
+ * go when the holder's process ends, however it ends, and never while that process holds it. Once every Mousse on the
+ * machine runs this build, a live holder is never taken over, however long it holds, and a killed one never holds the
+ * repository after it. That needs a file system whose locks work: not WebDAV, NFS without a lock manager, or (on
+ * macOS) msdos and exFAT volumes, where SQLite falls back to lock folders a crash leaves behind.
  *
  * The lease file (`repository-mutation.lease`) names the holder, for diagnostics and for builds that predate the OS
- * lock: they decide by that file alone, so a holder keeps it fresh for them while it holds the lease, and a new holder
- * waits while a fresh lease of theirs is there. Within the process a FIFO queue keeps callers in order.
+ * lock, which decide by that file alone. Toward them:
+ * - a holder keeps its file fresh while it holds the lease, so they never see it as stale;
+ * - a lease of theirs is never taken over while its process lives, however old its heartbeat; this build waits, and
+ *   says who holds it;
+ * - they can still take a lease of this build over when its heartbeat is late (a long pause of this process), and they
+ *   reclaim stale files without any lock among themselves. Neither can be prevented from here: upgrade or stop older
+ *   Mousse builds that work in the same repositories.
+ *
+ * Within the process a FIFO queue keeps callers in order; the caller at its head keeps one connection to the lock file
+ * while it waits.
  */
-import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeSync, ftruncateSync, readSync, fsyncSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, existsSync, linkSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync, ftruncateSync, readSync, fsyncSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type { RepositoryIdentity } from './RepositoryIdentity'
 import { requireRepositoryMutationCapability } from './RepositoryIdentity'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
+import { sqliteFilePath } from '../data/sqliteFilePath'
 
 export const REPOSITORY_LEASE_FILENAME = 'repository-mutation.lease'
 export const REPOSITORY_LOCK_FILENAME = 'repository-mutation.lock'
-/** How long a lease file of a build without the OS lock stays its holder's without a fresh heartbeat. */
+/** How long a lease file nobody can read, and that a holder of the OS lock did not start, stays its writer's. */
 export const DEFAULT_REPOSITORY_LEASE_STALE_MS = 30_000
-/** How often a holder refreshes the lease file, well inside the stale window older builds use. */
+/** How often a holder refreshes the lease file, well inside the 30 s stale window older builds use. */
 export const REPOSITORY_LEASE_HEARTBEAT_MS = 10_000
+/** How a lease file of this build begins (`osLock` is written first), so an unfinished one is told from an older build's. */
+const OS_LOCK_RECORD_PREFIX = '{"osLock":true'
+/** The complete record is written here first, then linked into place (`publishLease`). */
+const PUBLISH_PREFIX = `${REPOSITORY_LEASE_FILENAME}.publish-`
 
 export interface RepositoryLeaseOwner {
+  /** Written by a holder of the OS lock: the file is that holder's only while it holds the OS lock. */
+  osLock?: boolean
   pid: number
   processInstanceId: string
   token: string
   acquiredAt: string
   heartbeatAt: string
-  /** Written by a holder of the OS lock: the file is that holder's only while it holds the OS lock. */
-  osLock?: boolean
 }
 export interface RepositoryLeaseHandle {
   identity: RepositoryIdentity
@@ -45,15 +61,37 @@ export interface RepositoryLeaseHandle {
 export interface AcquireRepositoryLeaseOptions {
   signal?: AbortSignal
   retryDelayMs?: number
+  /** How long an unreadable lease file that a holder of the OS lock did not start is waited for before it is removed. */
   staleAfterMs?: number
   /** How long to wait for the lease at most; past it the wait ends with {@link RepositoryLeaseBusyError}. */
   maxWaitMs?: number
+  /** Test-only: how often the holder refreshes its lease file ({@link REPOSITORY_LEASE_HEARTBEAT_MS}). */
+  heartbeatMs?: number
   /** Test-only owner overrides. */
   pid?: number
   processInstanceId?: string
   token?: string
 }
-export class RepositoryLeaseBusyError extends Error { constructor(message = 'Repository mutation lease is busy') { super(message); this.name = 'RepositoryLeaseBusyError' } }
+
+/** Who holds a lease, as its lease file names it. */
+export interface RepositoryLeaseHolder {
+  pid: number
+  acquiredAt: string
+  /** A Mousse without the OS lock. */
+  olderBuild: boolean
+}
+export function describeLeaseHolder(holder: RepositoryLeaseHolder): string {
+  return `held by process ${holder.pid} since ${holder.acquiredAt}${holder.olderBuild ? ' (an older Mousse)' : ''}`
+}
+
+export class RepositoryLeaseBusyError extends Error {
+  readonly holder?: RepositoryLeaseHolder
+  constructor(message = 'Repository mutation lease is busy', options: { holder?: RepositoryLeaseHolder; cause?: unknown } = {}) {
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined)
+    this.name = 'RepositoryLeaseBusyError'
+    if (options.holder) this.holder = options.holder
+  }
+}
 export class RepositoryLeaseAbortedError extends Error { constructor() { super('Repository mutation lease acquisition was aborted'); this.name = 'RepositoryLeaseAbortedError' } }
 export class RepositoryLockOrderError extends Error { constructor(message: string) { super(message); this.name = 'RepositoryLockOrderError' } }
 
@@ -68,57 +106,132 @@ export function assertRepositoryLockOrder(held: readonly Pick<RepositoryIdentity
   if (last > next.key) throw new RepositoryLockOrderError(`Repository locks must be acquired by key order (${last} before ${next.key})`)
 }
 
-function readOwner(path: string): RepositoryLeaseOwner | null {
+function parseOwner(text: string): RepositoryLeaseOwner | null {
   try {
-    const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<RepositoryLeaseOwner>
+    const value = JSON.parse(text) as Partial<RepositoryLeaseOwner>
     if (typeof value.pid !== 'number' || !value.token || !value.acquiredAt || !value.heartbeatAt) return null
-    return { pid: value.pid, token: value.token, acquiredAt: value.acquiredAt, heartbeatAt: value.heartbeatAt, processInstanceId: typeof value.processInstanceId === 'string' ? value.processInstanceId : '', ...(value.osLock === true ? { osLock: true } : {}) }
+    return { ...(value.osLock === true ? { osLock: true } : {}), pid: value.pid, processInstanceId: typeof value.processInstanceId === 'string' ? value.processInstanceId : '', token: value.token, acquiredAt: value.acquiredAt, heartbeatAt: value.heartbeatAt }
   } catch { return null }
 }
-function stale(owner: RepositoryLeaseOwner, staleAfterMs: number): boolean {
-  return !isOwnerLive(owner) || Date.now() - Date.parse(owner.heartbeatAt) > staleAfterMs
+function readOwner(path: string): RepositoryLeaseOwner | null {
+  try { return parseOwner(readFileSync(path, 'utf8')) } catch { return null }
+}
+function holderOf(owner: RepositoryLeaseOwner): RepositoryLeaseHolder {
+  return { pid: owner.pid, acquiredAt: owner.acquiredAt, olderBuild: owner.osLock !== true }
 }
 /** Protect a live in-process holder even if its heartbeat was delayed. */
 const locallyHeldTokens = new Set<string>()
 
-/** The OS lock: an open connection holding an exclusive transaction on the lock file. */
-interface OsLock { release(): void }
+const SQLITE_BUSY = 5
+const SQLITE_IOERR = 10
+const SQLITE_CANTOPEN = 14
+/** The primary SQLite result code of an error (an extended code's low byte), as elsewhere in the codebase. */
+function sqliteCode(error: unknown): number | undefined {
+  const code = (error as { errcode?: unknown } | null)?.errcode
+  return typeof code === 'number' ? code & 0xff : undefined
+}
+/** The lock file could not be opened or locked for now (a scanner holding it, a network drive's lock failing): try again. */
+class LockUnavailableError extends Error {
+  constructor(cause: unknown) { super('The repository lock file could not be opened or locked', { cause }); this.name = 'LockUnavailableError' }
+}
 
-/** Takes the repository's OS lock without waiting; null while another connection (in any process) holds it. */
-function tryOsLock(path: string): OsLock | null {
-  const db = new DatabaseSync(path, { timeout: 0 })
-  try {
-    db.exec('BEGIN EXCLUSIVE')
-  } catch (error) {
-    try { db.close() } catch { /* nothing held */ }
-    if ((error as { errcode?: number }).errcode === 5 /* SQLITE_BUSY */) return null
-    throw error
-  }
-  let held = true
-  return {
-    release: () => {
-      if (!held) return
-      held = false
-      try { db.exec('ROLLBACK') } catch { /* closing ends the transaction too */ }
-      try { db.close() } catch { /* the OS lets go with the handle */ }
+/**
+ * One connection to the lock file, kept by the caller at the head of the queue while it waits, so each retry only begins
+ * a transaction again. It becomes the holder's when the lock is taken.
+ */
+class LockConnection {
+  private db: DatabaseSync | undefined
+  constructor(private readonly path: string) {}
+
+  /** `locked` once this connection holds the OS lock, `busy` while another connection does. */
+  tryLock(): 'locked' | 'busy' {
+    try {
+      this.db ??= new DatabaseSync(sqliteFilePath(this.path), { timeout: 0 })
+      this.db.exec('BEGIN EXCLUSIVE')
+      return 'locked'
+    } catch (error) {
+      const code = sqliteCode(error)
+      if (code === SQLITE_BUSY) return 'busy'
+      this.close()
+      if (code === SQLITE_CANTOPEN || code === SQLITE_IOERR) throw new LockUnavailableError(error)
+      throw error
     }
+  }
+
+  unlock(): void {
+    try { this.db?.exec('ROLLBACK') } catch { this.close() }
+  }
+
+  close(): void {
+    const db = this.db
+    this.db = undefined
+    try { db?.close() } catch { /* the OS lets go with the handle */ }
   }
 }
 
 /**
- * Whether the lease file may go, decided while holding the OS lock (so no other holder of it can be writing it):
- * a file a holder of the OS lock wrote was left by one that has let go of it, or ended; a file nobody could read for
- * longer than the stale window was left by a process that stopped while writing it; a lease of a build without the OS
- * lock goes as such builds decide, once it is stale.
+ * What to do with a lease file found while holding the OS lock (so no holder of it can be writing one):
+ * - one a holder of the OS lock wrote, complete or not, was left by one that let go of it or ended: it goes at once;
+ * - one of an older build goes once its process is gone, and never while it lives, however old its heartbeat;
+ * - one nobody can read that does not begin as this build's (empty, or an older build's unfinished record) goes once it
+ *   was unreadable for `staleAfterMs`, as older builds decide.
  */
-function leftBehind(path: string, staleAfterMs: number): boolean {
-  const owner = readOwner(path)
+function leaseFound(path: string, staleAfterMs: number): { remove: boolean; holder?: RepositoryLeaseHolder } {
+  let text: string
+  try { text = readFileSync(path, 'utf8') } catch { return { remove: !existsSync(path) } }
+  const owner = parseOwner(text)
   if (!owner) {
-    try { return Date.now() - statSync(path).mtimeMs > staleAfterMs } catch { return !existsSync(path) }
+    if (text.startsWith(OS_LOCK_RECORD_PREFIX)) return { remove: true }
+    try { return { remove: Date.now() - statSync(path).mtimeMs > staleAfterMs } } catch { return { remove: !existsSync(path) } }
   }
-  if (locallyHeldTokens.has(owner.token)) return false
-  return owner.osLock === true || stale(owner, staleAfterMs)
+  if (locallyHeldTokens.has(owner.token)) return { remove: false, holder: holderOf(owner) }
+  if (owner.osLock) return { remove: true }
+  return isOwnerLive(owner) ? { remove: false, holder: holderOf(owner) } : { remove: true }
 }
+
+/** Removes complete records an earlier holder wrote and did not link into place (it stopped in between). Under the OS lock. */
+function removeUnpublished(path: string): void {
+  const folder = dirname(path)
+  let names: string[]
+  try { names = readdirSync(folder) } catch { return }
+  for (const name of names) if (name.startsWith(PUBLISH_PREFIX)) try { unlinkSync(join(folder, name)) } catch { /* the next holder tries again */ }
+}
+
+/**
+ * Puts the lease file in place, under the OS lock, only where none is: the complete record is written to a file of its
+ * own and linked as the lease, so the lease is never seen empty or cut short, and never replaces a lease an older build
+ * made meanwhile (a rename would). Where the file system has no hard links, the record is written with a create-only
+ * open; a failed write leaves no file. `taken` when a lease is there.
+ */
+function publishLease(path: string, record: string, token: string): 'published' | 'taken' {
+  const staged = `${dirname(path)}/${PUBLISH_PREFIX}${token}`
+  writeFileSync(staged, record, { flag: 'wx' })
+  try {
+    try {
+      linkSync(staged, path)
+      return 'published'
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'taken'
+    }
+    let fd: number
+    try { fd = openSync(path, 'wx') } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'taken'
+      throw error
+    }
+    try {
+      writeSync(fd, record)
+    } catch (error) {
+      try { closeSync(fd) } catch { /* removed below */ }
+      try { unlinkSync(path) } catch { /* begins as this build's, so the next holder removes it */ }
+      throw error
+    }
+    closeSync(fd)
+    return 'published'
+  } finally {
+    try { unlinkSync(staged) } catch { /* removed by the next holder (`removeUnpublished`) */ }
+  }
+}
+
 /**
  * Removes the lease file while it still names `token`, trying again when it cannot be read or removed for a moment (on
  * Windows another program may have it open). False when it names another holder, is gone, or could not be removed.
@@ -154,28 +267,36 @@ function writeOwnerInPlace(path: string, token: string, owner: RepositoryLeaseOw
   } catch { return false } finally { if (fd !== null) try { closeSync(fd) } catch { /* ignore */ } }
 }
 
-function tryAcquire(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOptions): RepositoryLeaseHandle | null {
+type Attempt = { handle: RepositoryLeaseHandle } | { busy: RepositoryLeaseHolder | undefined }
+
+function tryAcquire(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOptions, connection: LockConnection): Attempt {
   const path = getRepositoryLeasePath(identity)
-  const lock = tryOsLock(getRepositoryLockPath(identity))
-  if (!lock) return null
+  if (connection.tryLock() === 'busy') {
+    const owner = readOwner(path)
+    return { busy: owner ? holderOf(owner) : undefined }
+  }
   const now = new Date().toISOString()
-  const owner: RepositoryLeaseOwner = { pid: opts.pid ?? process.pid, processInstanceId: opts.processInstanceId ?? PROCESS_INSTANCE_ID, token: opts.token ?? createRepositoryLeaseToken(), acquiredAt: now, heartbeatAt: now, osLock: true }
-  const write = (): boolean => {
-    try {
-      const fd = openSync(path, 'wx')
-      try { writeSync(fd, JSON.stringify(owner)) } finally { closeSync(fd) }
-      return true
-    } catch { return false }
-  }
-  let written = false
+  // `osLock` first: an unfinished record of this build is known by how it begins.
+  const owner: RepositoryLeaseOwner = { osLock: true, pid: opts.pid ?? process.pid, processInstanceId: opts.processInstanceId ?? PROCESS_INSTANCE_ID, token: opts.token ?? createRepositoryLeaseToken(), acquiredAt: now, heartbeatAt: now }
   try {
-    // A lease file already there is left behind (removed), or a build without the OS lock holds the repository (wait).
-    written = write() || (existsSync(path) && leftBehind(path, opts.staleAfterMs ?? DEFAULT_REPOSITORY_LEASE_STALE_MS) && (() => { try { unlinkSync(path) } catch { return false } return write() })())
-  } finally {
-    if (!written) lock.release()
+    removeUnpublished(path)
+    let published = false
+    for (let attempt = 0; attempt < 2 && !published; attempt += 1) {
+      if (existsSync(path)) {
+        const found = leaseFound(path, opts.staleAfterMs ?? DEFAULT_REPOSITORY_LEASE_STALE_MS)
+        if (!found.remove) { connection.unlock(); return { busy: found.holder } }
+        try { unlinkSync(path) } catch { connection.unlock(); return { busy: undefined } }
+      }
+      // `taken`: an older build made a lease meanwhile; it is looked at again.
+      published = publishLease(path, JSON.stringify(owner), owner.token) === 'published'
+    }
+    if (!published) { connection.unlock(); return { busy: undefined } }
+  } catch (error) {
+    connection.unlock()
+    throw error
   }
-  if (!written) return null
   locallyHeldTokens.add(owner.token)
+  localHolders.set(identity.key, owner)
   let released = false
   const heartbeat = (): boolean => {
     if (released) return false
@@ -183,32 +304,39 @@ function tryAcquire(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOp
     return writeOwnerInPlace(path, owner.token, owner)
   }
   // Only for builds without the OS lock, which take over a lease file that is not kept fresh.
-  const refresh = setInterval(heartbeat, REPOSITORY_LEASE_HEARTBEAT_MS)
+  const refresh = setInterval(heartbeat, opts.heartbeatMs ?? REPOSITORY_LEASE_HEARTBEAT_MS)
   refresh.unref()
-  const handle: RepositoryLeaseHandle = {
-    identity, path, owner, heartbeat,
-    // The file goes first, then the OS lock, so a lease file of a holder of the OS lock is never there without it.
-    // The holder's turn in this process always ends here, whatever happened to the file.
-    release: () => {
-      if (released) return true
-      released = true
-      clearInterval(refresh)
-      locallyHeldTokens.delete(owner.token)
-      const removed = removeOwnLease(path, owner.token)
-      lock.release()
-      releaseLocal(identity.key)
-      return removed
+  return {
+    handle: {
+      identity, path, owner, heartbeat,
+      // The file goes first, then the OS lock, so a lease file of a holder of the OS lock is never there without it.
+      // The holder's turn in this process always ends here, whatever happened to the file.
+      release: () => {
+        if (released) return true
+        released = true
+        clearInterval(refresh)
+        locallyHeldTokens.delete(owner.token)
+        localHolders.delete(identity.key)
+        const removed = removeOwnLease(path, owner.token)
+        connection.unlock()
+        connection.close()
+        releaseLocal(identity.key)
+        return removed
+      }
     }
   }
-  return handle
 }
 
 type Waiter = { identity: RepositoryIdentity; opts: AcquireRepositoryLeaseOptions; resolve: (h: RepositoryLeaseHandle) => void; reject: (e: Error) => void; abort?: () => void }
 const queues = new Map<string, Waiter[]>()
-/** Keys currently polling the cross-process lease file. */
+/** Keys currently polling the cross-process lock. */
 const pumping = new Set<string>()
 /** Keys granted to a local caller and not yet released. */
 const locallyHeldKeys = new Set<string>()
+/** The owner of each lease this process holds, by key, to name it in a busy error. */
+const localHolders = new Map<string, RepositoryLeaseOwner>()
+/** What the last look found holding each repository waited for, to name it when a wait ends busy. */
+const waitNotes = new Map<string, { holder?: RepositoryLeaseHolder; cause?: unknown }>()
 function delay(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)) }
 function removeAbortListener(waiter: Waiter): void {
   if (waiter.abort && waiter.opts.signal) waiter.opts.signal.removeEventListener('abort', waiter.abort)
@@ -218,18 +346,29 @@ async function pump(key: string): Promise<void> {
   const queue = queues.get(key); const waiter = queue?.[0]
   if (!queue || !waiter) { queues.delete(key); return }
   pumping.add(key)
+  const connection = new LockConnection(getRepositoryLockPath(waiter.identity))
+  let granted = false
   try {
     while (true) {
       if (waiter.opts.signal?.aborted) throw new RepositoryLeaseAbortedError()
-      const handle = tryAcquire(waiter.identity, waiter.opts)
-      if (handle) {
+      let attempt: Attempt | undefined
+      try {
+        attempt = tryAcquire(waiter.identity, waiter.opts, connection)
+      } catch (error) {
+        if (!(error instanceof LockUnavailableError)) throw error
+        waitNotes.set(key, { cause: error.cause })
+      }
+      if (attempt && 'handle' in attempt) {
+        granted = true
+        waitNotes.delete(key)
         queue.shift()
         if (queue.length === 0) queues.delete(key)
         locallyHeldKeys.add(key)
         removeAbortListener(waiter)
-        waiter.resolve(handle)
+        waiter.resolve(attempt.handle)
         return
       }
+      if (attempt) waitNotes.set(key, { ...(attempt.busy ? { holder: attempt.busy } : {}) })
       await delay(waiter.opts.retryDelayMs ?? 25)
     }
   } catch (error) {
@@ -239,6 +378,7 @@ async function pump(key: string): Promise<void> {
     removeAbortListener(waiter)
     waiter.reject(error instanceof Error ? error : new RepositoryLeaseBusyError())
   } finally {
+    if (!granted) connection.close()
     pumping.delete(key)
     if (!locallyHeldKeys.has(key)) void pump(key)
   }
@@ -246,6 +386,16 @@ async function pump(key: string): Promise<void> {
 function releaseLocal(key: string): void {
   locallyHeldKeys.delete(key)
   void pump(key)
+}
+
+/** The busy error for a wait on `key` that ran out: who holds the lease, as last seen, and what last failed. */
+function busyError(key: string): RepositoryLeaseBusyError {
+  const local = localHolders.get(key)
+  const note = waitNotes.get(key)
+  const holder = local ? holderOf(local) : note?.holder
+  const failed = note?.cause instanceof Error ? note.cause.message : undefined
+  const message = ['Repository mutation lease is busy', holder ? `: ${describeLeaseHolder(holder)}` : '', failed ? ` (the lock file could not be used: ${failed})` : ''].join('')
+  return new RepositoryLeaseBusyError(message, { ...(holder ? { holder } : {}), ...(note?.cause !== undefined ? { cause: note.cause } : {}) })
 }
 
 /** Acquire in FIFO order within this process and retry asynchronously across processes. */
@@ -256,7 +406,7 @@ export function acquireRepositoryLease(identity: RepositoryIdentity, opts: Acqui
     const timeout = AbortSignal.timeout(opts.maxWaitMs)
     const waited = acquireRepositoryLease(identity, { ...opts, maxWaitMs: undefined, signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout })
     return waited.catch((error: unknown) => {
-      throw error instanceof RepositoryLeaseAbortedError && timeout.aborted && !opts.signal?.aborted ? new RepositoryLeaseBusyError() : error
+      throw error instanceof RepositoryLeaseAbortedError && timeout.aborted && !opts.signal?.aborted ? busyError(identity.key) : error
     })
   }
   return new Promise((resolve, reject) => {
