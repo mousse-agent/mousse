@@ -79,12 +79,14 @@ interface Entry {
   usedAt: number
   /** The sum of its rows' and state's sizes. */
   bytes: number
-  stateBytes: number
+  /** Each state value's size (its payload's length), kept as saves and other writers replace or remove them. */
+  stateSizes: Map<string, number>
 }
 
-function entryBytes(collections: Map<string, Row[]>, stateBytes: number): number {
-  let bytes = stateBytes
-  for (const rows of collections.values()) for (const row of rows) bytes += row.size
+function entryBytes(entry: Pick<Entry, 'collections' | 'stateSizes'>): number {
+  let bytes = 0
+  for (const size of entry.stateSizes.values()) bytes += size
+  for (const rows of entry.collections.values()) for (const row of rows) bytes += row.size
   return bytes
 }
 
@@ -154,8 +156,8 @@ export class ThreadDbStore {
     }
     for (const rows of collections.values()) sortRows(rows)
     const state = new Map<string, Skeleton>(load.state.map((row) => [row.key, skeletonOf(JSON.parse(row.payload)) ?? null]))
-    const stateBytes = load.state.reduce((sum, row) => sum + row.payload.length, 0)
-    return { info: load.info, collections, state, usedAt: Date.now(), bytes: entryBytes(collections, stateBytes), stateBytes }
+    const stateSizes = new Map<string, number>(load.state.map((row) => [row.key, row.payload.length]))
+    return { info: load.info, collections, state, usedAt: Date.now(), bytes: entryBytes({ collections, stateSizes }), stateSizes }
   }
 
   private remember(dir: string, entry: Entry): Entry {
@@ -220,8 +222,14 @@ export class ThreadDbStore {
       touched.add(row.coll)
     }
     for (const coll of touched) sortRows(entry.collections.get(coll)!)
-    for (const key of changes.removedState) entry.state.delete(key)
-    for (const row of changes.state) entry.state.set(row.key, skeletonOf(JSON.parse(row.payload)) ?? null)
+    for (const key of changes.removedState) {
+      entry.state.delete(key)
+      entry.stateSizes.delete(key)
+    }
+    for (const row of changes.state) {
+      entry.state.set(row.key, skeletonOf(JSON.parse(row.payload)) ?? null)
+      entry.stateSizes.set(row.key, row.payload.length)
+    }
     entry.info = changes.info
   }
 
@@ -238,7 +246,7 @@ export class ThreadDbStore {
       const changes = this.client.callSync('changes', dir, entry.info.seq, entry.info.epoch)
       if (changes.reset) return this.remember(dir, this.entryFrom(dir, changes))
       this.applyChanges(entry, changes)
-      this.resize(dir, entry, entryBytes(entry.collections, entry.stateBytes))
+      this.resize(dir, entry, entryBytes(entry))
     }
     entry.usedAt = Date.now()
     this.entries.delete(dir)
@@ -428,6 +436,7 @@ export class ThreadDbStore {
       request: { baseSeq: entry.info.seq, epochBump: false, inserts: [], updates: [], deletes: [], state: [] },
       collections: new Map(),
       state: new Map(),
+      stateSizes: new Map(),
       bytes: 0,
       moved: new Map(),
       blobHashes: new Set()
@@ -449,6 +458,7 @@ export class ThreadDbStore {
       plan.bytes += payload.length
       plan.request.state.push({ key, payload })
       plan.state.set(key, skel)
+      plan.stateSizes.set(key, payload.length)
     }
     return plan
   }
@@ -695,12 +705,17 @@ export class ThreadDbStore {
       else entry.collections.delete(coll)
     }
     for (const [key, skel] of plan.state) {
-      if (skel === null) entry.state.delete(key)
-      else entry.state.set(key, skel)
+      if (skel === null) {
+        entry.state.delete(key)
+        entry.stateSizes.delete(key)
+      } else {
+        entry.state.set(key, skel)
+        entry.stateSizes.set(key, plan.stateSizes.get(key) ?? JSON.stringify(skel).length)
+      }
     }
     entry.info = info
     this.registerObjects(entry, plan, rids)
-    this.resize(dir, entry, entryBytes(entry.collections, entry.stateBytes))
+    this.resize(dir, entry, entryBytes(entry))
     // A save that left nothing unseen in place means this process has seen the thread up to here.
     const unseenLeft = [...entry.collections.values()].some((rows) => rows.some((row) => row.unseen))
     if (!unseenLeft && entry.info.dbId === this.observed.get(dir)?.dbId) this.observed.set(dir, { dbId: entry.info.dbId, seq: info.seq })
@@ -714,6 +729,8 @@ interface Plan {
   request: SaveRequest
   collections: Map<string, { planned: PlannedRow[]; survivors: Row[]; items: unknown[] }>
   state: Map<string, Skeleton | null>
+  /** The payload length of each state value the save writes. */
+  stateSizes: Map<string, number>
   bytes: number
   moved: Map<number, number>
   blobHashes: Set<string>

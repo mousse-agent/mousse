@@ -190,6 +190,59 @@ describe('thread database cache byte cap', () => {
     expect(store.cacheStats()).toEqual({ threads: 0, bytes: 0 })
   })
 
+  /** About `kb` KB of tasks: state, not rows. */
+  const tasks = (kb: number, seed: string) => Array.from({ length: kb }, (_, i) => ({ id: `${seed}-task-${i}`, description: ''.padEnd(1_000, 'd') }))
+
+  it('counts state a save grows, and drops threads past the cap for it', () => {
+    const dirs = threads(3, 1)
+    const store = new ThreadDbStore(client, { threads: 64, bytes: 100 * 1024 })
+    for (const threadDir of dirs) {
+      store.load(threadDir)
+      store.save(threadDir, { tasks: tasks(200, threadDir) as never })
+    }
+    // Each thread now holds about 200 KB of tasks: only the one in use stays under a 100 KB cap.
+    const stats = store.cacheStats()
+    expect(stats.threads).toBe(1)
+    expect(stats.bytes).toBeGreaterThan(200 * 1024)
+    expect(store.isWarm(dirs[2]!)).toBe(true)
+  })
+
+  it('counts state a save removes', () => {
+    const [threadDir] = threads(1, 1)
+    const store = new ThreadDbStore(client)
+    store.load(threadDir!)
+    const before = store.cacheStats().bytes
+    store.save(threadDir!, { tasks: tasks(100, 't') as never })
+    expect(store.cacheStats().bytes - before).toBeGreaterThan(100 * 1024)
+    store.save(threadDir!, { tasks: [] })
+    expect(store.cacheStats().bytes - before).toBeLessThan(1024)
+    store.save(threadDir!, { mousseAgentSessions: [{ id: 's1', messages: [] }] as never })
+    const withSessions = store.cacheStats().bytes
+    store.save(threadDir!, { mousseAgentSessions: null })
+    expect(store.cacheStats().bytes).toBeLessThan(withSessions)
+  })
+
+  it('counts state another writer changes, and drops threads past the cap for it', () => {
+    const dirs = threads(2, 1)
+    const writer = new ThreadDbStore(client)
+    const store = new ThreadDbStore(client, { threads: 64, bytes: 100 * 1024 })
+    for (const threadDir of dirs) store.load(threadDir)
+    const before = store.cacheStats().bytes
+    expect(store.cacheStats().threads).toBe(2)
+    // Another process saves 150 KB of tasks to the first thread; this store catches up when it next uses it.
+    writer.save(dirs[0]!, { tasks: tasks(150, 'other') as never })
+    store.info(dirs[0]!)
+    // 150 tasks of about 1 KB each; the other thread was dropped for them.
+    expect(store.cacheStats().bytes).toBeGreaterThan(150_000)
+    expect(store.cacheStats().threads).toBe(1)
+    expect(store.isWarm(dirs[0]!)).toBe(true)
+    expect(store.isWarm(dirs[1]!)).toBe(false)
+    // And removes them: the size comes back down.
+    writer.save(dirs[0]!, { tasks: [] })
+    store.info(dirs[0]!)
+    expect(store.cacheStats().bytes).toBeLessThan(before)
+  })
+
   it('reads state without loading a thread it does not hold, and from memory when it does', () => {
     const [threadDir] = threads(1, 50)
     const writer = new ThreadDbStore(client)
