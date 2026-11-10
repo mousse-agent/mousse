@@ -68,6 +68,27 @@ describe('a code block streaming in', () => {
   })
 })
 
+describe('a block that reaches its final text from the cache', () => {
+  it('is not set back by a result for its shorter text that arrives later', async () => {
+    // The same fence twice in a reply: the second copy's final text is in the cache already.
+    const full = 'def main():\n    rows = [1, 2, 3]\n    for row in rows:\n        print(row)\n'
+    await settle(full, 'python')
+    const partial = full.slice(0, 20)
+    await settle(partial, 'python')
+    const delivered: Result[] = []
+    // The copy grows past its first pass; a throttled pass for this text is now waiting.
+    const grown = full.slice(0, 40)
+    codeHighlighter.highlight({ code: grown, language: 'python' as never, themes }, (result) => delivered.push(result))
+    // It reaches its final text, which the cache answers at once.
+    const final = codeHighlighter.highlight({ code: full, language: 'python' as never, themes })
+    expect(flat(final!)).toBe(full)
+    await sleep(STREAMING_TOKENIZE_MS * 3)
+    // The late pass for the shorter text delivers the final text, not the shorter one.
+    expect(delivered.length).toBeGreaterThan(0)
+    for (const result of delivered) expect(flat(result)).toBe(full)
+  })
+})
+
 describe('extendTokens', () => {
   it('keeps the tokens of known lines and adds the new text plain', () => {
     const previous = {

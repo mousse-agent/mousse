@@ -124,8 +124,17 @@ const throttled = new Map<
   { code: string; lang: string; names: [string, string]; waiting: Set<(result: HighlightResult) => void> }
 >();
 
-/** The code last asked for per language and theme pair. */
-const lastAsked = new Map<string, string>();
+/**
+ * The text of the block growing now, per language and theme pair: the code last asked for that
+ * extends it, or that started a new block. A finished block drawn again from the cache leaves it.
+ */
+const growing = new Map<string, string>();
+
+function noteAsked(family: string, code: string, cached: boolean): void {
+  const current = growing.get(family);
+  if (current !== undefined && code.startsWith(current)) growing.set(family, code);
+  else if (!cached) growing.set(family, code);
+}
 
 /** The code whose first tokenisation is under way, per language and theme pair. */
 const firstPass = new Map<string, string>();
@@ -168,9 +177,12 @@ function deliver(
   result: HighlightResult,
   waiting: Iterable<(result: HighlightResult) => void>,
 ): void {
-  const asked = lastAsked.get(family);
-  const shown =
-    asked && asked.length > code.length && asked.startsWith(code) ? extendTokens({ code, result }, asked) : result;
+  const asked = growing.get(family);
+  let shown = result;
+  if (asked && asked.length > code.length && asked.startsWith(code)) {
+    // The block's newer text may be tokenised already (a finished block found in the cache).
+    shown = resultCache.get(`${family}\0${asked}`) ?? extendTokens({ code, result }, asked);
+  }
   for (const notify of waiting) notify(shown);
 }
 
@@ -247,6 +259,7 @@ export function createCodeHighlighter(
       const key = `${lang}\0${names[0]}\0${names[1]}\0${code}`;
       const family = `${lang}\0${names[0]}\0${names[1]}`;
       const cached = resultCache.get(key);
+      noteAsked(family, code, cached !== undefined);
       if (cached) {
         cacheResult(key, cached);
         return cached;
@@ -255,7 +268,6 @@ export function createCodeHighlighter(
       // A fence still streaming in grows from the block tokenised last. It is drawn from those
       // tokens at once, and tokenised whole again at most every STREAMING_TOKENIZE_MS, instead of
       // once per delta with the new text missing until each pass ends.
-      lastAsked.set(family, code);
       const latest = latestByFamily.get(family);
       if (latest && code.length > latest.code.length && code.startsWith(latest.code)) {
         tokenizeSoon(family, code, lang, names, callback);
