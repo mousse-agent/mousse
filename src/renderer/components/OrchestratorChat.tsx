@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { expiryPresetMs } from '../../shared/threadExpiry'
 import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
+import { AmbientGlow } from './AmbientGlow'
 import { EmptyThreadHeading } from './EmptyThreadHeading'
 import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
@@ -1425,6 +1426,7 @@ export function OrchestratorChat() {
 
   return (
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      {emptyThread && <AmbientGlow />}
       <SubagentParentBar />
       <ThreadComputerBar />
       <ThreadModeBar />

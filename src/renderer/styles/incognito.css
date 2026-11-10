@@ -45,13 +45,18 @@
   transform: none;
 }
 
-/* A quick glint across the lenses (about 0.6s), then a few seconds' pause. */
+/* A quick glint across the lenses (about 0.6s), then a few seconds' pause. The glint is inside the SVG, so
+   each change repaints the glasses: it crosses in 18 steps (the old curve, sampled at the middle of each
+   step) and the pause is one step, so nothing is drawn while it waits. */
 .incognito-glasses[data-on] .incognito-glasses-shine {
-  animation: incognito-shine calc(4.2s * var(--ui-motion-scale, 1)) cubic-bezier(0.45, 0, 0.3, 1) 0.8s infinite;
+  animation: incognito-shine calc(4.2s * var(--ui-motion-scale, 1)) steps(1) 0.8s infinite;
 }
 
 @keyframes incognito-shine {
-  0% { transform: translateX(0); }
+  0% {
+    transform: translateX(0);
+    animation-timing-function: linear(0.0013 0% 5.556%, 0.013 5.556% 11.111%, 0.0399 11.111% 16.667%, 0.0869 16.667% 22.222%, 0.1599 22.222% 27.778%, 0.2632 27.778% 33.333%, 0.3912 33.333% 38.889%, 0.5243 38.889% 44.444%, 0.6423 44.444% 50%, 0.7379 50% 55.556%, 0.8125 55.556% 61.111%, 0.8698 61.111% 66.667%, 0.9133 66.667% 72.222%, 0.9457 72.222% 77.778%, 0.9691 77.778% 83.333%, 0.9851 83.333% 88.889%, 0.9949 88.889% 94.444%, 0.9995 94.444% 100%);
+  }
   14% { transform: translateX(290px); }
   100% { transform: translateX(290px); }
 }

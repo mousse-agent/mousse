@@ -162,12 +162,15 @@ export function EmptyThreadLogo({ label, incognito }: { label: string; incognito
             ))}
           </g>
           {glassPaths.map((path, index) => <path key={index} d={path.d} className={`empty-logo-path empty-logo-${path.part}`} strokeWidth={path.width} pathLength={1} />)}
-          <g className="empty-logo-swirl">
+        </svg>
+        {/* The swirl is its own element, so its sway moves a finished layer and the logo never repaints. */}
+        <div className="empty-logo-swirl">
+          <svg className="empty-logo-art" viewBox="0 0 514 514" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <g className="empty-logo-swirl-bob">
               {swirlPaths.map((path, index) => <path key={index} d={path.d} className="empty-logo-path empty-logo-swirl-path" strokeWidth={path.width} pathLength={1} />)}
             </g>
-          </g>
-        </svg>
+          </svg>
+        </div>
         <IncognitoGlasses on={incognito} />
       </div>
     </div>
