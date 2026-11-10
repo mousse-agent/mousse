@@ -90,11 +90,12 @@ async function check() {
     const state = await lifecycleState()
     if (state !== 'purged' && Date.now() - pressed > 3000) await evaluate(`(() => { const button = document.querySelector('[data-testid="archived-delete-confirm"]'); if (button && !button.disabled) button.click() })()`).then(() => { pressed = Date.now() })
     return state
-  // The purge removes the live worktree whole, which takes a while on Windows.
   }, (state) => state === 'purged', 'Permanent delete', 60000)
   await until(() => evaluate(`!${threadRow} && !document.querySelector('[role="dialog"]')`), Boolean, 'Deleted thread leaves the list')
-  if (existsSync(config.workspace)) throw Error('Task checkout remains after delete')
   proof.purged = true
+  // A delete removes only the thread: its checkout, with the thread's change in it, stays until the person removes it.
+  if (!existsSync(config.workspace) || readFileSync(join(config.workspace, 'value.txt'), 'utf8') !== 'full application bytes\n') throw Error('Delete removed or changed the task checkout')
+  proof.checkoutKept = true
   if (readFileSync(join(config.repo, 'value.txt'), 'utf8') !== 'base\n') throw Error('Primary bytes changed')
   proof.primaryPreserved = true; await screenshot('04-delete-complete')
   writeFileSync(config.evidence, JSON.stringify(proof, null, 2))
