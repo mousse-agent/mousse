@@ -6,10 +6,21 @@
  * from the command and the command's own process handle, both while the command still runs. Nothing is killed after
  * that.
  *
+ * The command is known by its pid and when it was created, which must fall within {@link SPAWN_ANCHOR_SLACK_MS} of when
+ * Mousse started it (the anchor): a pid the system gave to another program since is never taken for it. Its
+ * descendants are the processes whose parent is in the tree (same pid and creation time) and that were created after
+ * that parent; Windows keeps a child's parent pid after the parent ends, so a program whose old parent had the
+ * command's pid is never taken in.
+ *
  * The processes seen at the stop are then only watched, each by its pid and the time it was created, until each has
  * exited, become a zombie, or its pid belongs to another process. Processes started later are not looked for. A look
  * that cannot list the processes in time counts them as still there, so the repository's lock is never let go on a
  * guess.
+ *
+ * On Windows one window is left: Git can end, and Windows give its pid to another program, between the check that the
+ * command still runs (and has the anchored creation time) and `taskkill` opening the pid, a few milliseconds later.
+ * Closing it needs a process handle held through the kill, or a Job Object, which Node offers neither of; a native
+ * helper could (follow-up).
  */
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 
@@ -19,7 +30,17 @@ export interface ProcessEntry {
   ppid: number
   pgid?: number
   started?: string
+  /** `started` in ms since the epoch, to compare creation times. */
+  startedMs?: number
   zombie?: boolean
+}
+
+/** How far from the moment Mousse started the command its creation time may be (`ps` reports it to the second). */
+export const SPAWN_ANCHOR_SLACK_MS = 2_000
+
+/** Windows file time (100 ns since 1601) in ms since the epoch. */
+function fileTimeMs(fileTime: number): number {
+  return fileTime / 10_000 - 11_644_473_600_000
 }
 
 /** Stand-ins for tests: the process list, the kill at the stop, or whether the tree is still there at all. */
@@ -52,10 +73,12 @@ function readTable(): Promise<ProcessEntry[] | undefined> {
         const fields = line.trim().split(/\s+/)
         if (windows) {
           const [pid, ppid, created] = fields.map(Number)
-          if (Number.isInteger(pid) && Number.isInteger(ppid)) entries.push({ pid: pid!, ppid: ppid!, ...(created ? { started: String(created) } : {}) })
+          if (Number.isInteger(pid) && Number.isInteger(ppid)) entries.push({ pid: pid!, ppid: ppid!, ...(created ? { started: String(created), startedMs: fileTimeMs(created) } : {}) })
         } else {
           const [pid, ppid, pgid] = fields.slice(0, 3).map(Number)
-          if (Number.isInteger(pid) && Number.isInteger(ppid) && Number.isInteger(pgid)) entries.push({ pid: pid!, ppid: ppid!, pgid: pgid!, zombie: (fields[3] ?? '').startsWith('Z'), started: fields.slice(4).join(' ') || undefined })
+          const started = fields.slice(4).join(' ') || undefined
+          const startedMs = started ? Date.parse(started) : Number.NaN
+          if (Number.isInteger(pid) && Number.isInteger(ppid) && Number.isInteger(pgid)) entries.push({ pid: pid!, ppid: ppid!, pgid: pgid!, zombie: (fields[3] ?? '').startsWith('Z'), ...(started ? { started } : {}), ...(Number.isFinite(startedMs) ? { startedMs } : {}) })
         }
       }
       done(entries.length ? entries : undefined)
@@ -91,9 +114,13 @@ export function readProcessStart(pid: number): Promise<number | null> {
  * The one kill, at the stop, while the command runs and so is certainly the process Mousse started: off Windows its
  * process group (it leads it); on Windows `taskkill /T` from it (not waited for) and its own handle.
  */
-function killAtStop(child: ChildProcess): void {
+function killAtStop(child: ChildProcess, rootConfirmed: boolean): void {
   const pid = child.pid
   if (!pid || child.exitCode !== null || child.signalCode !== null) return
+  // On Windows the pid `taskkill` opens must still be the command's: its creation time was just checked against the
+  // anchor (`rootConfirmed`), and Mousse's handle shows it running, right before `taskkill` starts. What is left is the
+  // window named at the top of this file.
+  if (process.platform === 'win32' && !rootConfirmed) return
   if (gitStopProbe.kill) { gitStopProbe.kill(pid, process.platform !== 'win32'); return }
   if (process.platform === 'win32') {
     // `taskkill /T` walks the tree from the command, so the command must still run while it does: its own handle is used
@@ -114,13 +141,19 @@ export class StoppedGitTree {
   /** False until a list was read; until then what the command started is not known, and it counts as still there. */
   private known = false
 
-  private constructor(readonly root: number) {
+  /** `spawnedAt`: when Mousse started the command, the anchor its creation time is checked against. */
+  private constructor(readonly root: number, private readonly spawnedAt: number) {
     this.tracked.set(root, undefined)
   }
 
-  /** The pids of the command's processes being watched. */
+  /** Whether `entry` is the command: its pid, created within {@link SPAWN_ANCHOR_SLACK_MS} of when Mousse started it. */
+  private isRoot(entry: ProcessEntry | undefined): entry is ProcessEntry {
+    return entry !== undefined && entry.pid === this.root && entry.startedMs !== undefined && Math.abs(entry.startedMs - this.spawnedAt) <= SPAWN_ANCHOR_SLACK_MS
+  }
+
+  /** The pids of the command's processes being watched (the command's own until its processes were listed). */
   pids(): number[] {
-    return [...this.tracked.keys()]
+    return this.known ? [...this.tracked.keys()] : [this.root]
   }
 
   /**
@@ -128,14 +161,15 @@ export class StoppedGitTree {
    * (a list after it would miss the children of a parent already gone); off Windows the group is killed at once and its
    * members are listed after. A list that cannot be read is tried again by the next look.
    */
-  static async stop(child: ChildProcess): Promise<StoppedGitTree> {
-    const tree = new StoppedGitTree(child.pid!)
+  static async stop(child: ChildProcess, spawnedAt: number): Promise<StoppedGitTree> {
+    const tree = new StoppedGitTree(child.pid!, spawnedAt)
     if (process.platform === 'win32') {
       const table = await readProcessEntries()
-      killAtStop(child)
+      // Killed only when the list shows the command, by its anchored creation time.
+      killAtStop(child, tree.isRoot(table?.find((entry) => entry.pid === child.pid)))
       if (table) tree.note(table)
     } else {
-      killAtStop(child)
+      killAtStop(child, true)
       const table = await readProcessEntries()
       if (table) tree.note(table)
     }
@@ -143,20 +177,35 @@ export class StoppedGitTree {
   }
 
   /**
-   * Notes, from the first list read, the command and what it had started then: its descendants by parent pid, and off
-   * Windows the members of its group. Only once: what is started later is never taken in.
+   * Notes, from the first list read, the command and what it had started then. The command counts only with its
+   * anchored creation time; without it, it is gone (another program may have its pid now), and so is anything found by
+   * it. A descendant counts when its parent is in the tree, as the same process in this list, and it was created after
+   * that parent; off Windows also a member of the command's group while the group is still the command's (no other
+   * process has the command's pid). Only once: what is started later is never taken in.
    */
   private note(table: ProcessEntry[]): void {
     if (this.known) return
     this.known = true
     const byPid = new Map(table.map((entry) => [entry.pid, entry]))
-    this.tracked.set(this.root, byPid.get(this.root)?.started)
+    this.tracked.clear()
+    const root = byPid.get(this.root)
+    if (!this.isRoot(root)) {
+      // The command is gone. Off Windows its group may still have members: its id goes to no other group while one lives,
+      // unless another process now has the command's pid and leads a group of that id.
+      if (process.platform === 'win32' || root) return
+    } else {
+      this.tracked.set(this.root, root.started)
+    }
+    const inTree = (entry: ProcessEntry): boolean => {
+      if (process.platform !== 'win32' && entry.pgid === this.root) return true
+      const parent = byPid.get(entry.ppid)
+      if (!parent || !this.tracked.has(parent.pid) || this.tracked.get(parent.pid) !== parent.started) return false
+      return parent.startedMs === undefined || entry.startedMs === undefined || entry.startedMs >= parent.startedMs
+    }
     for (let grew = true; grew;) {
       grew = false
       for (const entry of table) {
-        if (this.tracked.has(entry.pid)) continue
-        const inGroup = process.platform !== 'win32' && entry.pgid === this.root
-        if (!this.tracked.has(entry.ppid) && !inGroup) continue
+        if (this.tracked.has(entry.pid) || !inTree(entry)) continue
         this.tracked.set(entry.pid, entry.started)
         grew = true
       }
@@ -183,7 +232,7 @@ export class StoppedGitTree {
       this.note(table)
     }
     const byPid = new Map(table.map((entry) => [entry.pid, entry]))
-    return this.pids().some((pid) => {
+    return [...this.tracked.keys()].some((pid) => {
       const entry = byPid.get(pid)
       if (!entry || entry.zombie) return false
       const started = this.tracked.get(pid)

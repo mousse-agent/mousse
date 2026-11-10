@@ -184,14 +184,17 @@ describe('StoppedGitTree', () => {
   }
   /** The command as Mousse holds it: still running. */
   const command = (pid: number): ChildProcess => ({ pid, exitCode: null, signalCode: null, kill: () => true }) as unknown as ChildProcess
+  /** When Mousse started the command, and a process created `offsetMs` from then. */
+  const spawnedAt = Date.parse('2026-11-10T12:00:00.000Z')
+  const at = (pid: number, ppid: number, offsetMs: number, extra: Partial<ProcessEntry> = {}): ProcessEntry => ({ pid, ppid, pgid: 100, started: `t${spawnedAt + offsetMs}`, startedMs: spawnedAt + offsetMs, ...extra })
 
   it('kills once, at the stop, and only watches after: what is started later is neither watched nor killed', async () => {
     const killed = script(
-      [{ pid: 100, ppid: 1, pgid: 100, started: '1000' }, { pid: 101, ppid: 100, pgid: 100, started: '1001' }],
-      [{ pid: 101, ppid: 100, pgid: 100, started: '1001' }, { pid: 102, ppid: 101, pgid: 100, started: '1005' }],
-      [{ pid: 102, ppid: 101, pgid: 100, started: '1005' }]
+      [at(100, 1, 5), at(101, 100, 40)],
+      [at(101, 100, 40), at(102, 101, 900)],
+      [at(102, 101, 900)]
     )
-    const tree = await StoppedGitTree.stop(command(100))
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
     expect(killed).toEqual([100])
     expect(await tree.alive()).toBe(true)
     expect(tree.pids().sort()).toEqual([100, 101])
@@ -201,28 +204,55 @@ describe('StoppedGitTree', () => {
 
   it('kills nothing when the command already ended', async () => {
     const killed = script([])
-    await StoppedGitTree.stop({ pid: 100, exitCode: 0, signalCode: null, kill: () => true } as unknown as ChildProcess)
+    await StoppedGitTree.stop({ pid: 100, exitCode: 0, signalCode: null, kill: () => true } as unknown as ChildProcess, spawnedAt)
     expect(killed).toEqual([])
   })
 
   it("never takes a pid another program got for the command's", async () => {
     script(
-      [{ pid: 100, ppid: 1, started: '1000' }, { pid: 101, ppid: 100, started: '1001' }],
-      [{ pid: 100, ppid: 7, started: '9000' }, { pid: 101, ppid: 7, started: '9001' }, { pid: 103, ppid: 101, started: '9002' }]
+      [at(100, 1, 5), at(101, 100, 40)],
+      [at(100, 7, 3_600_000), at(101, 7, 3_600_001), at(103, 101, 3_600_002)]
     )
-    const tree = await StoppedGitTree.stop(command(100))
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
     expect(await tree.alive()).toBe(false)
   })
 
+  it('never takes a later process for the command when the list at the stop could not be read', async () => {
+    // The list at the stop fails; by the next one the command ended and another program got its pid, and started a child.
+    script(undefined, undefined, [at(100, 7, 3_600_000, { pgid: 100 }), at(104, 100, 3_600_001, { pgid: 100 })])
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
+    expect(await tree.alive()).toBe(true)
+    expect(await tree.alive()).toBe(false)
+    expect(tree.pids()).toEqual([])
+  })
+
+  it('never takes in a process created before the command whose old parent had the command\'s pid', async () => {
+    // Windows keeps a child's parent pid after the parent ends: this program's parent, long gone, had the pid git has now.
+    script(
+      [at(100, 1, 5), at(200, 100, -3_600_000, { pgid: 200 })],
+      [at(200, 100, -3_600_000, { pgid: 200 })]
+    )
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
+    expect(tree.pids()).toEqual([100])
+    expect(await tree.alive()).toBe(false)
+  })
+
+  it('on Windows, kills nothing when the pid at the stop is not the command by its creation time', async () => {
+    const killed = script([at(100, 7, 3_600_000)])
+    await StoppedGitTree.stop(command(100), spawnedAt)
+    // Off Windows the command's own group is killed before the list is read (its id goes to no other group while it lives).
+    expect(killed).toEqual(process.platform === 'win32' ? [] : [100])
+  })
+
   it('counts a zombie as exited', async () => {
-    script([{ pid: 100, ppid: 1, started: '1000' }], [{ pid: 100, ppid: 1, started: '1000', zombie: true }])
-    const tree = await StoppedGitTree.stop(command(100))
+    script([at(100, 1, 5)], [at(100, 1, 5, { zombie: true })])
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
     expect(await tree.alive()).toBe(false)
   })
 
   it('counts the command as still there while its processes cannot be listed', async () => {
     script(undefined, undefined, [])
-    const tree = await StoppedGitTree.stop(command(100))
+    const tree = await StoppedGitTree.stop(command(100), spawnedAt)
     expect(await tree.alive()).toBe(true)
     // The first list read stands for the one at the stop: nothing of the command is in it.
     expect(await tree.alive()).toBe(false)

@@ -136,6 +136,8 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
     const startedAt = Date.now()
     const indexLock = signal && options.env.GIT_INDEX_FILE ? `${resolve(options.cwd, options.env.GIT_INDEX_FILE)}.lock` : undefined
     const lockedBefore = indexLock !== undefined && existsSync(indexLock)
+    // When the command was started: its creation time must match this, so a pid reused later is never taken for it.
+    const spawnedAt = Date.now()
     const child = spawn('git', argv, { cwd: options.cwd, env: options.env, windowsHide: true, detached: ownGroup, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     const out: Buffer[] = []
     const err: Buffer[] = []
@@ -177,7 +179,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       // run ends at this deadline whatever the kill or a look at the process list is still doing.
       const deadline = Date.now() + GIT_STOP_TIMING.exitWaitMs
       // Kills once and notes what the command had; then only watches. Never rejects.
-      const stopping = child.pid ? StoppedGitTree.stop(child).then(async (tree) => ({ tree, gone: await goneBy(tree, deadline) })) : Promise.resolve(undefined)
+      const stopping = child.pid ? StoppedGitTree.stop(child, spawnedAt).then(async (tree) => ({ tree, gone: await goneBy(tree, deadline) })) : Promise.resolve(undefined)
       const atDeadline = sleep(GIT_STOP_TIMING.exitWaitMs).then(() => 'deadline' as const)
       void (async () => {
         const first = await Promise.race([stopping, atDeadline])
