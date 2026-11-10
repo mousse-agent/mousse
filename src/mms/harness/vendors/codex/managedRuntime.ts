@@ -14,6 +14,7 @@ import { reportedUsageWindows, snapshotPlan, snapshotResets } from './rateLimits
 import { chatgptTokenBroker, type ChatGptTokenBroker } from './broker'
 import { CodexInstallation } from './installation'
 import { CODEX_MANAGED_VERSION } from './release'
+import { codexOneShotRunsOn } from './oneShot'
 import { telemetryOf } from '../../telemetry'
 
 /**
@@ -150,7 +151,13 @@ export async function userCodexLimits(userCodex: UserCodexLimits | undefined, em
 
 function modelOption(model: ChatGptModel): LlmModelOption {
   const efforts = model.capabilities.efforts
-  return { id: model.id, label: model.label, ...(efforts?.length ? { efforts: [...efforts] } : {}) }
+  return {
+    id: model.id,
+    label: model.label,
+    ...(efforts?.length ? { efforts: [...efforts] } : {}),
+    // Its subagent tools cannot be turned off for a single request: never offered for titles.
+    ...(codexOneShotRunsOn(model.multiAgentVersion) ? {} : { oneShot: false as const })
+  }
 }
 
 /** The installs of one installation home, shared by its profiles in this process (leases count here). */

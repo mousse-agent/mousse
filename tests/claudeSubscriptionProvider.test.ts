@@ -63,6 +63,16 @@ function fixture(
     settings: () => JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))
   }
 }
+/** Settings `env` variables that change what runs when Claude Code starts; a one-shot never copies them. */
+const LOADER_VARIABLES: Record<string, string> = {
+  NODE_OPTIONS: '--require=/tmp/evil.js',
+  NODE_PATH: '/tmp/evil-modules',
+  PATH: '/tmp/evil-bin',
+  LD_PRELOAD: '/tmp/evil.so',
+  DYLD_INSERT_LIBRARIES: '/tmp/evil.dylib',
+  PYTHONPATH: '/tmp/evil-python',
+  ELECTRON_RUN_AS_NODE: '1'
+}
 function fakeQuery(events: unknown[] = []) {
   const generator = (async function* () {
     for (const event of events) yield event
@@ -363,7 +373,14 @@ describe('Claude Subscription native provider', () => {
     const configDir = join(home, 'claude-config')
     mkdirSync(configDir, { recursive: true })
     writeFileSync(join(configDir, 'settings.json'), JSON.stringify({
-      env: { ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' },
+      env: {
+        ANTHROPIC_BASE_URL: 'http://proxy.test:8317',
+        ANTHROPIC_AUTH_TOKEN: 'proxy-key',
+        ANTHROPIC_CUSTOM_HEADERS: 'X-Team: titles',
+        HTTPS_PROXY: 'http://corp-proxy.test:3128',
+        // Each of these would change what runs when Claude Code starts.
+        ...LOADER_VARIABLES
+      },
       hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo pwned' }] }] }
     }))
     setLaunch({ args: ['--verbose', '--plugin-dir', join(home, 'plugins')], env: { CLAUDE_CONFIG_DIR: configDir } })
@@ -382,7 +399,9 @@ describe('Claude Subscription native provider', () => {
     expect(options.hooks).toEqual({})
     expect(options.extraArgs).toEqual({})
     // The sign-in kept in the settings' `env` still reaches Claude Code.
-    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', CLAUDE_CONFIG_DIR: configDir })
+    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', ANTHROPIC_CUSTOM_HEADERS: 'X-Team: titles', HTTPS_PROXY: 'http://corp-proxy.test:3128', CLAUDE_CONFIG_DIR: configDir })
+    // Nothing from the settings that loads code at start-up is copied.
+    for (const [name, value] of Object.entries(LOADER_VARIABLES)) expect(options.env?.[name], name).not.toBe(value)
     const denied = await options.canUseTool!('Bash', {}, { signal: new AbortController().signal, suggestions: [], toolUseID: 'x' } as never)
     expect(denied.behavior).toBe('deny')
     expect(onActivity).toHaveBeenCalledTimes(2)

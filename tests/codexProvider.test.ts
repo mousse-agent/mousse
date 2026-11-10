@@ -14,11 +14,12 @@ import {
   CodexProviderService,
   CodexTurnFailure,
   codexEnvironment,
+  codexModelOption,
   type CodexServiceDependencies,
   type CodexServiceOptions
 } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
-import { CODEX_ONE_SHOT_FEATURES_OFF } from '../src/mms/harness/vendors/codex/oneShot'
+import { CODEX_ONE_SHOT_FEATURES_OFF, codexOneShotRunsOn } from '../src/mms/harness/vendors/codex/oneShot'
 
 type Message = { id?: number | string; method?: string; params?: unknown }
 type Reply = { result?: unknown; error?: { code: number; message: string } }
@@ -240,10 +241,10 @@ describe('CodexProviderService', () => {
       const cursor = (message.params as { cursor?: string }).cursor
       return {
         result: cursor
-          ? { data: [{ id: 'gpt-b', model: 'gpt-b', displayName: 'GPT B', description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false }], nextCursor: null }
+          ? { data: [{ id: 'gpt-b', model: 'gpt-b', displayName: 'GPT B', description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false, multiAgentVersion: 'v2' }], nextCursor: null }
           : {
               data: [
-                { id: 'gpt-a', model: 'gpt-a', displayName: 'GPT A', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fast responses' }, { reasoningEffort: 'ultra', description: 'Maximum reasoning with automatic task delegation' }, { reasoningEffort: 'turbo-new', description: '' }], defaultReasoningEffort: 'low', isDefault: true },
+                { id: 'gpt-a', model: 'gpt-a', displayName: 'GPT A', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fast responses' }, { reasoningEffort: 'ultra', description: 'Maximum reasoning with automatic task delegation' }, { reasoningEffort: 'turbo-new', description: '' }], defaultReasoningEffort: 'low', isDefault: true, multiAgentVersion: null },
                 { id: 'gpt-hidden', model: 'gpt-hidden', displayName: 'Hidden', description: '', hidden: true, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false }
               ],
               nextCursor: 'page-2'
@@ -253,10 +254,11 @@ describe('CodexProviderService', () => {
     const service = create(server, { models: [{ id: 'stale', label: 'Stale' }] })
     await service.status()
     const models = await service.refreshModels()
-    // Every level Codex reports, its extra `ultra` level included, with its descriptions and default.
+    // Every level Codex reports, its extra `ultra` level included, with its descriptions and default. A
+    // model with `v2` subagents runs no one-shot (titles).
     expect(models).toEqual([
       { id: 'gpt-a', label: 'GPT A', efforts: ['low', 'ultra'], thinkingOff: false, defaultEffort: 'low', effortDescriptions: { low: 'Fast responses', ultra: 'Maximum reasoning with automatic task delegation' } },
-      { id: 'gpt-b', label: 'GPT B' }
+      { id: 'gpt-b', label: 'GPT B', oneShot: false }
     ])
     expect(service.llmProvider()).toEqual({ id: 'codex', label: 'Codex', models })
 
@@ -734,10 +736,11 @@ describe('CodexProviderService options (managed Codex)', () => {
      * A server whose turn sends `events` of the turn's thread, then the turn's end (none when `end` is null).
      * `config/read` answers with `mcp` (an error when null).
      */
-    function oneShotServer(events: Event[], end: Turn | null = { status: 'completed' }, mcp: Record<string, unknown> | null = { github: {}, mousse: {}, 'mousse-relay': {}, off: { enabled: false } }) {
+    function oneShotServer(events: Event[], end: Turn | null = { status: 'completed' }, mcp: Record<string, unknown> | null = { github: {}, mousse: {}, 'mousse-relay': {}, off: { enabled: false } }, models: Array<Record<string, unknown>> = LISTED) {
       const server = scriptedServer((message) => {
         const method = message.method!
         if (method === 'account/read') return chatgpt
+        if (method === 'model/list') return { result: { data: models, nextCursor: null } }
         if (method === 'config/read') return mcp ? { result: { config: { mcp_servers: mcp }, layers: [] } } : { error: { code: -32603, message: 'config unreadable' } }
         if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
         if (method === 'turn/start') {
@@ -752,6 +755,12 @@ describe('CodexProviderService options (managed Codex)', () => {
       })
       return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
     }
+    /** `model/list` entries: `multiAgentVersion` null (no subagent tools) for gpt-x. */
+    const listed = (id: string, multiAgentVersion?: string | null, isDefault = false) => ({
+      id, model: id, displayName: id.toUpperCase(), description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault,
+      ...(multiAgentVersion === undefined ? {} : { multiAgentVersion })
+    })
+    const LISTED = [listed('gpt-x', null), listed('gpt-v1', 'v1', true), listed('gpt-v2', 'v2'), listed('gpt-old')]
     const once = (service: CodexProviderService, signal = new AbortController().signal, onActivity: () => void = () => {}) =>
       service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity }, signal)
     /** The `abort` listeners on the service's app-server connection. */
@@ -805,6 +814,32 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(unnamed.requests('thread/start')).toEqual([])
     })
 
+    it('runs only on a model whose subagent tools a one-shot turns off, as this Codex lists it', async () => {
+      const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }])
+      const service = create(server)
+      const run = (model: string) => service.oneShot({ model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+      // `v2` subagents start a child before Codex reports the call; an unlisted version counts as `v2`.
+      await expect(run('gpt-v2')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V2 can start subagents') })
+      await expect(run('gpt-old')).rejects.toMatchObject({ code: 'unsupported' })
+      await expect(run('gpt-missing')).rejects.toMatchObject({ code: 'unsupported' })
+      await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', task: 'commit_message', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('cannot write commit messages')
+      expect(server.requests('thread/start')).toEqual([])
+      // `model/list` is asked with hidden models included.
+      expect(server.requests('model/list').at(-1)!.params).toMatchObject({ includeHidden: true })
+      expect(await run('gpt-v1')).toEqual({ text: 'Title' })
+      // `default` is the model Codex lists as its default (gpt-v1 here).
+      expect(await run('default')).toEqual({ text: 'Title' })
+      expect(server.requests('thread/start')).toHaveLength(2)
+    })
+
+    it('marks listed models whose subagents cannot be turned off as unable to run one-shots', () => {
+      expect(codexModelOption(listed('gpt-x', null) as never).oneShot).toBeUndefined()
+      expect(codexModelOption(listed('gpt-v1', 'v1') as never).oneShot).toBeUndefined()
+      expect(codexModelOption(listed('gpt-v2', 'v2') as never).oneShot).toBe(false)
+      expect(codexModelOption(listed('gpt-old') as never).oneShot).toBe(false)
+      expect([null, 'v1', 'v2', 'v3', undefined].map(codexOneShotRunsOn)).toEqual([true, true, false, false, false])
+    })
+
     it('ends as refused and interrupts the turn when Codex starts any tool', async () => {
       for (const type of ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'collabAgentToolCall', 'dynamicToolCall']) {
         const server = oneShotServer([{ method: 'item/started', params: { item: { type, id: 'tool-1' } } }], null)
@@ -833,6 +868,7 @@ describe('CodexProviderService options (managed Codex)', () => {
       const server = scriptedServer((message) => {
         const method = message.method!
         if (method === 'account/read') return chatgpt
+        if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
         if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
         if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
         if (method === 'turn/start') {

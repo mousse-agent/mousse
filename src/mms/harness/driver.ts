@@ -189,6 +189,13 @@ export interface OneShotSpec {
 /** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
 export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
 
+/** What each one-shot task does, for a refusal that names it ("… cannot name chats"). */
+export const ONE_SHOT_TASK_TEXT: Readonly<Record<OneShotTask, string>> = {
+  title: 'name chats',
+  pull_request: 'draft pull requests',
+  commit_message: 'write commit messages'
+}
+
 /** What `/compact` asks a runtime: the thread, the history its native session must hold, and an optional focus. */
 export interface NativeCompactRequest {
   threadId: string

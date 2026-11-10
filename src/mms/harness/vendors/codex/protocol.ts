@@ -61,6 +61,8 @@ export interface CodexModel {
   defaultReasoningEffort: string
   inputModalities?: string[]
   isDefault: boolean
+  /** The model's subagent tools: null for none, `v1` or `v2` (`codexOneShotRunsOn`). Absent from older Codex. */
+  multiAgentVersion?: string | null
 }
 export interface ModelListResponse {
   data: CodexModel[]

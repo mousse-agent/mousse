@@ -50,7 +50,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveEnvironment, claudeEffectiveVariable } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -1062,15 +1062,16 @@ export class ClaudeSubscriptionProviderService {
    * plugin, MCP server, permission rule or CLAUDE.md of the user's or a project's applies; hooks are
    * also switched off in the flag settings, with none passed in code. None of the user's launch
    * arguments, no tools, one turn, no saved session, and any tool request is denied. The owner's entry
-   * keeps its sign-in: the `env` of the user's and the managed settings (where a proxy's address and
-   * token often live) is applied to its environment, as for a bot turn. A locked entry runs in its own
+   * keeps its sign-in: the sign-in and proxy variables of the user's and the managed settings' `env`
+   * (where a proxy's address and token often live) are applied to its environment, and nothing else
+   * from it, so a settings `NODE_OPTIONS` or `PATH` never runs code at start-up (`claudeSignInEnvironment`). A locked entry runs in its own
    * folder and environment, as its model discovery does. Hooks an organisation's managed settings
    * enforce still run: Claude Code gives no caller a switch over those.
    */
   private oneShotOptions(controller: AbortController): Options {
     const base = this.dependencies.lockedEnv
       ? this.housekeepingOptions(this.standaloneWorkspace('one-shot'), controller)
-      : this.options(this.standaloneWorkspace('one-shot'), controller, this.finalEnv(claudeEffectiveEnvironment(this.environment())))
+      : this.options(this.standaloneWorkspace('one-shot'), controller, this.finalEnv(claudeSignInEnvironment(this.environment())))
     return {
       ...base,
       settingSources: [],

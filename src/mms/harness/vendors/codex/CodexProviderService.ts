@@ -90,11 +90,12 @@ import {
 } from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
-import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig } from './oneShot'
+import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy } from '../../adapter'
-import type { OneShotSpec } from '../../driver'
+import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
+import { harnessAppError } from '../../../../shared/harness/types'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
 
 export const CODEX_PROVIDER_ID = 'codex'
@@ -160,7 +161,9 @@ export function codexModelOption(model: CodexModel): LlmModelOption {
     label: model.displayName || model.id,
     ...(efforts.length ? { efforts, thinkingOff: false as const } : {}),
     ...(efforts.length && efforts.includes(model.defaultReasoningEffort) ? { defaultEffort: model.defaultReasoningEffort } : {}),
-    ...(Object.keys(descriptions).length ? { effortDescriptions: descriptions } : {})
+    ...(Object.keys(descriptions).length ? { effortDescriptions: descriptions } : {}),
+    // Its subagent tools cannot be turned off for a single request: never offered for titles.
+    ...(codexOneShotRunsOn(model.multiAgentVersion) ? {} : { oneShot: false as const })
   }
 }
 
@@ -1697,6 +1700,10 @@ export class CodexProviderService {
       if (!locked)
         throw new AppError({ code: 'policy_unenforceable', message: 'Mousse could not read which MCP servers Codex has on, so it did not send this request.', errorInfo: { category: 'unavailable', retryable: false } })
       const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      // Checked with this Codex, not a saved listing: a model whose subagents cannot be turned off never runs one.
+      const listed = await abortable(this.listedModel(conn, baseId), signal)
+      if (!listed || !codexOneShotRunsOn(listed.multiAgentVersion))
+        throw harnessAppError({ code: 'unsupported', message: `${listed?.displayName || baseId} can start subagents that Mousse cannot turn off for a single request, so it cannot ${ONE_SHOT_TASK_TEXT[spec.task ?? 'title']}. Choose another title model in Settings → Agents, or Automatic.` })
       const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
       const model = baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}
       const started = pinnedProvider(this.modelProvider, await conn.request('thread/start', {
@@ -1772,6 +1779,22 @@ export class CodexProviderService {
       this.activeThreads.delete(key)
       this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
     }
+  }
+
+  /**
+   * `model` as this Codex lists it (`model/list`, hidden models included), or its default model for
+   * `default`. Undefined when Codex does not list it.
+   */
+  private async listedModel(conn: CodexConnection, model: string): Promise<CodexModel | undefined> {
+    let cursor: string | null = null
+    for (let page = 0; page < 10; page += 1) {
+      const response: ModelListResponse = await conn.request('model/list', { includeHidden: true, ...(cursor ? { cursor } : {}) })
+      const found = response.data.find((entry) => (model === CODEX_DEFAULT_MODEL_ID ? entry.isDefault : entry.id === model || entry.model === model))
+      if (found) return found
+      cursor = response.nextCursor
+      if (!cursor) return undefined
+    }
+    return undefined
   }
 
   /**

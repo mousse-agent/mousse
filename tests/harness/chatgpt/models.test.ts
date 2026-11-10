@@ -32,6 +32,23 @@ describe('ChatGPT plan models', () => {
     ])
   })
 
+  it('keeps each model\'s subagent version, null for none and absent when the entry does not say', () => {
+    const models = parseChatGptModels({
+      models: [
+        { slug: 'gpt-none', visibility: 'list', multi_agent_version: null },
+        { slug: 'gpt-v1', visibility: 'list', multi_agent_version: 'v1' },
+        { slug: 'gpt-v2', visibility: 'list', multi_agent_version: 'v2' },
+        { slug: 'gpt-unsaid', visibility: 'list' }
+      ]
+    })
+    expect(models.map((model) => [model.id, 'multiAgentVersion' in model, model.multiAgentVersion])).toEqual([
+      ['gpt-none', true, null],
+      ['gpt-v1', true, 'v1'],
+      ['gpt-v2', true, 'v2'],
+      ['gpt-unsaid', false, undefined]
+    ])
+  })
+
   it('a body without models[] is an error', () => {
     expect(() => parseChatGptModels({ data: [] })).toThrow(expect.objectContaining({ failure: 'invalid_response' }))
   })
