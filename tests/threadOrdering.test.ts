@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import { tmpdir } from 'os'
@@ -438,6 +438,89 @@ describe('persisted sidebar ordering', () => {
         writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(readFileSync(metaPath, 'utf8')), name: 'Half-finished writer' }))
         a.createThread('Next', project.id)
         expect(a.listThreads(project.id).find((entry) => entry.id === thread.id)?.name).toBe('Half-finished writer')
+      })
+    })
+  })
+
+  describe('the list lock is the innermost lock, and a write that cannot have it changes nothing', () => {
+    /** A lock file as another live process leaves it while it holds the lock (this test runner's parent process). */
+    const holdAsAnotherProcess = (path: string): void => {
+      mkdirSync(dirname(path), { recursive: true })
+      const now = new Date().toISOString()
+      writeFileSync(path, JSON.stringify({ pid: process.ppid, processInstanceId: 'another-process', token: randomUUID(), acquiredAt: now, heartbeatAt: now }))
+    }
+    const gatePath = (store: ThreadDataStore, taskId: string) => join((store.lifecycleStore as unknown as { root: string }).root, 'gates', taskId, 'gate.lock')
+    const listLockPath = (store: ThreadDataStore, projectId: string) => (store as unknown as { listLockPath: (id: string) => string }).listLockPath(projectId)
+    const revisionOf = (store: ThreadDataStore, projectId: string) => readFileSync((store as unknown as { listRevisionPath: (id: string) => string }).listRevisionPath(projectId), 'utf8')
+    const orderOnDisk = (store: ThreadDataStore, id: string) => JSON.parse(readFileSync(join(store.getThreadDir(id), 'meta.json'), 'utf8')).order as number
+    /** Runs `work` with the clock jumping a second per read, so the list lock's wait runs out at once. */
+    const pastTheWait = <T>(work: () => T): T => {
+      let now = Date.now()
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => (now += 1_000))
+      try { return work() } finally { clock.mockRestore() }
+    }
+
+    function store(root: string) {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      return { threads, project: projects.openProject(join(root, 'proj')) }
+    }
+
+    // Review repro: a lifecycle gate busy in another process, met under the list lock, stopped a reorder part way.
+    it("changes no row of a reorder when one row's lifecycle gate is busy, and leaves the revision done", () => {
+      withTemporaryMousseHome((root) => {
+        const { threads, project } = store(root)
+        const made = ['One', 'Two', 'Three'].map((name) => threads.createThread(name, project.id))
+        const before = made.map((thread) => orderOnDisk(threads, thread.id))
+        // A first read from disk backfills unstarted threads (`ensureStartedAt`); the revision is taken after it.
+        threads.listThreads(project.id)
+        const revision = revisionOf(threads, project.id)
+        const busy = gatePath(threads, made[0]!.id)
+        holdAsAnotherProcess(busy)
+        // Reversed: the busy row is written last.
+        expect(() => threads.reorderThreads(project.id, made.map((thread) => thread.id).reverse())).toThrow(/busy/)
+        expect(made.map((thread) => orderOnDisk(threads, thread.id))).toEqual(before)
+        expect(revisionOf(threads, project.id)).toBe(revision)
+        // A single write refused the same way leaves the revision done too, so lists stay reusable.
+        expect(() => threads.updateThreadMeta(made[0]!.id, { name: 'Renamed' })).toThrow(/busy/)
+        expect(revisionOf(threads, project.id)).toBe(revision)
+        rmSync(busy)
+        threads.reorderThreads(project.id, made.map((thread) => thread.id).reverse())
+        expect(made.map((thread) => orderOnDisk(threads, thread.id))).toEqual([2, 1, 0])
+      })
+    })
+
+    // Review repro: a create that timed out on the list lock left an active lifecycle record and an empty folder.
+    it('a create that cannot have the list lock in time makes nothing, and says the thread list is busy', () => {
+      withTemporaryMousseHome((root) => {
+        const { threads, project } = store(root)
+        threads.createThread('Existing', project.id)
+        const folders = readdirSync(dirname(threads.getThreadDir(threads.listThreads(project.id)[0]!.id)))
+        holdAsAnotherProcess(listLockPath(threads, project.id))
+        const id = randomUUID()
+        expect(() => pastTheWait(() => threads.createThread('New', project.id, undefined, { id }))).toThrow('Thread list busy, try again.')
+        expect(threads.lifecycleStore.get(id)).toBeUndefined()
+        expect(readdirSync(dirname(threads.getThreadDir(threads.listThreads(project.id)[0]!.id)))).toEqual(folders)
+        rmSync(listLockPath(threads, project.id))
+        expect(threads.createThread('New', project.id, undefined, { id }).id).toBe(id)
+      })
+    })
+
+    // Review repro: a discard that timed out on the list lock had already forgotten the lifecycle record.
+    it('a discard that cannot have the list lock in time leaves the thread as it was', () => {
+      withTemporaryMousseHome((root) => {
+        const { threads, project } = store(root)
+        const unused = threads.createThread('Unused', project.id)
+        const folder = threads.getThreadDir(unused.id)
+        holdAsAnotherProcess(listLockPath(threads, project.id))
+        expect(() => pastTheWait(() => threads.discardUnusedThread(unused.id))).toThrow('Thread list busy, try again.')
+        expect(threads.lifecycleStore.get(unused.id)?.state).toBe('active')
+        expect(existsSync(folder)).toBe(true)
+        rmSync(listLockPath(threads, project.id))
+        threads.discardUnusedThread(unused.id)
+        expect(threads.lifecycleStore.get(unused.id)).toBeUndefined()
+        expect(existsSync(folder)).toBe(false)
       })
     })
   })
