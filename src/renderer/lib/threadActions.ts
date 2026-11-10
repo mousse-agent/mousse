@@ -22,7 +22,17 @@ export async function selectThread(threadId: string): Promise<void> {
   // One store update: highlight + restore cached transcript (if any) while
   // the daemon snapshot loads. Main also broadcasts thread:selected early.
   store.switchToThread(threadId)
-  await window.mousse.threads.select(threadId)
+  await selectOrSettle(threadId)
+}
+
+/** Asks main to select a thread the store already switched to. A failed select sends no view, so the chat stops waiting for one. */
+export async function selectOrSettle(threadId: string): Promise<void> {
+  try {
+    await window.mousse.threads.select(threadId)
+  } catch (error) {
+    useAppStore.getState().settleTranscript(threadId)
+    throw error
+  }
 }
 
 /** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. A private draft is never reused for it. */

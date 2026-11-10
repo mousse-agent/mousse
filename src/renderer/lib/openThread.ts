@@ -1,5 +1,6 @@
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
+import { selectOrSettle } from './threadActions'
 
 /**
  * Opens a thread the way a sidebar click does: leaves any other view, asks to discard unsaved
@@ -13,5 +14,5 @@ export async function openThread(threadId: string): Promise<void> {
   if (state.activeThreadId === threadId) return
   // One store update shows the thread at once; the daemon snapshot follows.
   state.switchToThread(threadId)
-  await window.mousse.threads.select(threadId)
+  await selectOrSettle(threadId)
 }
