@@ -86,6 +86,7 @@ import {
 } from "./virtual/turn-window";
 import { useTurnWindow } from "./virtual/use-turn-window";
 import { TurnIdContext } from "./turn-context";
+import { countRender } from "./render-counts";
 import { FindInThreadBar } from "./find/FindInThreadBar";
 import { findBarHost, placeFindBar } from "./find/find-bar-host";
 import { useThreadFind } from "./find/use-thread-find";
@@ -675,15 +676,24 @@ function MessageToolbar({
  * user wrote: they join the reply in progress, in place, with only their
  * structured notice kept (their text is what the model reads).
  */
-function groupMessagesIntoTurns(messages: UIMessage[]) {
-  const turns: { userMsg?: UIMessage; assistantMsgs: UIMessage[] }[] = [];
-  let current: { userMsg?: UIMessage; assistantMsgs: UIMessage[] } | null =
-    null;
+type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[] };
+
+/** The empty-parts copy of a subagent-results message that joins a reply, one per message. */
+const noticeCopies = new WeakMap<UIMessage, UIMessage>();
+
+function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
+  const turns: Turn[] = [];
+  let current: Turn | null = null;
 
   for (const msg of messages) {
     if (msg.role === "user") {
       if (current && readSubagentNotice(msg)) {
-        current.assistantMsgs.push({ ...msg, parts: [] });
+        let copy = noticeCopies.get(msg);
+        if (!copy) {
+          copy = { ...msg, parts: [] };
+          noticeCopies.set(msg, copy);
+        }
+        current.assistantMsgs.push(copy);
         continue;
       }
       if (current) turns.push(current);
@@ -695,6 +705,30 @@ function groupMessagesIntoTurns(messages: UIMessage[]) {
   }
   if (current) turns.push(current);
   return turns;
+}
+
+function sameTurn(a: Turn, b: Turn): boolean {
+  if (a.userMsg !== b.userMsg) return false;
+  if (a.assistantMsgs.length !== b.assistantMsgs.length) return false;
+  return a.assistantMsgs.every((message, index) => message === b.assistantMsgs[index]);
+}
+
+/**
+ * `next` with every turn whose messages are the same objects as in `previous` replaced by the
+ * previous turn, so memoised rows of unchanged turns skip rendering. Turns are matched by position:
+ * a thread only grows at the end, and a page of earlier messages shifts every turn (a cache miss).
+ */
+function reuseTurns(previous: Turn[], next: Turn[]): Turn[] {
+  let reused = 0;
+  const merged = next.map((turn, index) => {
+    const before = previous[index];
+    if (before && sameTurn(before, turn)) {
+      reused += 1;
+      return before;
+    }
+    return turn;
+  });
+  return reused === next.length && next.length === previous.length ? previous : merged;
 }
 
 type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string };
@@ -736,8 +770,36 @@ export function promptRailLeft({ textLeft, scrollHeight, clientHeight }: {
  * re-render the message list — that was the expand/collapse stutter whenever
  * the markers were visible. Marker updates only re-render this tiny overlay.
  */
+/** A turn's tick tooltip text, kept per turn object: only a turn whose messages changed is read again. */
+const markerPreviews = new WeakMap<Turn, { preview: string; responsePreview: string }>();
+
+function markerPreview(turn: Turn): { preview: string; responsePreview: string } {
+  let cached = markerPreviews.get(turn);
+  if (!cached) {
+    // The tooltip shows plain text: Markdown syntax in the prompt or the reply is dropped.
+    cached = {
+      preview: cappedWords(markdownPreviewText(getTextFromParts(turn.userMsg?.parts ?? [], "\n")), 10),
+      responsePreview: cappedWords(
+        markdownPreviewText(
+          turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], "\n\n")).join("\n\n"),
+        ),
+        24,
+      ),
+    };
+    markerPreviews.set(turn, cached);
+  }
+  return cached;
+}
+
+/**
+ * While the transcript grows (a streamed reply, an image loading), ticks are placed again at most
+ * this often. Adding or removing a prompt places them at once.
+ */
+const MARKER_GROWTH_MS = 500;
+
 export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   messages,
+  turns: givenTurns,
   containerRef,
   contentRef,
   visible,
@@ -748,7 +810,9 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   layout,
   onFind,
 }: {
-  messages: UIMessage[];
+  /** The transcript; `turns` instead when the list already grouped it. */
+  messages?: UIMessage[];
+  turns?: Turn[];
   containerRef: React.RefObject<HTMLDivElement | null>;
   contentRef: React.RefObject<HTMLDivElement | null>;
   visible: boolean;
@@ -768,6 +832,21 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   const markerPositionsRef = useRef<PromptMarker[]>([]);
   const markerOffsetsRef = useRef<number[]>([]);
   const rafRef = useRef(0);
+  const growthTimerRef = useRef(0);
+  const turns = useMemo(
+    () => givenTurns ?? groupMessagesIntoTurns(normalizeMessages(messages ?? [])),
+    [givenTurns, messages],
+  );
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
+  // The prompts the ticks stand for. A streamed delta leaves it unchanged, so it does not place the ticks again.
+  const promptKey = useMemo(
+    () =>
+      turns
+        .map((turn) => (turn.userMsg && !readSubagentNotice(turn.userMsg) ? turn.userMsg.id : ""))
+        .join("\n"),
+    [turns],
+  );
 
   const updateActiveMarker = useCallback(() => {
     const container = containerRef.current;
@@ -794,7 +873,13 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
 
   const updateMarkers = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (growthTimerRef.current) {
+      window.clearTimeout(growthTimerRef.current);
+      growthTimerRef.current = 0;
+    }
     rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      countRender("updateMarkers");
       const container = containerRef.current;
       const content = contentRef.current;
       if (!container || !content) return;
@@ -806,7 +891,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           : (id: string) => id.replace(/["\\]/g, "\\$&");
       const next: PromptMarker[] = [];
       const containerRect = container.getBoundingClientRect();
-      for (const turn of groupMessagesIntoTurns(normalizeMessages(messages))) {
+      for (const turn of turnsRef.current) {
         const userMsg = turn.userMsg;
         // A message that delivers subagent results is not a prompt the user wrote.
         if (!userMsg || readSubagentNotice(userMsg)) continue;
@@ -819,14 +904,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           : target instanceof HTMLElement
             ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
             : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
-        // The tooltip shows plain text: Markdown syntax in the prompt or the reply is dropped.
-        const preview = cappedWords(markdownPreviewText(getTextFromParts(userMsg.parts ?? [], "\n")), 10);
-        const responsePreview = cappedWords(
-          markdownPreviewText(
-            turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], "\n\n")).join("\n\n"),
-          ),
-          24,
-        );
+        const { preview, responsePreview } = markerPreview(turn);
         next.push({
           id: userMsg.id,
           offset: y,
@@ -858,7 +936,17 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         return next;
       });
     });
-  }, [messages, containerRef, contentRef, updateActiveMarker, layout]);
+    // `promptKey` stands for the turns, which are read through `turnsRef`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [promptKey, containerRef, contentRef, updateActiveMarker, layout]);
+  // Growth of the transcript places the ticks again at most every MARKER_GROWTH_MS.
+  const updateMarkersSoon = useCallback(() => {
+    if (growthTimerRef.current || rafRef.current) return;
+    growthTimerRef.current = window.setTimeout(() => {
+      growthTimerRef.current = 0;
+      updateMarkers();
+    }, MARKER_GROWTH_MS);
+  }, [updateMarkers]);
   const visiblePromptIds = useVisiblePromptIds(containerRef, contentRef, updateMarkers);
 
   // The layout moves without the DOM saying so: rows measured, window shifted.
@@ -880,16 +968,22 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
     const container = containerRef.current;
     const content = contentRef.current;
     if (!container || !content) return;
-    const observer = new ResizeObserver(() => updateMarkers());
-    observer.observe(content);
-    observer.observe(container);
+    // The content grows with every streamed delta, which moves no tick above the reply.
+    const contentObserver = new ResizeObserver(() => updateMarkersSoon());
+    contentObserver.observe(content);
+    const containerObserver = new ResizeObserver(() => updateMarkers());
+    containerObserver.observe(container);
     window.addEventListener("resize", updateMarkers);
     return () => {
-      observer.disconnect();
+      contentObserver.disconnect();
+      containerObserver.disconnect();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      if (growthTimerRef.current) window.clearTimeout(growthTimerRef.current);
+      growthTimerRef.current = 0;
       window.removeEventListener("resize", updateMarkers);
     };
-  }, [updateMarkers, containerRef, contentRef]);
+  }, [updateMarkers, updateMarkersSoon, containerRef, contentRef]);
 
   const cancelScroll = useCallback(() => {
     if (scrollAnimRef.current) {
@@ -1122,6 +1216,7 @@ export const MessageList = memo(function MessageList({
     followModeRef.current = next;
     setIsPinned(next === "following-end");
     const container = chatContainerRef.current;
+    container?.toggleAttribute("data-following-end", next === "following-end");
     const compact = nextComposerCompact(composerCompactRef.current, {
       mode: next,
       distanceFromEnd: container
@@ -1252,13 +1347,6 @@ export const MessageList = memo(function MessageList({
     programmaticScrollAtRef.current = performance.now();
   }, []);
 
-  const scrollToBottomInstant = useCallback(() => {
-    const container = chatContainerRef.current;
-    if (!container) return;
-    markProgrammaticScroll();
-    container.scrollTop = container.scrollHeight;
-  }, [markProgrammaticScroll]);
-
   const isAtBottom = useCallback(() => {
     const container = chatContainerRef.current;
     if (!container) return true;
@@ -1363,47 +1451,26 @@ export const MessageList = memo(function MessageList({
       type: "thread-open",
       initial,
     });
+    container.toggleAttribute("data-following-end", followModeRef.current === "following-end");
 
-    let lastContentHeight = contentWrapper.getBoundingClientRect().height;
-    let raf = 0;
-
+    // The one writer that follows the end: the transcript grew (a streamed
+    // delta, an image, a tool card opening, the reply gap) and the observer
+    // runs after layout and before paint, so no frame shows the growth
+    // without the follow. It writes only when the end moved; in a windowed
+    // list `useTurnWindow` may have written the same value already.
+    // When reading history (free) nothing is written: streamed text appends
+    // below the viewport, and growth above it is held by native scroll
+    // anchoring (or by `useTurnWindow` in a windowed list).
     const resizeObserver = new ResizeObserver(() => {
-      if (windowedRef.current) {
-        // Windowed: the rows are anchored by `useTurnWindow`. This observer
-        // only follows growth outside them (the reply gap below the
-        // last turn), before paint and never by a delta.
-        if (followModeRef.current === "following-end") {
-          programmaticScrollAtRef.current = performance.now();
-          container.scrollTop = container.scrollHeight - container.clientHeight;
-        }
-        return;
-      }
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        const newContentHeight = contentWrapper.getBoundingClientRect().height;
-        if (newContentHeight === lastContentHeight) {
-          return;
-        }
-        lastContentHeight = newContentHeight;
-
-        if (followModeRef.current === "following-end") {
-          // Following: track streaming text / images / expanding tool cards.
-          programmaticScrollAtRef.current = performance.now();
-          container.scrollTop = container.scrollHeight;
-        }
-        // When reading history (free): leave scrollTop untouched.
-        // New streamed content appends below the viewport, so keeping
-        // scrollTop stable keeps what the user is reading stable.
-        // Growth above the viewport is handled by native CSS
-        // scroll-anchoring (overflow-anchor) — a manual delta here would
-        // push the viewport down on every streamed token.
-      });
+      if (followModeRef.current !== "following-end") return;
+      const end = container.scrollHeight - container.clientHeight;
+      if (Math.abs(container.scrollTop - end) < 1) return;
+      programmaticScrollAtRef.current = performance.now();
+      container.scrollTop = end;
     });
 
     resizeObserver.observe(contentWrapper);
     return () => {
-      cancelAnimationFrame(raf);
       resizeObserver.disconnect();
     };
   }, []);
@@ -1412,10 +1479,12 @@ export const MessageList = memo(function MessageList({
     () => normalizeMessages(messages),
     [messages],
   );
-  const turns = useMemo(
-    () => groupMessagesIntoTurns(normalizedMessages),
-    [normalizedMessages],
-  );
+  const previousTurnsRef = useRef<Turn[]>([]);
+  const turns = useMemo(() => {
+    const next = reuseTurns(previousTurnsRef.current, groupMessagesIntoTurns(normalizedMessages));
+    previousTurnsRef.current = next;
+    return next;
+  }, [normalizedMessages]);
   // The message that started the reply in progress. Subagent results that
   // join that reply do not start a new one.
   const lastUserMessageId = turns[turns.length - 1]?.userMsg?.id ?? null;
@@ -1637,20 +1706,6 @@ export const MessageList = memo(function MessageList({
   const showReplyGap =
     replyActive || showAwaitingReply || showPlanning || (turns.length > 0 && !lastTurnHasToolbar);
 
-  // Follow live output while following the end: every streamed token / tool
-  // update produces new `messages`, so snap to the bottom. Instant (not
-  // smooth) so it keeps up with fast streams; the ResizeObserver above covers
-  // late layout (images, markdown, expanding tool cards).
-  useLayoutEffect(() => {
-    if (followModeRef.current === "following-end") scrollToBottomInstant();
-  }, [
-    normalizedMessages,
-    isStreaming,
-    showPlanning,
-    showReplyGap,
-    scrollToBottomInstant,
-  ]);
-
   // Instant, and corrected against the real DOM until it holds: a smooth
   // scroll outlives the programmatic window and fights the settle loop.
   const handleJumpToLatest = useCallback(() => {
@@ -1659,6 +1714,11 @@ export const MessageList = memo(function MessageList({
   }, [dispatchFollow]);
 
   const showJumpButton = !isPinned && normalizedMessages.length > 0;
+  // When the reply in progress started, as the work clock saw it (the clock is set in an effect).
+  const liveStartedAt =
+    lastUserMessageId != null && workClockRef.current?.turnId === lastUserMessageId
+      ? workClockRef.current.startedAt
+      : null;
   // Tick position and active-turn state live in PromptMarkersOverlay so
   // scrolling never re-renders the conversation to update the rail.
 
@@ -1704,357 +1764,37 @@ export const MessageList = memo(function MessageList({
             const isLastTurn = turnIndex === turns.length - 1;
             const turnKey = turnKeys[turnIndex]!;
 
+            const userCopyKey = turn.userMsg ? `user-${turn.userMsg.id}` : null;
+            const copyKey = `assistant-${turnKey}-all`;
             return (
-              <div
+              <TurnRow
                 key={turnKey}
-                ref={windowed ? virtualization.rowRef(turnKey) : undefined}
-                data-turn-key={turnKey}
-                className="relative space-y-2"
-              >
-                {turn.userMsg &&
-                  (() => {
-                    // Subagent results delivered to this thread (a wake turn or a steer).
-                    const notice = readSubagentNotice(turn.userMsg);
-                    if (notice) {
-                      return (
-                        <div data-notice-id={turn.userMsg.id}>
-                          <SubagentNotice items={notice} />
-                        </div>
-                      );
-                    }
-                    const text = getTextFromParts(
-                      turn.userMsg!.parts ?? [],
-                      "",
-                    );
-                    const hasParts = (turn.userMsg!.parts ?? []).length > 0;
-                    if (!text && !hasParts) return null;
-                    const userCreatedAt = (
-                      turn.userMsg as { createdAt?: Date | string }
-                    )?.createdAt;
-                    const userCopyKey = `user-${turn.userMsg.id}`;
-                    const userCopyVisible = activeCopyId === userCopyKey;
-                    const userTimestamp =
-                      isMounted && userCreatedAt
-                        ? formatTimestamp(new Date(userCreatedAt))
-                        : undefined;
-                    // Keep unavailable Undo visible with an explanation for this prompt.
-                    const showUserToolbar = true;
-                    // Edit and versions act on the prompt's turn; a fork's copies of its source name none.
-                    const promptTurnId = (turn.userMsg as { turnId?: string }).turnId;
-                    const editPrompt = turnActionsForEdit?.editPrompt;
-                    return (
-                      <div
-                        className="group/user-message"
-                        data-prompt-id={turn.userMsg.id}
-                      >
-                        {editingPromptId === turn.userMsg.id && promptTurnId && editPrompt ? (
-                          <PromptEditor
-                            initial={text}
-                            onCancel={() => setEditingPromptId(null)}
-                            onSend={async (edited) => {
-                              await editPrompt(turn.userMsg!.id, promptTurnId, edited);
-                              setEditingPromptId(null);
-                            }}
-                          />
-                        ) : (
-                        <CustomUserMessage
-                          message={turn.userMsg}
-                          className={classNames?.userMessage}
-                          enableImagePreview={enableImagePreview}
-                        />
-                        )}
-                        {/* An edited prompt says so, with its versions, whether or not the pointer is over it. */}
-                        {promptTurnId && editingPromptId !== turn.userMsg.id && (
-                          <PromptVersionSwitcher turnId={promptTurnId} />
-                        )}
-                        {showUserToolbar && editingPromptId !== turn.userMsg.id && (
-                          <MessageToolbar
-                            text={showCopyToolbar ? text : ""}
-                            timestamp={userTimestamp}
-                            heightClass="h-[28px]"
-                            hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
-                            isVisible={userCopyVisible}
-                            alignClass="justify-end"
-                            onCopied={() => markCopied(userCopyKey)}
-                            undoMessageId={turn.userMsg.id}
-                            promptTurnId={promptTurnId}
-                            onEdit={promptTurnId && editPrompt ? () => setEditingPromptId(turn.userMsg!.id) : undefined}
-                            speechKey={userCopyKey}
-                            repeatText={text}
-                          />
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                {isLastTurn && turn.userMsg && lastTurnNotice}
-
-                {turn.assistantMsgs.length > 0 &&
-                  !(isLastTurn && showPlanning) &&
-                  (() => {
-                    const assistantText = getTextFromParts(
-                      turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
-                      "\n\n",
-                    );
-                    const isTurnStreaming = replyActive && isLastTurn;
-                    // A turn can span several assistant rows (text + tool
-                    // results); surface the latest completed-response
-                    // metadata so the popup reflects the visible reply.
-                    const turnMetadata = (() => {
-                      for (let m = turn.assistantMsgs.length - 1; m >= 0; m -= 1) {
-                        const meta = getResponseMetadata(turn.assistantMsgs[m]!);
-                        if (meta) return meta;
-                      }
-                      return undefined;
-                    })();
-                    // Only reserve toolbar height when there's actually
-                    // something to show in it. With showCopyToolbar=false the
-                    // toolbar would otherwise render as a 48px-tall empty box,
-                    // creating large gaps between assistant turns.
-                    const showToolbar =
-                      !isTurnStreaming &&
-                      finishedTurnHasToolbar(turn.assistantMsgs, showCopyToolbar);
-                    const copyKey = `assistant-${turnKey}-all`;
-                    const toolbarText = showCopyToolbar ? assistantText : "";
-                    // Read aloud reads the answer, not the notes the agent wrote while it worked.
-                    const speechText = turnAnswerText(turn.assistantMsgs);
-                    // A finished turn of this thread can be forked from; a fork's copies of its source name no turn.
-                    const forkTurnId = isTurnStreaming ? undefined : (turn.userMsg as { turnId?: string } | undefined)?.turnId;
-
-                    const promptId = turn.userMsg?.id;
-                    const workedMs = isTurnStreaming
-                      ? null
-                      : promptId != null && settledWork[promptId] != null
-                        ? settledWork[promptId]
-                        : turnDurationMs(turn.userMsg, turn.assistantMsgs);
-                    const liveStart =
-                      promptId != null &&
-                      workClockRef.current?.turnId === promptId
-                        ? workClockRef.current.startedAt
-                        : readCreatedAt(turn.userMsg);
-
-                    return (
-                      <div className="group/assistant-turn">
-                        <TurnWorkStatus
-                          active={isTurnStreaming}
-                          startedAt={isTurnStreaming ? liveStart : null}
-                          durationMs={workedMs}
-                          waitingLabel={
-                            isTurnStreaming &&
-                            turn.assistantMsgs.some(isWaitingPermissionRequest)
-                              ? "Waiting for approval"
-                              : undefined
-                          }
-                        />
-                        <div className="turn-answer flex flex-col gap-3">
-                          <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
-                          {(() => {
-                            // Consecutive thoughts and tool calls collapse into one
-                            // group titled with the latest thought. A run with
-                            // no thought falls back to "Tool calls N".
-                            // Subagent results whose subagents have a card in
-                            // the thread show there, as the card's state: the
-                            // results add no line of their own.
-                            const turnMsgs = turn.assistantMsgs.flatMap((msg) => {
-                              const notice = readSubagentNotice(msg);
-                              if (!notice) return [msg];
-                              const rest = notice.filter(
-                                (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
-                              );
-                              if (rest.length === 0) return [];
-                              return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
-                            });
-                            const turnAnalyses = turnMsgs.map((msg) =>
-                              analyzeAssistantMessage(
-                                msg.parts ?? [],
-                                suppressQuestionTool,
-                                subagentCardIds,
-                              ),
-                            );
-                            // A finished turn ends on its answer: the notes and
-                            // activity that led to it collapse above it.
-                            const settled = isTurnStreaming
-                              ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
-                              : settleFinishedTurn(turnMsgs, turnAnalyses);
-                            const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
-                            const analyses = settled.order.map((index) => settled.analyses[index]!);
-                            const segments = partitionTurnSegments(
-                              analyses.map((a) => a.toolsOnly),
-                              analyses.map((a) => a.cardsOnly),
-                            );
-                            return segments.map((segment) => {
-                              if (segment.kind === "cards") {
-                                const cardParts = segment.msgIndices.flatMap(
-                                  (msgIndex) => analyses[msgIndex]!.cardParts,
-                                );
-                                const chatStreamingStatus = isLastTurn && isStreaming
-                                  ? "streaming"
-                                  : undefined;
-                                return (
-                                  <SubagentCardGroup
-                                    key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
-                                    toolCallIds={cardParts.map(
-                                      (part) => part.toolCallId!,
-                                    )}
-                                  >
-                                    {cardParts.map((part) => (
-                                      <CustomToolRenderer
-                                        key={part.toolCallId}
-                                        part={part}
-                                        chatStatus={chatStreamingStatus}
-                                        toolRenderers={toolRenderers}
-                                      />
-                                    ))}
-                                  </SubagentCardGroup>
-                                );
-                              }
-                              if (segment.kind === "message") {
-                                const msg =
-                                  answerMsgs[segment.msgIndex]!;
-                                const notice = readSubagentNotice(msg);
-                                if (notice) {
-                                  return (
-                                    <div key={msg.id} data-notice-id={msg.id}>
-                                      <SubagentNotice items={notice} />
-                                    </div>
-                                  );
-                                }
-                                const isLastMsg =
-                                  isLastTurn &&
-                                  segment.msgIndex ===
-                                    answerMsgs.length - 1;
-                                return (
-                                  <AssistantParts
-                                    key={msg.id}
-                                    msg={msg}
-                                    isLast={isLastMsg}
-                                    isStreaming={isStreaming}
-                                    retryPromptId={
-                                      isLastTurn && !isStreaming
-                                        ? turn.userMsg?.id
-                                        : undefined
-                                    }
-                                    suppressQuestionTool={suppressQuestionTool}
-                                    ToolRendererComponent={CustomToolRenderer}
-                                    toolRenderers={toolRenderers}
-                                  />
-                                );
-                              }
-                              const items = segment.msgIndices.flatMap(
-                                (msgIndex) =>
-                                  analyses[msgIndex]!.toolItems,
-                              );
-                              const groupLabel = activityGroupLabel(items);
-                              const firstId =
-                                answerMsgs[
-                                  segment.msgIndices[0]!
-                                ]!.id;
-                              const chatStreamingStatus = isLastTurn && isStreaming
-                                ? "streaming"
-                                : undefined;
-                              // Only shimmer the group header while a child
-                              // tool is still running — not for the whole
-                              // remaining turn stream (text after tools).
-                              const anyToolPending = items.some((item) => {
-                                const state = item.part.state;
-                                return (
-                                  state !== "output-available" &&
-                                  state !== "output-error"
-                                );
-                              });
-                              return (
-                                <ToolCallsGroup
-                                  key={`${firstId}-toolcalls`}
-                                  count={items.length}
-                                  icon={
-                                    groupLabel ? (
-                                      <ThinkingIcon size={18} active={anyToolPending && isLastTurn && isStreaming} />
-                                    ) : (
-                                      <Wrench size={18} />
-                                    )
-                                  }
-                                  label={groupLabel}
-                                  autoOpen={anyToolPending}
-                                  failed={
-                                    items.filter(
-                                      (item) =>
-                                        getToolStatus(item.part).isError,
-                                    ).length
-                                  }
-                                  live={isLastTurn && isStreaming}
-                                >
-                                  {items.map((item, k) => (
-                                    <CustomToolRenderer
-                                      key={
-                                        item.part.toolCallId ??
-                                        `${firstId}-tool-${k}`
-                                      }
-                                      part={item.part}
-                                      nestedTools={item.nestedTools}
-                                      chatStatus={chatStreamingStatus}
-                                      toolRenderers={toolRenderers}
-                                    />
-                                  ))}
-                                </ToolCallsGroup>
-                              );
-                            });
-                          })()}
-                          </TurnIdContext.Provider>
-                        </div>
-                        {!isTurnStreaming && (
-                          <TurnEditSummary messages={turn.assistantMsgs} turnId={(turn.userMsg as { turnId?: string } | undefined)?.turnId} />
-                        )}
-                        {showToolbar ? (
-                          <MessageToolbar
-                            text={toolbarText}
-                            heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
-                            hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
-                            isVisible={activeCopyId === copyKey}
-                            alignClass="justify-start"
-                            onCopied={() => markCopied(copyKey)}
-                            metadata={turnMetadata}
-                            speechKey={copyKey}
-                            speechText={speechText}
-                            forkTurnId={forkTurnId}
-                          />
-                        ) : activeCopyId === copyKey ? (
-                          <MessageToolbar
-                            text={toolbarText}
-                            heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
-                            hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
-                            isVisible={true}
-                            alignClass="justify-start"
-                            onCopied={() => markCopied(copyKey)}
-                            metadata={turnMetadata}
-                            speechKey={copyKey}
-                            speechText={speechText}
-                            forkTurnId={forkTurnId}
-                          />
-                        ) : null}
-                      </div>
-                    );
-                  })()}
-
-                {isLastTurn && (showAwaitingReply || showPlanning) && (
-                  // Laid out like the turn's answer below, so its first row
-                  // takes the live row's place without moving.
-                  <div className="group/assistant-turn">
-                    <TurnWorkStatus
-                      active
-                      startedAt={
-                        turn.userMsg &&
-                        workClockRef.current?.turnId === turn.userMsg.id
-                          ? workClockRef.current.startedAt
-                          : readCreatedAt(turn.userMsg)
-                      }
-                      durationMs={null}
-                    />
-                    <div className="turn-answer flex flex-col gap-3">
-                      <LiveThinkingRow />
-                    </div>
-                  </div>
-                )}
-              </div>
+                turn={turn}
+                turnKey={turnKey}
+                rowRef={windowed ? virtualization.rowRef(turnKey) : undefined}
+                isLastTurn={isLastTurn}
+                replyActive={isLastTurn && replyActive}
+                isStreaming={isLastTurn && isStreaming}
+                showPlanning={isLastTurn && showPlanning}
+                showAwaitingReply={isLastTurn && showAwaitingReply}
+                lastTurnNotice={isLastTurn ? lastTurnNotice : undefined}
+                liveStartedAt={isLastTurn ? liveStartedAt : null}
+                settledMs={turn.userMsg ? settledWork[turn.userMsg.id] : undefined}
+                copyActive={activeCopyId !== null && (activeCopyId === userCopyKey || activeCopyId === copyKey) ? activeCopyId : null}
+                editingPromptId={turn.userMsg && editingPromptId === turn.userMsg.id ? editingPromptId : null}
+                setEditingPromptId={setEditingPromptId}
+                markCopied={markCopied}
+                isMounted={isMounted}
+                showCopyToolbar={showCopyToolbar}
+                enableImagePreview={enableImagePreview}
+                userMessageClassName={classNames?.userMessage}
+                CustomUserMessage={CustomUserMessage}
+                CustomToolRenderer={CustomToolRenderer}
+                toolRenderers={toolRenderers}
+                suppressQuestionTool={suppressQuestionTool}
+                cardedSubagents={cardedSubagents}
+                subagentCardIds={subagentCardIds}
+              />
             );
           })}
         </div>
@@ -2070,7 +1810,7 @@ export const MessageList = memo(function MessageList({
       </div>
     </div>
     <PromptMarkersOverlay
-      messages={normalizedMessages}
+      turns={turns}
       containerRef={chatContainerRef}
       contentRef={contentWrapperRef}
       visible={scrollbarActive}
@@ -2099,6 +1839,413 @@ export const MessageList = memo(function MessageList({
         <span>Go to latest</span>
       </button>
     )}
+    </div>
+  );
+});
+
+type TurnRowProps = {
+  turn: Turn;
+  turnKey: string;
+  rowRef?: (el: HTMLDivElement | null) => void;
+  isLastTurn: boolean;
+  /** The flags below describe the reply in progress; they are false on every turn but the last. */
+  replyActive: boolean;
+  isStreaming: boolean;
+  showPlanning: boolean;
+  showAwaitingReply: boolean;
+  lastTurnNotice?: React.ReactNode;
+  /** When the reply in progress started, as the work clock saw it; null when it did not see it start. */
+  liveStartedAt: number | null;
+  /** How long the turn worked, measured in this view when it ended here. */
+  settledMs?: number;
+  /** The copy key of this turn that was just copied, or null. */
+  copyActive: string | null;
+  /** This turn's prompt when it is open for editing, or null. */
+  editingPromptId: string | null;
+  setEditingPromptId: (id: string | null) => void;
+  markCopied: (id: string) => void;
+  isMounted: boolean;
+  showCopyToolbar: boolean;
+  enableImagePreview: boolean;
+  userMessageClassName?: string;
+  CustomUserMessage: React.ComponentType<React.ComponentProps<typeof UserMessage>>;
+  CustomToolRenderer: React.ComponentType<ToolRendererProps>;
+  toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
+  suppressQuestionTool: boolean;
+  cardedSubagents: Set<string>;
+  subagentCardIds: Set<string>;
+};
+
+/**
+ * One turn of the transcript. Memoised: a streamed delta changes only the last turn's messages, so
+ * every other turn keeps its props and is not rendered again.
+ */
+const TurnRow = memo(function TurnRow({
+  turn,
+  turnKey,
+  rowRef,
+  isLastTurn,
+  replyActive,
+  isStreaming,
+  showPlanning,
+  showAwaitingReply,
+  lastTurnNotice,
+  liveStartedAt,
+  settledMs,
+  copyActive,
+  editingPromptId,
+  setEditingPromptId,
+  markCopied,
+  isMounted,
+  showCopyToolbar,
+  enableImagePreview,
+  userMessageClassName,
+  CustomUserMessage,
+  CustomToolRenderer,
+  toolRenderers,
+  suppressQuestionTool,
+  cardedSubagents,
+  subagentCardIds,
+}: TurnRowProps) {
+  countRender("TurnRow");
+  const turnActionsForEdit = useTurnActions();
+  return (
+    <div
+      ref={rowRef}
+      data-turn-key={turnKey}
+      className="relative space-y-2"
+    >
+      {turn.userMsg &&
+        (() => {
+          // Subagent results delivered to this thread (a wake turn or a steer).
+          const notice = readSubagentNotice(turn.userMsg);
+          if (notice) {
+            return (
+              <div data-notice-id={turn.userMsg.id}>
+                <SubagentNotice items={notice} />
+              </div>
+            );
+          }
+          const text = getTextFromParts(
+            turn.userMsg!.parts ?? [],
+            "",
+          );
+          const hasParts = (turn.userMsg!.parts ?? []).length > 0;
+          if (!text && !hasParts) return null;
+          const userCreatedAt = (
+            turn.userMsg as { createdAt?: Date | string }
+          )?.createdAt;
+          const userCopyKey = `user-${turn.userMsg.id}`;
+          const userCopyVisible = copyActive === userCopyKey;
+          const userTimestamp =
+            isMounted && userCreatedAt
+              ? formatTimestamp(new Date(userCreatedAt))
+              : undefined;
+          // Keep unavailable Undo visible with an explanation for this prompt.
+          const showUserToolbar = true;
+          // Edit and versions act on the prompt's turn; a fork's copies of its source name none.
+          const promptTurnId = (turn.userMsg as { turnId?: string }).turnId;
+          const editPrompt = turnActionsForEdit?.editPrompt;
+          return (
+            <div
+              className="group/user-message"
+              data-prompt-id={turn.userMsg.id}
+            >
+              {editingPromptId === turn.userMsg.id && promptTurnId && editPrompt ? (
+                <PromptEditor
+                  initial={text}
+                  onCancel={() => setEditingPromptId(null)}
+                  onSend={async (edited) => {
+                    await editPrompt(turn.userMsg!.id, promptTurnId, edited);
+                    setEditingPromptId(null);
+                  }}
+                />
+              ) : (
+              <CustomUserMessage
+                message={turn.userMsg}
+                className={userMessageClassName}
+                enableImagePreview={enableImagePreview}
+              />
+              )}
+              {/* An edited prompt says so, with its versions, whether or not the pointer is over it. */}
+              {promptTurnId && editingPromptId !== turn.userMsg.id && (
+                <PromptVersionSwitcher turnId={promptTurnId} />
+              )}
+              {showUserToolbar && editingPromptId !== turn.userMsg.id && (
+                <MessageToolbar
+                  text={showCopyToolbar ? text : ""}
+                  timestamp={userTimestamp}
+                  heightClass="h-[28px]"
+                  hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
+                  isVisible={userCopyVisible}
+                  alignClass="justify-end"
+                  onCopied={() => markCopied(userCopyKey)}
+                  undoMessageId={turn.userMsg.id}
+                  promptTurnId={promptTurnId}
+                  onEdit={promptTurnId && editPrompt ? () => setEditingPromptId(turn.userMsg!.id) : undefined}
+                  speechKey={userCopyKey}
+                  repeatText={text}
+                />
+              )}
+            </div>
+          );
+        })()}
+
+      {turn.userMsg && lastTurnNotice}
+
+      {turn.assistantMsgs.length > 0 &&
+        !(isLastTurn && showPlanning) &&
+        (() => {
+          const assistantText = getTextFromParts(
+            turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
+            "\n\n",
+          );
+          const isTurnStreaming = replyActive && isLastTurn;
+          // A turn can span several assistant rows (text + tool
+          // results); surface the latest completed-response
+          // metadata so the popup reflects the visible reply.
+          const turnMetadata = (() => {
+            for (let m = turn.assistantMsgs.length - 1; m >= 0; m -= 1) {
+              const meta = getResponseMetadata(turn.assistantMsgs[m]!);
+              if (meta) return meta;
+            }
+            return undefined;
+          })();
+          // Only reserve toolbar height when there's actually
+          // something to show in it. With showCopyToolbar=false the
+          // toolbar would otherwise render as a 48px-tall empty box,
+          // creating large gaps between assistant turns.
+          const showToolbar =
+            !isTurnStreaming &&
+            finishedTurnHasToolbar(turn.assistantMsgs, showCopyToolbar);
+          const copyKey = `assistant-${turnKey}-all`;
+          const toolbarText = showCopyToolbar ? assistantText : "";
+          // Read aloud reads the answer, not the notes the agent wrote while it worked.
+          const speechText = turnAnswerText(turn.assistantMsgs);
+          // A finished turn of this thread can be forked from; a fork's copies of its source name no turn.
+          const forkTurnId = isTurnStreaming ? undefined : (turn.userMsg as { turnId?: string } | undefined)?.turnId;
+
+          const workedMs = isTurnStreaming
+            ? null
+            : settledMs ?? turnDurationMs(turn.userMsg, turn.assistantMsgs);
+          const liveStart = liveStartedAt ?? readCreatedAt(turn.userMsg);
+
+          return (
+            <div className="group/assistant-turn">
+              <TurnWorkStatus
+                active={isTurnStreaming}
+                startedAt={isTurnStreaming ? liveStart : null}
+                durationMs={workedMs}
+                waitingLabel={
+                  isTurnStreaming &&
+                  turn.assistantMsgs.some(isWaitingPermissionRequest)
+                    ? "Waiting for approval"
+                    : undefined
+                }
+              />
+              <div className="turn-answer flex flex-col gap-3">
+                <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
+                {(() => {
+                  // Consecutive thoughts and tool calls collapse into one
+                  // group titled with the latest thought. A run with
+                  // no thought falls back to "Tool calls N".
+                  // Subagent results whose subagents have a card in
+                  // the thread show there, as the card's state: the
+                  // results add no line of their own.
+                  const turnMsgs = turn.assistantMsgs.flatMap((msg) => {
+                    const notice = readSubagentNotice(msg);
+                    if (!notice) return [msg];
+                    const rest = notice.filter(
+                      (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
+                    );
+                    if (rest.length === 0) return [];
+                    return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
+                  });
+                  const turnAnalyses = turnMsgs.map((msg) =>
+                    analyzeAssistantMessage(
+                      msg.parts ?? [],
+                      suppressQuestionTool,
+                      subagentCardIds,
+                    ),
+                  );
+                  // A finished turn ends on its answer: the notes and
+                  // activity that led to it collapse above it.
+                  const settled = isTurnStreaming
+                    ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
+                    : settleFinishedTurn(turnMsgs, turnAnalyses);
+                  const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
+                  const analyses = settled.order.map((index) => settled.analyses[index]!);
+                  const segments = partitionTurnSegments(
+                    analyses.map((a) => a.toolsOnly),
+                    analyses.map((a) => a.cardsOnly),
+                  );
+                  return segments.map((segment) => {
+                    if (segment.kind === "cards") {
+                      const cardParts = segment.msgIndices.flatMap(
+                        (msgIndex) => analyses[msgIndex]!.cardParts,
+                      );
+                      const chatStreamingStatus = isLastTurn && isStreaming
+                        ? "streaming"
+                        : undefined;
+                      return (
+                        <SubagentCardGroup
+                          key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
+                          toolCallIds={cardParts.map(
+                            (part) => part.toolCallId!,
+                          )}
+                        >
+                          {cardParts.map((part) => (
+                            <CustomToolRenderer
+                              key={part.toolCallId}
+                              part={part}
+                              chatStatus={chatStreamingStatus}
+                              toolRenderers={toolRenderers}
+                            />
+                          ))}
+                        </SubagentCardGroup>
+                      );
+                    }
+                    if (segment.kind === "message") {
+                      const msg =
+                        answerMsgs[segment.msgIndex]!;
+                      const notice = readSubagentNotice(msg);
+                      if (notice) {
+                        return (
+                          <div key={msg.id} data-notice-id={msg.id}>
+                            <SubagentNotice items={notice} />
+                          </div>
+                        );
+                      }
+                      const isLastMsg =
+                        isLastTurn &&
+                        segment.msgIndex ===
+                          answerMsgs.length - 1;
+                      return (
+                        <AssistantParts
+                          key={msg.id}
+                          msg={msg}
+                          isLast={isLastMsg}
+                          isStreaming={isLastMsg && isStreaming}
+                          retryPromptId={
+                            isLastTurn && !isStreaming
+                              ? turn.userMsg?.id
+                              : undefined
+                          }
+                          suppressQuestionTool={suppressQuestionTool}
+                          ToolRendererComponent={CustomToolRenderer}
+                          toolRenderers={toolRenderers}
+                        />
+                      );
+                    }
+                    const items = segment.msgIndices.flatMap(
+                      (msgIndex) =>
+                        analyses[msgIndex]!.toolItems,
+                    );
+                    const groupLabel = activityGroupLabel(items);
+                    const firstId =
+                      answerMsgs[
+                        segment.msgIndices[0]!
+                      ]!.id;
+                    const chatStreamingStatus = isLastTurn && isStreaming
+                      ? "streaming"
+                      : undefined;
+                    // Only shimmer the group header while a child
+                    // tool is still running — not for the whole
+                    // remaining turn stream (text after tools).
+                    const anyToolPending = items.some((item) => {
+                      const state = item.part.state;
+                      return (
+                        state !== "output-available" &&
+                        state !== "output-error"
+                      );
+                    });
+                    return (
+                      <ToolCallsGroup
+                        key={`${firstId}-toolcalls`}
+                        count={items.length}
+                        icon={
+                          groupLabel ? (
+                            <ThinkingIcon size={18} active={anyToolPending && isLastTurn && isStreaming} />
+                          ) : (
+                            <Wrench size={18} />
+                          )
+                        }
+                        label={groupLabel}
+                        autoOpen={anyToolPending}
+                        failed={
+                          items.filter(
+                            (item) =>
+                              getToolStatus(item.part).isError,
+                          ).length
+                        }
+                        live={isLastTurn && isStreaming}
+                      >
+                        {items.map((item, k) => (
+                          <CustomToolRenderer
+                            key={
+                              item.part.toolCallId ??
+                              `${firstId}-tool-${k}`
+                            }
+                            part={item.part}
+                            nestedTools={item.nestedTools}
+                            chatStatus={chatStreamingStatus}
+                            toolRenderers={toolRenderers}
+                          />
+                        ))}
+                      </ToolCallsGroup>
+                    );
+                  });
+                })()}
+                </TurnIdContext.Provider>
+              </div>
+              {!isTurnStreaming && (
+                <TurnEditSummary messages={turn.assistantMsgs} turnId={(turn.userMsg as { turnId?: string } | undefined)?.turnId} />
+              )}
+              {showToolbar ? (
+                <MessageToolbar
+                  text={toolbarText}
+                  heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
+                  hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
+                  isVisible={copyActive === copyKey}
+                  alignClass="justify-start"
+                  onCopied={() => markCopied(copyKey)}
+                  metadata={turnMetadata}
+                  speechKey={copyKey}
+                  speechText={speechText}
+                  forkTurnId={forkTurnId}
+                />
+              ) : copyActive === copyKey ? (
+                <MessageToolbar
+                  text={toolbarText}
+                  heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
+                  hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
+                  isVisible={true}
+                  alignClass="justify-start"
+                  onCopied={() => markCopied(copyKey)}
+                  metadata={turnMetadata}
+                  speechKey={copyKey}
+                  speechText={speechText}
+                  forkTurnId={forkTurnId}
+                />
+              ) : null}
+            </div>
+          );
+        })()}
+
+      {isLastTurn && (showAwaitingReply || showPlanning) && (
+        // Laid out like the turn's answer below, so its first row
+        // takes the live row's place without moving.
+        <div className="group/assistant-turn">
+          <TurnWorkStatus
+            active
+            startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
+            durationMs={null}
+          />
+          <div className="turn-answer flex flex-col gap-3">
+            <LiveThinkingRow />
+          </div>
+        </div>
+      )}
     </div>
   );
 });
@@ -2183,7 +2330,7 @@ function CompactionRow({ text, metadata }: { text: string; metadata: CompactionM
   /></div>;
 }
 
-function AssistantParts({
+const AssistantParts = memo(function AssistantParts({
   msg,
   isLast,
   isStreaming,
@@ -2201,6 +2348,7 @@ function AssistantParts({
   ToolRendererComponent: React.ComponentType<ToolRendererProps>;
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
 }) {
+  countRender("AssistantParts");
   const parts = useMemo(
     () => normalizeAssistantToolParts(msg.parts ?? []) as unknown[],
     [msg.parts],
@@ -2385,4 +2533,4 @@ function AssistantParts({
   }
 
   return <div className="group/assistant-turn">{elements}</div>;
-}
+});

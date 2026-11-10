@@ -364,7 +364,7 @@ function createEngine(
    * layout change being corrected, so they land before the anchor is measured
    * and `end` is read after them.
    */
-  const transact = (openAtEnd = false) => {
+  const transact = (openAtEnd = false, quiet = false) => {
     const prevLayout = layout;
     rebuildLayout();
     writeSpacers();
@@ -376,19 +376,24 @@ function createEngine(
     }
     captureAnchor(prevLayout);
     syncWindow();
-    notify();
+    if (!quiet) notify();
   };
 
   const onRowsResized = (entries: ResizeObserverEntry[]) => {
     const { containerRef } = getOptions();
     let rowResized = false;
+    let otherRowResized = false;
+    const lastKey = layout.keys[layout.keys.length - 1];
     for (const entry of entries) {
       const key = keyOfEl.get(entry.target);
       if (key === undefined) continue;
       measured.set(key, entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height);
       rowResized = true;
+      if (key !== lastKey) otherRowResized = true;
     }
-    if (rowResized) transact();
+    // Only the last row grew (a streamed reply): no other row moved, so listeners (the prompt ticks)
+    // are not told.
+    if (rowResized) transact(false, !otherRowResized);
     else if (entries.some((entry) => entry.target === containerRef.current)) syncWindow();
   };
 

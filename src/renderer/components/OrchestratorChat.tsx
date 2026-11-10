@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { stopThreadNow } from '../lib/stopThread'
+import type { UIMessage } from 'ai'
 import { expiryPresetMs } from '../../shared/threadExpiry'
 import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
@@ -50,7 +51,7 @@ import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
-import { mousseToUIMessages, chatStatusFromTurn } from '../chat/adapters/mousseToUI'
+import { mousseToUIMessages, chatStatusFromTurn, reuseUIMessages } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
 import { usePermissionRequests } from '../hooks/usePermissionRequests'
 import { usePendingQuestions } from '../hooks/usePendingQuestions'
@@ -410,7 +411,13 @@ export function OrchestratorChat() {
   const placePermissionRequests = permissionRequests.place
   const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
   // Placed in a separate pass, so a permission request arriving or being answered does not convert the transcript again.
-  const shownMessages = useMemo(() => placePermissionRequests(uiMessages), [uiMessages, placePermissionRequests])
+  // Messages a delta did not change stay the same objects, so only the turn that changed renders again.
+  const shownMessagesRef = useRef<UIMessage[]>([])
+  const shownMessages = useMemo(() => {
+    const next = reuseUIMessages(shownMessagesRef.current, placePermissionRequests(uiMessages))
+    shownMessagesRef.current = next
+    return next
+  }, [uiMessages, placePermissionRequests])
   const approvalRequest = permissionRequests.current
   const approvalRowId = approvalRequest ? `permission:${approvalRequest.requestId}` : null
   const approvalPlaced = approvalRowId !== null && shownMessages.some((message) => message.id === approvalRowId)

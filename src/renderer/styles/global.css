@@ -232,6 +232,11 @@ html[data-theme='light'] {
 .an-message-list [aria-hidden][data-spacer] {
   overflow-anchor: none;
 }
+/* While the list follows the end it writes scrollTop itself, once per frame
+   (message-list.tsx): native anchoring would only move the view a second time. */
+.an-message-list[data-following-end] {
+  overflow-anchor: none;
+}
 
 /* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
    still win: unlayered author CSS would otherwise beat every layered

@@ -138,27 +138,92 @@ describe('the gap under a streaming reply', () => {
 })
 
 describe('following a streaming reply', () => {
-  /** Gives the list a scrollable size and a working `scrollTop`; jsdom has no layout. */
-  function scrollable(el: HTMLElement, scrollHeight: number, clientHeight: number) {
+  /** Every ResizeObserver the list made, so a test can deliver "the transcript grew". */
+  let observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = []
+  beforeEach(() => {
+    observers = []
+    globalThis.ResizeObserver = class {
+      private entry: { callback: ResizeObserverCallback; targets: Element[] }
+      constructor(callback: ResizeObserverCallback) {
+        this.entry = { callback, targets: [] }
+        observers.push(this.entry)
+      }
+      observe(target: Element) { this.entry.targets.push(target) }
+      unobserve() {}
+      disconnect() { this.entry.targets = [] }
+    } as unknown as typeof ResizeObserver
+  })
+  /** What the browser does after layout: tell the observers of the transcript content that it resized. */
+  const grew = () => act(() => {
+    const content = list().firstElementChild!
+    for (const { callback, targets } of observers) if (targets.includes(content)) callback([], {} as ResizeObserver)
+  })
+
+  /** Gives the list a scrollable size and a working `scrollTop` that counts writes; jsdom has no layout. */
+  function scrollable(el: HTMLElement, clientHeight: number) {
     let top = 0
-    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    const size = { scrollHeight: 3000, writes: 0 }
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => size.scrollHeight })
     Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => clientHeight })
-    Object.defineProperty(el, 'scrollTop', { configurable: true, get: () => top, set: (value: number) => { top = Math.min(value, scrollHeight - clientHeight) } })
+    Object.defineProperty(el, 'scrollTop', { configurable: true, get: () => top, set: (value: number) => { size.writes += 1; top = Math.min(value, size.scrollHeight - clientHeight) } })
+    return size
   }
   const jump = () => host.querySelector<HTMLElement>('.chat-jump')!
 
   it('keeps the newest text at the end while following, and stays put once the reader scrolls up', () => {
     render([ask('u1'), answer('a1', 'First line')], 'streaming')
-    scrollable(list(), 3000, 800)
+    const size = scrollable(list(), 800)
     render([ask('u1'), answer('a1', 'First line\n\nSecond line')], 'streaming')
+    grew()
     expect(list().scrollTop).toBe(2200)
     expect(jump().dataset.hidden).toBe('true')
+    expect(list().hasAttribute('data-following-end')).toBe(true)
 
-    // Reading an earlier message: a wheel up leaves follow mode.
+    // Reading an earlier message: a wheel up leaves follow mode, and native anchoring is back.
     act(() => { list().dispatchEvent(new WheelEvent('wheel', { deltaY: -120 })) })
     list().scrollTop = 900
+    expect(list().hasAttribute('data-following-end')).toBe(false)
+    size.scrollHeight = 3400
     render([ask('u1'), answer('a1', 'First line\n\nSecond line\n\nThird line')], 'streaming')
+    grew()
     expect(list().scrollTop).toBe(900)
     expect(jump().dataset.hidden).toBeUndefined()
+  })
+
+  it('writes the scroll position once per growth while following, and not at all when nothing moved', () => {
+    render([ask('u1'), answer('a1', 'Line 0')], 'streaming')
+    const size = scrollable(list(), 800)
+    grew()
+    let text = 'Line 0'
+    size.writes = 0
+    for (let i = 1; i <= 100; i++) {
+      text += `\n\nLine ${i}`
+      size.scrollHeight += 20
+      render([ask('u1'), answer('a1', text)], 'streaming')
+      grew()
+    }
+    // One write per frame of growth: rendering the delta itself writes nothing.
+    expect(size.writes).toBe(100)
+    expect(list().scrollTop).toBe(size.scrollHeight - 800)
+    // A resize that did not move the end writes nothing.
+    grew()
+    expect(size.writes).toBe(100)
+  })
+
+  it('writes nothing while the reader is in the history', () => {
+    render([ask('u1'), answer('a1', 'Line 0')], 'streaming')
+    const size = scrollable(list(), 800)
+    act(() => { list().dispatchEvent(new WheelEvent('wheel', { deltaY: -120 })) })
+    list().scrollTop = 500
+    size.writes = 0
+    let text = 'Line 0'
+    for (let i = 1; i <= 20; i++) {
+      text += `\n\nLine ${i}`
+      size.scrollHeight += 20
+      render([ask('u1'), answer('a1', text)], 'streaming')
+      grew()
+    }
+    expect(size.writes).toBe(0)
+    expect(list().scrollTop).toBe(500)
   })
 })
