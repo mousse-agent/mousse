@@ -7,7 +7,7 @@ How Mousse is versioned, how nightly and stable builds are made, and what gets a
 | Channel | Made by | When | Published as |
 |---|---|---|---|
 | CI build | `ci.yml` | Every PR and every push to `master` | Nothing; it only checks that the app builds |
-| Nightly | `nightly.yml` | Once a day at 20:47 UTC (02:17 IST), only when `master` has new commits | A GitHub prerelease, never marked latest |
+| Nightly | `nightly.yml` | Once a day at 21:30 UTC (03:00 IST), only when `master` has new commits | A GitHub prerelease, never marked latest |
 | Stable | `release.yml` | When someone pushes a `vX.Y.Z` tag | A draft GitHub release, published by hand |
 
 Both nightly and stable builds publish only when everything passes: typecheck, lint, build, the Windows-relevant tests, the full suite (`npm test`) on Linux, packaging on Windows, Linux and macOS, each packaged CLI reporting the right version, and a secret scan of the packaged app (on the Linux packages, which hold the same app code as Windows). In these builds a failed test gets two more tries, because a few timing-sensitive process tests occasionally fail on shared runners; a test that fails every try still blocks. When anything fails, nothing is published and the last good build stays up. GitHub emails the person who last changed the workflow about the failed run.

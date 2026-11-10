@@ -5,7 +5,7 @@ name: Nightly
 # Version: <next stable>-nightly.<UTC date>.<run number>, such as 0.1.2-nightly.20261022.17.
 on:
   schedule:
-    - cron: '47 20 * * *' # 02:17 IST
+    - cron: '30 21 * * *' # 03:00 IST
   workflow_dispatch:
     inputs:
       force:
