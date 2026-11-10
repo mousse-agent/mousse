@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  CROSS_USER_METHODS,
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_LOCAL_METHODS,
   ROUTED_METHODS,
@@ -53,7 +54,9 @@ function securityOf(row: RoutedRow): string {
     // Which values a caller may send ahead of the call is part of what the row lets through.
     ...(row.stageable?.length ? { stageable: [...row.stageable].sort() } : {}),
     // A numbered change keeps no ledger.
-    ...(row.sequenced ? { sequenced: true } : {})
+    ...(row.sequenced ? { sequenced: true } : {}),
+    // Another person (a teammate) may call the row.
+    ...(row.crossUser ? { crossUser: true } : {})
   })
 }
 
@@ -274,6 +277,43 @@ describe('the routed method table', () => {
     }
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       if (!row.stageable) expect(row.keys, method).not.toContain(ROUTED_STAGED_KEY)
+  })
+
+  it('lets another person call only the rows a shared thread needs', () => {
+    const marked = Object.entries(ROUTED_METHODS)
+      .filter(([, row]) => row.crossUser === true)
+      .map(([method]) => method)
+      .sort()
+    // Reading the thread, send, steer, stop, answering its questions, its queue and its review diff.
+    expect(marked).toEqual(
+      [
+        'threads.get',
+        'thread.snapshot',
+        'thread.messages',
+        'thread.changesSince',
+        'thread.messageImage',
+        'orchestrator.send',
+        'orchestrator.steer',
+        'orchestrator.abort',
+        'orchestrator.answerQuestions',
+        'queue.list',
+        'queue.enqueue',
+        'queue.edit',
+        'queue.reorder',
+        'queue.remove',
+        'queue.promoteToSteer',
+        'review.files',
+        'review.file'
+      ].sort()
+    )
+    expect([...CROSS_USER_METHODS].sort()).toEqual(marked)
+    for (const method of marked) {
+      const row = ROUTED_METHODS[method]!
+      // Never a terminal, the editor, Undo or Publish, and always one thread (a folder row names it as `threadId`).
+      expect(row.terminal, method).toBeUndefined()
+      expect(method, method).not.toMatch(/^(pty|editor|actions|publish)\./)
+      expect(['thread', 'folder'], method).toContain(row.target)
+    }
   })
 
   it('matches the versions on record, and a changed row needs a new version', () => {
