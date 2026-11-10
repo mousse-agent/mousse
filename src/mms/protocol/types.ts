@@ -236,6 +236,7 @@ export const PROTOCOL_METHODS = [
   'threads.pin',
   'threads.settle',
   'threads.focus',
+  'threads.markSeen',
   'threads.reorder',
   'threads.search',
   'threads.regenerateTitle',

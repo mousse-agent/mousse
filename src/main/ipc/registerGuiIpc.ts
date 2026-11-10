@@ -111,6 +111,7 @@ import {
   type ThreadToastPayload
 } from '../notifications/threadNotification'
 import { NotificationThreadIndex } from '../notifications/threadNotificationTarget'
+import { seenReporter, showsDone } from './threadSeen'
 import { playThreadCompletionSound } from '../notifications/completionSound'
 import { AttentionCounts, showAttentionCount } from '../attentionBadge'
 import type {
@@ -487,6 +488,20 @@ export function registerGuiIpc(
   const notificationThreads = new NotificationThreadIndex()
   // How many threads need the person in each window, for the dock or taskbar badge.
   const attentionCounts = new AttentionCounts()
+  // Done is "finished, and you haven't seen it": a window that opens a thread, or shows it in focus, clears it everywhere.
+  const reportSeen = seenReporter((senderId, threadId) => {
+    const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
+    if (!win || win.isDestroyed()) return Promise.resolve()
+    return guiMms.runWithSender(win.webContents, () => guiMms.request('threads.markSeen', { threadId }))
+  })
+  const reportSeenIfDone = (win: BrowserWindow): void => {
+    const senderId = win.webContents.id
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    const shownId = binding ? windowPresentations.get(senderId)?.getActiveThreadId() : null
+    if (!binding || !shownId || !win.isFocused()) return
+    if (showsDone(activityTrackerFor(binding.profileId).getSnapshot(), shownId, (id) => notificationThreads.listedAs(binding.profileId, id))) reportSeen(senderId, shownId)
+  }
+  app.on('browser-window-focus', (_event, win) => reportSeenIfDone(win))
 
   const broadcast = (channel: string, data: unknown, profileId?: string): void => {
     const senderId = guiMms.getCurrentSenderId()
@@ -1039,6 +1054,8 @@ export function registerGuiIpc(
       ? tracker.getState(event.threadId)
       : undefined
     routeWindowState(event, binding.profileId, target)
+    // A thread that finishes while a focused window shows it was seen as it finished.
+    if (event.type === 'activity' || event.type === 'activity.snapshot') reportSeenIfDone(win)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
     if (event.type === 'projects.updated') notificationThreads.noteProjects(binding.profileId, event.data)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
@@ -1660,6 +1677,8 @@ export function registerGuiIpc(
         console.warn('threads.focus failed:', errorCodeOf(error))
       }
     }
+    // Opening a thread clears its Done (on the computer that owns it, for every window). Nothing waits for it.
+    void guiMms.request('threads.markSeen', { threadId }).catch(() => undefined)
 
     const snap = await guiMms.snapshotThread(threadId)
     // A newer select won the race — discard this snapshot.

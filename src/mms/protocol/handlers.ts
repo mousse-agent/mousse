@@ -1847,6 +1847,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       return ctx.mms.threadRouter?.focus(ctx, threadId, focused) ?? { routed: false, focused: false }
     }
+    case 'threads.markSeen': {
+      // A window opened the thread or showed it in focus: it is no longer Done (finished and unseen).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) return { seen: false }
+      return { seen: ctx.mms.threadRuntimes.markSeen(threadId) }
+    }
     case 'applets.get':
     case 'applets.state.get':
     case 'applets.state.save':

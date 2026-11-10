@@ -83,6 +83,7 @@ import { LineEditStatsStore } from './stats/LineEditStatsStore'
 import type { TerminalSendSink } from './terminals/PtyManager'
 import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
+import { UnseenDoneStore } from './runtime/UnseenDoneStore'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
@@ -793,7 +794,8 @@ export class MmsProfileServices {
       threadStore: this.threads,
       orchestrator: this.orchestrator,
       ptyManager: this.ptyManager,
-      questions: this.questions
+      questions: this.questions,
+      unseenDone: new UnseenDoneStore(homeDir)
     })
     // Minimum MMS-owned persistence so headless turns survive without the GUI.
     // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).

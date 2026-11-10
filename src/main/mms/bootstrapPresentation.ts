@@ -46,6 +46,8 @@ export async function bootstrapPresentation(
   // The daemon keeps a thread the window shows loaded; nothing waits for it. Threads of other computers are focused
   // when they are selected.
   if (!isQualifiedId(activeId)) void guiMms.request('threads.focus', { threadId: activeId, focused: true }).catch(() => undefined)
+  // The window opens on this thread, so it is seen: its Done clears.
+  void guiMms.request('threads.markSeen', { threadId: activeId }).catch(() => undefined)
   // Select before the snapshot: the renderer filters view events by its selection.
   broadcast('thread:selected', { id: activeId })
   const snap = await guiMms.snapshotThread(activeId)

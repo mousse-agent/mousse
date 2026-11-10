@@ -154,6 +154,9 @@ export const ROUTED_FORBIDDEN_KEYS = [
 export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({
   // ---------------------------------------------------------------- thread reads
   'threads.get': read('thread', ['threadId']),
+  // A window of the caller opened the thread: its Done clears on the owner, and so in every window. Anyone who may
+  // read the thread may see it.
+  'threads.markSeen': read('thread', ['threadId']),
   // `transcript: false` leaves out what a computer that reads the thread's stream already has (the
   // messages and the queue), so a snapshot of a long thread is not sent a second time.
   'thread.snapshot': read('thread', ['threadId', 'transcript'], {
