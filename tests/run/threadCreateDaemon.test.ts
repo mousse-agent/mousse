@@ -24,6 +24,22 @@ import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
+/**
+ * A fault a test puts before every atomic JSON write: the store writes a project thread's first `meta.json` directly
+ * under the project's list lock, not through its own `writeJsonAtomic`, so a crash there is set up below both.
+ */
+const atomicWrites = vi.hoisted(() => ({ before: undefined as ((path: string) => void) | undefined }))
+vi.mock('../../src/mms/data/AtomicFs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/mms/data/AtomicFs')>()
+  return {
+    ...actual,
+    atomicWriteJsonSync: (...args: Parameters<typeof actual.atomicWriteJsonSync>) => {
+      atomicWrites.before?.(args[0])
+      actual.atomicWriteJsonSync(...args)
+    }
+  }
+})
+
 vi.setConfig({ testTimeout: 60_000 })
 
 type Mcp = { url: string; token: string; turnToken?: string }
@@ -119,6 +135,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks()
+    atomicWrites.before = undefined
     for (const stop of stops.splice(0).reverse()) await stop().catch(() => undefined)
     if (previousHome === undefined) delete process.env.MOUSSE_HOME
     else process.env.MOUSSE_HOME = previousHome
@@ -663,17 +680,13 @@ describe('thread_create end to end (SPEC §15.1)', () => {
 
     /** Throws once, when the store writes `file` of the thread the creation decided on (the creator's own files are left alone). */
     const failOnce = (w: World, file: string) => {
-      const store = w.d.store as unknown as { writeJsonAtomic(path: string, value: unknown): void }
-      const real = store.writeJsonAtomic.bind(store)
-      let armed = true
-      vi.spyOn(store, 'writeJsonAtomic').mockImplementation((path: string, value: unknown) => {
+      atomicWrites.before = (path) => {
+        if (!path.endsWith(file)) return
         const decided = w.d.engine.store.listUnfinishedThreadCreations('1970-01-01T00:00:00.000Z').map((receipt) => readAgentThreadReceipt(receipt)?.intent.threadId)
-        if (armed && path.endsWith(file) && decided.some((id) => id && path.includes(id))) {
-          armed = false
-          throw new Error(`crash while writing ${file}`)
-        }
-        return real(path, value)
-      })
+        if (!decided.some((id) => id && path.includes(id))) return
+        atomicWrites.before = undefined
+        throw new Error(`crash while writing ${file}`)
+      }
     }
 
     it('after the receipt and before any file: the retry makes the one thread from the stored launch', async () => {

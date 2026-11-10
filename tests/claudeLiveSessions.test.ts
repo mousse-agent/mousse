@@ -586,7 +586,8 @@ describe('Stop and process lifetime', () => {
       const f = fixture({}, cli, undefined, { query: withPid(cli, 4242), reap })
       await f.turn()
       expect(f.service.stopThread('thread')).toBe('stopped')
-      expect(reap).toHaveBeenCalledWith(4242)
+      // The process goes with what Mousse knows of it, so the delayed kill never reaches another program given its pid.
+      expect(reap).toHaveBeenCalledWith(4242, expect.objectContaining({ exited: expect.any(Function) }))
       await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledWith('thread', expect.stringContaining('Stop could not end Claude Code\'s process for this chat (process 4242)')))
     })
   })
