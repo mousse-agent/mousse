@@ -9,6 +9,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { closeSync, existsSync, fsyncSync, linkSync, openSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { sqliteFilePath } from '../sqliteFilePath'
 import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadData } from './collections'
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
@@ -216,7 +217,7 @@ export class ThreadDbEngine {
       connection = undefined
     }
     if (!connection) {
-      const db = new DatabaseSync(path)
+      const db = new DatabaseSync(sqliteFilePath(path))
       try {
         db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
         let version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
@@ -551,7 +552,7 @@ export class ThreadDbEngine {
   create(dir: string): DbInfo {
     const tmpName = `${THREAD_DB_FILE}.create-${process.pid}-${randomUUID()}`
     const tmp = join(dir, tmpName)
-    const db = new DatabaseSync(tmp)
+    const db = new DatabaseSync(sqliteFilePath(tmp))
     try {
       db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;')
       createSchema(db)
@@ -593,7 +594,7 @@ export class ThreadDbEngine {
     }
     try {
       const source = readLegacyThreadData(dir)
-      const db = new DatabaseSync(tmp)
+      const db = new DatabaseSync(sqliteFilePath(tmp))
       let rows: number
       try {
         db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;')
