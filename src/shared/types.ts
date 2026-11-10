@@ -1375,6 +1375,11 @@ export interface Thread {
   /** How much the agent may do without asking; absent means the profile default. */
   permissionMode?: PermissionMode
   /**
+   * Raised by one on every write of `modelOverride` or `permissionMode`, whatever made it; absent is 0. A caller that
+   * read the thread sends it as `ifRevision`, and the change applies only while it is still current.
+   */
+  settingsRevision?: number
+  /**
    * Whether this thread works in its own git worktree. `false` runs it on the project's
    * folder. Unset means no choice was recorded: the composer shows the "Start new threads in a
    * worktree" setting, and a thread from before the toggle was honoured gets a worktree.

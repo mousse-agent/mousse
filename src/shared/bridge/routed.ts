@@ -340,10 +340,12 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       required: ['itemId']
     }
   ),
-  'threads.setModel': chat('thread', ['threadId', 'model']),
+  // `ifRevision` (version 2): applied only while the thread's settings revision is that one. An owner from before it is
+  // never sent the call without it: the caller refuses it as outdated (`RoutedClient.unsupportedKey`).
+  'threads.setModel': chat('thread', ['threadId', 'model', 'ifRevision'], { version: 2, since: { ifRevision: 2 } }),
   // Version 2 accepts `mode: 'auto'` (issue #419); a caller sends an older owner `accept_edits` instead
   // (`routedParamsForOwner`).
-  'threads.setPermissionMode': chat('thread', ['threadId', 'mode'], { required: ['mode'], version: 2 }),
+  'threads.setPermissionMode': chat('thread', ['threadId', 'mode', 'ifRevision'], { required: ['mode'], version: 3, since: { ifRevision: 3 } }),
   'threads.clearApprovalRules': chat('thread', ['threadId', 'ruleId']),
   'runs.resumeNow': chat('thread', ['threadId', 'runId'], {
     required: ['runId'],

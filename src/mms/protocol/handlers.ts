@@ -228,6 +228,28 @@ function namedModel(ctx: HandlerContext, model: unknown, projectId: string | und
   return override
 }
 
+/**
+ * With `ifRevision`, a change of a thread's model or permission mode applies only while the thread's
+ * `settingsRevision` is still that one: any write since, by any route, refuses it with `thread_settings_changed` and
+ * the thread's current values. Called right before the write with nothing awaited in between, so the check and the
+ * write are one step of the daemon.
+ */
+function refuseStaleRevision(ctx: HandlerContext, threadId: string, ifRevision: unknown): void {
+  if (ifRevision === undefined) return
+  if (typeof ifRevision !== 'number' || !Number.isSafeInteger(ifRevision) || ifRevision < 0)
+    throw new DomainRpcError('invalid_params', 'ifRevision must be a whole number')
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+  const revision = thread.settingsRevision ?? 0
+  if (revision !== ifRevision)
+    throw new DomainRpcError('thread_settings_changed', "This thread's model or permissions changed since it was read.", {
+      threadId,
+      revision,
+      ...(thread.modelOverride ? { modelOverride: thread.modelOverride } : {}),
+      ...(thread.permissionMode ? { permissionMode: thread.permissionMode } : {})
+    })
+}
+
 /** The same instance, model and level. */
 function sameSelection(a: ModelOverride, b: ModelOverride | undefined): boolean {
   return Boolean(b) && (a.instanceId ?? '') === (b!.instanceId ?? '') && a.model === b!.model && (a.effort ?? '') === (b!.effort ?? '')
@@ -2279,6 +2301,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const model = p.model
       let override: ModelOverride | undefined
       if (model !== undefined && model !== null) override = namedModel(ctx, model, ctx.mms.threads.getThread(threadId)?.projectId)
+      refuseStaleRevision(ctx, threadId, p.ifRevision)
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
       if (next) {
         // The global default keeps the instance, so later default turns resolve the same agent.
@@ -2310,11 +2333,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'threads.setPermissionMode': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'mode'])
+      rejectUnknownKeys(p, ['threadId', 'mode', 'ifRevision'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const mode = asString(p.mode, 'mode', 32)
       if (!isPermissionMode(mode)) throw new DomainRpcError('invalid_params', `mode must be one of ${PERMISSION_MODES.join(', ')}`)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      refuseStaleRevision(ctx, threadId, p.ifRevision)
       // Applies from the next turn; a running turn and a pending question are not touched.
       const caller = ctx.connection?.bridgeCaller
       const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined)

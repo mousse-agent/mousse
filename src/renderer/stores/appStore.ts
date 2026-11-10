@@ -2,7 +2,6 @@ import { create } from 'zustand'
 import type { ExpiryPreset } from '../../shared/threadExpiry'
 import type { RunSettings } from '../../shared/settings'
 import type { ComposerWorkspace } from '../lib/newThread'
-import type { ThreadSetup } from '../lib/threadSetup'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
   Agent,
@@ -98,6 +97,7 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.worktreeEnabled !== right.worktreeEnabled ||
       // Saved without touching `updatedAt`, so it is compared on its own (a new thread gets its project's mode so).
       left.permissionMode !== right.permissionMode ||
+      left.settingsRevision !== right.settingsRevision ||
       // A thread of another computer going offline (or coming back) changes its row.
       left.node !== right.node ||
       left.offline !== right.offline ||
@@ -203,9 +203,6 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** What a new chat's thread still has to be given before anything is sent on it, by thread id (`lib/threadSetup`). */
-  pendingThreadSetup: Record<string, ThreadSetup>
-  setPendingThreadSetup: (threadId: string, setup?: ThreadSetup) => void
   /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** The new-chat defaults from Settings → Runs. */
@@ -393,7 +390,7 @@ const personalWorkspaceKeys = [
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed',
-  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'pendingThreadSetup', 'threadsSidebarView', 'threadFeedOrder',
+  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'threadFeedOrder',
   'reviewIgnoreWhitespace', 'queueEditDrafts'
 ] as const
 let profileActivated = false
@@ -502,7 +499,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
-  pendingThreadSetup: {},
   privateThreadExpiry: 'never',
   setRunDefaults: ({ privateThreadExpiry }) => set({ privateThreadExpiry }),
   workspacePending: {},
@@ -782,7 +778,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       threadsSidebarView: 'projects' as 'projects' | 'threads' | 'chats',
       threadFeedOrder: [] as string[],
       composerWorkspaceDrafts: {},
-      pendingThreadSetup: {},
       composerDrafts: {},
       composerReferences: {},
       queueEditDrafts: {} as Record<string, QueueEditDraft>,
@@ -946,12 +941,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         [threadId ?? '__standalone__']: []
       }
     })),
-  setPendingThreadSetup: (threadId, setup) => set((state) => {
-    const pendingThreadSetup = { ...state.pendingThreadSetup }
-    if (setup) pendingThreadSetup[threadId] = setup
-    else delete pendingThreadSetup[threadId]
-    return { pendingThreadSetup }
-  }),
   setComposerWorkspaceDraft: (threadId, workspace) => set((state) => {
     const key = threadId ?? '__blank__'
     const composerWorkspaceDrafts = { ...state.composerWorkspaceDrafts }
@@ -1030,24 +1019,6 @@ export function deletedThreadIds(previous: AppState, state: AppState): string[] 
   const kept = new Set(state.threads.map((thread) => thread.id))
   return previous.threads.map((thread) => thread.id).filter((id) => !kept.has(id) && !isQualifiedId(id))
 }
-
-/**
- * Threads whose pending setup (`pendingThreadSetup`) should go: listed before and gone now (deleted, or a thread of a
- * computer that was unlinked), or archived. Compared with the previous list, so the empty list before the first read
- * after a start forgets nothing.
- */
-export function threadsLeavingSetup(previous: AppState, state: AppState): string[] {
-  if (state.threads === previous.threads || state.profileId !== previous.profileId || state.threads.length === 0) return []
-  const pending = Object.keys(state.pendingThreadSetup)
-  if (pending.length === 0) return []
-  const now = new Map(state.threads.map((thread) => [thread.id, thread]))
-  const before = new Set(previous.threads.map((thread) => thread.id))
-  return pending.filter((id) => (before.has(id) && !now.has(id)) || Boolean(now.get(id)?.settledAt))
-}
-
-useAppStore.subscribe((state, previous) => {
-  for (const id of threadsLeavingSetup(previous, state)) state.setPendingThreadSetup(id)
-})
 
 // A deleted thread's open edit of a queued message and its notice go with it.
 useAppStore.subscribe((state, previous) => {

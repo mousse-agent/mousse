@@ -889,6 +889,17 @@ const api = {
       ipcRenderer.invoke('threads:pin', threadId, pinned),
     setWorktreeEnabled: (threadId: string, enabled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled),
+    /**
+     * Sets a new chat's thread's model and then its permission mode, each only while its settings revision is
+     * `ifRevision` and then the one the previous set returned. Never retried; a refusal answers with its code and the
+     * thread as it now is (`computer_outdated`: that computer is too old to set them conditionally).
+     */
+    applySettings: (
+      threadId: string,
+      settings: { model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode },
+      ifRevision: number
+    ): Promise<{ ok: true; thread?: Thread } | { ok: false; code: string; message: string; thread?: Thread }> =>
+      ipcRenderer.invoke('threads:applySettings', threadId, settings, ifRevision),
     setPermissionMode: (threadId: string, mode: PermissionMode): Promise<Thread> =>
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>

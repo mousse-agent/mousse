@@ -79,6 +79,8 @@ interface ThreadMeta {
   updatedAt: string
   modelOverride?: ModelOverride
   permissionMode?: PermissionMode
+  /** `Thread.settingsRevision`. */
+  settingsRevision?: number
   lineage?: ThreadLineage
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
@@ -709,6 +711,7 @@ export class ThreadDataStore extends EventEmitter {
     if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
+    meta.settingsRevision = 0
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
     if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
@@ -1039,6 +1042,8 @@ export class ThreadDataStore extends EventEmitter {
     const updated: Thread = {
       ...thread,
       ...partial,
+      // Every write of the model or the permission mode, by any route, moves the revision on (`ifRevision`).
+      ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (thread.settingsRevision ?? 0) + 1 } : {}),
       updatedAt: opts.touch === false ? thread.updatedAt : new Date().toISOString()
     }
 

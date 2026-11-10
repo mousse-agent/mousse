@@ -1863,6 +1863,35 @@ export function registerGuiIpc(
     broadcast('threads:updated', res.threads)
     return res.thread
   })
+  /**
+   * Gives a new chat's thread the model and then the permission mode its composer showed, each only while the thread's
+   * settings revision is still the one the window last had (`ifRevision`): the one `threads.create` returned, then the one
+   * each set returned. Nothing is retried. Any refusal (a change made elsewhere meanwhile, a computer too old to take
+   * `ifRevision`, any other failure) stops it and answers with the code and the thread as it now is, so the window shows
+   * what the thread really has and sends nothing.
+   */
+  registerHandler('threads:applySettings', async (_e, threadId: string, settings: { model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode }, ifRevision: number) => {
+    let revision = ifRevision
+    let thread: { settingsRevision?: number } | undefined
+    const set = async (method: 'threads.setModel' | 'threads.setPermissionMode', params: Record<string, unknown>) => {
+      const res = await guiMms.request<{ thread: { settingsRevision?: number }; threads?: unknown[] }>(method, { threadId, ...params, ifRevision: revision })
+      if (Array.isArray(res.threads)) broadcast('threads:updated', res.threads)
+      // A computer that took `ifRevision` answers with the new revision; without it, the next set can't be conditional.
+      if (typeof res.thread?.settingsRevision !== 'number') throw Object.assign(new Error('The computer did not say which revision it applied.'), { code: 'computer_outdated' })
+      thread = res.thread
+      revision = res.thread.settingsRevision
+    }
+    try {
+      if (settings.model) await set('threads.setModel', { model: settings.model })
+      if (settings.permissionMode) await set('threads.setPermissionMode', { mode: settings.permissionMode })
+      return { ok: true, ...(thread ? { thread } : {}) }
+    } catch (error) {
+      const code = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'failed'
+      let current: unknown
+      try { current = (await guiMms.request<{ thread: unknown }>('threads.get', { threadId })).thread } catch { current = undefined }
+      return { ok: false, code, message: error instanceof Error ? error.message : String(error), ...(current ? { thread: current } : {}) }
+    }
+  })
   registerHandler('threads:setPermissionMode', async (_e, threadId: string, mode: PermissionMode) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.setPermissionMode',

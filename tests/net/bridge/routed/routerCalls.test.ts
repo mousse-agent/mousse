@@ -310,6 +310,35 @@ describe('the Auto permission mode', () => {
   }, 60_000)
 })
 
+describe('a conditional settings change (ifRevision)', () => {
+  it('applies on the current revision across computers, refuses a stale one, and is never sent to an older computer', async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    const stored = () => t.owner.threads.getThread(thread.id)!
+    const revision = stored().settingsRevision ?? 0
+    const applied = await t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'ask', ifRevision: revision }) as { thread: { settingsRevision?: number } }
+    expect(stored().permissionMode).toBe('ask')
+    expect(applied.thread.settingsRevision).toBe(revision + 1)
+    await expect(t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'accept_edits', ifRevision: revision })).rejects.toMatchObject({ code: 'thread_settings_changed' })
+    expect(stored().permissionMode).toBe('ask')
+    // A computer from before ifRevision (version 2 of the row): the call is refused here, not sent without it.
+    const older = clientWith((real) => ({
+      rpc: async (method: string, params: unknown, options: unknown) => {
+        const answer = await real.rpc(method, params, options)
+        if (method !== 'net.info') return answer
+        const info = answer as { routed: Record<string, number> }
+        return { ...info, routed: { ...info.routed, 'threads.setPermissionMode': 2, 'threads.setModel': 1 } }
+      }
+    }))
+    await withClient(older, async () => {
+      const before = stored().settingsRevision
+      await expect(t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'accept_edits', ifRevision: before })).rejects.toMatchObject({ code: 'computer_outdated' })
+      expect(stored().permissionMode).toBe('ask')
+      expect(stored().settingsRevision).toBe(before)
+    })
+  }, 60_000)
+})
+
 describe('a call that takes too long', () => {
   it('is sent once: a slow read on a connected computer is not a lost link', async () => {
     const thread = t.thread()
