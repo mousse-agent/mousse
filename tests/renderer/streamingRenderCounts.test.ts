@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
+import { Markdown } from '../../src/renderer/chat/components/agent-elements/markdown'
 import { startRenderCounts, stopRenderCounts } from '../../src/renderer/chat/components/agent-elements/render-counts'
 import { mousseToUIMessages, reuseUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import type { ChatMessage } from '../../src/shared/types'
@@ -129,3 +130,39 @@ describe('reuseUIMessages', () => {
     expect(reuseUIMessages(first, next)[0]).toBe(next[0])
   })
 })
+
+describe('Markdown of a streaming reply', () => {
+  const paragraph = 'The renderer keeps a bounded window of rows and recycles their nodes as the list scrolls.'
+  const reply = Array.from({ length: 12 }, (_, i) => `## Part ${i}\n\n${paragraph}\n\n- one\n- two\n`).join('\n')
+
+  /** Renders `reply` growing by `step` characters a time; returns how many blocks were split from text. */
+  function streamInto(streaming: boolean, step: number): number {
+    const counts = startRenderCounts()
+    for (let end = step; end < reply.length + step; end += step) {
+      act(() => root.render(createElement(Markdown, { content: reply.slice(0, Math.min(end, reply.length)), streaming })))
+    }
+    return counts.blocksSplit ?? 0
+  }
+
+  it('splits only the live tail while the reply streams, and ends on the same blocks', () => {
+    const whole = streamInto(false, 40)
+    const html = host.innerHTML
+    act(() => root.render(createElement('div')))
+    const live = streamInto(true, 40)
+    expect(live).toBeLessThan(whole / 4)
+    // The streamed reply ends on exactly what the whole text renders.
+    act(() => root.render(createElement(Markdown, { content: reply, streaming: false })))
+    expect(host.innerHTML).toBe(html)
+  })
+
+  it('marks only the live reply, so only its new blocks fade in', () => {
+    const messages = thread(3, 'Live text.\n\nMore live text.')
+    act(() => root.render(createElement(MessageList, { messages, status: 'streaming' })))
+    const marked = [...host.querySelectorAll('.an-markdown')].map((el) => el.hasAttribute('data-streaming'))
+    expect(marked.at(-1)).toBe(true)
+    expect(marked.slice(0, -1).every((flag) => !flag)).toBe(true)
+    act(() => root.render(createElement(MessageList, { messages, status: 'ready' })))
+    expect(host.querySelector('.an-markdown[data-streaming]')).toBeNull()
+  })
+})
+
