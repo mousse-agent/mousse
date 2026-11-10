@@ -734,15 +734,20 @@ describe('CodexProviderService options (managed Codex)', () => {
     type Event = { method: string; params: Record<string, unknown> }
     /**
      * A server whose turn sends `events` of the turn's thread, then the turn's end (none when `end` is null).
-     * `config/read` answers with `mcp` (an error when null).
+     * `config/read` answers with `mcp` (an error when null). A thread runs the model it is asked for; one
+     * started without a model runs the user's configured `gpt-configured` (a `v2` model), or always does
+     * when `honourModel` is false.
      */
-    function oneShotServer(events: Event[], end: Turn | null = { status: 'completed' }, mcp: Record<string, unknown> | null = { github: {}, mousse: {}, 'mousse-relay': {}, off: { enabled: false } }, models: Array<Record<string, unknown>> = LISTED) {
+    function oneShotServer(events: Event[], end: Turn | null = { status: 'completed' }, mcp: Record<string, unknown> | null = { github: {}, mousse: {}, 'mousse-relay': {}, off: { enabled: false } }, models: Array<Record<string, unknown>> = LISTED, honourModel = true) {
       const server = scriptedServer((message) => {
         const method = message.method!
         if (method === 'account/read') return chatgpt
         if (method === 'model/list') return { result: { data: models, nextCursor: null } }
         if (method === 'config/read') return mcp ? { result: { config: { mcp_servers: mcp }, layers: [] } } : { error: { code: -32603, message: 'config unreadable' } }
-        if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'thread/start') {
+          const asked = (message.params as { model?: string }).model
+          return { result: { thread: { id: 'thr-once' }, model: (honourModel && asked) || 'gpt-configured', modelProvider: 'openai', cwd: home } }
+        }
         if (method === 'turn/start') {
           const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
           setImmediate(() => {
@@ -755,12 +760,12 @@ describe('CodexProviderService options (managed Codex)', () => {
       })
       return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
     }
-    /** `model/list` entries: `multiAgentVersion` null (no subagent tools) for gpt-x. */
+    /** `model/list` entries: gpt-x, Codex's catalog default, has no subagent tools (null). */
     const listed = (id: string, multiAgentVersion?: string | null, isDefault = false) => ({
       id, model: id, displayName: id.toUpperCase(), description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault,
       ...(multiAgentVersion === undefined ? {} : { multiAgentVersion })
     })
-    const LISTED = [listed('gpt-x', null), listed('gpt-v1', 'v1', true), listed('gpt-v2', 'v2'), listed('gpt-old')]
+    const LISTED = [listed('gpt-x', null, true), listed('gpt-v1', 'v1'), listed('gpt-v2', 'v2'), listed('gpt-old'), listed('gpt-configured', 'v2')]
     const once = (service: CodexProviderService, signal = new AbortController().signal, onActivity: () => void = () => {}) =>
       service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity }, signal)
     /** The `abort` listeners on the service's app-server connection. */
@@ -818,26 +823,45 @@ describe('CodexProviderService options (managed Codex)', () => {
       const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }])
       const service = create(server)
       const run = (model: string) => service.oneShot({ model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
-      // `v2` subagents start a child before Codex reports the call; an unlisted version counts as `v2`.
+      // Subagents of any version start a child before Codex reports the call (`v1` through its handler even
+      // with the feature off); an unlisted version is refused too.
       await expect(run('gpt-v2')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V2 can start subagents') })
+      await expect(run('gpt-v1')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V1 can start subagents') })
       await expect(run('gpt-old')).rejects.toMatchObject({ code: 'unsupported' })
       await expect(run('gpt-missing')).rejects.toMatchObject({ code: 'unsupported' })
       await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', task: 'commit_message', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('cannot write commit messages')
       expect(server.requests('thread/start')).toEqual([])
       // `model/list` is asked with hidden models included.
       expect(server.requests('model/list').at(-1)!.params).toMatchObject({ includeHidden: true })
-      expect(await run('gpt-v1')).toEqual({ text: 'Title' })
-      // `default` is the model Codex lists as its default (gpt-v1 here).
+      expect(await run('gpt-x')).toEqual({ text: 'Title' })
+      expect(server.requests('thread/start')).toHaveLength(1)
+    })
+
+    it('pins the checked model, `default` included, so a configured model never runs instead', async () => {
+      // The user's config names gpt-configured (`v2`); the catalog's default, gpt-x, has no subagents.
+      const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }])
+      const service = create(server)
+      const run = (model: string) => service.oneShot({ model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
       expect(await run('default')).toEqual({ text: 'Title' })
-      expect(server.requests('thread/start')).toHaveLength(2)
+      expect(await run('gpt-x')).toEqual({ text: 'Title' })
+      // Both requests name the checked model: none is left to Codex's config.
+      expect(server.requests('thread/start').map((message) => (message.params as { model?: string }).model)).toEqual(['gpt-x', 'gpt-x'])
+      expect(server.requests('turn/start').map((message) => (message.params as { model?: string }).model)).toEqual(['gpt-x', 'gpt-x'])
+
+      // A Codex that opens the thread on its configured model anyway: no turn runs, and the thread is let go.
+      const stubborn = oneShotServer([], { status: 'completed' }, undefined, LISTED, false)
+      await expect(create(stubborn).oneShot({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
+        .rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('gpt-configured instead of gpt-x') })
+      expect(stubborn.requests('turn/start')).toEqual([])
+      expect(stubborn.requests('thread/unsubscribe')).toHaveLength(1)
     })
 
     it('marks listed models whose subagents cannot be turned off as unable to run one-shots', () => {
       expect(codexModelOption(listed('gpt-x', null) as never).oneShot).toBeUndefined()
-      expect(codexModelOption(listed('gpt-v1', 'v1') as never).oneShot).toBeUndefined()
+      expect(codexModelOption(listed('gpt-v1', 'v1') as never).oneShot).toBe(false)
       expect(codexModelOption(listed('gpt-v2', 'v2') as never).oneShot).toBe(false)
       expect(codexModelOption(listed('gpt-old') as never).oneShot).toBe(false)
-      expect([null, 'v1', 'v2', 'v3', undefined].map(codexOneShotRunsOn)).toEqual([true, true, false, false, false])
+      expect([null, 'v1', 'v2', 'v3', undefined].map(codexOneShotRunsOn)).toEqual([true, false, false, false, false])
     })
 
     it('ends as refused and interrupts the turn when Codex starts any tool', async () => {

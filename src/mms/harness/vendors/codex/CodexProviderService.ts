@@ -1705,7 +1705,10 @@ export class CodexProviderService {
       if (!listed || !codexOneShotRunsOn(listed.multiAgentVersion))
         throw harnessAppError({ code: 'unsupported', message: `${listed?.displayName || baseId} can start subagents that Mousse cannot turn off for a single request, so it cannot ${ONE_SHOT_TASK_TEXT[spec.task ?? 'title']}. Choose another title model in Settings → Agents, or Automatic.` })
       const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
-      const model = baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}
+      // Always the checked model, `default` included: left out, Codex would run the model the user's or a
+      // profile's config names, which was never checked.
+      const pinned = listed.model || listed.id
+      const model = { model: pinned }
       const started = pinnedProvider(this.modelProvider, await conn.request('thread/start', {
         cwd,
         approvalPolicy: 'never',
@@ -1718,6 +1721,9 @@ export class CodexProviderService {
       }, { signal }))
       const threadId = started.thread.id
       codexThreadId = threadId
+      // A thread Codex opened on another model than the checked one never runs a turn.
+      if (started.model !== pinned)
+        throw harnessAppError({ code: 'unsupported', message: `Codex opened this request on ${started.model} instead of ${pinned}, so Mousse did not send it.` })
       spec.onActivity()
       // The turn's agent messages by item, and its end.
       const messages = new Map<string, string>()
@@ -1726,12 +1732,13 @@ export class CodexProviderService {
       const completed = new Promise<CodexTurn>((resolve, reject) => { done = resolve; refuse = reject })
       completed.catch(() => undefined)
       this.oneShots.set(threadId, (notification) => {
-        spec.onActivity()
+        // A tool is refused before anything else runs, a slow activity callback included.
         const started = notificationParams(notification, 'item/started')?.item
         if (started && !CODEX_ONE_SHOT_ITEMS.has(started.type)) {
           refuse(new AppError({ code: 'policy_unenforceable', message: `Codex tried to use a tool (${started.type}) in a request that runs none, so Mousse stopped it.`, errorInfo: { category: 'unavailable', retryable: false } }))
           return
         }
+        spec.onActivity()
         const delta = notificationParams(notification, 'item/agentMessage/delta')
         if (delta) {
           messages.set(delta.itemId, (messages.get(delta.itemId) ?? '') + delta.delta)
