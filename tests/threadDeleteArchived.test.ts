@@ -8,6 +8,9 @@ import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { fixtureGit as git } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import { ensureSnapshotWorkspaceAsync, threadStorePath } from '../src/mms/workspace/SnapshotWorkspace'
+import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
+import { actionOptions } from './fixtures/gitFoundation'
 
 /** Puts a file only this thread has in its scratch folder: unpublished work a purge may discard only with consent. */
 function soleCopy(services: MmsProfileServices, threadId: string): string {
@@ -130,6 +133,83 @@ describe('threads.delete', () => {
       expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
       expect(refs()).toBe(before)
     } finally { await f.close() }
+  })
+
+  it('deletes a thread whose worktree cannot be checked (a broken .git), and leaves that folder as it is', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const thread = f.services.threads.createThread('Archived, its worktree broken')
+      const { worktree } = worktreeWithChanges(f.services, f.home, f.root, thread.id)
+      // Its link to the repository is broken: Mousse can't check it, so it could never remove it, but that no longer matters.
+      rmSync(join(worktree, '.git'), { force: true })
+      writeFileSync(join(worktree, '.git'), 'gitdir: nowhere\n')
+      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.rpc.request('threads.delete', { threadId: thread.id, discard: true })
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
+      expect(readFileSync(join(worktree, '.git'), 'utf8')).toBe('gitdir: nowhere\n')
+      expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+      expect(readFileSync(join(worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')
+    } finally { await f.close() }
+  })
+
+  it('a preview that keeps the work cannot authorize a purge that releases a hidden store thread’s snapshots', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const thread = f.services.threads.createThread('Archived, in a folder without Git')
+      const work = join(f.root, 'no-git-folder'); mkdirSync(work)
+      writeFileSync(join(work, 'a.txt'), 'first\n')
+      const directory = f.services.threads.getThreadDir(thread.id)
+      const space = await ensureSnapshotWorkspaceAsync({ threadDirectory: directory, threadId: thread.id, workTree: work })
+      await new ThreadActionService(directory).runCheckpointedAction({ ...actionOptions(space.record.workTree, 'turn'), threadId: thread.id }, () => writeFileSync(join(work, 'a.txt'), 'second\n'))
+      const store = threadStorePath(thread.id, f.home)
+      const refs = () => git(store, ['for-each-ref', '--format=%(refname) %(objectname)'])
+      const before = refs()
+      expect(before).toContain(`refs/mousse/threads/${thread.id}/`)
+      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.services.trashThread(thread.id, undefined, undefined, true)
+      const keeping = await f.services.lifecycle.cleanup.preview(thread.id, { keepWork: true })
+      expect(keeping.keepWork).toBe(true)
+      // Signed for a purge that keeps the work: one that would release the snapshots is refused, and nothing goes.
+      await expect(f.services.lifecycle.cleanup.purge({ taskId: thread.id, operationId: 'removes', expectedGeneration: keeping.generation, previewDigest: keeping.digest, discard: true, human: true })).rejects.toMatchObject({ code: 'resource_purge_preview_stale' })
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
+      expect(refs()).toBe(before)
+      // The delete itself keeps them.
+      const purged = await f.services.lifecycle.cleanup.purge({ taskId: thread.id, operationId: 'keeps', expectedGeneration: keeping.generation, previewDigest: keeping.digest, discard: true, human: true, keepWork: true })
+      expect(purged.state).toBe('purged')
+      expect(refs()).toBe(before)
+      expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('second\n')
+    } finally { await f.close() }
+  })
+
+  it('keeps the worktree of a delete an older version left half done when the next start resumes it', async () => {
+    const f = await lifecycleHarness()
+    let restarted: MousseMainService | undefined
+    try {
+      const thread = f.services.threads.createThread('Cut short by an older version')
+      const { worktree, branch, refs } = worktreeWithChanges(f.services, f.home, f.root, thread.id)
+      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.services.trashThread(thread.id)
+      // What an older version wrote at its purge boundary: the worktree and its refs in the ledger, to be removed.
+      const preview = await f.services.lifecycle.cleanup.preview(thread.id)
+      expect(preview.items.some((item) => item.kind === 'worktree')).toBe(true)
+      const store = f.services.threads.lifecycleStore
+      store.enableCleanupWriter()
+      store.update(thread.id, (current) => {
+        current.state = 'purge-started'; current.generation++
+        current.purge = { ...preview, operationId: 'older-purge', startedAt: new Date().toISOString(), discardAuthorized: true }
+      })
+      const before = refs()
+      await f.main.stop()
+      restarted = await MousseMainService.create({ homeDir: f.home, repoRoot: f.root, requireOwnership: false, headless: true })
+      const services = await restarted.getProfileServices(f.alice.id)
+      const record = services.threads.lifecycleStore.require(thread.id)
+      expect(record.state).toBe('purged')
+      expect(record.purge?.keptWork).toBe(true)
+      expect(readFileSync(join(worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')
+      expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+      expect(git(worktree, ['branch', '--show-current'])).toBe(branch)
+      expect(refs()).toBe(before)
+    } finally { await restarted?.stop(); await f.close() }
   })
 
   it('discards unpublished work only for the app; anyone else is refused and the thread goes back to Archived', async () => {

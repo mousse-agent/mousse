@@ -24,6 +24,11 @@ const digest = (value: string): string => createHash('sha256').update(value).dig
 export interface ResourceInventoryOptions {
   /** Additional known source containers; never walk browser caches or repository files. */
   sourceRoots?: string[]
+  /**
+   * The caller leaves the task's worktrees where they are (a delete that keeps the work): they are listed but not
+   * verified, so a missing checkout, a drive that is not connected or a broken `.git` blocks nothing.
+   */
+  keepWork?: boolean
 }
 
 /**
@@ -353,7 +358,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
     }
   }
   const verifyWorktree = (path: string | undefined, expectedBranch: string | undefined, expectedRepository: string | undefined): void => {
-    if (!path) return
+    if (!path || options.keepWork) return
     const key = worktreeKey(store, path, expectedBranch, expectedRepository)
     // Read beforehand without blocking (`verifyWorktreeFact`).
     if (!verifiedWorktrees.has(key)) verifiedWorktrees.set(key, reads.worktree(store, path, expectedBranch, expectedRepository))

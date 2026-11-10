@@ -69,6 +69,11 @@ export interface LifecycleOperation {
   inventory?: ResourceInventorySnapshot
   runner?: { pid: number; processInstanceId: string; token: string }
   result?: LifecycleOperationResult
+  /**
+   * A trash that is a step of a delete keeping the thread's work, or a restore that puts it back: its inventory does
+   * not verify the thread's worktrees, which stay where they are, so one that can't be checked never stops it.
+   */
+  keepWork?: true
 }
 export interface TaskLifecycleRecord {
   schemaVersion: 1
@@ -151,6 +156,8 @@ export interface LifecyclePurgePreview {
   /** Kept, with why. `unverifiedOwner` is the thread whose checkout can't be verified and whose records name it. */
   retained: Array<{ identity: string; reason: string; unverifiedOwner?: string }>
   exclusiveBytes: number
+  /** A preview of a delete that keeps the thread's work; signed with the rest, so it authorizes only such a purge. */
+  keepWork?: true
 }
 
 /**

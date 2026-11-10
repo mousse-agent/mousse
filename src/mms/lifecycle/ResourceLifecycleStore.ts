@@ -446,7 +446,7 @@ export class ResourceLifecycleStore {
         if (item.manifestPath) assertLifecyclePath(this.root, item.manifestPath)
         if (item.kind === 'scheduled-row' && ![join(this.profileHome, 'mousse.conf'), join(this.profileHome, 'scheduled', 'jobs-runtime.json')].includes(item.sourcePath ?? '')) throw new ResourceLifecycleError('ambiguous', 'Purge configuration intent is invalid')
       }
-      const original = { schemaVersion: purge.schemaVersion, taskId: purge.taskId, generation: purge.generation, digest: '', items: purge.items.map((item) => ({ ...item, status: 'pending', ...(item.discardState ? { discardState: 'pending' } : {}) })), ownedTaskIds: purge.ownedTaskIds, blockers: purge.blockers, retained: purge.retained, exclusiveBytes: purge.exclusiveBytes }
+      const original = { schemaVersion: purge.schemaVersion, taskId: purge.taskId, generation: purge.generation, digest: '', items: purge.items.map((item) => ({ ...item, status: 'pending', ...(item.discardState ? { discardState: 'pending' } : {}) })), ownedTaskIds: purge.ownedTaskIds, blockers: purge.blockers, retained: purge.retained, exclusiveBytes: purge.exclusiveBytes, ...(purge.keepWork ? { keepWork: true } : {}) }
       if (createHash('sha256').update(JSON.stringify(original)).digest('hex') !== purge.digest) throw new ResourceLifecycleError('ambiguous', 'Purge intent digest does not match its immutable resource plan')
     }
     const ids = new Set<string>()

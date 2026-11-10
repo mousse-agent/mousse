@@ -36,7 +36,8 @@ export interface ThreadDeleteDeps {
   purge: Pick<ResourcePurgeService, 'preview' | 'purge'>
   getThread(threadId: string): Thread | undefined
   listThreads(): Thread[]
-  trash(threadId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord>
+  /** `keepWork`: the trash's inventory does not verify the worktrees the delete keeps. */
+  trash(threadId: string, operationId?: string, expectedGeneration?: number, keepWork?: boolean): Promise<TaskLifecycleRecord>
   restore(threadId: string): Promise<unknown>
   /** Archives a thread a person started; a subagent thread or an owned thread is left as it is. */
   archive(threadId: string): void
@@ -176,7 +177,7 @@ export class ThreadDeleter {
         if (current?.state === 'purge-started' || current?.state === 'purged') continue
         this.setIntent(id, intent)
         if (!current || current.state === 'active') {
-          await this.deps.trash(id, id === threadId ? options.operationId : undefined, id === threadId ? options.expectedGeneration : undefined)
+          await this.deps.trash(id, id === threadId ? options.operationId : undefined, id === threadId ? options.expectedGeneration : undefined, keepsWork(intent))
           trashedHere.push(id)
         }
         await this.check(id, intent)
