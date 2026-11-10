@@ -148,7 +148,7 @@ describe('Files tree', () => {
     await mountTree(listDir)
     await click(row('src'))
     await flush()
-    const error = must(host.querySelector('.file-tree-children .file-tree-error'), 'folder error')
+    const error = must(host.querySelector('.file-tree-folder-error'), 'folder error')
     expect(error.getAttribute('role')).toBe('alert')
     expect(error.textContent).toContain('Couldn’t read this folder')
     expect(error.querySelector('span')?.getAttribute('title')).toContain('EACCES')
@@ -338,7 +338,7 @@ describe('terminal held on another computer', () => {
         onExit: () => () => undefined
       }
     }
-    useAppStore.setState({ activeThreadId: 't1', mainView: 'terminal', projectTerminalTabs: [], threads: [{ id: 't1', projectId: 'p1' }] as never })
+    useAppStore.setState({ activeThreadId: 't1', mainView: 'terminal', mainAreaOpen: true, projectTerminalTabs: [], threads: [{ id: 't1', projectId: 'p1' }] as never })
     return act(async () => root.render(createElement(ProjectTerminalPanel)))
   }
 

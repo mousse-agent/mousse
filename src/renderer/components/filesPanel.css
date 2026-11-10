@@ -156,6 +156,11 @@
 .file-tree-row:focus-visible,
 .files-editor-empty:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.6); outline-offset: -2px; }
 .file-tree-loader { display: flex; padding: 4px 16px; justify-content: flex-start; }
+/* The tree draws only the rows on screen: the list keeps the full height, and its top padding stands in for the rows above. */
+.file-tree { position: relative; }
+.file-tree-list { box-sizing: border-box; }
+.file-tree-list > * { box-sizing: border-box; min-height: 0; overflow: hidden; }
+.file-tree-pending { display: flex; align-items: center; }
 .file-tree-error { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 2px 8px 2px 16px; font-size: 12px; color: var(--danger); }
 .file-tree-error > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-tree-retry { flex: none; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--text-primary); background: var(--ui-hover); }

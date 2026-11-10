@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type RefObject } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -12,8 +12,13 @@ import type { FileEntry } from '../../shared/types'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { useFixedRowWindow } from '../lib/virtualRows'
 import { addReferenceToChat, filesEntryReference } from '../utils/fileReference'
 import { DelayedLoader } from './ui/DelayedLoader'
+import { FileTreeMemory, type FileTreeRow } from './fileTreeState'
+
+/** Every tree row has this height (px), so the tree draws only the rows on screen. */
+export const FILE_TREE_ROW_HEIGHT = 26
 
 interface FileTreeProps {
   /** The folder the tree shows; entries are named relative to it. */
@@ -24,24 +29,19 @@ interface FileTreeProps {
   selectedPath: string | null
   onSelectFile: (path: string) => void
   refreshKey: number
+  /** Keeps the tree's folders, open folders and scroll offset after it unmounts. The tree has its own when absent. */
+  memory?: FileTreeMemory
 }
 
 type EntryAction = 'add-to-chat' | 'copy-path'
 
-interface TreeNodeProps {
-  entry: FileEntry
-  depth: number
+interface EntryRowProps {
+  row: Extract<FileTreeRow, { kind: 'entry' }>
   selectedPath: string | null
   onSelectFile: (path: string) => void
-  expandedPaths: Set<string>
-  toggleExpand: (path: string) => void
-  loadChildren: (path: string) => Promise<FileEntry[]>
+  onToggle: (path: string) => void
   onAction: (entry: FileEntry, action: EntryAction) => void
   onDragEntry: (entry: FileEntry, dataTransfer: DataTransfer) => void
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 /** Shift+F10 and the context-menu key open a row's menu, as right-click does. */
@@ -102,45 +102,17 @@ function EntryMenu({ label, anchorRef, onPick, onClose }: {
   </FloatingPortal>
 }
 
-function TreeNode({
-  entry,
-  depth,
-  selectedPath,
-  onSelectFile,
-  expandedPaths,
-  toggleExpand,
-  loadChildren,
-  onAction,
-  onDragEntry
-}: TreeNodeProps) {
-  const [children, setChildren] = useState<FileEntry[] | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [loadError, setLoadError] = useState<string | null>(null)
+/** One file or folder row of the flattened tree. */
+function EntryRow({ row, selectedPath, onSelectFile, onToggle, onAction, onDragEntry }: EntryRowProps) {
+  const { entry, depth, expanded } = row
   const [menuOpen, setMenuOpen] = useState(false)
   const rowRef = useRef<HTMLButtonElement>(null)
   const moreRef = useRef<HTMLButtonElement>(null)
   const isDir = entry.kind === 'directory'
-  const expanded = isDir && expandedPaths.has(entry.path)
-
-  const load = useCallback(() => {
-    setLoading(true)
-    setLoadError(null)
-    void loadChildren(entry.path)
-      .then(setChildren, (error: unknown) => setLoadError(errorText(error)))
-      .finally(() => setLoading(false))
-  }, [entry.path, loadChildren])
-
-  useEffect(() => {
-    if (!expanded || children !== null || loading || loadError !== null) return
-    load()
-  }, [expanded, children, loading, loadError, load])
 
   const handleClick = () => {
-    if (isDir) {
-      toggleExpand(entry.path)
-    } else {
-      onSelectFile(entry.path)
-    }
+    if (isDir) onToggle(entry.path)
+    else onSelectFile(entry.path)
   }
 
   const closeMenu = useCallback(() => {
@@ -149,91 +121,65 @@ function TreeNode({
   }, [])
 
   return (
-    <div className="file-tree-node">
-      <div className={`file-tree-item${selectedPath === entry.path ? ' selected' : ''}${menuOpen ? ' menu-open' : ''}`}>
-        <button
-          ref={rowRef}
-          type="button"
-          className="file-tree-row"
-          data-path={entry.path}
-          style={{ paddingLeft: 8 + depth * 14 }}
-          aria-expanded={isDir ? expanded : undefined}
-          aria-keyshortcuts="Shift+F10"
-          onClick={handleClick}
-          onContextMenu={(event) => { event.preventDefault(); setMenuOpen(true) }}
-          onKeyDown={(event) => {
-            if (!isMenuKey(event)) return
-            event.preventDefault()
-            setMenuOpen(true)
-          }}
-          draggable
-          onDragStart={(event) => onDragEntry(entry, event.dataTransfer)}
-        >
-          {isDir ? (
-            expanded ? (
-              <ChevronDown size={14} className="file-tree-chevron" />
-            ) : (
-              <ChevronRight size={14} className="file-tree-chevron" />
-            )
+    <div className={`file-tree-item${selectedPath === entry.path ? ' selected' : ''}${menuOpen ? ' menu-open' : ''}`}
+      style={{ height: FILE_TREE_ROW_HEIGHT }}>
+      <button
+        ref={rowRef}
+        type="button"
+        className="file-tree-row"
+        data-path={entry.path}
+        style={{ paddingLeft: 8 + depth * 14 }}
+        aria-expanded={isDir ? expanded : undefined}
+        aria-keyshortcuts="Shift+F10"
+        onClick={handleClick}
+        onContextMenu={(event) => { event.preventDefault(); setMenuOpen(true) }}
+        onKeyDown={(event) => {
+          if (!isMenuKey(event)) return
+          event.preventDefault()
+          setMenuOpen(true)
+        }}
+        draggable
+        onDragStart={(event) => onDragEntry(entry, event.dataTransfer)}
+      >
+        {isDir ? (
+          expanded ? (
+            <ChevronDown size={14} className="file-tree-chevron" />
           ) : (
-            <span className="file-tree-chevron-spacer" />
-          )}
-          {isDir ? (
-            expanded ? (
-              <FolderOpen size={14} className="file-tree-icon" />
-            ) : (
-              <Folder size={14} className="file-tree-icon" />
-            )
+            <ChevronRight size={14} className="file-tree-chevron" />
+          )
+        ) : (
+          <span className="file-tree-chevron-spacer" />
+        )}
+        {isDir ? (
+          expanded ? (
+            <FolderOpen size={14} className="file-tree-icon" />
           ) : (
-            <File size={14} className="file-tree-icon" />
-          )}
-          <span className="file-tree-name">{entry.name}</span>
-        </button>
-        <button
-          ref={moreRef}
-          type="button"
-          className="file-tree-more"
-          tabIndex={-1}
-          aria-label={`Actions for ${entry.name}`}
-          title="More actions (Shift+F10)"
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
-        >
-          <MoreHorizontal size={14} aria-hidden="true" />
-        </button>
-        {menuOpen && <EntryMenu
-          label={`Actions for ${entry.name}`}
-          anchorRef={moreRef}
-          onClose={closeMenu}
-          onPick={(action) => { closeMenu(); onAction(entry, action) }}
-        />}
-      </div>
-      {expanded && (
-        <div className="file-tree-children">
-          {loading && <DelayedLoader size="small" label={`Loading ${entry.name}`} className="file-tree-loader" />}
-          {loadError !== null && !loading && (
-            <div className="file-tree-error" role="alert" style={{ paddingLeft: 8 + (depth + 1) * 14 }}>
-              <span title={loadError}>Couldn’t read this folder</span>
-              <button type="button" className="file-tree-retry" onClick={load}>Retry</button>
-            </div>
-          )}
-          {children?.map((child) => (
-            <TreeNode
-              key={child.path}
-              entry={child}
-              depth={depth + 1}
-              selectedPath={selectedPath}
-              onSelectFile={onSelectFile}
-              expandedPaths={expandedPaths}
-              toggleExpand={toggleExpand}
-              loadChildren={loadChildren}
-              onAction={onAction}
-              onDragEntry={onDragEntry}
-            />
-          ))}
-        </div>
-      )}
+            <Folder size={14} className="file-tree-icon" />
+          )
+        ) : (
+          <File size={14} className="file-tree-icon" />
+        )}
+        <span className="file-tree-name">{entry.name}</span>
+      </button>
+      <button
+        ref={moreRef}
+        type="button"
+        className="file-tree-more"
+        tabIndex={-1}
+        aria-label={`Actions for ${entry.name}`}
+        title="More actions (Shift+F10)"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
+      >
+        <MoreHorizontal size={14} aria-hidden="true" />
+      </button>
+      {menuOpen && <EntryMenu
+        label={`Actions for ${entry.name}`}
+        anchorRef={moreRef}
+        onClose={closeMenu}
+        onPick={(action) => { closeMenu(); onAction(entry, action) }}
+      />}
     </div>
   )
 }
@@ -244,49 +190,43 @@ export function FileTree({
   threadId,
   selectedPath,
   onSelectFile,
-  refreshKey
+  refreshKey,
+  memory: givenMemory
 }: FileTreeProps) {
   const projectId = useAppStore((s) => s.threads.find((thread) => thread.id === threadId)?.projectId)
-  const [rootEntries, setRootEntries] = useState<FileEntry[]>([])
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set(['']))
-  const [loading, setLoading] = useState(false)
-  const [rootError, setRootError] = useState<string | null>(null)
+  const [ownMemory] = useState(() => (givenMemory ? null : new FileTreeMemory()))
+  const memory = givenMemory ?? ownMemory!
+  useSyncExternalStore(memory.subscribe, memory.getVersion)
+  const rows = memory.rows()
+  const root = memory.root()
   const [notice, setNotice] = useState<{ error: boolean; text: string } | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
 
-  const loadChildren = useCallback(
+  const list = useCallback(
     async (dirPath: string) => window.mousse.fs.listDir(dirPath, undefined, threadId, listRoot),
     [listRoot, threadId]
   )
 
-  const refreshRoot = useCallback(async () => {
-    if (!filesRoot) return
-    setLoading(true)
-    setRootError(null)
-    try {
-      const entries = await window.mousse.fs.listDir('', undefined, threadId, listRoot)
-      setRootEntries(entries)
-    } catch (error) {
-      setRootEntries([])
-      setRootError(errorText(error))
-    } finally {
-      setLoading(false)
-    }
-  }, [filesRoot, listRoot, threadId])
-
+  // A tree that comes back shows what it had at once and reads its folders again behind it.
   useEffect(() => {
-    void refreshRoot()
-  }, [refreshRoot, refreshKey])
+    if (!filesRoot) return
+    void (memory.root()?.entries ? memory.refresh(list) : memory.load('', list))
+  }, [filesRoot, list, memory, refreshKey])
 
   useEffect(() => setNotice(null), [threadId])
 
-  const toggleExpand = useCallback((path: string) => {
-    setExpandedPaths((prev) => {
-      const next = new Set(prev)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }, [])
+  // Back to where it was scrolled. Declared before the row window, so that measures the restored offset.
+  const scrollRestored = useRef(false)
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current
+    if (scrollRestored.current || !scroller || rows.length === 0) return
+    scrollRestored.current = true
+    scroller.scrollTop = memory.scrollTop
+  }, [memory, rows.length])
+  const { start, end } = useFixedRowWindow(scrollRef, listRef, rows.length, FILE_TREE_ROW_HEIGHT)
+
+  const toggleExpand = useCallback((path: string) => memory.toggle(path, list), [list, memory])
 
   const referenceOf = useCallback((entry: FileEntry) => filesEntryReference({
     path: entry.path, name: entry.name, kind: entry.kind === 'directory' ? 'folder' : 'file', filesRoot, threadId, projectId
@@ -315,33 +255,44 @@ export function FileTree({
   }
 
   return (
-    <div className="file-tree">
+    <div className="file-tree" ref={scrollRef} onScroll={(event) => { memory.scrollTop = event.currentTarget.scrollTop }}>
       <div className="sr-only" role="status">{notice && !notice.error ? notice.text : ''}</div>
       {notice?.error && <div className="file-tree-error" role="alert">{notice.text}</div>}
-      {loading ? (
+      {!root || root.loading ? (
         <DelayedLoader size="small" label="Loading files" className="file-tree-loader" />
-      ) : rootError !== null ? (
+      ) : root.error !== null ? (
         <div className="file-tree-error" role="alert">
-          <span title={rootError}>Couldn’t read this folder</span>
-          <button type="button" className="file-tree-retry" onClick={() => void refreshRoot()}>Retry</button>
+          <span title={root.error}>Couldn’t read this folder</span>
+          <button type="button" className="file-tree-retry" onClick={() => void memory.load('', list)}>Retry</button>
         </div>
-      ) : rootEntries.length === 0 ? (
+      ) : rows.length === 0 ? (
         <div className="file-tree-note">Empty folder</div>
       ) : (
-        rootEntries.map((entry) => (
-          <TreeNode
-            key={entry.path}
-            entry={entry}
-            depth={0}
-            selectedPath={selectedPath}
-            onSelectFile={onSelectFile}
-            expandedPaths={expandedPaths}
-            toggleExpand={toggleExpand}
-            loadChildren={loadChildren}
-            onAction={onAction}
-            onDragEntry={onDragEntry}
-          />
-        ))
+        // Only the rows on screen are drawn; the list keeps its full height so the scrollbar stays true.
+        <div ref={listRef} className="file-tree-list"
+          style={{ height: rows.length * FILE_TREE_ROW_HEIGHT, paddingTop: start * FILE_TREE_ROW_HEIGHT }}>
+          {rows.slice(start, end).map((row) => row.kind === 'entry' ? (
+            <EntryRow
+              key={row.key}
+              row={row}
+              selectedPath={selectedPath}
+              onSelectFile={onSelectFile}
+              onToggle={toggleExpand}
+              onAction={onAction}
+              onDragEntry={onDragEntry}
+            />
+          ) : row.kind === 'loading' ? (
+            <div key={row.key} className="file-tree-pending" style={{ height: FILE_TREE_ROW_HEIGHT }}>
+              <DelayedLoader size="small" label={`Loading ${row.name}`} className="file-tree-loader" />
+            </div>
+          ) : (
+            <div key={row.key} className="file-tree-error file-tree-folder-error" role="alert"
+              style={{ height: FILE_TREE_ROW_HEIGHT, paddingLeft: 8 + row.depth * 14 }}>
+              <span title={row.message}>Couldn’t read this folder</span>
+              <button type="button" className="file-tree-retry" onClick={() => void memory.load(row.path, list)}>Retry</button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )

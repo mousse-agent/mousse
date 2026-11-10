@@ -597,7 +597,7 @@ export default function App() {
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
-          <MainViewPanel />
+          <MainViewPanel open={mainAreaOpen && layoutMode === 'projects'} />
         </KeepMounted>
         </>}
         </div>
