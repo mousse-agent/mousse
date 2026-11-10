@@ -975,6 +975,8 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'runs',
     'provider',
     'title',
+    'botModel',
+    'experimental',
     'agents',
     'integrations'
   ])

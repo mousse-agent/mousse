@@ -130,6 +130,11 @@ describe('protocol nested validators', () => {
     expect(asSettingsPartial({ shortcuts: { 'thread.new': 'CommandOrControl+Shift+X', 'thread.next': null } })).toEqual({
       shortcuts: { 'thread.new': 'CommandOrControl+Shift+X', 'thread.next': null }
     })
+    // Settings → Agents saves the bot model and the experimental switches through this same patch.
+    expect(asSettingsPartial({ botModel: { llmProvider: 'claude-subscription', model: 'sonnet', instanceId: 'claude' } })).toEqual({
+      botModel: { llmProvider: 'claude-subscription', model: 'sonnet', instanceId: 'claude' }
+    })
+    expect(asSettingsPartial({ experimental: { subagentWorktrees: true } })).toEqual({ experimental: { subagentWorktrees: true } })
     expect(() => asSettingsPartial({ notASection: true })).toThrow(/not allowed/)
     // The General page saves the default permission mode and the run settings through this patch.
     expect(asSettingsPartial({ permissions: { defaultMode: 'full' } })).toEqual({ permissions: { defaultMode: 'full' } })
