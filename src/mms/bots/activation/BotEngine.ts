@@ -225,6 +225,8 @@ export const MAX_WAITING_REMINDERS = 50
 const MAX_REMINDER_AHEAD_MS = 366 * 24 * 60 * 60_000
 /** The longest the reminder timer waits before it looks again (a far timer would overflow, and clocks move). */
 const REMINDER_REARM_MS = 6 * 60 * 60_000
+/** How long a reminder that failed to be said waits before it is tried again. */
+const REMINDER_RETRY_MS = 60_000
 /** A reminder said later than this (Mousse was off) says what time it was for. */
 const REMINDER_LATE_MS = 2 * 60_000
 /** How long a dispatch's reply waits for the executor's final message before it is posted without it. */
@@ -312,11 +314,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
   private readonly liveChips = new Map<string, { botId: string; chip: BotChip | null }>()
-  /** Chips of a work's earlier turns, for its report, when the owner's notes continued it. */
-  private readonly carriedChips = new Map<string, BotChip[]>()
   /** The one timer for the soonest reminder of any bot (`armReminders`). */
   private reminderTimer: { clear(): void } | undefined
   private delivering: Promise<void> | undefined
+  /** Until when a reminder that failed to be said is not tried again (`REMINDER_RETRY_MS`), so a failure never spins. */
+  private readonly reminderRetryAt = new Map<string, number>()
+  private closed = false
   /** Final messages the executor delivered while the dispatch's end was still being recorded, by `<activationId>:<n>`. */
   private readonly lateTexts = new Map<string, string>()
   /** The owner's message that answered a wall while its turn was still ending: the continuation's input. */
@@ -1664,8 +1667,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // Chips never stop a call.
       }
     }
-    // A new bot's first message (`bots.create`'s activation, its first dispatch) answers no request of the owner's.
-    const firstMessage = row.idempotencyKey.startsWith('create:') && input.mainN === 1
+    // A new bot's first message (`bots.create`'s activation, every dispatch of it: a reload or a retry continues it)
+    // answers no request of the owner's.
+    const firstMessage = row.idempotencyKey.startsWith('create:')
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const decided = base.check(call)
@@ -2470,7 +2474,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const owned = this.store.all("SELECT id FROM bot_messages WHERE activation_id = ? AND author = 'owner' AND kind = 'text' ORDER BY seq", row.id)
       .map((entry) => this.store.message(entry.id as string)).filter((message): message is BotMessageRow => message !== undefined)
     const input = (message: BotMessageRow) => messageInput(message, (id) => this.store.message(id))
-    if (owned[0] && input(owned[0]) === row.trigger.input) owned.shift()
+    // The message that started the activation is its request, not a reply to its wall: found by its request id, as
+    // its rebuilt input can differ from the one sent (a quoted message forgotten since).
+    if (owned[0] && (row.idempotencyKey === `chat:${owned[0].clientRequestId}` || input(owned[0]) === row.trigger.input)) owned.shift()
     // A message an earlier continuation already carried is not sent twice.
     const sent = this.store.dispatches(row.id).filter((dispatch) => dispatch.kind === 'continue').map((dispatch) => dispatch.prompt.text)
     const reply = owned.reverse().find((message) => !sent.some((prompt) => prompt.endsWith(`\n\n${input(message)}`)) &&
@@ -2605,8 +2611,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
       }
       const openWalls = this.store.escalations({ activationId: row.id, status: 'open' }).filter((ask) => ask.mode === 'wall')
-      // Work the owner added to while it ran takes the notes before it reports, if it has time left for them;
-      // without the time it reports what it has, and the notes stay unread (work_list shows it ended).
+      // Work the owner added to while it ran posts what it has, then takes the notes and reports again, if it has time
+      // left for them; without the time it reports what it has, and the notes stay unread (work_list shows it ended).
       let noted = false
       const next = this.recorded(row, () => {
         noted = !reload && row.lane === 'run' && run.status === 'completed' && this.store.pendingWorkNotes(row.id).length > 0 && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
@@ -2628,16 +2634,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return this.store.activation(row.id)!
       })
       if (!next) return
-      // The notes continue the same thread now: what it had so far is not posted, its report comes with them.
+      // What it has is posted first, so a continuation that fails or is stopped never loses it; then the notes continue
+      // the same thread, and its report follows with the change.
+      this.postReply(next, main, text, options.expectText === true)
       if (noted && next.status === 'running') {
-        this.lateTexts.delete(`${row.id}:${main.n}`)
-        const chips = this.drained.get(`${row.id}:${main.n}`)
-        this.drained.delete(`${row.id}:${main.n}`)
-        if (chips?.length) this.carriedChips.set(row.id, [...(this.carriedChips.get(row.id) ?? []), ...chips])
         await this.continueWith(row.id, ['running'], {})
         return
       }
-      this.postReply(next, main, text, options.expectText === true)
       if (reload && next.status === 'running') {
         await this.continueWith(row.id, ['running'], { reload: true })
         return
@@ -2696,10 +2699,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.pendingReplies.get(key)?.timer.clear()
     this.pendingReplies.delete(key)
     this.lateTexts.delete(key)
-    // Chips of earlier turns of the same work (it continued with the owner's notes) go with its report.
-    const chips = [...(this.carriedChips.get(row.id) ?? []), ...(this.drained.get(key) ?? [])]
+    const chips = this.drained.get(key) ?? []
     this.drained.delete(key)
-    this.carriedChips.delete(row.id)
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
       !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
@@ -2889,6 +2890,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         ? `The owner wrote instead of answering, so the answer is not now: ${title}. Carry on without it.`
         : `The owner said not now: ${title}. Carry on without it and say what you couldn't do.`
       if (isSpecialAsk(answer.permission)) return `The owner allowed: ${title}. Mousse saves it now.`
+      // A chat turn is not offered what takes long: the work it hands off has it now.
+      if (row.lane === 'chat' && 'tool' in answer.permission && (BOT_WORK_ONLY_TOOLS.includes(botGrantTool(answer.permission.tool)) || botGrantTool(answer.permission.tool) === BOT_BROWSER_PERMISSION))
+        return `The owner allowed: ${title}. Your work has it now: hand the job to work_start.`
       return `The owner allowed: ${title}.`
     }
     const depth = row.modelOverride?.depth
@@ -2897,13 +2901,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
         : input.restart ? 'Mousse restarted while you were working.'
           : input.network ? 'The internet connection dropped while you were working; it is back now.'
-            : input.notes ? 'Before you report, take this into account.' : 'The owner asked you to continue.'
+            : input.notes ? 'The owner added something while you worked; what you had so far was already sent to them.' : 'The owner asked you to continue.'
     const calls = this.store.unknownCalls(row.id)
     const interrupted = calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${call.role} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : ''
     // The owner's notes to a run: they change the work, so the run reports again on all of it.
-    if (input.notes) return `[Mousse] ${lead}${interrupted}\n\n${input.notes}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}Update your work for it. ${BOT_RUN_REPORT_LINE}`
+    if (input.notes) return `[Mousse] ${lead}${interrupted}\n\n${input.notes}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}Update your work for it. Your last message is your updated report: lead with what changed, in plain words.`
     // The owner's message is the next input.
     if (input.ownerText !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${input.ownerText}`
     // The walled dispatch never ran (a time wall before it started): its own prompt is sent now.
@@ -3942,6 +3946,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const replyTo = this.ownerMessageOf(from)
     const summary = await this.enqueue(botId, `work:${input.key}`, { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from }, 'run')
     const row = this.store.activation(summary.id)!
+    if (ENDED_ACTIVATION_STATUSES.has(row.status)) return { workId: row.id, status: 'ended', ahead: [] }
     if (row.status !== 'queued') return { workId: row.id, status: 'started', ahead: [] }
     const ahead = this.store.laneActivations(botId, 'run', ['running', 'waiting_grant', 'queued'])
       .filter((other) => other.id !== row.id && (other.status !== 'queued' || other.createdAt <= row.createdAt))
@@ -3994,7 +3999,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
     return this.store.db.transaction(() => {
       const current = this.store.activation(workId)
-      if (!current || ENDED_ACTIVATION_STATUSES.has(current.status)) return 'ended' as const
+      // Only work that will take it: waiting, or running. Paused or blocked work may never continue.
+      if (!current || !['queued', 'running', 'waiting_grant'].includes(current.status)) return 'ended' as const
       this.store.addWorkNote(workId, botId, text)
       return 'noted' as const
     })
@@ -4032,10 +4038,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private armReminders(): void {
     this.reminderTimer?.clear()
     this.reminderTimer = undefined
-    if (!this.startupPassed) return
+    if (!this.startupPassed || this.closed) return
     const next = this.store.nextReminder()
     if (!next) return
-    const wait = Math.min(Math.max(0, Date.parse(next.dueAt) - this.now()), REMINDER_REARM_MS)
+    // One that failed waits for its retry time; the others behind it are said at the next pass.
+    const at = Math.max(Date.parse(next.dueAt), this.reminderRetryAt.get(next.id) ?? 0)
+    const wait = Math.min(Math.max(0, at - this.now()), REMINDER_REARM_MS)
     this.reminderTimer = (this.host.setTimer ?? defaultTimer)(() => {
       this.reminderTimer = undefined
       void this.deliverDueReminders().catch((error: unknown) => {
@@ -4058,10 +4066,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       await Promise.resolve()
       try {
         for (const reminder of this.store.dueReminders(now.toISOString())) {
+          if ((this.reminderRetryAt.get(reminder.id) ?? 0) > now.getTime()) continue
           try {
             await this.deliverReminder(reminder, now)
+            this.reminderRetryAt.delete(reminder.id)
           } catch (error) {
-            console.warn('a bot reminder could not be delivered', { reminderId: reminder.id, error: error instanceof Error ? error.message : String(error) })
+            // Tried again in a minute (a full disk clears, a journal comes back), never in a tight loop.
+            this.reminderRetryAt.set(reminder.id, now.getTime() + REMINDER_RETRY_MS)
+            console.warn('a bot reminder could not be delivered; trying again in a minute', { reminderId: reminder.id, error: error instanceof Error ? error.message : String(error) })
           }
         }
       } finally {
@@ -4080,10 +4092,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const late = now.getTime() - Date.parse(reminder.dueAt) > REMINDER_LATE_MS
+    let couldNot: string | undefined
     if (reminder.work) {
-      const summary = await this.enqueue(reminder.botId, `reminder:${reminder.id}`, { kind: 'work', input: late ? `${reminder.work.brief}\n\n(This was due at ${clockTime(reminder.dueAt)}; Mousse was off then.)` : reminder.work.brief, title: reminder.work.title, ...(reminder.replyTo ? { replyTo: reminder.replyTo } : {}), from: reminder.id }, 'run')
-      this.store.settleReminder(reminder.id, 'delivered', { activationId: summary.id })
-      return
+      try {
+        const summary = await this.enqueue(reminder.botId, `reminder:${reminder.id}`, { kind: 'work', input: late ? `${reminder.work.brief}\n\n(This was due at ${clockTime(reminder.dueAt)}; Mousse was off then.)` : reminder.work.brief, title: reminder.work.title, ...(reminder.replyTo ? { replyTo: reminder.replyTo } : {}), from: reminder.id }, 'run')
+        this.store.settleReminder(reminder.id, 'delivered', { activationId: summary.id })
+        return
+      } catch (error) {
+        // The bot can't run now (its permissions wait for approval, its thread is in the trash): the reminder is
+        // still said, with why its work didn't start, so it is never lost and never retried forever.
+        if (!(error instanceof BotEngineError)) throw error
+        couldNot = error.message
+      }
     }
     const id = `bm_${reminder.id}`
     const posted = this.store.db.transaction(() => {
@@ -4093,7 +4113,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         botId: reminder.botId,
         author: 'bot',
         kind: 'run_report',
-        text: late ? `(For ${clockTime(reminder.dueAt)}) ${reminder.text}` : reminder.text,
+        text: `${late ? `(For ${clockTime(reminder.dueAt)}) ` : ''}${reminder.text}${couldNot ? `\n\nI couldn't start on it: ${couldNot}` : ''}`,
         ...(reminder.replyTo ? { replyTo: reminder.replyTo } : {}),
         lane: 'run'
       })
@@ -4372,6 +4392,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.offlineTimers.clear()
     for (const reply of this.pendingReplies.values()) reply.timer.clear()
     this.pendingReplies.clear()
+    this.closed = true
     this.reminderTimer?.clear()
     this.reminderTimer = undefined
   }

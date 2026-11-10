@@ -42,13 +42,13 @@ The chat turn hands work off with `work_start({ title, brief })`.
 
 - `work_start` inserts a run-lane activation with the trigger `{ kind: 'work', input: brief, title, replyTo, from }` and returns at once. The bot then says something like "On it, I'll tell you when it's done."
 - **Its own thread.** Each piece of work is a run-lane activation on a thread of its own (`bot:<id>:act:<activationId>`), as scheduled runs already are. The run engine, receipts, unknown-call gate, supervisor, internet wait and usage-limit handling all apply unchanged.
-- **Up to three at once.** A bot may run up to 3 run-lane activations at a time (scheduled runs count too). Later ones queue, and a full queue says so.
-- **Tools.** Work gets the bot's full grant. It does not get the work tools, so work can't start work. A missing permission behaves as in any run: the call is refused, one ask card appears in the chat, and the work carries on and says what it skipped.
+- **One at a time.** Work runs one at a time in the run lane, after what is already there (scheduled runs included). Later work queues, `work_start` says what it waits behind, and a full queue says so. The chat stays free either way, which is the point; running several at once touches every place that assumes one live run per bot (the failure streak, the live chip, crash recovery of replies, consults, spend), so it is a later step.
+- **Tools.** Work gets the bot's full grant. It does not get the work tools, so work can't start work. A missing permission behaves as in any run: the call is refused, one ask card appears in the chat, and the work carries on and says what it skipped. Work saves run notes to memory and can't forget, as any run.
 - **Ending.** When work ends, its report is posted in the chat, replying to the owner's message that started it, and it notifies the owner as a run report does.
 - **The other work tools.**
   - `work_list` shows what is running: title, how long it has run, its live activity, and its last few reports.
   - `work_stop({ workId })` stops one piece of work.
-  - `work_note({ workId, note })` passes a note from the owner to running work. The note is kept on the activation. When the work's current turn ends, the engine continues the same thread with the note (`continueWith`, `ownerText`) instead of finishing. So the report includes the change. If the note changes the task completely, the bot stops the work and starts new work.
+  - `work_note({ workId, note })` passes a note from the owner to running work. The note is kept on the activation. When the work's current turn ends, the engine posts what the work has so far and continues the same thread with the note (`continueWith`), instead of finishing. Then the report leads with what changed. Posting first means nothing found so far is lost if the continuation fails or is stopped. If the note changes the task completely, the bot stops the work and starts new work.
 - **Context.** The chat pack's situation lists the work in progress ("Working on: Vacuum comparison, 2 min, searching the web"), so a chat turn can answer "how's it going?" without a tool call. The chat window already holds the reports of finished work.
 
 ### 3. Replies say what they answer
@@ -107,6 +107,7 @@ The base instructions are rewritten around the front desk:
 
 ## Not in this change
 
+- Several pieces of work at once (see "One at a time").
 - Live steering of a running work turn (the note waits for the current turn).
 - MCP servers for bots.
 - Grant defaults (for example the bot's own browser without an ask). These are worth a separate look once this lands.

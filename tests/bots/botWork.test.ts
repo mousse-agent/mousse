@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { BOT_FAILURE_PAUSE_STREAK } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
+import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -106,24 +107,40 @@ describe('the chat is the front desk', () => {
 })
 
 describe('notes to work', () => {
-  it('running work takes the note before it reports: no early message, one report', async () => {
+  it('running work posts what it has, takes the note, and reports again with the change', async () => {
     const first = await chat('Compare vacuums', 'm1')
     const { workId } = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Vacuums', brief: 'Compare vacuums.', key: 'k' })
     await finish(f, first.payload, 'completed', { text: 'On it.' })
     const work = await start(f, workId)
     expect(f.bots.tools.work.note(botId, workId, 'Only ones under £200.')).toBe('noted')
-    const before = chatOf(f, botId).length
     await finish(f, work.payload, 'completed', { text: 'Here are three under £250.' })
-    // Nothing was posted: the work continues with the note.
-    expect(chatOf(f, botId)).toHaveLength(before)
+    // What it had is posted at once (never lost), as an update on the way; the work goes on with the note.
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'Here are three under £250.', replyTo: { id: first.message.id } })
     expect(f.store.activation(workId)!.status).toBe('running')
     const continued = await start(f, workId, 2)
     expect(continued.prepared.prompt).toContain('Only ones under £200.')
-    expect(continued.prepared.prompt).toContain('report')
-    await finish(f, continued.payload, 'completed', { text: 'Here are two under £200.' })
-    const reports = chatOf(f, botId).filter((message) => message.kind === 'run_report')
-    expect(reports.map((message) => message.text)).toEqual(['Here are two under £200.'])
+    expect(continued.prepared.prompt).toContain('already sent')
+    await finish(f, continued.payload, 'completed', { text: 'Under £200 there are two.' })
+    expect(chatOf(f, botId).filter((message) => message.kind === 'run_report').map((message) => message.text)).toEqual(['Under £200 there are two.'])
     expect(f.store.pendingWorkNotes(workId)).toEqual([])
+  })
+
+  it('a note continuation that is stopped keeps what the work had already found', async () => {
+    const first = await chat('Compare vacuums', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Vacuums', brief: 'Compare vacuums.', key: 'k' })
+    await finish(f, first.payload, 'completed', { text: 'On it.' })
+    const work = await start(f, workId)
+    f.bots.tools.work.note(botId, workId, 'Cordless only.')
+    await finish(f, work.payload, 'completed', { text: 'Three picks, one corded.' })
+    await f.bots.service.workStop(botId, workId)
+    expect(chatOf(f, botId).some((message) => message.text === 'Three picks, one corded.')).toBe(true)
+  })
+
+  it('notes for work that is paused or blocked are refused: it may never continue', async () => {
+    const first = await chat('A job', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Job', brief: 'Do it.', key: 'k' })
+    f.store.moveActivation(workId, ['running'], 'paused', { endReason: 'unknown_calls' })
+    expect(f.bots.tools.work.note(botId, workId, 'Also this.')).toBe('ended')
   })
 
   it('waiting work gets the note with its request; ended work says so', async () => {
@@ -174,6 +191,32 @@ describe('reminders', () => {
     expect(work[0]!.trigger).toMatchObject({ kind: 'work', title: 'Weather', replyTo: turn.message.id })
   })
 
+  it("a work reminder whose bot can't run is still said, with why, and never retried in a loop", async () => {
+    const turn = await chat('Check the weather at 8', 'm1')
+    f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Checking the weather.', work: { title: 'Weather', brief: 'Check the weather.' } })
+    await finish(f, turn.payload, 'completed', { text: 'Set.' })
+    f.bots.revoke(botId)
+    f.clock.now += 2 * 60_000
+    await f.bots.deliverDueReminders()
+    const said = chatOf(f, botId).at(-1)!
+    expect(said.text).toMatch(/^Checking the weather\.\n\nI couldn't start on it: /)
+    expect(f.store.waitingReminders(botId)).toEqual([])
+    expect(f.store.laneActivations(botId, 'run', ['queued', 'running'])).toEqual([])
+  })
+
+  it('forgetting the message that asked cancels its reminder and removes its words', async () => {
+    const turn = await chat('Remind me at 9 to call Dr Ames about the biopsy', 'm1')
+    const added = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60 * 60_000).toISOString(), text: 'Call Dr Ames about the biopsy.' })
+    await finish(f, turn.payload, 'completed', { text: 'Set for 9.' })
+    // The owner's message in a real journal (the fixture's journal is a stand-in), then forgotten by its row.
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+    f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${turn.message.id}`, who: 'owner', text: turn.message.text }))
+    const row = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${turn.message.id}`)!
+    expect(memory.forget(botId, { refs: [`j${row.seq as number}`], by: 'owner_ui' })).not.toHaveProperty('error')
+    expect(f.store.reminder(added.reminderId)).toMatchObject({ status: 'cancelled' })
+    expect(f.store.reminder(added.reminderId)!.text).not.toContain('Ames')
+  })
+
   it('cancelled and deleted bots say nothing', async () => {
     const turn = await chat('Remind me', 'm1')
     const added = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'One.' })
@@ -203,6 +246,10 @@ describe('reminders', () => {
     expect(reminderTime(7, '2026-11-14T09:00', now)).toBe('Give either inMinutes or at.')
     expect(reminderTime(0, undefined, now)).toBe('A reminder is at least a minute from now.')
     expect(reminderTime(undefined, 'tomorrow', now)).toMatch(/local date and time/)
+    // A date alone has no time, and a field out of range is refused, not rolled over.
+    expect(reminderTime(undefined, '2026-11-14', now)).toMatch(/local date and time/)
+    expect(reminderTime(undefined, '2026-13-01T09:00', now)).toMatch(/local date and time/)
+    expect(reminderTime(undefined, '2026-11-14T09:00:00Z', now)).toEqual(new Date(Date.UTC(2026, 10, 14, 9)))
     expect(reminderLabel(new Date(2026, 10, 10, 18, 42), now)).toBe('18:42')
     expect(reminderLabel(new Date(2026, 10, 14, 9, 0), now)).toBe('Sat 14 Nov · 09:00')
   })

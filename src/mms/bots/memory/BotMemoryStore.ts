@@ -911,6 +911,18 @@ function scrubMessageChips(tx: BotStoreTx, botId: string, scrub: (chips: unknown
 }
 
 function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, text: string): void {
-  if (!tx.statement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_messages'").get()) return
+  const has = (table: string) => Boolean(tx.statement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
+  if (!has('bot_messages')) return
   tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, messageId, botId)
+  // What the forgotten message asked for keeps no copy of its words (docs/plans/bot-always-free.md): a reminder it set
+  // is cancelled and its text removed, and work it started keeps neither its brief nor the notes passed to it.
+  if (has('bot_reminders'))
+    tx.statement("UPDATE bot_reminders SET text = ?, work_title = NULL, work_brief = NULL, status = CASE WHEN status = 'waiting' THEN 'cancelled' ELSE status END WHERE bot_id = ? AND reply_to = ?").run(text, botId, messageId)
+  if (has('bot_activations')) {
+    const work = tx.statement("SELECT id FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'work' AND json_extract(trigger_json, '$.replyTo') = ?").all(botId, messageId) as Array<{ id: string }>
+    for (const row of work) {
+      tx.statement("UPDATE bot_activations SET trigger_json = json_set(trigger_json, '$.input', ?, '$.title', ?) WHERE id = ?").run(text, text, row.id)
+      if (has('bot_work_notes')) tx.statement('UPDATE bot_work_notes SET text = ? WHERE activation_id = ?').run(text, row.id)
+    }
+  }
 }

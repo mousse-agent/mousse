@@ -80,7 +80,7 @@ export interface BotToolHost {
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {
   workId: string
-  status: 'started' | 'queued'
+  status: 'started' | 'queued' | 'ended'
   ahead: string[]
 }
 

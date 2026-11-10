@@ -173,8 +173,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const working = Boolean(bot.chat) || (legacy && bot.state === 'working')
   const chatChip = useBotsStore((s) => (bot.chat ? s.activity[bot.chat.activationId] : undefined)) ?? (legacy || live?.activationId === bot.chat?.activationId ? live?.chip : undefined)
   const work = bot.work ?? NO_WORK
-  // Working, but waiting for the internet: no spinner, and the header says so.
-  const offline = bot.state === 'working' && bot.waiting === 'internet'
+  // The chat's turn waits for the internet: no spinner, and the header says so (work that waits says so on its line).
+  const offline = working && bot.waiting === 'internet'
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES

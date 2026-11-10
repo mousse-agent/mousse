@@ -363,7 +363,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const title = typeof args.title === 'string' ? args.title : ''
         try {
           const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}` })
-          const result = { ...started, note: started.status === 'queued' ? `It starts after: ${started.ahead.join('; ')}. Tell the owner it is next in line.` : 'It is running. Tell the owner you are on it; its report reaches them by itself.' }
+          const result = { ...started, note: started.status === 'queued' ? `It starts after: ${started.ahead.join('; ')}. Tell the owner it is next in line.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running. Tell the owner you are on it; its report reaches them by itself.' }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
@@ -499,13 +499,19 @@ export function reminderTime(inMinutes: unknown, at: unknown, now: Date = new Da
     return new Date(now.getTime() + Math.round(inMinutes as number) * 60_000)
   }
   const text = (at as string).trim()
-  // "2026-11-14T09:00" (or with a space): the owner's local time.
+  const usage = 'at is a local date and time like 2026-11-14T09:00.'
+  // "2026-11-14T09:00" (or with a space): the owner's local time. A field out of range is refused, never rolled over.
   const local = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(text)
-  const date = local
-    ? new Date(Number(local[1]), Number(local[2]) - 1, Number(local[3]), Number(local[4]), Number(local[5]), Number(local[6] ?? 0))
-    : new Date(text)
-  if (Number.isNaN(date.getTime())) return 'at is a local date and time like 2026-11-14T09:00.'
-  return date
+  if (local) {
+    const [year, month, day, hour, minute, second] = local.slice(1).map((part) => Number(part ?? 0)) as [number, number, number, number, number, number]
+    const date = new Date(year, month - 1, day, hour, minute, second)
+    const same = date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day && date.getHours() === hour && date.getMinutes() === minute
+    return same ? date : usage
+  }
+  // Anything else must say its own offset ("…Z", "…+05:30"); a date alone has no time to say it at.
+  if (!/T\d{2}:\d{2}.*(Z|[+-]\d{2}:?\d{2})$/.test(text)) return usage
+  const date = new Date(text)
+  return Number.isNaN(date.getTime()) ? usage : date
 }
 
 /** A reminder's time in plain words for its chip and list: "18:42", or "Sat 14 Nov · 09:00". */
