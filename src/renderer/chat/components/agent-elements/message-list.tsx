@@ -104,8 +104,8 @@ export type MessageListProps = {
   onComposerCompactChange?: (compact: boolean) => void;
   lastTurnNotice?: React.ReactNode;
   /**
-   * Drawn after the last turn (the thread's queued messages). Outside the windowed rows, so it
-   * follows the end like the breathing space does.
+   * Drawn after the last turn (the thread's queued messages), above the reply gap. Outside the
+   * windowed rows, so it follows the end.
    */
   afterTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
@@ -143,6 +143,15 @@ export type MessageListProps = {
 };
 
 const SCROLL_THRESHOLD = 80;
+/**
+ * The space under the newest text while a reply is in progress: about two lines above the
+ * composer (with the list's end padding). A finished last turn's toolbar takes the same space,
+ * since it overlaps that padding by the rest of its height, so the text does not move when the
+ * reply ends.
+ */
+const REPLY_GAP_CLASS = "h-[28px]";
+const TURN_TOOLBAR_CLASS = "h-[48px] flex items-start w-full";
+const LAST_TURN_TOOLBAR_CLASS = `${TURN_TOOLBAR_CLASS} -mb-5`;
 const timeFormatter = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -440,6 +449,16 @@ export type ResponseMetadata = {
   tokensUsed?: number;
   tokensPerSecond?: number;
 };
+
+/**
+ * A finished turn shows its toolbar when it has text to copy or a reply's metadata. The list keeps
+ * the reply gap under a last turn without one, so neither ending a reply nor opening the thread
+ * moves the text.
+ */
+function finishedTurnHasToolbar(assistantMsgs: UIMessage[], showCopyToolbar: boolean): boolean {
+  if (assistantMsgs.some((message) => getResponseMetadata(message) !== undefined)) return true;
+  return showCopyToolbar && Boolean(getTextFromParts(assistantMsgs.flatMap((message) => message.parts ?? []), "\n\n").trim());
+}
 
 function getResponseMetadata(msg: UIMessage): ResponseMetadata | undefined {
   const raw = (msg as { metadata?: unknown }).metadata;
@@ -1030,10 +1049,6 @@ export const MessageList = memo(function MessageList({
   const followModeRef = useRef<FollowMode>(
     initialScrollBehavior === "top" ? "free" : "following-end",
   );
-  const lastMessageIdRef = useRef<string | null>(
-    messages[messages.length - 1]?.id ?? null,
-  );
-  const assistantSpaceActiveRef = useRef(false);
   const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
   /** The prompt open for editing, by message id. */
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
@@ -1355,7 +1370,7 @@ export const MessageList = memo(function MessageList({
     const resizeObserver = new ResizeObserver(() => {
       if (windowedRef.current) {
         // Windowed: the rows are anchored by `useTurnWindow`. This observer
-        // only follows growth outside them (the breathing space below the
+        // only follows growth outside them (the reply gap below the
         // last turn), before paint and never by a delta.
         if (followModeRef.current === "following-end") {
           programmaticScrollAtRef.current = performance.now();
@@ -1397,9 +1412,6 @@ export const MessageList = memo(function MessageList({
     () => normalizeMessages(messages),
     [messages],
   );
-  const lastMessage = normalizedMessages[normalizedMessages.length - 1];
-  const lastMessageId = lastMessage?.id ?? null;
-  const lastMessageRole = lastMessage?.role ?? null;
   const turns = useMemo(
     () => groupMessagesIntoTurns(normalizedMessages),
     [normalizedMessages],
@@ -1613,24 +1625,17 @@ export const MessageList = memo(function MessageList({
     if (lastMessage.role === "user" && !hasAssistant) return true;
     return isStreaming && !getLastAssistantHasContent(normalizedMessages);
   }, [isStreaming, normalizedMessages, turns]);
-  const isNewAssistantMessage =
-    lastMessageRole === "assistant" &&
-    Boolean(lastMessageId) &&
-    lastMessageId !== lastMessageIdRef.current;
-  const showAssistantBreathingSpace =
-    showAwaitingReply ||
-    showPlanning ||
-    assistantSpaceActiveRef.current ||
-    isNewAssistantMessage;
-
-  useEffect(() => {
-    if (lastMessageRole === "assistant") {
-      if (lastMessageId && lastMessageId !== lastMessageIdRef.current) {
-        assistantSpaceActiveRef.current = true;
-      }
-    }
-    lastMessageIdRef.current = lastMessageId;
-  }, [lastMessageId, lastMessageRole]);
+  // A small, fixed gap under the reply in progress (REPLY_GAP_CLASS), so the
+  // newest text sits about two lines above the composer, never a share of the
+  // viewport. The last turn's toolbar takes its place when the reply ends; a
+  // last turn without one (only tool calls, or stopped before any text) keeps
+  // the gap, so the end of the reply moves nothing.
+  const lastTurnHasToolbar = useMemo(() => {
+    const last = turns[turns.length - 1];
+    return Boolean(last && last.assistantMsgs.length > 0 && finishedTurnHasToolbar(last.assistantMsgs, showCopyToolbar));
+  }, [turns, showCopyToolbar]);
+  const showReplyGap =
+    replyActive || showAwaitingReply || showPlanning || (turns.length > 0 && !lastTurnHasToolbar);
 
   // Follow live output while following the end: every streamed token / tool
   // update produces new `messages`, so snap to the bottom. Instant (not
@@ -1642,7 +1647,7 @@ export const MessageList = memo(function MessageList({
     normalizedMessages,
     isStreaming,
     showPlanning,
-    showAssistantBreathingSpace,
+    showReplyGap,
     scrollToBottomInstant,
   ]);
 
@@ -1808,8 +1813,7 @@ export const MessageList = memo(function MessageList({
                     // creating large gaps between assistant turns.
                     const showToolbar =
                       !isTurnStreaming &&
-                      ((showCopyToolbar && Boolean(assistantText.trim())) ||
-                        turnMetadata !== undefined);
+                      finishedTurnHasToolbar(turn.assistantMsgs, showCopyToolbar);
                     const copyKey = `assistant-${turnKey}-all`;
                     const toolbarText = showCopyToolbar ? assistantText : "";
                     // Read aloud reads the answer, not the notes the agent wrote while it worked.
@@ -2003,7 +2007,7 @@ export const MessageList = memo(function MessageList({
                         {showToolbar ? (
                           <MessageToolbar
                             text={toolbarText}
-                            heightClass="h-[48px] flex items-start w-full"
+                            heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
                             hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
                             isVisible={activeCopyId === copyKey}
                             alignClass="justify-start"
@@ -2016,7 +2020,7 @@ export const MessageList = memo(function MessageList({
                         ) : activeCopyId === copyKey ? (
                           <MessageToolbar
                             text={toolbarText}
-                            heightClass="h-[48px] flex items-start w-full"
+                            heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
                             hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
                             isVisible={true}
                             alignClass="justify-start"
@@ -2054,12 +2058,14 @@ export const MessageList = memo(function MessageList({
             );
           })}
         </div>
-        {afterTurns}
-        {showAssistantBreathingSpace && (
-          <div
-            aria-hidden="true"
-            className="min-h-[max(140px,24vh)] mx-auto max-w-an w-full"
-          />
+        {afterTurns != null && (
+          // Clear of the last turn's toolbar, which reaches into the space below the rows.
+          <div data-after-turns className="[&:not(:empty)]:mt-5">
+            {afterTurns}
+          </div>
+        )}
+        {showReplyGap && (
+          <div aria-hidden="true" data-reply-gap className={cn(REPLY_GAP_CLASS, "w-full")} />
         )}
       </div>
     </div>
