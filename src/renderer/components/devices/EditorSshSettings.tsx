@@ -1,4 +1,3 @@
-import { Code2 } from '../../lib/icons'
 import { editorSshProblemWords, editorSshSwitch, editorSshVisible, useEditorSsh } from '../../lib/editorSsh'
 import { EDITOR_PROXY_READY } from '../../../shared/remoteEditor'
 import type { EditorSshStatus } from '../../../shared/net/local'
@@ -25,7 +24,7 @@ export function EditorSshSettingsView({
   const control = editorSshSwitch(status)
   const problem = status.problem ? editorSshProblemWords(status.problem, status.includeLine, status.userConfig) : ''
   return (
-    <SettingsGroup anchor="devices-editors" title="Editors" icon={Code2} className="devices-group">
+    <SettingsGroup anchor="devices-editors" title="Editors" className="devices-group">
       <SettingsRow
         title={TITLE}
         description={control.description}
@@ -39,7 +38,7 @@ export function EditorSshSettingsView({
   )
 }
 
-/** Settings → Devices → Editors. Undo removes only Mousse's line; turning it on adds the line again. */
+/** Settings → Devices → Advanced → Editors. Undo removes only Mousse's line; turning it on adds the line again. */
 export function EditorSshSettings() {
   const { status, busy, error, enable, disable, acknowledge } = useEditorSsh()
   return (

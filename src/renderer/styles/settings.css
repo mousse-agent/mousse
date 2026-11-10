@@ -535,6 +535,17 @@ html[data-theme='high-contrast'] .settings-group-icon {
   opacity: 0.5;
 }
 
+/* A glyph that identifies the row's item (SettingsRow `leading`): bare, never boxed (rule 3). */
+.settings-item-lead {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  margin-right: calc(-1 * var(--space-12));
+  color: var(--text-secondary);
+}
+
 .settings-item-text {
   display: flex;
   flex: 1 1 240px;

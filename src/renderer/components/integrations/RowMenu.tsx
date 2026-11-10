@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { MoreHorizontal } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import './rowMenu.css'
@@ -16,18 +16,22 @@ export interface RowMenuItem {
   ariaLabel?: string
   /** `data-testid` on the item. */
   testId?: string
+  /** A second, quieter line under the label: what the item does, or what it needs first. */
+  detail?: string
 }
 
 /**
  * Overflow menu for a row's secondary actions. Choosing an item puts focus back on the button first, so a dialog the
- * item opens returns focus there when it closes. `buttonClassName` replaces the settings icon button's look.
+ * item opens returns focus there when it closes. `buttonClassName` replaces the settings icon button's look, and
+ * `trigger` replaces the "more" icon with visible content (a text button such as "Add device").
  */
-export function RowMenu({ label, items, disabled, buttonClassName = 'settings-icon-btn', iconSize = 14 }: {
+export function RowMenu({ label, items, disabled, buttonClassName = 'settings-icon-btn', iconSize = 14, trigger }: {
   label: string
   items: RowMenuItem[]
   disabled?: boolean
   buttonClassName?: string
   iconSize?: number
+  trigger?: ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -69,14 +73,14 @@ export function RowMenu({ label, items, disabled, buttonClassName = 'settings-ic
       ref={buttonRef}
       type="button"
       className={`${buttonClassName} row-menu-btn`}
-      aria-label={label}
-      title="More actions"
+      aria-label={trigger ? undefined : label}
+      title={trigger ? undefined : 'More actions'}
       aria-haspopup="menu"
       aria-expanded={open}
       disabled={disabled}
       onClick={() => setOpen((value) => !value)}
     >
-      <MoreHorizontal size={iconSize} aria-hidden="true" />
+      {trigger ?? <MoreHorizontal size={iconSize} aria-hidden="true" />}
     </button>
     {open && <FloatingPortal>
       <div ref={panelRef} className="row-menu" role="menu" aria-label={label} style={style}>
@@ -84,14 +88,16 @@ export function RowMenu({ label, items, disabled, buttonClassName = 'settings-ic
           key={item.label}
           type="button"
           role="menuitem"
-          className={`row-menu-item${item.danger ? ' danger' : ''}`}
-          disabled={item.disabled}
+          className={`row-menu-item${item.danger ? ' danger' : ''}${item.detail ? ' has-detail' : ''}`}
+          // An item with a detail line stays focusable while unavailable, so its need is read out.
+          disabled={item.disabled && !item.detail}
+          aria-disabled={item.disabled && item.detail ? true : undefined}
           title={item.title}
           data-action={item.action}
           data-testid={item.testId}
           aria-label={item.ariaLabel}
-          onClick={() => { setOpen(false); buttonRef.current?.focus(); item.onSelect() }}
-        >{item.label}</button>)}
+          onClick={() => { if (item.disabled) return; setOpen(false); buttonRef.current?.focus(); item.onSelect() }}
+        >{item.detail ? <><span className="row-menu-item-label">{item.label}</span><span className="row-menu-item-detail">{item.detail}</span></> : item.label}</button>)}
       </div>
     </FloatingPortal>}
   </>

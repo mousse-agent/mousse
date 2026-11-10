@@ -35,3 +35,17 @@
 .row-menu-item:focus-visible { background: var(--ui-hover); outline: none; }
 .row-menu-item.danger { color: var(--danger, #e07a8a); }
 .row-menu-item:disabled { opacity: 0.45; cursor: default; }
+
+/* Two-line rows (rule 15 in settings.css): the name, then a quieter line of what it does or needs. */
+.row-menu-item.has-detail {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  height: auto;
+  min-height: 40px;
+  padding-block: 5px;
+}
+.row-menu-item-detail { color: var(--text-secondary); font-size: 12px; }
+.row-menu-item[aria-disabled='true'] { cursor: default; }
+.row-menu-item[aria-disabled='true'] .row-menu-item-label { opacity: 0.45; }

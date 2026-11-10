@@ -44,7 +44,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Version and updates', section: 'general', anchor: 'general-updates', keywords: ['check for updates', 'about', 'upgrade'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
-  { title: 'Phones', section: 'connections', anchor: 'account-phones', keywords: ['mobile', 'pair'], needs: { anchor: 'account-mousse-id', reason: 'Phones appear once you sign in to Mousse ID.' } },
+  { title: 'Add a phone', section: 'connections', anchor: 'account-phones', keywords: ['phones', 'mobile', 'pair'] },
   { title: 'Activity', section: 'activity', anchor: 'account-activity', keywords: ['heatmap', 'line edits'] },
   { title: 'Token usage', section: 'activity', anchor: 'account-token-usage', keywords: ['tokens'] },
 
