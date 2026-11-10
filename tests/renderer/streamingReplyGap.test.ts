@@ -139,16 +139,19 @@ describe('the gap under a streaming reply', () => {
 
 describe('following a streaming reply', () => {
   /** Every ResizeObserver the list made, so a test can deliver "the transcript grew". */
-  let observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = []
+  let observers: Array<{ callback: ResizeObserverCallback; targets: Element[]; boxes: Map<Element, string> }> = []
   beforeEach(() => {
     observers = []
     globalThis.ResizeObserver = class {
-      private entry: { callback: ResizeObserverCallback; targets: Element[] }
+      private entry: { callback: ResizeObserverCallback; targets: Element[]; boxes: Map<Element, string> }
       constructor(callback: ResizeObserverCallback) {
-        this.entry = { callback, targets: [] }
+        this.entry = { callback, targets: [], boxes: new Map() }
         observers.push(this.entry)
       }
-      observe(target: Element) { this.entry.targets.push(target) }
+      observe(target: Element, options?: ResizeObserverOptions) {
+        this.entry.targets.push(target)
+        this.entry.boxes.set(target, options?.box ?? 'content-box')
+      }
       unobserve() {}
       disconnect() { this.entry.targets = [] }
     } as unknown as typeof ResizeObserver
@@ -157,6 +160,27 @@ describe('following a streaming reply', () => {
   const grew = () => act(() => {
     const content = list().firstElementChild!
     for (const { callback, targets } of observers) if (targets.includes(content)) callback([], {} as ResizeObserver)
+  })
+  /**
+   * Only the content's end padding grew (it is the composer's height, and the composer unfolded):
+   * the browser tells observers of the border box, not of the content box.
+   */
+  const paddingGrew = () => act(() => {
+    const content = list().firstElementChild!
+    for (const { callback, targets, boxes } of observers) {
+      if (targets.includes(content) && boxes.get(content) === 'border-box') callback([], {} as ResizeObserver)
+    }
+  })
+
+  it('reaches the end when only the end padding grows, as when the composer unfolds', () => {
+    render([ask('u1'), answer('a1', 'Done.')], 'ready')
+    const size = scrollable(list(), 800)
+    grew()
+    expect(list().scrollTop).toBe(2200)
+    // The composer unfolds: 30px more padding under the last turn.
+    size.scrollHeight += 30
+    paddingGrew()
+    expect(list().scrollTop).toBe(2230)
   })
 
   /** Gives the list a scrollable size and a working `scrollTop` that counts writes; jsdom has no layout. */

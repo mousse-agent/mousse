@@ -1469,7 +1469,9 @@ export const MessageList = memo(function MessageList({
       container.scrollTop = end;
     });
 
-    resizeObserver.observe(contentWrapper);
+    // The border box: the content's end padding is the composer's height, and the composer
+    // unfolding grows only the padding.
+    resizeObserver.observe(contentWrapper, { box: "border-box" });
     return () => {
       resizeObserver.disconnect();
     };

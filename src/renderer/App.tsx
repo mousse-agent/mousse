@@ -358,8 +358,9 @@ export default function App() {
         setShortcuts(settings?.shortcuts ?? {})
         useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
       })),
-      window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
-      window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
+      // A turn that ends shows with its last text, never a frame before it.
+      window.mousse.turn.onTurnState(applyIfCurrent(messageUpdates.flushBefore(setTurnState))),
+      window.mousse.turn.onTurnSnapshot(applyIfCurrent(messageUpdates.flushBefore(setTurnSnapshot))),
       window.mousse.app.onNavigateMainView((view) => {
         if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git' || view === 'pullRequest') {
           openSurface(view)

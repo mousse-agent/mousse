@@ -8,6 +8,11 @@ export interface MessageUpdateBatcher {
   flush(): void
   /** Drops what is queued (the thread or profile went away). */
   clear(): void
+  /**
+   * `handler`, applying held updates before it runs: for events that change how the transcript
+   * reads, such as a turn ending, which must not show while its last text is still held.
+   */
+  flushBefore<A extends unknown[]>(handler: (...args: A) => void): (...args: A) => void
 }
 
 export interface MessageUpdateBatcherOptions {
@@ -78,6 +83,12 @@ export function createMessageUpdateBatcher(options: MessageUpdateBatcherOptions)
       })
     },
     flush,
+    flushBefore(handler) {
+      return (...args) => {
+        flush()
+        handler(...args)
+      }
+    },
     clear() {
       cancel?.()
       cancel = null

@@ -90,6 +90,30 @@ describe('createMessageUpdateBatcher', () => {
     }
   })
 
+  it('applies held text before a turn-state event, so a turn never shows ended without its last words', () => {
+    const clock = frames()
+    useAppStore.setState({
+      activeThreadId: 't1',
+      earlierByThread: {},
+      messages: [{ id: 'u1', role: 'user', content: 'Hi', timestamp: '2026-11-10T09:59:00.000Z' } as ChatMessage, reply('The first')]
+    })
+    const batcher = createMessageUpdateBatcher({
+      apply: (_t, messages) => useAppStore.getState().updateMessages(messages),
+      isCurrent: () => true,
+      schedule: clock.schedule
+    })
+    batcher.push('t1', reply('The first and the last words'))
+    let shownWhenEnded = ''
+    // As App wires the daemon's turn-state events.
+    const onTurnState = batcher.flushBefore((phase: string) => {
+      shownWhenEnded = `${phase}: ${useAppStore.getState().messages.at(-1)!.content}`
+    })
+    onTurnState('idle')
+    expect(shownWhenEnded).toBe('idle: The first and the last words')
+    // Nothing is left for the frame.
+    expect(clock.pending()).toBe(0)
+  })
+
   afterEach(() => {
     vi.useRealTimers()
   })

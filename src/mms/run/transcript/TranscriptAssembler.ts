@@ -527,8 +527,9 @@ export class TranscriptAssembler {
 
   /**
    * Sends every text update still held back by the coalescing window now, so it reaches clients
-   * before whatever the caller emits next. The assembler does this itself before its own other
-   * emits; the owner calls it before it emits around the transcript (turn end, snapshots).
+   * before whatever is emitted next. The assembler calls it before each of its other emits (a new
+   * message, a tool event, a final reply or thinking update), from `closeOpenTools`, which the
+   * owner calls when a turn ends, and from `reset`.
    */
   flushText(): void {
     for (const [messageId, stream] of this.textStreams) {
