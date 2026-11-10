@@ -34,10 +34,14 @@ describe('find on a long thread', () => {
 
   it('builds the index in slices, then answers every keystroke from it', () => {
     const index = new FindIndex()
+    // A clock that moves 1 ms each time it is read: an 8 ms slice reads 8 messages, whatever the hardware.
+    let clock = 0
+    const tick = () => ++clock
     let slices = 0
-    for (let done = false; !done; slices++) done = index.indexSome(all, 8)
-    // 3.7 million characters do not fit one 8 ms slice: the build gives the renderer frames in between.
-    expect(slices).toBeGreaterThan(1)
+    for (let done = false; !done; slices++) done = index.indexSome(all, 8, tick)
+    // The build stops at its budget and gives the renderer frames in between: 2,000 messages in slices of 8.
+    expect(all).toHaveLength(2000)
+    expect(slices).toBe(250)
     expect(index.missing(turns, 1)).toBe(0)
 
     for (const query of ['r', 're', 'ren', 'rend', 'render', 'render l', 'render lo', 'render loop', 'compute(77']) {

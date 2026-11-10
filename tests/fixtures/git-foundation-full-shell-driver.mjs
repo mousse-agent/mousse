@@ -10,7 +10,9 @@ const config = JSON.parse(readFileSync(process.env.MOUSSE_FULL_SHELL_CONFIG, 'ut
 // GUI startup can relaunch this same Electron entrypoint in CLI/daemon mode.
 // The actual app handles that mode; the UI driver must not stop its daemon.
 const isCli = process.argv.includes('--cli')
-if (!isCli) { runWithoutGpu({ app, BrowserWindow }); keepWindowsOffScreen(); exitWithParent() }
+// Also in the --cli relaunch (the daemon): it opens no window, and the GPU stays off there too.
+runWithoutGpu({ app, BrowserWindow })
+if (!isCli) { keepWindowsOffScreen(); exitWithParent() }
 const timer = isCli ? undefined : setTimeout(() => { console.error('Full application driver timed out'); app.exit(1) }, 55_000)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 async function until(read, predicate, label) {

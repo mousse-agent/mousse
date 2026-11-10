@@ -8,7 +8,9 @@ import { runWithoutGpu } from './electronWithoutGpu.mjs'
 
 const config = JSON.parse(readFileSync(process.env.MOUSSE_CHAT_UNDO_CONFIG, 'utf8'))
 const cli = process.argv.includes('--cli')
-if (!cli) { runWithoutGpu({ app, BrowserWindow }); keepWindowsOffScreen(); exitWithParent() }
+// Also in the --cli relaunch (the daemon): it opens no window, and the GPU stays off there too.
+runWithoutGpu({ app, BrowserWindow })
+if (!cli) { keepWindowsOffScreen(); exitWithParent() }
 const timer = cli ? undefined : setTimeout(() => { console.error('Chat Undo driver timed out'); app.exit(1) }, 55_000)
 async function until(read, accept, label) {
   let value

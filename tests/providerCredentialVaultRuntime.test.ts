@@ -39,19 +39,22 @@ describe.skipIf(process.platform !== 'win32')('provider credentials across real 
   it.each(['cjs', 'esm'] as const)('preserves %s Electron-encrypted providers after a plain Node open attempt and Electron restart', async (format) => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-vault-runtime-'))
     roots.push(root)
-    const entry = join(root, format === 'cjs' ? 'vault-probe.cjs' : 'vault-probe.mjs')
-    await build({ entryPoints: [resolve('tests/fixtures/provider-credentials/vault-probe.ts')], outfile: entry,
-      bundle: true, platform: 'node', format, target: 'node22', external: ['electron'] })
+    const extension = format === 'cjs' ? 'cjs' : 'mjs'
+    const nodeEntry = join(root, `vault-probe.${extension}`)
+    const electronEntry = join(root, `vault-probe-electron.${extension}`)
+    for (const [source, outfile] of [['tests/fixtures/provider-credentials/vault-probe.ts', nodeEntry], ['tests/fixtures/provider-credentials/vault-probe-electron.ts', electronEntry]]) {
+      await build({ entryPoints: [resolve(source)], outfile, bundle: true, platform: 'node', format, target: 'node22', external: ['electron'] })
+    }
     const electron = createRequire(import.meta.url)('electron') as string
-    await run(electron, entry, 'write', root)
+    await run(electron, electronEntry, 'write', root)
     const auth = join(root, 'home', 'auth.json')
     const original = readFileSync(auth)
     expect(JSON.parse(original.toString()).__mousse_encrypted_v1).toEqual(expect.any(String))
     expect(original.toString()).not.toContain('synthetic-')
-    await run(process.execPath, entry, 'node-reject', root)
+    await run(process.execPath, nodeEntry, 'node-reject', root)
     expect(readFileSync(auth)).toEqual(original)
     expect(readdirSync(join(root, 'home'))).toEqual(['auth.json'])
-    await run(electron, entry, 'read', root)
+    await run(electron, electronEntry, 'read', root)
     expect(readFileSync(auth)).toEqual(original)
     expect(readdirSync(join(root, 'home'))).toEqual(['auth.json'])
   }, 65_000)

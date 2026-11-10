@@ -7,7 +7,9 @@ import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
 import { runWithoutGpu } from './electronWithoutGpu.mjs'
 const config = JSON.parse(readFileSync(process.env.MOUSSE_FULL_SHELL_CONFIG, 'utf8'))
 const isCli = process.argv.includes('--cli')
-if (!isCli) { runWithoutGpu({ app, BrowserWindow }); keepWindowsOffScreen(); exitWithParent() }
+// Also in the --cli relaunch (the daemon): it opens no window, and the GPU stays off there too.
+runWithoutGpu({ app, BrowserWindow })
+if (!isCli) { keepWindowsOffScreen(); exitWithParent() }
 const timer = isCli ? undefined : setTimeout(() => { console.error('Lifecycle full shell timed out'); app.exit(1) }, 140000)
 const delay = (ms) => new Promise((done) => setTimeout(done, ms))
 let stage = 'startup'
