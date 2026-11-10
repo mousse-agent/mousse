@@ -2432,7 +2432,7 @@ const AssistantParts = memo(function AssistantParts({
       }
 
       if (isRecord(part) && part.type === "data-applet-pending") {
-        elems.push(<section className="mousse-applet mousse-applet-pending" key={`${msg.id}-applet-pending-${i}`} role="status" aria-label="Generating applet"><header className="mousse-applet-header"><strong>Generating interactive applet…</strong></header><div className="mousse-applet-preview" style={{ height: 320 }}>Preview appears when the response is complete.</div></section>);
+        elems.push(<section className="mousse-applet mousse-applet-pending" key={`${msg.id}-applet-pending-${i}`} role="status" aria-label="Generating applet"><span className="mousse-applet-name">Generating applet…</span></section>);
         i++;
         continue;
       }

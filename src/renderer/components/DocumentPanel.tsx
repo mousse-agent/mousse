@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { Check, Copy, FileText } from '../lib/icons'
+import { Check, Copy, FileText, LayoutGrid } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { TabBar } from './ui/TabBar'
 import '../styles/chat-markdown.css'
+import { AppletPanelView } from './applets/AppletPanelView'
 
 const COPIED_MS = 1600
 
@@ -40,20 +41,30 @@ export function DocumentPanel() {
     )
   }
 
+  const tabs = (
+    <TabBar
+      label="Documents"
+      activeId={activeTab?.id ?? null}
+      tabs={documentTabs.map((tab) => ({
+        id: tab.id,
+        name: tab.title,
+        icon: tab.applet
+          ? <LayoutGrid size={13} strokeWidth={2} className="document-tab-icon" aria-hidden="true" />
+          : <FileText size={13} strokeWidth={2} className="document-tab-icon" aria-hidden="true" />
+      }))}
+      onSelect={setActiveDocumentTab}
+      onClose={closeDocumentTab}
+    />
+  )
+
+  if (activeTab?.applet) {
+    return <AppletPanelView key={activeTab.id} tab={{ ...activeTab, applet: activeTab.applet }} tabs={tabs} />
+  }
+
   return (
     <div className="document-panel">
       <div className="document-toolbar">
-        <TabBar
-          label="Documents"
-          activeId={activeTab?.id ?? null}
-          tabs={documentTabs.map((tab) => ({
-            id: tab.id,
-            name: tab.title,
-            icon: <FileText size={13} strokeWidth={2} className="document-tab-icon" aria-hidden="true" />
-          }))}
-          onSelect={setActiveDocumentTab}
-          onClose={closeDocumentTab}
-        />
+        {tabs}
         <button
           type="button"
           className="document-copy"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   IconChevronLeft,
@@ -89,6 +89,15 @@ export function ImageLightbox({
       window.removeEventListener("keydown", handleKeyDown, true);
   }, [open, hasMultipleImages, onClose, goToPrevious, goToNext]);
 
+  // Keyboard focus moves to Close while open and returns to the image that opened it.
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeButton.current?.focus();
+    return () => opener?.focus();
+  }, [open]);
+
   // Lock body scroll while open so the page underneath doesn't move.
   useEffect(() => {
     if (!open) return;
@@ -108,10 +117,12 @@ export function ImageLightbox({
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm"
+      aria-label={currentImage.filename ?? "Image"}
+      className="image-preview-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm"
       onClick={onClose}
     >
       <button
+        ref={closeButton}
         type="button"
         onClick={onClose}
         aria-label="Close fullscreen (Esc)"
