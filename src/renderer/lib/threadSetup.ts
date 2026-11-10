@@ -24,11 +24,13 @@ export function errorCodeOf(error: unknown): string | undefined {
 
 /**
  * The line for a bound send the daemon refused, or undefined for any other refusal: the thread's settings changed since
- * they were shown, or the computer that runs it is too old to bind a send.
+ * they were shown, the computer that runs it is too old to bind a send, or (`bound`: the send carried `expect`) the
+ * thread was busy, where a bound send never waits.
  */
-export function boundSendRefusal(error: unknown): string | undefined {
+export function boundSendRefusal(error: unknown, bound = false): string | undefined {
   const code = errorCodeOf(error)
   if (code === 'thread_settings_changed') return 'Not sent: settings changed. Check and send again.'
+  if (code === 'thread_busy' && bound) return 'Not sent: this chat is busy. Send again when it is free.'
   if (code === 'computer_outdated') {
     const details = (error as { details?: { name?: unknown } }).details
     return typeof details?.name === 'string' ? setupRefusalLine(code, details.name) : 'Update Mousse on that computer to send from here.'

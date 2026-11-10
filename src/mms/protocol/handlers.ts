@@ -254,8 +254,9 @@ function refuseStaleRevision(ctx: HandlerContext, threadId: string, ifRevision: 
  * The model and mode a send bound with `expect` runs with, after checking that they are still what the thread runs: its
  * permission mode (its own, else the profile's default, narrowed by the calling device's limit), its model (its own,
  * else the profile's last-used one) and, when given, its settings revision. Anything else is refused with
- * `thread_settings_changed` and the current values; nothing runs. Synchronous, so the caller hands the values to the turn
- * with nothing awaited in between.
+ * `thread_settings_changed` and the current values; nothing runs. Synchronous: the engine runs it again inside its admission,
+ * under the thread's lock, right before the run is committed. The guarantee comes from what the turn is then given: it
+ * is pinned to the compared model and capped at the compared mode, so a later change can only narrow it.
  */
 function boundTurnSettings(ctx: HandlerContext, threadId: string, raw: unknown, limit: PermissionMode | undefined): { permissionMode: PermissionMode; model?: ModelOverride } {
   if (!isObject(raw)) throw new DomainRpcError('invalid_params', 'expect must be an object')
@@ -272,14 +273,15 @@ function boundTurnSettings(ctx: HandlerContext, threadId: string, raw: unknown, 
     const llmProvider = asOptionalString(raw.model.llmProvider, 256) ?? ''
     const model = asString(raw.model.model, 'expect.model.model', 512)
     const effort = asOptionalString(raw.model.effort, 64)
-    expectedModel = ctx.mms.providerInstances.migrate({ ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}) })
+    expectedModel = storedSelection(ctx, { ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}) })
   }
   const thread = ctx.mms.threads.getThread(threadId)
   if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
   const settings = ctx.mms.settings.get()
   const ownMode = thread.permissionMode ?? normalizePermissionMode(settings.permissions?.defaultMode)
   const runsIn = limit ? narrowPermissionMode(ownMode, limit) : ownMode
-  const runsOn = ctx.mms.providerInstances.migrate(thread.modelOverride ?? lastUsedChatModel(settings))
+  const runsOnRaw = thread.modelOverride ?? lastUsedChatModel(settings)
+  const runsOn = runsOnRaw ? storedSelection(ctx, runsOnRaw) : undefined
   const currentRevision = thread.settingsRevision ?? 0
   const changed =
     runsIn !== mode ||
@@ -301,6 +303,19 @@ function pickedFields(raw: unknown): Set<'model' | 'permissionMode' | 'worktreeE
   if (!Array.isArray(raw) || raw.some((field) => field !== 'model' && field !== 'permissionMode' && field !== 'worktreeEnabled'))
     throw new DomainRpcError('invalid_params', 'picked must list model, permissionMode or worktreeEnabled')
   return new Set(raw as Array<'model' | 'permissionMode' | 'worktreeEnabled'>)
+}
+
+/**
+ * A model as a thread stores it when it is named (`namedModel`, `threads.create`): the same resolution of its instance and
+ * level, so a model compared with a stored one is read the same way. One that resolution refuses (an instance turned off
+ * since) is read as a stored selection is, and then simply differs.
+ */
+function storedSelection(ctx: HandlerContext, model: ModelOverride): ModelOverride {
+  try {
+    return ctx.mms.providerInstances.overrideFor(model)
+  } catch {
+    return ctx.mms.providerInstances.migrate(model)
+  }
 }
 
 /** The same instance, model and level. */
@@ -2490,8 +2505,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const input = conversationBranchId ? { ...(typeof prepared === 'string' ? { content: prepared } : prepared), conversationBranchId } : prepared
       const limit = deviceLimit(ctx)
       const sentFrom = sentFromOf(ctx)
-      // A send bound to what the composer showed: compared here, after every await above and with none until the turn is
-      // handed its model and mode, which it then keeps whatever the thread changes to.
+      // A send bound to what the composer showed: compared here, and again inside the engine's admission. The turn is then
+      // pinned to the compared model and capped at the compared mode, so a later change can only narrow it.
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
@@ -2502,8 +2517,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         actor: questionAnswerer(ctx),
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),
-        // A bound send runs on the model and in at most the mode that were shown, and never waits in the queue.
-        ...(bound ? { permissionMode: bound.permissionMode, refuseQueue: true, ...(bound.model ? { modelOverride: bound.model } : {}) } : {}),
+        // A bound send runs on the model and in at most the mode that were shown, and never waits in the queue. The
+        // engine compares again inside its admission, under the thread's lock, before the run is committed.
+        ...(bound ? { permissionMode: bound.permissionMode, refuseQueue: true, bindCheck: () => { boundTurnSettings(ctx, threadId, p.expect, limit) }, ...(bound.model ? { modelOverride: bound.model } : {}) } : {}),
         ...(sentFrom ? { sentFrom } : {}),
         ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})

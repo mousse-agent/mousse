@@ -8,6 +8,7 @@ import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds } from './threadOrder'
+import { pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /** Opens a thread in the main workspace after the navigation guards agree. */
 export async function selectThread(threadId: string): Promise<void> {
@@ -65,6 +66,19 @@ export function matchesRememberedChoices(thread: Pick<Thread, 'modelOverride' | 
 }
 
 /**
+ * The remembered choices a new thread in `projectId` would really start with: a remembered model the picker does not list
+ * (hidden, or its instance turned off) is left out, because a create falls back to the profile's default for it. Without
+ * the project's provider listing yet, the model is left out too, so an empty thread is reused rather than another made.
+ */
+function usableRemembered(remembered: NewThreadChoice | undefined, projectId: string): NewThreadChoice | undefined {
+  if (!remembered?.model) return remembered
+  const snapshots = useProviderSnapshotsStore.getState().scopes[scopeKey(projectScope(projectId))]?.snapshots
+  if (snapshots && pickerListsModel(remembered.model, pickerProviders(snapshots, []))) return remembered
+  const { model: _unusable, ...rest } = remembered
+  return rest
+}
+
+/**
  * Opens the newest empty draft thread of a project, or creates one there with the project's remembered choices, and
  * selects it. An empty thread is reused only while it matches those choices; otherwise a new one is made with them
  * (setting them on the old one would also make its model the profile's last-used one).
@@ -72,7 +86,7 @@ export function matchesRememberedChoices(thread: Pick<Thread, 'modelOverride' | 
 export async function createAndSelectProjectThread(projectId: string): Promise<void> {
   const store = useAppStore.getState()
   const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
-  const remembered = rememberedChoiceOf(store.projects, projectId)
+  const remembered = usableRemembered(rememberedChoiceOf(store.projects, projectId), projectId)
   const thread = empty && matchesRememberedChoices(empty, remembered) ? empty : await window.mousse.threads.create(undefined, projectId, { rememberedChoices: true })
   // The daemon's threads:updated broadcast can arrive after the first message is sent.
   store.upsertThread(thread)

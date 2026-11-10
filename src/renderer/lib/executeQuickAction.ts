@@ -166,7 +166,7 @@ async function sendToActiveThread(content: string, profileId: string): Promise<v
       .catch(() => true)
     settleLoading(profileId, activeThreadId, stillActive)
     // Settings changed since they were shown: the thread is read again, so the composer shows what it really runs.
-    const refusal = boundSendRefusal(error)
+    const refusal = boundSendRefusal(error, Boolean(prepared.expect))
     if (refusal) void window.mousse.threads.get(activeThreadId).then((thread) => { if (thread) useAppStore.getState().upsertThread(thread) }).catch(() => undefined)
     throw new Error(refusal ?? 'Failed to send message.')
   }

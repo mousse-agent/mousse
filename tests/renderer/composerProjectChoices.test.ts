@@ -477,19 +477,26 @@ describe('a new chat on another computer gets its settings in the same send, or 
       composerWorkspaceDrafts: { __blank__: { projectId: `${NODE}:repo`, worktreeEnabled: false, node: NODE as never } }
     })
     const daemon = daemonForSend(threadRow(`${NODE}:made`, { node: NODE, projectId: `${NODE}:repo`, modelOverride: OPUS }), { defaultMode: 'ask' })
-    bridge.platformRequest = {
-      request: vi.fn(async (method: string) => method === 'bridge.hub.composerOptions'
-        ? { providers: [{ id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus 5.5' }] }], defaultModel: OPUS, permission: { defaultMode: 'ask' } }
-        : new Promise(() => undefined))
-    }
+    // That computer's composer options: its default mode, as it says it when asked.
+    let remoteDefault = 'ask'
+    const request = vi.fn(async (method: string) => method === 'bridge.hub.composerOptions'
+      ? { providers: [{ id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus 5.5' }] }], defaultModel: OPUS, permission: { defaultMode: remoteDefault } }
+      : new Promise(() => undefined))
+    bridge.platformRequest = { request }
     stubBridge()
     await mountComposer()
     expect(permissionChip()).toBe('Permissions: Ask before acting')
     daemon.setDefaultMode('full')
+    remoteDefault = 'full'
+    const readsBefore = request.mock.calls.filter((entry) => entry[0] === 'bridge.hub.composerOptions').length
     await send('Fix the parser')
     expect(daemon.calls.find((call) => call[0] === 'send')).toBeUndefined()
     expect(daemon.calls.at(-1)).toEqual(['refused', 'thread_settings_changed'])
     expect(host.textContent).toContain('Not sent: settings changed. Check and send again.')
+    // The refusal reads that computer's options again, so the composer shows the mode the thread really runs in now.
+    await settle()
+    expect(request.mock.calls.filter((entry) => entry[0] === 'bridge.hub.composerOptions').length).toBeGreaterThan(readsBefore)
+    expect(permissionChip()).toBe('Permissions: Full access')
   })
 
   it('a change after the last set and before the send is admitted runs nothing', async () => {

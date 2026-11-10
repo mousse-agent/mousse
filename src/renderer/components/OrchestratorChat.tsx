@@ -66,7 +66,7 @@ import type { NodeId } from '../../shared/net'
 import { qualifyId } from '../../shared/threadRef'
 import { composerCreatesThread, prepareComposerThread } from '../lib/createComposerThread'
 import { boundSendRefusal, errorCodeOf, needsSetup, setupRefusalLine, type ThreadSetup } from '../lib/threadSetup'
-import { openRemoteProject, remoteErrorMessage, remotePermissionCeiling, remotePermissionView, workspaceOnDevice } from '../lib/remoteComputers'
+import { openRemoteProject, refreshRemoteComposerOptions, remoteErrorMessage, remotePermissionCeiling, remotePermissionView, workspaceOnDevice } from '../lib/remoteComputers'
 import { UNKNOWN_COMPUTER_NAME, useComputer } from '../lib/computers'
 import { useRemoteComposerOptions, useRunOnDevices } from '../hooks/useRunOnDevices'
 import { localProjectsOf } from '../hooks/useLocalProjects'
@@ -982,10 +982,14 @@ export function OrchestratorChat() {
         // answer (a timeout, another computer that did not confirm) keeps its id, so sending it again replays it.
         sendIds.current.settle(signature, requestId, isOutcomeUncertain(error) ? 'unknown' : 'refused')
         if (!stillVisible()) return
-        setSendError(boundSendRefusal(error) ?? sendErrorLine(error))
-        // Settings changed since they were shown: the composer shows what the thread really runs now.
-        if (errorCodeOf(error) === 'thread_settings_changed' && targetThreadId)
+        setSendError(boundSendRefusal(error, Boolean(expect)) ?? sendErrorLine(error))
+        // Settings changed since they were shown: the composer shows what the thread really runs now, and for a thread of
+        // another computer that computer's default mode and this device's limit too, which the thread may run in.
+        if (errorCodeOf(error) === 'thread_settings_changed' && targetThreadId) {
           void window.mousse.threads.get(targetThreadId).then((thread) => { if (thread && stillVisible()) useAppStore.getState().upsertThread(thread) }).catch(() => undefined)
+          const node = useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)?.node
+          if (node) void refreshRemoteComposerOptions(node as NodeId).catch(() => undefined)
+        }
         const changes = pendingChangesDetails(error)
         setSendChanges(changes ? { line: sendErrorLine(error), message: errorText(error), details: changes } : null)
         if (isOutcomeUncertain(error) && targetThreadId) {

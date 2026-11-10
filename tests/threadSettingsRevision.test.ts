@@ -22,10 +22,27 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await mms.stop()
   rmSync(home, { recursive: true, force: true })
   delete process.env.MOUSSE_HOME
 })
+
+/**
+ * Replaces the turn's own wait for its thread's folders (the second wait of a send: the handler waits first) with
+ * `turnWait`. Returns whether the turn's wait was reached.
+ */
+function turnFolderWait(turnWait: () => Promise<'ready' | 'stopped' | 'aborted'>): () => boolean {
+  const original = mms.orchestrator.waitForThreadFolders.bind(mms.orchestrator)
+  let calls = 0
+  vi.spyOn(mms.orchestrator, 'waitForThreadFolders').mockImplementation((...args) => (calls++ === 0 ? original(...args) : turnWait()))
+  return () => calls >= 2
+}
+
+/** The profile's run engine. */
+function engine() {
+  return (mms.orchestrator as unknown as { runEngine: import('../src/mms/run/RunEngine').RunEngine }).runEngine
+}
 
 async function projectThread(): Promise<Thread> {
   const path = join(home, 'repo')
@@ -113,6 +130,18 @@ describe('a send bound to what was shown (expect)', () => {
     expect(turns).toHaveBeenCalledTimes(1)
   })
 
+  it('reads the shown model the way a create stores it: a legacy provider name resolves to the same instance', async () => {
+    const thread = await projectThread()
+    const stored = (await call('threads.setModel', { threadId: thread.id, model: sonnet })).thread.modelOverride!
+    expect(stored.instanceId).toBe('claude')
+    const turns = captureTurns()
+    mms.settings.set({ permissions: { defaultMode: 'ask' } })
+    // Named by the provider an older window still sends, with no instance: the same model, so the send goes.
+    await call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'ask', model: { llmProvider: 'claude-subscription', model: 'sonnet' } } })
+    expect(turns).toHaveBeenCalledTimes(1)
+    expect(turns.mock.calls[0]![2]).toMatchObject({ modelOverride: expect.objectContaining({ instanceId: 'claude', model: 'sonnet' }) })
+  })
+
   it('compares the mode a thread without its own runs in: the profile default, changed after it was shown', async () => {
     const thread = await projectThread()
     const turns = captureTurns()
@@ -123,11 +152,66 @@ describe('a send bound to what was shown (expect)', () => {
     expect(turns).toHaveBeenCalledTimes(1)
   })
 
-  it('a bound send that would wait in the queue is refused, as an edited prompt is', async () => {
+  it('a bound send that would wait in the queue is refused at admission, before it is a run', async () => {
     const thread = await projectThread()
     mms.settings.set({ permissions: { defaultMode: 'ask' } })
     await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', forceQueue: true, expect: { permissionMode: 'ask' } })).rejects.toMatchObject({ code: 'thread_busy' })
     expect(mms.threads.loadMessageQueue(thread.id)).toEqual([])
+    // No cancelled, unbound run is left for a later continuation to take as its predecessor.
+    expect(engine().listRuns(thread.id)).toEqual([])
+  })
+
+  it('is compared again inside the engine admission: a change made while the send waits for the thread lock is refused', async () => {
+    const thread = await projectThread()
+    mms.settings.set({ permissions: { defaultMode: 'ask' } })
+    const run = engine()
+    const lock = (run as unknown as { mutex: { withLock(key: string, fn: () => Promise<void>): Promise<void> } }).mutex
+    let release!: () => void
+    const held = lock.withLock(thread.id, () => new Promise<void>((resolve) => { release = resolve }))
+    // The send has passed the handler's comparison once it asks the engine to admit it.
+    let reached!: () => void
+    const atDispatch = new Promise<void>((resolve) => { reached = resolve })
+    const dispatch = run.dispatch.bind(run)
+    vi.spyOn(run, 'dispatch').mockImplementation((...args: Parameters<typeof run.dispatch>) => { reached(); return dispatch(...args) })
+    const sending = call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'ask' } })
+    await atDispatch
+    await call('threads.setPermissionMode', { threadId: thread.id, mode: 'full' })
+    release()
+    await held
+    await expect(sending).rejects.toMatchObject({ code: 'thread_settings_changed', details: { permissionMode: 'full' } })
+    expect(run.listRuns(thread.id)).toEqual([])
+  })
+
+  it('a bound turn that loses the thread lease while it waits for its folders is refused with its run cancelled, never queued', async () => {
+    const thread = await projectThread()
+    mms.settings.set({ permissions: { defaultMode: 'ask' } })
+    const { tryAcquireExecutionLease } = await import('../src/mms/queue/ThreadExecutionLease')
+    let peer: { release?: () => void } | null = null
+    const waits = turnFolderWait(async () => {
+      // Another process takes the thread between the admission and the turn's own lease.
+      peer = tryAcquireExecutionLease(mms.threads.getThreadDir(thread.id), { source: 'test-peer' }) as never
+      return 'ready'
+    })
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'ask' } })).rejects.toMatchObject({ code: 'thread_busy' })
+    expect(waits()).toBe(true)
+    expect(peer).not.toBeNull()
+    expect(mms.threads.loadMessageQueue(thread.id)).toEqual([])
+    expect(engine().listRuns(thread.id).map((entry) => entry.status)).toEqual(['cancelled'])
+    ;(peer as unknown as { release?: () => void })?.release?.()
+  })
+
+  it('a bound turn the profile shutdown stops while it waits for its folders is refused with its run cancelled, never queued', async () => {
+    const thread = await projectThread()
+    mms.settings.set({ permissions: { defaultMode: 'ask' } })
+    // The profile stops while the turn waits: its wait ends 'aborted' with the shutdown as the reason.
+    let stopping = false
+    const waits = turnFolderWait(async () => { stopping = true; return 'aborted' })
+    const shutdown = (mms.orchestrator as unknown as { isShutdownAbort(reason: unknown): boolean }).isShutdownAbort.bind(mms.orchestrator)
+    vi.spyOn(mms.orchestrator as unknown as { isShutdownAbort(reason: unknown): boolean }, 'isShutdownAbort').mockImplementation((reason) => stopping || shutdown(reason))
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'ask' } })).rejects.toMatchObject({ code: 'thread_busy' })
+    expect(waits()).toBe(true)
+    expect(mms.threads.loadMessageQueue(thread.id)).toEqual([])
+    expect(engine().listRuns(thread.id).map((entry) => entry.status)).toEqual(['cancelled'])
   })
 
   it('takes expect at a new version of the routed row, and setModel refuses unknown keys', async () => {

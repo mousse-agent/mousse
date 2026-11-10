@@ -108,6 +108,24 @@ export function cachedRemoteComposerOptions(node: NodeId): RemoteComposerOptions
   return composerOptionsCache.get(composerOptionsKey(node))
 }
 
+/** Composers showing a computer's options hear when they are read again (`refreshRemoteComposerOptions`). */
+const composerOptionsListeners = new Set<(node: NodeId, options: RemoteComposerOptions) => void>()
+
+/** Calls `listener` with a computer's options each time they are read again on purpose; returns the unsubscribe. */
+export function onRemoteComposerOptionsRead(listener: (node: NodeId, options: RemoteComposerOptions) => void): () => void {
+  composerOptionsListeners.add(listener)
+  return () => { composerOptionsListeners.delete(listener) }
+}
+
+/**
+ * Reads a computer's composer options again now (its default permission mode and this device's limit, among others)
+ * and hands them to every composer showing them: after a send there was refused because they changed.
+ */
+export async function refreshRemoteComposerOptions(node: NodeId): Promise<void> {
+  const options = await readRemoteComposerOptions(node)
+  for (const listener of composerOptionsListeners) listener(node, options)
+}
+
 export function readRemoteComposerOptions(node: NodeId): Promise<RemoteComposerOptions> {
   const key = composerOptionsKey(node)
   const pending = composerOptionsReads.get(key)
