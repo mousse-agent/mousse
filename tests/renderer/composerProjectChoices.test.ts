@@ -3,7 +3,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LlmProviderOption, MousseSettings } from '../../src/shared/settings'
-import type { Project } from '../../src/shared/types'
+import type { Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -118,5 +118,14 @@ describe('a new chat in a project', () => {
     await showBlankChat('fresh')
     expect(modelButton()).toBe('Model: Opus 5.5')
     expect(permissionChip()).toBe('Permissions: Auto-accept edits')
+  })
+})
+
+describe('the thread list in the store', () => {
+  it('takes a list where only a thread permission mode changed, as a new thread gets its project mode that way', async () => {
+    const { sameThreadSnapshot } = await import('../../src/renderer/stores/appStore')
+    const thread = { id: 't1', name: 'New Chat', projectId: 'remembers', createdAt: '', updatedAt: '2026-11-10T00:00:00Z' } as Thread
+    expect(sameThreadSnapshot([thread], [{ ...thread }])).toBe(true)
+    expect(sameThreadSnapshot([thread], [{ ...thread, permissionMode: 'full' }])).toBe(false)
   })
 })

@@ -95,6 +95,8 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.settledAt !== right.settledAt ||
       left.startedAt !== right.startedAt ||
       left.worktreeEnabled !== right.worktreeEnabled ||
+      // Saved without touching `updatedAt`, so it is compared on its own (a new thread gets its project's mode so).
+      left.permissionMode !== right.permissionMode ||
       // A thread of another computer going offline (or coming back) changes its row.
       left.node !== right.node ||
       left.offline !== right.offline ||
