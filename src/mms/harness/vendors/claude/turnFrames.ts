@@ -58,6 +58,23 @@ export class TurnFrames {
     private readonly metrics: ClaudeMetricsCollector
   ) {}
 
+  /** What waits for the next assistant message to start: a steer's place in the reply (`atNextMessage`). */
+  private readonly nextMessage: Array<() => void> = []
+
+  /**
+   * Runs `run` once the message being written has ended: its result arrives (an aborted one, after a steer's cut) or
+   * the next top-level assistant message starts. After a steer is pushed Claude Code still sends the rest of the
+   * message it was writing, until its cut lands; the steer's place in the reply is there. `flushNextMessage` runs
+   * whatever still waits (the turn ended first).
+   */
+  atNextMessage(run: () => void): void {
+    this.nextMessage.push(run)
+  }
+
+  flushNextMessage(): void {
+    for (const run of this.nextMessage.splice(0)) run()
+  }
+
   /** A steer cut the turn here: what follows is a new paragraph. */
   breakParagraph(): void {
     if (this.text) this.text += '\n\n'
@@ -73,6 +90,8 @@ export class TurnFrames {
     this.metrics.observe(message)
     observeRateLimit(message, this.rateLimits)
     this.sessionId = message.session_id || this.sessionId
+    // The message being written ended (its result, an aborted one after a steer's cut) or the next one starts.
+    if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || message.type === 'result') this.flushNextMessage()
     if (message.type === 'stream_event') {
       const event = message.event
       if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {

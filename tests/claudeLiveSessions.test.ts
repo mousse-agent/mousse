@@ -16,7 +16,7 @@ import {
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
 import { STOP_GRACE_MS } from '../src/mms/harness/stopProcesses'
-import { FakeClaudeCli, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
+import { FakeClaudeCli, messageStart, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const homes: string[] = []
@@ -209,7 +209,6 @@ describe('a live Claude query', () => {
     const first = process.uuid(0)
     process.emit(roster({ id: 'bash-1' }), textDelta('working', first))
     await inputs(cli, 2)
-    expect(onSteer).toHaveBeenCalledExactlyOnceWith('also do X')
     expect(process.inputs[1]).toMatchObject({ priority: 'now' })
     expect(process.text(1)).toContain('also do X')
     expect(process.backgrounded).toBe(1)
@@ -219,10 +218,33 @@ describe('a live Claude query', () => {
     await new Promise((resolve) => setTimeout(resolve, 30))
     expect(ended).toBe(false)
     const steerUuid = process.uuid(1)
-    process.emit(textDelta('after steer', steerUuid), resultFrame({ uuids: [steerUuid], text: 'after steer' }))
+    process.emit(messageStart(steerUuid), textDelta('after steer', steerUuid), resultFrame({ uuids: [steerUuid], text: 'after steer' }))
     expect(await turn).toBe('working\n\nafter steer')
+    expect(onSteer).toHaveBeenCalledExactlyOnceWith('also do X')
     expect(service.hasBackgroundWork('thread')).toBe(true)
     expect(host.backgroundWork).toHaveBeenCalledExactlyOnceWith('thread', true)
+  })
+
+  it('a steer takes its place in the reply where the next message starts, after the words the cut message still sent', async () => {
+    const { cli, chat } = fixture()
+    silent(cli)
+    const events: string[] = []
+    const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('also do X').mockReturnValue(undefined)
+    const onSteer = vi.fn((text: string) => void events.push(`steer:${text}`))
+    const onText = vi.fn((text: string) => void events.push(`text:${text}`))
+    const turn = chat({ drainSteer, onSteer, onText })
+    await inputs(cli, 1)
+    const process = cli.last
+    const first = process.uuid(0)
+    process.emit(textDelta('working', first))
+    await inputs(cli, 2)
+    // Pushed, but Claude Code has not cut the message it is writing yet: the steer has no place in the reply yet.
+    expect(onSteer).not.toHaveBeenCalled()
+    process.emit(textDelta(' tail', first), resultFrame({ uuids: [first], terminalReason: 'aborted_streaming', queued: 1 }))
+    const steerUuid = process.uuid(1)
+    process.emit(messageStart(steerUuid), textDelta('after steer', steerUuid), resultFrame({ uuids: [steerUuid], text: 'after steer' }))
+    expect(await turn).toBe('working tail\n\nafter steer')
+    expect(events).toEqual(['text:working', 'text:working tail', 'steer:also do X', 'text:working tail\n\nafter steer'])
   })
 
   it('a steered run whose result already arrived is not steered: the text stays with the orchestrator', async () => {
@@ -863,9 +885,11 @@ describe('result routing and steering edge cases', () => {
     await inputs(f.cli, 3)
     expect(process.inputs[2]).toMatchObject({ priority: 'now' })
     expect(process.text(2)).toContain('early steer')
-    expect(onSteer).toHaveBeenCalledExactlyOnceWith('early steer')
+    // It counts as read once Claude Code has begun it (here, when the turn's result arrives).
+    expect(onSteer).not.toHaveBeenCalled()
     process.emit(resultFrame({ uuids: [process.uuid(1), process.uuid(2)], text: 'ok' }))
     expect(await turn).toBe('ok')
+    expect(onSteer).toHaveBeenCalledExactlyOnceWith('early steer')
   })
 
   /** Turn two reads the helper's notification and is cut off by a plain interrupt (nothing of it is unechoed). */
