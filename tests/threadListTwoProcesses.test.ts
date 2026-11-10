@@ -106,6 +106,29 @@ describe('two processes changing one project at once', () => {
     }
   }, 120_000)
 
+  // Review repro: a conditional mode change compared against this process's cached revision and wrote over the other's.
+  it("refuses a conditional change made from a stale cache once another process changed the thread's mode", async () => {
+    const projects = new ProjectManager()
+    const a = new ThreadDataStore(projects)
+    projects.setThreadStore(a)
+    const project = projects.openProject(join(root, 'conditional'))
+    const thread = a.createThread('Conditional', project.id)
+    a.listAllThreads()
+    const shown = thread.settingsRevision ?? 0
+    const other = runChild([project.id, '0', 'B', 'modes', thread.id])
+    expect(await other.exited, other.err()).toBe(0)
+    let refusal: { code?: string; details?: { revision?: number; permissionMode?: string } } | undefined
+    try {
+      a.updateThreadMeta(thread.id, { permissionMode: 'full' }, { ifRevision: shown })
+    } catch (error) {
+      refusal = error as typeof refusal
+    }
+    expect(refusal).toMatchObject({ code: 'thread_settings_changed', details: { revision: shown + 1, permissionMode: 'ask' } })
+    const now = new ThreadDataStore(new ProjectManager()).getThread(thread.id)!
+    expect(now.permissionMode).toBe('ask')
+    expect(now.settingsRevision).toBe(shown + 1)
+  }, 120_000)
+
   it(`keeps every thread, rename and order across ${ITERATIONS} concurrent creates and renames on each side`, async () => {
     const projects = new ProjectManager()
     const a = new ThreadDataStore(projects)

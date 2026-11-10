@@ -5020,7 +5020,7 @@ export class OrchestratorService extends EventEmitter {
    * Sets a thread's permission mode. A subagent's mode never exceeds its lineage's ceiling. Applies
    * from the next turn: a running turn and a pending approval are not touched.
    */
-  setThreadPermissionMode(threadId: string, mode: PermissionMode, by?: { node: string; maxPermissionMode: PermissionMode }): Thread {
+  setThreadPermissionMode(threadId: string, mode: PermissionMode, by?: { node: string; maxPermissionMode: PermissionMode }, opts: { ifRevision?: number } = {}): Thread {
     const store = this.threadStore
     if (!store) throw new Error('Permission modes need the thread store')
     const thread = store.getThread(threadId)
@@ -5032,7 +5032,7 @@ export class OrchestratorService extends EventEmitter {
     if (by && isStricter(by.maxPermissionMode, mode))
       throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${describePermissionMode(by.maxPermissionMode)} at most. To allow more, raise the limit for this device on that computer, in Settings, Devices.`, { threadId, limit: by.maxPermissionMode, reason: 'device_limit' })
     const previous = thread.permissionMode
-    const updated = store.updateThreadMeta(threadId, { permissionMode: mode }, { touch: false })
+    const updated = store.updateThreadMeta(threadId, { permissionMode: mode }, { touch: false, ...(opts.ifRevision !== undefined ? { ifRevision: opts.ifRevision } : {}) })
     try {
       this.runEngine?.store.appendEvent({ threadId, type: 'thread.permission_mode', payload: { from: previous ?? null, to: mode, ceiling, ...(by ? { node: by.node } : {}) } })
     } catch (error) {
@@ -7067,7 +7067,8 @@ export class OrchestratorService extends EventEmitter {
   /** Set one thread's model without mutating global provider settings. */
   setThreadModelOverride(
     threadId: string,
-    override: ThreadSession['modelOverride'] | undefined
+    override: ThreadSession['modelOverride'] | undefined,
+    opts: { ifRevision?: number } = {}
   ): ThreadSession['modelOverride'] {
     const session = this.getOrCreateSession(threadId)
     // Stored in the instance shape (SPEC §13.8); callers that still pass an `llmProvider` are mapped,
@@ -7083,12 +7084,14 @@ export class OrchestratorService extends EventEmitter {
     const pending = switched ? this.runEngine?.handoffs.pendingForThread(threadId) : null
     if (pending)
       throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
+    // Written first: a conditional change (`ifRevision`) the thread on disk refuses changes nothing here either.
+    const stored = next ? structuredClone(next) : undefined
+    if (this.threadStore) {
+      this.threadStore.updateThreadMeta(threadId, { modelOverride: stored }, opts.ifRevision !== undefined ? { ifRevision: opts.ifRevision } : {})
+    }
     // The old provider's process is stopped while the thread still resolves to it; its helpers end with it.
     if (switched) void this.stopProviderWork(threadId)
-    session.modelOverride = next ? structuredClone(next) : undefined
-    if (this.threadStore) {
-      this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
-    }
+    session.modelOverride = stored ? structuredClone(stored) : undefined
     // SPEC §15.1: a credential belongs to a thread and provider instance; a switch revokes it.
     if (switched) this.revokeMcp(threadId)
     return session.modelOverride

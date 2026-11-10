@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
-import { ThreadDataStore, ordersKeeping } from '../src/mms/data/ThreadDataStore'
+import { ThreadDataStore, ThreadListBusyError, ordersKeeping } from '../src/mms/data/ThreadDataStore'
 
 function withTemporaryMousseHome(run: (root: string) => void): void {
   const previousHome = process.env.MOUSSE_HOME
@@ -543,6 +543,37 @@ describe('persisted sidebar ordering', () => {
       })
     }, 120_000)
 
+    // Review repro: a thread another process made just before a reorder took the lock could share a moved row's order.
+    it('refuses a reorder when another process made a thread since the list was read', () => {
+      withTemporaryMousseHome((root) => {
+        const { threads: a, project } = store(root)
+        const projectsB = new ProjectManager()
+        const b = new ThreadDataStore(projectsB)
+        projectsB.setThreadStore(b)
+        for (const name of ['One', 'Two', 'Three']) a.createThread(name, project.id)
+        const listed = a.listThreads(project.id).map((thread) => thread.id)
+        const internals = a as unknown as { withProjectListLock: <T>(projectId: string, fn: () => T) => T }
+        const lock = internals.withProjectListLock.bind(a)
+        let made: { id: string; order: number } | undefined
+        vi.spyOn(internals, 'withProjectListLock').mockImplementationOnce(<T>(projectId: string, fn: () => T): T => {
+          // B's create lands after A listed the threads and before A takes the lock.
+          made = b.createThread('Made by B', project.id)
+          return lock(projectId, fn)
+        })
+        const moved = [listed[2]!, listed[0]!, listed[1]!]
+        try {
+          expect(() => a.reorderThreads(project.id, moved)).toThrow('Thread list busy, try again.')
+        } finally {
+          vi.restoreAllMocks()
+        }
+        const after = a.listThreads(project.id)
+        expect(new Set(after.map((thread) => thread.order)).size).toBe(after.length)
+        // Sent again with the thread B made, it applies.
+        a.reorderThreads(project.id, [made!.id, ...moved])
+        expect(a.listThreads(project.id).map((thread) => thread.id)).toEqual([made!.id, ...moved])
+      })
+    })
+
     // Review repro: a trash in another process during a rename moved a folder; the rename certified the list with it.
     it("drops its list when another process moves a thread folder while it writes, instead of certifying it", () => {
       withTemporaryMousseHome((root) => {
@@ -565,6 +596,32 @@ describe('persisted sidebar ordering', () => {
           vi.restoreAllMocks()
         }
         expect(threads.listThreads(project.id).map((thread) => thread.id)).toEqual([kept.id])
+      })
+    })
+
+    // Review: a run start marks its thread started and bumps it; a list busy once must not leave either undone.
+    it('tries marking a thread started, and bumping it, once more when the list was busy', () => {
+      withTemporaryMousseHome((root) => {
+        const { threads, project } = store(root)
+        threads.createThread('Older', project.id)
+        const thread = threads.createThread('Draft', project.id)
+        threads.createThread('Newer', project.id)
+        const internals = threads as unknown as { writeThreadMeta: (...args: unknown[]) => unknown }
+        const write = internals.writeThreadMeta.bind(threads)
+        let busy = 0
+        vi.spyOn(internals, 'writeThreadMeta').mockImplementation((...args: unknown[]) => {
+          busy += 1
+          if (busy % 2 === 1) throw new ThreadListBusyError()
+          return write(...args)
+        })
+        try {
+          const touched = threads.touchThreadUserActivity(thread.id)
+          expect(touched).toMatchObject({ newlyStarted: true, bumped: true })
+        } finally {
+          vi.restoreAllMocks()
+        }
+        expect(threads.listThreads(project.id)[0]!.id).toBe(thread.id)
+        expect(threads.getThread(thread.id)?.startedAt).toBeTruthy()
       })
     })
 

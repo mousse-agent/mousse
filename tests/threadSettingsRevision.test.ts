@@ -5,6 +5,9 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
+import { ProjectManager } from '../src/mms/data/ProjectManager'
+import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
+import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ROUTED_METHODS, routedKeysAt } from '../src/shared/bridge/routed'
 import type { Thread } from '../src/shared/types'
 
@@ -220,6 +223,48 @@ describe('a send bound to what was shown (expect)', () => {
     expect(routedKeysAt(row, row.version - 1)).not.toContain('expect')
     const thread = await projectThread()
     await expect(call('threads.setModel', { threadId: thread.id, model: sonnet, ifRevison: 0 })).rejects.toMatchObject({ code: 'invalid_params' })
+  })
+})
+
+describe('a change another process made, which this daemon has not read yet', () => {
+  /** Another process on the same profile, as a second daemon session would be. */
+  function anotherProcess(): ThreadDataStore {
+    const threadsHome = (mms.threads as unknown as { homeDir: string }).homeDir
+    const profileId = (mms.threads.lifecycleStore as unknown as { profileId: string }).profileId
+    const other = new ThreadDataStore(new ProjectManager(threadsHome), threadsHome, { profileId })
+    // This daemon's own lifecycle authority stays the one its paths use.
+    registerThreadLifecycleGate(threadsHome, mms.threads.lifecycleStore)
+    return other
+  }
+
+  it('refuses a conditional mode or model change, and a bound send, that this daemon checked against its cache', async () => {
+    const thread = await projectThread()
+    const shown = (await call('threads.setPermissionMode', { threadId: thread.id, mode: 'accept_edits' })).thread.settingsRevision!
+    // This daemon holds the thread in its lists.
+    mms.threads.listAllThreads()
+    anotherProcess().updateThreadMeta(thread.id, { permissionMode: 'ask' }, { touch: false })
+    await expect(call('threads.setPermissionMode', { threadId: thread.id, mode: 'full', ifRevision: shown })).rejects.toMatchObject({ code: 'thread_settings_changed', details: { revision: shown + 1, permissionMode: 'ask' } })
+    await expect(call('threads.setModel', { threadId: thread.id, model: { instanceId: 'claude', model: 'sonnet' }, ifRevision: shown })).rejects.toMatchObject({ code: 'thread_settings_changed' })
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'accept_edits', settingsRevision: shown } })).rejects.toMatchObject({ code: 'thread_settings_changed' })
+    const onDisk = mms.threads.threadOnDisk(thread.id)!
+    expect(onDisk.permissionMode).toBe('ask')
+    expect(onDisk.settingsRevision).toBe(shown + 1)
+  })
+
+  it('refuses it under the list lock too, when the change lands after the handler checked', async () => {
+    const thread = await projectThread()
+    const shown = (await call('threads.setPermissionMode', { threadId: thread.id, mode: 'accept_edits' })).thread.settingsRevision!
+    mms.threads.listAllThreads()
+    const other = anotherProcess()
+    // The other process's change lands between the handler's check and this daemon's write.
+    const read = mms.threads.threadOnDisk.bind(mms.threads)
+    vi.spyOn(mms.threads, 'threadOnDisk').mockImplementationOnce((id: string) => {
+      const before = read(id)
+      other.updateThreadMeta(thread.id, { permissionMode: 'ask' }, { touch: false })
+      return before
+    })
+    await expect(call('threads.setPermissionMode', { threadId: thread.id, mode: 'full', ifRevision: shown })).rejects.toMatchObject({ code: 'thread_settings_changed' })
+    expect(mms.threads.threadOnDisk(thread.id)!.permissionMode).toBe('ask')
   })
 })
 

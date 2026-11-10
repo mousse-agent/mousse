@@ -235,11 +235,13 @@ function namedModel(ctx: HandlerContext, model: unknown, projectId: string | und
  * the thread's current values. Called right before the write with nothing awaited in between, so the check and the
  * write are one step of the daemon.
  */
-function refuseStaleRevision(ctx: HandlerContext, threadId: string, ifRevision: unknown): void {
-  if (ifRevision === undefined) return
+function refuseStaleRevision(ctx: HandlerContext, threadId: string, ifRevision: unknown): number | undefined {
+  if (ifRevision === undefined) return undefined
   if (typeof ifRevision !== 'number' || !Number.isSafeInteger(ifRevision) || ifRevision < 0)
     throw new DomainRpcError('invalid_params', 'ifRevision must be a whole number')
-  const thread = ctx.mms.threads.getThread(threadId)
+  // Read from disk: another process may have changed the thread since this daemon cached it. The write compares again
+  // under the project's list lock (`updateThreadMeta` `ifRevision`), where it counts.
+  const thread = ctx.mms.threads.threadOnDisk(threadId)
   if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
   const revision = thread.settingsRevision ?? 0
   if (revision !== ifRevision)
@@ -249,6 +251,7 @@ function refuseStaleRevision(ctx: HandlerContext, threadId: string, ifRevision: 
       ...(thread.modelOverride ? { modelOverride: thread.modelOverride } : {}),
       ...(thread.permissionMode ? { permissionMode: thread.permissionMode } : {})
     })
+  return ifRevision
 }
 
 /**
@@ -276,7 +279,9 @@ function boundTurnSettings(ctx: HandlerContext, threadId: string, raw: unknown, 
     const effort = asOptionalString(raw.model.effort, 64)
     expectedModel = storedSelection(ctx, { ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}) })
   }
-  const thread = ctx.mms.threads.getThread(threadId)
+  // Read from disk each time, the admission's check included: another process may have changed the thread since this
+  // daemon cached it.
+  const thread = ctx.mms.threads.threadOnDisk(threadId)
   if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
   const settings = ctx.mms.settings.get()
   const ownMode = thread.permissionMode ?? normalizePermissionMode(settings.permissions?.defaultMode)
@@ -2375,8 +2380,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const model = p.model
       let override: ModelOverride | undefined
       if (model !== undefined && model !== null) override = namedModel(ctx, model, ctx.mms.threads.getThread(threadId)?.projectId)
-      refuseStaleRevision(ctx, threadId, p.ifRevision)
-      const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
+      const ifRevision = refuseStaleRevision(ctx, threadId, p.ifRevision)
+      const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override, ifRevision !== undefined ? { ifRevision } : {})
       if (next) {
         // The global default keeps the instance, so later default turns resolve the same agent.
         ctx.mms.settings.set({ provider: { instanceId: next.instanceId, llmProvider: next.llmProvider, model: next.model, effort: next.effort, name: next.name } })
@@ -2414,10 +2419,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const mode = asString(p.mode, 'mode', 32)
       if (!isPermissionMode(mode)) throw new DomainRpcError('invalid_params', `mode must be one of ${PERMISSION_MODES.join(', ')}`)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      refuseStaleRevision(ctx, threadId, p.ifRevision)
+      const ifRevision = refuseStaleRevision(ctx, threadId, p.ifRevision)
       // Applies from the next turn; a running turn and a pending question are not touched.
       const caller = ctx.connection?.bridgeCaller
-      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined)
+      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined, ifRevision !== undefined ? { ifRevision } : {})
       rememberPick(ctx, threadId, { permissionMode: mode })
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
