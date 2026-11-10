@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { BrowserAccessState } from '../../../shared/browser/access'
 import { useAppStore } from '../../stores/appStore'
+import { followBrowserAccess } from '../../lib/followBrowserAccess'
 
 /** Explicit, profile-owned browser consent, visible in the requesting thread. */
 export function ChatBrowserAccess({ threadId, profileId: suppliedProfile, requireSelectedThread = false }: { threadId: string; profileId?: string; requireSelectedThread?: boolean }) {
@@ -24,12 +25,11 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
     const state = useAppStore.getState()
     if (state.mainView !== 'browser' || !state.mainAreaOpen) state.openSurfaceKind('browser')
   }
+  // Read when the service says the access state changed (`browser.access.changed`), and every 30 seconds for a missed
+  // push: the card is told at once when this thread's agent asks, instead of reading the state every 750 ms.
   useEffect(() => {
     alive.current = true
-    let pending = false
     const refresh = async () => {
-      if (pending) return
-      pending = true
       const expectedRevision = revision.current
       try {
         const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
@@ -41,11 +41,15 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
         if ((!state.allowed && pendingRequest) || (state.allowed && state.tabRequests?.some((item) => item.threadId === threadId))) openBrowser()
       } catch (cause) {
         if (current() && expectedRevision === revision.current) setError(String((cause as { message?: string })?.message || cause))
-      } finally { pending = false }
+      }
     }
-    void refresh()
-    const timer = setInterval(() => { void refresh() }, 750)
-    return () => { alive.current = false; clearInterval(timer) }
+    const stop = followBrowserAccess({
+      read: refresh,
+      shown: () => false,
+      onChanged: window.mousse.browser?.onAccessChanged ? (listener) => window.mousse.browser.onAccessChanged(listener) : undefined,
+      document
+    })
+    return () => { alive.current = false; stop() }
   }, [threadId, profileId, requireSelectedThread])
   const answer = async (allowed: boolean) => {
     const id = requestId
