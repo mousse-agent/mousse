@@ -42,6 +42,7 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
+import { lifecycleForReply } from '../../shared/resourceLifecycle'
 import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
 import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
@@ -2090,7 +2091,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           expectedGeneration: lifecycleExpectedGeneration(p)
         })
         const threads = ctx.mms.threads.listAllThreads()
-        return { threads: listedThreadsFor(ctx, threads), lifecycle }
+        return { threads: listedThreadsFor(ctx, threads), lifecycle: lifecycleForReply(lifecycle) }
       } finally {
         // Also after a refusal: a thread put back in Archived shows there again.
         ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
@@ -5049,7 +5050,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           } catch { /* Missing/invalid metadata remains identified by the stable task ID. */ }
         }
         return {
-          lifecycles,
+          lifecycles: lifecycles.map(lifecycleForReply),
           taskNames,
           migrationDiagnostics,
           trashPolicy: ctx.mms.lifecycle.cleanup.policy(),
@@ -5064,7 +5065,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ctx.mms.threads.getThreadDir(threadId)
       }
       const lifecycle = store.require(threadId)
-      return { lifecycle, inventory: await buildResourceInventory(store, lifecycle), migrationDiagnostics }
+      return { lifecycle: lifecycleForReply(lifecycle), inventory: await buildResourceInventory(store, lifecycle), migrationDiagnostics }
     }
     case 'storage.policy': {
       const cleanup = ctx.mms.lifecycle.cleanup

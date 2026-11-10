@@ -161,6 +161,21 @@ export interface LifecyclePurgePreview {
 }
 
 /**
+ * A lifecycle record as a reply carries it: without each purge item's `rootIdentity`. That is the folder's device and
+ * file id (`ino`), which the purge compares with the disk before it removes anything and no caller reads. A file id
+ * can be larger than 2^53 (on NTFS it is 64 bits), which the network's strict JSON refuses, so it never leaves the
+ * record on this computer. The stored record keeps it.
+ */
+export function lifecycleForReply(record: TaskLifecycleRecord): TaskLifecycleRecord {
+  if (!record.purge) return record
+  const items = record.purge.items.map((item) => {
+    const { rootIdentity: _kept, ...rest } = item
+    return rest
+  })
+  return { ...record, purge: { ...record.purge, items } }
+}
+
+/**
  * Why the thread can't be deleted yet: something of it is kept back because another thread, whose worktree can't be
  * checked, may still use it (`retained` entries with `unverifiedOwner`). Deleting the thread then would leave what is
  * kept with no thread to own it, and nothing in the app could delete it later; so the thread stays in the trash, owning
