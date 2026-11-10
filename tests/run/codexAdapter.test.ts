@@ -1119,6 +1119,8 @@ describe('CodexAdapter', () => {
     )
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
+    // Off Windows a binary that cannot be executed is no Codex CLI.
+    chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
     const launch = replayCodexAppServer(replay)

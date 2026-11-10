@@ -82,6 +82,7 @@ afterEach(async () => {
   Object.assign(REPOSITORY_LEASE_TIMING, leaseTiming)
   Object.assign(GIT_STOP_TIMING, stopTiming)
   delete gitStopProbe.alive
+  delete gitStopProbe.kill
   vi.restoreAllMocks()
   // A killed holder lets go of its files only once it has exited (on Windows, its open handles hold the folder).
   await Promise.all(children.splice(0).map((made) => { made.kill('SIGKILL'); return exited(made) }))
@@ -362,6 +363,9 @@ describe('the repository lease, round 2', () => {
     Object.assign(GIT_STOP_TIMING, { exitWaitMs: 200, slowPollMs: 50, survivorLimitMs: 300 })
     let lingering = true
     gitStopProbe.alive = () => lingering
+    // A kill that does nothing: the command survives its stop, so the processes listed at the stop are still there (off
+    // Windows the list is read after the kill, and a command that was killed leaves none to name).
+    gitStopProbe.kill = () => undefined
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const controller = new AbortController()
     setTimeout(() => controller.abort(), 500)
@@ -380,6 +384,11 @@ describe('the repository lease, round 2', () => {
     expect(error.message).toContain('Close it or restart Mousse.')
     lingering = false
     await acquires(identity)
+    // The command and what it started are ended here, so its folder can be removed.
+    const command = first.stoppedGitPids![0]!
+    if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(command), '/T', '/F'], { stdio: 'ignore' }) } catch { /* gone */ } }
+    else { try { process.kill(-command, 'SIGKILL') } catch { /* gone */ } }
+    await vi.waitFor(() => expect(() => process.kill(command, 0)).toThrow(), { timeout: 5_000 })
   }, 30_000)
 
   it.skipIf(process.platform === 'win32')('never holds a lock on a lock file that another took the place of while it waited', async () => {
