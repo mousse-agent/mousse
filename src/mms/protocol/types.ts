@@ -26,8 +26,6 @@ export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
 export const MMS_PROTOCOL_MAX_PENDING_REQUESTS = 64
 /** Per-connection outbound write backlog before disconnecting a slow client. */
 export const MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES = 2 * 1024 * 1024 // 2 MiB
-/** Bounded completed-response cache size per connection (duplicate id handling). */
-export const MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS = 256
 export const MMS_PROTOCOL_MAX_ID_LENGTH = 128
 export const MMS_PROTOCOL_MAX_METHOD_LENGTH = 96
 export const MMS_PROTOCOL_MAX_TEXT_LENGTH = 512 * 1024
