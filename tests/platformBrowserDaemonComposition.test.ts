@@ -532,6 +532,32 @@ describe('browser daemon composition', () => {
     await artifacts.dispose()
   })
 
+  it('says when its access state changes: a waiting request, the grant, and a tab an agent waits for', async () => {
+    const profileId = '33333333-3333-4333-8333-333333333333'
+    const root = makeBrowserCommandTempRoot()
+    roots.push(root)
+    const artifacts = new BrowserArtifactService({ profileId, profileRoot: root, workerArtifactRoot: join(root, 'browser', 'worker-artifacts') })
+    let changes = 0
+    const service = new MmsBrowserService({ profileId, profileRoot: root, workerArtifactRoot: join(root, 'browser', 'worker-artifacts'), artifacts,
+      installationBrowserRoot: join(root, 'browser-binaries'), threadExists: () => true, onAccessChanged: () => { changes += 1 } })
+    const execution = context(profileId, 'thread_1').execution
+    const waiting = service.requestAccess(execution)
+    expect(changes).toBe(1)
+    const before = changes
+    await service.setAccess(true)
+    expect(changes).toBeGreaterThan(before)
+    // Allowed now, the request waits for a tab: a window must hear of it to open one.
+    await vi.waitFor(() => expect(service.accessStatus().tabRequests).toHaveLength(1))
+    const tabAsked = changes
+    const rejected = expect(waiting).rejects.toMatchObject({ code: 'policy_denied' })
+    await service.setAccess(false)
+    await rejected
+    expect(service.accessStatus().tabRequests).toEqual([])
+    expect(changes).toBeGreaterThanOrEqual(tabAsked + 2)
+    await service.dispose()
+    await artifacts.dispose()
+  })
+
   it('retains a managed backend whose first close fails and retries the same owner', async () => {
     const profileId = '22222222-2222-4222-8222-222222222222'
     const root = makeBrowserCommandTempRoot()

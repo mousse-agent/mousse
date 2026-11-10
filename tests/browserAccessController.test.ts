@@ -81,4 +81,25 @@ describe('profile browser access', () => {
     await assertion
     expect(alice.status().allowed).toBe(true)
   })
+
+  it('tells its listeners when a request waits, is answered or is cancelled, and when the grant changes', async () => {
+    const access = new BrowserAccessController()
+    let changes = 0
+    const stop = access.onChange(() => { changes += 1 })
+    const abort = new AbortController()
+    const cancelled = expect(access.request('thread', abort.signal)).rejects.toMatchObject({ code: 'cancelled' })
+    expect(changes).toBe(1)
+    abort.abort()
+    await cancelled
+    expect(changes).toBe(2)
+    const answered = access.request('thread')
+    access.set(true)
+    await expect(answered).resolves.toBe('allowed')
+    expect(changes).toBe(5)
+    access.set(true)
+    expect(changes).toBe(5)
+    stop()
+    access.set(false)
+    expect(changes).toBe(5)
+  })
 })

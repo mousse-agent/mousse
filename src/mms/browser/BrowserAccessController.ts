@@ -7,6 +7,19 @@ export class BrowserAccessController {
   private allowed = false
   private grant = new AbortController()
   private readonly pending = new Map<string, { threadId: string; settle(allowed: boolean): void; cancel(): void }>()
+  private readonly changeListeners = new Set<() => void>()
+
+  /** Calls `listener` after the grant or the pending requests change. Returns an unsubscribe. */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener)
+    return () => { this.changeListeners.delete(listener) }
+  }
+
+  private changed(): void {
+    for (const listener of this.changeListeners) {
+      try { listener() } catch { /* A listener never changes what was granted. */ }
+    }
+  }
 
   status(): BrowserAccessState {
     return { allowed: this.allowed, pending: [...this.pending].map(([requestId, request]) => ({ requestId, threadId: request.threadId })) }
@@ -19,7 +32,7 @@ export class BrowserAccessController {
     if (this.allowed) return Promise.resolve('already-allowed')
     return new Promise((resolve, reject) => {
       const requestId = randomUUID()
-      const cleanup = () => { this.pending.delete(requestId); signal?.removeEventListener('abort', cancel) }
+      const cleanup = () => { this.pending.delete(requestId); signal?.removeEventListener('abort', cancel); this.changed() }
       const cancel = () => { cleanup(); reject(new BrowserAutomationError({ code: 'cancelled', message: 'Browser access request was cancelled' })) }
       this.pending.set(requestId, { threadId, cancel, settle: (allowed) => {
         cleanup()
@@ -27,6 +40,7 @@ export class BrowserAccessController {
         else reject(new BrowserAutomationError({ code: 'policy_denied', message: 'The user selected Deny for agents browser access.', details: { userResponse: 'deny' } }))
       } })
       signal?.addEventListener('abort', cancel, { once: true })
+      this.changed()
     })
   }
 
@@ -38,8 +52,10 @@ export class BrowserAccessController {
   set(allowed: boolean): BrowserAccessState {
     if (!allowed) this.grant.abort()
     else if (!this.allowed) this.grant = new AbortController()
+    const was = this.allowed
     this.allowed = allowed
     for (const request of [...this.pending.values()]) request.settle(allowed)
+    if (was !== allowed) this.changed()
     return this.status()
   }
 

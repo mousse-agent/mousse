@@ -21,6 +21,7 @@ import type { InAppBrowserState } from '../../shared/browser/inApp'
 import type { BrowserAgentCursor } from '../../shared/browser/agentCursor'
 import { AgentCursor } from './browser/AgentCursor'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { followBrowserAccess } from '../lib/followBrowserAccess'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
@@ -417,20 +418,22 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
   const manualActive = active && !agentControlled
   const pendingAccess = access.allowed ? undefined : access.pending[0]
+  // Read on the service's push, shown or hidden (a hidden panel still opens the tab an agent asked for), and polled
+  // every 750 ms only while the panel is on screen. Shown or hidden starts it again, which reads at once.
   useEffect(() => {
     let disposed = false
-    let timer: ReturnType<typeof setTimeout>
-    const refresh = async () => {
-      const revision = accessRevision.current
-      try {
+    const stop = followBrowserAccess({
+      read: async () => {
+        const revision = accessRevision.current
         const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
         if (!disposed && revision === accessRevision.current) setAccess(state)
-      } catch { /* Reconnect on the next poll. */ }
-      if (!disposed) timer = setTimeout(() => void refresh(), 750)
-    }
-    void refresh()
-    return () => { disposed = true; clearTimeout(timer) }
-  }, [profileId])
+      },
+      shown: () => active,
+      onChanged: window.mousse.browser?.onAccessChanged ? (listener) => window.mousse.browser.onAccessChanged(listener) : undefined,
+      document
+    })
+    return () => { disposed = true; stop() }
+  }, [profileId, active])
   useEffect(() => {
     if (!access.allowed) return
     const pending = access.tabRequests ?? []

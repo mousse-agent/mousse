@@ -727,6 +727,19 @@ export class MmsProtocolServer {
     onEmitter(services.pullRequestWatch, 'updated', (payload: { threadId: string }) => {
       emitToSubscribers(this.ring.push('pullRequests.updated', payload, payload.threadId))
     })
+    // The browser access state changed (a grant, a pending request, a tab an agent waits for): windows read it again
+    // instead of polling it, including a window whose Browser panel is hidden, which opens the tab an agent asked for.
+    const platform = services.platform as { onBrowserAccessChanged?: (listener: () => void) => () => void } | undefined
+    if (platform?.onBrowserAccessChanged) {
+      let browserAccessTimer: ReturnType<typeof setImmediate> | undefined
+      disposers.push(platform.onBrowserAccessChanged(() => {
+        browserAccessTimer ??= setImmediate(() => {
+          browserAccessTimer = undefined
+          emitToSubscribers(this.ring.push('browser.access.changed', {}, undefined))
+        })
+      }))
+      disposers.push(() => { if (browserAccessTimer) clearImmediate(browserAccessTimer) })
+    }
     if (services.personalBots) onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.changed', event, undefined))
     })
