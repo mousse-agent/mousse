@@ -13,10 +13,26 @@ const BARE_LIST_NUMBER = /^\s*\d+[.)]\s*$/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 /**
  * Syntax that ties blocks together across blank lines: reference definitions, footnotes, raw HTML,
- * display math and directives. Text with any of it is always worked on whole.
+ * display math and directives. Text with any of it is always worked on whole, as is text whose
+ * code fences are read differently by different steps (see `fenceTicksDisagree`).
  */
 const TIED = /^ {0,3}\[[^\]\n]+\]:|\[\^|<[A-Za-z!/]|\$\$|^ {0,3}:::/;
 const INLINE_CODE = /`[^`\n]*`/g;
+
+/**
+ * True when `line` has a triple backtick that the line-start fence rules here and
+ * `normalizeMarkdown` (which pairs every triple backtick in the text) would read differently: one
+ * in prose or inside a fence, a longer run, a backtick in an info string, or a fence line inside a
+ * fence that does not close it. Such text is worked on whole, so the live tail never renders
+ * differently from the finished reply. `open` is the marker of the fence the line is in.
+ */
+function fenceTicksDisagree(line: string, open: string | null): boolean {
+  if (!line.includes("```")) return false;
+  const fence = FENCE.exec(line);
+  if (!fence || fence[1] !== "```" || fence[2]!.includes("`")) return true;
+  // Inside a fence, only the plain line that closes a backtick fence may have them.
+  return open !== null && (open !== "```" || fence[2]!.trim() !== "");
+}
 
 type ScanState = {
   /** The open fence's marker, or null outside a fence. */
@@ -41,6 +57,10 @@ export function stableCut(text: string, from = 0, tied = false): { cut: number; 
     if (end === -1) break;
     const line = text.slice(offset, end);
     const next = end + 1;
+    if (fenceTicksDisagree(line, state.fence)) {
+      state.tied = true;
+      break;
+    }
     if (state.fence) {
       const fence = FENCE.exec(line);
       if (fence && fence[1]![0] === state.fence[0] && fence[1]!.length >= state.fence.length && !fence[2]!.trim()) {
@@ -65,7 +85,11 @@ export function stableCut(text: string, from = 0, tied = false): { cut: number; 
     offset = next;
   }
   // The text after the last complete line can tie blocks too (a definition being written).
-  if (!state.tied && offset < text.length && !state.fence && TIED.test(text.slice(offset).replace(INLINE_CODE, ""))) state.tied = true;
+  if (!state.tied && offset < text.length) {
+    const rest = text.slice(offset);
+    if (fenceTicksDisagree(rest, state.fence)) state.tied = true;
+    else if (!state.fence && TIED.test(rest.replace(INLINE_CODE, ""))) state.tied = true;
+  }
   return state.tied ? { cut: 0, tied: true } : { cut, tied: false };
 }
 

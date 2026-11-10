@@ -20,7 +20,12 @@ const REPLIES: Record<string, string> = {
   quote: '> [!NOTE]\n> A note.\n\n> plain quote\n\nText.\n\n---\n\nAfter a rule.\n',
   links: 'See [the docs][docs].\n\nMore text.\n\n[docs]: https://example.com\n',
   html: 'Text.\n\n<details>\n<summary>More</summary>\n\nInside.\n\n</details>\n\nAfter.\n',
-  mousseLinks: 'Open [the file](mousse-file://open?path=a.ts).\n\nThen [another](mousse-file://open?path=b.ts).\n'
+  mousseLinks: 'Open [the file](mousse-file://open?path=a.ts).\n\nThen [another](mousse-file://open?path=b.ts).\n',
+  // Fence markers that only the line-start fence rules see, or only `normalizeMarkdown` sees.
+  inlineFence: 'Wrap code in ``` to fence it.\n\nIntro:\n\n- one\n\n- two\n\nClose with ``` too.\n\nAfter.\n',
+  tildeFence: 'Before.\n\n~~~\ncode\n\n- not a list\n\n- still code\n~~~\n\n- a real\n\n- list\n',
+  fourBackticks: 'Before.\n\n````md\n```js\nx\n```\n\n- a\n\n- b\n````\n\n- c\n\n- d\n',
+  fenceInFence: 'Before.\n\n```md\n```js\n\n- a\n\n- b\n```\n\nText.\n\n- e\n\n- f\n'
 }
 
 /** Feeds `text` as a stream: one call per `step` characters, as deltas arrive. */
@@ -83,6 +88,20 @@ describe('stableCut', () => {
     expect(stableCut('A.\n\nB [x][y].\n\n[y]: https://x\n\nC').cut).toBe(0)
     expect(stableCut('A.\n\n<div>\n\nB\n\n</div>\n\nC').cut).toBe(0)
     expect(stableCut('A.\n\n$$\nx\n$$\n\nC').cut).toBe(0)
+  })
+
+  it('works on the whole text when its fences are read differently by different steps', () => {
+    // A triple backtick in prose, a longer fence, a backtick fence inside a tilde fence, a fence line with an info
+    // string inside an open fence, and one still being written.
+    for (const text of [
+      'Use ``` here.\n\nA.\n\nB',
+      'A.\n\n````md\nx\n````\n\nB.\n\nC',
+      'A.\n\n~~~\n```\n~~~\n\nB.\n\nC',
+      'A.\n\n```md\n```js\n```\n\nB.\n\nC',
+      'A.\n\nB.\n\nC ```'
+    ]) expect(stableCut(text)).toEqual({ cut: 0, tied: true })
+    // Plain fences, opened with an info string and closed by a bare line, keep the incremental path.
+    expect(stableCut('A.\n\n```ts\nx\n```\n\nB.\n\nC').tied).toBe(false)
   })
 
   it('ignores markup inside code', () => {
