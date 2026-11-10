@@ -642,16 +642,37 @@ export function dropSteerItems(items: QueuedMessage[], ids?: string[]): QueuedMe
  * Recover steer intents that arrived after the active turn's final steer boundary: they become pending
  * messages again and run as turns of their own. `ids` limits it to those items; a demoted item keeps its
  * origin and mode but is no longer bound to a run.
+ *
+ * `toFront`: the steers were sent now (Send now, a typed steer) and the turn ended before it read them, so they
+ * go next: ahead of every other pending item, in their own order, behind only a paused run's continue message.
+ * Without it a demoted item keeps its place.
  */
-export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]): QueuedMessage[] {
+export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[], opts?: { toFront?: boolean }): QueuedMessage[] {
   const only = ids ? new Set(ids) : undefined
-  return sortQueue(
+  const demotedIds = new Set<string>()
+  const demoted = sortQueue(
     items.map((item) => {
       if (item.intent !== 'steer' || item.state === 'claimed' || (only && !only.has(item.id))) return item
       const { steerRunId: _steerRunId, ...rest } = item
+      demotedIds.add(item.id)
       return { ...rest, intent: 'normal' as const, state: 'pending' as const, claim: undefined }
     })
   )
+  if (!opts?.toFront || demotedIds.size === 0) return demoted
+  // The pending items take the same order slots in a new sequence; claimed items keep theirs. A queued subagent
+  // result was never sent now: it keeps its place.
+  const pending = listPendingQueue(demoted)
+  const front = pending.filter((item) => demotedIds.has(item.id) && !item.inboxIds?.length)
+  if (front.length === 0) return demoted
+  const continuations = pending.filter((item) => item.continuationOfRunId && !front.includes(item))
+  const sequence = [
+    ...continuations,
+    ...front,
+    ...pending.filter((item) => !front.includes(item) && !continuations.includes(item))
+  ]
+  const slots = pending.map((item) => item.order)
+  const placed = new Map(sequence.map((item, index) => [item.id, { ...item, order: slots[index]! }]))
+  return sortQueue(demoted.map((item) => placed.get(item.id) ?? item))
 }
 
 /**

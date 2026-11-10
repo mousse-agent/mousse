@@ -362,6 +362,22 @@ describe('queued messages in the conversation', () => {
     expect(api.remove).toHaveBeenCalledWith('t1', 'b')
   })
 
+  it('sends the clicked message now, by its id, once however often Send now is clicked before it answers', async () => {
+    let answer!: () => void
+    api.promoteToSteer.mockImplementation(() => new Promise((resolve) => { answer = () => resolve({ ok: true }) }))
+    await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    const send = button('c', 'Send')!
+    // Two clicks in the same frame, before the button shows busy.
+    await act(async () => { send.click(); send.click() })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'c')
+    await act(async () => { answer() })
+    // The daemon's list is what shows: C is steering, A and B wait in order.
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two'), queued('c', 'three', { intent: 'steer', state: 'steering' })] }) })
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b', 'c'])
+    expect(button('c', 'Sending')!.disabled).toBe(true)
+  })
+
   it('shows a queued subagent result by what it reports, never by the text the model reads, and offers no edit', async () => {
     const notice = [{ delegationId: 'd1', childThreadId: 'a', title: 'API reviewer', runStatus: 'completed', fullyShown: true }]
     await show([queued('n', 'Subagent "API reviewer" (thread a) finished task d1.\nSECRET RESULT', { intent: 'steer', subagentNotice: notice })])

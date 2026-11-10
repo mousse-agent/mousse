@@ -493,5 +493,32 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
       expect(some.find((item) => item.id === second.id)).toMatchObject({ intent: 'steer', state: 'steering', steerRunId: 'run-a' })
       expect(demoteSteerItems(both).every((item) => item.intent === 'normal' && item.steerRunId === undefined)).toBe(true)
     })
+
+    it('puts steers sent now that the turn never read ahead of the rest, in their order, behind a pause\'s continue message', () => {
+      let items = enqueueMessage([], { threadId: 't1', content: 'A' }).items
+      items = enqueueMessage(items, { threadId: 't1', content: 'B' }).items
+      items = enqueueMessage(items, { threadId: 't1', content: 'C' }).items
+      items = enqueueMessage(items, { threadId: 't1', content: 'D' }).items
+      const id = (content: string) => items.find((item) => item.content === content)!.id
+      items = promoteQueuedMessageToSteer(items, id('C')).items
+      items = promoteQueuedMessageToSteer(items, id('D')).items
+      const claimed = claimNextNormal(items, { ownerPid: 1, ownerToken: 'tok' })
+      expect(claimed.claimed?.content).toBe('A')
+      const front = demoteSteerItems(claimed.items, undefined, { toFront: true })
+      expect(listPendingQueue(front).map((item) => [item.content, item.state])).toEqual([['C', 'pending'], ['D', 'pending'], ['B', 'pending']])
+      // The claimed item keeps its slot; each slot is still used once.
+      expect(front.find((item) => item.content === 'A')).toMatchObject({ state: 'claimed', order: claimed.claimed!.order })
+      expect(new Set(front.map((item) => item.order)).size).toBe(front.length)
+      // Without it they keep their place; with nothing to demote nothing moves.
+      expect(listPendingQueue(demoteSteerItems(claimed.items)).map((item) => item.content)).toEqual(['B', 'C', 'D'])
+      expect(demoteSteerItems(front, undefined, { toFront: true })).toEqual(front)
+
+      const resume = enqueueMessage(claimed.items, { threadId: 't1', content: 'continue', atFront: true, continuationOfRunId: 'run-p' }).items
+      expect(listPendingQueue(demoteSteerItems(resume, undefined, { toFront: true })).map((item) => item.content)).toEqual(['continue', 'C', 'D', 'B'])
+
+      // A queued subagent result was never sent now: it keeps its place.
+      const notice = enqueueMessage(claimed.items, { threadId: 't1', content: 'result', intent: 'steer', inboxIds: ['row-1'] }).items
+      expect(listPendingQueue(demoteSteerItems(notice, undefined, { toFront: true })).map((item) => item.content)).toEqual(['C', 'D', 'B', 'result'])
+    })
   })
 })
