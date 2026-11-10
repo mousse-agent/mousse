@@ -385,14 +385,18 @@ export class ThreadRuntimeManager extends EventEmitter {
         }
       }
     }
-    // Done outlives the service: threads that finished unseen before the restart show Done again.
+    // Done outlives the service: threads that finished unseen before the restart show Done again. A thread that
+    // is gone or archived since is no longer listed, so its mark is dropped.
     for (const threadId of this.unseenDone?.list() ?? []) {
-      if (!this.threadStore.getThread(threadId)) {
+      const thread = this.threadStore.getThread(threadId)
+      if (!thread || thread.settledAt) {
         this.unseenDone?.delete(threadId)
         continue
       }
+      // Hydrated first: a runtime made here starts its turn state from its own (idle) activity.
+      const rt = this.getOrHydrate(threadId)
       this.turnActivity.set(threadId, 'completed')
-      this.publishDerivedActivity(threadId, this.getOrHydrate(threadId))
+      this.publishDerivedActivity(threadId, rt)
     }
   }
 }

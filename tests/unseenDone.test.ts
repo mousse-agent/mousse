@@ -115,6 +115,20 @@ describe('Done until seen', () => {
     expect((await reopened.request<{ activity: ThreadActivitySnapshot }>('activity.snapshot')).activity[unseen.id] ?? 'idle').toBe('idle')
   })
 
+  it('drops the mark of a thread archived before the restart, and restores the others whatever loaded them', async () => {
+    const archived = mms.threads.createThread('Archived')
+    const kept = mms.threads.createThread('Kept')
+    finishTurn(archived.id)
+    finishTurn(kept.id)
+    mms.threads.setThreadSettled(archived.id, true)
+    await stopService()
+
+    await startService()
+    expect(marked()).toEqual([kept.id])
+    expect(mms.threadRuntimes.getActivity(kept.id)).toBe('completed')
+    expect(mms.threadRuntimes.getActivity(archived.id)).toBe('idle')
+  })
+
   it('clears Done in every window when one window sees the thread', async () => {
     const thread = mms.threads.createThread('Shared')
     const first = await window()
