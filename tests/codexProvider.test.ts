@@ -727,6 +727,74 @@ describe('CodexProviderService options (managed Codex)', () => {
     })
   })
 
+  describe('one-shot', () => {
+    /** A server whose turn sends `events` of the turn's thread, then the turn's end (none when `end` is null). */
+    function oneShotServer(events: Array<{ method: string; params: Record<string, unknown> }>, end: Turn | null = { status: 'completed' }) {
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        if (method === 'account/read') return chatgpt
+        if (method === 'config/read') return { result: { config: { mcp_servers: { github: {}, off: { enabled: false } } }, layers: [] } }
+        if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'turn/start') {
+          const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+          setImmediate(() => {
+            for (const event of events) write(event.method, { threadId: 'thr-once', turnId: 'turn-1', ...event.params })
+            if (end) write('turn/completed', { threadId: 'thr-once', turn: { id: 'turn-1', error: null, ...end } })
+          })
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        return { result: {} }
+      })
+      return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
+    }
+
+    it('runs one turn on an ephemeral read-only thread and answers with the last agent message', async () => {
+      const server = oneShotServer([
+        { method: 'item/agentMessage/delta', params: { itemId: 'a', delta: 'Thinking' } },
+        { method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Thinking about it' } } },
+        { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'Login ' } },
+        { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'redirect fix' } }
+      ])
+      const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'high'] }] })
+      const onActivity = vi.fn()
+      const answer = await service.oneShot({ model: 'gpt-x:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+      expect(answer).toEqual({ text: 'Login redirect fix' })
+      expect(server.requests('thread/start').map((message) => message.params)).toEqual([expect.objectContaining({
+        approvalPolicy: 'never',
+        sandbox: 'read-only',
+        model: 'gpt-x',
+        baseInstructions: 'Name the chat.',
+        ephemeral: true,
+        config: { 'mcp_servers.github.enabled': false, model_provider: 'openai' }
+      })])
+      expect(server.requests('turn/start').map((message) => message.params)).toEqual([expect.objectContaining({
+        threadId: 'thr-once',
+        input: [{ type: 'text', text: 'Request: fix the login redirect', text_elements: [] }],
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        effort: 'low'
+      })])
+      expect(onActivity).toHaveBeenCalled()
+      // The thread is let go once answered; nothing is kept for a later turn.
+      expect(server.requests('thread/unsubscribe').map((message) => message.params)).toEqual([{ threadId: 'thr-once' }])
+      expect(server.requests('turn/interrupt')).toEqual([])
+    })
+
+    it('reports a failed turn, and a stop interrupts the turn and lets the thread go', async () => {
+      const failed = create(oneShotServer([], { status: 'failed', error: { message: 'model not available' } }))
+      await expect(failed.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('model not available')
+
+      const server = oneShotServer([{ method: 'turn/started', params: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }], null)
+      const service = create(server)
+      const stop = new AbortController()
+      // Stopped once the turn runs (its first event), with no end coming.
+      let events = 0
+      const running = service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity: () => { if (++events === 2) stop.abort(new Error('Stopped')) } }, stop.signal)
+      await expect(running).rejects.toThrow('Stopped')
+      expect(server.requests('turn/interrupt').map((message) => message.params)).toEqual([{ threadId: 'thr-once', turnId: 'turn-1' }])
+      expect(server.requests('thread/unsubscribe')).toHaveLength(1)
+    })
+  })
+
   it('managed pins its own provider on start, fork and resume, and never reads the account from Codex', async () => {
     const server = turnServer({ provider: () => MANAGED })
     const service = managed(server)

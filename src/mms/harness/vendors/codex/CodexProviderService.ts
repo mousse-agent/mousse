@@ -93,6 +93,7 @@ import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy } from '../../adapter'
+import type { OneShotSpec } from '../../driver'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
 
 export const CODEX_PROVIDER_ID = 'codex'
@@ -1123,6 +1124,8 @@ export class CodexProviderService {
    * its end, resolved by the compaction's `turn/completed`.
    */
   private readonly compactions = new Map<string, CompactionTurn>()
+  /** One-shots running, by their ephemeral Codex thread: every notification of that thread goes to its handler. */
+  private readonly oneShots = new Map<string, (notification: CodexNotification) => void>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
   /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
@@ -1665,6 +1668,96 @@ export class CodexProviderService {
   }
 
   /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
+   * commit message on the chosen model. It runs as one turn on an ephemeral Codex thread (never written
+   * to Codex's history) with the system text as its base instructions, a read-only sandbox in a folder
+   * of its own, no approvals (any request is cancelled: no run owns the thread) and the user's MCP
+   * servers off where Codex can list them. The answer is the turn's last agent message. It never retries.
+   */
+  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    // Held for the whole request, so the idle close never ends the process under it.
+    const key = `one-shot:${randomUUID()}`
+    this.activeThreads.add(key)
+    let codexThreadId: string | undefined
+    let conn: CodexConnection | undefined
+    let turnId: string | undefined
+    let ended = false
+    try {
+      if (this.checkDue()) await abortable(this.status(), signal)
+      if (!this.configured())
+        throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      conn = await this.verifiedConnection(signal)
+      const cwd = this.standaloneWorkspace('one-shot')
+      const userMcp = codexBotMcpOverrides((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers) ?? {}
+      const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
+      const model = baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}
+      const started = pinnedProvider(this.modelProvider, await conn.request('thread/start', {
+        cwd,
+        approvalPolicy: 'never',
+        sandbox: 'read-only',
+        ...model,
+        modelProvider: this.modelProvider,
+        config: { ...userMcp, model_provider: this.modelProvider },
+        baseInstructions: spec.system,
+        ephemeral: true
+      }, { signal }))
+      const threadId = started.thread.id
+      codexThreadId = threadId
+      spec.onActivity()
+      // The turn's agent messages by item, and its end.
+      const messages = new Map<string, string>()
+      let done!: (turn: CodexTurn) => void
+      const completed = new Promise<CodexTurn>((resolve) => { done = resolve })
+      this.oneShots.set(threadId, (notification) => {
+        spec.onActivity()
+        const delta = notificationParams(notification, 'item/agentMessage/delta')
+        if (delta) {
+          messages.set(delta.itemId, (messages.get(delta.itemId) ?? '') + delta.delta)
+          return
+        }
+        const item = notificationParams(notification, 'item/completed')?.item
+        if (item?.type === 'agentMessage' && 'text' in item) {
+          messages.delete(item.id)
+          messages.set(item.id, item.text)
+          return
+        }
+        const end = notificationParams(notification, 'turn/completed')
+        if (end && (turnId === undefined || end.turn.id === turnId)) done(end.turn)
+      })
+      const turn = await conn.request('turn/start', {
+        threadId,
+        input: [textInput(spec.prompt)],
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        ...model,
+        ...(effort ? { effort } : {})
+      })
+      // Not tied to the signal: once sent, a stop has to interrupt the turn Codex started.
+      turnId = turn.turn.id
+      const result = await abortable(Promise.race([completed, new Promise<never>((_resolve, reject) => {
+        const lost = (): void => reject(new Error('Codex stopped before it answered.'))
+        if (conn!.signal.aborted) lost()
+        else conn!.signal.addEventListener('abort', lost, { once: true })
+      })]), signal)
+      ended = true
+      if (result.status === 'failed') throw new Error(this.redact(result.error?.message ?? 'Codex could not answer.'))
+      if (result.status !== 'completed') throw new Error('Codex stopped before it answered.')
+      return { text: [...messages.values()].pop() ?? '' }
+    } finally {
+      if (codexThreadId) this.oneShots.delete(codexThreadId)
+      if (conn && codexThreadId && !conn.signal.aborted) {
+        // A stopped request ends its turn on Codex's side too; then the thread is let go.
+        if (!ended && turnId) await conn.request('turn/interrupt', { threadId: codexThreadId, turnId }, { timeoutMs: 5_000 }).catch(() => undefined)
+        await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { timeoutMs: 5_000 }).catch(() => undefined)
+      }
+      this.activeThreads.delete(key)
+      this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
+    }
+  }
+
+  /**
    * Ends a stopped `/compact` on Codex's side: once Codex accepted it, its compaction turn (by id when Codex named
    * it, else whatever turn the thread runs) is interrupted, and its end awaited. True when the thread still holds the
    * full history: Codex refused the compaction, or its turn ended interrupted or failed. False when that cannot be
@@ -2046,6 +2139,8 @@ export class CodexProviderService {
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
     if (typeof threadId !== 'string') return
+    const oneShot = this.oneShots.get(threadId)
+    if (oneShot) return oneShot(notification)
     const compaction = this.compactions.get(threadId)
     if (compaction?.sent) {
       // Only the compaction's own turn: the first that starts once it was asked for, then that turn by id. An end

@@ -1,8 +1,9 @@
 /**
  * PR 4 §4 `HarnessGateway.oneShot`: one model request with no tools (chat titles), resolved like a
  * turn for its purpose. The pi driver makes one pi-ai request in Mousse's process; the gateway owns
- * a 60 s inactivity timeout and never retries; hidden models, turned-off instances and agent runtimes
- * (`oneShot` absent) are refused with their typed errors.
+ * a 60 s inactivity timeout and never retries; hidden models, turned-off instances and drivers without
+ * one-shots (`oneShot` absent) are refused with their typed errors. Claude Code and Codex run one-shots
+ * through their own runtimes (covered in their provider tests).
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -13,6 +14,8 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Assistan
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ONE_SHOT_INACTIVITY_MS, type Harness, type OneShotRequest } from '../../src/mms/harness/gateway'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
+import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
+import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { runPiOneShot } from '../../src/mms/harness/drivers/pi/oneShot'
 import { streamSimple as bedrockStreamSimple } from '@earendil-works/pi-ai/api/bedrock-converse-stream'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -59,7 +62,7 @@ function piModels() {
   return { models, requests, respond: (next: typeof script) => { script = next } }
 }
 
-/** A Codex-like agent runtime: runs turns only. */
+/** An agent runtime without one-shots (the test kit's driver for it declares none): runs turns only. */
 const agent: ProviderAdapter = {
   driver: 'codex',
   capabilities: { ...CODEX_CAPABILITIES },
@@ -200,7 +203,12 @@ describe('gateway.oneShot refusals', () => {
     expect(s.pi.requests).toHaveLength(0)
   })
 
-  it('refuses an agent runtime (`oneShot` absent) with `unsupported`', async () => {
+  it('Claude Code and Codex declare one-shots, so their models are offered for titles', () => {
+    expect(claudeCodeDriver().oneShot).toBe(true)
+    expect(codexDriver({ builtIn: () => { throw new Error('unused') } }).oneShot).toBe(true)
+  })
+
+  it('refuses an agent runtime without one-shots (`oneShot` absent) with `unsupported`', async () => {
     const s = setup()
     await expect(s.harness.oneShot(s.request({ selection: { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5' } }))).rejects.toMatchObject({ code: 'unsupported' })
     expect(s.pi.requests).toHaveLength(0)

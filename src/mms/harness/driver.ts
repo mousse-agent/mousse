@@ -395,7 +395,7 @@ export interface HarnessDriver {
   readonly customModels: boolean
   /**
    * Its runtimes run a single request with no tools (`DriverRuntime.oneShot`), so its models can name
-   * chats. Agent runtimes run turns only (absent = false).
+   * chats. Without it, its runtimes run turns only (absent = false).
    */
   readonly oneShot?: boolean
   /** How the driver's instances sign in, for display. */

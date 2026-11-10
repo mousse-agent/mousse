@@ -290,6 +290,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     privateHomeFor: (config) => (config.setup === 'managed' ? 'required' : 'allowed'),
     canInstall: true,
     customModels: true,
+    // Chat titles, pull request drafts and commit messages: one turn on an ephemeral thread (`service.oneShot`).
+    oneShot: true,
     methodLabel: 'ChatGPT sign-in',
     // Codex forks a loaded thread when its bearer changes, so the bearer is kept after turns proven drained.
     mcpTurnBinding: 'drained_turn',
@@ -337,7 +339,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
   }
 
   /** What every Codex runtime does with its service: turns, listings, usage, refresh. */
-  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation'> {
+  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation' | 'oneShot'> {
     return {
       adapter: new CodexAdapter(() => service),
       configured: () => service.configured(),
@@ -355,7 +357,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       },
       forgetConversation: (threadId) => service.forgetConversation(threadId),
       // Codex compacts with no focus of its own.
-      compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.signal)
+      compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.signal),
+      oneShot: (spec, signal) => service.oneShot(spec, signal)
     }
   }
 

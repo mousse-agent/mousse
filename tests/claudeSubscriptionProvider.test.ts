@@ -353,6 +353,34 @@ describe('Claude Subscription native provider', () => {
     expect(await service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)).toBe(false)
     expect(inputs[1].prompt).toBe('/compact')
   })
+  it('a one-shot runs one turn with no tools and no saved session, and returns the answer', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const { service, settings } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery([{ type: 'stream_event', event: {} }, { ...result, result: 'Login redirect fix' }])
+    })
+    const onActivity = vi.fn()
+    const answer = await service.oneShot({ model: 'sonnet:high', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+    expect(answer).toEqual({ text: 'Login redirect fix' })
+    expect(inputs).toHaveLength(1)
+    const { options, prompt } = inputs[0]!
+    expect(prompt).toBe('Request: fix the login redirect')
+    expect(options).toMatchObject({ model: 'sonnet', systemPrompt: 'Name the chat.', tools: [], mcpServers: {}, strictMcpConfig: true, plugins: [], maxTurns: 1, persistSession: false })
+    expect(options.resume).toBeUndefined()
+    const denied = await options.canUseTool!('Bash', {}, { signal: new AbortController().signal, suggestions: [], toolUseID: 'x' } as never)
+    expect(denied.behavior).toBe('deny')
+    expect(onActivity).toHaveBeenCalledTimes(2)
+    // No thread session is recorded for it.
+    expect(settings().sessions ?? {}).toEqual({})
+  })
+  it('a one-shot reports a failed answer and needs a sign-in', async () => {
+    const failed = fixture(() => fakeQuery([{ ...result, subtype: 'error_during_execution', is_error: true, errors: ['model not found'] }]))
+    await expect(failed.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('model not found')
+    const query = vi.fn(() => fakeQuery([result]))
+    const signedOut = fixture(query, false)
+    await expect(signedOut.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'claude_subscription_sign_in_required' })
+    expect(query).not.toHaveBeenCalled()
+  })
   it('resumes a saved session only on the instance that created it', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
     const { service, home, settings } = fixture((input) => {

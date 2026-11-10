@@ -8022,7 +8022,7 @@ export class OrchestratorService extends EventEmitter {
    * tool output, and its answer is fitted to the sidebar (`normalizeTitle`). Null when it names nothing.
    * The selection is resolved through the gateway like any other: the instance the picker chose (a legacy
    * record maps to its built-in instance), and exactly that selection runs. A disabled instance, a hidden
-   * model or an instance that cannot run a single request (an agent runtime, a Bedrock model) is refused
+   * model or an instance that cannot run a single request (an agent without one-shots, a Bedrock model) is refused
    * by its typed error, never swapped for another provider.
    */
   private async generateTitleText(context: TitleContext, threadId: string | undefined): Promise<string | null> {
@@ -8060,7 +8060,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * A title model the gateway refuses outright (a Bedrock model, an agent runtime) fails every request
+   * A title model the gateway refuses outright (a Bedrock model, an agent without one-shots) fails every request
    * the same way. The reason is logged once per kind of refusal, and the thread's title failure event
    * carries it, rather than a warning on every chat; Settings → Agents shows the stored choice as
    * unavailable.

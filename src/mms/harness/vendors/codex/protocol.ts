@@ -92,6 +92,10 @@ export interface ThreadStartParams {
   sandbox?: SandboxMode | null
   config?: ThreadConfig | null
   developerInstructions?: string | null
+  /** Replaces Codex's own base instructions (a one-shot's system text). */
+  baseInstructions?: string | null
+  /** Kept in memory only: never written to Codex's session history (a one-shot). */
+  ephemeral?: boolean | null
 }
 export interface ThreadResumeParams extends ThreadStartParams {
   threadId: string

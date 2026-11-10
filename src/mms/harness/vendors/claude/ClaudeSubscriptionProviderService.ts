@@ -68,6 +68,7 @@ import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
+import type { OneShotSpec } from '../../driver'
 import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
@@ -1011,6 +1012,58 @@ export class ClaudeSubscriptionProviderService {
       signal.removeEventListener('abort', abort)
       this.controllers.delete(controller)
       this.activeThreads.delete(threadId)
+    }
+  }
+  /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
+   * commit message on the chosen model. It starts Claude Code as model discovery does
+   * (`housekeepingOptions`) with its tools, MCP servers and plugins off, one turn, and no saved
+   * session, so it never shows in the user's `claude --resume`. It never retries.
+   */
+  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    if (this.checkDue()) await this.status()
+    signal.throwIfAborted()
+    if (!this.configured())
+      throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+    const controller = new AbortController()
+    this.controllers.add(controller)
+    const abort = (): void => controller.abort(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    let query: Query | undefined
+    try {
+      const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      // A level the model does not offer runs at the model's default; Ultracode is a turn setting, not a level.
+      const level = spec.effort ?? supportedEffortOf(spec.model, this.listedByClaude() ? this.models() : [], CLAUDE_EFFORTS)
+      const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
+      const housekeeping = this.housekeepingOptions(this.standaloneWorkspace('one-shot'), controller)
+      query = await this.createQuery(spec.prompt, {
+        ...housekeeping,
+        model: baseId,
+        ...(effort ? { effort } : {}),
+        systemPrompt: spec.system,
+        tools: [],
+        mcpServers: {},
+        strictMcpConfig: true,
+        plugins: [],
+        maxTurns: 1,
+        persistSession: false,
+        includePartialMessages: true,
+        canUseTool: async () => ({ behavior: 'deny', message: 'No tools run for a single request.' })
+      })
+      for await (const message of query) {
+        spec.onActivity()
+        if (message.type !== 'result') continue
+        const failure = resultFailure(message)
+        if (failure) throw failure
+        return { text: message.subtype === 'success' ? message.result : '' }
+      }
+      signal.throwIfAborted()
+      throw new Error('Claude Code ended without an answer.')
+    } finally {
+      query?.close()
+      signal.removeEventListener('abort', abort)
+      this.controllers.delete(controller)
     }
   }
   /** The executable path, launch args and environment set in Settings → Providers. */

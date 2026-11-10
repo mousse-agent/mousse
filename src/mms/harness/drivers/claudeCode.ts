@@ -270,6 +270,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     privateHome: true,
     canInstall: false,
     customModels: true,
+    // Chat titles, pull request drafts and commit messages: one turn with no tools (`service.oneShot`).
+    oneShot: true,
     methodLabel: 'Claude Code sign-in',
     // Mousse's own PreToolUse hook stamps each Mousse call with the turn's token (`updatedInput`).
     mcpTurnBinding: 'per_call',
@@ -587,6 +589,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         signOut: privateHome ? signOutOfHome : () => service.logout(),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal),
+        oneShot: (spec, signal) => service.oneShot(spec, signal),
         setLiveHost: (host) => service.setLiveHost(host),
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),

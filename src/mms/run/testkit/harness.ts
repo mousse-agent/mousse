@@ -35,7 +35,7 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     mcpTurnBinding: mcpTurnBinding ?? TURN_BINDINGS[adapter.driver],
     mcpImageResults: MCP_IMAGE_RESULTS[adapter.driver] ?? false,
     ...(RELAY_APPROVALS[adapter.driver] ? { relay: { approvals: RELAY_APPROVALS[adapter.driver]! } } : {}),
-    // As the real pi driver declares: its models name chats.
+    // Only pi here: the test kit's vendor drivers stand for agents without one-shots.
     oneShot: adapter.driver === 'pi',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     // Mousse-run tools (strong containment) are exact; the vendor-like test runtimes ask first.
