@@ -7,6 +7,8 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -137,7 +139,10 @@ function ensureLockParent(lockPath: string): void {
   mkdirSync(dirname(lockPath), { recursive: true })
 }
 
-function tryCreateFileLock(lockPath: string): { fd: number; owner: FileLockOwner } | null {
+/** The file a lock was created as. A file system without file identities reports 0. */
+interface CreatedLockFile { dev: bigint; ino: bigint }
+
+function tryCreateFileLock(lockPath: string): { fd: number; owner: FileLockOwner; file: CreatedLockFile } | null {
   ensureLockParent(lockPath)
   const owner: FileLockOwner = {
     pid: process.pid,
@@ -148,8 +153,10 @@ function tryCreateFileLock(lockPath: string): { fd: number; owner: FileLockOwner
   }
   try {
     const fd = openSync(lockPath, 'wx')
+    let file: CreatedLockFile
     try {
       writeSync(fd, JSON.stringify(owner, null, 2))
+      file = fstatSync(fd, { bigint: true })
     } catch (err) {
       try {
         closeSync(fd)
@@ -163,23 +170,31 @@ function tryCreateFileLock(lockPath: string): { fd: number; owner: FileLockOwner
       }
       throw err
     }
-    return { fd, owner }
+    return { fd, owner, file }
   } catch {
     return null
   }
 }
 
-function releaseOwnedFileLock(lockPath: string, fd: number | null, token: string): void {
+function releaseOwnedFileLock(lockPath: string, fd: number | null, token: string, file?: CreatedLockFile): void {
   try {
     if (fd !== null) closeSync(fd)
   } catch {
     /* ignore */
   }
   try {
-    // Unlink only when a readable owner token exactly matches ours.
-    // Missing/unreadable must not delete a new owner's empty/partial publication.
-    const still = readFileLockOwner(lockPath)
-    if (still && still.token === token) {
+    // Unlink only our own lock: the file this process created, or, on a file system without file
+    // identities, one whose readable owner token matches ours. Missing/unreadable must not delete a
+    // new owner's empty/partial publication.
+    let ours: boolean
+    if (file && file.ino !== 0n) {
+      const current = lstatSync(lockPath, { bigint: true })
+      ours = current.dev === file.dev && current.ino === file.ino
+    } else {
+      const still = readFileLockOwner(lockPath)
+      ours = Boolean(still && still.token === token)
+    }
+    if (ours) {
       unlinkSync(lockPath)
     }
   } catch {
@@ -212,7 +227,7 @@ export function withFileLock<T>(lockPath: string, fn: () => T): T {
     throw new FileLockBusyError(lockPath, readFileLockOwner(lockPath))
   }
 
-  const { fd, owner } = created
+  const { fd, owner, file } = created
   heldTokens.set(lockPath, owner.token)
   lockDepth.set(lockPath, 1)
   try {
@@ -220,7 +235,7 @@ export function withFileLock<T>(lockPath: string, fn: () => T): T {
   } finally {
     lockDepth.delete(lockPath)
     heldTokens.delete(lockPath)
-    releaseOwnedFileLock(lockPath, fd, owner.token)
+    releaseOwnedFileLock(lockPath, fd, owner.token, file)
   }
 }
 
@@ -237,14 +252,14 @@ export function tryAcquireTickLock(lockPath: string): (() => void) | null {
   }
   if (!created) return null
 
-  const { fd, owner } = created
+  const { fd, owner, file } = created
   heldTokens.set(lockPath, owner.token)
   let released = false
   return () => {
     if (released) return
     released = true
     heldTokens.delete(lockPath)
-    releaseOwnedFileLock(lockPath, fd, owner.token)
+    releaseOwnedFileLock(lockPath, fd, owner.token, file)
   }
 }
 

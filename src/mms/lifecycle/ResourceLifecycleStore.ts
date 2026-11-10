@@ -1,6 +1,6 @@
 import { AppError } from '../../shared/errors'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { lstat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -30,6 +30,23 @@ const identity = (value: string): string => {
 // Lifecycle locations use resolved path identity; their components are separately
 // checked for links. Only external root ingress is physically canonicalized.
 function pathsEqual(a: string, b: string): boolean { return relative(resolve(a), resolve(b)) === '' }
+
+type FileIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+const signatureOf = (stats: FileIdentity): string => `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`
+const sameFile = (a: Pick<FileIdentity, 'dev' | 'ino'>, b: Pick<FileIdentity, 'dev' | 'ino'>): boolean => a.dev === b.dev && a.ino === b.ino
+/**
+ * The signature of the regular file at `path` itself: undefined when it is missing, null when it is not a
+ * regular file (a link), which callers send down the full, checked read.
+ */
+function regularFileSignature(path: string): string | undefined | null {
+  try {
+    const stats = lstatSync(path, { bigint: true })
+    return stats.isFile() ? signatureOf(stats) : null
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
 
 function contains(root: string, path: string): boolean {
   const rel = relative(resolve(root), resolve(path))
@@ -93,6 +110,15 @@ export class ResourceLifecycleStore {
   readonly profileHome: string
   readonly root: string
   readonly allowedTaskRoots: string[]
+  /**
+   * Lifecycle files (task records and location indexes) as last read and validated by this store, by path.
+   * Every write replaces a file with a rename, so a file whose identity, size and times are unchanged holds
+   * the same bytes: one `lstat` stands in for opening, parsing and checking it again. A write from any
+   * process gives the file a new identity, and the next read takes it from disk.
+   */
+  private readonly checkedFiles = new Map<string, { signature: string; text: string }>()
+  /** The manifest file last found compatible. */
+  private compatibleManifest: string | undefined
 
   constructor(options: ResourceLifecycleStoreOptions) {
     this.profileId = identity(options.profileId)
@@ -114,6 +140,44 @@ export class ResourceLifecycleStore {
     if (manifest.schemaVersion !== RESOURCE_LIFECYCLE_VERSION || ![1, 2].includes(manifest.minimumWriterVersion ?? 0) || manifest.profileId !== this.profileId) throw new ResourceLifecycleError('unsupported', 'Lifecycle storage requires a compatible writer and matching profile')
   }
 
+  /** {@link assertCompatible}, skipped while the manifest is the file last found compatible. */
+  private assertCompatibleCached(): void {
+    const signature = regularFileSignature(join(this.root, 'manifest.json'))
+    if (signature && signature === this.compatibleManifest) return
+    this.assertCompatible()
+    this.compatibleManifest = signature ?? undefined
+  }
+
+  /**
+   * The text of the lifecycle JSON file at `path` once `validate` accepts it, or undefined when the file is
+   * missing. Opened, parsed and validated again only when the file changed since it was last accepted.
+   */
+  private readChecked(path: string, validate: (value: unknown) => void): string | undefined {
+    const signature = regularFileSignature(path)
+    const checked = this.checkedFiles.get(path)
+    if (signature && checked?.signature === signature) return checked.text
+    this.checkedFiles.delete(path)
+    assertLifecyclePath(this.root, path)
+    if (signature === undefined) return undefined
+    let read: { signature: string; text: string }
+    try {
+      const fd = openSync(path, 'r')
+      try {
+        // The signature of the open file, so it always matches the bytes read.
+        read = { signature: signatureOf(fstatSync(fd, { bigint: true })), text: readFileSync(fd, 'utf8') }
+      } finally { closeSync(fd) }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw new ResourceLifecycleError('ambiguous', 'Lifecycle source unreadable. Check the owned storage and report this error.', error)
+    }
+    let value: unknown
+    try { value = JSON.parse(read.text) }
+    catch (error) { throw new ResourceLifecycleError('ambiguous', 'Lifecycle source unreadable. Check the owned storage and report this error.', error) }
+    validate(value)
+    this.checkedFiles.set(path, read)
+    return read.text
+  }
+
   private initialize(): void {
     this.assertCompatible()
     if (!existsSync(join(this.root, 'manifest.json'))) atomicWriteJsonSync(join(this.root, 'manifest.json'), { schemaVersion: 1, minimumWriterVersion: 1, profileId: this.profileId })
@@ -129,16 +193,13 @@ export class ResourceLifecycleStore {
 
   recordPath(taskId: string): string { return join(this.root, 'tasks', `${identity(taskId)}.json`) }
   get(taskId: string): TaskLifecycleRecord | undefined {
-    this.assertCompatible()
-    const path = this.recordPath(taskId)
-    assertLifecyclePath(this.root, path)
-    if (!existsSync(path)) return undefined
-    const value = this.readJson(path) as TaskLifecycleRecord
-    this.validateRecord(value, taskId)
-    return value
+    this.assertCompatibleCached()
+    const text = this.readChecked(this.recordPath(taskId), (value) => this.validateRecord(value as TaskLifecycleRecord, taskId))
+    // Parsed again for each caller, which may change its copy.
+    return text === undefined ? undefined : JSON.parse(text) as TaskLifecycleRecord
   }
   list(): TaskLifecycleRecord[] {
-    this.assertCompatible()
+    this.assertCompatibleCached()
     const path = join(this.root, 'tasks')
     assertLifecyclePath(this.root, path)
     if (!existsSync(path)) return []
@@ -147,7 +208,7 @@ export class ResourceLifecycleStore {
   findByLocation(path: string): TaskLifecycleRecord | undefined {
     // Include every historical path; missing former directories must never become unmanaged.
     if (contains(this.root, path)) return undefined
-    this.assertCompatible()
+    this.assertCompatibleCached()
     // The index only routes to the authoritative record. Hot writes never scan all retained tasks.
     const indexRoot = join(this.root, 'locations')
     if (!existsSync(indexRoot) && existsSync(join(this.root, 'tasks'))) {
@@ -155,11 +216,13 @@ export class ResourceLifecycleStore {
     }
     let candidate = resolve(path)
     while (this.allowedTaskRoots.some((root) => contains(root, candidate)) || contains(join(this.profileHome, 'trash', 'threads'), candidate)) {
-      const indexPath = this.locationIndexPath(candidate)
-      assertLifecyclePath(this.root, indexPath)
-      if (existsSync(indexPath)) {
-        const index = this.readJson(indexPath) as { schemaVersion?: number; profileId?: string; taskId?: string; location?: string }
-        if (index.schemaVersion !== 1 || index.profileId !== this.profileId || !index.taskId || !index.location || !pathsEqual(index.location, candidate)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle location index is invalid')
+      type LocationIndex = { schemaVersion?: number; profileId?: string; taskId?: string; location?: string }
+      const indexText = this.readChecked(this.locationIndexPath(candidate), (value) => {
+        const index = value as LocationIndex
+        if (index?.schemaVersion !== 1 || index.profileId !== this.profileId || !index.taskId || !index.location || !pathsEqual(index.location, candidate)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle location index is invalid')
+      })
+      if (indexText !== undefined) {
+        const index = JSON.parse(indexText) as Required<LocationIndex>
         const record = this.require(index.taskId)
         if (!record.locations.some((location) => pathsEqual(location, candidate))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle source does not authorize indexed location')
         return record
@@ -258,24 +321,31 @@ export class ResourceLifecycleStore {
     })
   }
 
+  /**
+   * Reads, so it takes no gate: records are replaced whole and a parent's state is checked as it is now, so a
+   * capture sees each record before or after any change. A capture taken during a change only makes the later
+   * {@link withAdmission}, which runs under the gates, refuse as stale.
+   */
   captureAdmission(taskId: string, expectedLocation?: string): LifecycleAdmission {
-    return this.withAdmissionGates(taskId, () => {
-      const record = this.require(taskId)
-      this.checkAvailable(record, 'execution')
-      if (expectedLocation && !pathsEqual(record.location, expectedLocation)) throw new ResourceLifecycleError('stale', 'Task location changed')
-      return this.admission(record)
-    })
+    const record = this.require(taskId)
+    this.checkAvailable(record, 'execution')
+    if (expectedLocation && !pathsEqual(record.location, expectedLocation)) throw new ResourceLifecycleError('stale', 'Task location changed')
+    return this.admission(record)
   }
-  assertAdmission(admission: LifecycleAdmission): void { this.withAdmission(admission, 'execution', () => undefined) }
+  /** The checks of {@link withAdmission} with nothing to run under them, so without the gates. */
+  assertAdmission(admission: LifecycleAdmission): void { this.checkAdmission(admission, 'execution') }
   withAdmission<T>(admission: LifecycleAdmission, kind: 'execution' | 'write', fn: () => T): T {
     return this.withAdmissionGates(admission.taskId, () => {
-      const record = this.require(admission.taskId)
-      if (admission.profileId !== this.profileId || record.generation !== admission.generation || !pathsEqual(record.location, admission.location)) throw new ResourceLifecycleError('stale', 'Task lifecycle generation or location changed')
-      if (JSON.stringify(admission.ancestors ?? []) !== JSON.stringify(this.ancestorRecords(record).map((item) => ({ taskId: item.taskId, generation: item.generation })))) throw new ResourceLifecycleError('stale', 'Parent task lifecycle generation changed')
-      this.checkAvailable(record, kind)
-      this.assertTaskLocation(record.location)
+      this.checkAdmission(admission, kind)
       return fn()
     })
+  }
+  private checkAdmission(admission: LifecycleAdmission, kind: 'execution' | 'write'): void {
+    const record = this.require(admission.taskId)
+    if (admission.profileId !== this.profileId || record.generation !== admission.generation || !pathsEqual(record.location, admission.location)) throw new ResourceLifecycleError('stale', 'Task lifecycle generation or location changed')
+    if (JSON.stringify(admission.ancestors ?? []) !== JSON.stringify(this.ancestorRecords(record).map((item) => ({ taskId: item.taskId, generation: item.generation })))) throw new ResourceLifecycleError('stale', 'Parent task lifecycle generation changed')
+    this.checkAvailable(record, kind)
+    this.assertTaskLocation(record.location)
   }
   withPathAdmission<T>(path: string, kind: 'execution' | 'write', fn: () => T): T {
     if (contains(this.root, path)) return fn()
@@ -286,6 +356,23 @@ export class ResourceLifecycleStore {
     }
     if (!contains(record.location, path)) throw new ResourceLifecycleError('stale', 'Task path is no longer current')
     return this.withAdmission(this.admission(record), kind, fn)
+  }
+  /**
+   * {@link withPathAdmission} for a caller with nothing to run under it: the same checks on the records as read
+   * now, without taking the task gates. Nothing runs that a lifecycle change could interleave with, so the gates
+   * would only add their lock files' writes and reads to every check.
+   */
+  assertPathAdmission(path: string, kind: 'execution' | 'write'): void {
+    if (contains(this.root, path)) return
+    const record = this.findByLocation(path)
+    if (!record) {
+      if (this.allowedTaskRoots.some((root) => contains(root, path)) || contains(join(this.profileHome, 'trash'), path)) throw new ResourceLifecycleError('unavailable', 'Task must be registered before accessing managed storage')
+      return
+    }
+    if (!contains(record.location, path)) throw new ResourceLifecycleError('stale', 'Task path is no longer current')
+    this.ancestorRecords(record)
+    this.checkAvailable(record, kind)
+    this.assertTaskLocation(record.location)
   }
 
   /** Internal completion scope only; no serializable permit is issued to protocol callers. */
@@ -376,8 +463,10 @@ export class ResourceLifecycleStore {
       unlinkSync(path)
       try { fd = openSync(path, 'wx') } catch { throw new ResourceLifecycleError('busy', 'Task lifecycle gate is busy') }
     }
+    let created: FileIdentity | undefined
     try {
       writeFileSync(fd, JSON.stringify(owner))
+      created = fstatSync(fd, { bigint: true })
       gateDepth.set(path, 1)
       const result = fn()
       if (result && typeof (result as { then?: unknown }).then === 'function') throw new ResourceLifecycleError('unsupported', 'Lifecycle gate callbacks must be synchronous')
@@ -385,7 +474,14 @@ export class ResourceLifecycleStore {
     } finally {
       gateDepth.delete(path)
       closeSync(fd)
-      try { if ((this.readJson(path) as typeof owner).token === owner.token) unlinkSync(path) } catch { /* leave ambiguous gate protected */ }
+      try {
+        // The gate is still ours while it is the file this process created. Reading its token back is needed
+        // only on a file system without file identities.
+        const ours = created && created.ino !== 0n
+          ? sameFile(lstatSync(path, { bigint: true }), created)
+          : (this.readJson(path) as typeof owner).token === owner.token
+        if (ours) unlinkSync(path)
+      } catch { /* leave ambiguous gate protected */ }
     }
   }
 

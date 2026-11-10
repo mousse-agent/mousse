@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { withFileLock } from '../scheduled/fileLock'
@@ -37,6 +37,53 @@ const PROFILE_DIR_MODE = 0o700
 
 export interface ProfileManagerOptions {
   clock?: Clock
+}
+
+/**
+ * The registry files as last read in this process, by path, with the identity of the file they came from.
+ * Every write replaces a file with a rename, so a file that still has the same identity, size and times holds
+ * the same bytes: a read checks that with one `stat` and reuses the parsed value. A write from any process,
+ * the CLI or another daemon included, gives the file a new identity, and the next read takes it from disk.
+ */
+const registryFiles = new Map<string, { signature: string; value: unknown }>()
+
+function fileSignature(stats: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }): string {
+  return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`
+}
+
+/** The file's current signature, or undefined when it is missing. */
+function currentSignature(path: string): string | undefined {
+  try {
+    return fileSignature(statSync(path, { bigint: true }))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+/**
+ * `parse(JSON in path)`, reused while the file is unchanged. The signature is taken from the open file, so the
+ * bytes read always match it. Returns a copy the caller may change.
+ */
+function readRegistryFile<T>(path: string, parse: (raw: unknown) => T): T {
+  const signature = currentSignature(path)
+  const cached = registryFiles.get(path)
+  if (signature !== undefined && cached?.signature === signature) return structuredClone(cached.value as T)
+  const fd = openSync(path, 'r')
+  let read: { signature: string; text: string }
+  try {
+    read = { signature: fileSignature(fstatSync(fd, { bigint: true })), text: readFileSync(fd, 'utf8') }
+  } finally {
+    closeSync(fd)
+  }
+  const value = parse(JSON.parse(read.text))
+  registryFiles.set(path, { signature: read.signature, value })
+  return structuredClone(value)
+}
+
+/** Test seam: forget what this process read from the registry files. */
+export function resetProfileRegistryCacheForTests(): void {
+  registryFiles.clear()
 }
 
 function slugFromDisplayName(displayName: string): string {
@@ -236,14 +283,14 @@ export class ProfileManager {
 
   list(): ProfileRecord[] {
     if (!this.isInitialized()) return []
-    return this.withLock(() => {
+    return this.read(() => {
       const manifest = this.requireManifestUnlocked()
       return manifest.profiles.map((entry) => this.readProfileUnlocked(entry.id))
     })
   }
 
   get(profileRef: string): ProfileRecord {
-    return this.withLock(() => this.getUnlocked(profileRef))
+    return this.read(() => this.getUnlocked(profileRef))
   }
 
   getDefaultProfileId(): ProfileId {
@@ -469,16 +516,30 @@ export class ProfileManager {
   }
 
   private requireManifest(): InstallationManifest {
-    return this.withLock(() => this.requireManifestUnlocked())
+    return this.read(() => this.requireManifestUnlocked())
+  }
+
+  /**
+   * Runs a read without the registry lock, so requests never wait on it or on another process holding it.
+   * Each file is replaced whole, but one change writes `profile.json` before `installation.json`; a read
+   * between the two sees them disagree, and runs again under the lock, after the change is complete.
+   */
+  private read<T>(fn: () => T): T {
+    try {
+      return fn()
+    } catch (error) {
+      if (!(error instanceof ProfileError) || error.code !== 'PROFILE_STATE') throw error
+      return this.withLock(fn)
+    }
   }
 
   private requireManifestUnlocked(): InstallationManifest {
-    if (!this.isInitialized()) {
-      throw new ProfileError('INSTALLATION_UNINITIALIZED', 'Installation manifest is missing')
-    }
     try {
-      return parseManifest(JSON.parse(readFileSync(this.installation.installationManifest, 'utf8')))
+      return readRegistryFile(this.installation.installationManifest, parseManifest)
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ProfileError('INSTALLATION_UNINITIALIZED', 'Installation manifest is missing')
+      }
       if (error instanceof ProfileError) throw error
       throw new ProfileError('PROFILE_STATE', 'Failed to read installation.json', {
         cause: error instanceof Error ? error.message : String(error)
@@ -548,11 +609,14 @@ export class ProfileManager {
 
   private readProfileUnlocked(profileId: ProfileId): ProfileRecord {
     const paths = createProfilePaths(this.installation, profileId)
-    if (!existsSync(paths.profileManifest)) {
-      throw new ProfileError('PROFILE_STATE', 'profile.json is missing', { profileId })
+    try {
+      return readRegistryFile(paths.profileManifest, (raw) => parseProfileRecord(raw, profileId))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ProfileError('PROFILE_STATE', 'profile.json is missing', { profileId })
+      }
+      throw error
     }
-    const raw = JSON.parse(readFileSync(paths.profileManifest, 'utf8')) as unknown
-    return parseProfileRecord(raw, profileId)
   }
 
   private writeProfileUnlocked(record: ProfileRecord): void {
