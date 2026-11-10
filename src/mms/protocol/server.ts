@@ -139,7 +139,11 @@ export class MmsProtocolServer {
    * otherwise healthy clients to resnapshot.
    */
   private readonly audienceRings = new Map<string, EventSequenceRing>()
-  private readonly ring = new EventSequenceRing()
+  /**
+   * Numbers every event before it reaches its audience ring. Nothing replays from it (subscribers replay from
+   * `audienceRings`), so it keeps no events.
+   */
+  private readonly ring = new EventSequenceRing(0)
   private readonly profileEventDisposers = new Map<string, Array<() => void>>()
   private readonly servicesByProfile = new Map<string, MmsProfileServices>()
   /** Each profile's `threads.updated` sender: changes in one turn of the event loop go out as one event. */
