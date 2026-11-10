@@ -5,6 +5,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AmbientGlow } from '../../src/renderer/components/AmbientGlow'
+import { useAppStore } from '../../src/renderer/stores/appStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -77,6 +78,14 @@ describe('the ambient glow while the window is not focused', () => {
     expect(chat.hasAttribute('data-ambient-rest')).toBe(true)
     act(() => root!.unmount())
     root = undefined
+    expect(chat.hasAttribute('data-ambient-rest')).toBe(false)
+  })
+
+  it('rests while the search palette covers the chat, and moves again when it closes', () => {
+    const { chat } = mount(true)
+    act(() => useAppStore.getState().setPaletteOpen(true, 'messages'))
+    expect(chat.hasAttribute('data-ambient-rest')).toBe(true)
+    act(() => useAppStore.getState().setPaletteOpen(false))
     expect(chat.hasAttribute('data-ambient-rest')).toBe(false)
   })
 

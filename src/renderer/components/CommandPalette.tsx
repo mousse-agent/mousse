@@ -21,7 +21,11 @@ import { useAppStore } from '../stores/appStore'
 import '../styles/thread-search.css'
 
 /** The palette's fade-out, before the speed scale; matches its close animation in thread-search.css. */
-const PALETTE_EXIT_MS = 90
+const PALETTE_EXIT_MS = 120
+/** The overlay's fade-out in thread-search.css; the closing dialog unmounts when it ends. */
+const PALETTE_EXIT_ANIMATION = 'thread-search-dim-out'
+/** How long past the fade the closing dialog waits for its end before it unmounts anyway. */
+const PALETTE_EXIT_FALLBACK_MS = 150
 
 export interface PaletteListItem {
   key: string
@@ -215,8 +219,11 @@ function useMessageSearch(text: string | null): { found: MessageSearch | null; p
   return { found, pending, error }
 }
 
-/** `closing`: fading out after the palette closed; it takes no input and leaves the keyboard alone. */
-function PaletteDialog({ closing = false }: { closing?: boolean }) {
+/**
+ * `closing`: fading out after the palette closed; it takes no input and leaves the keyboard alone.
+ * `onClosed` runs when that fade ends.
+ */
+function PaletteDialog({ closing = false, onClosed }: { closing?: boolean; onClosed?: () => void }) {
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
@@ -313,6 +320,7 @@ function PaletteDialog({ closing = false }: { closing?: boolean }) {
     <div
       className={`thread-search-overlay${closing ? ' is-closing' : ''}`}
       onClick={closing ? undefined : () => dismissPalette()}
+      onAnimationEnd={closing ? (event) => { if (event.animationName === PALETTE_EXIT_ANIMATION) onClosed?.() } : undefined}
       role="presentation"
       aria-hidden={closing || undefined}
     >
@@ -388,8 +396,10 @@ function PaletteDialog({ closing = false }: { closing?: boolean }) {
 export function CommandPalette() {
   const open = useAppStore((state) => state.paletteOpen)
   useCommandOverlay('palette', open)
-  // After closing, the dialog stays a moment to fade out (none with motion off). Each opening is a
-  // fresh dialog, as before. Set while rendering, so it never unmounts for a frame in between.
+  // After closing, the dialog stays to fade out (none with motion off) and unmounts when the fade ends,
+  // so its last frame is drawn; the timer is a fallback for a fade that never ends, as in a hidden
+  // window. Each opening is a fresh dialog, as before. Set while rendering, so it never unmounts for a
+  // frame in between.
   const [session, setSession] = useState(0)
   const [leaving, setLeaving] = useState(false)
   const [wasOpen, setWasOpen] = useState(open)
@@ -400,8 +410,8 @@ export function CommandPalette() {
   }
   useEffect(() => {
     if (!leaving) return
-    const timer = setTimeout(() => setLeaving(false), scaleMotionMs(PALETTE_EXIT_MS))
+    const timer = setTimeout(() => setLeaving(false), scaleMotionMs(PALETTE_EXIT_MS) + PALETTE_EXIT_FALLBACK_MS)
     return () => clearTimeout(timer)
   }, [leaving])
-  return open || leaving ? <PaletteDialog key={session} closing={!open} /> : null
+  return open || leaving ? <PaletteDialog key={session} closing={!open} onClosed={() => setLeaving(false)} /> : null
 }
