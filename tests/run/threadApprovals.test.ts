@@ -191,6 +191,20 @@ describe('saved approval requests: the store and the question service', () => {
     expect(f.questions.listPendingForThread('t')).toEqual([])
   })
 
+  it("records who answered when it is a person other than the owner, and nothing more for the owner's own answer", async () => {
+    const f = fixture()
+    await running(f.engine, 't', 'req-1')
+    const theirs = ask(f, 't')
+    const user = 'usr_0000000000000000000000000a' as const
+    expect(f.questions.settle(theirs.requestId, { permission: 'allow' }, { kind: 'user', via: 'bridge', node: 'nod_laptop', maxPermissionMode: 'full', user })).toEqual({ ok: true, decision: 'allow' })
+    expect(f.engine.approvals.get(theirs.requestId)!.answeredBy).toEqual({ kind: 'user', via: 'bridge', node: 'nod_laptop', user })
+    // The loser of a race learns which person won.
+    expect(f.questions.settle(theirs.requestId, { permission: 'reject' }, { kind: 'user', via: 'gui' })).toMatchObject({ ok: false, answeredBy: { user } })
+    const owners = ask(f, 't')
+    f.questions.settle(owners.requestId, { permission: 'allow' }, { kind: 'user', via: 'bridge', node: 'nod_laptop', maxPermissionMode: 'full' })
+    expect(f.engine.approvals.get(owners.requestId)!.answeredBy).toEqual({ kind: 'user', via: 'bridge', node: 'nod_laptop' })
+  })
+
   it('one answer wins a race: the second gets already_answered with the winner and the callback is resolved once', async () => {
     const f = fixture()
     await running(f.engine, 't', 'req-1')

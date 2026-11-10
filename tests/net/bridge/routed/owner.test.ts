@@ -14,6 +14,10 @@ import { SqliteBridgeAudit } from '../../../../src/mms/net/store/audit'
 import { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
 import { systemClock } from '../../../../src/mms/net/clock'
 import { DomainRpcError } from '../../../../src/mms/protocol/domainRegistry'
+import { dispatchMethod } from '../../../../src/mms/protocol/handlers'
+import { routedAuthorOf } from '../../../../src/mms/bridge/routed/author'
+import { shortUserName } from '../../../../src/shared/humanAuthor'
+import type { HumanAuthor, QueuedMessage } from '../../../../src/shared/types'
 import { CommandRejection } from '../../../../src/mms/run/db/RunStoreError'
 import {
   ROUTED_METHODS,
@@ -71,6 +75,7 @@ async function owner(
     caps?: NodeCapability[]
     maxMode?: PermissionMode
     connectionEvent?: ConstructorParameters<typeof OwnerRoutes>[0]['connectionEvent']
+    authorOf?: ConstructorParameters<typeof OwnerRoutes>[0]['authorOf']
   } = {}
 ) {
   const f = await fixture(options.caps ?? COMPUTER)
@@ -83,7 +88,8 @@ async function owner(
     policy,
     audit,
     track: (work) => work,
-    connectionEvent: options.connectionEvent
+    connectionEvent: options.connectionEvent,
+    ...(options.authorOf ? { authorOf: options.authorOf } : {})
   }).register()
   await f.connect()
   const protocolEvents: Array<{ type: string; data: unknown; threadId?: string }> = []
@@ -162,7 +168,8 @@ describe('the routed methods the owner registers', () => {
         'source',
         'projectPath',
         'profileId',
-        'expectedProfileId'
+        'expectedProfileId',
+        'author'
       ])
       {
         expect(
@@ -776,4 +783,83 @@ describe('a device’s mode limit holds for every way its text can run', () => {
     expect(f.mms.threads.getThread(started.thread.id)!.startedFrom).toEqual({ node: f.callerNode })
     vi.restoreAllMocks()
   }, 120_000)
+})
+
+describe('messages from a person other than the owner', () => {
+  const ana: HumanAuthor = { user: newId('user'), node: newId('node'), displayName: 'Ana' }
+  const ben: HumanAuthor = { user: newId('user'), node: newId('node'), displayName: 'Ben' }
+
+  it('stamps nothing for the owner on another of their computers, so their queue items are as before', async () => {
+    let fixtureRef: Awaited<ReturnType<typeof fixture>> | undefined
+    const { ok, thread, f } = await owner({ authorOf: (caller) => routedAuthorOf(fixtureRef!.targetIdentity, caller) })
+    fixtureRef = f
+    const t = thread()
+    const queued = await ok('queue.enqueue', { threadId: t.id, content: 'mine' })
+    expect('author' in queued.item).toBe(false)
+    expect(f.mms.threads.loadMessageQueue(t.id).every((item) => !('author' in item))).toBe(true)
+  }, 60_000)
+
+  it('stamps the authenticated caller when the owner is someone else, and keeps it across a reload', async () => {
+    const owners = { self: () => ({ user: newId('user') }) }
+    const { ok, thread, f } = await owner({ authorOf: (caller) => routedAuthorOf(owners, caller) })
+    const t = thread()
+    const queued = await ok('queue.enqueue', { threadId: t.id, content: 'from another person' })
+    const user = (f.targetIdentity.self()!.user)
+    expect(queued.item.author).toEqual({ user, node: f.callerNode, displayName: shortUserName(user) })
+    expect(f.mms.threads.loadMessageQueue(t.id).find((item) => item.id === queued.item.id)?.author).toEqual(queued.item.author)
+  }, 60_000)
+
+  it('refuses a routed call that names its own author', async () => {
+    const { call, thread, f } = await owner({ authorOf: () => ana })
+    const t = thread()
+    const enqueue = vi.spyOn(f.mms.orchestrator, 'enqueueForThread')
+    for (const method of ['orchestrator.send', 'queue.enqueue']) {
+      const outcome = await call(method, { threadId: t.id, content: 'forged', author: ben }).then(
+        (reply) => (reply.ok ? 'accepted' : reply.error.code),
+        (error: { code?: string }) => error.code
+      )
+      expect(outcome, method).toBe('bad_request')
+    }
+    expect(enqueue).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  }, 60_000)
+
+  it('ignores an author a window on this computer names', async () => {
+    const { thread, f } = await owner()
+    const t = thread()
+    const ctx = { mms: f.mms, globalSequence: () => 0, connection: { clientType: 'gui', capabilities: new Set<string>() } as never }
+    const queued = (await dispatchMethod(ctx, 'queue.enqueue', { threadId: t.id, content: 'local', author: ana })) as { item: QueuedMessage }
+    expect('author' in queued.item).toBe(false)
+    const sent = (await dispatchMethod(ctx, 'orchestrator.send', { threadId: t.id, content: 'local send', forceQueue: true, author: ana })) as { queueItem?: QueuedMessage }
+    expect(sent.queueItem).toBeDefined()
+    expect('author' in sent.queueItem!).toBe(false)
+  }, 60_000)
+
+  it('lets only the author, or the owner, edit, remove or send now their queued message', async () => {
+    let who: HumanAuthor | undefined = ana
+    const { call, ok, thread, f } = await owner({ authorOf: () => who })
+    const t = thread()
+    const first = (await ok('queue.enqueue', { threadId: t.id, content: 'Ana wrote this' })).item
+    const second = (await ok('queue.enqueue', { threadId: t.id, content: 'Ana again' })).item
+    expect(first.author).toEqual(ana)
+
+    who = ben
+    for (const [method, params] of [
+      ['queue.edit', { threadId: t.id, itemId: first.id, content: 'Ben rewrote it' }],
+      ['queue.remove', { threadId: t.id, itemId: first.id }],
+      ['queue.promoteToSteer', { threadId: t.id, itemId: first.id }]
+    ] as const)
+      expect(await call(method, params), method).toMatchObject({ ok: false, error: { code: 'not_author' } })
+    expect(f.mms.orchestrator.listQueue(t.id).map((item) => [item.content, item.author?.user])).toEqual([
+      ['Ana wrote this', ana.user],
+      ['Ana again', ana.user]
+    ])
+
+    // The author changes their own; the owner (no author on the call) removes anyone's.
+    who = ana
+    expect((await ok('queue.edit', { threadId: t.id, itemId: first.id, content: 'Ana, edited' })).item).toMatchObject({ content: 'Ana, edited', author: ana })
+    who = undefined
+    expect(await ok('queue.remove', { threadId: t.id, itemId: second.id })).toMatchObject({ outcome: 'removed' })
+    expect(f.mms.orchestrator.listQueue(t.id).map((item) => item.id)).toEqual([first.id])
+  }, 60_000)
 })

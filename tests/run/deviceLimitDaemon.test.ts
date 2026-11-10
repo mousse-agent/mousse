@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
+import type { HumanAuthor } from '../../src/shared/types'
 
 let home: string | undefined
 let before: string | undefined
@@ -155,5 +156,38 @@ describe('turns from another computer', () => {
     expect(() => daemon!.orch.setThreadPermissionMode(thread.id, 'full', { node: 'nod_laptop', maxPermissionMode: 'accept_edits' })).toThrow(expect.objectContaining({ code: 'permission_mode_above_ceiling' }))
     expect(daemon.orch.setThreadPermissionMode(thread.id, 'accept_edits', { node: 'nod_laptop', maxPermissionMode: 'accept_edits' }).permissionMode).toBe('accept_edits')
     expect(daemon.orch.setThreadPermissionMode(thread.id, 'ask', { node: 'nod_laptop', maxPermissionMode: 'ask' }).permissionMode).toBe('ask')
+  })
+})
+
+describe('messages from a person other than the owner', () => {
+  const ana: HumanAuthor = { user: 'usr_0000000000000000000000000a', node: 'nod_0000000000000000000000000a', displayName: 'Ana' }
+
+  it('carry their author on the message a turn stores, sent at once, queued, or steered into a running turn', async () => {
+    const gate = deferred()
+    daemon = phase6Daemon(home!, [piAdapter(async (input) => (input.prompt === 'first' ? (await gate.promise, 'one') : 'done'))])
+    const thread = daemon.store.createThread('Authors')
+    daemon.orch.setThreadModelOverride(thread.id, PI)
+    const first = await daemon.orch.send('first', false, { threadId: thread.id, source: 'gui', awaitMode: 'ack', permissionMode: 'ask', author: ana })
+    await waitFor(() => daemon!.engine.bindingForRun(first.runId!) !== undefined, 'the first turn to bind')
+
+    // While it runs: Ana's steer joins the turn, Ana's next message queues, and the owner's own queues too.
+    expect(daemon.orch.steerThreadOrEnqueueExternal(thread.id, 'steered', { source: 'gui', permissionMode: 'ask', author: ana })).toMatchObject({ steered: true })
+    const queued = await daemon.orch.send('queued', false, { threadId: thread.id, source: 'gui', permissionMode: 'ask', author: ana })
+    expect(queued.queueItem?.author).toEqual(ana)
+    const own = await daemon.orch.send('own', false, { threadId: thread.id, source: 'gui' })
+    expect(own.queueItem && 'author' in own.queueItem).toBe(false)
+
+    gate.resolve()
+    await waitFor(() => daemon!.engine.listRuns(thread.id).filter((run) => run.status === 'completed').length >= 3, 'every turn to finish')
+    // The transcript the turns wrote, as the thread's store saves and reads it back (messages are kept whole, as JSON).
+    const transcript = daemon.orch.getOrCreateSession(thread.id).messages
+    daemon.store.saveThreadData(thread.id, { ...daemon.store.loadThreadData(thread.id), messages: transcript })
+    const users = daemon.store.loadThreadData(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden)
+    const byText = Object.fromEntries(users.map((message) => [message.content, message]))
+    expect(byText.first.author).toEqual(ana)
+    expect(byText.steered.author).toEqual(ana)
+    expect(byText.queued.author).toEqual(ana)
+    // The owner's message is stored as it always was: no author field at all.
+    expect('author' in byText.own).toBe(false)
   })
 })

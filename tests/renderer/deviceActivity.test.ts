@@ -164,3 +164,26 @@ describe('turns sent from another computer are marked in the transcript', () => 
     expect(turnSendersFrom({ runs: { x: { node: NODE, name: '' }, y: null as never } })).toEqual({})
   })
 })
+
+describe('messages from a person other than the owner name them', () => {
+  const ana = { user: 'usr_0000000000000000000000000a', displayName: 'Ana' } as const
+  const message = (patch: Partial<ChatMessage>): ChatMessage => ({ id: 'm', role: 'user', content: 'hello', timestamp: '2026-11-11T10:00:00Z', ...patch })
+  const authorOf = (entry: { metadata?: unknown }) => (entry.metadata as { author?: { user: string; name: string } } | undefined)?.author
+
+  it('shows their initial and name under the message, with the computer when the run says which', () => {
+    const senders = turnSendersFrom({ runs: { 'run-1': { node: NODE, name: 'Build Mac' } } })
+    const [ui] = mousseToUIMessages([message({ id: 'a', turnId: 'run-1', author: ana })], senders)
+    expect(authorOf(ui!)).toEqual({ user: ana.user, name: 'Ana' })
+    const html = renderToStaticMarkup(createElement(UserMessage, { message: ui! }))
+    expect(html).toContain('chat-message-author-avatar')
+    expect(html).toContain('>A<')
+    expect(html).toContain('Ana')
+    expect(html).toContain('from Build Mac')
+  })
+
+  it("changes nothing for the owner's own message", () => {
+    const [ui] = mousseToUIMessages([message({ id: 'a' })])
+    expect(authorOf(ui!)).toBeUndefined()
+    expect(renderToStaticMarkup(createElement(UserMessage, { message: ui! }))).not.toContain('chat-message-author')
+  })
+})
