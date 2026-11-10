@@ -60,7 +60,7 @@ const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
   'tests/renderer/networkTaskPicker-electron.test.ts:21': { starts: 'tests/fixtures/net-gui/task-picker-electron.ts', how: 'esbuild bundle of tests/fixtures/net-gui/task-picker-electron.ts (line 14) in a temporary folder' },
   'tests/renderer/profile-footer-electron.test.ts:18': { starts: 'tests/fixtures/profile-footer/main.ts', how: 'esbuild bundle of tests/fixtures/profile-footer/main.ts (line 15) in a temporary folder' },
   'tests/renderer/profileReady-startup-electron.test.ts:40': { starts: 'tests/fixtures/renderer-startup/main.ts', how: 'esbuild bundle of tests/fixtures/renderer-startup/main.ts (line 37) in a temporary folder' },
-  'tests/renderer/prompt-rail-electron.test.ts:32': { starts: 'tests/fixtures/prompt-rail/main.ts', how: 'esbuild bundle of tests/fixtures/prompt-rail/main.ts (line 29) in a temporary folder' },
+  'tests/renderer/prompt-rail-electron.test.ts:33': { starts: 'tests/fixtures/prompt-rail/main.ts', how: 'esbuild bundle of tests/fixtures/prompt-rail/main.ts (line 30) in a temporary folder' },
   'tests/renderer/storage-settings-electron.test.ts:25': { starts: 'tests/fixtures/storage-settings/main.ts', how: 'esbuild bundle of tests/fixtures/storage-settings/main.ts (line 20) in a temporary folder' },
   'tests/renderer/turn-window-electron.test.ts:87': { starts: 'tests/fixtures/turn-window/main.ts', how: 'esbuild bundle of tests/fixtures/turn-window/main.ts (line 84) in a temporary folder' },
   'tests/net/chats/gui-electron.test.ts:37': { starts: 'tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts', how: 'esbuild bundle of tests/fixtures/repository-upgrades/electron-net-chats-bridge.ts (line 32) in a temporary folder' },
