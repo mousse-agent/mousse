@@ -683,7 +683,8 @@ export function OrchestratorChat() {
   }, [remoteNode])
   useEffect(() => {
     if (!remoteNode || !remoteOptions.loaded) return
-    const own = pendingSetup?.model ?? (remoteDraft ? undefined : activeThreadModelOverride)
+    // The local empty thread behind a draft for that computer is not the chat; a thread already made there is.
+    const own = pendingSetup?.model ?? (activeThread && (activeThread.node ?? undefined) === remoteNode ? activeThreadModelOverride : undefined)
     const remote = remoteDefaultRef.current
     const known = remote?.llmProvider ? { ...remote, llmProvider: remote.llmProvider } : undefined
     const pick = own ?? (known && pickerOffers(known, providersRef.current) ? known : fallbackModel(providersRef.current))
@@ -697,7 +698,7 @@ export function OrchestratorChat() {
       context,
       shown: pick ? selectionKey({ instanceId: pick.instanceId, llmProvider: pick.llmProvider, pickerId: pickerModelId(pick) }) : selectionKey({ llmProvider: '', pickerId: '' })
     }
-  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefaultKey, activeThreadModelOverride, pendingSetup?.model, providers])
+  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefaultKey, activeThread?.node, activeThreadModelOverride, pendingSetup?.model, providers])
 
   useEffect(() => {
     void refreshSelection()
@@ -1255,7 +1256,7 @@ export function OrchestratorChat() {
           targetThreadId = thread.id
           // What the thread still needs before its first turn stays with it until it is set, so a retry after a
           // failed call sets it first instead of sending with the defaults.
-          recordThreadSetup(thread.id, setupFor(thread))
+          recordThreadSetup(thread, setupFor(thread))
           store.setWorkspacePending(profileId, thread.id, true)
           store.switchToThread(thread.id)
         }
@@ -1264,7 +1265,7 @@ export function OrchestratorChat() {
       if (!stillVisible()) return
       // A reused empty thread gets what was picked for it here.
       const reused = useAppStore.getState().threads.find((entry) => entry.id === id)
-      if (reused && id === activeThreadId) recordThreadSetup(id, setupFor(reused))
+      if (reused && id === activeThreadId) recordThreadSetup(reused, setupFor(reused))
     } else if (autoModel && activeThreadId) {
       // A thread without a model of its own would run on the unusable default: give it the shown one.
       const updated = await window.mousse.threads.setModel(activeThreadId, autoModel)
@@ -1275,13 +1276,19 @@ export function OrchestratorChat() {
     // Nothing is sent on a thread whose model or permission mode could not be set yet: the setup is finished first,
     // and when it still fails the send stops here with the error, the prompt kept.
     if (targetThreadId && useAppStore.getState().pendingThreadSetup[targetThreadId]) {
-      await finishThreadSetup(targetThreadId, {
+      const dropped = await finishThreadSetup(targetThreadId, {
         setModel: (id, model) => window.mousse.threads.setModel(id, model),
         setPermissionMode: (id, mode) => window.mousse.threads.setPermissionMode(id, mode),
         update: (thread) => useAppStore.getState().upsertThread(thread)
       })
       if (!stillVisible()) return
       setBlankPermissionMode(undefined)
+      // The thread's model or mode was changed elsewhere since this chat recorded its own: the newer choice stands, and
+      // the composer now shows it. Nothing is sent in a mode or on a model the person has not seen; they send again.
+      if (dropped.length) {
+        setSendError(`Nothing was sent: this chat's ${dropped.includes('permissionMode') ? 'permissions were' : 'model was'} changed elsewhere. Check them, then send again.`)
+        return
+      }
     }
 
     // Clear only after we accept the send/queue path (control commands already cleared above).
@@ -1424,7 +1431,7 @@ export function OrchestratorChat() {
   const remoteComputer = useComputer(remoteNode)
   const remoteMode = remoteNode
     ? remotePermissionView({
-        threadMode: blankPermissionMode ?? pendingSetup?.permissionMode ?? (remoteDraft ? undefined : activeThread?.permissionMode),
+        threadMode: blankPermissionMode ?? pendingSetup?.permissionMode ?? (activeThread && (activeThread.node ?? undefined) === remoteNode ? activeThread.permissionMode : undefined),
         permission: remoteOptions.loaded ? remoteOptions.permission : undefined
       })
     : undefined

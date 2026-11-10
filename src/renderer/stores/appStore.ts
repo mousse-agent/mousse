@@ -1031,6 +1031,24 @@ export function deletedThreadIds(previous: AppState, state: AppState): string[] 
   return previous.threads.map((thread) => thread.id).filter((id) => !kept.has(id) && !isQualifiedId(id))
 }
 
+/**
+ * Threads whose pending setup (`pendingThreadSetup`) should go: listed before and gone now (deleted, or a thread of a
+ * computer that was unlinked), or archived. Compared with the previous list, so the empty list before the first read
+ * after a start forgets nothing.
+ */
+export function threadsLeavingSetup(previous: AppState, state: AppState): string[] {
+  if (state.threads === previous.threads || state.profileId !== previous.profileId || state.threads.length === 0) return []
+  const pending = Object.keys(state.pendingThreadSetup)
+  if (pending.length === 0) return []
+  const now = new Map(state.threads.map((thread) => [thread.id, thread]))
+  const before = new Set(previous.threads.map((thread) => thread.id))
+  return pending.filter((id) => (before.has(id) && !now.has(id)) || Boolean(now.get(id)?.settledAt))
+}
+
+useAppStore.subscribe((state, previous) => {
+  for (const id of threadsLeavingSetup(previous, state)) state.setPendingThreadSetup(id)
+})
+
 // A deleted thread's open edit of a queued message and its notice go with it.
 useAppStore.subscribe((state, previous) => {
   const gone = deletedThreadIds(previous, state).filter((id) => id in state.queueEditDrafts || id in state.queueDraftNotices)
