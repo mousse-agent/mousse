@@ -123,6 +123,11 @@ export interface HostedProfileOptions {
     roster: Signed
     delegation: Signed
   }
+  /**
+   * Merges a root-signed roster Mousse ID holds for this network. Returns whether it was newer.
+   * Invalid or older rosters are ignored or refused by the identity service.
+   */
+  adoptRoster?(roster: Signed): boolean
   signal: AbortSignal
   fetch?: typeof fetch
   now?(): number
@@ -419,7 +424,10 @@ export class HostedProfileService {
     account: { email?: string; plan?: string } = {}
   ): Promise<PlusStatus> {
     if (bindRoot) await this.bind(selected, accessToken)
-    else this.configure(selected)
+    else {
+      this.configure(selected)
+      await this.catchUpRoster(selected, accessToken)
+    }
     const { email, plan } = account,
       stored = this.read()
     if (stored && (email || plan)) {
@@ -427,6 +435,42 @@ export class HostedProfileService {
       this.save(stored)
     }
     return this.connect(accessToken)
+  }
+  /**
+   * Adopts the newest roster Mousse ID holds for this network before registering. A computer
+   * that was away while its delegation was renewed (for example, off for a week) only has the
+   * lapsed one, which Mousse ID refuses; the renewed roster is already stored there, uploaded by
+   * the authority. Best effort: without it, registration reports the lapsed delegation.
+   */
+  private async catchUpRoster(configuration: PlusConfiguration, accountToken: string): Promise<void> {
+    if (!this.options.adoptRoster) return
+    let bindings: unknown
+    try {
+      bindings = (
+        await this.request<{ bindings?: unknown }>(
+          'GET',
+          configuration,
+          '/v1/net/inventory',
+          accountToken
+        )
+      )?.bindings
+    } catch {
+      return
+    }
+    const identity = this.options.identity(),
+      binding = (Array.isArray(bindings) ? bindings : []).find(
+        (row: { userId?: unknown; rootKey?: unknown; revokedAt?: unknown }) =>
+          row?.userId === identity.user &&
+          row.rootKey === identity.rootKey &&
+          row.revokedAt === null
+      ) as { roster?: unknown } | undefined
+    const roster = binding?.roster as Signed | undefined
+    if (!roster || typeof roster !== 'object') return
+    try {
+      this.options.adoptRoster(roster)
+    } catch {
+      // A roster that does not verify against the pinned root is ignored.
+    }
   }
   /** Drops the pending sign-in so a cancelled attempt does not block a new one. */
   cancelLogin(): void {

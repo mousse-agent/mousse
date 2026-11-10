@@ -20,6 +20,9 @@ import type {
 } from '../contracts'
 import { systemClock } from '../clock'
 
+/** How often a peer refused for a lapsed delegation is tried again. */
+const LAPSED_RETRY_MS = 10 * 60_000
+
 /** Reconnects authenticated sessions and reattaches reads from their durable cursors.
  * Mutations are never blindly replayed; callers retain their outbox/RPC journals.
  */
@@ -275,6 +278,15 @@ export class SyncSupervisor implements SyncSession {
     const retryable =
       error instanceof NetError &&
       ['route_unreachable', 'peer_offline', 'deadline_exceeded'].includes(error.code)
+    // A lapsed delegation (this computer's or the peer's) clears once either side gets a renewed
+    // roster, which can arrive from another device or Mousse ID. A roster change retries at once;
+    // this slow retry covers a renewal this computer cannot see coming.
+    if (error instanceof NetError && error.code === 'bad_delegation') {
+      this.retry = this.clock.setTimeout(() => {
+        void this.connect()
+      }, LAPSED_RETRY_MS)
+      return
+    }
     if (!retryable) {
       this.blocked = true
       this.firstReject(error)

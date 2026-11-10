@@ -697,13 +697,21 @@ export class HostedNetController implements HostedNet {
       signal: this.host.signal,
       identity: () => {
         const self = rt.identity.self()!,
-          hello = rt.enrollment.localHello()
+          // Sign-in must work after this computer's delegation lapsed: Mousse ID checks only its
+          // keys to sign in, and the renewed roster is fetched before it registers.
+          hello = rt.enrollment.localHello(true)
         return {
           ...self,
           rootKey: rt.identity.pinnedRootKey(self.user)!,
           roster: hello.roster!,
           delegation: hello.delegation!
         }
+      },
+      adoptRoster: (roster) => {
+        const self = rt.identity.self()
+        const root = self && rt.identity.pinnedRootKey(self.user)
+        if (!root) return false
+        return rt.identity.acceptRoster(roster, root).changed
       }
     }))
   }

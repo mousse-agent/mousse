@@ -149,6 +149,10 @@ describe('sign-in errors', () => {
     expect(signInErrorMessage({ code: 'route_unreachable', message: 'No route to the peer is reachable.' }, origin))
       .toBe('Can’t reach Mousse ID at api.mousse.work. Check your internet connection and try again.')
     expect(signInErrorMessage({ code: 'forbidden' }, origin)).toContain('api.mousse.work didn’t accept')
+    for (const code of ['bad_delegation', 'revoked'])
+      expect(signInErrorMessage({ code, message: 'The delegation is invalid or expired.' }, origin)).toContain(
+        'computer that owns your devices'
+      )
   })
 
   it('points to the setup step when the keystore is locked', () => {

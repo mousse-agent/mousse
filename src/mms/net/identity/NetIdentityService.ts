@@ -23,6 +23,7 @@ import {
 } from '../../../shared/net/capabilities'
 import {
   NODE_DELEGATION_TTL_MS,
+  RENEW_LAPSED_MAX_MS,
   PREAUTH_MAX_BYTES,
   NET_PROTO_MAJOR,
   NET_PROTO_MINOR
@@ -726,8 +727,10 @@ export class NetIdentityService implements IdentityService {
       throw new NetError('bad_request', 'Renewal must use the authority clock.')
     const current = this.roster()
     if (!current) throw new NetError('not_enrolled')
-    const self = this.self()
-    if (!self?.isAuthority) throw new NetError('forbidden')
+    const self = this.load().self
+    // The authority's own delegation may have lapsed too (the computer was off for a week), so
+    // this checks the authority's keys without requiring that delegation to be current.
+    if (!self || !this.authorityKeysHeld(self)) throw new NetError('forbidden')
     const root = this.pinnedRootKey(self.user)!
     const roster = this.rosterDocument(current, root)
     const latest = new Map<string, Delegation>()
@@ -743,7 +746,9 @@ export class NetIdentityService implements IdentityService {
     const due = [...latest.values()].filter(
       (entry) =>
         entry.expiresAt - now <= 86400000 &&
-        entry.expiresAt > now &&
+        // A delegation that lapsed while the authority was offline is renewed too, unless the
+        // device has been gone so long that it should be added again.
+        now - entry.expiresAt < RENEW_LAPSED_MAX_MS &&
         (roster.revoked.find((row) => row.subject === entry.subject)?.throughKeyEpoch ?? 0) <
           entry.keyEpoch
     )
@@ -767,7 +772,7 @@ export class NetIdentityService implements IdentityService {
           next.bots.push(signed)
         }
       }
-    })
+    }, true)
   }
 
   /** Local operation journal. Actual protected delivery and passphrase exchange belong to P2. */
@@ -1163,12 +1168,30 @@ export class NetIdentityService implements IdentityService {
     return () => this.listeners.delete(listener)
   }
 
-  private localNodeMatches(roster: Roster, node: NodeId): boolean {
+  /**
+   * Whether this profile holds the authority's root and node keys for its current roster, even
+   * when its own delegation has lapsed. Only renewal uses this: everything else needs a current one.
+   */
+  private authorityKeysHeld(self: { user: UserId; node: NodeId }): boolean {
+    const state = this.load(),
+      user = state.users[self.user]
+    if (
+      state.writer !== 'authority' ||
+      user?.state !== 'ok' ||
+      !user.current ||
+      this.keys.state() !== 'unlocked' ||
+      this.keys.rootKey() !== user.root
+    )
+      return false
+    const roster = this.rosterDocument(user.current, user.root)
+    return roster.authorityNode === self.node && this.localNodeMatches(roster, self.node, true)
+  }
+  private localNodeMatches(roster: Roster, node: NodeId, allowLapsed = false): boolean {
     if (this.keys.state() !== 'unlocked') return false
     try {
       return (
         Buffer.compare(
-          canonicalJson(this.liveNode(roster, node).keys),
+          canonicalJson(this.liveNode(roster, node, true, allowLapsed).keys),
           canonicalJson(this.keys.nodeKeys())
         ) === 0
       )
@@ -1178,7 +1201,12 @@ export class NetIdentityService implements IdentityService {
     }
   }
 
-  private liveNode(roster: Roster, node: NodeId, current = true): NodeDelegation {
+  private liveNode(
+    roster: Roster,
+    node: NodeId,
+    current = true,
+    allowLapsed = false
+  ): NodeDelegation {
     if (!isId('node', node)) throw new NetError('bad_request')
     const rows = this.delegations(roster).filter(
       (row): row is NodeDelegation => row.kind === 'node' && row.subject === node
@@ -1186,7 +1214,12 @@ export class NetIdentityService implements IdentityService {
     const epoch = Math.max(0, ...rows.map((row) => row.keyEpoch)),
       at = current ? this.clock.now() : roster.issuedAt
     const found = rows
-      .filter((row) => row.keyEpoch === epoch && row.issuedAt <= at && at < row.expiresAt)
+      .filter(
+        (row) =>
+          row.keyEpoch === epoch &&
+          row.issuedAt <= at &&
+          (at < row.expiresAt || (allowLapsed && at - row.expiresAt < RENEW_LAPSED_MAX_MS))
+      )
       .sort((a, b) => b.issuedAt - a.issuedAt)[0]
     if (
       !found ||
@@ -1587,7 +1620,8 @@ export class NetIdentityService implements IdentityService {
     return epoch
   }
   private authorityUpdate(
-    change: (roster: Roster, self: { user: UserId; node: NodeId }) => void
+    change: (roster: Roster, self: { user: UserId; node: NodeId }) => void,
+    allowLapsed = false
   ): Signed {
     let result!: Signed, owner!: UserId
     this.transaction((state) => {
@@ -1602,7 +1636,10 @@ export class NetIdentityService implements IdentityService {
         throw new NetError('forbidden', 'This profile is not the authority.')
       if (user.state === 'conflict') throw new NetError('roster_conflict')
       const roster = this.rosterDocument(user.current, user.root)
-      if (roster.authorityNode !== self.node || !this.localNodeMatches(roster, self.node))
+      if (
+        roster.authorityNode !== self.node ||
+        !this.localNodeMatches(roster, self.node, allowLapsed)
+      )
         throw new NetError('forbidden')
       change(roster, self)
       this.pruneNodes(roster)

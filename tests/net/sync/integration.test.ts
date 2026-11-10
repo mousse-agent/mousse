@@ -991,6 +991,21 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
       clock.now() + 24 * 60 * 60 * 1_000
     )
   })
+  it('lets a follower whose delegation lapsed catch up from a peer with the renewed roster', async () => {
+    const clock = new FakeClock(Date.now()),
+      p = await profiles(clock)
+    const prior = p.bIdentity.roster()!.payload
+    clock.advance(6 * 24 * 60 * 60 * 1_000 + 12 * 60 * 60 * 1_000)
+    expect(p.aIdentity.renewExpiring()).toBeDefined()
+    // The follower missed the renewal and its own delegation has now lapsed.
+    clock.advance(24 * 60 * 60 * 1_000)
+    expect(p.bIdentity.roster()!.payload).toBe(prior)
+    const connection = await sessions(p, { clock })
+    await Promise.all([connection.a.opened, connection.b.opened])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+    expect(p.bIdentity.roster()!.payload).toBe(p.aIdentity.roster()!.payload)
+  })
   it('rejects a hello whose delegation transport key differs from its real certificate', async () => {
     const p = await profiles(),
       connection = await sessions(p, { clientCredentials: generateSelfSignedCert('wrong-key') })
