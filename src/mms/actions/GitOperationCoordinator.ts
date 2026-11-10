@@ -55,7 +55,7 @@ export async function withGitMutationLocks<T>(
   /**
    * Ends the operation's Git commands too (see `gitCancellationScope`). The repository's lock goes only once nothing they
    * started is left: when a stopped command left processes, the operation still ends, and the lock is kept until they
-   * are gone (for good, when they never are).
+   * are gone, however long that takes.
    */
   workSignal?: AbortSignal
 ): Promise<T> {
@@ -82,8 +82,8 @@ export async function withGitMutationLocks<T>(
       return await mutationContext.run(held, () => scope ? scope.run(work) : work())
     } finally {
       const survivors = scope?.survivorsGone()
-      // Processes a stopped command left keep the repository locked until they are gone; never released early.
-      if (survivors) void survivors.then((gone) => { if (gone) repositoryLease.release() })
+      // Processes a stopped command left keep the repository locked until they are gone, however long; never released early.
+      if (survivors) void survivors.then(() => repositoryLease.release())
       else repositoryLease.release()
     }
   } finally {

@@ -8,7 +8,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { GIT_STOP_TIMING, gitCancellationScope, gitStopProbe, gitWorkCancelled, runGitProcess } from '../src/mms/git/runGitProcess'
+import { GIT_STOP_TIMING, gitCancellationScope, gitStopProbe, gitWorkCancelled, runGitProcess, StoppedGitTree } from '../src/mms/git/runGitProcess'
+import type { ProcessEntry } from '../src/mms/git/stoppedGitTree'
 import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
 import { acquireRepositoryLease, RepositoryLeaseBusyError } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
@@ -18,6 +19,8 @@ const timing = { ...GIT_STOP_TIMING }
 afterEach(() => {
   Object.assign(GIT_STOP_TIMING, timing)
   delete gitStopProbe.alive
+  delete gitStopProbe.table
+  delete gitStopProbe.kill
   vi.restoreAllMocks()
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true })
 })
@@ -107,7 +110,7 @@ describe('gitCancellationScope', () => {
     expect(survivors).toBeDefined()
     expect(existsSync(`${index}.lock`)).toBe(true)
     lingering = false
-    await expect(survivors).resolves.toBe(true)
+    await expect(survivors).resolves.toBeUndefined()
     expect(existsSync(`${index}.lock`)).toBe(false)
   }, 30_000)
 
@@ -129,20 +132,79 @@ describe('gitCancellationScope', () => {
     expect(lease.release()).toBe(true)
   }, 30_000)
 
-  it("keeps the repository locked for good, and says so, when a stopped command's process never goes", async () => {
+  it("keeps watching a stopped command's process past the limit, says so, and lets the repository go once it ends", async () => {
     const cwd = repo()
     const threadDirectory = mkdtempSync(join(tmpdir(), 'mousse-git-cancel-thread-')); dirs.push(threadDirectory)
     const identity = resolveRepositoryIdentity(cwd)
-    Object.assign(GIT_STOP_TIMING, { exitWaitMs: 100, survivorLimitMs: 300 })
-    gitStopProbe.alive = () => true
+    Object.assign(GIT_STOP_TIMING, { exitWaitMs: 100, slowPollMs: 50, survivorLimitMs: 300 })
+    let lingering = true
+    gitStopProbe.alive = () => lingering
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const controller = new AbortController()
     setTimeout(() => controller.abort(), 500)
     const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env }), undefined, undefined, controller.signal)
     expect(ran.error?.code).toBe('ABORT_ERR')
     await new Promise((resolve) => setTimeout(resolve, 800))
-    expect(logged).toHaveBeenCalledWith(expect.stringContaining('stays locked until Mousse restarts'), expect.anything())
-    // Past the limit it is not released early: the next caller still waits.
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('until it ends or Mousse restarts'), expect.anything())
+    // Past the limit it is still held, and still watched.
     await expect(acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 300 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
+    lingering = false
+    const lease = await acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 5_000 })
+    expect(lease.release()).toBe(true)
   }, 30_000)
+
+  it('ends a stopped run on time while something that escaped the kill holds its output open', async () => {
+    const cwd = repo()
+    GIT_STOP_TIMING.exitWaitMs = 1_000
+    const controller = new AbortController()
+    const scope = gitCancellationScope(controller.signal)
+    // A subshell that ends at once leaves a `sleep` behind with the command's output; then the command waits.
+    const running = scope.run(() => runGitProcess(['-c', 'alias.orphan=!f() { (sleep 8 &) ; sleep 30; }; f', 'orphan'], { cwd, env: process.env }))
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const begun = Date.now()
+    controller.abort()
+    expect((await running).error?.code).toBe('ABORT_ERR')
+    expect(Date.now() - begun).toBeLessThan(6_000)
+  }, 40_000)
+})
+
+describe('StoppedGitTree', () => {
+  /** Answers each look with the next list in turn, and records what was killed. */
+  const script = (...tables: Array<ProcessEntry[] | undefined>): number[] => {
+    const killed: number[] = []
+    gitStopProbe.table = async () => tables.length > 1 ? tables.shift() : tables[0]
+    gitStopProbe.kill = (pid) => { killed.push(pid) }
+    return killed
+  }
+
+  it('finds and kills what the command left started after the stop, and counts it until it is gone', async () => {
+    const killed = script(
+      [{ pid: 100, ppid: 1, started: '1000' }, { pid: 101, ppid: 100, started: '1001' }],
+      [{ pid: 101, ppid: 100, started: '1001' }, { pid: 102, ppid: 101, started: '1005' }],
+      []
+    )
+    const tree = await StoppedGitTree.stop(100, Date.now() + 1_000)
+    expect(killed).toEqual([100, 101])
+    expect(await tree.alive()).toBe(true)
+    expect(killed).toContain(102)
+    expect(tree.pids()).toEqual(expect.arrayContaining([100, 101, 102]))
+    expect(await tree.alive()).toBe(false)
+  })
+
+  it("never takes a pid another program got for the command, nor that program's children", async () => {
+    const killed = script(
+      [{ pid: 100, ppid: 1, started: '1000' }, { pid: 101, ppid: 100, started: '1001' }],
+      // Both pids belong to other programs now (created later), and one of them started a child.
+      [{ pid: 100, ppid: 7, started: '9000' }, { pid: 101, ppid: 7, started: '9001' }, { pid: 103, ppid: 101, started: '9002' }]
+    )
+    const tree = await StoppedGitTree.stop(100, Date.now() + 1_000)
+    expect(await tree.alive()).toBe(false)
+    expect(killed).not.toContain(103)
+  })
+
+  it('counts the command as still there while its processes cannot be listed', async () => {
+    script(undefined)
+    const tree = await StoppedGitTree.stop(100, Date.now() + 100)
+    expect(await tree.alive()).toBe(true)
+  })
 })

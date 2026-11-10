@@ -2,7 +2,8 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawn } from 'node:child_process'
 import { createReadStream, existsSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { listProcesses, type ListedProcess } from '../harness/stopProcesses'
+import { StoppedGitTree } from './stoppedGitTree'
+export { gitStopProbe, StoppedGitTree } from './stoppedGitTree'
 
 /** What a Git process left: as `spawnSync` reports it. */
 export interface GitProcess {
@@ -17,10 +18,15 @@ export interface GitProcess {
 /** The output limit `spawnSync` and `execFileSync` use when none is given. */
 const DEFAULT_MAX_BUFFER = 1024 * 1024
 
+/** Processes a stopped command left, and the watch that settles once they are gone. */
+export interface GitSurvivors {
+  pids(): number[]
+  gone: Promise<void>
+}
 interface GitCancellation {
   signal: AbortSignal
-  /** One watch per stopped command whose processes were not all gone in time: true once they are, false at the limit. */
-  survivors: Array<Promise<boolean>>
+  /** One per stopped command whose processes were not all gone in time. */
+  survivors: GitSurvivors[]
 }
 const cancellation = new AsyncLocalStorage<GitCancellation>()
 
@@ -29,22 +35,25 @@ const cancellation = new AsyncLocalStorage<GitCancellation>()
  * at once, and one running is stopped with everything it started. A command that writes a ref is left to finish (it is
  * quick, and a stopped one would leave the ref's lock file behind).
  *
- * A stopped command's run ends once its processes are confirmed gone, or after {@link GIT_STOP_TIMING}`.exitWaitMs`
- * when some are still there (one stuck in the file system can outlive a kill for a while). Then the run ends anyway,
- * so the work can end, and {@link GitCancellationScope.survivorsGone} says when they are gone: the caller keeps the
- * repository's lock until then.
+ * A stopped command's run ends once its processes are confirmed gone, or {@link GIT_STOP_TIMING}`.exitWaitMs` after the
+ * stop when some are still there (one stuck in the file system can outlive a kill, and one that escaped the kill can
+ * hold its output open), whether or not its output was closed. The work then ends, and
+ * {@link GitCancellationScope.survivorsGone} settles once they are gone: the caller keeps the repository's lock until then.
  */
 export interface GitCancellationScope {
   run<T>(work: () => Promise<T>): Promise<T>
-  /** Settles once every process a stopped command left is gone (true), or at the limit (false); undefined when none was left. */
-  survivorsGone(): Promise<boolean> | undefined
+  /** Settles once every process a stopped command left is gone; undefined when none was left. */
+  survivorsGone(): Promise<void> | undefined
+  /** The pids of what stopped commands left, while it is there. */
+  survivorPids(): number[]
 }
 
 export function gitCancellationScope(signal: AbortSignal): GitCancellationScope {
   const scope: GitCancellation = { signal, survivors: [] }
   return {
     run: (work) => cancellation.run(scope, work),
-    survivorsGone: () => scope.survivors.length ? Promise.all(scope.survivors).then((gone) => gone.every(Boolean)) : undefined
+    survivorsGone: () => scope.survivors.length ? Promise.all(scope.survivors.map((left) => left.gone)).then(() => undefined) : undefined,
+    survivorPids: () => scope.survivors.flatMap((left) => left.pids())
   }
 }
 
@@ -57,71 +66,40 @@ export function gitWorkCancelled(): boolean {
 const REF_WRITERS = new Set(['update-ref', 'symbolic-ref', 'pack-refs', 'branch', 'tag', 'commit'])
 
 /**
- * How long a stopped command's processes are waited for before its run ends anyway (`exitWaitMs`), how long they are
- * then watched before the repository is given up as locked until Mousse restarts (`survivorLimitMs`), and how often
- * they are looked at. Tests shorten them.
+ * After a stop: how long its processes are waited for before the run ends anyway (`exitWaitMs`, from the stop), how
+ * often they are looked at meanwhile (`pollMs`) and after (`slowPollMs`, until they are gone, however long), and after
+ * how long what is left is logged as an error (`survivorLimitMs`). Tests shorten them.
  */
-export const GIT_STOP_TIMING = { exitWaitMs: 5_000, survivorLimitMs: 10 * 60_000, pollMs: 50 }
+export const GIT_STOP_TIMING = { exitWaitMs: 5_000, pollMs: 50, slowPollMs: 5_000, survivorLimitMs: 10 * 60_000 }
 
-/** A stopped command's processes: off Windows its process group (it leads it); on Windows it and what it started. */
-export interface StoppedGitTree {
-  pid: number
-  /** Windows: the processes below it when it was stopped. */
-  members: number[]
+function sleep(ms: number): Promise<void> {
+  return new Promise((done) => { setTimeout(done, ms).unref() })
 }
 
-/** Stands in for the look at a stopped command's processes (tests: one that does not exit yet). */
-export const gitStopProbe: { alive?: (tree: StoppedGitTree) => boolean } = {}
-
-function below(listed: ListedProcess[], root: number): number[] {
-  const found: number[] = []
-  const queue = [root]
-  while (queue.length) {
-    const parent = queue.shift()!
-    for (const entry of listed) {
-      if (entry.ppid === parent && entry.pid !== parent && !found.includes(entry.pid)) { found.push(entry.pid); queue.push(entry.pid) }
-    }
+/** True once nothing of `tree` is left, false when something still is at `deadline`. Cheap looks, confirmed by the list. */
+async function goneBy(tree: StoppedGitTree, deadline: number): Promise<boolean> {
+  for (;;) {
+    if (!tree.quickAlive() && !(await tree.alive())) return true
+    if (Date.now() >= deadline) return false
+    await sleep(Math.min(GIT_STOP_TIMING.pollMs, Math.max(0, deadline - Date.now())))
   }
-  return found
 }
 
 /**
- * Kills a stopped command and everything it started: off Windows its process group; on Windows the processes below it
- * are listed first (what is left of them is looked at by pid later, since Windows keeps no group), then `taskkill /T`
- * runs and is waited for.
+ * Looks at what a stopped command left until none of it is there, however long that takes; past
+ * {@link GIT_STOP_TIMING}`.survivorLimitMs` it says so in the log once, and keeps looking.
  */
-async function killCommandTree(pid: number): Promise<StoppedGitTree> {
-  if (process.platform === 'win32') {
-    const listed = await listProcesses('win32')
-    const members = listed ? below(listed, pid) : []
-    await new Promise<void>((done) => {
-      const kill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-      kill.on('error', () => done())
-      kill.on('exit', () => done())
-    })
-    return { pid, members }
-  }
-  try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } }
-  return { pid, members: [] }
-}
-
-function treeAlive(tree: StoppedGitTree): boolean {
-  if (gitStopProbe.alive) return gitStopProbe.alive(tree)
-  const there = (target: number): boolean => { try { process.kill(target, 0); return true } catch { return false } }
-  return process.platform === 'win32' ? [tree.pid, ...tree.members].some(there) : there(-tree.pid)
-}
-
-/** True once nothing of `tree` is left, false when something still is after `ms`. */
-function waitGone(tree: StoppedGitTree, ms: number): Promise<boolean> {
-  const until = Date.now() + ms
-  return new Promise((done) => {
-    const look = (): void => {
-      if (!treeAlive(tree)) done(true)
-      else if (Date.now() >= until) done(false)
-      else setTimeout(look, GIT_STOP_TIMING.pollMs)
+async function watchSurvivors(tree: StoppedGitTree, describe: () => Record<string, unknown>): Promise<void> {
+  const since = Date.now()
+  let logged = false
+  for (;;) {
+    await sleep(GIT_STOP_TIMING.slowPollMs)
+    if (!(await tree.alive())) return
+    if (!logged && Date.now() - since >= GIT_STOP_TIMING.survivorLimitMs) {
+      logged = true
+      console.error('[git] a stopped Git command is still running; its repository stays locked until it ends or Mousse restarts', { pids: tree.pids(), ...describe() })
     }
-    look()
-  })
+  }
 }
 
 /**
@@ -166,48 +144,60 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       child.kill()
     }
     const timer = options.timeout ? setTimeout(() => stop('ETIMEDOUT'), options.timeout) : undefined
-    let stopped: Promise<StoppedGitTree> | undefined
+    // A command stopped part way may leave the lock of the private index it was writing. Only a lock that was not there
+    // when it started, and was made since, is removed, and only once nothing of the command is left: under the
+    // repository's lease nothing else writes that index meanwhile.
+    const cleanLock = (): void => {
+      if (!indexLock || lockedBefore) return
+      try { if (statSync(indexLock).mtimeMs >= startedAt - 2_000) rmSync(indexLock, { force: true }) } catch { /* not there */ }
+    }
+    let settled = false
+    let exitCode: number | null = null
+    child.on('exit', (code) => { exitCode = code })
+    const finish = (code: number | null): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      // As `spawnSync`: the exit code even when the output was cut off; none for a process that was killed or never started.
+      const started = !error || error.code === 'ENOBUFS' || error.code === 'ETIMEDOUT' || error.code === 'ABORT_ERR'
+      const bytes = Buffer.concat(out)
+      settle({ status: started ? code : null, stdout: bytes.toString('utf8'), stdoutBytes: bytes, stderr: Buffer.concat(err).toString('utf8'), ...(error ? { error } : {}) })
+    }
+    let stopping = false
     const onAbort = (): void => {
-      if (error || argv.some((arg) => REF_WRITERS.has(arg))) return
+      if (settled || error || argv.some((arg) => REF_WRITERS.has(arg))) return
       error = Object.assign(new Error('spawnSync git ABORT_ERR'), { code: 'ABORT_ERR', syscall: 'spawnSync git' })
-      // The whole tree: a program Git started would otherwise keep running, and keep its output open.
-      if (child.pid) stopped = killCommandTree(child.pid)
-      else child.kill()
+      stopping = true
+      // From the stop, not from when the output closes: something that escaped the kill may hold it open for good.
+      const deadline = Date.now() + GIT_STOP_TIMING.exitWaitMs
+      void (async () => {
+        // The whole tree: a program Git started would otherwise keep running, and keep its output open. Without a pid Git
+        // never started.
+        const tree = child.pid ? await StoppedGitTree.stop(child.pid, deadline) : undefined
+        const gone = tree ? await goneBy(tree, deadline) : true
+        if (gone) cleanLock()
+        else {
+          const left = tree!
+          // Something of it is still there. The run ends now, so the work can end; the caller keeps the repository
+          // locked until this watch sees it gone, and then the lock is cleaned up.
+          scope?.survivors.push({
+            pids: () => left.pids(),
+            gone: watchSurvivors(left, () => ({ command: argv.slice(0, 4).join(' '), cwd: options.cwd })).then(cleanLock)
+          })
+        }
+        // The output is not waited for: a process that escaped the kill may hold it open.
+        for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.destroy()
+        child.unref()
+        finish(exitCode)
+      })()
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     child.stdout!.on('data', (chunk: Buffer) => { outSize += chunk.length; if (outSize > limit) stop('ENOBUFS'); else out.push(chunk) })
     child.stderr!.on('data', (chunk: Buffer) => { errSize += chunk.length; if (errSize > limit) stop('ENOBUFS'); else err.push(chunk) })
     child.on('error', (spawnError) => { error ??= spawnError })
-    child.on('close', (code) => {
-      if (timer) clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      // A command stopped part way may leave the lock of the private index it was writing. Only a lock that was not there
-      // when it started, and was made since, is removed, and only once nothing of the command is left: under the
-      // repository's lease nothing else writes that index meanwhile.
-      const cleanLock = (): void => {
-        if (!indexLock || lockedBefore) return
-        try { if (statSync(indexLock).mtimeMs >= startedAt - 2_000) rmSync(indexLock, { force: true }) } catch { /* not there */ }
-      }
-      void (async () => {
-        const tree = stopped ? await stopped : undefined
-        if (tree) {
-          if (await waitGone(tree, GIT_STOP_TIMING.exitWaitMs)) cleanLock()
-          else {
-            // Something of it is still there. The run ends now, so the work can end; the caller keeps the repository
-            // locked until this watch sees it gone (and then its lock is cleaned up), or for good at the limit.
-            scope?.survivors.push(waitGone(tree, GIT_STOP_TIMING.survivorLimitMs).then((gone) => {
-              if (gone) cleanLock()
-              else console.error('[git] a stopped Git command left processes that did not exit; its repository stays locked until Mousse restarts', { pid: tree.pid, members: tree.members, command: argv.slice(0, 4).join(' '), cwd: options.cwd })
-              return gone
-            }))
-          }
-        }
-        // As `spawnSync`: the exit code even when the output was cut off; none for a process that was killed or never started.
-        const started = !error || error.code === 'ENOBUFS' || error.code === 'ETIMEDOUT' || error.code === 'ABORT_ERR'
-        const bytes = Buffer.concat(out)
-        settle({ status: started ? code : null, stdout: bytes.toString('utf8'), stdoutBytes: bytes, stderr: Buffer.concat(err).toString('utf8'), ...(error ? { error } : {}) })
-      })()
-    })
+    // A stopped command's run is ended by its stop (above), not by its output closing.
+    child.on('close', (code) => { if (!stopping) finish(code) })
     if (options.input !== undefined) {
       // Git may stop reading early (a refusal); what it did not read is dropped, as with `spawnSync`.
       child.stdin!.on('error', () => undefined)
