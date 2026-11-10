@@ -196,16 +196,27 @@ function createEngine(
     }
   };
 
+  /**
+   * The new heights are read back in the same frame (anchor, window), so they
+   * must apply at once. Reduced motion gives every element a 0.01 ms
+   * transition on `all` (global.css); a spacer that transitioned would still
+   * report its old height, the window would be computed from it, and each
+   * commit would move the window again until React gave up.
+   */
+  const writeSpacer = (el: HTMLDivElement | null, height: number) => {
+    if (!el) return;
+    el.style.transition = "none";
+    el.style.height = `${height}px`;
+  };
+
   const writeSpacers = () => {
     const { topSpacer, bottomSpacer } = windowSpacers(
       layout,
       committed.start,
       committed.end,
     );
-    if (topSpacerRef.current) topSpacerRef.current.style.height = `${topSpacer}px`;
-    if (bottomSpacerRef.current) {
-      bottomSpacerRef.current.style.height = `${bottomSpacer}px`;
-    }
+    writeSpacer(topSpacerRef.current, topSpacer);
+    writeSpacer(bottomSpacerRef.current, bottomSpacer);
   };
 
   /** The rows wrapper's offset inside the scroll content: layout space to scroll space. */
