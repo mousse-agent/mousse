@@ -57,6 +57,15 @@ export function claudeEffectiveVariable(env: NodeJS.ProcessEnv, name: string, op
 }
 
 /**
+ * The environment Claude Code runs with once it applies the `env` of the user's and the managed
+ * settings. A turn that loads no settings files passes it so the sign-in kept there (a proxy's
+ * address and token, say) still applies.
+ */
+export function claudeEffectiveEnvironment(env: NodeJS.ProcessEnv, options: AccountSubjectOptions = {}): NodeJS.ProcessEnv {
+  return readClaudeSettings(env, options).effective
+}
+
+/**
  * A stable id of the account Claude Code runs as, read from the files and variables it reads,
  * without starting it (never shown or stored; the gateway hashes it). Undefined when Mousse cannot
  * tell which account a turn would use; the gateway then hands the history over instead of resuming.

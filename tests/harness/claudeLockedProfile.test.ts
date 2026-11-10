@@ -120,7 +120,7 @@ const canUse = (options: Options, tool: string, input: Record<string, unknown>, 
   options.canUseTool!(tool, input, { signal: new AbortController().signal, toolUseID: id, requestId: 'r' } as never)
 
 /** The owner's own entry's service: their sign-in and environment, no locked environment. */
-function ownerService(probe: Probe) {
+function ownerService(probe: Probe, result: Record<string, unknown> = { subtype: 'success', is_error: false, result: 'done' }) {
   const home = temp('claude-owner-profile-')
   const binary = join(home, 'claude')
   writeFileSync(binary, 'fixture')
@@ -133,7 +133,7 @@ function ownerService(probe: Probe) {
     captured.push(options)
     const generator = (async function* () {
       await probe(options)
-      yield { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'owner-session' }
+      yield { type: 'result', ...result, session_id: 'owner-session' }
     })()
     return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
   }
@@ -163,6 +163,26 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
     // One query per turn: no live process is kept for the bot's thread.
     expect(captured.filter((entry) => entry.hooks)).toHaveLength(1)
+  })
+
+  it('keeps the sign-in the owner\'s Claude settings give as variables, though it loads no settings files', async () => {
+    const root = temp('claude-owner-root-')
+    const scratch = temp('claude-owner-scratch-')
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' } }))
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const options = captured.find((entry) => entry.hooks)!
+    expect(options.settingSources).toEqual([])
+    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', USER_VARIABLE: 'from-settings' })
+  })
+
+  it('a failed turn reports Claude Code\'s own reason', async () => {
+    const root = temp('claude-owner-root-')
+    const scratch = temp('claude-owner-scratch-')
+    const { service } = ownerService(async () => {}, { subtype: 'success', is_error: true, result: 'Failed to authenticate: OAuth session expired and could not be refreshed' })
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await expect(service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })).rejects.toThrow('Failed to authenticate: OAuth session expired')
   })
 
   it('a chat activation\'s cleared context starts a new Claude session; a continuation in the activation resumes its own', async () => {
