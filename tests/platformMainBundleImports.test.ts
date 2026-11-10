@@ -1,13 +1,14 @@
 import { readdirSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { expect, it } from 'vitest'
+import { appBuild } from './support/build'
 
-it('loads every package subpath the actual main bundle imports through native package exports', () => {
-  // Like built-CLI checks, this verifies npm run build output. Checking the
-  // generated specifiers catches externalizer regressions source imports miss,
+it('loads every package subpath the actual main bundle imports through native package exports', async () => {
+  // This checks a production build of the current sources (support/build.ts), not the checkout's out/. The
+  // generated specifiers catch externalizer regressions source imports miss,
   // such as a subpath (highlight.js/lib/index.js once) that the package does not export.
-  const root = resolve('out/main')
+  const root = join(await appBuild(), 'main')
   const files = readdirSync(root, { recursive: true }).filter((file) => String(file).endsWith('.js'))
   const specifiers = new Set<string>()
   for (const file of files) {
@@ -24,4 +25,4 @@ it('loads every package subpath the actual main bundle imports through native pa
   ], { cwd: process.cwd(), encoding: 'utf8', timeout: 15_000, windowsHide: true })
   expect(result.error).toBeUndefined()
   expect(result.status, result.stderr).toBe(0)
-})
+}, 5 * 60_000)

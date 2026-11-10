@@ -1,8 +1,6 @@
 import type { BundledLanguage, CodeHighlighterPlugin } from "streamdown";
-import { createHighlighterCore, type HighlighterCore } from "shiki/core";
-import { createOnigurumaEngine } from "shiki/engine/oniguruma";
+import type { HighlighterCore } from "shiki/core";
 import { bundledLanguages, bundledLanguagesInfo } from "shiki/langs";
-import { bundledThemes } from "shiki/themes";
 
 type HighlightOptions = Parameters<CodeHighlighterPlugin["highlight"]>[0];
 type HighlightResult = NonNullable<ReturnType<CodeHighlighterPlugin["highlight"]>>;
@@ -58,17 +56,24 @@ export function plainTokens(code: string): HighlightResult {
 const themeName = (theme: ThemeInput): string =>
   typeof theme === "string" ? theme : ((theme as { name?: string }).name ?? "custom");
 
-// One highlighter (and one WASM engine) for the whole renderer. Grammars are
-// loaded the first time a language is used.
+// One highlighter (and one WASM engine) for the whole renderer. The highlighter
+// itself loads with the first code block, not with the app; grammars load the
+// first time a language is used.
 let highlighterPromise: Promise<HighlighterCore> | null = null;
 const languageLoads = new Map<string, Promise<void>>();
 
 function getHighlighter(): Promise<HighlighterCore> {
   if (!highlighterPromise) {
-    highlighterPromise = createHighlighterCore({
-      engine: createOnigurumaEngine(import("shiki/wasm")),
-      themes: [bundledThemes["github-light"], bundledThemes["github-dark"]],
-    });
+    highlighterPromise = Promise.all([
+      import("shiki/core"),
+      import("shiki/engine/oniguruma"),
+      import("shiki/themes"),
+    ]).then(([{ createHighlighterCore }, { createOnigurumaEngine }, { bundledThemes }]) =>
+      createHighlighterCore({
+        engine: createOnigurumaEngine(import("shiki/wasm")),
+        themes: [bundledThemes["github-light"], bundledThemes["github-dark"]],
+      }),
+    );
     // Allow a retry after a failed load instead of caching the rejection.
     highlighterPromise.catch(() => {
       highlighterPromise = null;

@@ -1,10 +1,9 @@
-import React, { memo, useContext } from "react";
-import { MultiFileDiff, PatchDiff, type FileContents } from "@pierre/diffs/react";
+import React, { memo, Suspense, useContext } from "react";
+import type { FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
 import { File, FilePlus, GitCompare, IconChevronRight, Pencil } from "../../../../lib/icons";
 import { Collapse } from "../../../../components/ui/Collapse";
-import { diffSurfaceStyle, diffUnsafeCSS, useDiffThemeType } from "../../../../lib/diffTheme";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
   extractFilePathArg,
@@ -16,10 +15,11 @@ import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
 import { openFileInPanel } from "../../../../utils/chatLinks";
 import { openTurnInChanges } from "../../../../components/changes/openChanges";
 import { useAppStore } from "../../../../stores/appStore";
+import { lazyNamed } from "../../../../lib/lazyComponent";
 import { TurnIdContext } from "../turn-context";
 
 /** What one file's diff is drawn from. */
-type DiffSource =
+export type DiffSource =
   | { kind: "patch"; patch: string }
   | { kind: "sides"; oldFile: FileContents; newFile: FileContents };
 
@@ -212,40 +212,14 @@ function fileFromRawCall(
   };
 }
 
-const DIFF_CLASS = "an-edit-diff bg-an-tool-background";
-
 /**
- * One file's diff. Rendered only while its row is open, so a collapsed row costs no diff and no theme watcher.
- * The diff points the library at the app theme tokens instead of hardcoded black, and `colorScheme` keeps the
- * library's `light-dark()` backgrounds in sync with the syntax tokens (without it dark text lands on a dark
- * background). The font matches the Changes tab.
+ * One file's diff, drawn by the diff library in its own chunk: it loads on the first open row (or the idle
+ * preload after startup), not with the app; if it fails to load, the row shows "Couldn't load. Retry" in its place.
+ * Rendered only while its row is open, so a collapsed row costs no diff
+ * and no theme watcher.
  */
-function EditDiff({ diff }: { diff: DiffSource }) {
-  const themeType = useDiffThemeType();
-  const style = React.useMemo(() => diffSurfaceStyle(themeType), [themeType]);
-  const options = React.useMemo(
-    () => ({
-      theme: { dark: "github-dark", light: "github-light" } as const,
-      themeType,
-      unsafeCSS: diffUnsafeCSS(themeType),
-      diffStyle: "unified" as const,
-      disableFileHeader: true,
-    }),
-    [themeType],
-  );
-  return diff.kind === "patch" ? (
-    <PatchDiff key={themeType} patch={diff.patch} className={DIFF_CLASS} style={style} options={options} />
-  ) : (
-    <MultiFileDiff
-      key={themeType}
-      oldFile={diff.oldFile}
-      newFile={diff.newFile}
-      className={DIFF_CLASS}
-      style={style}
-      options={options}
-    />
-  );
-}
+const EditDiff = lazyNamed(() => import("./edit-diff"), "EditDiff");
+export const preloadEditDiff = (): Promise<unknown> => EditDiff.preload();
 
 function Stat({ added, removed }: { added: number; removed: number }) {
   if (added === 0 && removed === 0) return null;
@@ -446,7 +420,7 @@ function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) 
         {file.error && (
           <div className="px-2.5 py-1.5 text-[12px] text-red-400 whitespace-pre-wrap break-words">{file.error}</div>
         )}
-        {file.diff && <EditDiff diff={file.diff} />}
+        {file.diff && <Suspense fallback={null}><EditDiff diff={file.diff} /></Suspense>}
         {file.note && <div className="px-2.5 py-1.5 text-[11px] text-an-tool-color-muted">{file.note}</div>}
       </div>
     </EditLine>

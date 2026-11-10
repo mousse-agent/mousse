@@ -77,6 +77,7 @@
     "tests/platformWorkflowWorkspace.test.ts",
     "tests/providerCredentialVaultRuntime.test.ts",
     "tests/receiptRefRelease.test.ts",
+    "tests/rendererEntryBudget.test.ts",
     "tests/repositoryIdentityLease.test.ts",
     "tests/resourceLifecycleAcceptanceInventory.test.ts",
     "tests/resourceLifecycleNamedGate.test.ts",

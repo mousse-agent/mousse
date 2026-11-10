@@ -88,6 +88,10 @@ export default defineConfig({
     worker: { format: 'es' },
     server: { host: '127.0.0.1', port: rendererPort, strictPort: true },
     build: {
+      // Pages and panels load as their own chunks (src/renderer/lib/lazySurfaces.tsx), but their styles stay in
+      // the one stylesheet loaded at startup: shared rules (markdown, settings controls) style the first paint
+      // too, and nothing restyles when a chunk arrives.
+      cssCodeSplit: false,
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/renderer/index.html')

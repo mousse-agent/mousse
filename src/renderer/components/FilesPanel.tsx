@@ -8,6 +8,8 @@ import { useCommand } from '../commands/commandRegistry'
 import { useActiveProjectLocation, useFilesRoot } from '../hooks/useActiveProjectPath'
 import type { FileGrepMatch } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import { registerAutosaveFlush } from '../services/reloadWindow'
+import { registerFileLinkOpener } from '../services/fileLinks'
 import { useMonacoCodeFont } from '../lib/monacoCodeFont'
 import { fileWorkspaceScope, useFileWorkspaceStore } from '../stores/filesStore'
 import { SerializedAutosave, normalizeWorkspacePath, reconcileExternalContent } from '../utils/fileWorkspace'
@@ -383,54 +385,54 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }, [fileKey, openPaths, patchFile, profileId])
 
   useEffect(() => {
-    const onOpenFile = (event: Event) => {
-      const detail = (event as CustomEvent<OpenFileDetail>).detail
+    // Resolves when this open has finished, or given way to a later one (services/fileLinks waits for it).
+    const openLink = async (link: unknown): Promise<void> => {
+      const detail = link as OpenFileDetail | undefined
       if (!detail?.path) return
-      void (async () => {
-        const store = useAppStore.getState()
-        const ownerProfileId = store.profileId
-        const requestSequence = ++openRequestSequence.current
-        let expectedThreadId = store.activeThreadId
-        const stillCurrent = () => {
-          const current = useAppStore.getState()
-          return current.profileId === ownerProfileId && current.activeThreadId === expectedThreadId && openRequestSequence.current === requestSequence
-        }
-        const currentProjectId = store.threads.find((thread) => thread.id === store.activeThreadId)?.projectId
-        let projectThreadId: string | undefined
-        if (!detail.threadId && detail.projectId && detail.projectId !== currentProjectId) {
-          const thread = await ensureProjectReferenceThread(detail.projectId, stillCurrent)
-          if (!thread || !stillCurrent()) return
-          projectThreadId = thread.id
-        }
-        const targetThreadId = detail.threadId ?? projectThreadId ?? store.activeThreadId
-        const targetProjectId = detail.projectId
-          ?? useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)?.projectId
-          ?? null
-        if (targetThreadId && targetThreadId !== store.activeThreadId) {
-          expectedThreadId = targetThreadId
-          useAppStore.getState().switchToThread(targetThreadId)
-          await window.mousse.threads.select(targetThreadId)
-          if (!stillCurrent()) return
-        }
-        const targetRoot = await window.mousse.app.getFilesRoot(targetThreadId)
+      const store = useAppStore.getState()
+      const ownerProfileId = store.profileId
+      const requestSequence = ++openRequestSequence.current
+      let expectedThreadId = store.activeThreadId
+      const stillCurrent = () => {
+        const current = useAppStore.getState()
+        return current.profileId === ownerProfileId && current.activeThreadId === expectedThreadId && openRequestSequence.current === requestSequence
+      }
+      const currentProjectId = store.threads.find((thread) => thread.id === store.activeThreadId)?.projectId
+      let projectThreadId: string | undefined
+      if (!detail.threadId && detail.projectId && detail.projectId !== currentProjectId) {
+        const thread = await ensureProjectReferenceThread(detail.projectId, stillCurrent)
+        if (!thread || !stillCurrent()) return
+        projectThreadId = thread.id
+      }
+      const targetThreadId = detail.threadId ?? projectThreadId ?? store.activeThreadId
+      const targetProjectId = detail.projectId
+        ?? useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)?.projectId
+        ?? null
+      if (targetThreadId && targetThreadId !== store.activeThreadId) {
+        expectedThreadId = targetThreadId
+        useAppStore.getState().switchToThread(targetThreadId)
+        await window.mousse.threads.select(targetThreadId)
         if (!stillCurrent()) return
-        const path = normalizeWorkspacePath(detail.path, targetRoot)
-        const targetScope = fileWorkspaceScope(ownerProfileId, targetThreadId, targetProjectId)
-        const currentStore = useAppStore.getState()
-        currentStore.openSurfaceKind('files')
-        useFileWorkspaceStore.getState().openFile(targetScope, path)
-        if (detail.line) {
-          const position = { path, line: detail.line, column: detail.column ?? 1 }
-          pendingPosition.current = position
-          const key = `${targetScope}\0${path}`
-          setPositions((current) => ({ ...current, [key]: position }))
-          setPreview((current) => ({ ...current, [key]: false }))
-        }
-        await loadFile(path, targetScope, targetThreadId, ownerProfileId)
-      })().catch((error) => console.error('Failed to open file link', error))
+      }
+      const targetRoot = await window.mousse.app.getFilesRoot(targetThreadId)
+      if (!stillCurrent()) return
+      const path = normalizeWorkspacePath(detail.path, targetRoot)
+      const targetScope = fileWorkspaceScope(ownerProfileId, targetThreadId, targetProjectId)
+      const currentStore = useAppStore.getState()
+      currentStore.openSurfaceKind('files')
+      useFileWorkspaceStore.getState().openFile(targetScope, path)
+      if (detail.line) {
+        const position = { path, line: detail.line, column: detail.column ?? 1 }
+        pendingPosition.current = position
+        const key = `${targetScope}\0${path}`
+        setPositions((current) => ({ ...current, [key]: position }))
+        setPreview((current) => ({ ...current, [key]: false }))
+      }
+      await loadFile(path, targetScope, targetThreadId, ownerProfileId)
     }
-    window.addEventListener('mousse:open-file', onOpenFile)
-    return () => window.removeEventListener('mousse:open-file', onOpenFile)
+    // File links reach this tab through services/fileLinks, including the ones that arrived before it mounted (or
+    // while its chunk failed to load).
+    return registerFileLinkOpener(openLink)
   }, [filesRoot, loadFile])
 
   useEffect(() => {
@@ -483,6 +485,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       monaco.editor.getModel(monaco.Uri.parse(key))?.dispose()
     }
   }, [files, selectedKey])
+
+  // A reload the person chooses (lib/lazyComponent) saves what autosave is holding first.
+  useEffect(() => registerAutosaveFlush(() => Promise.all(Object.keys(filesRef.current).map((key) => flushPath(key)))), [flushPath])
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {

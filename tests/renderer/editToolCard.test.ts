@@ -18,7 +18,7 @@ vi.mock('@pierre/diffs/react', () => ({
   MultiFileDiff: () => createElement('div', { 'data-testid': 'diff' })
 }))
 
-import { EditTool } from '../../src/renderer/chat/components/agent-elements/tools/edit-tool'
+import { EditTool, preloadEditDiff } from '../../src/renderer/chat/components/agent-elements/tools/edit-tool'
 import { TurnIdContext } from '../../src/renderer/chat/components/agent-elements/turn-context'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { File, GitCompare } from '../../src/renderer/lib/icons'
@@ -109,11 +109,13 @@ describe('edit row', () => {
     expect(open!.innerHTML).toBe(renderToStaticMarkup(createElement(File, { size: 16 })))
   })
 
-  it('opens to the diff on one surface, and closes again', () => {
+  it('opens to the diff on one surface, and closes again', async () => {
     draw(edit)
     click(toggle())
     expect(toggle().getAttribute('aria-expanded')).toBe('true')
     expect(host.querySelectorAll('.an-edit-surface')).toHaveLength(1)
+    // The diff library is its own chunk: the diff draws once it has loaded.
+    await act(async () => { await preloadEditDiff() })
     expect(host.querySelector('.an-edit-surface [data-testid="diff"]')).not.toBeNull()
     click(toggle())
     expect(host.querySelector('.an-edit-surface')).toBeNull()
