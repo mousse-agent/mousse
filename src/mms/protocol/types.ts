@@ -126,6 +126,13 @@ export type ProtocolConnectionEventType = 'bridge.hub.thread' | 'mcp.auth-url' |
 /** Granted to every session: it may receive `git.operation` events for the Git actions it starts. */
 export const GIT_OPERATIONS_CAPABILITY = 'git.operations.v1'
 
+/**
+ * Asked for by a window that binds the first message of a chat made for it (`Thread.firstSendPending`) to the settings
+ * it shows. The service refuses such a window's unbound first send as a lost update ("send it again"), and an older
+ * window's as one it cannot make ("update Mousse").
+ */
+export const FIRST_SEND_BINDING_CAPABILITY = 'threads.firstSendBinding.v1'
+
 /** One authenticated socket's live display lane. Never sequenced or replayed. */
 export interface ProtocolConnectionEvent {
   kind: 'connection_event'

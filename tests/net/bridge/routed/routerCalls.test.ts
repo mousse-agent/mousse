@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { NetError, type NodeId } from '../../../../src/shared/net'
 import { RoutedClient } from '../../../../src/mms/bridge/routed/RoutedClient'
+import { FIRST_SEND_BINDING_CAPABILITY } from '../../../../src/mms/protocol/types'
 import { cleanupAll, linked } from './routerFixture'
 
 afterAll(cleanupAll)
@@ -359,6 +360,39 @@ describe('a send bound to what was shown (expect)', () => {
     await withClient(older, async () => {
       await expect(t.dispatch('orchestrator.send', { threadId: id, content: 'hi', expect: { permissionMode: 'accept_edits' } })).rejects.toMatchObject({ code: 'computer_outdated' })
     })
+  }, 60_000)
+})
+
+describe("a chat's first message, sent from a window on this computer", () => {
+  it("is held to the owner's rule, an older window is told to update, and an older owner is sent it without the mark", async () => {
+    const thread = t.owner.threads.createThread('First', undefined, undefined, { started: true, firstSendPending: true })
+    const id = t.qualified(thread.id)
+    const window = { ...t.connection('window-1'), capabilities: new Set([FIRST_SEND_BINDING_CAPABILITY]) }
+    expect(await t.refused(t.dispatch('orchestrator.send', { threadId: id, content: 'hi' }, window))).toMatchObject({ code: 'first_send_unbound', message: expect.stringContaining('Send it again') })
+    expect(await t.refused(t.dispatch('orchestrator.send', { threadId: id, content: 'hi' }))).toMatchObject({ code: 'first_send_unbound', message: 'Update Mousse to send the first message in this chat.' })
+    // A window cannot set the mark itself.
+    expect(await t.refused(t.dispatch('orchestrator.send', { threadId: id, content: 'hi', window: 'binds' }))).toMatchObject({ message: 'Update Mousse to send the first message in this chat.' })
+    // An owner from before the mark takes the send without it, instead of refusing the call as outdated.
+    const sent: unknown[] = []
+    const older = clientWith((real) => ({
+      rpc: async (method: string, params: unknown, options: unknown) => {
+        if (method === 'routed.orchestrator.send') {
+          sent.push(params)
+          throw new NetError('forbidden', 'Stopped by the test.')
+        }
+        const answer = await real.rpc(method, params, options)
+        if (method !== 'net.info') return answer
+        const info = answer as { routed: Record<string, number> }
+        return { ...info, routed: { ...info.routed, 'orchestrator.send': 5 } }
+      }
+    }))
+    await withClient(older, async () => {
+      const refusal = await t.refused(t.dispatch('orchestrator.send', { threadId: id, content: 'hi' }, window))
+      expect(refusal.code).not.toBe('computer_outdated')
+    })
+    expect(sent).toHaveLength(1)
+    expect(JSON.stringify(sent[0])).not.toContain('"window"')
+    expect(t.owner.threads.getThread(thread.id)?.firstSendPending).toBe(true)
   }, 60_000)
 })
 

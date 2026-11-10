@@ -51,7 +51,12 @@ export function composerCreatesThread(
 export async function prepareComposerThread(deps: {
   thread?: Thread
   workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiryMs?: number; expiryStopsRun?: boolean; baseBranch?: string; worktreePicked?: true }
-  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; model?: ModelOverride; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'>; rememberedChoices?: boolean }) => Promise<Thread>
+  /**
+   * The new thread is made for a message being sent now: the sidebar lists it as soon as it exists, rather than
+   * after the selection, model and send round trips that follow. Off for a pick applied without a message.
+   */
+  started?: boolean
+  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; started?: boolean; model?: ModelOverride; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'>; rememberedChoices?: boolean }) => Promise<Thread>
   /**
    * The model and permission mode the composer shows. A thread made on this computer is made with them, so a send that
    * fails after it was made, and is retried on it, still runs with them. Another computer sets them afterwards.
@@ -84,6 +89,7 @@ export async function prepareComposerThread(deps: {
       create: () =>
         deps.create(workspace.projectId, {
           worktreeEnabled: enabled,
+          ...(deps.started ? { started: true } : {}),
           ...(workspace.localOnly ? { localOnly: true } : workspace.node ? { node: workspace.node } : {}),
           ...expiry,
           ...(baseBranch ? { baseBranch } : {}),

@@ -3,6 +3,7 @@ import {
   ROUTED_LARGE_READS,
   ROUTED_LARGE_READS_PER_CALLER,
   ROUTED_METHODS,
+  ROUTED_DROPPABLE_KEYS,
   ROUTED_STAGED_KEY,
   isRoutedPagedReply,
   isRoutedReply,
@@ -159,8 +160,9 @@ export class RoutedClient {
     const version = versions?.[method]
     if (version === undefined) return { outdated: true }
     const known = new Set(routedKeysAt(row, version))
+    const droppable = ROUTED_DROPPABLE_KEYS[method] ?? []
     for (const [key, value] of Object.entries(params))
-      if (value !== undefined && !known.has(key)) return { outdated: true, key }
+      if (value !== undefined && !known.has(key) && !droppable.includes(key)) return { outdated: true, key }
     return { outdated: false, version }
   }
 

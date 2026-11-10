@@ -8,7 +8,7 @@ import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds } from './threadOrder'
-import { pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
+import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /** Opens a thread in the main workspace after the navigation guards agree. */
 export async function selectThread(threadId: string): Promise<void> {
@@ -77,13 +77,21 @@ export function matchesRememberedChoices(thread: Pick<Thread, 'modelOverride' | 
 
 /**
  * The remembered choices a new thread in `projectId` would really start with: a remembered model the picker does not list
- * (hidden, or its instance turned off) is left out, because a create falls back to the profile's default for it. Without
- * the project's provider listing yet, the model is left out too, so an empty thread is reused rather than another made.
+ * (hidden, or its instance turned off) is left out, because a create falls back to the profile's default for it. A
+ * listing not loaded yet is loaded first; one that still cannot be read says nothing about the model, so it is kept
+ * (an empty thread on another model is not reused as if the remembered one were unusable).
  */
 function usableRemembered(remembered: NewThreadChoice | undefined, projectId: string): NewThreadChoice | undefined {
   if (!remembered?.model) return remembered
-  const snapshots = useProviderSnapshotsStore.getState().scopes[scopeKey(projectScope(projectId))]?.snapshots
-  if (snapshots && pickerListsModel(remembered.model, pickerProviders(snapshots, []))) return remembered
+  const scope = projectScope(projectId)
+  const snapshots = useProviderSnapshotsStore.getState().scopes[scopeKey(scope)]?.snapshots
+  // Navigation never waits for provider checks (a first listing can wait on them for half a minute): without a listing
+  // yet the model is unknown, so it is kept, and the listing is fetched for next time.
+  if (!snapshots) {
+    void loadProviderSnapshots(scope).catch(() => undefined)
+    return remembered
+  }
+  if (pickerListsModel(remembered.model, pickerProviders(snapshots, []))) return remembered
   const { model: _unusable, ...rest } = remembered
   return rest
 }
@@ -94,12 +102,21 @@ function usableRemembered(remembered: NewThreadChoice | undefined, projectId: st
  * (setting them on the old one would also make its model the profile's last-used one).
  */
 export async function createAndSelectProjectThread(projectId: string): Promise<void> {
+  // Decided from the store as it is now, with nothing awaited first.
   const store = useAppStore.getState()
+  const profileId = store.profileId
   const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
   const remembered = usableRemembered(rememberedChoiceOf(store.projects, projectId), projectId)
-  const thread = empty && matchesRememberedChoices(empty, remembered) ? empty : await window.mousse.threads.create(undefined, projectId, { rememberedChoices: true })
-  // The daemon's threads:updated broadcast can arrive after the first message is sent.
-  store.upsertThread(thread)
+  if (empty && matchesRememberedChoices(empty, remembered)) {
+    await selectThread(empty.id)
+    return
+  }
+  const thread = await window.mousse.threads.create(undefined, projectId, { rememberedChoices: true })
+  // Read again after the create: another profile shown meanwhile gets nothing from this one, and a newer copy of the
+  // thread the service already pushed is kept (the push can come before the reply, or after the first message).
+  const current = useAppStore.getState()
+  if (current.profileId !== profileId || !current.projects.some((project) => project.id === projectId)) return
+  if (!current.threads.some((entry) => entry.id === thread.id)) current.upsertThread(thread)
   await selectThread(thread.id)
 }
 

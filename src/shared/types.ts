@@ -1417,6 +1417,13 @@ export interface Thread {
    */
   settingsRevision?: number
   /**
+   * The thread was made for a message a window is about to send, and none has been saved yet. Its first message runs only
+   * bound to the settings the window showed (`orchestrator.send` `expect`): a window always binds it, and the service
+   * refuses an unbound send from a window while this is set. Cleared when the thread's first message is saved. Listing
+   * the thread early (`startedAt`) is for the sidebar only.
+   */
+  firstSendPending?: true
+  /**
    * Whether this thread works in its own git worktree. `false` runs it on the project's
    * folder. Unset means no choice was recorded: the composer shows the "Start new threads in a
    * worktree" setting, and a thread from before the toggle was honoured gets a worktree.

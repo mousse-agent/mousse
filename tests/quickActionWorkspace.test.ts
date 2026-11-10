@@ -79,7 +79,7 @@ describe('send-in-current-chat on a new chat', () => {
 
     await executeQuickAction(action, 'default')
 
-    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', { worktreeEnabled: true, permissionMode: 'accept_edits', rememberedChoices: true })
+    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', { worktreeEnabled: true, started: true, permissionMode: 'accept_edits', rememberedChoices: true })
     expect(mousse.select).toHaveBeenCalledWith('made')
     expect(mousse.sendToThread).toHaveBeenCalledWith('made', expect.objectContaining({ content: 'Review this' }))
     const state = useAppStore.getState()
@@ -102,6 +102,34 @@ describe('send-in-current-chat on a new chat', () => {
     expect(mousse.setWorktreeEnabled).toHaveBeenCalledWith('t1', true)
     expect(mousse.sendToThread).toHaveBeenCalledWith('t1', expect.objectContaining({ content: 'Review this' }))
     expect(useAppStore.getState().threads.find((entry) => entry.id === 't1')?.worktreeEnabled).toBe(true)
+  })
+
+  it("binds the first message of a thread made for it and listed already, as after a failed selection or a reload", async () => {
+    const mousse = stubMousse()
+    // Listed (startedAt) because it was made for a send, but its first message never went out.
+    const listed = thread({ projectId: 'p', startedAt: '2026-01-01T00:00:01Z', firstSendPending: true, permissionMode: 'ask', settingsRevision: 3 })
+    useAppStore.setState({ activeThreadId: 't1', threads: [listed], messages: [] })
+
+    await executeQuickAction(action, 'default')
+
+    expect(mousse.create).not.toHaveBeenCalled()
+    expect(mousse.sendToThread).toHaveBeenCalledWith('t1', expect.objectContaining({
+      content: 'Review this',
+      expect: { permissionMode: 'ask', settingsRevision: 3 }
+    }))
+  })
+
+  it('sends unbound, to be queued, while the first turn of such a thread is already under way', async () => {
+    const mousse = stubMousse()
+    const listed = thread({ projectId: 'p', startedAt: '2026-01-01T00:00:01Z', firstSendPending: true, permissionMode: 'ask', settingsRevision: 3 })
+    useAppStore.setState({ activeThreadId: 't1', threads: [listed], messages: [], threadActivity: { t1: 'processing' } })
+    try {
+      await executeQuickAction(action, 'default')
+      expect(mousse.sendToThread).toHaveBeenCalledTimes(1)
+      expect(mousse.sendToThread.mock.calls[0]![1]).not.toHaveProperty('expect')
+    } finally {
+      useAppStore.setState({ threadActivity: {} })
+    }
   })
 
   it('leaves a started thread alone', async () => {

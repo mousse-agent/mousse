@@ -309,7 +309,9 @@ export class MmsListsSource {
                 // From the same snapshot as the mode and model, so a window conditions its changes on what it shows.
                 settingsRevision: thread.settingsRevision ?? 0,
                 startedFrom: thread.startedFrom,
-                sentFrom: thread.sentFrom
+                sentFrom: thread.sentFrom,
+                // A chat made for its first message: a window binds that message (`Thread.firstSendPending`).
+                ...(thread.firstSendPending ? { firstSendPending: true } : {})
               }
             : {})
         })),

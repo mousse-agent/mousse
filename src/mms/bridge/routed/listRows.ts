@@ -164,6 +164,8 @@ export function threadRow(
   if (isRecord(raw.startedFrom))
     row.startedFrom = raw.startedFrom as unknown as Thread['startedFrom']
   if (isRecord(raw.sentFrom)) row.sentFrom = raw.sentFrom as unknown as Thread['sentFrom']
+  // Its first message is bound by the window that sends it, as on the computer that runs it.
+  if (raw.firstSendPending === true) row.firstSendPending = true
   if (context.notShared) row.notShared = true
   else if (context.offline) row.offline = true
   return row

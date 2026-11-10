@@ -36,7 +36,9 @@ function daemon(options: { clientType?: 'gui' | 'cli' | 'bridge'; bridgeCaller?:
       updateThreadMeta: (id: string, patch: Partial<Thread>) => { const next = { ...threads.get(id)!, ...patch }; threads.set(id, next); return next },
       setThreadWorktreeEnabled: (id: string, worktreeEnabled: boolean) => { const next = { ...threads.get(id)!, worktreeEnabled }; threads.set(id, next); return next },
       getThreadDir: (id: string) => join(home, 'threads', id),
-      listAllThreads: () => [...threads.values()]
+      listAllThreads: () => [...threads.values()],
+      // Every list a handler returns carries the store's version (#819).
+      listAllThreadsVersioned: () => ({ threads: [...threads.values()], version: { epoch: 'test', seq: 0 } })
     },
     orchestrator: {
       setThreadPermissionMode: (id: string, permissionMode: Thread['permissionMode']) => { const next = { ...threads.get(id)!, permissionMode }; threads.set(id, next); return next },

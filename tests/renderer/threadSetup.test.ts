@@ -57,3 +57,70 @@ describe("the sidebar's New thread when the remembered model can no longer be us
     expect(useAppStore.getState().activeThreadId).toBe('empty')
   })
 })
+
+describe("the sidebar's New thread before the project's provider listing has loaded", () => {
+  const opus = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  async function setup(listing: () => Promise<unknown>) {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { useProviderSnapshotsStore } = await import('../../src/renderer/lib/providerSnapshots')
+    const { createAndSelectProjectThread } = await import('../../src/renderer/lib/threadActions')
+    const empty = { id: 'empty', name: 'New Chat', projectId: 'p', createdAt: '', updatedAt: '', order: 0, modelOverride: opus } as never
+    // Sonnet is remembered for the project; the empty thread is on Opus.
+    useAppStore.setState({ threads: [empty], activeThreadId: null, projects: [{ id: 'p', name: 'p', path: '/p', createdAt: '', order: 0, newThread: { model: { ...opus, model: 'sonnet' } } }] })
+    useProviderSnapshotsStore.setState({ scopes: {} })
+    const snapshots = vi.fn(listing)
+    const create = vi.fn(async () => ({ ...(empty as object), id: 'made', modelOverride: { ...opus, model: 'sonnet' } }))
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) }, providers: { snapshots } } })
+    return { useAppStore, createAndSelectProjectThread, create, snapshots }
+  }
+
+  it('keeps the remembered model without waiting, and fetches the listing for next time', async () => {
+    const { model, snapshot } = await import('../providerSnapshotFixture')
+    const page = await setup(async () => [snapshot({ models: { entries: [model('opus'), model('sonnet')], source: 'live' } })])
+    await page.createAndSelectProjectThread('p')
+    expect(page.snapshots).toHaveBeenCalledTimes(1)
+    expect(page.create).toHaveBeenCalledWith(undefined, 'p', { rememberedChoices: true })
+    expect(page.useAppStore.getState().activeThreadId).toBe('made')
+  })
+
+  it('never waits for a provider listing that is still being checked', async () => {
+    // A first listing can wait on the providers' start-up checks for half a minute; this one never answers.
+    const page = await setup(() => new Promise(() => undefined))
+    const opened = page.createAndSelectProjectThread('p')
+    const result = await Promise.race([opened.then(() => 'opened'), new Promise((resolve) => setTimeout(() => resolve('waited'), 500))])
+    expect(result).toBe('opened')
+    expect(page.useAppStore.getState().activeThreadId).toBe('made')
+  })
+
+  it('keeps a newer copy of the new thread, and does nothing for a profile switched away from meanwhile', async () => {
+    const page = await setup(() => new Promise(() => undefined))
+    let finish!: (thread: unknown) => void
+    page.create.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }) as never)
+    const opened = page.createAndSelectProjectThread('p')
+    // The service pushes the new thread with a later change before the create answers.
+    const pushed = { id: 'made', name: 'Renamed already', projectId: 'p', createdAt: '', updatedAt: '', order: -1 }
+    page.useAppStore.getState().upsertThread(pushed as never)
+    finish({ ...pushed, name: 'New Chat' })
+    await opened
+    expect(page.useAppStore.getState().threads.find((entry) => entry.id === 'made')?.name).toBe('Renamed already')
+
+    const later = await setup(() => new Promise(() => undefined))
+    let answer!: (thread: unknown) => void
+    later.create.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }) as never)
+    const switching = later.createAndSelectProjectThread('p')
+    later.useAppStore.setState({ profileId: 'another-profile', threads: [], activeThreadId: null })
+    answer({ id: 'late', name: 'New Chat', projectId: 'p', createdAt: '', updatedAt: '', order: 0 })
+    await switching
+    expect(later.useAppStore.getState().threads).toEqual([])
+    expect(later.useAppStore.getState().activeThreadId).toBeNull()
+  })
+
+  it('keeps the remembered model when the listing cannot be read, instead of reusing a thread on another model', async () => {
+    const page = await setup(async () => { throw new Error('The service did not answer') })
+    await page.createAndSelectProjectThread('p')
+    expect(page.create).toHaveBeenCalledTimes(1)
+    expect(page.useAppStore.getState().activeThreadId).toBe('made')
+  })
+})

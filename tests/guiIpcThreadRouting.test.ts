@@ -232,6 +232,15 @@ describe('a chat is created on another computer', () => {
       { name: 'New Chat', projectId: qualifyId(NODE, 'project-1'), worktreeEnabled: true, node: NODE }
     ])
   })
+
+  it('lists a chat made for a message at once on this computer, and leaves that to the other computer', async () => {
+    await invoke('threads:create', undefined, undefined, { worktreeEnabled: false, started: true })
+    await invoke('threads:create', undefined, qualifyId(NODE, 'project-1'), { node: NODE, started: true })
+    expect(sent('threads.create').map((call) => call.params)).toEqual([
+      { name: 'New Chat', projectId: undefined, worktreeEnabled: false, started: true },
+      { name: 'New Chat', projectId: qualifyId(NODE, 'project-1'), node: NODE }
+    ])
+  })
 })
 
 describe('the thread list after a change', () => {

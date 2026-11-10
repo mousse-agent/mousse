@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../src/shared/types'
 import { composerCreatesThread, createComposerThread, prepareComposerThread } from '../src/renderer/lib/createComposerThread'
+import { isNewEmptyThread } from '../src/renderer/lib/newThread'
 
 describe('blank composer thread creation', () => {
   const thread = { id: 'created-thread' } as Thread
@@ -79,6 +80,37 @@ describe('blank composer workspace selection', () => {
     expect(deps.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true })
     expect(deps.activate).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-a', worktreeEnabled: true }))
     expect(deps.select).toHaveBeenCalledWith('created')
+  })
+
+  it('lists a chat for a send only in the same create that gives it the shown mode, so a retry after a failed setup keeps that mode', async () => {
+    const shown = { model: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }, permissionMode: 'ask' as const }
+    // What the service makes: the thread exactly as asked, already listed.
+    const deps = {
+      ...setup(),
+      started: true,
+      shown,
+      create: vi.fn(async (projectId: string | undefined, opts: object) => ({ id: 'created', projectId, startedAt: '2026-11-10T00:00:00Z', ...opts } as unknown as Thread)),
+      select: vi.fn(async () => { throw new Error('The service did not answer') })
+    }
+    await expect(prepareComposerThread(deps)).rejects.toThrow('The service did not answer')
+    // One call made it listed and gave it the mode: nothing was left to set between them.
+    expect(deps.create).toHaveBeenCalledTimes(1)
+    expect(deps.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true, started: true, ...shown })
+    const made = deps.activate.mock.calls[0][0] as Thread
+    // The retry sees a started thread, so it skips the new-chat setup and sends on it, in the mode it was made with.
+    expect(isNewEmptyThread(made.id, made, 0)).toBe(false)
+    expect(made.permissionMode).toBe('ask')
+    expect(made.modelOverride ?? (made as unknown as { model: unknown }).model).toEqual(shown.model)
+  })
+
+  it('creates the thread started only when a message is being sent with it', async () => {
+    const sending = { ...setup(), started: true }
+    await prepareComposerThread(sending)
+    expect(sending.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true, started: true })
+
+    const pickOnly = setup()
+    await prepareComposerThread(pickOnly)
+    expect(pickOnly.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true })
   })
 
   it('creates a draft in the chosen project instead of sending to the original project', async () => {

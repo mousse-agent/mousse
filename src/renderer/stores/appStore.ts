@@ -118,6 +118,7 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       // Saved without touching `updatedAt`, so it is compared on its own (a new thread gets its project's mode so).
       left.permissionMode !== right.permissionMode ||
       left.settingsRevision !== right.settingsRevision ||
+      left.firstSendPending !== right.firstSendPending ||
       // A thread of another computer going offline (or coming back) changes its row.
       left.node !== right.node ||
       left.offline !== right.offline ||

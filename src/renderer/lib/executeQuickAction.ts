@@ -6,7 +6,7 @@ import { normalizePermissionMode } from '../../shared/permissionMode'
 import type { SendExpectation, Thread } from '../../shared/types'
 import { composerCreatesThread } from './createComposerThread'
 import { isNewEmptyThread, isWorkspacePending, localWorkspaceFor, rememberedChoiceOf } from './newThread'
-import { boundSendRefusal } from './threadSetup'
+import { boundSendRefusal, sendIsFirst } from './threadSetup'
 
 const TERMINAL_SPAWN_TIMEOUT_MS = 15_000
 const TERMINAL_SPAWN_POLL_MS = 150
@@ -41,6 +41,7 @@ function settleLoading(profileId: string, threadId: string | null, active: boole
  * (project, new worktree) before the first send, like the composer does.
  * Returns the thread to send to, or null if the user moved away meanwhile.
  * `beforeSwitch` runs with the new thread just before it is shown, when the pick needs a new thread.
+ * `sending`: a message goes to the thread next, so a new thread is listed in the sidebar at once.
  */
 export async function threadForSend(profileId: string, beforeSwitch?: (threadId: string) => void): Promise<string | null> {
   // A thread made for a terminal sends nothing, so it is made on the profile's defaults and nothing is bound.
@@ -67,7 +68,17 @@ async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId
   const store = requireActiveProfile(profileId)
   const startId = store.activeThreadId
   const thread = store.threads.find((entry) => entry.id === startId)
-  if (!isNewEmptyThread(startId, thread, store.messages.length)) return startId ? { threadId: startId } : null
+  if (!isNewEmptyThread(startId, thread, store.messages.length)) {
+    if (!startId) return null
+    // A thread made for its first message and still without one is bound like a new chat's first send
+    // (`Thread.firstSendPending`), whichever route reaches it; with a turn under way it is not the first, and queues.
+    if (bind && thread && sendIsFirst(thread, store.turnStates[startId]?.phase, store.threadActivity[startId])) {
+      const defaultMode = normalizePermissionMode((await window.mousse.settings.get()).permissions?.defaultMode)
+      const expect = expectationOf(thread, defaultMode)
+      return { threadId: startId, ...(expect ? { expect } : {}) }
+    }
+    return { threadId: startId }
+  }
   // One preparation at a time: a composer send or another action already owns this thread.
   if (isWorkspacePending(store)) throw new WorkspaceBusyError()
   let targetId = startId
@@ -87,6 +98,8 @@ async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId
     const threadId = await prepareComposerThread({
       thread,
       workspace,
+      // A thread made for a message is listed at once; one made for a terminal stays an unlisted draft.
+      started: bind,
       ...composerThreadActions(),
       ...(bind ? {
         shown: { ...(permissionMode ? { permissionMode } : {}), ...(workspace.model ? { model: workspace.model } : {}) },

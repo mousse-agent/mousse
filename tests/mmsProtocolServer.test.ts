@@ -8,7 +8,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { EventSequenceRing } from '../src/mms/protocol/eventRing'
 import { encodeFrame, FrameDecoder } from '../src/mms/protocol/framing'
-import { MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
+import { FIRST_SEND_BINDING_CAPABILITY, MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
 import { MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS, MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES, NON_REPLAYED_METHODS, keepsResponseForReplay } from '../src/mms/protocol/replayCache'
 import { ROUTED_METHODS } from '../src/shared/bridge/routed'
 import { parseEnvelope, validateHello, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
@@ -981,6 +981,27 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     expect(caps.methods).toContain('orchestrator.send')
 
     await client.close()
+  })
+
+  it("grants a window's first-send binding only when a window asks for it, and holds each window to what it said", async () => {
+    const connect = async (clientType: 'gui' | 'cli', requestedCapabilities: string[] = []) => {
+      const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType, requestedCapabilities })
+      await client.connect()
+      return client
+    }
+    const binds = await connect('gui', [FIRST_SEND_BINDING_CAPABILITY])
+    const older = await connect('gui')
+    const cli = await connect('cli', [FIRST_SEND_BINDING_CAPABILITY])
+    try {
+      const { thread } = await binds.request<{ thread: { id: string } }>('threads.create', { name: 'New Chat', started: true })
+      await expect(binds.request('orchestrator.send', { threadId: thread.id, content: 'hi' })).rejects.toThrow(/Send it again/)
+      await expect(older.request('orchestrator.send', { threadId: thread.id, content: 'hi' })).rejects.toThrow('Update Mousse to send the first message in this chat.')
+      // A CLI cannot claim it: it is not a window, so its send is not held to the rule.
+      const outcome = await cli.request('orchestrator.send', { threadId: thread.id, content: 'hi' }).then(() => undefined, (error: Error) => error.message)
+      expect(outcome ?? '').not.toMatch(/Send it again|Update Mousse/)
+    } finally {
+      await Promise.all([binds.close(), older.close(), cli.close()])
+    }
   })
 
   it('closing the client rejects pending requests', async () => {
