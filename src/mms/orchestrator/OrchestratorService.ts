@@ -171,6 +171,7 @@ import {
   type Thread,
   type ThreadTitleSource,
   type TurnPhase,
+  type TurnStep,
   type TurnState,
   type TurnStateSnapshot,
   type UserQuestion,
@@ -178,7 +179,8 @@ import {
   type AnsweredQuestion,
   type ScheduledRunAgent,
   DEFAULT_CHAT_MODE,
-  isTurnStoppable
+  isTurnStoppable,
+  isTurnActivePhase
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
@@ -1747,7 +1749,7 @@ export class OrchestratorService extends EventEmitter {
   private queueHoldClock: () => number = () => Date.now()
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
-  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause'>> & { blockedOnWait?: boolean }): void {
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause' | 'step'>> & { blockedOnWait?: boolean }): void {
     // A stopped turn that is still ending already shows stopped (`showStopped`): what its provider sent before it let go
     // (a last delta, a tool event, a question) does not make the thread look busy again.
     if (this.isStopping(threadId) && isTurnStoppable({ phase, turnId: 'any' })) return
@@ -1769,6 +1771,8 @@ export class OrchestratorService extends EventEmitter {
     // The pause is only part of the paused state; any other phase drops it.
     if (phase === 'paused' && patch?.pause) state.pause = patch.pause
     else delete state.pause
+    // A step is only part of the phase it was given with (`setTurnStep`).
+    if (patch?.step && isTurnActivePhase(phase)) state.step = patch.step
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) state.startedAt = now
     if (phase !== 'idle' && !state.startedAt) state.startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
@@ -1776,6 +1780,18 @@ export class OrchestratorService extends EventEmitter {
     else if (existing?.turnId) this.runHeartbeats.delete(existing.turnId)
     this.emit('turn-state', state)
     this.runtimeManager?.setActivity(threadId, turnPhaseActivity(phase, patch?.blockedOnWait))
+  }
+
+  /**
+   * What the thread's turn is doing while the transcript shows nothing of it (`TurnState.step`); undefined clears it.
+   * Only a turn that is thinking or writing takes a step: a tool phase says what it does itself.
+   */
+  private setTurnStep(threadId: string, step: TurnStep | undefined): void {
+    const existing = this.turnStates.get(threadId)
+    if (!existing || (existing.phase !== 'thinking' && existing.phase !== 'streaming')) return
+    if (!step && !existing.step) return
+    if (step && existing.step && JSON.stringify(step) === JSON.stringify(existing.step)) return
+    this.setTurnPhase(threadId, existing.phase, step ? { step } : undefined)
   }
 
   /** Liveness touch for an engine run (SPEC §12.4 rule 2), at most once per throttle window. */
@@ -10937,7 +10953,8 @@ export class OrchestratorService extends EventEmitter {
       opts?.externalSignal?.addEventListener('abort', mirrorExternalAbort, { once: true })
     }
     this.setTurnPhase(session.threadId, 'queued', { turnId })
-    this.setTurnPhase(session.threadId, 'thinking', { turnId })
+    // Until its provider reports something, the turn is starting: the runtime, its tools and Skills are being set up.
+    this.setTurnPhase(session.threadId, 'thinking', { turnId, step: { kind: 'starting' } })
     // The turn's app-tool context (PR 2 §2), registered before the run is active so a call a runtime made
     // while the run was started finds it; the executor completes it before the gateway starts the turn.
     const appTurn = engineRunId ? this.registerAppTurn(session, engineRunId, mode, opts?.source === 'provider-continuation', opts?.bot) : undefined
@@ -11217,8 +11234,22 @@ export class OrchestratorService extends EventEmitter {
           }
         },
         compaction: onCompaction,
-        retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
-        progress: () => { providerProgress = true },
+        // The line under Working says it; nothing is saved to the transcript.
+        retry: (attempt, detail) => this.setTurnStep(session.threadId, {
+          kind: 'retrying', attempt,
+          ...(detail?.maxAttempts && !detail.noResponse ? { maxAttempts: detail.maxAttempts } : {}),
+          ...(detail?.delayMs !== undefined && detail.delayMs >= 0 ? { delayMs: detail.delayMs } : {}),
+          ...(detail?.noResponse ? { noResponse: true as const } : {})
+        }),
+        progress: () => {
+          providerProgress = true
+          this.setTurnStep(session.threadId, undefined)
+        },
+        status: (status) => {
+          // A runtime may name its session again once it writes; waiting is only before output.
+          if (status === 'waiting' && this.turnStates.get(session.threadId)?.phase !== 'thinking') return
+          this.setTurnStep(session.threadId, { kind: status })
+        },
         // Usage statistics, as each runtime reports them; an automation run's turn adds it to the run in the inbox.
         usage: (usage) => {
           lastUsageAt = Date.now()
@@ -11246,6 +11277,8 @@ export class OrchestratorService extends EventEmitter {
           ]))
           this.persist(true)
           this.acknowledgeDrainedSteers(session)
+          // The model has the steered message and has not answered it yet.
+          this.setTurnStep(session.threadId, { kind: 'waiting' })
         },
         providerMetrics: (metrics) => {
           promptMetrics = metrics

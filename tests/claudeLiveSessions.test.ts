@@ -247,6 +247,26 @@ describe('a live Claude query', () => {
     expect(events).toEqual(['text:working', 'text:working tail', 'steer:also do X', 'text:working tail\n\nafter steer'])
   })
 
+  it("hands the open run the process's first frame and a retry, but no retry while background agents run", async () => {
+    const hooks = { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() }
+    const session = new LiveSession('thread', hooks)
+    const cli = new FakeClaudeCli()
+    silent(cli)
+    session.attach(cli.query({ prompt: session.queue, options: {} as never }))
+    const seen: Array<Record<string, unknown>> = []
+    const run = session.beginRun((message) => seen.push(message as unknown as Record<string, unknown>))
+    session.push(run, { type: 'user', message: { role: 'user', content: 'go' }, parent_tool_use_id: null, session_id: '' })
+    await vi.waitFor(() => expect(cli.last.inputs).toHaveLength(1))
+    const retry = (attempt: number) => ({ type: 'system', subtype: 'api_retry', attempt, max_retries: 10, retry_delay_ms: 500, error_status: 529, error: 'overloaded', session_id: SESSION })
+    cli.last.emit({ type: 'system', subtype: 'init', session_id: SESSION }, retry(1))
+    await vi.waitFor(() => expect(seen.map((frame) => `${frame.subtype}${frame.attempt ?? ''}`)).toEqual(['init', 'api_retry1']))
+    // A background agent is listed: a retry that names no agent may be its own, so the turn is not told.
+    cli.last.emit(roster({ id: 'agent-1', type: 'local_agent' }), retry(2))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(seen.filter((frame) => frame.subtype === 'api_retry').map((frame) => frame.attempt)).toEqual([1])
+    session.close()
+  })
+
   it('a steered run whose result already arrived is not steered: the text stays with the orchestrator', async () => {
     const hooks = { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() }
     const session = new LiveSession('thread', hooks)

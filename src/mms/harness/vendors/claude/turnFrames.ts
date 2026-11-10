@@ -22,6 +22,13 @@ export interface TurnFrameSink {
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: ProviderToolEvent) => void
+  /** What Claude is doing while it shows nothing: `waiting`, its first frame of the turn came; `reasoning`, a thinking block began. */
+  onStatus?: (status: 'waiting' | 'reasoning') => void
+  /**
+   * Claude Code tries a failed request of this turn again (`api_retry`). `noResponse`: the API sent no headers in
+   * time; that retry has its own small cap, so `maxAttempts` is left out.
+   */
+  onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
 }
 
 /**
@@ -52,6 +59,8 @@ export class TurnFrames {
   segmentStart = 0
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
   readonly rateLimits = new RejectedWindows()
+  /** A frame of this turn arrived. */
+  private heard = false
 
   constructor(
     private readonly sink: TurnFrameSink,
@@ -75,6 +84,36 @@ export class TurnFrames {
     for (const run of this.nextMessage.splice(0)) run()
   }
 
+  /** Claude has the turn's prompt and has sent nothing back yet: said once, at the turn's first frame or when the prompt reached a ready process. */
+  waiting(): void {
+    if (this.heard) return
+    this.heard = true
+    this.sink.onStatus?.('waiting')
+  }
+
+  /**
+   * A retry frame names no agent. While a subagent of this turn runs it may be the subagent's request, so it is not
+   * shown as the turn's: the subagent's row already says it works.
+   */
+  private observeRetry(frame: Record<string, unknown>): void {
+    if (frame.parent_tool_use_id != null || this.subagentOpen()) return
+    const noResponse = frame.no_response !== undefined && frame.no_response !== null
+    this.sink.onRetry?.({
+      attempt: typeof frame.attempt === 'number' ? frame.attempt : 1,
+      ...(typeof frame.max_retries === 'number' && !noResponse ? { maxAttempts: frame.max_retries } : {}),
+      ...(typeof frame.retry_delay_ms === 'number' ? { delayMs: frame.retry_delay_ms } : {}),
+      ...(noResponse ? { noResponse: true } : {})
+    })
+  }
+
+  /** A subagent call of this turn is open, or a call a subagent made. */
+  private subagentOpen(): boolean {
+    for (const [callId, name] of this.tools) {
+      if (this.parents.get(callId) || this.contexts.get(callId)?.kind === 'subagent' || name === 'Agent' || name === 'Task') return true
+    }
+    return false
+  }
+
   /** A steer cut the turn here: what follows is a new paragraph. */
   breakParagraph(): void {
     if (this.text) this.text += '\n\n'
@@ -92,6 +131,8 @@ export class TurnFrames {
     this.sessionId = message.session_id || this.sessionId
     // The message being written ended (its result, an aborted one after a steer's cut) or the next one starts.
     if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || message.type === 'result') this.flushNextMessage()
+    this.waiting()
+    if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
     if (message.type === 'stream_event') {
       const event = message.event
       if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {
@@ -106,8 +147,11 @@ export class TurnFrames {
         }
       }
       // Each thinking block is a paragraph of its own, and so is each text block (a note before a tool call, then the answer).
-      if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && !message.parent_tool_use_id && this.thinking)
-        this.thinking += '\n\n'
+      if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && !message.parent_tool_use_id) {
+        if (this.thinking) this.thinking += '\n\n'
+        // Its text may come late, or not at all: the model is reasoning meanwhile.
+        this.sink.onStatus?.('reasoning')
+      }
       if (event.type === 'content_block_start' && event.content_block.type === 'text' && !message.parent_tool_use_id && /\S$/.test(this.text))
         this.text += '\n\n'
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {

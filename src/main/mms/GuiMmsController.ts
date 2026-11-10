@@ -96,6 +96,8 @@ export interface ThreadSnapshotResult {
   pendingQuestions?: Array<{ requestId: string; questions: unknown }>
   activity?: string
   activeTurn: { active: boolean; running: boolean }
+  /** The service's state of the thread's turn (absent from an older service). */
+  turnState?: unknown
   connectionFailed: boolean
   /** A long transcript of another computer arrives as its newest part: the older messages are loaded from `before`. */
   earlier?: { before: string; count: number }

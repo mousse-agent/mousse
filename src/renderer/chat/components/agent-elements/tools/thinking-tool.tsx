@@ -56,22 +56,6 @@ export function ThinkingCollapsed({
   );
 }
 
-/**
- * The row a turn shows from the moment it is sent until its first output: the
- * same row a thought takes, so the thought (or a tool call) that follows
- * replaces it in place.
- */
-export function LiveThinkingRow() {
-  return (
-    <ToolRowBase
-      icon={<ThinkingIcon size={18} active />}
-      shimmerLabel="Thinking"
-      completeLabel="Thinking"
-      isAnimating
-    />
-  );
-}
-
 export type ThinkingToolProps = {
   part?: any;
   step?: Extract<TimelineStep, { type: "tool-call" }>;

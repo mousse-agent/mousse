@@ -352,6 +352,11 @@ class PiTurn {
   retryExhaustedError: AppError | undefined
   /** Pi's retry limit, as its last `auto_retry_start` stated it. */
   maxRetries = 0
+  /**
+   * The next model request answers the person (the turn's prompt, or a steer just sent): it shows as waiting for the
+   * model. A request between tool calls does not; the turn reads as thinking there, as with every runtime.
+   */
+  awaitingModel = true
   /** The text of each assistant message that ended the turn's steps, in order (the reply joins them). */
   readonly texts: string[] = []
   /** The Stop in progress: a second caller (thread Stop after a turn Stop) waits for the same one. */
@@ -420,11 +425,13 @@ class PiTurn {
     return [...this.texts, current].filter((text) => text.trim()).join('\n\n')
   }
 
+  /**
+   * The model produced output. Said on every output, as other runtimes do: it ends a step the line under Working
+   * shows (a retry's wait, say) when the retried reply streams into the same row.
+   */
   progress(): void {
-    if (!this.progressed) {
-      this.progressed = true
-      this.sink.progress()
-    }
+    this.progressed = true
+    this.sink.progress()
     this.ctl.heartbeat()
   }
 }
@@ -1619,6 +1626,7 @@ export class PiRpcEngine implements ProviderAdapter {
     try {
       await this.send(owner, { type: 'steer', message: text })
       turn.steers.push({ text })
+      turn.awaitingModel = true
       return 'delivered'
     } catch {
       return 'not_active'
@@ -1907,6 +1915,10 @@ export class PiRpcEngine implements ProviderAdapter {
     switch (event.type) {
       case 'turn_start':
         if (turn.phase !== 'stopping') turn.phase = 'running'
+        if (turn.awaitingModel) {
+          turn.awaitingModel = false
+          sink.status?.('waiting')
+        }
         return
       case 'turn_end': {
         // Steers Mousse holds join the live turn at its next step.
@@ -1914,6 +1926,7 @@ export class PiRpcEngine implements ProviderAdapter {
         const entry = turn.ctl.drainSteerEntry?.()
         if (entry) {
           turn.steers.push(entry)
+          turn.awaitingModel = true
           this.send(thread, { type: 'steer', message: entry.text }).catch(() => {
             const index = turn.steers.indexOf(entry)
             if (index >= 0) turn.steers.splice(index, 1)
@@ -2030,7 +2043,10 @@ export class PiRpcEngine implements ProviderAdapter {
         turn.pendingError = undefined
         turn.maxRetries = Number(event.maxAttempts) || turn.maxRetries
         if (turn.phase !== 'stopping') turn.phase = 'retrying'
-        sink.retry(Number(event.attempt) || 1)
+        sink.retry(Number(event.attempt) || 1, {
+          ...(turn.maxRetries ? { maxAttempts: turn.maxRetries } : {}),
+          ...(Number.isFinite(Number(event.delayMs)) && event.delayMs !== undefined ? { delayMs: Number(event.delayMs) } : {})
+        })
         return
       case 'auto_retry_end': {
         if (event.success === true || turn.phase === 'stopping' || event.finalError === 'Retry cancelled') return

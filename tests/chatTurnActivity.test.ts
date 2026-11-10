@@ -27,25 +27,26 @@ const render = (messages: UIMessage[], status: 'ready' | 'submitted' | 'streamin
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
 
 describe('a turn right after sending', () => {
-  it.each(['submitted', 'streaming'] as const)('shows a live Thinking row under the timer while %s', (status) => {
+  it.each(['submitted', 'streaming'] as const)('shows a live line under the timer while %s', (status) => {
     const html = render([user], status)
     const working = html.indexOf('Working · ')
-    const thinking = html.indexOf('Thinking')
+    const starting = html.indexOf('Starting…')
     expect(working).toBeGreaterThan(-1)
-    expect(thinking).toBeGreaterThan(working)
-    // The row sits where the answer's first row will, so the handover does not move it.
-    expect(html).toMatch(/class="turn-work"[\s\S]*class="turn-answer[^"]*"[\s\S]*Thinking/)
+    expect(starting).toBeGreaterThan(working)
+    // The line sits where the answer's first row will, so the handover does not move it.
+    expect(html).toMatch(/class="turn-work"[\s\S]*class="turn-answer[^"]*"[\s\S]*data-turn-progress="starting"/)
   })
 
-  it('shows no live row once the turn settled', () => {
-    expect(render([user], 'ready')).not.toContain('Thinking')
+  it('shows no live line once the turn settled', () => {
+    const html = render([user], 'ready')
+    expect(html).not.toContain('data-turn-progress')
+    expect(html).not.toContain('Starting…')
   })
 
-  it('streams the thought into the row in place of the placeholder', () => {
+  it('streams the thought in its own row, with the live line under it', () => {
     const html = render([user, thought('t1', 'Looking for the start script', 'input-available')], 'streaming')
     expect(text(html)).toContain('Thinking Looking for the start script')
-    // One row: the placeholder gave way to the thought.
-    expect(html.match(/Thinking/g)).toHaveLength(1)
+    expect(text(html)).toMatch(/Looking for the start script .*Thinking…/)
   })
 })
 
@@ -97,13 +98,14 @@ describe('a finished turn', () => {
     expect(rows(html)).toEqual(['Nothing else to check', 'The app starts on port 3000.'])
   })
 
-  it('keeps the order things happened in while the turn still runs', () => {
+  it('keeps the order things happened in while the turn still runs, the live line last', () => {
     const html = render(turn, 'streaming')
     expect(rows(html)).toEqual([
       'Checking the start script first.',
       'The script is fine',
       'The app starts on port 3000.',
-      'Nothing else to check'
+      'Nothing else to check',
+      'Thinking…'
     ])
   })
 })

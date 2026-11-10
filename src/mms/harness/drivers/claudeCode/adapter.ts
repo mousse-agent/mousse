@@ -230,6 +230,14 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
         progress()
         streams.thinking.update(text)
       },
+      onStatus: (status) => {
+        ctl.heartbeat()
+        sink.status?.(status)
+      },
+      onRetry: ({ attempt, ...detail }) => {
+        ctl.heartbeat()
+        sink.retry(attempt, detail)
+      },
       onTool: (event) => {
         progress()
         // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
