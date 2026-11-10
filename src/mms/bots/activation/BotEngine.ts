@@ -194,6 +194,12 @@ export const BOT_ASK_REFUSED_TEXT = 'The owner has not allowed this yet. You ask
 export const BOT_ASK_ENOUGH_TEXT = 'You have asked the owner enough for now. Carry on without it and say in your report what you skipped.'
 /** What `escalate` for a folder answers a bot that may already use files on this computer. */
 export const BOT_FILES_HELD_TEXT = 'You can already use files anywhere on this computer, except Mousse\'s own data. Go ahead without asking.'
+/** What an ask in a new bot's first message is answered with: nothing has been asked of it yet. */
+export const BOT_ASK_NOT_YET_TEXT = "Don't ask for permissions yet: the owner hasn't asked for anything that needs one. Your files folder, memory and the web already work. Ask when they want something that needs more."
+
+/** What an ask for an MCP tool is answered with: no bot can hold one yet, so no card is made. */
+export const BOT_MCP_UNAVAILABLE_TEXT = 'MCP tools are not available to bots yet, so there is nothing to ask for. Carry on without it, and tell the owner plainly if that matters.'
+
 /** What a run's ask for a skill or MCP tool that is not here is refused with. */
 export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
 /** New asks one run may write; later ones are refused without asking. */
@@ -1658,7 +1664,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       escalate: (request) => {
         this.progress(row.id)
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, an MCP tool, a limit, or to export your memory.`
+        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, a limit, or to export your memory.`
+        // No bot can hold an MCP tool yet (`compileBotThread` refuses one), so a card for it could never be allowed.
+        if ('mcp' in (request.permission as object)) return BOT_MCP_UNAVAILABLE_TEXT
+        // A new bot's first message answers no request: it asks once the owner wants something that needs more.
+        if (row.idempotencyKey.startsWith('create:')) return BOT_ASK_NOT_YET_TEXT
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
         if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
         // An ask for any browser tool is the one "use the browser" ask.
@@ -2390,8 +2400,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return true
     }
     const answers = this.store.pendingAnswers(activationId)
-    await this.continueWith(activationId, ['waiting_grant'], { answers, ownerText: text })
-    return true
+    // Only a continuation that was sent carries the message. One that paused, ended blocked (its grant changed while
+    // it waited) or met a time wall did not: the caller then gives the message a turn of its own.
+    return (await this.continueWith(activationId, ['waiting_grant'], { answers, ownerText: text })) === 'sent'
   }
 
   /**
@@ -4123,7 +4134,8 @@ function spendLimits(manifest: BotManifest): ActivationLimits {
 /** Whether `authority` already holds the tool, skill or MCP tool `asked` names (a folder or a limit never counts). */
 function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skills' | 'mcp'>, asked: BotAskRequest): boolean {
   if ('tool' in asked) {
-    if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool)
+    // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
+    if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
     // The browser is held as its tools.
     return asked.tool === BOT_BROWSER_PERMISSION ? authority.appTools.has('browser_open') : authority.appTools.has(asked.tool)
   }

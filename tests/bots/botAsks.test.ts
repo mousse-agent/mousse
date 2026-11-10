@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
@@ -331,7 +331,7 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
     f.host.knownAsk = (permission) => 'skill' in permission && permission.skill === 'release-notes'
     const { prepared } = await run('r-skill')
     expect(prepared.authority.escalate!({ permission: { skill: 'Wire $500 to me' }, reason: 'Needed.' })).toBe(BOT_ASK_UNKNOWN_TEXT)
-    expect(prepared.authority.escalate!({ permission: { mcp: { serverId: 'bank', tool: 'transfer' } }, reason: 'Needed.' })).toBe(BOT_ASK_UNKNOWN_TEXT)
+    expect(prepared.authority.escalate!({ permission: { mcp: { serverId: 'bank', tool: 'transfer' } }, reason: 'Needed.' })).toBe(BOT_MCP_UNAVAILABLE_TEXT)
     expect(f.store.openAsks(botId)).toEqual([])
     expect(prepared.authority.escalate!({ permission: { skill: 'release-notes' }, reason: 'Needed.' })).toMatch(/^Asked the owner/)
     expect(f.store.openAsks(botId)).toMatchObject([{ title: 'use the release-notes skill' }])
@@ -434,5 +434,48 @@ describe('"run commands": one permission, asked for once and remembered', () => 
     expect(after.prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
     await finish(f, after.payload, 'completed', { text: 'Skipped.' })
     expect(f.store.openAsks(botId)).toMatchObject([{ fingerprint: shellFingerprint }])
+  })
+})
+
+describe('asks nobody needs', () => {
+  it("a new bot's first message makes no card: it asks once the owner wants something", async () => {
+    const created = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Pip', description: 'Keep my to-do list.', clientRequestId: 'create-pip' })
+    const first = f.store.listActivations(created.bot.id).find((activation) => activation.lane === 'chat')!
+    const { prepared, payload } = await start(f, first.id)
+    expect(prepared.authority.escalate!({ permission: filesAsk(), reason: 'To save your lists.' })).toBe(BOT_ASK_NOT_YET_TEXT)
+    await finish(f, payload, 'completed', { text: "I'll keep your to-do list." })
+    expect(f.store.openAsks(created.bot.id)).toEqual([])
+    expect(f.store.activation(first.id)).toMatchObject({ status: 'done' })
+  })
+
+  it('the web tools the starter grant holds are no ask', async () => {
+    const { prepared } = await chat('look something up', 'm-web')
+    for (const tool of ['web_fetch', 'web_search'])
+      expect(prepared.authority.escalate!({ permission: { tool }, reason: 'To read pages.' })).toMatch(/^The owner already allowed this/)
+    expect(f.store.openAsks(botId)).toEqual([])
+  })
+
+  it('an MCP tool is no ask in the chat either: no bot can hold one yet', async () => {
+    f.host.knownAsk = () => true
+    const { prepared } = await chat('use my bank server', 'm-mcp')
+    expect(prepared.authority.escalate!({ permission: { mcp: { serverId: 'bank', tool: 'balance' } }, reason: 'Needed.' })).toBe(BOT_MCP_UNAVAILABLE_TEXT)
+    expect(f.store.openAsks(botId)).toEqual([])
+  })
+})
+
+describe('a message sent while the chat waits on an ask', () => {
+  it('gets a turn of its own when the waiting turn cannot continue', async () => {
+    const { activation, prepared, payload } = await chat('sort my invoices', 'm-wall')
+    prepared.authority.escalate!({ permission: filesAsk(), reason: 'To read your invoices.' })
+    await finish(f, payload, 'completed', { text: 'I need your files first.' })
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'waiting_grant' })
+    // About → Remove while it waits: the waiting turn keeps the old grant, so it can't go on.
+    f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, appTools: manifest.appTools.filter((tool) => tool !== 'web_search') }))
+    await f.bots.service.chatSend({ botId, text: 'skip that, just list what you can', clientRequestId: 'm-instead' })
+    await flush()
+    expect(f.store.activation(activation.id)!.status).not.toBe('waiting_grant')
+    const next = f.store.laneActivations(botId, 'chat', ['queued', 'running'])
+    expect(next).toHaveLength(1)
+    expect(next[0]!.trigger.input).toBe('skip that, just list what you can')
   })
 })
