@@ -17,7 +17,7 @@ const subagentOf = (parentThreadId: string, rootThreadId = parentThreadId): Thre
 
 type Patch = Partial<ReturnType<typeof useAppStore.getState>>
 const initial = useAppStore.getInitialState()
-const keys = ['threads', 'activeThreadId', 'threadActivity', 'subagentsByParent'] as const
+const keys = ['threads', 'activeThreadId', 'threadActivity', 'subagentsByParent', 'threadsSidebarView'] as const
 const original = Object.fromEntries(keys.map((key) => [key, initial[key]])) as Patch
 
 /** Server rendering reads the store's initial state, so patch both it and the live state. */
@@ -71,8 +71,11 @@ describe('SubagentParentBar', () => {
 })
 
 describe('ThreadsSidebar with subagents', () => {
-  const render = () => renderToStaticMarkup(createElement(ThreadsSidebar))
-  // The Threads view lists every shown thread as a card; the same threads also sit in the recent list.
+  // The Threads view lists every shown thread as a card (its cards render only while it shows).
+  const render = () => {
+    setStore({ threadsSidebarView: 'threads' })
+    return renderToStaticMarkup(createElement(ThreadsSidebar))
+  }
   const cardTitles = (html: string) => [...html.matchAll(/threads-sidebar-card-title">([^<]*)</g)].map((match) => match[1])
 
   it('lists threads people started and leaves subagents under their parent, keeping an orphan', () => {
