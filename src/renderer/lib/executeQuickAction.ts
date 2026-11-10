@@ -68,7 +68,17 @@ async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId
   const store = requireActiveProfile(profileId)
   const startId = store.activeThreadId
   const thread = store.threads.find((entry) => entry.id === startId)
-  if (!isNewEmptyThread(startId, thread, store.messages.length)) return startId ? { threadId: startId } : null
+  if (!isNewEmptyThread(startId, thread, store.messages.length)) {
+    if (!startId) return null
+    // A thread made for its first message and still without one is bound like a new chat's first send
+    // (`Thread.firstSendPending`), whichever route reaches it.
+    if (bind && thread?.firstSendPending) {
+      const defaultMode = normalizePermissionMode((await window.mousse.settings.get()).permissions?.defaultMode)
+      const expect = expectationOf(thread, defaultMode)
+      return { threadId: startId, ...(expect ? { expect } : {}) }
+    }
+    return { threadId: startId }
+  }
   // One preparation at a time: a composer send or another action already owns this thread.
   if (isWorkspacePending(store)) throw new WorkspaceBusyError()
   let targetId = startId

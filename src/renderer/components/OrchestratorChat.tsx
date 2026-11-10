@@ -1219,6 +1219,7 @@ export function OrchestratorChat() {
 
     // What the first turn of a new chat is bound to (`expect`): the daemon runs nothing on other settings.
     let bound: SendExpectation | undefined
+    let autoModelRevision: number | undefined
     if (newChat) {
       // What the composer shows at this click, read before anything below awaits.
       const wanted = selectedProviderId && selectedModelId
@@ -1302,6 +1303,23 @@ export function OrchestratorChat() {
       const updated = await window.mousse.threads.setModel(activeThreadId, autoModel)
       if (!stillVisible()) return
       if (updated) useAppStore.getState().upsertThread(updated)
+      if (typeof updated?.settingsRevision === 'number') autoModelRevision = updated.settingsRevision
+    }
+    // A thread made for its first message is listed at once, so after a failed selection, a reload or another route in
+    // it is no longer a "new chat" here; its first message is bound all the same (`Thread.firstSendPending`). Bound to
+    // what this composer showed at the click (render-time values, never the store after an await): a change made in
+    // another window since is refused by the service, and the composer then shows it.
+    // The service clears the flag once the first message is saved, so it, not the transcript this window holds, decides.
+    if (!bound && !newChat && activeThreadId && activeThread?.firstSendPending) {
+      const shownModel = autoModel ?? (selectedProviderId && selectedModelId
+        ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
+        : undefined)
+      const revision = autoModelRevision ?? activeThread.settingsRevision
+      bound = {
+        permissionMode: shownPermissionMode,
+        ...(shownModel ? { model: shownModel } : {}),
+        ...(typeof revision === 'number' ? { settingsRevision: revision } : {})
+      }
     }
 
     // Clear only after we accept the send/queue path (control commands already cleared above).

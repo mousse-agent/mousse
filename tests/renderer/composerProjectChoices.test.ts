@@ -189,8 +189,10 @@ function daemonForSend(made: Thread, options: {
     // Made with the model and permission mode the composer names, as the daemon does.
     create: vi.fn(async (...args: unknown[]) => {
       calls.push(['create', ...args])
-      const opts = (args[2] ?? {}) as { model?: Thread['modelOverride']; permissionMode?: Thread['permissionMode'] }
+      const opts = (args[2] ?? {}) as { model?: Thread['modelOverride']; permissionMode?: Thread['permissionMode']; started?: boolean }
       current = { ...current, ...(opts.model ? { modelOverride: opts.model } : {}), ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}) }
+      // Made for a send: listed at once, and its first message must be bound (`Thread.firstSendPending`).
+      if (opts.started) current = { ...current, startedAt: '2026-11-10T00:00:01Z', firstSendPending: true }
       return current
     }),
     get: vi.fn(async () => current),
@@ -232,7 +234,13 @@ function daemonForSend(made: Thread, options: {
         calls.push(['refused', 'thread_settings_changed'])
         return { requestAcknowledged: false, error: { code: 'thread_settings_changed', message: 'changed' } }
       }
+      if (!bound && current.firstSendPending) {
+        calls.push(['refused', 'first_send_unbound'])
+        return { requestAcknowledged: false, error: { code: 'first_send_unbound', message: 'Send it again.' } }
+      }
       calls.push(['send', runsIn, current.modelOverride?.model])
+      const { firstSendPending: _sent, ...rest } = current
+      current = rest
       return { message: '', actions: [] }
     }),
     isTurnActive: vi.fn(async () => false)
@@ -372,6 +380,21 @@ describe('a first send that fails after its thread was made (review reproduction
     await send('Fix the parser')
     expect(daemon.calls.filter((call) => call[0] === 'create')).toHaveLength(1)
     expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+  })
+
+  it('the retry of a chat that is listed already (its selection failed) binds its first message, so Full set elsewhere runs nothing', async () => {
+    const daemon = await askChatUnderFullDefault({ select: 1 })
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toBeUndefined()
+    // The chat is listed now (made for a send), so it is no longer a "new chat" here.
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    expect(useAppStore.getState().threads.find((entry) => entry.id === 'made')?.firstSendPending).toBe(true)
+    // Another window switches it to Full access before this retry is admitted; this window has not heard yet.
+    daemon.writeElsewhere({ permissionMode: 'full' })
+    await send('Fix the parser')
+    expect(daemon.calls.some((call) => call[0] === 'refused' && call[1] === 'thread_settings_changed')).toBe(true)
+    expect(daemon.sentWith()).toBeUndefined()
+    expect(daemon.calls.some((call) => call[0] === 'refused' && call[1] === 'first_send_unbound')).toBe(false)
   })
 
   it('a thread made here needs no call after it: it is made in Ask, and the send runs in Ask', async () => {

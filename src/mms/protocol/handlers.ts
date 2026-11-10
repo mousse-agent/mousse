@@ -2052,7 +2052,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // follows the profile's defaults). Any other creator keeps the values it passes, or the profile's defaults.
       const askedForRemembered = asOptionalBoolean(p.rememberedChoices, 'rememberedChoices') === true
       const remembered = rememberedChoiceFor(ctx.connection, projectId ? ctx.mms.projects.getProject(projectId) : undefined, askedForRemembered, (model) => usableProjectModel(ctx, model, projectId!))
-      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled: worktreeEnabled ?? remembered.worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(started ? { started } : {}), ...(worktreeStart ? { worktreeStart } : {}) })
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled: worktreeEnabled ?? remembered.worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(started ? { started, firstSendPending: true } : {}), ...(worktreeStart ? { worktreeStart } : {}) })
       if (expiresAt) ctx.mms.threadExpiry?.reschedule()
       // A remembered model that can no longer be used falls back to the profile's default, unless that one can't be used
       // either: then the thread has no model of its own, and the composer offers the first ready one.
@@ -2512,6 +2512,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const sentFrom = sentFromOf(ctx)
       // A send bound to what the composer showed: compared here, and again inside the engine's admission. The turn is then
       // pinned to the compared model and capped at the compared mode, so a later change can only narrow it.
+      // A thread a window made for its first message runs that message only bound to what the window showed. A window
+      // always binds it; one that did not (an older window, a lost update) is refused, so it reads the thread again.
+      if (p.expect === undefined && ctx.connection?.clientType === 'gui' && ctx.mms.threads.getThread(threadId)?.firstSendPending)
+        throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,

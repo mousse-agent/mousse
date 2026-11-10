@@ -82,6 +82,8 @@ interface ThreadMeta {
   permissionMode?: PermissionMode
   /** `Thread.settingsRevision`. */
   settingsRevision?: number
+  /** `Thread.firstSendPending`. */
+  firstSendPending?: true
   lineage?: ThreadLineage
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
@@ -673,6 +675,8 @@ export class ThreadDataStore extends EventEmitter {
        * empty draft. For a thread something other than a person's first message creates.
        */
       started?: boolean
+      /** See `Thread.firstSendPending`: the thread is made for a message a window is about to send. */
+      firstSendPending?: boolean
       worktreeEnabled?: boolean
       lineage?: ThreadLineage
       modelOverride?: ModelOverride
@@ -708,6 +712,7 @@ export class ThreadDataStore extends EventEmitter {
       order: this.nextThreadOrder(projectId, projectPath)
     }
     if (opts?.started === true) meta.startedAt = now
+    if (opts?.firstSendPending === true) meta.firstSendPending = true
     // `false` is kept: a thread that chose its project's folder never gets a worktree (`WorkspaceResolver`).
     if (typeof opts?.worktreeEnabled === 'boolean') meta.worktreeEnabled = opts.worktreeEnabled
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
@@ -1438,10 +1443,13 @@ export class ThreadDataStore extends EventEmitter {
       const meta = readThreadMeta<ThreadMeta>(metaPath)
       const now = new Date().toISOString()
       const starting = !meta.startedAt && hasMessages
+      // Its first message is saved: a later send is no longer this thread's first (`Thread.firstSendPending`).
+      const firstSent = meta.firstSendPending === true && hasMessages
       meta.updatedAt = now
       if (starting) meta.startedAt = now
+      if (firstSent) delete meta.firstSendPending
       const lastWrite = this.metaTouchedAt.get(threadDir) ?? 0
-      if (options.throttle && !starting && Date.now() - lastWrite < META_TOUCH_INTERVAL_MS) {
+      if (options.throttle && !starting && !firstSent && Date.now() - lastWrite < META_TOUCH_INTERVAL_MS) {
         this.pendingMetaTouch.set(threadDir, now)
         this.patchListCache(meta)
         this.emitTouched(meta)
@@ -1453,8 +1461,10 @@ export class ThreadDataStore extends EventEmitter {
       if (!meta.projectId) this.updateStandaloneIndexEntry(meta)
       // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
       this.patchListCache(meta)
-      // A thread's first message lists it; a later save changes only its time, which windows hear in a small push.
-      if (starting) this.emit('list-changed', { id: meta.id })
+      // A thread's first message lists it, and ends its first-send mark (`Thread.firstSendPending`), which windows read
+      // from the list; a later save changes only its time, which windows hear in a small push.
+      if (firstSent) this.emit('updated', meta)
+      else if (starting) this.emit('list-changed', { id: meta.id })
       else this.emitTouched(meta)
     } catch {
       // Corrupt meta: do not overwrite with a stale reconstructed fallback.

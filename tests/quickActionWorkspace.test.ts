@@ -104,6 +104,21 @@ describe('send-in-current-chat on a new chat', () => {
     expect(useAppStore.getState().threads.find((entry) => entry.id === 't1')?.worktreeEnabled).toBe(true)
   })
 
+  it("binds the first message of a thread made for it and listed already, as after a failed selection or a reload", async () => {
+    const mousse = stubMousse()
+    // Listed (startedAt) because it was made for a send, but its first message never went out.
+    const listed = thread({ projectId: 'p', startedAt: '2026-01-01T00:00:01Z', firstSendPending: true, permissionMode: 'ask', settingsRevision: 3 })
+    useAppStore.setState({ activeThreadId: 't1', threads: [listed], messages: [] })
+
+    await executeQuickAction(action, 'default')
+
+    expect(mousse.create).not.toHaveBeenCalled()
+    expect(mousse.sendToThread).toHaveBeenCalledWith('t1', expect.objectContaining({
+      content: 'Review this',
+      expect: { permissionMode: 'ask', settingsRevision: 3 }
+    }))
+  })
+
   it('leaves a started thread alone', async () => {
     const mousse = stubMousse()
     useAppStore.setState({
