@@ -60,6 +60,27 @@ describe("an agent's browser tab", () => {
     expect(state.mainView).toBe('browser')
   })
 
+  it('is created by a hidden Browser panel as soon as the service says an agent asked, without its fast poll', async () => {
+    let pushed: (() => void) | undefined
+    ;(window as unknown as { mousse: Record<string, unknown> }).mousse.browser = { onAccessChanged: (listener: () => void) => { pushed = listener; return () => { pushed = undefined } } }
+    vi.useFakeTimers()
+    try {
+      await render(() => createElement(BrowserPanel, { active: false }))
+      expect(useAppStore.getState().browserTabs).toHaveLength(0)
+      access = { ...access, tabRequests: [{ requestId: 'request_1', threadId: 'thread_b' }] }
+      // A hidden panel does not poll fast: a second later nothing has been read again.
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      await settle()
+      expect(useAppStore.getState().browserTabs).toHaveLength(0)
+      expect(pushed).toBeTypeOf('function')
+      await act(async () => { pushed!() })
+      await settle()
+      expect(useAppStore.getState().browserTabs.map((tab) => tab.ownerThreadId)).toEqual(['thread_b'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("is created for a background thread without taking over the current view", async () => {
     access = { ...access, tabRequests: [{ requestId: 'request_1', threadId: 'thread_b' }] }
     await render(() => createElement(BrowserPanel))

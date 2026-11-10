@@ -206,6 +206,11 @@ export function bridgeProtocolEvent(
       broadcast('bots:changed', event.data ?? {})
       return true
     }
+    // The browser access state changed: the window's Browser panel reads it again.
+    case 'browser.access.changed': {
+      broadcast('browser:accessChanged', null)
+      return true
+    }
     case 'bots.message': {
       broadcast('bots:message', event.data)
       return true

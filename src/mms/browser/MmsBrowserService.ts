@@ -65,6 +65,8 @@ export interface MmsBrowserServiceOptions {
   commandRouter?: AttachedCommandDispatchPort
   createManagedBackend?: () => BrowserBackendPort
   admitManagedLaunch?: () => Promise<{ release(): void }>
+  /** Called when `accessStatus()` may read differently: the grant, a pending request or a tab an agent waits for. */
+  onAccessChanged?: () => void
 }
 
 function requireUuid(value: string, label: string): string {
@@ -121,6 +123,7 @@ export class MmsBrowserService {
   private readonly tabRequests = new Map<string, { requestId: string; waiters: number }>()
 
   constructor(private readonly options: MmsBrowserServiceOptions) {
+    this.access.onChange(() => options.onAccessChanged?.())
     this.artifacts = options.artifacts
     this.workerArtifactRoot = options.workerArtifactRoot
     this.attached = new AttachedBrowserConnectionBackend({
@@ -230,7 +233,10 @@ export class MmsBrowserService {
     if (this.selectedTarget(threadId)) return
     const request = this.tabRequests.get(threadId) ?? { requestId: randomUUID(), waiters: 0 }
     request.waiters++
+    const added = !this.tabRequests.has(threadId)
     this.tabRequests.set(threadId, request)
+    // A window opens the tab when it hears of the request, hidden or not.
+    if (added) this.options.onAccessChanged?.()
     const deadline = Date.now() + 30_000
     const grantSignal = this.access.signal
     try {
@@ -243,7 +249,10 @@ export class MmsBrowserService {
         await new Promise<void>((resolve) => setTimeout(resolve, 100))
       }
     } finally {
-      if (--request.waiters === 0) this.tabRequests.delete(threadId)
+      if (--request.waiters === 0) {
+        this.tabRequests.delete(threadId)
+        this.options.onAccessChanged?.()
+      }
     }
   }
 

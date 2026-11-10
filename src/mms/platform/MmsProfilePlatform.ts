@@ -57,6 +57,16 @@ export class MmsProfilePlatform {
   readonly browserArtifacts: BrowserArtifactService
   readonly workerArtifactRoot: string
   private browserAssembly?: MmsBrowserService
+  private readonly browserAccessListeners = new Set<() => void>()
+
+  /**
+   * Calls `listener` when the browser access state a window shows may have changed (`MmsBrowserService.accessStatus`).
+   * Listening does not build the browser service; it has nothing to report until something does.
+   */
+  onBrowserAccessChanged(listener: () => void): () => void {
+    this.browserAccessListeners.add(listener)
+    return () => { this.browserAccessListeners.delete(listener) }
+  }
   private commandRouter?: AttachedCommandDispatchPort
   private browserConfig?: MmsBrowserPlatformConfig
   private readonly models: SharedAgentModelLookup
@@ -220,7 +230,12 @@ export class MmsProfilePlatform {
       workerModulePath: this.browserConfig?.workerModulePath,
       admitManagedLaunch: this.browserConfig?.admitManagedLaunch,
       threadExists: (threadId) => Boolean(this.services.threads.getThread(threadId)),
-      commandRouter: this.commandRouter
+      commandRouter: this.commandRouter,
+      onAccessChanged: () => {
+        for (const listener of this.browserAccessListeners) {
+          try { listener() } catch { /* Notifications never change the access state. */ }
+        }
+      }
     })
     return this.browserAssembly
   }

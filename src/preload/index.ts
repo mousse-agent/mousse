@@ -679,6 +679,12 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, state: BrowserState) => cb(state)
       ipcRenderer.on('browser:state', handler)
       return () => ipcRenderer.removeListener('browser:state', handler)
+    },
+    /** The agents' browser access, a pending request or a tab an agent waits for changed (`browser.access.changed`). */
+    onAccessChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('browser:accessChanged', handler)
+      return () => ipcRenderer.removeListener('browser:accessChanged', handler)
     }
   },
   settings: {
