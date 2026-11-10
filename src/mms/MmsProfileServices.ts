@@ -1759,8 +1759,9 @@ export class MmsProfileServices {
     // A delete an older version cut short keeps the thread's work before recovery resumes it; only an expiry's goes on.
     const keeping = this.lifecycle.cleanup.keepWorkOfInterruptedDeletes()
     if (keeping.kept.length) console.warn('deletes cut short keep their threads’ worktrees and refs', { threads: keeping.kept })
-    if (keeping.failed.length) console.warn('deletes cut short could not be set to keep their work', { failed: keeping.failed })
-    await this.lifecycle.recoverAll()
+    // One that could not be set to keep the work is left pending, untouched, and never resumed as it began; the next start tries again.
+    if (keeping.failed.length) console.warn('deletes cut short could not be set to keep their work; left pending until the next start', { failed: keeping.failed })
+    await this.lifecycle.recoverAll(keeping.skip)
     // After the trash operations a crash left are finished: once, what was in the old trash comes back, archived.
     // Only then is a thread still in the trash a delete that was cut short, and it is finished.
     try {

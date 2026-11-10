@@ -319,23 +319,31 @@ export class ResourcePurgeService {
   /**
    * At start, before recovery resumes anything: every delete an older version began and a stop cut short (a purge
    * started, not by an expiry, and not yet keeping the work) keeps the thread's worktrees, branches, refs and snapshots
-   * now, as a delete does. Only an expiry's purge resumes as it began. Says which purges changed and which could not.
+   * now, as a delete does. Only an expiry's purge resumes as it began.
+   *
+   * `skip` names every such delete that could not be set to keep the work (its ledger could not be written, or another
+   * process holds it): recovery must not resume it this time, since it would resume as the older version planned and
+   * remove the work. It stays pending as it is, and the next start tries again.
    */
-  keepWorkOfInterruptedDeletes(): { kept: string[]; failed: Array<{ taskId: string; error: string }> } {
-    const kept: string[] = [], failed: Array<{ taskId: string; error: string }> = []
+  keepWorkOfInterruptedDeletes(): { kept: string[]; skip: Set<string>; failed: Array<{ taskId: string; error: string }> } {
+    const kept: string[] = [], skip = new Set<string>(), failed: Array<{ taskId: string; error: string }> = []
     for (const record of this.store.list()) {
       if (record.state !== 'purge-started' || !record.purge || record.purge.expired || record.purge.keptWork) continue
-      // Another process working on it now finishes it; it keeps its own ledger.
-      if (record.cleanupOwner && isOwnerLive(record.cleanupOwner)) continue
       try {
+        if (record.cleanupOwner && isOwnerLive(record.cleanupOwner)) throw new Error('Another process holds this delete')
         this.store.enableCleanupWriter()
         this.store.update(record.taskId, (current) => {
           if (current.state === 'purge-started' && current.purge && !current.purge.expired && !current.purge.keptWork) keepPendingWork(current)
         })
+        // Read back: only a ledger that now says so keeps the work.
+        if (this.store.require(record.taskId).purge?.keptWork !== true) throw new Error('The delete was not set to keep the work')
         kept.push(record.taskId)
-      } catch (error) { failed.push({ taskId: record.taskId, error: (error as Error).message }) }
+      } catch (error) {
+        skip.add(record.taskId)
+        failed.push({ taskId: record.taskId, error: (error as Error).message })
+      }
     }
-    return { kept, failed }
+    return { kept, skip, failed }
   }
   /** `taskId` and the threads it owns; one trashed on its own keeps its own choice, and one deleted for good is gone. */
   private owned(taskId: string): TaskLifecycleRecord[] {

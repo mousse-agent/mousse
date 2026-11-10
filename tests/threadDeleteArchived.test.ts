@@ -11,6 +11,7 @@ import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { ensureSnapshotWorkspaceAsync, threadStorePath } from '../src/mms/workspace/SnapshotWorkspace'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { actionOptions } from './fixtures/gitFoundation'
+import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 
 /** Puts a file only this thread has in its scratch folder: unpublished work a purge may discard only with consent. */
 function soleCopy(services: MmsProfileServices, threadId: string): string {
@@ -210,6 +211,60 @@ describe('threads.delete', () => {
       expect(git(worktree, ['branch', '--show-current'])).toBe(branch)
       expect(refs()).toBe(before)
     } finally { await restarted?.stop(); await f.close() }
+  })
+
+  it('leaves a half-done older delete pending and untouched when it cannot be set to keep the work, and keeps the work at a later start', async () => {
+    const f = await lifecycleHarness()
+    let restarted: MousseMainService | undefined
+    try {
+      const thread = f.services.threads.createThread('Cut short, its ledger not writable at first')
+      const { worktree, branch, refs } = worktreeWithChanges(f.services, f.home, f.root, thread.id)
+      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await f.services.trashThread(thread.id)
+      const preview = await f.services.lifecycle.cleanup.preview(thread.id)
+      expect(preview.items.some((item) => item.kind === 'worktree')).toBe(true)
+      const store = f.services.threads.lifecycleStore
+      store.enableCleanupWriter()
+      store.update(thread.id, (current) => {
+        current.state = 'purge-started'; current.generation++
+        current.purge = { ...preview, operationId: 'older-purge', startedAt: new Date().toISOString(), discardAuthorized: true }
+      })
+      const ledger = () => JSON.stringify(store.require(thread.id).purge)
+      const pending = ledger()
+      const before = refs()
+      const expectWorkThere = () => {
+        expect(readFileSync(join(worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')
+        expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+        expect(git(worktree, ['branch', '--show-current'])).toBe(branch)
+        expect(refs()).toBe(before)
+      }
+      await f.main.stop()
+
+      // First start: the write that would set it to keep the work fails once (a file another program holds, say).
+      const update = ResourceLifecycleStore.prototype.update
+      let failures = 0
+      const spy = vi.spyOn(ResourceLifecycleStore.prototype, 'update').mockImplementation(function (this: ResourceLifecycleStore, taskId: string, ...rest: unknown[]) {
+        if (taskId === thread.id && failures === 0) { failures++; throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }) }
+        return (update as (...args: unknown[]) => unknown).call(this, taskId, ...rest)
+      } as typeof update)
+      restarted = await MousseMainService.create({ homeDir: f.home, repoRoot: f.root, requireOwnership: false, headless: true })
+      let services = await restarted.getProfileServices(f.alice.id)
+      spy.mockRestore()
+      expect(failures).toBe(1)
+      // Not resumed: still pending, its ledger exactly as it was, and the work all there.
+      expect(services.threads.lifecycleStore.require(thread.id).state).toBe('purge-started')
+      expect(JSON.stringify(services.threads.lifecycleStore.require(thread.id).purge)).toBe(pending)
+      expectWorkThere()
+      await restarted.stop(); restarted = undefined
+
+      // A later start writes it, then finishes the delete keeping the work.
+      restarted = await MousseMainService.create({ homeDir: f.home, repoRoot: f.root, requireOwnership: false, headless: true })
+      services = await restarted.getProfileServices(f.alice.id)
+      const record = services.threads.lifecycleStore.require(thread.id)
+      expect(record.state).toBe('purged')
+      expect(record.purge?.keptWork).toBe(true)
+      expectWorkThere()
+    } finally { vi.restoreAllMocks(); await restarted?.stop(); await f.close() }
   })
 
   it('discards unpublished work only for the app; anyone else is refused and the thread goes back to Archived', async () => {

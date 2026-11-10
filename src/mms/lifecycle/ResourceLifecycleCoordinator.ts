@@ -69,9 +69,11 @@ export class ResourceLifecycleCoordinator {
     if (!operation || ['completed', 'rejected'].includes(operation.phase)) return record
     return this.run(operation.kind, { taskId, operationId: operation.id, expectedGeneration: operation.expectedGeneration })
   }
-  async recoverAll(): Promise<Array<{ taskId: string; record?: TaskLifecycleRecord; error?: string }>> {
+  /** `skip`: tasks left exactly as they are this time (a delete that could not be set to keep the work). */
+  async recoverAll(skip: ReadonlySet<string> = new Set()): Promise<Array<{ taskId: string; record?: TaskLifecycleRecord; error?: string }>> {
     const results: Array<{ taskId: string; record?: TaskLifecycleRecord; error?: string }> = []
     for (const record of this.store.list()) {
+      if (skip.has(record.taskId)) { results.push({ taskId: record.taskId, record, error: 'Left pending until the next start' }); continue }
       try { results.push({ taskId: record.taskId, record: await this.recover(record.taskId) }) }
       catch (error) { results.push({ taskId: record.taskId, error: (error as Error).message }) }
     }
