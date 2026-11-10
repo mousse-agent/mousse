@@ -1,6 +1,7 @@
 /**
  * Reloading the window by hand, for when part of the app failed to load and Retry cannot repair it (a chunk it
  * imports failed, and Chromium keeps that failure until the page reloads). Never automatic: the person chooses it.
+ * It never discards edits and never silences the editors' own unload checks.
  */
 
 const AUTOSAVE_FLUSH_DEADLINE_MS = 5_000
@@ -19,39 +20,25 @@ export function registerAutosaveFlush(flush: () => Promise<unknown>): () => void
  */
 export function hasUnsavedEdits(): boolean {
   const probe = new Event('beforeunload', { cancelable: true })
-  probes.add(probe)
   window.dispatchEvent(probe)
   return probe.defaultPrevented
 }
-const probes = new WeakSet<Event>()
 
-/** How long a confirmed reload's unload may skip the editors' checks; past it the window did not reload. */
-const UNLOAD_BYPASS_MS = 5_000
+const settleWithin = (work: Promise<unknown>, ms: number) => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([work.catch(() => undefined), new Promise((done) => { timer = setTimeout(done, ms) })])
+    .finally(() => clearTimeout(timer))
+}
 
-const settleWithin = (work: Promise<unknown>, ms: number) =>
-  Promise.race([work.catch(() => undefined), new Promise((done) => setTimeout(done, ms))])
+export type ReloadOutcome = 'reloaded' | 'unsaved'
 
 /**
- * Saves what autosave is holding, asks before discarding any edits that are still unsaved, then reloads. Resolves
- * false when the person keeps the window as it is.
+ * Saves what autosave is holding (waiting at most a few seconds), then reloads if nothing is left unsaved. With
+ * unsaved edits left it does nothing and says so; the person saves or closes those files first.
  */
-export async function reloadWindow(reload: () => void = () => window.location.reload()): Promise<boolean> {
-  // A save that hangs does not keep the window from reloading; the question below still covers its edits.
+export async function reloadWindow(reload: () => void = () => window.location.reload()): Promise<ReloadOutcome> {
   await settleWithin(Promise.allSettled([...flushers].map((flush) => Promise.resolve().then(flush))), AUTOSAVE_FLUSH_DEADLINE_MS)
-  if (hasUnsavedEdits() && !window.confirm("Some edits aren't saved. Reload anyway and lose them?")) return false
-  // The person has decided: the editors' own unload checks would otherwise cancel the reload without a word. Only
-  // this reload's unload skips them; a check for unsaved edits, or a later unload, still asks the editors.
-  const bypass = (event: Event) => {
-    if (probes.has(event)) return
-    event.stopImmediatePropagation()
-    stop()
-  }
-  const timer = setTimeout(() => stop(), UNLOAD_BYPASS_MS)
-  const stop = () => {
-    clearTimeout(timer)
-    window.removeEventListener('beforeunload', bypass, { capture: true })
-  }
-  window.addEventListener('beforeunload', bypass, { capture: true })
+  if (hasUnsavedEdits()) return 'unsaved'
   reload()
-  return true
+  return 'reloaded'
 }

@@ -6,25 +6,14 @@ import { BrowserPanel, ChangesPanel, DocumentPanel, FilesPanel, ProjectTerminalP
 import '../styles/chat-markdown.css'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { useAppStore } from '../stores/appStore'
-import { fileLinksHandled, holdFileLink } from '../services/fileLinks'
+import { onFileLinkHeld } from '../services/fileLinks'
 import { surfaceTabItems } from '../lib/surfaces'
 import { OpenSurfacePicker } from './OpenSurfaceMenu'
 import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 
-/**
- * File links that arrive before the Files tab is listening (not mounted yet, or its chunk failed to load) are held
- * in services/fileLinks and mount the tab; the tab takes them once its own listener is in place.
- */
+/** A file link that the Files tab cannot open yet (services/fileLinks holds it) mounts the tab. */
 function useHeldFileLinks() {
-  useEffect(() => {
-    const hold = (event: Event) => {
-      if (fileLinksHandled()) return
-      holdFileLink((event as CustomEvent).detail)
-      mountKeptPanel('files')
-    }
-    window.addEventListener('mousse:open-file', hold)
-    return () => window.removeEventListener('mousse:open-file', hold)
-  }, [])
+  useEffect(() => onFileLinkHeld(() => mountKeptPanel('files')), [])
 }
 
 /**

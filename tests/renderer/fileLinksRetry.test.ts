@@ -14,15 +14,16 @@ vi.mock('../../src/renderer/components/FilesPanel', async () => {
   files.loads += 1
   if (files.loads === 1) throw new TypeError('Failed to fetch dynamically imported module')
   const { createElement: element, useEffect } = await import('react')
-  const { fileLinksListening } = await import('../../src/renderer/services/fileLinks')
+  const { registerFileLinkOpener } = await import('../../src/renderer/services/fileLinks')
+  const openSequence = { current: 0 }
   return {
     FilesPanel: () => {
-      useEffect(() => {
-        const open = (event: Event) => { files.links.push((event as CustomEvent).detail) }
-        window.addEventListener('mousse:open-file', open)
-        const stop = fileLinksListening()
-        return () => { stop(); window.removeEventListener('mousse:open-file', open) }
-      }, [])
+      // Like the real tab: an open waits for the files root, and one that starts meanwhile replaces it.
+      useEffect(() => registerFileLinkOpener(async (detail) => {
+        const sequence = ++openSequence.current
+        await new Promise((done) => setTimeout(done, 0))
+        if (openSequence.current === sequence) files.links.push(detail)
+      }), [])
       return element('div', { 'data-testid': 'files' })
     }
   }
@@ -56,6 +57,10 @@ afterEach(() => {
 })
 
 const settle = () => act(async () => { for (let i = 0; i < 10; i += 1) await new Promise((done) => setTimeout(done, 0)) })
+/** Waits until `ready` holds (the chunk imports and the opens take a few turns), for at most two seconds. */
+const until = (ready: () => boolean) => act(async () => {
+  for (let i = 0; i < 200 && !ready(); i += 1) await new Promise((done) => setTimeout(done, 10))
+})
 const openFile = (detail: unknown) => act(() => { window.dispatchEvent(new CustomEvent('mousse:open-file', { detail })) })
 
 it('holds links while the Files chunk has failed, and hands them over once when Retry loads it', async () => {
@@ -71,6 +76,7 @@ it('holds links while the Files chunk has failed, and hands them over once when 
   expect(files.links).toEqual([])
 
   act(() => { host.querySelector<HTMLButtonElement>('.lazy-load-failed-retry')!.click() })
+  await until(() => files.links.length >= 2)
   await settle()
   expect(files.loads).toBe(2)
   expect(host.querySelector('[data-testid="files"]')).not.toBeNull()
@@ -78,5 +84,7 @@ it('holds links while the Files chunk has failed, and hands them over once when 
 
   // From now on, links go straight to the tab, once each.
   openFile({ path: 'c.ts' })
+  await until(() => files.links.length >= 3)
+  await settle()
   expect(files.links).toEqual([{ path: 'a.ts' }, { path: 'b.ts', line: 2 }, { path: 'c.ts' }])
 })

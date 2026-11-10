@@ -36,23 +36,24 @@ vi.mock('../../src/renderer/components/SettingsPage', () => ({ SettingsPage: stu
 const fileLinks = vi.hoisted(() => [] as unknown[])
 vi.mock('../../src/renderer/components/FilesPanel', async () => {
   const { createElement: element, useEffect } = await import('react')
-  const { fileLinksListening } = await import('../../src/renderer/services/fileLinks')
+  const { registerFileLinkOpener } = await import('../../src/renderer/services/fileLinks')
+  const openSequence = { current: 0 }
   return {
     FilesPanel: () => {
-      useEffect(() => {
-        const open = (event: Event) => { fileLinks.push((event as CustomEvent).detail) }
-        window.addEventListener('mousse:open-file', open)
-        const stop = fileLinksListening()
-        return () => { stop(); window.removeEventListener('mousse:open-file', open) }
-      }, [])
+      // Like the real tab: an open waits for the files root, and one that starts meanwhile replaces it.
+      useEffect(() => registerFileLinkOpener(async (detail) => {
+        const sequence = ++openSequence.current
+        await new Promise((done) => setTimeout(done, 0))
+        if (openSequence.current === sequence) fileLinks.push(detail)
+      }), [])
       return element('div', { 'data-testid': 'files' })
     }
   }
 })
 // Reloading is the person's choice; here it only records that it was asked for.
-const reloads = vi.hoisted(() => ({ count: 0 }))
+const reloads = vi.hoisted(() => ({ count: 0, outcome: 'reloaded' as 'reloaded' | 'unsaved' }))
 vi.mock('../../src/renderer/services/reloadWindow', () => ({
-  reloadWindow: async () => { reloads.count += 1; return true },
+  reloadWindow: async () => { reloads.count += 1; return reloads.outcome },
   registerAutosaveFlush: () => () => {}
 }))
 vi.mock('../../src/renderer/components/ProjectTerminalPanel', () => ({ ProjectTerminalPanel: stub('terminal') }))
@@ -109,6 +110,7 @@ beforeEach(() => {
   surfaces.useKeptPanels.setState({ files: false, terminal: false, browser: false })
   fileLinks.length = 0
   reloads.count = 0
+  reloads.outcome = 'reloaded'
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -187,6 +189,7 @@ describe('split-out surfaces', () => {
     expect(fileLinks).toEqual([{ path: 'a.ts' }, { path: 'b.ts', line: 3 }])
     // Later links go straight to the tab, once each.
     act(() => openFile({ path: 'c.ts' }))
+    await settle()
     expect(fileLinks).toEqual([{ path: 'a.ts' }, { path: 'b.ts', line: 3 }, { path: 'c.ts' }])
   })
 
@@ -300,7 +303,22 @@ describe('a chunk that fails to load', () => {
     expect(host.querySelector('[role="alert"]')?.textContent).toBe("Couldn't load. Retry · Reload window")
     expect(reloads.count).toBe(0)
     act(() => { [...host.querySelectorAll<HTMLButtonElement>('[role="alert"] button')].find((button) => button.textContent === 'Reload window')!.click() })
+    await settle()
     expect(reloads.count).toBe(1)
+  })
+
+  it('with unsaved edits left, Reload window says to save or close them, and offers no way to discard them', async () => {
+    reloads.outcome = 'unsaved'
+    const Page = lazyNamed(async (): Promise<{ Page: () => null }> => { throw new Error('offline') }, 'Page')
+    act(() => root.render(createElement(Suspense, { fallback: null }, createElement(Page))))
+    await settle()
+    act(() => { host.querySelector<HTMLButtonElement>('.lazy-load-failed-retry')!.click() })
+    await settle()
+    const reload = () => [...host.querySelectorAll<HTMLButtonElement>('[role="alert"] button')].find((button) => button.textContent === 'Reload window')!
+    act(() => { reload().click() })
+    await settle()
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("Couldn't load. Retry · Reload window Save or close unsaved files first.")
+    expect([...host.querySelectorAll('[role="alert"] button')].map((button) => button.textContent)).toEqual(['Retry', 'Reload window'])
   })
 
   it('the warm-up goes on past a module that does not load in time', async () => {

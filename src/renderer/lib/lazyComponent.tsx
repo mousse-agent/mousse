@@ -1,14 +1,14 @@
-import { Component, lazy, useReducer, type ComponentProps, type ComponentType, type ReactNode } from 'react'
-import { reloadWindow } from '../services/reloadWindow'
+import { Component, lazy, useReducer, useState, type ComponentProps, type ComponentType, type ReactNode } from 'react'
+import { reloadWindow, type ReloadOutcome } from '../services/reloadWindow'
 
 export interface LoadFailedProps {
   /** Loads the chunk again. */
   retry: () => void
   /**
    * Present once a Retry has failed too: something the chunk imports may have failed, which only a reload of the
-   * window repairs. Saves pending edits and asks before discarding unsaved ones.
+   * window repairs. Saves pending edits first, and does not reload while unsaved edits remain.
    */
-  reload?: () => void
+  reload?: () => Promise<ReloadOutcome>
 }
 
 /** What a split-out component shows when its chunk failed to load. */
@@ -41,10 +41,16 @@ export function failedChunkUrl(error: unknown, base: string = document.baseURI):
 
 /** The default failed state: one short line in place of the component. */
 export function LoadFailed({ retry, reload }: LoadFailedProps) {
+  const [unsaved, setUnsaved] = useState(false)
+  const reloadIfSaved = async () => {
+    setUnsaved(false)
+    if (reload && await reload() === 'unsaved') setUnsaved(true)
+  }
   return (
     <div className="lazy-load-failed" role="alert">
       Couldn't load. <button type="button" className="lazy-load-failed-retry" onClick={retry}>Retry</button>
-      {reload && <>{' · '}<button type="button" className="lazy-load-failed-retry" onClick={reload}>Reload window</button></>}
+      {reload && <>{' · '}<button type="button" className="lazy-load-failed-retry" onClick={() => void reloadIfSaved()}>Reload window</button></>}
+      {unsaved && <span className="lazy-load-failed-note"> Save or close unsaved files first.</span>}
     </div>
   )
 }
@@ -76,7 +82,7 @@ class LoadBoundary extends Component<BoundaryProps, { error: unknown; retried: b
         this.props.onRetry()
         this.setState({ error: null, retried: true })
       }}
-      reload={retried ? () => { void reloadWindow() } : undefined}
+      reload={retried ? () => reloadWindow() : undefined}
     />
   }
 }
