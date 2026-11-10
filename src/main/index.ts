@@ -4,7 +4,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
-import { configureElectronContext, finishElectronCli } from '../cli/electronContext'
+import { configureElectronContext, configureWindowlessElectron, finishElectronCli } from '../cli/electronContext'
 import { isChatgptTokenArgv } from '../cli/fastpath/chatgptToken'
 import { isSshProxyArgv } from '../cli/fastpath/sshProxy'
 import { resolveMousseHome } from '../cli/paths'
@@ -100,6 +100,8 @@ const isChatgptTokenCommand = isCliMode && isChatgptTokenArgv(electronCliArgv())
 // they cannot.
 const isSshProxyCommand = isCliMode && isSshProxyArgv(electronCliArgv())
 if (!isChatgptTokenCommand && !isSshProxyCommand) configureElectronContext(app, isCliMode ? electronCliArgv() : [])
+// A CLI command or the daemon opens no window: no GPU or network service process for it.
+if (isCliMode) configureWindowlessElectron(app)
 
 if (isChatgptTokenCommand) {
   app.dock?.hide()

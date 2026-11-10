@@ -28,6 +28,27 @@ export function configureElectronContext(
   process.env.MOUSSE_ELECTRON_USER_DATA = userData
 }
 
+const NETWORK_SERVICE_IN_PROCESS = 'NetworkServiceInProcess2'
+
+/**
+ * The CLI and the daemon run in Electron for safeStorage only: they open no window and make no request
+ * through Chromium's network stack. Left to its defaults, Electron still starts a GPU process and a
+ * network service process for them (together about 70 MB of private memory and 230 MB of working set
+ * for a daemon on Windows). This runs both inside the main process and turns GPU use off. Call before
+ * `app` is ready.
+ */
+export function configureWindowlessElectron(app: {
+  disableHardwareAcceleration(): void
+  commandLine: { getSwitchValue(name: string): string; appendSwitch(name: string, value?: string): void }
+}): void {
+  app.disableHardwareAcceleration()
+  app.commandLine.appendSwitch('in-process-gpu')
+  const features = app.commandLine.getSwitchValue('enable-features').split(',').filter(Boolean)
+  if (!features.includes(NETWORK_SERVICE_IN_PROCESS)) {
+    app.commandLine.appendSwitch('enable-features', [...features, NETWORK_SERVICE_IN_PROCESS].join(','))
+  }
+}
+
 /** Graceful success flushes Local State; Electron quit otherwise discards exitCode. */
 export function finishElectronCli(
   app: { quit(): void; exit(code: number): void },

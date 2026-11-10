@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { join, resolve } from 'path'
-import { resolveElectronUserData, finishElectronCli } from '../src/cli/electronContext'
+import { resolveElectronUserData, finishElectronCli, configureWindowlessElectron } from '../src/cli/electronContext'
 
 describe('Electron vault context', () => {
   const appData = resolve('fixture/app-data')
@@ -44,5 +44,34 @@ describe('Electron CLI completion', () => {
     finishElectronCli(app, 1)
     expect(app.exit).toHaveBeenCalledWith(1)
     expect(app.quit).not.toHaveBeenCalled()
+  })
+})
+
+describe('a windowless Electron run (the CLI and the daemon)', () => {
+  function fakeApp(enableFeatures = '') {
+    const switches = new Map<string, string>(enableFeatures ? [['enable-features', enableFeatures]] : [])
+    return {
+      switches,
+      disableHardwareAcceleration: vi.fn(),
+      commandLine: {
+        getSwitchValue: (name: string) => switches.get(name) ?? '',
+        appendSwitch: (name: string, value = '') => { switches.set(name, value) }
+      }
+    }
+  }
+
+  it('starts no GPU process and keeps the network service in the main process', () => {
+    const app = fakeApp()
+    configureWindowlessElectron(app)
+    expect(app.disableHardwareAcceleration).toHaveBeenCalledOnce()
+    expect(app.switches.has('in-process-gpu')).toBe(true)
+    expect(app.switches.get('enable-features')).toBe('NetworkServiceInProcess2')
+  })
+
+  it('keeps features already enabled on the command line', () => {
+    const app = fakeApp('SomeFeature')
+    configureWindowlessElectron(app)
+    configureWindowlessElectron(app)
+    expect(app.switches.get('enable-features')).toBe('SomeFeature,NetworkServiceInProcess2')
   })
 })
