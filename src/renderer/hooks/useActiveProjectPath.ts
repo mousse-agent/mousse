@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { resolveActiveProject, type ActiveProject } from '../lib/activeProject'
+import { folderRecheckKey, resolveActiveProject, type ActiveProject } from '../lib/activeProject'
 import { isNewEmptyThread, localWorkspaceFor } from '../lib/newThread'
 import { useAppStore } from '../stores/appStore'
 
@@ -62,6 +62,14 @@ export function useActiveProjectLocation(): ActiveProject {
   ).projectId)
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
   const [resolved, setResolved] = useState<({ scope: string } & ResolvedWorkspace) | null>(null)
+  const turnPhase = useAppStore((s) => (s.activeThreadId ? s.turnStates[s.activeThreadId]?.phase ?? null : null))
+  // A new worktree thread's worktree is made when its first turn starts: look again as that turn moves on.
+  const recheck = folderRecheckKey({
+    threadId: activeThreadId,
+    threadProjectId,
+    resolvedWorkspaceThreadId: resolved?.scope === scope ? resolved.workspaceThreadId : null,
+    turnPhase
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -69,7 +77,7 @@ export function useActiveProjectLocation(): ActiveProject {
       if (!cancelled) setResolved({ scope, ...workspace })
     }).catch(() => { if (!cancelled) setResolved({ scope, path: null, workspaceThreadId: null }) })
     return () => { cancelled = true }
-  }, [activeThreadId, profileId, scope])
+  }, [activeThreadId, profileId, scope, recheck])
 
   return resolveActiveProject({
     isNewChat,
