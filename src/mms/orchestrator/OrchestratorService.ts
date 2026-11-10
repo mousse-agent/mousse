@@ -597,6 +597,11 @@ export interface OrchestratorSendOptions {
   schedule?: ScheduledTurnRef
   /** Called right after the run is admitted (accepted and new), before it is queued or started. */
   onAdmitted?: (runId: string) => void
+  /**
+   * Daemon-only: a send bound to the settings its sender saw (`expect`) never waits in the queue, where it would run later
+   * on whatever the thread has then. One that would queue is refused (`thread_busy`), as an edited prompt is.
+   */
+  refuseQueue?: boolean
 }
 
 /** Options of `runRemoteTurn`. */
@@ -9525,7 +9530,7 @@ export class OrchestratorService extends EventEmitter {
     const heldByCompaction = !session.isTurnRunning() && this.compactionHoldsQueue(threadId)
 
     if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause || heldByCompaction) {
-      if (expectedBranch) {
+      if (expectedBranch || opts?.refuseQueue) {
         const busy = new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
         if (run) this.cancelOrphanedAdmission(run.runId, busy.message)
         throw busy

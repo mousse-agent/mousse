@@ -16,6 +16,26 @@ export function needsSetup(setup: ThreadSetup): boolean {
   return Boolean(setup.model || setup.permissionMode)
 }
 
+/** The code of a refusal as the window gets it (a serialized app error or an `Error` with `code`). */
+export function errorCodeOf(error: unknown): string | undefined {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * The line for a bound send the daemon refused, or undefined for any other refusal: the thread's settings changed since
+ * they were shown, or the computer that runs it is too old to bind a send.
+ */
+export function boundSendRefusal(error: unknown): string | undefined {
+  const code = errorCodeOf(error)
+  if (code === 'thread_settings_changed') return 'Not sent: settings changed. Check and send again.'
+  if (code === 'computer_outdated') {
+    const details = (error as { details?: { name?: unknown } }).details
+    return typeof details?.name === 'string' ? setupRefusalLine(code, details.name) : 'Update Mousse on that computer to send from here.'
+  }
+  return undefined
+}
+
 /** The line a send shows when its thread's settings could not be applied on `computer`; nothing was sent. */
 export function setupRefusalLine(code: string, computer: string): string {
   return code === 'computer_outdated'

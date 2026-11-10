@@ -205,8 +205,10 @@ interface AppState {
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
   /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
   privateThreadExpiry: ExpiryPreset | 'never'
+  /** Where a new thread in a project with no remembered checkout starts (`runs.newThreadWorktree`). */
+  newThreadWorktree: boolean
   /** The new-chat defaults from Settings → Runs. */
-  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry'>) => void
+  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry' | 'newThreadWorktree'>) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -500,7 +502,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
   privateThreadExpiry: 'never',
-  setRunDefaults: ({ privateThreadExpiry }) => set({ privateThreadExpiry }),
+  newThreadWorktree: true,
+  setRunDefaults: ({ privateThreadExpiry, newThreadWorktree }) => set({ privateThreadExpiry, newThreadWorktree }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)

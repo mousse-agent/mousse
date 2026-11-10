@@ -306,6 +306,8 @@ export class MmsListsSource {
                 lineage: thread.lineage,
                 permissionMode: thread.permissionMode,
                 modelOverride: thread.modelOverride,
+                // From the same snapshot as the mode and model, so a window conditions its changes on what it shows.
+                settingsRevision: thread.settingsRevision ?? 0,
                 startedFrom: thread.startedFrom,
                 sentFrom: thread.sentFrom
               }

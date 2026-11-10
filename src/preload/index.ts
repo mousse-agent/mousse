@@ -855,9 +855,9 @@ const api = {
      * `opts.rememberedChoices`: a new chat of this window, which starts with its project's remembered model, mode and checkout.
      * `opts.model` and `opts.permissionMode`: what the composer shows, so the thread is made with them.
      */
-    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode }): Promise<Thread> =>
+    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }): Promise<Thread> =>
       ipcRenderer.invoke('threads:create', name, projectId, opts),
-    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode }): Promise<Thread> =>
+    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }): Promise<Thread> =>
       ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     /** A page of the messages before `before` of a long thread of another computer. */
@@ -887,8 +887,11 @@ const api = {
     ): Promise<Thread> => ipcRenderer.invoke('threads:setModel', threadId, model),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),
-    setWorktreeEnabled: (threadId: string, enabled: boolean): Promise<Thread> =>
-      ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled),
+    /** One thread as the computer that runs it has it now, its settings revision included; null when it is not there. */
+    get: (threadId: string): Promise<Thread | null> => ipcRenderer.invoke('threads:get', threadId),
+    /** `picked`: the person chose this checkout, so it is remembered for the project's next new threads. */
+    setWorktreeEnabled: (threadId: string, enabled: boolean, picked?: boolean): Promise<Thread> =>
+      ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled, picked),
     /**
      * Sets a new chat's thread's model and then its permission mode, each only while its settings revision is
      * `ifRevision` and then the one the previous set returned. Never retried; a refusal answers with its code and the

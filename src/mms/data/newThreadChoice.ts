@@ -2,17 +2,20 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import type { NewThreadChoice, Project, Thread } from '../../shared/types'
 
 /**
- * Once: the "Start new threads in a worktree" setting is gone, and each project remembers its own checkout choice
- * (`Project.newThread`). A setting that was turned off carries on as the choice of every project there was; on (the
- * default) needs nothing, because a project with no choice starts in a new worktree. The stored key is then removed.
+ * The "Start new threads in a worktree" setting is gone: each project remembers its own checkout choice
+ * (`Project.newThread`), and a project with none takes the global default for new checkouts (`runs.newThreadWorktree`,
+ * a new worktree unless set otherwise). A setting that was turned off becomes that default, so projects added later
+ * start in their folder too. The stored key is then removed. Writing the default first makes a second run (the key could
+ * not be removed) write the same value again, so it is safe at every start.
  */
-export function migrateWorktreeDefaultSetting(
-  config: { assembleSettings(): { runs?: unknown }; removeRunsKey(key: string): boolean },
-  projects: { seedWorktreeChoice(worktreeEnabled: boolean): void }
-): void {
+export function migrateWorktreeDefaultSetting(config: {
+  assembleSettings(): { runs?: unknown }
+  setRunsKey(key: string, value: unknown): void
+  removeRunsKey(key: string): boolean
+}): void {
   const runs = config.assembleSettings().runs as Record<string, unknown> | undefined
   if (!runs || !Object.hasOwn(runs, 'worktreeByDefault')) return
-  if (runs.worktreeByDefault === false) projects.seedWorktreeChoice(false)
+  if (runs.worktreeByDefault === false && runs.newThreadWorktree !== false) config.setRunsKey('newThreadWorktree', false)
   config.removeRunsKey('worktreeByDefault')
 }
 

@@ -174,6 +174,10 @@ function daemonForSend(made: Thread, options: {
   outdated?: boolean
   /** Runs between the model set and the mode set, as another window could. */
   betweenSets?: () => void
+  /** Runs synchronously when the new thread is opened, right after it was made, as another window's update could. */
+  afterCreate?: () => void
+  /** Runs when the send reaches the daemon, before it is admitted. */
+  beforeSend?: () => void
   defaultMode?: Thread['permissionMode']
 } = {}) {
   const calls: Array<[string, ...unknown[]]> = []
@@ -189,8 +193,12 @@ function daemonForSend(made: Thread, options: {
       current = { ...current, ...(opts.model ? { modelOverride: opts.model } : {}), ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}) }
       return current
     }),
+    get: vi.fn(async () => current),
     // A setup step after the thread was made can fail; the person sends again.
     select: vi.fn(async () => {
+      const hook = options.afterCreate
+      options.afterCreate = undefined
+      hook?.()
       if (selectFailures > 0) { selectFailures -= 1; throw new Error('The service did not answer.') }
     }),
     applySettings: vi.fn(async (id: string, settings: { model?: Thread['modelOverride']; permissionMode?: Thread['permissionMode'] }, ifRevision: number) => {
@@ -211,7 +219,22 @@ function daemonForSend(made: Thread, options: {
     })
   }
   bridge.orchestrator = {
-    sendToThread: vi.fn(async () => { calls.push(['send', current.permissionMode ?? options.defaultMode, current.modelOverride?.model]); return { message: '', actions: [] } }),
+    // Admitted only on the settings the send is bound to (the mode the thread runs in, its model, its revision).
+    sendToThread: vi.fn(async (_id: string, request: { expect?: { permissionMode: string; model?: { model: string }; settingsRevision?: number } }) => {
+      options.beforeSend?.()
+      const runsIn = current.permissionMode ?? options.defaultMode
+      const bound = request?.expect
+      if (bound && options.outdated) {
+        calls.push(['refused', 'computer_outdated'])
+        return { requestAcknowledged: false, error: { code: 'computer_outdated', message: 'Update Mousse on Studio to do this.', details: { name: 'Studio' } } }
+      }
+      if (bound && (bound.permissionMode !== runsIn || (bound.settingsRevision !== undefined && bound.settingsRevision !== (current.settingsRevision ?? 0)) || (bound.model && current.modelOverride && bound.model.model !== current.modelOverride.model))) {
+        calls.push(['refused', 'thread_settings_changed'])
+        return { requestAcknowledged: false, error: { code: 'thread_settings_changed', message: 'changed' } }
+      }
+      calls.push(['send', runsIn, current.modelOverride?.model])
+      return { message: '', actions: [] }
+    }),
     isTurnActive: vi.fn(async () => false)
   }
   stubBridge()
@@ -219,7 +242,11 @@ function daemonForSend(made: Thread, options: {
     calls,
     sentWith: () => calls.find((call) => call[0] === 'send')?.slice(1),
     /** Another window (or computer) changes the thread on the daemon; this window has not heard yet. */
-    writeElsewhere: write
+    writeElsewhere: write,
+    /** The computer that runs the thread changes its default permission mode (no write to the thread). */
+    setDefaultMode: (mode: Thread['permissionMode']) => { options.defaultMode = mode },
+    /** The thread as the daemon has it now. */
+    current: () => current
   }
 }
 
@@ -256,6 +283,22 @@ describe('the first send of a new chat runs with what the composer shows', () =>
     expect(create[3]).toMatchObject({ worktreeEnabled: true, baseBranch: 'feature' })
     expect(create[3]).not.toHaveProperty('rememberedChoices')
     expect(daemon.sentWith()).toEqual(['full', 'opus'])
+  })
+
+  it('a local chat: a change made after its creation and before its send is admitted runs nothing', async () => {
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [project('remembers', { permissionMode: 'ask' })],
+      threads: [], activeThreadId: null, messages: [],
+      composerWorkspaceDrafts: { __blank__: { projectId: 'remembers', worktreeEnabled: true } }
+    })
+    let daemon!: ReturnType<typeof daemonForSend>
+    daemon = daemonForSend(threadRow('made', { worktreeEnabled: true, modelOverride: OPUS }), { beforeSend: () => daemon.writeElsewhere({ permissionMode: 'full' }) })
+    await mountComposer()
+    await send('Fix the parser')
+    expect(daemon.calls.find((call) => call[0] === 'send')).toBeUndefined()
+    expect(host.textContent).toContain('Not sent: settings changed.')
   })
 
   it('a mode picked for the new chat runs, and the thread is made with it', async () => {
@@ -413,7 +456,7 @@ describe('a new chat on another computer gets its settings in the same send, or 
     expect(permissionChip()).toBe('Permissions: Full access')
   })
 
-  it('with nothing to set, an older computer is not asked anything and the send goes', async () => {
+  it('with nothing to set, an older computer is not asked to set anything, and the bound send is refused as outdated', async () => {
     const daemon = await chatOnOtherComputer({ outdated: true }, { computerDefault: 'full', pick: 'Full access' })
     // The shown model is that computer's default; the thread there has no model of its own, so it is still set.
     ;(bridge.threads.create as ReturnType<typeof vi.fn>).mockImplementationOnce(async (...args: unknown[]) => {
@@ -422,6 +465,55 @@ describe('a new chat on another computer gets its settings in the same send, or 
     })
     await send('Fix the parser')
     expect(daemon.calls.some((call) => call[0] === 'applySettings')).toBe(false)
-    expect(daemon.calls.some((call) => call[0] === 'send')).toBe(true)
+    expect(daemon.calls.some((call) => call[0] === 'send')).toBe(false)
+    expect(host.textContent).toContain('Update Mousse on Studio to send from here.')
+  })
+
+  it('untouched picker: that computer changes its default to Full access after Ask was shown, and nothing runs', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [{ ...project(`${NODE}:repo`), node: NODE }],
+      threads: [], activeThreadId: null, messages: [],
+      composerWorkspaceDrafts: { __blank__: { projectId: `${NODE}:repo`, worktreeEnabled: false, node: NODE as never } }
+    })
+    const daemon = daemonForSend(threadRow(`${NODE}:made`, { node: NODE, projectId: `${NODE}:repo`, modelOverride: OPUS }), { defaultMode: 'ask' })
+    bridge.platformRequest = {
+      request: vi.fn(async (method: string) => method === 'bridge.hub.composerOptions'
+        ? { providers: [{ id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus 5.5' }] }], defaultModel: OPUS, permission: { defaultMode: 'ask' } }
+        : new Promise(() => undefined))
+    }
+    stubBridge()
+    await mountComposer()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+    daemon.setDefaultMode('full')
+    await send('Fix the parser')
+    expect(daemon.calls.find((call) => call[0] === 'send')).toBeUndefined()
+    expect(daemon.calls.at(-1)).toEqual(['refused', 'thread_settings_changed'])
+    expect(host.textContent).toContain('Not sent: settings changed. Check and send again.')
+  })
+
+  it('a change after the last set and before the send is admitted runs nothing', async () => {
+    let daemon!: ReturnType<typeof daemonForSend>
+    daemon = await chatOnOtherComputer({ beforeSend: () => daemon.writeElsewhere({ permissionMode: 'full' }) }, { computerDefault: 'full', pick: 'Ask before acting' })
+    await send('Fix the parser')
+    expect(daemon.calls.some((call) => call[0] === 'setPermissionMode')).toBe(true)
+    expect(daemon.calls.find((call) => call[0] === 'send')).toBeUndefined()
+    expect(host.textContent).toContain('Not sent: settings changed.')
+  })
+
+  it("another window's update delivered before the settings are applied never stands in for the revision this send read", async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    let daemon!: ReturnType<typeof daemonForSend>
+    // Another window sets Ask and this window hears it, before the composer goes on with the thread it made.
+    daemon = await chatOnOtherComputer({
+      afterCreate: () => { daemon.writeElsewhere({ permissionMode: 'ask' }); useAppStore.getState().upsertThread(daemon.current()) }
+    }, { computerDefault: 'ask', pick: 'Full access' })
+    await send('Fix the parser')
+    // The window's store has the newer thread by now; the conditional set still used the revision creation answered with.
+    expect(useAppStore.getState().threads.find((thread) => thread.id === `${NODE}:made`)?.settingsRevision).toBe(1)
+    expect(daemon.calls.find((call) => call[0] === 'applySettings')?.[3]).toBe(0)
+    expect(daemon.calls.some((call) => call[0] === 'setPermissionMode')).toBe(false)
+    expect(daemon.calls.find((call) => call[0] === 'send')).toBeUndefined()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
   })
 })

@@ -339,6 +339,29 @@ describe('a conditional settings change (ifRevision)', () => {
   }, 60_000)
 })
 
+describe('a send bound to what was shown (expect)', () => {
+  it('is refused across computers when the mode changed, and never sent to an older computer', async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    await t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'ask' })
+    const revision = t.owner.threads.getThread(thread.id)!.settingsRevision
+    await t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'accept_edits' })
+    // The owner's daemon compares and refuses before any turn: Ask was shown, the thread now runs in Auto-accept edits.
+    await expect(t.dispatch('orchestrator.send', { threadId: id, content: 'hi', expect: { permissionMode: 'ask', settingsRevision: revision } })).rejects.toMatchObject({ code: 'thread_settings_changed' })
+    const older = clientWith((real) => ({
+      rpc: async (method: string, params: unknown, options: unknown) => {
+        const answer = await real.rpc(method, params, options)
+        if (method !== 'net.info') return answer
+        const info = answer as { routed: Record<string, number> }
+        return { ...info, routed: { ...info.routed, 'orchestrator.send': 4 } }
+      }
+    }))
+    await withClient(older, async () => {
+      await expect(t.dispatch('orchestrator.send', { threadId: id, content: 'hi', expect: { permissionMode: 'accept_edits' } })).rejects.toMatchObject({ code: 'computer_outdated' })
+    })
+  }, 60_000)
+})
+
 describe('a call that takes too long', () => {
   it('is sent once: a slow read on a connected computer is not a lost link', async () => {
     const thread = t.thread()

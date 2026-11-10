@@ -348,11 +348,13 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
  * by itself when the limit resets, at most `usageLimitPauseCap` times in a row on one thread; without
  * it the pause waits for Resume now. Read when a run pauses, never afterwards: turning it on does not
  * arm runs that are already paused. Where a new thread in a project starts (a new worktree or the
- * project's folder) is the project's own remembered choice (`Project.newThread`), not a setting.
+ * project's folder) is the project's own remembered choice (`Project.newThread`); `newThreadWorktree` is where a
+ * project with no choice starts. It has no control: it carries the removed "Start new threads in a worktree" setting.
  */
 export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
+  newThreadWorktree: boolean
   /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
 }
@@ -368,6 +370,7 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
         ? cap
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
+    newThreadWorktree: raw?.newThreadWorktree !== false,
     privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never'
   }
 }

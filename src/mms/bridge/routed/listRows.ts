@@ -158,6 +158,9 @@ export function threadRow(
     row.permissionMode = normalizePermissionMode(raw.permissionMode)
   if (isRecord(raw.modelOverride))
     row.modelOverride = raw.modelOverride as unknown as Thread['modelOverride']
+  // Left out when the computer did not say (an older one): never guessed, so a window reads the thread first.
+  if (typeof raw.settingsRevision === 'number' && Number.isSafeInteger(raw.settingsRevision) && raw.settingsRevision >= 0)
+    row.settingsRevision = raw.settingsRevision
   if (isRecord(raw.startedFrom))
     row.startedFrom = raw.startedFrom as unknown as Thread['startedFrom']
   if (isRecord(raw.sentFrom)) row.sentFrom = raw.sentFrom as unknown as Thread['sentFrom']

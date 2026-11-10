@@ -1,9 +1,9 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
 import { expiryPresetMs } from '../../shared/threadExpiry'
-import { composerWorkspaceFor, workspaceWithPrivate } from './newThread'
+import { composerWorkspaceFor, rememberedChoiceOf, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
-import type { Thread } from '../../shared/types'
+import type { NewThreadChoice, Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
@@ -50,10 +50,30 @@ export async function createAndSelectPrivateThread(): Promise<void> {
   await selectThread(thread.id)
 }
 
-/** Opens the newest empty draft thread of a project, or creates one there with the project's remembered choices, and selects it. */
+/**
+ * Whether an empty thread already starts with what its project remembers (`Project.newThread`), so reusing it gives the
+ * same new thread a fresh one would. A field the project never picked, or the thread leaves to the default, matches.
+ */
+export function matchesRememberedChoices(thread: Pick<Thread, 'modelOverride' | 'permissionMode' | 'worktreeEnabled'>, remembered: NewThreadChoice | undefined): boolean {
+  if (!remembered) return true
+  const model = remembered.model
+  return (
+    (remembered.permissionMode === undefined || thread.permissionMode === remembered.permissionMode) &&
+    (thread.worktreeEnabled === undefined || remembered.worktreeEnabled === undefined || thread.worktreeEnabled === remembered.worktreeEnabled) &&
+    (model === undefined || (thread.modelOverride?.instanceId === model.instanceId && thread.modelOverride?.model === model.model && (thread.modelOverride?.effort ?? '') === (model.effort ?? '')))
+  )
+}
+
+/**
+ * Opens the newest empty draft thread of a project, or creates one there with the project's remembered choices, and
+ * selects it. An empty thread is reused only while it matches those choices; otherwise a new one is made with them
+ * (setting them on the old one would also make its model the profile's last-used one).
+ */
 export async function createAndSelectProjectThread(projectId: string): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId) ?? await window.mousse.threads.create(undefined, projectId, { rememberedChoices: true })
+  const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
+  const remembered = rememberedChoiceOf(store.projects, projectId)
+  const thread = empty && matchesRememberedChoices(empty, remembered) ? empty : await window.mousse.threads.create(undefined, projectId, { rememberedChoices: true })
   // The daemon's threads:updated broadcast can arrive after the first message is sent.
   store.upsertThread(thread)
   await selectThread(thread.id)

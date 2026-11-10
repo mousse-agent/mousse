@@ -1,6 +1,9 @@
 import type { NodeId } from '../../shared/net'
 import { isThreadStarted } from '../../shared/threadTitle'
+import type { PermissionMode } from '../../shared/permissionMode'
+import type { ModelOverride } from '../../shared/providerInstances'
 import { isTurnActivePhase, type NewThreadChoice, type Project, type TurnPhase } from '../../shared/types'
+import { useAppStore } from '../stores/appStore'
 
 /**
  * Where a new chat will run: the project it starts in and whether that is a fresh worktree.
@@ -27,6 +30,18 @@ export interface ComposerWorkspace {
    * branch (`threads.create`'s `baseBranch`). Absent: the folder's HEAD, as a daemon without the field does anyway.
    */
   baseBranch?: string
+  /** The person chose the checkout (worktree or the project's folder), so a send remembers it for the project. */
+  worktreePicked?: true
+  /** A model picked for the new chat, applied when a send makes its thread (and remembered for the project). */
+  model?: ModelOverride
+  /** A permission mode picked for the new chat, applied when a send makes its thread (and remembered for the project). */
+  permissionMode?: PermissionMode
+}
+
+/** The draft without the picks made for its chat (after a send applied them, or when its project or computer changes). */
+export function withoutPicks(workspace: ComposerWorkspace): ComposerWorkspace {
+  const { worktreePicked: _checkout, model: _model, permissionMode: _mode, ...rest } = workspace
+  return rest
 }
 
 /**
@@ -50,9 +65,12 @@ export function rememberedChoiceOf(projects: ProjectChoices, projectId: string |
   return projectId ? projects.find((project) => project.id === projectId)?.newThread : undefined
 }
 
-/** Whether a new thread in `projectId` starts in a new worktree: the project's remembered choice, else yes. */
-export function newThreadWorktree(projects: ProjectChoices, projectId: string | undefined): boolean {
-  return rememberedChoiceOf(projects, projectId)?.worktreeEnabled ?? true
+/**
+ * Whether a new thread in `projectId` starts in a new worktree: the project's remembered choice, else the global default
+ * for new checkouts (`runs.newThreadWorktree`; yes until settings are read).
+ */
+export function newThreadWorktree(projects: ProjectChoices, projectId: string | undefined, fallback = useAppStore.getState().newThreadWorktree): boolean {
+  return rememberedChoiceOf(projects, projectId)?.worktreeEnabled ?? fallback
 }
 
 /**
@@ -160,7 +178,8 @@ function withExpiryOf(workspace: ComposerWorkspace): Pick<ComposerWorkspace, 'ex
  * remembered for another.
  */
 export function workspaceWithProject(workspace: ComposerWorkspace, projectId: string | undefined, projects: ProjectChoices): ComposerWorkspace {
-  const { localProjectId: _remembered, baseBranch: _branch, ...rest } = workspace
+  // Another project shows its own remembered choices: what was picked for the previous one goes.
+  const { localProjectId: _remembered, baseBranch: _branch, ...rest } = withoutPicks(workspace)
   return { ...rest, projectId, worktreeEnabled: Boolean(projectId && newThreadWorktree(projects, projectId)) }
 }
 

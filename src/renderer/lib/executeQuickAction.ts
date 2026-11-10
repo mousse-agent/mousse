@@ -2,7 +2,11 @@ import type { QuickAction } from './quickActions'
 import { useAppStore } from '../stores/appStore'
 import { composerThreadActions } from './composerThreadActions'
 import { prepareComposerThread } from './createComposerThread'
-import { isNewEmptyThread, isWorkspacePending, localWorkspaceFor } from './newThread'
+import { normalizePermissionMode } from '../../shared/permissionMode'
+import type { SendExpectation, Thread } from '../../shared/types'
+import { composerCreatesThread } from './createComposerThread'
+import { isNewEmptyThread, isWorkspacePending, localWorkspaceFor, rememberedChoiceOf } from './newThread'
+import { boundSendRefusal } from './threadSetup'
 
 const TERMINAL_SPAWN_TIMEOUT_MS = 15_000
 const TERMINAL_SPAWN_POLL_MS = 150
@@ -39,10 +43,31 @@ function settleLoading(profileId: string, threadId: string | null, active: boole
  * `beforeSwitch` runs with the new thread just before it is shown, when the pick needs a new thread.
  */
 export async function threadForSend(profileId: string, beforeSwitch?: (threadId: string) => void): Promise<string | null> {
+  // A thread made for a terminal sends nothing, so it is made on the profile's defaults and nothing is bound.
+  return (await preparedThreadForSend(profileId, beforeSwitch, false))?.threadId ?? null
+}
+
+/** What a send's turn must run on: the model, mode and revision of the thread as made or shown (`expect`). */
+function expectationOf(thread: Thread, defaultMode: Thread['permissionMode']): SendExpectation | undefined {
+  const permissionMode = thread.permissionMode ?? defaultMode
+  if (!permissionMode) return undefined
+  return {
+    permissionMode,
+    ...(thread.modelOverride ? { model: thread.modelOverride } : {}),
+    ...(typeof thread.settingsRevision === 'number' ? { settingsRevision: thread.settingsRevision } : {})
+  }
+}
+
+/**
+ * `threadForSend` with what the first turn of a new chat is bound to. A thread it makes is made with what was picked for
+ * the chat (its draft's model and mode), else its project's remembered choices, else the profile's default mode, as the
+ * composer shows them; the send then runs only on what that thread was made with.
+ */
+async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId: string) => void, bind = true): Promise<{ threadId: string; expect?: SendExpectation } | null> {
   const store = requireActiveProfile(profileId)
   const startId = store.activeThreadId
   const thread = store.threads.find((entry) => entry.id === startId)
-  if (!isNewEmptyThread(startId, thread, store.messages.length)) return startId
+  if (!isNewEmptyThread(startId, thread, store.messages.length)) return startId ? { threadId: startId } : null
   // One preparation at a time: a composer send or another action already owns this thread.
   if (isWorkspacePending(store)) throw new WorkspaceBusyError()
   let targetId = startId
@@ -53,12 +78,24 @@ export async function threadForSend(profileId: string, beforeSwitch?: (threadId:
     return current.profileId === profileId && current.activeThreadId === targetId
   }
   try {
-    return await prepareComposerThread({
+    const workspace = localWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread, store.projects)
+    const defaultMode = bind ? normalizePermissionMode((await window.mousse.settings.get()).permissions?.defaultMode) : undefined
+    if (!stillVisible()) return null
+    const creates = composerCreatesThread(thread, workspace)
+    const permissionMode = workspace.permissionMode ?? rememberedChoiceOf(store.projects, workspace.projectId)?.permissionMode ?? defaultMode
+    let made: Thread | undefined
+    const threadId = await prepareComposerThread({
       thread,
-      workspace: localWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread, store.projects),
+      workspace,
       ...composerThreadActions(),
+      ...(bind ? {
+        shown: { ...(permissionMode ? { permissionMode } : {}), ...(workspace.model ? { model: workspace.model } : {}) },
+        picked: [...(workspace.model ? ['model' as const] : []), ...(workspace.permissionMode ? ['permissionMode' as const] : [])],
+        rememberedChoices: true
+      } : {}),
       stillVisible,
       activate: (created) => {
+        made = created
         const current = useAppStore.getState()
         current.upsertThread(created)
         current.setComposerWorkspaceDraft(startId)
@@ -68,6 +105,11 @@ export async function threadForSend(profileId: string, beforeSwitch?: (threadId:
         current.switchToThread(created.id)
       }
     })
+    if (!threadId) return null
+    // Bound to the thread as it was made, else as it was shown at the start (the empty thread this send reuses).
+    const basis = made ?? (!creates && thread?.id === threadId ? thread : undefined)
+    const expect = bind && basis ? expectationOf(basis, defaultMode) : undefined
+    return { threadId, ...(expect ? { expect } : {}) }
   } finally {
     const current = useAppStore.getState()
     current.setWorkspacePending(profileId, startId, false)
@@ -79,15 +121,16 @@ async function sendToActiveThread(content: string, profileId: string): Promise<v
   const mode = requireActiveProfile(profileId).chatMode
   const trimmed = content.trim()
   if (!trimmed) return
-  let activeThreadId: string | null
+  let prepared: { threadId: string; expect?: SendExpectation } | null
   try {
-    activeThreadId = await threadForSend(profileId)
+    prepared = await preparedThreadForSend(profileId)
   } catch (error) {
     if (error instanceof WorkspaceBusyError) throw error
     requireActiveProfile(profileId)
     throw new Error('Failed to send message.')
   }
-  if (!activeThreadId) return
+  if (!prepared) return
+  const activeThreadId = prepared.threadId
   // Selecting a thread resets loading, so it is set only once the thread is chosen.
   const store = requireActiveProfile(profileId)
   store.setLoading(true)
@@ -103,8 +146,11 @@ async function sendToActiveThread(content: string, profileId: string): Promise<v
   try {
     const result = await window.mousse.orchestrator.sendToThread(activeThreadId, {
       content: trimmed,
-      mode
+      mode,
+      ...(prepared.expect ? { expect: prepared.expect } : {})
     })
+    // A send the daemon refused ran nothing (a bound one whose thread's settings changed meanwhile, among others).
+    if (result.error && result.requestAcknowledged === false) throw result.error
     requireActiveProfile(profileId)
     if (result.queued) {
       const stillActive = await window.mousse.orchestrator.isTurnActive(activeThreadId)
@@ -113,13 +159,16 @@ async function sendToActiveThread(content: string, profileId: string): Promise<v
     }
     const stillActive = await window.mousse.orchestrator.isTurnActive(activeThreadId)
     settleLoading(profileId, activeThreadId, stillActive)
-  } catch {
+  } catch (error) {
     requireActiveProfile(profileId)
     const stillActive = await window.mousse.orchestrator
       .isTurnActive(activeThreadId)
       .catch(() => true)
     settleLoading(profileId, activeThreadId, stillActive)
-    throw new Error('Failed to send message.')
+    // Settings changed since they were shown: the thread is read again, so the composer shows what it really runs.
+    const refusal = boundSendRefusal(error)
+    if (refusal) void window.mousse.threads.get(activeThreadId).then((thread) => { if (thread) useAppStore.getState().upsertThread(thread) }).catch(() => undefined)
+    throw new Error(refusal ?? 'Failed to send message.')
   }
 }
 

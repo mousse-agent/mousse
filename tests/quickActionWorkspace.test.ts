@@ -12,8 +12,9 @@ const thread = (patch: Partial<Thread>): Thread => ({
 
 const action = createQuickAction({ label: 'Review', kind: 'send-current', payload: 'Review this', isBuiltIn: false })
 
-function stubMousse(created?: Thread) {
-  const create = vi.fn(async () => created!)
+function stubMousse(created?: Thread, defaultMode = 'accept_edits') {
+  // Made as the daemon makes it: with the permission mode it is given.
+  const create = vi.fn(async (_name?: string, _projectId?: string, opts?: { permissionMode?: Thread['permissionMode'] }) => ({ ...created!, ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}) }))
   const setWorktreeEnabled = vi.fn(async (id: string, enabled: boolean) => thread({ id, projectId: 'p', worktreeEnabled: enabled }))
   const select = vi.fn(async () => undefined)
   const sendToThread = vi.fn(async () => ({ queued: false }))
@@ -21,8 +22,9 @@ function stubMousse(created?: Thread) {
   vi.stubGlobal('window', {
     localStorage: { getItem: () => null, setItem: () => undefined },
     mousse: {
-      threads: { create, setWorktreeEnabled, select },
-      orchestrator: { sendToThread, send: vi.fn(), isTurnActive }
+      threads: { create, setWorktreeEnabled, select, get: vi.fn(async () => null) },
+      orchestrator: { sendToThread, send: vi.fn(), isTurnActive },
+      settings: { get: vi.fn(async () => ({ permissions: { defaultMode } })) }
     }
   })
   return { create, setWorktreeEnabled, select, sendToThread, isTurnActive }
@@ -31,11 +33,42 @@ function stubMousse(created?: Thread) {
 afterEach(() => {
   vi.unstubAllGlobals()
   useAppStore.setState({
-    profileId: 'default', activeThreadId: null, loading: false, threads: [], messages: [], composerWorkspaceDrafts: {}, workspacePending: {}
+    profileId: 'default', activeThreadId: null, loading: false, threads: [], messages: [], composerWorkspaceDrafts: {}, workspacePending: {}, projects: []
   })
 })
 
 describe('send-in-current-chat on a new chat', () => {
+  it('makes the thread in the mode the composer shows (the project remembers Ask under a Full access default) and sends bound to it', async () => {
+    const created = thread({ id: 'made', projectId: 'p', worktreeEnabled: true, settingsRevision: 2, modelOverride: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' } })
+    const mousse = stubMousse(created, 'full')
+    useAppStore.setState({
+      activeThreadId: null,
+      projects: [{ id: 'p', name: 'p', path: '/p', createdAt: '', order: 0, newThread: { permissionMode: 'ask' } }],
+      composerWorkspaceDrafts: { __blank__: { projectId: 'p', worktreeEnabled: true } }
+    })
+
+    await executeQuickAction(action, 'default')
+
+    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', expect.objectContaining({ permissionMode: 'ask', rememberedChoices: true }))
+    expect(mousse.sendToThread).toHaveBeenCalledWith('made', expect.objectContaining({
+      expect: { permissionMode: 'ask', model: created.modelOverride, settingsRevision: 2 }
+    }))
+  })
+
+  it('a pick made for the chat wins, is remembered, and a refused bound send is reported, not run', async () => {
+    const created = thread({ id: 'made', projectId: 'p', worktreeEnabled: true, settingsRevision: 1 })
+    const mousse = stubMousse(created, 'full')
+    mousse.sendToThread.mockImplementation(async () => ({ requestAcknowledged: false, error: { code: 'thread_settings_changed', message: 'changed' } }) as never)
+    useAppStore.setState({
+      activeThreadId: null,
+      projects: [{ id: 'p', name: 'p', path: '/p', createdAt: '', order: 0, newThread: { permissionMode: 'full' } }],
+      composerWorkspaceDrafts: { __blank__: { projectId: 'p', worktreeEnabled: true, permissionMode: 'ask' } }
+    })
+
+    await expect(executeQuickAction(action, 'default')).rejects.toThrow('Not sent: settings changed. Check and send again.')
+    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', expect.objectContaining({ permissionMode: 'ask', picked: ['permissionMode'] }))
+  })
+
   it('starts a blank chat in the worktree picked in the side card', async () => {
     const created = thread({ id: 'made', projectId: 'p', worktreeEnabled: true })
     const mousse = stubMousse(created)
@@ -46,7 +79,7 @@ describe('send-in-current-chat on a new chat', () => {
 
     await executeQuickAction(action, 'default')
 
-    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', { worktreeEnabled: true })
+    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', { worktreeEnabled: true, permissionMode: 'accept_edits', rememberedChoices: true })
     expect(mousse.select).toHaveBeenCalledWith('made')
     expect(mousse.sendToThread).toHaveBeenCalledWith('made', expect.objectContaining({ content: 'Review this' }))
     const state = useAppStore.getState()

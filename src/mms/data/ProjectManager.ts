@@ -146,17 +146,6 @@ export class ProjectManager {
     return project
   }
 
-  /** Gives every project that has no checkout choice yet this one (the removed "Start new threads in a worktree" setting's). */
-  seedWorktreeChoice(worktreeEnabled: boolean): void {
-    let changed = false
-    for (const project of this.projects) {
-      if (typeof project.newThread?.worktreeEnabled === 'boolean') continue
-      project.newThread = { ...project.newThread, worktreeEnabled }
-      changed = true
-    }
-    if (changed) this.persist()
-  }
-
   reorderProjects(projectIds: string[]): Project[] {
     if (projectIds.length !== this.projects.length || new Set(projectIds).size !== projectIds.length) {
       throw new Error('Project reorder must include every project exactly once')

@@ -81,9 +81,9 @@ describe('Settings > General > Runs', () => {
     const { updates } = show()
     pick('Up to 3 times')
     // The whole setting travels, so nothing else is dropped.
-    expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 3, privateThreadExpiry: 'never' } })
+    expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 3, newThreadWorktree: true, privateThreadExpiry: 'never' } })
     expect(resume().textContent).toContain('Up to 3 times')
-    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 3, privateThreadExpiry: 'never' })
+    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 3, newThreadWorktree: true, privateThreadExpiry: 'never' })
     expect(tooltips()).toContain('at most 3 times in a row')
     expect(tooltips()).toContain('Runs already paused are not resumed; press Try now.')
   })
@@ -91,10 +91,10 @@ describe('Settings > General > Runs', () => {
   it('Off keeps the saved count, so turning it back on offers the same one', () => {
     show({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5 })
     pick('Off')
-    expect(saved()).toEqual({ resumeAfterUsageLimit: false, usageLimitPauseCap: 5, privateThreadExpiry: 'never' })
+    expect(saved()).toEqual({ resumeAfterUsageLimit: false, usageLimitPauseCap: 5, newThreadWorktree: true, privateThreadExpiry: 'never' })
     expect(resume().textContent).toContain('Off')
     pick('Up to 5 times')
-    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, privateThreadExpiry: 'never' })
+    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, newThreadWorktree: true, privateThreadExpiry: 'never' })
   })
 
   it('has no worktree setting: each project remembers where its new threads start', () => {
@@ -106,8 +106,8 @@ describe('Settings > General > Runs', () => {
   it('choosing another count saves it and the description follows', () => {
     const { updates } = show({ resumeAfterUsageLimit: true })
     pick('Up to 5 times')
-    expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5, privateThreadExpiry: 'never' } })
-    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, privateThreadExpiry: 'never' })
+    expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5, newThreadWorktree: true, privateThreadExpiry: 'never' } })
+    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, newThreadWorktree: true, privateThreadExpiry: 'never' })
     expect(tooltips()).toContain('at most 5 times in a row')
     pick('Once')
     expect(saved().usageLimitPauseCap).toBe(1)
@@ -124,7 +124,7 @@ describe('Settings > General > Runs', () => {
     show({ resumeAfterUsageLimit: false, usageLimitPauseCap: 2 })
     expect(optionLabels()).toEqual(['Off', 'Once', 'Up to 2 times', 'Up to 3 times', 'Up to 5 times'])
     pick('Up to 2 times')
-    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 2, privateThreadExpiry: 'never' })
+    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 2, newThreadWorktree: true, privateThreadExpiry: 'never' })
   })
 
   it('offers 1, 3 and 5, and keeps a cap saved by hand in the list', () => {

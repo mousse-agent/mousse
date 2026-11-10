@@ -467,8 +467,8 @@ export class MmsProfileServices {
     this.ptyManager.setSendSink(terminalSink)
 
     this.projects = new ProjectManager(homeDir)
-    // Once: "Start new threads in a worktree" is gone; turned off, it becomes each existing project's checkout choice.
-    try { migrateWorktreeDefaultSetting(config, this.projects) } catch (error) { console.warn('the worktree setting could not be moved to projects', error instanceof Error ? error.message : String(error)) }
+    // "Start new threads in a worktree" is gone; turned off, it becomes the default checkout of projects with no choice.
+    try { migrateWorktreeDefaultSetting(config) } catch (error) { console.warn('the worktree setting could not be moved to the new checkout default', error instanceof Error ? error.message : String(error)) }
     // Projects added before Mousse recorded their repositories' own Git filters: recorded once, now.
     trustExistingProjectsOnce(homeDir, this.projects.listProjects().map((project) => project.path))
     this.threads = new ThreadDataStore(this.projects, homeDir, {

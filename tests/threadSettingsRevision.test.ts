@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
 import { ROUTED_METHODS, routedKeysAt } from '../src/shared/bridge/routed'
@@ -85,5 +85,82 @@ describe("a thread's settings revision", () => {
       expect(routedKeysAt(row, row.version)).toContain('ifRevision')
       expect(routedKeysAt(row, row.version - 1)).not.toContain('ifRevision')
     }
+  })
+})
+
+describe('a send bound to what was shown (expect)', () => {
+  /** The turn is not run here: the send's options are what the daemon hands it. */
+  function captureTurns() {
+    return vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({ message: '', actions: [] } as never)
+  }
+  const sonnet = { instanceId: 'claude', model: 'sonnet' }
+
+  it('runs on the shown model and at most the shown mode, never queues, and refuses anything changed', async () => {
+    const thread = await projectThread()
+    const set = (await call('threads.setModel', { threadId: thread.id, model: sonnet })).thread
+    const withMode = (await call('threads.setPermissionMode', { threadId: thread.id, mode: 'ask' })).thread
+    const turns = captureTurns()
+    const expect_ = { permissionMode: 'ask', model: { instanceId: 'claude', llmProvider: set.modelOverride!.llmProvider, model: 'sonnet' }, settingsRevision: withMode.settingsRevision }
+    await call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: expect_ })
+    expect(turns).toHaveBeenCalledTimes(1)
+    expect(turns.mock.calls[0]![2]).toMatchObject({ permissionMode: 'ask', refuseQueue: true, modelOverride: expect.objectContaining({ instanceId: 'claude', model: 'sonnet' }) })
+
+    // Each difference is refused before a turn is asked for: the mode, the model, the revision (ABA included).
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { ...expect_, permissionMode: 'full' } })).rejects.toMatchObject({ code: 'thread_settings_changed', details: { permissionMode: 'ask' } })
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { ...expect_, model: { ...expect_.model, model: 'opus' } } })).rejects.toMatchObject({ code: 'thread_settings_changed' })
+    for (const mode of ['full', 'ask']) await call('threads.setPermissionMode', { threadId: thread.id, mode })
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: expect_ })).rejects.toMatchObject({ code: 'thread_settings_changed', details: { revision: withMode.settingsRevision! + 2 } })
+    expect(turns).toHaveBeenCalledTimes(1)
+  })
+
+  it('compares the mode a thread without its own runs in: the profile default, changed after it was shown', async () => {
+    const thread = await projectThread()
+    const turns = captureTurns()
+    mms.settings.set({ permissions: { defaultMode: 'full' } })
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'accept_edits' } })).rejects.toMatchObject({ code: 'thread_settings_changed', details: { permissionMode: 'full' } })
+    expect(turns).not.toHaveBeenCalled()
+    await call('orchestrator.send', { threadId: thread.id, content: 'hi', expect: { permissionMode: 'full' } })
+    expect(turns).toHaveBeenCalledTimes(1)
+  })
+
+  it('a bound send that would wait in the queue is refused, as an edited prompt is', async () => {
+    const thread = await projectThread()
+    mms.settings.set({ permissions: { defaultMode: 'ask' } })
+    await expect(call('orchestrator.send', { threadId: thread.id, content: 'hi', forceQueue: true, expect: { permissionMode: 'ask' } })).rejects.toMatchObject({ code: 'thread_busy' })
+    expect(mms.threads.loadMessageQueue(thread.id)).toEqual([])
+  })
+
+  it('takes expect at a new version of the routed row, and setModel refuses unknown keys', async () => {
+    const row = ROUTED_METHODS['orchestrator.send']!
+    expect(routedKeysAt(row, row.version)).toContain('expect')
+    expect(routedKeysAt(row, row.version - 1)).not.toContain('expect')
+    const thread = await projectThread()
+    await expect(call('threads.setModel', { threadId: thread.id, model: sonnet, ifRevison: 0 })).rejects.toMatchObject({ code: 'invalid_params' })
+  })
+})
+
+describe("another computer's thread rows", () => {
+  it('carry the settings revision from the same lists snapshot as the mode and model, and an unknown one stays unknown', async () => {
+    const { threadRow } = await import('../src/mms/bridge/routed/listRows')
+    const thread = await projectThread()
+    await call('threads.setPermissionMode', { threadId: thread.id, mode: 'ask' })
+    const { MmsListsSource } = await import('../src/mms/bridge/remote/MmsListsSource')
+    // The lists snapshot this computer sends another of the user's computers, from its real thread store.
+    const source = new MmsListsSource({
+      projects: { listProjects: () => [] },
+      threads: { listAllThreads: () => mms.threads.listAllThreads() },
+      orchestrator: { getTurnSnapshot: () => ({}) },
+      threadRuntimes: { getActivitySnapshot: () => ({}) },
+      platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } }
+    } as never, undefined, { private: true })
+    const sent = (source.snapshot().threads as Array<Record<string, unknown>>).find((entry) => entry.id === thread.id)!
+    const owned = mms.threads.getThread(thread.id)!
+    expect(sent.settingsRevision).toBe(owned.settingsRevision)
+    // As that computer's merged lists take it.
+    const row = threadRow({ ...sent, id: 'node-1:' + thread.id }, 0, { node: 'node-1', offline: false })
+    expect(row.settingsRevision).toBe(owned.settingsRevision)
+    expect(row.permissionMode).toBe('ask')
+    const older = threadRow({ id: 'node-1:x', name: 'x', permissionMode: 'ask' }, 0, { node: 'node-1', offline: false })
+    expect(older).not.toHaveProperty('settingsRevision')
   })
 })

@@ -205,9 +205,12 @@ export interface ThreadSearchOptions {
 }
 
 /** A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field. */
-function readThreadMeta<T extends { modelOverride?: ModelOverride }>(path: string): T {
+function readThreadMeta<T extends { modelOverride?: ModelOverride; settingsRevision?: number }>(path: string): T {
   const meta = JSON.parse(readFileSync(path, 'utf-8')) as T
-  return meta?.modelOverride ? { ...meta, modelOverride: upgradeSelection(meta.modelOverride) } : meta
+  if (!meta || typeof meta !== 'object') return meta
+  // A thread saved before the settings revision existed is at 0: said, so no reader has to guess it.
+  const revised = typeof meta.settingsRevision === 'number' ? meta : { ...meta, settingsRevision: 0 }
+  return revised.modelOverride ? { ...revised, modelOverride: upgradeSelection(revised.modelOverride) } : revised
 }
 
 export class ThreadDataStore extends EventEmitter {

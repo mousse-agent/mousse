@@ -17,7 +17,7 @@ import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageClean
 import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
-import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
+import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
@@ -248,6 +248,59 @@ function refuseStaleRevision(ctx: HandlerContext, threadId: string, ifRevision: 
       ...(thread.modelOverride ? { modelOverride: thread.modelOverride } : {}),
       ...(thread.permissionMode ? { permissionMode: thread.permissionMode } : {})
     })
+}
+
+/**
+ * The model and mode a send bound with `expect` runs with, after checking that they are still what the thread runs: its
+ * permission mode (its own, else the profile's default, narrowed by the calling device's limit), its model (its own,
+ * else the profile's last-used one) and, when given, its settings revision. Anything else is refused with
+ * `thread_settings_changed` and the current values; nothing runs. Synchronous, so the caller hands the values to the turn
+ * with nothing awaited in between.
+ */
+function boundTurnSettings(ctx: HandlerContext, threadId: string, raw: unknown, limit: PermissionMode | undefined): { permissionMode: PermissionMode; model?: ModelOverride } {
+  if (!isObject(raw)) throw new DomainRpcError('invalid_params', 'expect must be an object')
+  rejectUnknownKeys(raw, ['model', 'permissionMode', 'settingsRevision'])
+  const mode = asString(raw.permissionMode, 'expect.permissionMode', 32)
+  if (!isPermissionMode(mode)) throw new DomainRpcError('invalid_params', `expect.permissionMode must be one of ${PERMISSION_MODES.join(', ')}`)
+  const revision = raw.settingsRevision
+  if (revision !== undefined && (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0))
+    throw new DomainRpcError('invalid_params', 'expect.settingsRevision must be a whole number')
+  let expectedModel: ModelOverride | undefined
+  if (raw.model !== undefined && raw.model !== null) {
+    if (!isObject(raw.model)) throw new DomainRpcError('invalid_params', 'expect.model must be an object')
+    const instanceId = asOptionalString(raw.model.instanceId, 256)
+    const llmProvider = asOptionalString(raw.model.llmProvider, 256) ?? ''
+    const model = asString(raw.model.model, 'expect.model.model', 512)
+    const effort = asOptionalString(raw.model.effort, 64)
+    expectedModel = ctx.mms.providerInstances.migrate({ ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}) })
+  }
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+  const settings = ctx.mms.settings.get()
+  const ownMode = thread.permissionMode ?? normalizePermissionMode(settings.permissions?.defaultMode)
+  const runsIn = limit ? narrowPermissionMode(ownMode, limit) : ownMode
+  const runsOn = ctx.mms.providerInstances.migrate(thread.modelOverride ?? lastUsedChatModel(settings))
+  const currentRevision = thread.settingsRevision ?? 0
+  const changed =
+    runsIn !== mode ||
+    (revision !== undefined && revision !== currentRevision) ||
+    (expectedModel !== undefined && !sameSelection(expectedModel, runsOn))
+  if (changed)
+    throw new DomainRpcError('thread_settings_changed', "This thread's model or permissions changed since they were shown.", {
+      threadId,
+      revision: currentRevision,
+      permissionMode: runsIn,
+      ...(runsOn ? { modelOverride: runsOn } : {})
+    })
+  return { permissionMode: limit ? narrowPermissionMode(mode, limit) : mode, ...(runsOn ? { model: runsOn } : {}) }
+}
+
+/** Which of a new thread's named values the person picked (`threads.create` `picked`), from a list of field names. */
+function pickedFields(raw: unknown): Set<'model' | 'permissionMode' | 'worktreeEnabled'> {
+  if (raw === undefined) return new Set()
+  if (!Array.isArray(raw) || raw.some((field) => field !== 'model' && field !== 'permissionMode' && field !== 'worktreeEnabled'))
+    throw new DomainRpcError('invalid_params', 'picked must list model, permissionMode or worktreeEnabled')
+  return new Set(raw as Array<'model' | 'permissionMode' | 'worktreeEnabled'>)
 }
 
 /** The same instance, model and level. */
@@ -1997,11 +2050,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ctx.mms.settings.set({ provider: { instanceId: namedThreadModel.instanceId, llmProvider: namedThreadModel.llmProvider, model: namedThreadModel.model, effort: namedThreadModel.effort, name: namedThreadModel.name } })
         ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
       }
-      // What a window names for a new thread in a project was picked, or shown, in its composer.
+      // Only what the person picked in the composer is remembered for the project (`picked`); a value it merely showed (a
+      // default) is not, so a default changed later still reaches the project's next new threads.
+      const picked = pickedFields(p.picked)
       const named: NewThreadChoice = {
-        ...(worktreeEnabled !== undefined ? { worktreeEnabled } : {}),
-        ...(namedThreadModel ? { model: namedThreadModel } : {}),
-        ...(namedMode ? { permissionMode: namedMode as PermissionMode } : {})
+        ...(worktreeEnabled !== undefined && picked.has('worktreeEnabled') ? { worktreeEnabled } : {}),
+        ...(namedThreadModel && picked.has('model') ? { model: namedThreadModel } : {}),
+        ...(namedMode && picked.has('permissionMode') ? { permissionMode: namedMode as PermissionMode } : {})
       }
       if (Object.keys(named).length) rememberPick(ctx, thread.id, named)
       const threads = listedThreadsFor(ctx, ctx.mms.threads.listAllThreads())
@@ -2296,6 +2351,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'threads.setModel': {
       const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'model', 'ifRevision'])
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const model = p.model
@@ -2319,6 +2375,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const enabled = asOptionalBoolean(p.enabled, 'enabled') === true
+      // A checkout the person picked is remembered for the project; one a send records as it was shown is not.
+      const pickedCheckout = asOptionalBoolean(p.picked, 'picked') === true
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       // Refuse once an isolated workspace exists — the toggle is new-chat only.
       const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
@@ -2326,7 +2384,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
       }
       const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
-      rememberPick(ctx, threadId, { worktreeEnabled: enabled })
+      if (pickedCheckout) rememberPick(ctx, threadId, { worktreeEnabled: enabled })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads) }
@@ -2399,7 +2457,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId'
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect'
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
@@ -2432,6 +2490,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const input = conversationBranchId ? { ...(typeof prepared === 'string' ? { content: prepared } : prepared), conversationBranchId } : prepared
       const limit = deviceLimit(ctx)
       const sentFrom = sentFromOf(ctx)
+      // A send bound to what the composer showed: compared here, after every await above and with none until the turn is
+      // handed its model and mode, which it then keeps whatever the thread changes to.
+      const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
@@ -2441,6 +2502,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         actor: questionAnswerer(ctx),
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),
+        // A bound send runs on the model and in at most the mode that were shown, and never waits in the queue.
+        ...(bound ? { permissionMode: bound.permissionMode, refuseQueue: true, ...(bound.model ? { modelOverride: bound.model } : {}) } : {}),
         ...(sentFrom ? { sentFrom } : {}),
         ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})

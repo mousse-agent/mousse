@@ -50,14 +50,18 @@ export function composerCreatesThread(
  */
 export async function prepareComposerThread(deps: {
   thread?: Thread
-  workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiryMs?: number; expiryStopsRun?: boolean; baseBranch?: string }
-  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; model?: ModelOverride; permissionMode?: PermissionMode }) => Promise<Thread>
+  workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiryMs?: number; expiryStopsRun?: boolean; baseBranch?: string; worktreePicked?: true }
+  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; model?: ModelOverride; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'>; rememberedChoices?: boolean }) => Promise<Thread>
   /**
    * The model and permission mode the composer shows. A thread made on this computer is made with them, so a send that
    * fails after it was made, and is retried on it, still runs with them. Another computer sets them afterwards.
    */
   shown?: { model?: ModelOverride; permissionMode?: PermissionMode }
-  setWorktreeEnabled: (id: string, enabled: boolean) => Promise<Thread>
+  /** Which of the shown values the person picked (the checkout comes from `workspace.worktreePicked`); only those are remembered. */
+  picked?: Array<'model' | 'permissionMode'>
+  /** A new thread made here takes its project's remembered choices for what is not named in `shown`. */
+  rememberedChoices?: boolean
+  setWorktreeEnabled: (id: string, enabled: boolean, picked?: boolean) => Promise<Thread>
   /** Gives a reused empty draft the expiry picked for it. */
   setExpiry?: (id: string, expiresAt: string, stopsRun: boolean) => Promise<Thread>
   now?: () => number
@@ -73,6 +77,7 @@ export async function prepareComposerThread(deps: {
   const expiresAt = workspace.expiryMs !== undefined && !workspace.node ? new Date((deps.now?.() ?? Date.now()) + workspace.expiryMs).toISOString() : undefined
   const expiry = expiresAt ? { expiresAt, ...(workspace.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}
   const baseBranch = composerBaseBranch(workspace)
+  const pickedOnCreate: Array<'model' | 'permissionMode' | 'worktreeEnabled'> = [...(deps.picked ?? []), ...(workspace.worktreePicked ? ['worktreeEnabled' as const] : [])]
   if (!thread || composerCreatesThread(thread, workspace)) {
     return createComposerThread({
       ...deps,
@@ -83,13 +88,15 @@ export async function prepareComposerThread(deps: {
           ...expiry,
           ...(baseBranch ? { baseBranch } : {}),
           ...(!workspace.node && deps.shown?.model ? { model: deps.shown.model } : {}),
-          ...(!workspace.node && deps.shown?.permissionMode ? { permissionMode: deps.shown.permissionMode } : {})
+          ...(!workspace.node && deps.shown?.permissionMode ? { permissionMode: deps.shown.permissionMode } : {}),
+          ...(pickedOnCreate.length && !workspace.node ? { picked: pickedOnCreate } : {}),
+          ...(deps.rememberedChoices && !workspace.node ? { rememberedChoices: true } : {})
         })
     })
   }
   // An unset choice is recorded too, so the thread keeps the one it was sent with.
   if (thread.worktreeEnabled !== enabled) {
-    const updated = await deps.setWorktreeEnabled(thread.id, enabled)
+    const updated = workspace.worktreePicked ? await deps.setWorktreeEnabled(thread.id, enabled, true) : await deps.setWorktreeEnabled(thread.id, enabled)
     if (!deps.stillVisible()) return null
     deps.update(updated)
   }

@@ -292,14 +292,14 @@ describe('device menu options', () => {
   })
 
   it('writes a choice into the draft and keeps the project', () => {
-    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p', worktreeEnabled: true })
-    expect(workspaceDraftForChoice({ projectId: 'p', worktreeEnabled: true }, 'checkout')).toEqual({ projectId: 'p', worktreeEnabled: false })
+    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p', worktreeEnabled: true, worktreePicked: true })
+    expect(workspaceDraftForChoice({ projectId: 'p', worktreeEnabled: true }, 'checkout')).toEqual({ projectId: 'p', worktreeEnabled: false, worktreePicked: true })
     expect(activeWorkspaceChoice({ projectId: 'p', worktreeEnabled: true })).toBe('worktree')
   })
 
   it('keeps the picked computer when a workspace choice is made', () => {
     expect(workspaceDraftForChoice({ ...workspace, node: 'node-1' as Device['node'], localProjectId: 'l' }, 'worktree'))
-      .toEqual({ projectId: 'p', worktreeEnabled: true, node: 'node-1', localProjectId: 'l' })
+      .toEqual({ projectId: 'p', worktreeEnabled: true, worktreePicked: true, node: 'node-1', localProjectId: 'l' })
   })
 })
 
@@ -428,7 +428,7 @@ describe('device menu stylesheet', () => {
 describe('a private draft in the side card (issue #672)', () => {
   it('keeps Private when a checkout choice is picked, and offers no other computer', () => {
     const workspace = { projectId: 'p1', worktreeEnabled: false, localOnly: true }
-    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p1', worktreeEnabled: true, localOnly: true })
+    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p1', worktreeEnabled: true, worktreePicked: true, localOnly: true })
     const devices = [device({ node: 'big' as Device['node'], name: 'Studio', kind: 'computer' })]
     expect(buildDeviceMenu({ localName: 'Mac', devices, workspace: { ...workspace, localOnly: false } }).runOn).not.toBeNull()
     expect(buildDeviceMenu({ localName: 'Mac', devices, workspace }).runOn).toBeNull()

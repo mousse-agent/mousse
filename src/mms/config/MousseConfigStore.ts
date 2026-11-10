@@ -435,6 +435,14 @@ export class MousseConfigStore {
     atomicWriteJson(this.confPath, payload)
   }
 
+  /** Writes one key under `settings.runs` and keeps the others. */
+  setRunsKey(key: string, value: unknown): void {
+    this.assertPersonalMutation('settings')
+    const runs = (this.conf.settings?.runs ?? {}) as unknown as Record<string, unknown>
+    this.conf.settings = { ...this.conf.settings, runs: { ...runs, [key]: value } as unknown as MousseSettingsSection['runs'] }
+    this.persist()
+  }
+
   /** Removes a key an older build wrote under `settings.runs`, which a merge never removes. True when it was there. */
   removeRunsKey(key: string): boolean {
     const runs = this.conf.settings?.runs as unknown as Record<string, unknown> | undefined

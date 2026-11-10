@@ -287,11 +287,13 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'acknowledgeUncertain',
       ROUTED_STAGED_KEY,
       'refuseWhilePaused',
-      'conversationBranchId'
+      'conversationBranchId',
+      'expect'
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
     // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
-    { required: ['content'], ...staging(['content', 'images']), version: 4, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4 } }
+    // Version 5: `expect`, the model, mode and settings revision the sender saw; the owner runs nothing on other ones.
+    { required: ['content'], ...staging(['content', 'images']), version: 5, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5 } }
   ),
   'orchestrator.steer': chat(
     'thread',

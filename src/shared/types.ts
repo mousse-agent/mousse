@@ -525,6 +525,18 @@ export interface OrchestratorSendRequest {
    * the thread's lease; a thread on another branch by then refuses the message (`conversation_branch_changed`).
    */
   conversationBranchId?: string
+  /**
+   * What the sender showed for the thread: the turn runs only on these (the mode with the device limit applied), and the
+   * daemon refuses the send (`thread_settings_changed`, with the current values) when the thread runs anything else.
+   */
+  expect?: SendExpectation
+}
+
+/** The model, permission mode and (when known) settings revision a send is bound to (`OrchestratorSendRequest.expect`). */
+export interface SendExpectation {
+  model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
+  permissionMode: PermissionMode
+  settingsRevision?: number
 }
 
 export type OrchestratorSendInput = string | OrchestratorSendRequest

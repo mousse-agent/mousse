@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
+import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { migrateWorktreeDefaultSetting } from '../src/mms/data/newThreadChoice'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
 import type { ModelOverride } from '../src/shared/providerInstances'
@@ -77,7 +78,7 @@ describe('new threads remember the choices last made in their project', () => {
     const first = await create()
     await call('threads.setModel', { threadId: first.id, model: OPUS })
     await call('threads.setPermissionMode', { threadId: first.id, mode: 'full' })
-    await call('threads.setWorktreeEnabled', { threadId: first.id, enabled: false })
+    await call('threads.setWorktreeEnabled', { threadId: first.id, enabled: false, picked: true })
     expect(remembered()).toEqual({ model: OPUS, permissionMode: 'full', worktreeEnabled: false })
     // Windows hear about it, so a new chat's composer shows it before its thread exists.
     expect(emitEvent).toHaveBeenCalledWith('projects.updated', { projects: [expect.objectContaining({ id: project.id, newThread: remembered() })] })
@@ -88,12 +89,17 @@ describe('new threads remember the choices last made in their project', () => {
     expect(next.worktreeEnabled).toBe(false)
   })
 
-  it('the checkout a window names for a new thread is remembered, and wins over the remembered one', async () => {
-    const { create, remembered } = daemon()
-    expect((await create({ worktreeEnabled: false })).worktreeEnabled).toBe(false)
+  it('a checkout picked for a new thread is remembered and wins over the remembered one; one only shown is not remembered', async () => {
+    const { create, remembered, call } = daemon()
+    expect((await create({ worktreeEnabled: false, picked: ['worktreeEnabled'] })).worktreeEnabled).toBe(false)
     expect(remembered()).toEqual({ worktreeEnabled: false })
     expect((await create({ worktreeEnabled: true })).worktreeEnabled).toBe(true)
-    expect(remembered()).toEqual({ worktreeEnabled: true })
+    expect(remembered()).toEqual({ worktreeEnabled: false })
+    // A send recording the shown checkout on a reused thread is no pick either.
+    const reused = await create({ worktreeEnabled: false })
+    await call('threads.setWorktreeEnabled', { threadId: reused.id, enabled: true })
+    expect(remembered()).toEqual({ worktreeEnabled: false })
+    await expect(call('threads.create', { name: 'New Chat', projectId: reused.projectId, picked: ['everything'] })).rejects.toThrow(/picked/)
   })
 
   it('a remembered model that can no longer be used falls back to the profile default, and the rest still applies', async () => {
@@ -165,13 +171,14 @@ describe('new threads remember the choices last made in their project', () => {
 describe('a new thread made with the model and mode its creator names', () => {
   const SONNET: ModelOverride = { instanceId: 'claude', llmProvider: 'claude-code', model: 'claude-sonnet-5-5' }
 
-  it('the composer names what it shows: the thread is born with it, it is remembered, and it becomes the last-used model', async () => {
+  it('the composer names what it shows: the thread is born with it, only the picked part is remembered, and the model becomes the last-used one', async () => {
     const { call, project, remembered, ctx } = daemon()
-    const made = (await call<{ thread: Thread }>('threads.create', { name: 'New Chat', projectId: project.id, worktreeEnabled: false, model: SONNET, permissionMode: 'ask' })).thread
+    const made = (await call<{ thread: Thread }>('threads.create', { name: 'New Chat', projectId: project.id, worktreeEnabled: false, model: SONNET, permissionMode: 'ask', picked: ['permissionMode'] })).thread
     expect(made.modelOverride).toEqual(SONNET)
     expect(made.permissionMode).toBe('ask')
     expect(made.worktreeEnabled).toBe(false)
-    expect(remembered()).toEqual({ worktreeEnabled: false, model: SONNET, permissionMode: 'ask' })
+    // The model and checkout were only shown (defaults): a default changed later still reaches this project.
+    expect(remembered()).toEqual({ permissionMode: 'ask' })
     expect(ctx.mms.settings.set).toHaveBeenCalledWith({ provider: expect.objectContaining({ instanceId: 'claude', model: 'claude-sonnet-5-5' }) })
   })
 
@@ -213,36 +220,36 @@ describe('ProjectManager.rememberNewThreadChoice', () => {
 })
 
 describe('the removed "Start new threads in a worktree" setting', () => {
-  const storedRuns = () => (JSON.parse(readFileSync(join(home, 'mousse.conf'), 'utf-8')) as { settings?: { runs?: Record<string, unknown> } }).settings?.runs
+  const stored = () => (JSON.parse(readFileSync(join(home, 'mousse.conf'), 'utf-8')) as { settings?: { runs?: Record<string, unknown> } }).settings?.runs
 
-  it('turned off, becomes the checkout choice of every project there was, once, and is removed', () => {
+  it('turned off on disk, becomes the default checkout of every project with no choice, later ones too, and is removed', () => {
+    // As an older build left it in mousse.conf.
     const config = MousseConfigStore.load(home)
     config.updateSettingsSection({ runs: { resumeAfterUsageLimit: true, worktreeByDefault: false } as never })
-    const projects = new ProjectManager(home)
-    const kept = projects.openProject(join(home, 'kept'))
-    const plain = projects.openProject(join(home, 'plain'))
-    projects.rememberNewThreadChoice(kept.id, { worktreeEnabled: true })
-
-    migrateWorktreeDefaultSetting(config, projects)
-    expect(projects.getProject(plain.id)?.newThread).toEqual({ worktreeEnabled: false })
-    // A project that already chose keeps its choice.
-    expect(projects.getProject(kept.id)?.newThread).toEqual({ worktreeEnabled: true })
-    expect(storedRuns()).not.toHaveProperty('worktreeByDefault')
-    expect(storedRuns()?.resumeAfterUsageLimit).toBe(true)
-
-    // A project added later starts in a worktree, like any project with no choice; the migration does not run again.
-    const later = projects.openProject(join(home, 'later'))
-    migrateWorktreeDefaultSetting(MousseConfigStore.load(home), projects)
-    expect(projects.getProject(later.id)?.newThread).toBeUndefined()
+    const fromDisk = MousseConfigStore.load(home)
+    migrateWorktreeDefaultSetting(fromDisk)
+    expect(stored()).not.toHaveProperty('worktreeByDefault')
+    expect(stored()).toMatchObject({ resumeAfterUsageLimit: true, newThreadWorktree: false })
+    expect(new SettingsStore(MousseConfigStore.load(home)).get().runs.newThreadWorktree).toBe(false)
+    // No project is written: a project added after the migration takes the same default.
+    expect(new ProjectManager(home).listProjects()).toEqual([])
   })
 
-  it('left on, changes no project and is removed', () => {
+  it('is safe to run again when the key could not be removed, and left on it changes nothing', () => {
     const config = MousseConfigStore.load(home)
-    config.updateSettingsSection({ runs: { worktreeByDefault: true } as never })
-    const projects = new ProjectManager(home)
-    const project = projects.openProject(join(home, 'app'))
-    migrateWorktreeDefaultSetting(config, projects)
-    expect(projects.getProject(project.id)?.newThread).toBeUndefined()
-    expect(storedRuns()).not.toHaveProperty('worktreeByDefault')
+    config.updateSettingsSection({ runs: { worktreeByDefault: false } as never })
+    const stuck = Object.assign(MousseConfigStore.load(home), { removeRunsKey: () => { throw new Error('read-only') } })
+    expect(() => migrateWorktreeDefaultSetting(stuck)).toThrow('read-only')
+    expect(stored()).toMatchObject({ worktreeByDefault: false, newThreadWorktree: false })
+    migrateWorktreeDefaultSetting(MousseConfigStore.load(home))
+    expect(stored()).toMatchObject({ newThreadWorktree: false })
+    expect(stored()).not.toHaveProperty('worktreeByDefault')
+
+    rmSync(join(home, 'mousse.conf'), { force: true })
+    const on = MousseConfigStore.load(home)
+    on.updateSettingsSection({ runs: { worktreeByDefault: true } as never })
+    migrateWorktreeDefaultSetting(MousseConfigStore.load(home))
+    expect(stored()).not.toHaveProperty('worktreeByDefault')
+    expect(new SettingsStore(MousseConfigStore.load(home)).get().runs.newThreadWorktree).toBe(true)
   })
 })

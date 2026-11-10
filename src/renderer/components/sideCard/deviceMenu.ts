@@ -111,7 +111,7 @@ export function activeWorkspaceChoice(workspace: ComposerWorkspace): WorkspaceCh
 
 /** The draft to store when a choice is picked; everything else it holds (project, computer, Private) is kept. */
 export function workspaceDraftForChoice(workspace: ComposerWorkspace, choice: WorkspaceChoice): ComposerWorkspace {
-  return { ...workspace, worktreeEnabled: choice === 'worktree' }
+  return { ...workspace, worktreeEnabled: choice === 'worktree', worktreePicked: true }
 }
 
 /** True when at least one row would change something if picked. */
