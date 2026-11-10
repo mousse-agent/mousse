@@ -2427,6 +2427,7 @@ const AssistantParts = memo(function AssistantParts({
               <Markdown
                 content={text}
                 className="leading-relaxed [&_p]:leading-relaxed"
+                streaming={isLast && isStreaming}
               />
             </div>,
           );

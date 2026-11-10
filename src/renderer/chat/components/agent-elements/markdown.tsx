@@ -1,7 +1,7 @@
 "use client";
 
-import { memo, type ComponentProps, type ReactNode } from "react";
-import { Streamdown, type Components } from "streamdown";
+import { memo, useRef, type ComponentProps, type ReactNode } from "react";
+import { parseMarkdownIntoBlocks, Streamdown, type Components } from "streamdown";
 import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
 import { codeHighlighter } from "./code-highlighter";
@@ -17,6 +17,8 @@ import { MathInline } from "../../../markdown/math/MathView";
 import { useRenderMath } from "../../../markdown/math/renderMathSetting";
 import { mathRenderers, mousseMathPlugin } from "../../../markdown/math/streamdown-math";
 import { mermaidRenderer } from "./markdown-mermaid";
+import { countRender } from "./render-counts";
+import { createIncrementalNormalizer, createIncrementalSplitter } from "./streaming-markdown";
 
 function fixNumberedListBreaks(text: string): string {
   return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");
@@ -209,7 +211,33 @@ export type MarkdownProps = {
   content: string;
   className?: string;
   textContrast?: "normal" | "high";
+  /**
+   * The text is a reply still streaming in. Only its live tail is normalised and split again on
+   * each update, and blocks that appear fade in. Off for everything already written.
+   */
+  streaming?: boolean;
 };
+
+/** Splits text into blocks as Streamdown does, counting the blocks it splits (see render-counts). */
+function splitBlocks(text: string): string[] {
+  const blocks = parseMarkdownIntoBlocks(text);
+  countRender("blocksSplit", blocks.length);
+  return blocks;
+}
+
+function normalizeText(text: string): string {
+  return normalizeCodeFenceLanguages(normalizeMarkdown(text), false);
+}
+
+/** One incremental normaliser and splitter for the reply this Markdown shows while it streams. */
+function useLiveMarkdown() {
+  const live = useRef<{ normalize: (text: string) => string; split: (text: string) => string[] } | null>(null);
+  live.current ??= {
+    normalize: createIncrementalNormalizer(normalizeText),
+    split: createIncrementalSplitter(splitBlocks),
+  };
+  return live.current;
+}
 
 // Same reason as `markdownComponents` below: a fresh `{ code }` wrapper per
 // render would defeat memoization inside Streamdown. Streamdown keeps one
@@ -389,13 +417,17 @@ const markdownMathComponents: Components = {
   },
 };
 
-export const Markdown = memo(function Markdown({ content, className }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ content, className, streaming = false }: MarkdownProps) {
+  countRender("Markdown");
   const renderMath = useRenderMath();
   const math = renderMath && mayContainMath(content);
-  const safeContent = normalizeCodeFenceLanguages(
-    normalizeMarkdown(math ? hideUnclosedMathFence(content) : content),
-    math,
-  );
+  const live = useLiveMarkdown();
+  // Math has a split of its own and is worked on whole; the live tail gives the same text and
+  // blocks as the whole would, so the end of the stream changes nothing on screen.
+  const incremental = streaming && !math;
+  const safeContent = incremental
+    ? live.normalize(content)
+    : normalizeCodeFenceLanguages(normalizeMarkdown(math ? hideUnclosedMathFence(content) : content), math);
 
   // Streamdown reports a fence as unfinished (`isIncomplete`) only while
   // `isAnimating`, and Markdown is not told whether a reply is streaming. An
@@ -413,11 +445,12 @@ export const Markdown = memo(function Markdown({ content, className }: MarkdownP
         className,
       )}
       onCopy={math ? copyMathAsTex : undefined}
+      data-streaming={streaming || undefined}
     >
       <Streamdown
         components={math ? markdownMathComponents : markdownComponents}
         plugins={math ? markdownMathPlugins : markdownPlugins}
-        parseMarkdownIntoBlocksFn={math ? parseBlocksKeepingMath : undefined}
+        parseMarkdownIntoBlocksFn={math ? parseBlocksKeepingMath : incremental ? live.split : splitBlocks}
         remend={markdownRemend}
         isAnimating={drawingDiagram}
         urlTransform={safeMarkdownUrl}
