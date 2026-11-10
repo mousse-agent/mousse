@@ -30,12 +30,14 @@ export interface AcquireRepositoryLeaseOptions {
   signal?: AbortSignal
   retryDelayMs?: number
   staleAfterMs?: number
+  /** How long to wait for the lease at most; past it the wait ends with {@link RepositoryLeaseBusyError}. */
+  maxWaitMs?: number
   /** Test-only owner overrides. */
   pid?: number
   processInstanceId?: string
   token?: string
 }
-export class RepositoryLeaseBusyError extends Error { constructor() { super('Repository mutation lease is busy'); this.name = 'RepositoryLeaseBusyError' } }
+export class RepositoryLeaseBusyError extends Error { constructor(message = 'Repository mutation lease is busy') { super(message); this.name = 'RepositoryLeaseBusyError' } }
 export class RepositoryLeaseAbortedError extends Error { constructor() { super('Repository mutation lease acquisition was aborted'); this.name = 'RepositoryLeaseAbortedError' } }
 export class RepositoryLockOrderError extends Error { constructor(message: string) { super(message); this.name = 'RepositoryLockOrderError' } }
 
@@ -72,6 +74,19 @@ function safeReclaim(path: string, staleAfterMs: number): boolean {
     unlinkSync(path)
     return true
   } catch { return false }
+}
+/**
+ * Removes the lease file while it still names `token`, trying again when it cannot be read or removed for a moment (on
+ * Windows another program may have it open). False when it names another holder, is gone, or could not be removed.
+ */
+function removeOwnLease(path: string, token: string): boolean {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = readOwner(path)
+    if (current ? current.token !== token : !existsSync(path)) return false
+    if (!current) continue
+    try { unlinkSync(path); return true } catch { /* busy: try again */ }
+  }
+  return false
 }
 /**
  * Update through the opened inode after verifying the token, never a replacement owner: a reclaim that unlinked the file
@@ -116,10 +131,15 @@ function tryAcquire(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOp
       owner.heartbeatAt = new Date().toISOString()
       return writeOwnerInPlace(path, owner.token, owner)
     },
+    // The holder's turn in this process always ends here, whatever happened to the file: a file another process took
+    // over or removed, or one that could not be removed, must never leave every later caller waiting for good.
     release: () => {
       if (released) return true
-      if (readOwner(path)?.token !== owner.token) return false
-      try { unlinkSync(path); released = true; locallyHeldTokens.delete(owner.token); releaseLocal(identity.key); return true } catch { return false }
+      released = true
+      locallyHeldTokens.delete(owner.token)
+      const removed = removeOwnLease(path, owner.token)
+      releaseLocal(identity.key)
+      return removed
     }
   }
   return handle
@@ -174,6 +194,13 @@ function releaseLocal(key: string): void {
 export function acquireRepositoryLease(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOptions = {}): Promise<RepositoryLeaseHandle> {
   requireRepositoryMutationCapability(identity)
   if (opts.signal?.aborted) return Promise.reject(new RepositoryLeaseAbortedError())
+  if (opts.maxWaitMs !== undefined) {
+    const timeout = AbortSignal.timeout(opts.maxWaitMs)
+    const waited = acquireRepositoryLease(identity, { ...opts, maxWaitMs: undefined, signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout })
+    return waited.catch((error: unknown) => {
+      throw error instanceof RepositoryLeaseAbortedError && timeout.aborted && !opts.signal?.aborted ? new RepositoryLeaseBusyError() : error
+    })
+  }
   return new Promise((resolve, reject) => {
     const waiter: Waiter = { identity, opts, resolve, reject }
     if (opts.signal) {

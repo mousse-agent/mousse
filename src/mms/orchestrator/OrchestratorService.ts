@@ -820,6 +820,12 @@ interface ContinuationTurnPayload {
 
 /** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
 const CONTINUATION_CALL_WAIT_MS = 10_000
+/**
+ * How long a stopped turn waits for its repository to record where it ended. Another operation holding the repository
+ * longer than this must not keep the stopped turn running: it ends without that record, and the next turn's recovery
+ * records it.
+ */
+const STOPPED_TURN_CHECKPOINT_WAIT_MS = 20_000
 /** How long `/compact` waits for a runtime's own compaction; after it the compaction stops and the full history stays. */
 const NATIVE_COMPACT_TIMEOUT_MS = 5 * 60_000
 /** The compaction row of a `/compact` that was stopped or ran out of time. */
@@ -2613,6 +2619,8 @@ export class OrchestratorService extends EventEmitter {
    */
   /** Waits for a folder's volume, per thread, that a Stop of the thread ends (`waitForThreadFolders`). */
   private readonly folderWaits = new Map<string, Set<AbortController>>()
+  /** {@link STOPPED_TURN_CHECKPOINT_WAIT_MS}; tests shorten it. */
+  private stoppedTurnCheckpointWaitMs = STOPPED_TURN_CHECKPOINT_WAIT_MS
 
   /**
    * Waits until the volumes of the folders a thread's request or turn works in answer (see `folderAccess`),
@@ -2679,6 +2687,18 @@ export class OrchestratorService extends EventEmitter {
     return ended
   }
 
+  /**
+   * Ends the setup of the turns of `threadIds` that are still being set up (`ThreadSession.setupStop`): a Stop of a
+   * thread whose start waits for its repository or worktree ends that wait, and the turn ends before it started. Only a
+   * Stop does this; an internal abort lets the setup finish and stops the turn as it begins.
+   */
+  private endTurnSetups(threadIds: Iterable<string>): void {
+    for (const id of threadIds) {
+      const session = this.boundSession.threadId === id ? this.boundSession : this.sessions.get(id)
+      if (session && !session.activeTurn) session.setupStop?.abort(new DOMException('Thread stopped', 'AbortError'))
+    }
+  }
+
   /** The thread's project folder, or undefined (no project, unbound session). */
   private threadProjectPath(threadId: string): string | undefined {
     if (threadId === '__unbound__' || !this.projectManager || !this.threadStore) return undefined
@@ -2700,13 +2720,18 @@ export class OrchestratorService extends EventEmitter {
     if (!engine) {
       // Without a run engine there is only the local turn and its queue.
       const ended = this.endFolderWaits([threadId])
+      this.endTurnSetups([threadId])
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
       return { ok: aborted || ended || compactionStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
     if (result.status !== 'stopped') return { ok: false, ...result }
-    // Work still waiting for its folder's volume (a pending macOS permission prompt) never starts.
-    if (!result.replayed) this.endFolderWaits(result.threads)
+    // Work still waiting for its folder's volume (a pending macOS permission prompt) never starts, nor does a turn still
+    // waiting to be set up (its repository held by another operation).
+    if (!result.replayed) {
+      this.endFolderWaits(result.threads)
+      this.endTurnSetups(result.threads)
+    }
     // The Stop is recorded (every thread of the subtree has a higher generation): a pull request watch on any of them ends now.
     this.emit('threads-stopped', { threadIds: [...result.threads] })
     // A pause the Stop ended (the engine ends it in the same transaction): the thread no longer shows as paused,
@@ -7474,6 +7499,9 @@ export class OrchestratorService extends EventEmitter {
     // A compaction (here, or in another process) has no turn to steer: Send now skips it and the message goes first,
     // with the full history.
     if (!localActive && !externalActive && this.compactionHoldsQueue(threadId)) return this.sendNowSkippingCompaction(session, itemId, opts?.expectedRevision)
+    // A turn that was stopped (or is still being set up) takes no steer, but it still holds the thread: Send now puts
+    // the message first, and it goes as the next turn once that turn has ended.
+    if (!localActive && !externalActive && session.isTurnRunning()) return this.sendNowAfterTurn(session, itemId, opts?.expectedRevision)
     if (!localActive && !externalActive) {
       throw new QueueValidationError('No active turn to steer on this thread.')
     }
@@ -7527,6 +7555,27 @@ export class OrchestratorService extends EventEmitter {
    */
   private sendNowSkippingCompaction(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
     const threadId = session.threadId
+    this.moveQueueItemToFront(session, itemId, expectedRevision)
+    // Too late once its result was taken: the message then goes first with the compacted context, and says so.
+    const running = this.compactions.get(threadId)
+    if (running && this.takenCompactions.has(running)) return { ok: true, notice: 'compaction_finished' }
+    // A Stop already on its way ends it the same way.
+    if (this.stopCompaction(threadId)) return { ok: true }
+    return this.requestPeerCompactionStop(threadId) === 'taken' ? { ok: true, notice: 'compaction_finished' } : { ok: true }
+  }
+
+  /**
+   * Send now on a message queued behind a turn that cannot take a steer (it was stopped and is still ending, or is still
+   * being set up): the message moves to the front of the queue and goes as the next turn when that turn ends.
+   */
+  private sendNowAfterTurn(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
+    this.moveQueueItemToFront(session, itemId, expectedRevision)
+    session.drainAfterSettle = true
+    return { ok: true }
+  }
+
+  /** Moves a person's pending message to the front of the thread's queue, under the queue lock. */
+  private moveQueueItemToFront(session: ThreadSession, itemId: string, expectedRevision?: string): void {
     const toFront = (items: QueuedMessage[]): QueuedMessage[] => {
       assertQueueRevision(items, expectedRevision)
       const pending = listPendingQueue(items).filter((entry) => !entry.internal)
@@ -7535,14 +7584,8 @@ export class OrchestratorService extends EventEmitter {
       if (pending[0]?.id === itemId) return items
       return reorderQueuedMessages(items, [itemId, ...pending.map((entry) => entry.id).filter((id) => id !== itemId)])
     }
-    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, toFront) : toFront(session.queue)
-    this.emitQueueUpdated(threadId, session.queue)
-    // Too late once its result was taken: the message then goes first with the compacted context, and says so.
-    const running = this.compactions.get(threadId)
-    if (running && this.takenCompactions.has(running)) return { ok: true, notice: 'compaction_finished' }
-    // A Stop already on its way ends it the same way.
-    if (this.stopCompaction(threadId)) return { ok: true }
-    return this.requestPeerCompactionStop(threadId) === 'taken' ? { ok: true, notice: 'compaction_finished' } : { ok: true }
+    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, toFront) : toFront(session.queue)
+    this.emitQueueUpdated(session.threadId, session.queue)
   }
 
   /**
@@ -9790,9 +9833,15 @@ export class OrchestratorService extends EventEmitter {
         ))
       return turnResponse
     } catch (error) {
+      // A Stop ended the turn's setup (its waits for the repository or the worktree): nothing of the turn runs.
+      if (session.setupStop?.signal.aborted && !session.activeTurn && !this.lifecycle.signal.aborted) {
+        turnResponse = this.endTurnBeforeStart(session, opts?.runId, opts?.queueItemId, opts?.claimOwnerToken)
+        return turnResponse
+      }
       turnFailure = error ?? new Error('Turn failed')
       throw error
     } finally {
+      session.setupStop = null
       // A queue item that was never accepted stays on the queue and keeps its run queued.
       const requeued = turnResponse?.queued === true ||
         (opts?.queueItemId !== undefined && session.queue.some((item) => item.id === opts.queueItemId))
@@ -9879,6 +9928,21 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * A turn that ends before it started (a Stop, a delegation cancel, or the caller giving up while it waited to be
+   * set up): nothing of it runs, now or later. Its queue item goes, as a Stop's cancelled runs' entries do.
+   */
+  private endTurnBeforeStart(session: ThreadSession, runId: string | undefined, queueItemId: string | undefined, claimOwnerToken: string | undefined): OrchestratorResponse {
+    if (runId) this.markRun(runId, (engine, id) => {
+      const current = engine.getRun(id)
+      if (current && !TERMINAL_RUN_STATUSES.has(current.status)) engine.markTerminal(id, 'cancelled', { error: 'cancelled_before_start' })
+    })
+    if (queueItemId) this.completeSessionClaim(session, queueItemId, claimOwnerToken)
+    // The run is ended: the same refusal a turn of an ended run always gets.
+    this.markRunStarting(runId)
+    return { message: '', actions: [] }
+  }
+
   /** Honor a stop that arrived while the turn was admitted but not yet running. */
   private applyRequestedAbort(session: ThreadSession, turn: { abort: AbortController }): void {
     if (!session.abortRequested) return
@@ -9903,6 +9967,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.externalSignal?.aborted) abort()
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
     this.activeTurn = turn
+    session.setupStop = null
     this.applyRequestedAbort(session, turn)
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
@@ -10013,6 +10078,11 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
+    // A Stop while the turn is still being set up ends the setup's waits (`endTurnSetups`); `startTurn` then ends the
+    // turn before it started.
+    const setupStop = new AbortController()
+    session.setupStop = setupStop
+    const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
     const requeueUnstarted = (): OrchestratorResponse => {
@@ -10047,16 +10117,8 @@ export class OrchestratorService extends EventEmitter {
         // to run after the restart. A run something already ended stays ended.
         const shutdown = this.lifecycle.signal.aborted || this.isShutdownAbort(opts?.externalSignal?.reason)
         if (waited === 'aborted' && shutdown && !(run && TERMINAL_RUN_STATUSES.has(run.status))) return requeueUnstarted()
-        // A Stop, a delegation cancel, or the caller giving up (a phone send that disconnected, a time limit):
-        // nothing of the turn runs, now or later. Its queue item goes, as a Stop's cancelled runs' entries do.
-        if (opts?.runId) this.markRun(opts.runId, (engine, id) => {
-          const current = engine.getRun(id)
-          if (current && !TERMINAL_RUN_STATUSES.has(current.status)) engine.markTerminal(id, 'cancelled', { error: 'cancelled_before_start' })
-        })
-        if (queueItemId) this.completeSessionClaim(session, queueItemId, claimOwnerToken)
-        // The run is ended: the same refusal a turn of an ended run always gets.
-        this.markRunStarting(opts?.runId)
-        return { message: '', actions: [] }
+        // A Stop, a delegation cancel, or the caller giving up (a phone send that disconnected, a time limit).
+        return this.endTurnBeforeStart(session, opts?.runId, queueItemId, claimOwnerToken)
       }
     }
 
@@ -10097,23 +10159,23 @@ export class OrchestratorService extends EventEmitter {
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
       if (primary) {
-        const settled = await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+        const settled = await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease, setupSignal)
         const merging = [...new Set(settled.flatMap((item) => item.state === 'cancelled' && item.mergeInProgress ? [item.mergeInProgress] : []))]
         if (merging.length) this.sessionAls.run(session, () => this.addSystemMessage(`A publish merge from an earlier version is still in progress in ${merging.join(', ')}; abort it (operations abort) or finish it with Git. It was not run again.`))
       }
-      await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
-      await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
+      await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
       await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
         if (!action.nativeContextStartBoundary) return
         if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
         else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary)
-      }, heldLease)
+      }, heldLease, setupSignal)
       await new ConversationBranchService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (branch) => {
         const path = join(recoveryDirectory, 'conversation-contexts', `${encodeURIComponent(branch.id)}.json`)
         const saved = JSON.parse(readFileSync(path, 'utf8')) as { schemaVersion: number; messages: ChatMessage[]; nativeContext: NativeLlmContext }
         if (saved.schemaVersion !== 1 || !Array.isArray(saved.messages) || !saved.nativeContext) throw new Error('Conversation recovery snapshot is invalid')
         this.replaceConversationState(session.threadId, saved.messages, saved.nativeContext)
-      }, heldLease)
+      }, heldLease, setupSignal)
     }
     const request = normalizeSendRequest(input)
     // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.
@@ -10144,10 +10206,10 @@ export class OrchestratorService extends EventEmitter {
         )
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
-          await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
-          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
+          await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
+          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
           session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
-            .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
+            .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
           session.projectCwd = session.workspace.projectPath
         } else {
           session.workspace = null
@@ -10216,11 +10278,13 @@ export class OrchestratorService extends EventEmitter {
           checkpointCwd = prepared.record.workTree
           turnStartSha = (await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
-            heldThreadLease: session.executionLease ?? undefined,
+            heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
             presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
           })).startSha
           setSnapshotsOff(snapshotFolder.directory, undefined)
         } catch (error) {
+          // A Stop that ended the wait for the folder's store ends the turn; it says nothing about the folder's snapshots.
+          if (setupSignal.aborted) throw error
           const message = error instanceof Error ? error.message : String(error)
           snapshotsOff = error instanceof SnapshotRefusedError ? message : `Undo is off for this folder: ${message}`
           snapshotsNotCovered = coverageNotice([{ path: '.', reason: error instanceof SnapshotRefusedError ? error.gapReason : `no snapshot could be taken (${message.split(/\r?\n/)[0]})` }])
@@ -10231,7 +10295,7 @@ export class OrchestratorService extends EventEmitter {
       } else if (directory) {
         turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
           threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
-          heldThreadLease: session.executionLease ?? undefined,
+          heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
           presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
         })).startSha
       } else {
@@ -10368,7 +10432,7 @@ export class OrchestratorService extends EventEmitter {
     this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
-    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
+    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed', signal?: AbortSignal): Promise<void> => {
       if ((!checkpointEnabled || !turnStartSha || !checkpointCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
       if (!threadDir) return
@@ -10376,6 +10440,8 @@ export class OrchestratorService extends EventEmitter {
         threadId: session.threadId,
         turnId,
         heldThreadLease: session.executionLease ?? undefined,
+        // A stopped turn's checkpoint ends with its signal, its Git commands too: the Stop ends the turn in bounded time.
+        ...(signal ? { signal, signalEndsWork: true } : {}),
         externalEffects,
         ...(turnStartNote ? { startNote: turnStartNote } : {}),
         conversationBranchId,
@@ -10411,6 +10477,8 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     this.activeTurn = turn
+    // From here a Stop aborts the turn itself.
+    session.setupStop = null
     this.applyRequestedAbort(session, turn)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
@@ -10941,7 +11009,13 @@ export class OrchestratorService extends EventEmitter {
       const response: OrchestratorResponse = { message: partial, actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
-      await checkpointTurn('stopped')
+      try {
+        await checkpointTurn('stopped', AbortSignal.timeout(this.stoppedTurnCheckpointWaitMs))
+      } catch (error) {
+        // A stopped turn always ends, so its queued messages go and the thread is free. Where it ended is recorded by the
+        // next turn's recovery (its checkpoint stays pending in the journal).
+        console.warn('a stopped turn ended without recording its checkpoint', { threadId: session.threadId, turnId, error: error instanceof Error ? error.message : String(error) })
+      }
       this.persist(true)
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave
       // the persisted stopped message invisible until the thread is reopened.

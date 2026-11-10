@@ -1,4 +1,5 @@
 import { acquireRepositoryLease } from '../git/RepositoryLease'
+import { gitCancellationScope } from '../git/runGitProcess'
 import { resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import { hiddenStoreIdentity, inHiddenStore, type HiddenStore } from '../git/hiddenStore'
 import { threadSnapshotStoreAsync } from '../workspace/SnapshotWorkspace'
@@ -50,7 +51,13 @@ export async function withGitMutationLocks<T>(
   source: string,
   operation: () => Promise<T> | T,
   signal?: AbortSignal,
-  heldThreadLease?: ThreadLeaseHandle
+  heldThreadLease?: ThreadLeaseHandle,
+  /**
+   * Ends the operation's Git commands too (see `gitCancellationScope`). The repository's lock goes only once nothing they
+   * started is left: when a stopped command left processes, the operation still ends, and the lock is kept until they
+   * are gone, however long that takes.
+   */
+  workSignal?: AbortSignal
 ): Promise<T> {
   if (heldThreadLease) assertHeldThreadLease(threadDirectory, heldThreadLease)
   const heldRepositories = mutationContext.getStore()
@@ -68,11 +75,16 @@ export async function withGitMutationLocks<T>(
   const threadLease = await started.threadLease
   try {
     const repositoryLease = await acquireRepositoryLease(repository, { signal })
+    const scope = workSignal ? gitCancellationScope(workSignal) : undefined
     try {
       const held = new Set([...(heldRepositories ?? []), repository.key])
-      return await mutationContext.run(held, () => store ? inHiddenStore(store, operation) : operation())
+      const work = async (): Promise<T> => store ? inHiddenStore(store, operation) : operation()
+      return await mutationContext.run(held, () => scope ? scope.run(work) : work())
     } finally {
-      repositoryLease.release()
+      const survivors = scope?.survivorsGone()
+      // Processes a stopped command left keep the repository locked until they are gone, however long; never released early.
+      if (survivors) void survivors.then(() => repositoryLease.release())
+      else repositoryLease.release()
     }
   } finally {
     if (!heldThreadLease) releaseExecutionLeaseHandle(threadLease)

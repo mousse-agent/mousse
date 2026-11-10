@@ -359,7 +359,7 @@ export class PublishService {
    * after setting files aside and before its fast-forward (`holding`, the branch not moved) gets them put back, each only
    * where nothing stands. A publish an older version left waiting (`recovery_required`) is settled the same way.
    */
-  async recoverPending(_threadWorkspace: string, primaryCheckout: string, heldThreadLease?: ThreadLeaseHandle): Promise<PublishRecovery[]> {
+  async recoverPending(_threadWorkspace: string, primaryCheckout: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<PublishRecovery[]> {
     // Recovery only records what an interrupted publish did; it never runs under the user's request.
     return withoutUserRequest(async () => {
       const pending = [...this.journal.latestByOperation().values()].filter((entry) => ['publish', 'change-publish'].includes(entry.operationType) && PENDING_STATES.includes(entry.state))
@@ -382,7 +382,7 @@ export class PublishService {
           settled.push(await this.settle(checkout, entry.operationId, intent.expected, intent.paths.holding))
         }
         return settled
-      }, undefined, heldThreadLease)
+      }, signal, heldThreadLease)
     })
   }
 

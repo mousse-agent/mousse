@@ -67,6 +67,11 @@ export class ThreadSession {
   drainAfterSettle = false
   /** Stop requested after admission but before the turn created its abort controller. */
   abortRequested = false
+  /**
+   * Ends the waits of a turn that is still being set up (its worktree, the snapshot it starts from) when a Stop comes
+   * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.
+   */
+  setupStop: AbortController | null = null
   activeToolCallMessageIds = new Map<string, string>()
   /** Provider tool call id → timeline message id for the turn's calls, finished ones too (parents of later children). */
   callToMessage = new Map<string, string>()

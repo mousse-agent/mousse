@@ -152,6 +152,25 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(orch.listQueue(thread.id).map((i) => i.content)).toEqual(['keep-me'])
   })
 
+  it('Send now behind a stopped turn that is still ending puts the message first instead of failing to steer', () => {
+    const thread = store.createThread('Stopping')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    session.turnAdmitted = true
+    orch.enqueueForThread(thread.id, 'resume')
+    const later = orch.enqueueForThread(thread.id, 'carry on')
+    expect(orch.abortActiveTurn(thread.id)).toBe(true)
+
+    expect(orch.promoteQueueItem(thread.id, later.id)).toEqual({ ok: true })
+    expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['carry on', 'pending'], ['resume', 'pending']])
+    expect(session.drainAfterSettle).toBe(true)
+    // With nothing running at all there is still nothing to steer.
+    session.activeTurn = null
+    session.turnAdmitted = false
+    expect(() => orch.promoteQueueItem(thread.id, later.id)).toThrow('No active turn to steer on this thread.')
+  })
+
   it('does not use process.chdir when resolving project cwd for turns', () => {
     const cwdBefore = process.cwd()
     const spy = vi.spyOn(process, 'chdir')
