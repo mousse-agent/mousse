@@ -52,10 +52,10 @@ const belowRows = () => [...list().firstElementChild!.children].slice(1)
 const toolbars = () => [...host.querySelectorAll<HTMLElement>('.chat-message-toolbar')].filter((el) => el.className.includes('h-[48px]'))
 
 describe('the gap under a streaming reply', () => {
-  it('is a fixed 28px, about two lines above the composer, never a share of the viewport', () => {
+  it('is a fixed 44px, about three lines above the composer, never a share of the viewport', () => {
     render([ask('u1'), answer('a1', 'The renderer keeps a bounded window of rows')], 'streaming')
     expect(gap()).not.toBeNull()
-    expect(gap()!.className).toContain('h-[28px]')
+    expect(gap()!.className).toContain('h-[44px]')
     expect(gap()!.className).not.toMatch(/vh|min-h/)
     // Directly under the rows: nothing else pushes the newest text up from the composer.
     expect(belowRows()).toEqual([gap()])
@@ -82,10 +82,10 @@ describe('the gap under a streaming reply', () => {
     render([ask('u1'), answer('a1', 'Done streaming.')], 'ready')
     expect(gap()).toBeNull()
     expect(belowRows()).toEqual([])
-    // 48px tall, pulled 20px (-mb-5) into the end padding: 28px of space, like the gap, so the text does not move.
+    // 48px tall, pulled 4px (-mb-1) into the end padding: 44px of space, like the gap, so the text does not move.
     const [toolbar] = toolbars()
     expect(toolbar!.className).toContain('h-[48px]')
-    expect(toolbar!.className).toContain('-mb-5')
+    expect(toolbar!.className).toContain('-mb-1')
   })
 
   it('stays when the reply ends without a toolbar to take its place, so nothing moves', () => {
@@ -111,8 +111,8 @@ describe('the gap under a streaming reply', () => {
     expect(gap()).toBeNull()
     const [first, last] = toolbars()
     expect(first!.className).toContain('h-[48px]')
-    expect(first!.className).not.toContain('-mb-5')
-    expect(last!.className).toContain('-mb-5')
+    expect(first!.className).not.toContain('-mb-1')
+    expect(last!.className).toContain('-mb-1')
   })
 
   it('keeps queued messages clear of the last turn toolbar', () => {
@@ -130,7 +130,7 @@ describe('the gap under a streaming reply', () => {
     const messages = [...history(RENDER_ALL_THRESHOLD + 5), ask('live'), answer('streaming', 'Point A11: the store keeps one entry per thread')]
     render(messages, 'streaming')
     expect(list().dataset.windowed).toBe('true')
-    expect(gap()!.className).toContain('h-[28px]')
+    expect(gap()!.className).toContain('h-[44px]')
     // Below the last turn; the turn window's spacers stay inside the rows column, above it.
     expect(belowRows()).toEqual([gap()])
     expect(list().firstElementChild!.firstElementChild!.querySelector('[data-reply-gap]')).toBeNull()
