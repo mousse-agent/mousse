@@ -81,10 +81,23 @@ export type TranscriptTextMode = 'replace' | 'append'
 /** A running item's output reaches clients at most this often. */
 const ACTIVITY_EMIT_MS = 100
 
+/**
+ * Streamed reply and thinking text reaches clients at most this often per message: the first delta
+ * goes out at once, later ones within the window are folded into one update at its end. Providers
+ * send deltas unevenly, often hundreds a second; clients redraw the reply about 20 times a second.
+ */
+export const TEXT_EMIT_MS = 50
+
 /** Emit and save bookkeeping of one running item. */
 interface ItemStream {
   lastEmit: number
   lastCheckpoint: number
+  timer?: ReturnType<typeof setTimeout>
+}
+
+/** Emit bookkeeping of one streaming reply or thinking message. */
+interface TextStream {
+  lastEmit: number
   timer?: ReturnType<typeof setTimeout>
 }
 
@@ -148,6 +161,7 @@ export class TranscriptAssembler {
   private readonly closedReplyIds: string[] = []
   private readonly callToMessage: Map<string, string>
   private readonly streams = new Map<string, ItemStream>()
+  private readonly textStreams = new Map<string, TextStream>()
 
   constructor(
     private readonly hooks: TranscriptHooks,
@@ -162,6 +176,8 @@ export class TranscriptAssembler {
    * is closed as stopped first, so no item outlives its turn.
    */
   reset(): void {
+    this.flushText()
+    this.textStreams.clear()
     this.closeOpenTools('stop')
     this.callToMessage.clear()
     this.closedReplyIds.length = 0
@@ -233,6 +249,8 @@ export class TranscriptAssembler {
   }
 
   tool(event: StreamingLlmToolEvent): void {
+    // Text streamed before the call reaches clients before the call does.
+    this.flushText()
     // Build tools render as MCP calls in the timeline.
     const kind =
       event.kind === 'build_tool_call'
@@ -307,6 +325,7 @@ export class TranscriptAssembler {
    * (it settled and this call has no result) or `daemon_restart` (a profile shutdown aborted it).
    */
   closeOpenTools(reason: ActivityInterruptedBy): void {
+    this.flushText()
     let changed = false
     for (const messageId of this.state.activeToolCallMessageIds.values()) {
       const existing = this.hooks.getMessage(messageId)
@@ -502,8 +521,61 @@ export class TranscriptAssembler {
       ...(incomplete ? { incomplete: true } : {})
     }
     this.hooks.updateMessage(updated)
-    this.hooks.emitUpdated(updated)
+    this.emitText(updated, streaming)
     this.hooks.persist(!streaming)
+  }
+
+  /**
+   * Sends every text update still held back by the coalescing window now, so it reaches clients
+   * before whatever the caller emits next. The assembler does this itself before its own other
+   * emits; the owner calls it before it emits around the transcript (turn end, snapshots).
+   */
+  flushText(): void {
+    for (const [messageId, stream] of this.textStreams) {
+      if (!stream.timer) continue
+      clearTimeout(stream.timer)
+      stream.timer = undefined
+      stream.lastEmit = Date.now()
+      const latest = this.hooks.getMessage(messageId)
+      if (latest) this.hooks.emitUpdated(latest)
+    }
+  }
+
+  /**
+   * Emits a reply or thinking update. A streaming one goes out at once when the message has not
+   * been sent for `TEXT_EMIT_MS`, otherwise once at the end of that window with the message as it
+   * is then. A final one goes out at once, after any other held-back text.
+   */
+  private emitText(message: ChatMessage, streaming: boolean): void {
+    if (!streaming) {
+      const stream = this.textStreams.get(message.id)
+      if (stream?.timer) clearTimeout(stream.timer)
+      this.textStreams.delete(message.id)
+      this.flushText()
+      this.hooks.emitUpdated(message)
+      return
+    }
+    const now = Date.now()
+    let stream = this.textStreams.get(message.id)
+    if (!stream) {
+      stream = { lastEmit: 0 }
+      this.textStreams.set(message.id, stream)
+    }
+    if (stream.timer) return
+    const wait = TEXT_EMIT_MS - (now - stream.lastEmit)
+    if (wait <= 0) {
+      stream.lastEmit = now
+      this.hooks.emitUpdated(message)
+      return
+    }
+    const held = stream
+    held.timer = setTimeout(() => {
+      held.timer = undefined
+      held.lastEmit = Date.now()
+      const latest = this.hooks.getMessage(message.id)
+      if (latest) this.hooks.emitUpdated(latest)
+    }, wait)
+    held.timer.unref?.()
   }
 
   /** Content of the open assistant reply, or undefined when none is open. */
@@ -553,6 +625,8 @@ export class TranscriptAssembler {
   }
 
   private add(message: ChatMessage): void {
+    // Text streamed so far reaches clients before the new message does.
+    this.flushText()
     this.hooks.addMessage(message)
     this.hooks.emitAdded(message)
     this.hooks.persist(false)
@@ -586,7 +660,7 @@ export class TranscriptAssembler {
     if (!existing) return
     const updated: ChatMessage = { ...existing, thinking: { content, status } }
     this.hooks.updateMessage(updated)
-    this.hooks.emitUpdated(updated)
+    this.emitText(updated, status !== 'complete')
     this.hooks.persist(status === 'complete')
   }
 }

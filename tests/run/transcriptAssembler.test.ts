@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  TEXT_EMIT_MS,
   TranscriptAssembler,
   unshownReplyText,
   type TranscriptHooks,
@@ -69,13 +70,13 @@ describe('TranscriptAssembler', () => {
       lastCompletedAssistantMessageId: id,
       lastCompletedAssistantContent: 'Hello there'
     })
-    // Streaming updates are debounced; the completed reply is written at once.
+    // Streaming updates are debounced; the completed reply is written at once. The second delta
+    // came within the coalescing window, so it reaches clients only as part of the completed reply.
     expect(log).toEqual([
       'added:assistant',
       'persist',
       'updated:assistant',
       'persist',
-      'updated:assistant',
       'persist',
       'updated:assistant',
       'persist!'
@@ -621,5 +622,123 @@ describe('TranscriptAssembler typed activity', () => {
       expect(activityOf(message)).toMatchObject({ kind: 'generic', output: JSON.stringify({ delegationId: 'del-1', status: 'running' }) })
       expect(size(message)).toBeLessThan(5000)
     })
+  })
+})
+
+describe('TranscriptAssembler text coalescing', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** A harness whose emits record the content they carried. */
+  function contentHarness() {
+    const h = harness()
+    const sent: string[] = []
+    const hooks = (h.assembler as unknown as { hooks: TranscriptHooks }).hooks
+    const emitUpdated = hooks.emitUpdated
+    hooks.emitUpdated = (message) => {
+      sent.push(message.kind === 'thinking' ? `thinking:${message.thinking?.content}` : message.content)
+      emitUpdated(message)
+    }
+    return { ...h, sent }
+  }
+
+  it('sends the first delta at once and folds the rest of a 50 ms window into one update', () => {
+    vi.useFakeTimers()
+    const { assembler, sent } = contentHarness()
+    assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+    let text = ''
+    for (let i = 0; i < 10; i++) {
+      text += `w${i} `
+      assembler.text({ phase: 'delta', content: text, contentIndex: 0 })
+      vi.advanceTimersByTime(4)
+    }
+    // 10 deltas in 40 ms: the first went out, the rest wait for the window to end.
+    expect(sent).toEqual(['w0 '])
+    vi.advanceTimersByTime(TEXT_EMIT_MS)
+    expect(sent).toEqual(['w0 ', text])
+    // Nothing is held back once the window has passed.
+    vi.advanceTimersByTime(TEXT_EMIT_MS * 4)
+    expect(sent).toHaveLength(2)
+  })
+
+  it('sends at most one update per window however fast deltas come, and the final text equals the whole reply', () => {
+    vi.useFakeTimers()
+    const { assembler, sent, messages } = contentHarness()
+    assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+    let text = ''
+    // 200 deltas a second for one second.
+    for (let i = 0; i < 200; i++) {
+      text += `t${i} `
+      assembler.text({ phase: 'delta', content: text, contentIndex: 0 })
+      vi.advanceTimersByTime(5)
+    }
+    expect(sent.length).toBeLessThanOrEqual(1000 / TEXT_EMIT_MS + 1)
+    expect(sent.length).toBeGreaterThanOrEqual(1000 / TEXT_EMIT_MS - 1)
+    assembler.text({ phase: 'complete', content: text, contentIndex: 0 })
+    expect(sent.at(-1)).toBe(text)
+    expect(messages[0]).toMatchObject({ content: text, streaming: false })
+    vi.advanceTimersByTime(TEXT_EMIT_MS * 2)
+    expect(sent.at(-1)).toBe(text)
+  })
+
+  it('sends held-back text before a tool call starts', () => {
+    vi.useFakeTimers()
+    const { assembler, log, sent } = contentHarness()
+    assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+    assembler.text({ phase: 'delta', content: 'Let me', contentIndex: 0 })
+    assembler.text({ phase: 'delta', content: 'Let me check.', contentIndex: 0 })
+    log.length = 0
+    assembler.tool({ kind: 'tool_call', phase: 'start', callId: 'c1', title: 'Bash', details: [] } as StreamingLlmToolEvent)
+    expect(log.indexOf('updated:assistant')).toBeGreaterThanOrEqual(0)
+    expect(log.indexOf('updated:assistant')).toBeLessThan(log.indexOf('added:tool_call'))
+    expect(sent.at(-1)).toBe('Let me check.')
+    // The flushed window does not send again later.
+    const count = sent.length
+    vi.advanceTimersByTime(TEXT_EMIT_MS * 2)
+    expect(sent).toHaveLength(count)
+  })
+
+  it('sends held-back text before the turn closes its tools, and nothing after a reset', () => {
+    vi.useFakeTimers()
+    const { assembler, sent } = contentHarness()
+    assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+    assembler.text({ phase: 'delta', content: 'a', contentIndex: 0 })
+    assembler.text({ phase: 'delta', content: 'ab', contentIndex: 0 })
+    assembler.closeOpenTools('no_result')
+    expect(sent).toEqual(['a', 'ab'])
+    assembler.text({ phase: 'delta', content: 'abc', contentIndex: 0 })
+    vi.advanceTimersByTime(TEXT_EMIT_MS)
+    assembler.text({ phase: 'delta', content: 'abcd', contentIndex: 0 })
+    assembler.reset()
+    const count = sent.length
+    expect(sent.at(-1)).toBe('abcd')
+    vi.advanceTimersByTime(TEXT_EMIT_MS * 4)
+    expect(sent).toHaveLength(count)
+  })
+
+  it('coalesces thinking the same way and sends its completion at once', () => {
+    vi.useFakeTimers()
+    const { assembler, sent } = contentHarness()
+    assembler.thinking({ phase: 'start', content: '' })
+    assembler.thinking({ phase: 'delta', content: 'Hm' })
+    assembler.thinking({ phase: 'delta', content: 'Hmm,' })
+    assembler.thinking({ phase: 'delta', content: 'Hmm, so' })
+    expect(sent).toEqual(['thinking:Hm'])
+    assembler.thinking({ phase: 'complete', content: 'Hmm, so.' })
+    expect(sent).toEqual(['thinking:Hm', 'thinking:Hmm, so.'])
+    vi.advanceTimersByTime(TEXT_EMIT_MS * 2)
+    expect(sent).toHaveLength(2)
+  })
+
+  it('sends held-back text before a new message is added', () => {
+    vi.useFakeTimers()
+    const { assembler, log } = contentHarness()
+    assembler.thinking({ phase: 'start', content: '' })
+    assembler.thinking({ phase: 'delta', content: 'a' })
+    assembler.thinking({ phase: 'delta', content: 'ab' })
+    log.length = 0
+    assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+    expect(log.slice(0, 2)).toEqual(['updated:thinking', 'added:assistant'])
   })
 })
