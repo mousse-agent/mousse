@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
-import { createRequire } from 'node:module'
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { build } from 'esbuild'
+import electron from 'electron'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const roots: string[] = []
@@ -45,8 +45,7 @@ describe.skipIf(process.platform !== 'win32')('provider credentials across real 
     for (const [source, outfile] of [['tests/fixtures/provider-credentials/vault-probe.ts', nodeEntry], ['tests/fixtures/provider-credentials/vault-probe-electron.ts', electronEntry]]) {
       await build({ entryPoints: [resolve(source)], outfile, bundle: true, platform: 'node', format, target: 'node22', external: ['electron'] })
     }
-    const electron = createRequire(import.meta.url)('electron') as string
-    await run(electron, electronEntry, 'write', root)
+    await run(electron as unknown as string, electronEntry, 'write', root)
     const auth = join(root, 'home', 'auth.json')
     const original = readFileSync(auth)
     expect(JSON.parse(original.toString()).__mousse_encrypted_v1).toEqual(expect.any(String))
@@ -54,7 +53,7 @@ describe.skipIf(process.platform !== 'win32')('provider credentials across real 
     await run(process.execPath, nodeEntry, 'node-reject', root)
     expect(readFileSync(auth)).toEqual(original)
     expect(readdirSync(join(root, 'home'))).toEqual(['auth.json'])
-    await run(electron, electronEntry, 'read', root)
+    await run(electron as unknown as string, electronEntry, 'read', root)
     expect(readFileSync(auth)).toEqual(original)
     expect(readdirSync(join(root, 'home'))).toEqual(['auth.json'])
   }, 65_000)

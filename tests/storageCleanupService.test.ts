@@ -1751,14 +1751,13 @@ describe('the merged rule counts conversation as use', () => {
 })
 
 describe('the hourly run does not hold up the daemon', () => {
-  /** Calls between two turns of the event loop: a request can only be answered when one comes round. */
+  /** Counts turns of the event loop: a request can only be answered when one comes round. */
   function watchLoop() {
-    const stamps: number[] = []; let running = true
-    const spin = () => { if (!running) return; stamps.push(Date.now()); setImmediate(spin) }
+    let turns = 0; let running = true
+    const spin = () => { if (!running) return; turns++; setImmediate(spin) }
     setImmediate(spin)
-    return { stop: () => { running = false; return stamps }, }
+    return { turns: () => turns, stop: () => { running = false; return turns } }
   }
-  const busy = (ms: number) => { const end = Date.now() + ms; while (Date.now() < end) { /* Stands for a Git call and a file walk. */ } }
 
   it('yields to the event loop between worktrees, so a request is answered promptly during a run', async () => {
     const f = fixture(); setPolicy(f, inactive())
@@ -1768,15 +1767,15 @@ describe('the hourly run does not hold up the daemon', () => {
       writeFileSync(join(location, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: `extra-${index}`, worktreePath: f.worktree, lifecycle: 'ready' }))
       f.store.registerTask({ taskId: `extra-${index}`, location })
     }
-    const evaluate = vi.spyOn(f.service as unknown as { evaluateOne: () => Promise<{ keep: string }> }, 'evaluateOne').mockImplementation(async () => { busy(25); return { keep: 'Stubbed' } })
     const watch = watchLoop()
+    // The loop turns seen when each worktree's evaluation starts.
+    const seen: number[] = []
+    const evaluate = vi.spyOn(f.service as unknown as { evaluateOne: () => Promise<{ keep: string }> }, 'evaluateOne').mockImplementation(async () => { seen.push(watch.turns()); return { keep: 'Stubbed' } })
     await f.service.run('schedule')
-    const stamps = watch.stop()
+    watch.stop()
     expect(evaluate.mock.calls.length).toBeGreaterThanOrEqual(6)
-    // One turn of the loop after every worktree, and none of them waited for more than a worktree's work.
-    expect(stamps.length).toBeGreaterThanOrEqual(evaluate.mock.calls.length)
-    const gaps = stamps.slice(1).map((stamp, index) => stamp - stamps[index]!)
-    expect(Math.max(...gaps)).toBeLessThan(250)
+    // The loop came round between every two worktrees: no two were evaluated in one turn.
+    for (let index = 1; index < seen.length; index++) expect(seen[index], JSON.stringify(seen)).toBeGreaterThan(seen[index - 1]!)
   }, 90_000)
 
   it('walks a big folder for another repository in slices, and still finds one', async () => {
@@ -1786,7 +1785,7 @@ describe('the hourly run does not hold up the daemon', () => {
     }
     const watch = watchLoop()
     expect(await findNestedRepository(root)).toEqual({ truncated: false })
-    expect(watch.stop().length).toBeGreaterThanOrEqual(2)
+    expect(watch.stop()).toBeGreaterThanOrEqual(2)
     mkdirSync(join(root, 'd7', 'inner', '.git'), { recursive: true })
     expect(await findNestedRepository(root)).toEqual({ nested: 'd7/inner', truncated: false })
   }, 60_000)

@@ -44,9 +44,9 @@ const env = {
   MOUSSE_ATTACHED_PAGE_HTML: resolve(fixtureDir, 'site', 'page.html')
 }
 delete env.ELECTRON_RUN_AS_NODE
-const electronPath = typeof electron === 'string' ? electron : electron.default ?? electron
 const code = await new Promise((resolveExit, reject) => {
-  const child = spawn(electronPath, [resolve(buildDir, 'main.mjs')], {
+  // In Node the `electron` package's default export is the path of the Electron binary.
+  const child = spawn(electron, [resolve(buildDir, 'main.mjs')], {
     cwd: root,
     env,
     windowsHide: true,

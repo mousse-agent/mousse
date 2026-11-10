@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process'
-import { createRequire } from 'node:module'
 import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { build } from 'esbuild'
+import electron from 'electron'
 import { browserWorkerModulePath } from '../src/mms/browser/workerModulePath'
 
 const roots: string[] = []
@@ -35,13 +35,11 @@ describe('browser worker build and Electron host', () => {
 
     const probePath = join(root, 'host.cjs')
     await build({ entryPoints: [resolve('tests/fixtures/browser-host-probe/main.ts')], outfile: probePath, bundle: true, platform: 'node', format: 'cjs', target: 'node22', external: ['electron'] })
-    const require = createRequire(import.meta.url)
-    const electronPath = require('electron') as string
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((done, reject) => {
       const environment = { ...process.env, MOUSSE_HOME: join(root, 'installation') }
       delete environment.ELECTRON_RUN_AS_NODE
       delete environment.MOUSSE_BROWSER_WORKER
-      const child = spawn(electronPath, [probePath, root, modulePath], { windowsHide: true, env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(electron as unknown as string, [probePath, root, modulePath], { windowsHide: true, env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
       let stdout = '', stderr = ''
       const timeout = setTimeout(() => { child.kill(); reject(new Error('Electron browser host probe timed out')) }, 25000)
       child.stdout.on('data', (bytes: Buffer) => { stdout = (stdout + bytes.toString()).slice(-64 * 1024) })

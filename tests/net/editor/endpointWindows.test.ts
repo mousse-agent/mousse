@@ -20,6 +20,7 @@ import {
   run,
   sshdHelper,
   until,
+  watchKills,
   type Bed,
   type SshClient
 } from '../helpers/endpointBed'
@@ -309,19 +310,15 @@ describe.skipIf(!windows)('ending on a Windows owner', () => {
     const b = await bed()
     const session = await b.connect()
     const server = await detached(session.client)
-    let worst = 0
-    let last = Date.now()
-    const timer = setInterval(() => {
-      const now = Date.now()
-      worst = Math.max(worst, now - last)
-      last = now
-    }, 5)
-    const before = Date.now()
+    const kills = watchKills(b.host)
     session.connection.end(true)
-    expect(Date.now() - before).toBeLessThan(250)
-    await until(async () => !(await alive(server)), 10_000)
-    clearInterval(timer)
-    expect(worst).toBeLessThan(500)
+    // The kill started and end() returned before it finished: the caller is not held while the job is stopped.
+    expect(kills.calls).toHaveLength(1)
+    expect(kills.calls[0]!.endedAt).toBeUndefined()
+    await until(async () => !(await alive(server)) && kills.calls[0]!.endedAt !== undefined, 10_000)
+    kills.stop()
+    // The loop came round while the kill ran: it never held the thread from start to end.
+    expect(kills.calls[0]!.endedAt!).toBeGreaterThan(kills.calls[0]!.startedAt)
   })
 
   it('stops nothing of another device', async () => {
