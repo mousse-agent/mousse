@@ -1,7 +1,7 @@
 import { execFile, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, readlinkSync, type BigIntStats } from 'node:fs'
-import { lstat } from 'node:fs/promises'
+import { lstatSync, readFileSync, readlinkSync, statSync, type BigIntStats } from 'node:fs'
+import { lstat, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
@@ -107,10 +107,11 @@ const LINK = '120000'
 /** A Git read the status needs: `optional` ones yield '' instead of failing the whole read. */
 interface GitRead { args: readonly string[]; optional?: boolean }
 /**
- * The stat data of files (paths relative to the folder, or absolute), answered one line per path: its
- * {@link fileSignature}, or '' when it cannot be read.
+ * The stat data of files (paths relative to the folder, or absolute), answered one line per path. Without `follow`, the
+ * path itself (a link stays a link): its {@link fileSignature}, or '' when it cannot be read. With `follow`, what Git
+ * reads when it opens the path, through any links: {@link followedSignature}.
  */
-interface StatRead { stat: readonly string[] }
+interface StatRead { stat: readonly string[]; follow?: boolean }
 /** The `-c` settings Mousse's own Git commands run with in the folder, answered one per line. */
 interface SettingsRead { programSettings: true }
 type Read = GitRead | StatRead | SettingsRead
@@ -120,6 +121,18 @@ type Step = Read[]
 /** What a regular file's stat data says about its content: size, modification and change times in nanoseconds, and inode. '' for anything else. */
 function fileSignature(stats: BigIntStats): string {
   return stats.isFile() ? `${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}:${stats.ino}` : ''
+}
+
+/** A followed file that is not there (Git then reads nothing from it): a state of its own, safe to remember. */
+const MISSING = '-'
+/** A followed file that could not be read, or is not a regular file: nothing may be remembered against it. */
+const UNUSABLE = '!'
+
+/** {@link fileSignature} of what a followed path leads to; {@link MISSING} or {@link UNUSABLE} otherwise. */
+function followedSignature(stats: BigIntStats | null, error?: unknown): string {
+  if (stats) return stats.isFile() ? fileSignature(stats) : UNUSABLE
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR' ? MISSING : UNUSABLE
 }
 
 /**
@@ -187,7 +200,8 @@ function systemAttributesFallback(config: readonly ConfigEntry[]): string | null
 /** The folders from `top` down to `cwd`, both included; just `top` when `cwd` is not inside it. */
 function foldersDownTo(top: string, cwd: string): string[] {
   const inside = relative(top, cwd)
-  if (inside.startsWith('..') || isAbsolute(inside)) return [top]
+  // A folder named `..something` is inside; only `..` itself, or a path through it, leads out.
+  if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return [top]
   const folders = [top]
   for (const part of inside.split(sep).filter(Boolean)) folders.push(join(folders.at(-1)!, part))
   return folders
@@ -208,7 +222,7 @@ function foldersOf(path: string): string[] {
  * `core.autocrlf` consults the index, and every commit and stage rewrites it. Null when a read it needs failed, or the
  * system's attributes file cannot be named: nothing is then taken from, or added to, the memory of unchanged files.
  */
-function* conversionSteps(cwd: string, paths: readonly string[]): Generator<Step, ((path: string) => string) | null, string[]> {
+function* conversionSteps(cwd: string, paths: readonly string[]): Generator<Step, ((path: string) => string | null) | null, string[]> {
   const [listing, where, system, global, settings] = yield [
     { args: ['config', '--null', '--show-scope', '--show-origin', '--list'], optional: true },
     { args: ['rev-parse', '--show-toplevel', '--git-path', 'info/attributes', '--git-path', 'index'], optional: true },
@@ -226,11 +240,18 @@ function* conversionSteps(cwd: string, paths: readonly string[]): Generator<Step
   // Above `cwd` the folders are every file's; below it, each file has its own.
   const shared = [...gitFiles, systemFile, globalFile, ...foldersDownTo(resolve(cwd, top!), resolve(cwd)).map((folder) => join(folder, '.gitattributes'))]
   const folders = [...new Set(paths.flatMap(foldersOf))]
-  const [sharedSignatures, folderSignatures] = yield [{ stat: shared }, { stat: folders.map((folder) => `${folder}/.gitattributes`) }]
+  // Git opens these through links (a `core.attributesFile` kept in a dotfiles folder, say), so what is fingerprinted is
+  // the file each one leads to.
+  const [sharedSignatures, folderSignatures] = yield [{ stat: shared, follow: true }, { stat: folders.map((folder) => `${folder}/.gitattributes`), follow: true }]
+  if (sharedSignatures!.split('\n').includes(UNUSABLE)) return null
   const base = createHash('sha256').update([listing, settings, shared.join('\0'), sharedSignatures].join('\u0001')).digest('hex')
   const signatures = folderSignatures!.split('\n')
-  const byFolder = new Map(folders.map((folder, index) => [folder, signatures[index] ?? '']))
-  return (path) => createHash('sha256').update(base).update(foldersOf(path).map((folder) => `${folder}\u0002${byFolder.get(folder) ?? ''}`).join('\u0001')).digest('hex')
+  const byFolder = new Map(folders.map((folder, index) => [folder, signatures[index] ?? UNUSABLE]))
+  return (path) => {
+    const own = foldersOf(path).map((folder) => [folder, byFolder.get(folder) ?? UNUSABLE] as const)
+    if (own.some(([, signature]) => signature === UNUSABLE)) return null
+    return createHash('sha256').update(base).update(own.map(([folder, signature]) => `${folder}\u0002${signature}`).join('\u0001')).digest('hex')
+  }
 }
 
 /** For tests: forget which files were found unchanged. */
@@ -390,7 +411,9 @@ async function drive<T>(cwd: string, steps: Generator<Step, T, string[]>): Promi
   let next = steps.next([])
   while (!next.done) {
     next = steps.next(await Promise.all(next.value.map((read) => 'stat' in read
-      ? Promise.all(read.stat.map((path) => lstat(resolve(cwd, path), { bigint: true }).then(fileSignature, () => ''))).then((lines) => lines.join('\n'))
+      ? Promise.all(read.stat.map((path) => read.follow
+        ? stat(resolve(cwd, path), { bigint: true }).then((stats) => followedSignature(stats), (error: unknown) => followedSignature(null, error))
+        : lstat(resolve(cwd, path), { bigint: true }).then(fileSignature, () => ''))).then((lines) => lines.join('\n'))
       : 'programSettings' in read
         ? repoProgramSettingsAsync(cwd).then((settings) => settings.join('\n'), () => '')
         : plumbing(cwd, read.args).catch((error: unknown) => {
@@ -399,6 +422,15 @@ async function drive<T>(cwd: string, steps: Generator<Step, T, string[]>): Promi
         }))))
   }
   return next.value
+}
+
+/** {@link followedSignature} of a path, blocking. */
+function followedSignatureSync(path: string): string {
+  try {
+    return followedSignature(statSync(path, { bigint: true }))
+  } catch (error) {
+    return followedSignature(null, error)
+  }
 }
 
 /** {@link fileSignature} of a path, blocking; '' when it cannot be read. */
@@ -416,7 +448,7 @@ export function readWorkingTreeStatusSync(top: string): StatusEntry[] {
   let next = steps.next([])
   while (!next.done) {
     next = steps.next(next.value.map((read) => {
-      if ('stat' in read) return read.stat.map((path) => fileSignatureSync(resolve(top, path))).join('\n')
+      if ('stat' in read) return read.stat.map((path) => (read.follow ? followedSignatureSync : fileSignatureSync)(resolve(top, path))).join('\n')
       if ('programSettings' in read) {
         try {
           return repoProgramSettings(top).join('\n')

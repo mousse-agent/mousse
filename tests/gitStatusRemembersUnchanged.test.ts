@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -24,7 +24,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const { GitService } = await import('../src/mms/git/GitService')
-const { clearVerifiedUnchanged, readWorkingTreeStatus } = await import('../src/mms/git/workingTreeStatus')
+const { clearVerifiedUnchanged, readWorkingTreeStatus, unchangedWorktreePaths } = await import('../src/mms/git/workingTreeStatus')
 
 const roots: string[] = []
 const OLD = new Date('2020-01-01')
@@ -166,6 +166,56 @@ describe('What the status read remembers ends when Git would convert content dif
     writeFileSync(system, '*.txt text\n')
     await readWorkingTreeStatus(cwd)
     expect(hashRuns.count).toBe(2)
+  })
+
+  it('reads the file again when the file a symlinked core.attributesFile points at changes', async (context) => {
+    const outside = mkdtempSync(join(tmpdir(), 'mousse-linked-attributes-'))
+    roots.push(outside)
+    const target = join(outside, 'attributes')
+    const link = join(outside, 'attributes-link')
+    writeFileSync(target, '# none\n')
+    utimesSync(target, OLD, OLD)
+    try {
+      symlinkSync(target, link, 'file')
+    } catch {
+      // Windows without Developer Mode or the right to make links.
+      context.skip()
+    }
+    const cwd = touchedRepository(1, () => 'one\r\ntwo\r\n')
+    git(cwd, 'config', 'core.attributesFile', link.replace(/\\/g, '/'))
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 60_000 })
+    expect(await readWorkingTreeStatus(cwd)).toEqual([])
+    expect(await readWorkingTreeStatus(cwd)).toEqual([])
+    expect(hashRuns.count).toBe(1)
+    // The link itself is untouched; only the file it leads to changes.
+    writeFileSync(target, '*.txt text\n')
+    const read = await readWorkingTreeStatus(cwd)
+    expect(hashRuns.count).toBe(2)
+    expect(read).toEqual([{ path: 'file-0.txt', index: '', workdir: 'M' }])
+    expect(read).toEqual(await fresh(cwd))
+  })
+
+  it('follows the .gitattributes of a folder whose name starts with two dots', async () => {
+    const cwd = emptyRepository()
+    const nested = join(cwd, '..nested')
+    mkdirSync(nested)
+    writeFileSync(join(nested, 'file.txt'), 'one\r\ntwo\r\n')
+    git(cwd, 'add', '-A')
+    git(cwd, 'commit', '-qm', 'base')
+    utimesSync(join(nested, 'file.txt'), OLD, OLD)
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 60_000 })
+    // Read from inside the folder, as the Changes tab reads a folder: the folder's own .gitattributes is above the file.
+    const raw = git(nested, 'diff-files', '-z', '--raw', '--no-abbrev', '--relative')
+    expect(await unchangedWorktreePaths(nested, raw)).toEqual(new Set(['file.txt']))
+    expect(await unchangedWorktreePaths(nested, raw)).toEqual(new Set(['file.txt']))
+    expect(hashRuns.count).toBe(1)
+
+    writeFileSync(join(nested, '.gitattributes'), '*.txt text\n')
+    const read = await unchangedWorktreePaths(nested, raw)
+    expect(hashRuns.count).toBe(2)
+    expect(read).toEqual(new Set())
+    clearVerifiedUnchanged()
+    expect(await unchangedWorktreePaths(nested, raw)).toEqual(read)
   })
 
   it('reads the file again when a filter is set up', async () => {
