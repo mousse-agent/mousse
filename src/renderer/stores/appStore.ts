@@ -80,7 +80,6 @@ export function sameMessageSnapshot(a: ChatMessage[], b: ChatMessage[]): boolean
   return true
 }
 
-/** Skip sidebar updates when a protocol event/reconciliation returns the same list. */
 /**
  * A whole thread list with each row's time no older than the one this window holds for it. Touches
  * (`threads.touched`) move times without a new list version, so a list read or pushed before a touch can land
@@ -99,6 +98,7 @@ export function withNewerTimes(incoming: Thread[], held: readonly Thread[]): Thr
   return out ?? incoming
 }
 
+/** Skip sidebar updates when a protocol event/reconciliation returns the same list. */
 export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
   if (a === b) return true
   if (a.length !== b.length) return false
