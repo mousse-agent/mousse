@@ -138,7 +138,9 @@
 }
 
 /* Scrolling folds and unfolds the input smoothly (data-composer-motion is set only
-   around a scroll-driven change). Focus and typing switch it at once. */
+   around a scroll-driven change). Focus and typing switch it at once. Only the composer
+   moves per frame: the transcript gets the folded height once (composer-stack-height.ts,
+   which matches this timing). */
 .mousse-chat-shell[data-composer-motion]:not(:has(.composer:focus-within)) .composer-input,
 .mousse-chat-shell[data-composer-motion]:not(:has(.composer:focus-within)) .composer-input-wrap {
   transition:

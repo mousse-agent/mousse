@@ -6,6 +6,7 @@ import { X } from '../../lib/icons'
 import { PromptUndoProvider } from '../../components/PromptUndoControls'
 import { useSubagentCardModels } from '../../hooks/useSubagentCards'
 import { AgentChat } from './agent-elements/agent-chat'
+import { watchComposerStackHeight } from './agent-elements/composer-stack-height'
 import { WorkspaceRecoveryBanner } from './WorkspaceRecoveryBanner'
 import { SubagentCardsContext, SubagentInheritedProviderContext } from './agent-elements/tools/subagent-cards-context'
 import { useThreadProviderId } from '../../components/SubagentAvatar'
@@ -45,16 +46,7 @@ function MousseInputBarSlot() {
     const el = ref.current
     const shell = el?.closest('.mousse-chat-shell')
     if (!el || !(shell instanceof HTMLElement)) return
-    const apply = () => {
-      shell.style.setProperty('--chat-composer-stack', `${el.offsetHeight}px`)
-    }
-    apply()
-    const observer = new ResizeObserver(apply)
-    observer.observe(el)
-    return () => {
-      observer.disconnect()
-      shell.style.removeProperty('--chat-composer-stack')
-    }
+    return watchComposerStackHeight(el, shell)
   }, [])
   return <div ref={ref} className="chat-composer-stack shrink-0">{composer}</div>
 }
