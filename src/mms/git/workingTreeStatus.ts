@@ -2,11 +2,12 @@ import { execFile, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, readlinkSync, type BigIntStats } from 'node:fs'
 import { lstat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
 import { GitPolicyError } from './gitPolicy'
 import { READ_ONLY_GIT_ENV } from './readOnlyGit'
-import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
+import { repoProgramEnv, repoProgramSettings, repoProgramSettingsAsync, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 
 /**
  * One path's state as `git status --porcelain` would print it: a code for the index side and one for the
@@ -105,9 +106,14 @@ const LINK = '120000'
 
 /** A Git read the status needs: `optional` ones yield '' instead of failing the whole read. */
 interface GitRead { args: readonly string[]; optional?: boolean }
-/** The stat data of files (paths relative to the folder), answered one line per path: its {@link fileSignature}, or '' when it cannot be read. */
+/**
+ * The stat data of files (paths relative to the folder, or absolute), answered one line per path: its
+ * {@link fileSignature}, or '' when it cannot be read.
+ */
 interface StatRead { stat: readonly string[] }
-type Read = GitRead | StatRead
+/** The `-c` settings Mousse's own Git commands run with in the folder, answered one per line. */
+interface SettingsRead { programSettings: true }
+type Read = GitRead | StatRead | SettingsRead
 /** The reads of one step, run together; the step gets their output in the same order. */
 type Step = Read[]
 
@@ -121,9 +127,10 @@ function fileSignature(stats: BigIntStats): string {
  * refreshes the index, so a file whose times changed but whose content did not stays "modified" to `diff-files` for
  * good, and without this every status read hashed it again: thousands of files after a checkout by another tool. A
  * file is taken as unchanged without hashing only while its stat data is exactly what it was, against the same index
- * entry, which is how Git's own index decides it.
+ * entry, which is how Git's own index decides it, and while nothing that decides how Git converts content changed
+ * (its {@link conversionSteps} fingerprint).
  */
-const verifiedUnchanged = new Map<string, { sha: string; signature: string }>()
+const verifiedUnchanged = new Map<string, { sha: string; signature: string; fingerprint: string }>()
 /** Remembered files at most; past it the memory starts over. */
 const VERIFIED_MAX = 200_000
 /**
@@ -132,13 +139,53 @@ const VERIFIED_MAX = 200_000
  */
 const RACY_MS = 2_000
 
-function rememberUnchanged(path: string, sha: string, signature: string, hashedAt: number): void {
+function rememberUnchanged(path: string, sha: string, signature: string, fingerprint: string, hashedAt: number): void {
   if (!signature) return
   const [, mtimeNs, ctimeNs] = signature.split(':')
   const changedAt = Number(BigInt(mtimeNs!) > BigInt(ctimeNs!) ? BigInt(mtimeNs!) / 1_000_000n : BigInt(ctimeNs!) / 1_000_000n)
   if (changedAt > hashedAt - RACY_MS) return
   if (verifiedUnchanged.size >= VERIFIED_MAX) verifiedUnchanged.clear()
-  verifiedUnchanged.set(path, { sha, signature })
+  verifiedUnchanged.set(path, { sha, signature, fingerprint })
+}
+
+/** The value of `key` (lower case, as `config --list` prints it) in a `git config --null --list` listing; the last one wins. */
+function configValue(listing: string, key: string): string | null {
+  let value: string | null = null
+  for (const entry of listing.split('\0')) {
+    const newline = entry.indexOf('\n')
+    const name = newline < 0 ? entry : entry.slice(0, newline)
+    if (name.toLowerCase() === key) value = newline < 0 ? 'true' : entry.slice(newline + 1)
+  }
+  return value
+}
+
+/** The user's own attributes file: `core.attributesFile`, else Git's default under the config home. */
+function globalAttributesFile(listing: string): string {
+  const configured = configValue(listing, 'core.attributesfile')
+  const home = process.env.HOME || homedir()
+  if (configured) return configured.startsWith('~/') ? join(home, configured.slice(2)) : configured
+  return process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, 'git', 'attributes') : join(home, '.config', 'git', 'attributes')
+}
+
+/**
+ * A fingerprint of everything that decides what `hash-object` makes of a file's content, read in `cwd`: every config
+ * value Git sees (`core.autocrlf`, `core.eol`, `core.safecrlf`, `filter.*`, encodings, from every scope), the settings
+ * Mousse adds to its own commands, the stat data of each `.gitattributes` in the tree, `info/attributes` and the user's
+ * attributes file, and the index's (which `core.autocrlf` consults, and which every commit and stage rewrites). Null
+ * when a read it needs failed: nothing is then taken from, or added to, the memory of unchanged files.
+ */
+function* conversionSteps(cwd: string): Generator<Step, string | null, string[]> {
+  const [listing, paths, attributes, settings] = yield [
+    { args: ['config', '--null', '--list'], optional: true },
+    { args: ['rev-parse', '--git-path', 'info/attributes', '--git-path', 'index'], optional: true },
+    { args: ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.gitattributes', '*/.gitattributes'], optional: true },
+    { programSettings: true }
+  ]
+  const gitPaths = paths!.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (!listing || gitPaths.length !== 2) return null
+  const files = [...gitPaths, globalAttributesFile(listing!), ...attributes!.split('\0').filter(Boolean)]
+  const [signatures] = yield [{ stat: files }]
+  return createHash('sha256').update([listing, settings, files.join('\0'), signatures].join('\u0001')).digest('hex')
 }
 
 /** For tests: forget which files were found unchanged. */
@@ -182,6 +229,8 @@ function* unchangedSteps(cwd: string, records: readonly RawRecord[], objectForma
   if (files.length === 0) return unchanged
   // Taken before the stat data is read, so a write after the read is never remembered as the state that was hashed.
   const hashedAt = Date.now()
+  // Read before the files' stat data and the hashes, so a change to the settings after it is never remembered as theirs.
+  const fingerprint = yield* conversionSteps(cwd)
   const [statOutput] = yield [{ stat: files.map((record) => record.path) }]
   const signatures = statOutput!.split('\n')
   const toHash: Array<{ record: RawRecord; path: string; signature: string }> = []
@@ -189,7 +238,7 @@ function* unchangedSteps(cwd: string, records: readonly RawRecord[], objectForma
     const path = resolve(cwd, record.path)
     const signature = signatures[index] ?? ''
     const known = verifiedUnchanged.get(path)
-    if (signature && known?.sha === record.srcSha && known.signature === signature) unchanged.add(record.path)
+    if (fingerprint !== null && signature && known?.sha === record.srcSha && known.signature === signature && known.fingerprint === fingerprint) unchanged.add(record.path)
     else toHash.push({ record, path, signature })
   })
   const batches: Array<typeof toHash> = []
@@ -203,7 +252,7 @@ function* unchangedSteps(cwd: string, records: readonly RawRecord[], objectForma
       batch.forEach(({ record, path, signature }, index) => {
         if (hashes[index]?.trim() !== record.srcSha) return
         unchanged.add(record.path)
-        rememberUnchanged(path, record.srcSha, signature, hashedAt)
+        if (fingerprint !== null) rememberUnchanged(path, record.srcSha, signature, fingerprint, hashedAt)
       })
     })
   }
@@ -295,11 +344,13 @@ async function drive<T>(cwd: string, steps: Generator<Step, T, string[]>): Promi
   let next = steps.next([])
   while (!next.done) {
     next = steps.next(await Promise.all(next.value.map((read) => 'stat' in read
-      ? Promise.all(read.stat.map((path) => lstat(join(cwd, path), { bigint: true }).then(fileSignature, () => ''))).then((lines) => lines.join('\n'))
-      : plumbing(cwd, read.args).catch((error: unknown) => {
-        if (read.optional && !(error instanceof GitPolicyError)) return ''
-        throw error
-      }))))
+      ? Promise.all(read.stat.map((path) => lstat(resolve(cwd, path), { bigint: true }).then(fileSignature, () => ''))).then((lines) => lines.join('\n'))
+      : 'programSettings' in read
+        ? repoProgramSettingsAsync(cwd).then((settings) => settings.join('\n'), () => '')
+        : plumbing(cwd, read.args).catch((error: unknown) => {
+          if (read.optional && !(error instanceof GitPolicyError)) return ''
+          throw error
+        }))))
   }
   return next.value
 }
@@ -319,7 +370,14 @@ export function readWorkingTreeStatusSync(top: string): StatusEntry[] {
   let next = steps.next([])
   while (!next.done) {
     next = steps.next(next.value.map((read) => {
-      if ('stat' in read) return read.stat.map((path) => fileSignatureSync(join(top, path))).join('\n')
+      if ('stat' in read) return read.stat.map((path) => fileSignatureSync(resolve(top, path))).join('\n')
+      if ('programSettings' in read) {
+        try {
+          return repoProgramSettings(top).join('\n')
+        } catch {
+          return ''
+        }
+      }
       try {
         return plumbingSync(top, read.args)
       } catch (error) {

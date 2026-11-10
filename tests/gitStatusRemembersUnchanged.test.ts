@@ -27,14 +27,16 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /** A repository with `count` committed files whose times were then moved, so only their content says they are unchanged. */
-function touchedRepository(count: number): string {
+function touchedRepository(count: number, text = (index: number) => `line ${index}\n`): string {
   const cwd = mkdtempSync(join(tmpdir(), 'mousse-status-memory-'))
   roots.push(cwd)
   git(cwd, 'init', '-q', '-b', 'main')
   git(cwd, 'config', 'user.name', 'Status fixture')
   git(cwd, 'config', 'user.email', 'status@example.invalid')
   git(cwd, 'config', 'commit.gpgsign', 'false')
-  for (let index = 0; index < count; index++) writeFileSync(join(cwd, `file-${index}.txt`), `line ${index}\n`)
+  // Git for Windows turns it on for the whole system; the files are committed exactly as written.
+  git(cwd, 'config', 'core.autocrlf', 'false')
+  for (let index = 0; index < count; index++) writeFileSync(join(cwd, `file-${index}.txt`), text(index))
   git(cwd, 'add', '-A')
   git(cwd, 'commit', '-qm', 'base')
   for (let index = 0; index < count; index++) utimesSync(join(cwd, `file-${index}.txt`), OLD, OLD)
@@ -64,11 +66,61 @@ describe('The status read remembers files it proved unchanged', () => {
 
   it('hashes again, and reports the change, once a remembered file is rewritten with the same size and old times', async () => {
     const cwd = touchedRepository(2)
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 60_000 })
     await readWorkingTreeStatus(cwd)
     // Same length, other content, and the old modification time put back: only the change time and the content differ.
     writeFileSync(join(cwd, 'file-0.txt'), 'line X\n')
     utimesSync(join(cwd, 'file-0.txt'), OLD, OLD)
     expect(await readWorkingTreeStatus(cwd)).toEqual([{ path: 'file-0.txt', index: '', workdir: 'M' }])
+  })
+})
+
+describe('What the status read remembers ends when Git would convert content differently', () => {
+  /** A file committed with CRLF line endings, its times moved, read once so it is remembered as unchanged. */
+  async function rememberedCrlf(): Promise<string> {
+    const cwd = touchedRepository(1, () => 'one\r\ntwo\r\n')
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 60_000 })
+    expect(await readWorkingTreeStatus(cwd)).toEqual([])
+    expect(await readWorkingTreeStatus(cwd)).toEqual([])
+    expect(hashRuns.count).toBe(1)
+    return cwd
+  }
+
+  /** The status read with nothing remembered, which a remembered read must agree with. */
+  async function fresh(cwd: string) {
+    clearVerifiedUnchanged()
+    return readWorkingTreeStatus(cwd)
+  }
+
+  it('reads the file again when core.autocrlf changes', async () => {
+    const cwd = await rememberedCrlf()
+    git(cwd, 'config', 'core.autocrlf', 'true')
+    const read = await readWorkingTreeStatus(cwd)
+    expect(hashRuns.count).toBe(2)
+    expect(read).toEqual([{ path: 'file-0.txt', index: '', workdir: 'M' }])
+    expect(read).toEqual(await fresh(cwd))
+  })
+
+  it('reads the file again when a .gitattributes file appears or changes', async () => {
+    const cwd = await rememberedCrlf()
+    writeFileSync(join(cwd, '.gitattributes'), '*.md text\n')
+    utimesSync(join(cwd, '.gitattributes'), OLD, OLD)
+    await readWorkingTreeStatus(cwd)
+    expect(hashRuns.count).toBe(2)
+    // The same size and the old times, other content: the change time still tells.
+    writeFileSync(join(cwd, '.gitattributes'), '*.txt text\n')
+    utimesSync(join(cwd, '.gitattributes'), OLD, OLD)
+    const read = await readWorkingTreeStatus(cwd)
+    expect(hashRuns.count).toBe(3)
+    expect(read.find((entry) => entry.path === 'file-0.txt')).toEqual({ path: 'file-0.txt', index: '', workdir: 'M' })
+    expect(read).toEqual(await fresh(cwd))
+  })
+
+  it('reads the file again when a filter is set up', async () => {
+    const cwd = await rememberedCrlf()
+    git(cwd, 'config', 'filter.lower.clean', 'tr A-Z a-z')
+    expect(await readWorkingTreeStatus(cwd)).toEqual(await fresh(cwd))
+    expect(hashRuns.count).toBe(3)
   })
 })
 
