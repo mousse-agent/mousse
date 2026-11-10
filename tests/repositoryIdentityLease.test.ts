@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readFile } from 'node:fs/promises'
@@ -99,4 +99,48 @@ describe('RepositoryLease heartbeat', () => {
     expect(reads).toBeGreaterThan(1_000)
     expect(unreadable).toBe(0)
   }, 30_000)
+})
+
+describe('RepositoryLease reclaim across processes', () => {
+  it('never lets two processes that reclaim the same stale lease at once hold it together', async () => {
+    const root = repo()
+    const identity = resolveRepositoryIdentity(root); const leasePath = getRepositoryLeasePath(identity)
+    const work = mkdtempSync(join(tmpdir(), 'mousse-lease-race-')); dirs.push(work)
+    const log = join(work, 'holds.log'); const go = join(work, 'go')
+    // The real lease code in processes of their own: each waits for `go`, then takes the lease, records when it held it, and lets go.
+    writeFileSync(join(work, 'child.ts'), [
+      `import { appendFileSync, existsSync } from 'node:fs'`,
+      `import { acquireRepositoryLease } from ${JSON.stringify(resolve('src/mms/git/RepositoryLease'))}`,
+      `import { resolveRepositoryIdentity } from ${JSON.stringify(resolve('src/mms/git/RepositoryIdentity'))}`,
+      `const [repo, log, go] = process.argv.slice(2)`,
+      `const identity = resolveRepositoryIdentity(repo)`,
+      `console.log('ready')`,
+      `const sleeper = new Int32Array(new SharedArrayBuffer(4))`,
+      `while (!existsSync(go)) Atomics.wait(sleeper, 0, 0, 1)`,
+      `const lease = await acquireRepositoryLease(identity, { retryDelayMs: 1 })`,
+      `appendFileSync(log, 'enter ' + process.pid + '\\n')`,
+      `Atomics.wait(sleeper, 0, 0, 60)`,
+      `appendFileSync(log, 'exit ' + process.pid + '\\n')`,
+      `lease.release()`
+    ].join('\n'))
+    buildSync({ entryPoints: [join(work, 'child.ts')], bundle: true, platform: 'node', format: 'esm', outfile: join(work, 'child.mjs'), logLevel: 'silent', banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" } })
+    for (let round = 0; round < 8; round += 1) {
+      rmSync(go, { force: true }); rmSync(log, { force: true })
+      // What a stopped process left: half a record (it stopped while writing it), or the record of a process that is gone.
+      writeFileSync(leasePath, round % 2 === 0 ? '{"pid":' : JSON.stringify({ pid: 2147000000, processInstanceId: 'gone', token: `gone-${round}`, acquiredAt: new Date(0).toISOString(), heartbeatAt: new Date(0).toISOString() }))
+      const old = new Date(Date.now() - 120_000); utimesSync(leasePath, old, old)
+      const children = Array.from({ length: 4 }, () => spawn(process.execPath, [join(work, 'child.mjs'), root, log, go], { stdio: ['ignore', 'pipe', 'inherit'] }))
+      await Promise.all(children.map((child) => new Promise<void>((done) => child.stdout.once('data', () => done()))))
+      writeFileSync(go, '')
+      await Promise.all(children.map((child) => new Promise<void>((done) => child.on('exit', () => done()))))
+      const lines = readFileSync(log, 'utf8').trim().split('\n')
+      expect(lines).toHaveLength(8)
+      // One holder at a time: every enter is followed by the same process's exit.
+      for (let index = 0; index < lines.length; index += 2) {
+        expect(lines[index]!.startsWith('enter ')).toBe(true)
+        expect(lines[index + 1]).toBe(lines[index]!.replace('enter', 'exit'))
+      }
+      expect(existsSync(leasePath)).toBe(false)
+    }
+  }, 120_000)
 })
