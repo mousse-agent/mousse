@@ -3,7 +3,7 @@
  * stopped command's run ends once Git and what it started are gone; when something of it outlives the kill, the run
  * ends anyway and the repository's lease is kept until it is gone, or for good.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,7 +22,13 @@ afterEach(() => {
   delete gitStopProbe.table
   delete gitStopProbe.kill
   vi.restoreAllMocks()
-  while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true })
+  // A repository kept locked keeps its lock file open, and a stopped command may still be ending in its folder (on
+  // Windows the folder cannot be removed then); it stays.
+  for (const dir of dirs.splice(0)) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch (error) {
+      if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+    }
+  }
 })
 
 function repo(): string {
@@ -176,35 +182,67 @@ describe('StoppedGitTree', () => {
     gitStopProbe.kill = (pid) => { killed.push(pid) }
     return killed
   }
+  /** The command as Mousse holds it: still running. */
+  const command = (pid: number): ChildProcess => ({ pid, exitCode: null, signalCode: null, kill: () => true }) as unknown as ChildProcess
 
-  it('finds and kills what the command left started after the stop, and counts it until it is gone', async () => {
+  it('kills once, at the stop, and only watches after: what is started later is neither watched nor killed', async () => {
     const killed = script(
-      [{ pid: 100, ppid: 1, started: '1000' }, { pid: 101, ppid: 100, started: '1001' }],
-      [{ pid: 101, ppid: 100, started: '1001' }, { pid: 102, ppid: 101, started: '1005' }],
-      []
+      [{ pid: 100, ppid: 1, pgid: 100, started: '1000' }, { pid: 101, ppid: 100, pgid: 100, started: '1001' }],
+      [{ pid: 101, ppid: 100, pgid: 100, started: '1001' }, { pid: 102, ppid: 101, pgid: 100, started: '1005' }],
+      [{ pid: 102, ppid: 101, pgid: 100, started: '1005' }]
     )
-    const tree = await StoppedGitTree.stop(100, Date.now() + 1_000)
-    expect(killed).toEqual([100, 101])
+    const tree = await StoppedGitTree.stop(command(100))
+    expect(killed).toEqual([100])
     expect(await tree.alive()).toBe(true)
-    expect(killed).toContain(102)
-    expect(tree.pids()).toEqual(expect.arrayContaining([100, 101, 102]))
+    expect(tree.pids().sort()).toEqual([100, 101])
+    expect(await tree.alive()).toBe(false)
+    expect(killed).toEqual([100])
+  })
+
+  it('kills nothing when the command already ended', async () => {
+    const killed = script([])
+    await StoppedGitTree.stop({ pid: 100, exitCode: 0, signalCode: null, kill: () => true } as unknown as ChildProcess)
+    expect(killed).toEqual([])
+  })
+
+  it("never takes a pid another program got for the command's", async () => {
+    script(
+      [{ pid: 100, ppid: 1, started: '1000' }, { pid: 101, ppid: 100, started: '1001' }],
+      [{ pid: 100, ppid: 7, started: '9000' }, { pid: 101, ppid: 7, started: '9001' }, { pid: 103, ppid: 101, started: '9002' }]
+    )
+    const tree = await StoppedGitTree.stop(command(100))
     expect(await tree.alive()).toBe(false)
   })
 
-  it("never takes a pid another program got for the command, nor that program's children", async () => {
-    const killed = script(
-      [{ pid: 100, ppid: 1, started: '1000' }, { pid: 101, ppid: 100, started: '1001' }],
-      // Both pids belong to other programs now (created later), and one of them started a child.
-      [{ pid: 100, ppid: 7, started: '9000' }, { pid: 101, ppid: 7, started: '9001' }, { pid: 103, ppid: 101, started: '9002' }]
-    )
-    const tree = await StoppedGitTree.stop(100, Date.now() + 1_000)
+  it('counts a zombie as exited', async () => {
+    script([{ pid: 100, ppid: 1, started: '1000' }], [{ pid: 100, ppid: 1, started: '1000', zombie: true }])
+    const tree = await StoppedGitTree.stop(command(100))
     expect(await tree.alive()).toBe(false)
-    expect(killed).not.toContain(103)
   })
 
   it('counts the command as still there while its processes cannot be listed', async () => {
-    script(undefined)
-    const tree = await StoppedGitTree.stop(100, Date.now() + 100)
+    script(undefined, undefined, [])
+    const tree = await StoppedGitTree.stop(command(100))
     expect(await tree.alive()).toBe(true)
+    // The first list read stands for the one at the stop: nothing of the command is in it.
+    expect(await tree.alive()).toBe(false)
   })
+
+  it('ends the stopped run at its deadline while the process list and the kill hang', async () => {
+    const cwd = repo()
+    GIT_STOP_TIMING.exitWaitMs = 1_000
+    gitStopProbe.table = () => new Promise(() => undefined)
+    // A kill that does nothing, as a hung taskkill would: the command keeps running.
+    gitStopProbe.kill = () => undefined
+    const controller = new AbortController()
+    const scope = gitCancellationScope(controller.signal)
+    const running = scope.run(() => runGitProcess(['-c', 'alias.slow=!sleep 8', 'slow'], { cwd, env: process.env }))
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const begun = Date.now()
+    controller.abort()
+    expect((await running).error?.code).toBe('ABORT_ERR')
+    expect(Date.now() - begun).toBeLessThan(2_500)
+    // Not known to be gone: the repository stays locked for it.
+    expect(scope.survivorsGone()).toBeDefined()
+  }, 30_000)
 })
