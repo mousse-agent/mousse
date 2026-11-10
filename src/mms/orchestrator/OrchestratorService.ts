@@ -168,6 +168,7 @@ import {
   type OrchestratorSendInput,
   type PendingUserQuestions,
   type QueuedMessage,
+  type HumanAuthor,
   type Thread,
   type ThreadTitleSource,
   type TurnPhase,
@@ -181,6 +182,8 @@ import {
   isTurnStoppable
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
+import type { UserId } from '../../shared/net/ids'
+import { humanAuthorOf } from '../../shared/humanAuthor'
 import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
 import {
   buildPermissionModeChangeNotice,
@@ -284,6 +287,7 @@ import {
   releaseClaim,
   removeQueuedMessage,
   reorderQueuedMessages,
+  assertQueueAuthor,
   type QueuedMessagePatch
 } from '../queue/ThreadMessageQueue'
 import {
@@ -557,6 +561,11 @@ export interface OrchestratorSendOptions {
    */
   sentFrom?: { node: string }
   /**
+   * Daemon-only: the person other than the account's owner who sends this (a routed call from another account). It is
+   * stored on the message, on a queued item and on the turn's message when the item drains; absent for the owner.
+   */
+  author?: HumanAuthor
+  /**
    * Who sends: the user through a client (the default), or an agent. A new message denies the
    * thread's pending approvals, so the sender must be allowed to answer them
    * (`canAnswerApproval`); one that is not leaves them pending and its message queues.
@@ -803,6 +812,8 @@ interface TurnStartRequest {
   schedule?: ScheduledTurnRef
   /** The agent that sent the message (`OrchestratorSendOptions.agent`); JSON-safe, so it survives queueing and a restart. */
   agent?: AgentOrigin
+  /** The person other than the owner who sent it (`OrchestratorSendOptions.author`); JSON-safe, so it survives a restart. */
+  author?: HumanAuthor
 }
 
 /** Payload of a `turn.start` effect (SPEC §12.2). */
@@ -3117,7 +3128,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** Steer a specific run. Only the thread's active run receives the text; anything else is ignored. */
-  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string, actor?: AgentActor, ceiling?: PermissionMode, deviceLimit?: PermissionMode, sentFrom?: { node: string }): Promise<CommandResult> {
+  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string, actor?: AgentActor, ceiling?: PermissionMode, deviceLimit?: PermissionMode, sentFrom?: { node: string }, author?: HumanAuthor): Promise<CommandResult> {
     const engine = this.requireRunEngine()
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
@@ -3129,8 +3140,8 @@ export class OrchestratorService extends EventEmitter {
       const origin = actor ? agentOriginOf(actor) : undefined
       // A person on another computer carries that computer's limit with the text, wherever it ends up.
       const limit = actor ? ceiling ?? 'ask' : deviceLimit
-      this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin, permissionMode: limit } : deviceLimit ? { deviceLimit } : {}), ...(sentFrom && !origin ? { sentFrom } : {}) }, () => {
-        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, origin ? undefined : sentFrom)) {
+      this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin, permissionMode: limit } : deviceLimit ? { deviceLimit } : {}), ...(sentFrom && !origin ? { sentFrom } : {}), ...(author && !origin ? { author } : {}) }, () => {
+        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, origin ? undefined : sentFrom, origin ? undefined : author)) {
           console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
         }
       })
@@ -4201,7 +4212,8 @@ export class OrchestratorService extends EventEmitter {
         modelOverride: payload.modelOverride,
         origin: payload.origin,
         schedule: payload.schedule,
-        agent: payload.agent
+        agent: payload.agent,
+        ...(payload.author ? { author: payload.author } : {})
       }
     ))
     const runId = payload.runId
@@ -4368,7 +4380,8 @@ export class OrchestratorService extends EventEmitter {
           modelOverride: payload.modelOverride,
           origin: payload.origin,
           schedule: payload.schedule,
-          agent: payload.agent
+          agent: payload.agent,
+          ...(payload.author ? { author: payload.author } : {})
         }
       )
       entry?.resolve(response)
@@ -4524,7 +4537,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private executeTurnSteerEffect(effect: EffectRecord): void {
-    const { runId, threadId, text, inboxIds, origin, permissionMode, deviceLimit, sentFrom } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[]; origin?: AgentOrigin; permissionMode?: PermissionMode; deviceLimit?: PermissionMode; sentFrom?: { node: string } }
+    const { runId, threadId, text, inboxIds, origin, permissionMode, deviceLimit, sentFrom, author: rawAuthor } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[]; origin?: AgentOrigin; permissionMode?: PermissionMode; deviceLimit?: PermissionMode; sentFrom?: { node: string }; author?: unknown }
+    const author = humanAuthorOf(rawAuthor)
     // An agent's steer always carries its sender's mode; one that lost it (a damaged payload) reads as the strictest.
     // A person's steer from another computer carries that computer's limit.
     const limit = origin ? (isPermissionMode(permissionMode) ? permissionMode : 'ask') : isPermissionMode(deviceLimit) ? deviceLimit : undefined
@@ -4551,8 +4565,8 @@ export class OrchestratorService extends EventEmitter {
     // The rows stay the steer's until the model reads the text (`drainSteerForSession`) or the turn ends
     // without reading it, when the follow-up turn it leaves takes them.
     const run = engine.getRun(runId)
-    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit, undefined, sentFrom)) return
-    this.enqueueLateSteer(threadId, content, carried, notice, runId, origin, limit, sentFrom)
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit, undefined, sentFrom, author)) return
+    this.enqueueLateSteer(threadId, content, carried, notice, runId, origin, limit, sentFrom, author)
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -4891,14 +4905,14 @@ export class OrchestratorService extends EventEmitter {
    * item (`queue:<id>`), so exactly one delivery owns them at a time: the reconciler does not hand
    * them to a wake, and the item rebuilds its text from the rows that are still its own when it runs.
    */
-  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[], runId?: string, origin?: AgentOrigin, permissionMode?: PermissionMode, sentFrom?: { node: string }): void {
+  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[], runId?: string, origin?: AgentOrigin, permissionMode?: PermissionMode, sentFrom?: { node: string }, author?: HumanAuthor): void {
     const content = text.trim()
     const session = this.getOrCreateSession(threadId)
     if (!content || session.deleted) return
     // Stamped with the generation of the run it was meant for, never the current one: the Stop fence must
     // still see a steer of an older run as older.
     const stopGeneration = runId && this.runEngine ? runStopGeneration(this.runEngine.store, runId) : undefined
-    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late', ...(stopGeneration !== undefined ? { stopGeneration } : {}), ...(origin ? { origin } : {}), ...(permissionMode ? { permissionMode } : {}), ...(sentFrom ? { sentFrom } : {}) }, carried ? [carried] : [], subagentNotice)
+    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late', ...(stopGeneration !== undefined ? { stopGeneration } : {}), ...(origin ? { origin } : {}), ...(permissionMode ? { permissionMode } : {}), ...(sentFrom ? { sentFrom } : {}), ...(author ? { author } : {}) }, carried ? [carried] : [], subagentNotice)
     if (session.isTurnRunning()) session.drainAfterSettle = true
     else this.scheduleQueueDrain(session)
   }
@@ -4907,7 +4921,7 @@ export class OrchestratorService extends EventEmitter {
   private enqueueCarrying(
     threadId: string,
     input: OrchestratorSendInput,
-    opts: { source: string; internal?: boolean; stopGeneration?: number; origin?: QueuedMessage['origin']; permissionMode?: PermissionMode; sentFrom?: QueuedMessage['sentFrom'] },
+    opts: { source: string; internal?: boolean; stopGeneration?: number; origin?: QueuedMessage['origin']; permissionMode?: PermissionMode; sentFrom?: QueuedMessage['sentFrom']; author?: HumanAuthor },
     carried: ReadonlyArray<{ inboxIds: string[]; effectId: string }>,
     subagentNotice: SubagentNoticeItem[] | undefined
   ): QueuedMessage {
@@ -7059,7 +7073,7 @@ export class OrchestratorService extends EventEmitter {
   enqueueExternalSteer(
     threadId: string,
     text: string,
-    opts?: { source?: string; permissionMode?: PermissionMode; sentFrom?: { node: string } }
+    opts?: { source?: string; permissionMode?: PermissionMode; sentFrom?: { node: string }; author?: HumanAuthor }
   ): QueuedMessage | null {
     const trimmed = text.trim()
     if (!trimmed) return null
@@ -7067,7 +7081,7 @@ export class OrchestratorService extends EventEmitter {
     return this.enqueueForThread(
       threadId,
       { content: trimmed },
-      { source: opts?.source ?? 'cli-steer', intent: 'steer', ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}), ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {}) }
+      { source: opts?.source ?? 'cli-steer', intent: 'steer', ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}), ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {}), ...(opts?.author ? { author: opts.author } : {}) }
     )
   }
 
@@ -7602,6 +7616,8 @@ export class OrchestratorService extends EventEmitter {
     input: OrchestratorSendInput,
     opts?: {
       source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number; permissionMode?: PermissionMode; origin?: QueuedMessage['origin']; sentFrom?: QueuedMessage['sentFrom']
+      /** The person other than the owner who queued it (`QueuedMessage.author`). */
+      author?: HumanAuthor
       /** A fixed id: an item with it already on the queue is returned as it is (the continue message of a pause). */
       id?: string
       /** Ahead of every pending item. */
@@ -7645,6 +7661,7 @@ export class OrchestratorService extends EventEmitter {
           stopGeneration,
           permissionMode: opts?.permissionMode,
           sentFrom: opts?.sentFrom,
+          author: opts?.author,
           origin: opts?.origin,
           id: opts?.id,
           atFront: opts?.atFront,
@@ -7672,6 +7689,7 @@ export class OrchestratorService extends EventEmitter {
       stopGeneration,
       permissionMode: opts?.permissionMode,
       sentFrom: opts?.sentFrom,
+      author: opts?.author,
       origin: opts?.origin,
       id: opts?.id,
       atFront: opts?.atFront,
@@ -7688,12 +7706,13 @@ export class OrchestratorService extends EventEmitter {
    * A person's removal (the app, the CLI). `expectedRevision`, when given, is checked against the queue on disk
    * inside the same lock as the change: a queue that changed since it was read refuses with a conflict.
    */
-  removeQueuedItem(threadId: string, itemId: string, opts?: { expectedRevision?: string }): QueuedMessage | null {
+  removeQueuedItem(threadId: string, itemId: string, opts?: { expectedRevision?: string; byUser?: UserId }): QueuedMessage | null {
     const session = this.getOrCreateSession(threadId)
     let removed: QueuedMessage | null = null
     if (this.threadStore) {
       session.queue = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
         assertQueueRevision(diskItems, opts?.expectedRevision)
+        assertQueueAuthor(diskItems, itemId, opts?.byUser)
         const result = removeQueuedMessage(diskItems, itemId)
         if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
         removed = result.removed
@@ -7703,6 +7722,7 @@ export class OrchestratorService extends EventEmitter {
       })
     } else {
       assertQueueRevision(session.queue, opts?.expectedRevision)
+      assertQueueAuthor(session.queue, itemId, opts?.byUser)
       const result = removeQueuedMessage(session.queue, itemId)
       if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
       this.releaseQueuedRows([result.removed])
@@ -7751,9 +7771,12 @@ export class OrchestratorService extends EventEmitter {
   promoteQueueItem(
     threadId: string,
     itemId: string,
-    opts?: { expectedRevision?: string; expectedRunId?: string; permissionCeiling?: PermissionMode }
+    opts?: { expectedRevision?: string; expectedRunId?: string; permissionCeiling?: PermissionMode; byUser?: UserId }
   ): SendNowOutcome {
     const session = this.getOrCreateSession(threadId)
+    // Another person's message is sent now only by them or the owner. An item's author never changes to someone
+    // else's once set (only its author or the owner edits it), so the check holds for the rest of the promotion.
+    if (opts?.byUser) assertQueueAuthor(this.threadStore ? readDurableQueue(this.threadStore, threadId) : session.queue, itemId, opts.byUser)
     if (session.queue.find((entry) => entry.id === itemId)?.inboxIds?.length)
       throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
     // Send now is idempotent per message: a second one (a double click, a retried request) while the running turn
@@ -7902,7 +7925,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private deliverPromotedItem(session: ThreadSession, item: QueuedMessage, steerRunId: string | undefined, byAgent = false): boolean {
     const threadId = session.threadId
-    const steered = this.steerThread(threadId, item.content, undefined, undefined, item.origin?.kind === 'agent' ? item.origin : undefined, item.permissionMode, { id: item.id, ...(steerRunId ? { runId: steerRunId } : {}), ...(item.mode ? { mode: item.mode } : {}), ...(item.images?.length ? { images: item.images } : {}), ...(byAgent ? { byAgent } : {}) })
+    const steered = this.steerThread(threadId, item.content, undefined, undefined, item.origin?.kind === 'agent' ? item.origin : undefined, item.permissionMode, { id: item.id, ...(steerRunId ? { runId: steerRunId } : {}), ...(item.mode ? { mode: item.mode } : {}), ...(item.images?.length ? { images: item.images } : {}), ...(byAgent ? { byAgent } : {}) }, item.sentFrom, item.author)
     if (steered) {
       // The item stays queued as steering until the turn's steer drain consumes its content. Dropping it here
       // would lose the message when the turn is aborted (which discards pendingSteer) before the next drain.
@@ -7968,18 +7991,20 @@ export class OrchestratorService extends EventEmitter {
    * chat mode alone leaves it the agent's. `expectedRevision` is checked under the queue lock; a message already steering a
    * turn or started is refused.
    */
-  editQueuedItem(threadId: string, itemId: string, patch: { content?: string; mode?: ChatMode }, opts?: { expectedRevision?: string; permissionMode?: PermissionMode; sentFrom?: QueuedMessage['sentFrom'] }): QueuedMessage {
+  editQueuedItem(threadId: string, itemId: string, patch: { content?: string; mode?: ChatMode }, opts?: { expectedRevision?: string; permissionMode?: PermissionMode; sentFrom?: QueuedMessage['sentFrom']; author?: HumanAuthor }): QueuedMessage {
     const session = this.getOrCreateSession(threadId)
     let edited: QueuedMessage | undefined
     let droppedRun: string | undefined
     const edit = (items: QueuedMessage[]): QueuedMessage[] => {
       assertQueueRevision(items, opts?.expectedRevision)
+      // Another person's message is edited only by them or the owner; an edit by someone else makes the text theirs.
+      assertQueueAuthor(items, itemId, opts?.author?.user)
       const current = items.find((entry) => entry.id === itemId)
       const takesOver = patch.content !== undefined && current?.origin?.kind === 'agent'
       // An edit from another computer leaves the message no looser than that computer's limit, whoever queued it
       // (the text is the editor's now), and records where the text came from.
       const limit = opts?.permissionMode ? strictestMode(current?.permissionMode, opts.permissionMode) : undefined
-      const result = editQueuedMessage(items, itemId, { content: patch.content, mode: patch.mode, ...(takesOver ? { origin: null, dropRun: true } : {}), ...(limit ? { permissionMode: limit } : {}), ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {}) })
+      const result = editQueuedMessage(items, itemId, { content: patch.content, mode: patch.mode, ...(takesOver ? { origin: null, dropRun: true } : {}), ...(limit ? { permissionMode: limit } : {}), ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {}), ...(opts?.author ? { author: opts.author } : {}) })
       edited = result.item
       droppedRun = takesOver ? current?.runId : undefined
       return result.items
@@ -8833,7 +8858,8 @@ export class OrchestratorService extends EventEmitter {
     mode?: ChatMode,
     subagentNotice?: SubagentNoticeItem[],
     steered?: boolean,
-    origin?: AgentOrigin
+    origin?: AgentOrigin,
+    author?: HumanAuthor
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -8846,7 +8872,8 @@ export class OrchestratorService extends EventEmitter {
       ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {}),
       ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {}),
       ...(role === 'user' && steered ? { steered: true } : {}),
-      ...(role === 'user' && origin ? { origin } : {})
+      ...(role === 'user' && origin ? { origin } : {}),
+      ...(role === 'user' && author && !origin ? { author } : {})
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
@@ -8925,7 +8952,8 @@ export class OrchestratorService extends EventEmitter {
     scheduled?: ScheduledTurnRef,
     approvalNote?: string,
     agent?: AgentOrigin,
-    backgroundNotice?: BackgroundTaskNoticeItem[]
+    backgroundNotice?: BackgroundTaskNoticeItem[],
+    author?: HumanAuthor
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -8989,6 +9017,8 @@ export class OrchestratorService extends EventEmitter {
       ...(scheduled ? { scheduled: { jobId: scheduled.jobId, ...(scheduled.jobName ? { jobName: scheduled.jobName } : {}) } } : {}),
       // A message another thread's agent wrote is stored as that agent's, never as something a person typed.
       ...(agent ? { origin: agentOriginOf(agent) } : {}),
+      // A person other than the owner wrote it: the daemon recorded who when it took the message in.
+      ...(author && !agent ? { author } : {}),
       hidden: displayUserMessage ? undefined : true,
       ...(displayUserMessage && mode !== undefined
         ? { mode: normalizeChatMode(mode) }
@@ -9332,7 +9362,7 @@ export class OrchestratorService extends EventEmitter {
               // Without a run the text is still queued; the thread is just not held for it.
             }
             try {
-              this.enqueueForThread(session.threadId, { content: steer.text, mode }, { source: 'steer-followup', internal: true, runId: limitedRunId, permissionMode: steer.permissionMode, ...(steer.sentFrom ? { sentFrom: steer.sentFrom } : {}) })
+              this.enqueueForThread(session.threadId, { content: steer.text, mode }, { source: 'steer-followup', internal: true, runId: limitedRunId, permissionMode: steer.permissionMode, ...(steer.sentFrom ? { sentFrom: steer.sentFrom } : {}), ...(steer.author ? { author: steer.author } : {}) })
             } catch {
               this.cancelQueuedRuns([limitedRunId])
             }
@@ -9498,7 +9528,7 @@ export class OrchestratorService extends EventEmitter {
    * `item`: the queue item this steer is (a promotion), and the run it was checked against. A steer for another
    * run than `item.runId` is refused, so a promotion never reaches a turn it was not checked against.
    */
-  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string; mode?: ChatMode; images?: ChatImageAttachment[]; byAgent?: boolean }, sentFrom?: { node: string }): boolean {
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string; mode?: ChatMode; images?: ChatImageAttachment[]; byAgent?: boolean }, sentFrom?: { node: string }, author?: HumanAuthor): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     // Nothing is steered into a bot's turn: it runs exactly what its dispatch sent.
@@ -9516,7 +9546,8 @@ export class OrchestratorService extends EventEmitter {
         ...(item ? { itemId: item.id, ...(item.mode ? { mode: item.mode } : {}), ...(item.images?.length ? { images: item.images } : {}), ...(item.byAgent ? { byAgent: true as const } : {}) } : {}),
         ...(origin ? { origin } : {}),
         ...(origin || permissionMode ? { permissionMode: permissionMode ?? 'ask' } : {}),
-        ...(sentFrom ? { sentFrom } : {})
+        ...(sentFrom ? { sentFrom } : {}),
+        ...(author ? { author } : {})
       })
       if (carried) {
         (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
@@ -9528,7 +9559,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin)
+        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin, author)
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -9553,10 +9584,10 @@ export class OrchestratorService extends EventEmitter {
     // `permissionMode`: a device's limit. It travels with the text wherever it ends up: a steer the running turn
     // never reads, or one that has to wait, becomes a turn of its own at no more than the limit. A steer the turn
     // does read joins that turn at its mode (the limit cannot narrow a turn that is running).
-    opts?: { source?: string; permissionMode?: PermissionMode; sentFrom?: { node: string } }
+    opts?: { source?: string; permissionMode?: PermissionMode; sentFrom?: { node: string }; author?: HumanAuthor }
   ): { steered: boolean; queued: boolean; item?: QueuedMessage } {
     this.assertNotBotThread(threadId)
-    if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom)) {
+    if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom, opts?.author)) {
       return { steered: true, queued: false }
     }
     if (this.isThreadLeaseHeldExternally(threadId)) {
@@ -9570,7 +9601,8 @@ export class OrchestratorService extends EventEmitter {
       const item = this.enqueueForThread(threadId, { content: text.trim() }, {
         source: opts?.source,
         ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
-        ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {})
+        ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {}),
+        ...(opts?.author ? { author: opts.author } : {})
       })
       this.drainQueueAfterCompaction(threadId)
       return { steered: false, queued: true, item }
@@ -9579,7 +9611,7 @@ export class OrchestratorService extends EventEmitter {
     // (`executeTurnSteerEffect`): it runs after the continue turn and the pause stays, as a message sent now does.
     const paused = this.runEngine?.store.getPausedRun(threadId)
     if (paused && text.trim()) {
-      this.enqueueLateSteer(threadId, text, undefined, undefined, paused.runId, undefined, opts?.permissionMode, opts?.sentFrom)
+      this.enqueueLateSteer(threadId, text, undefined, undefined, paused.runId, undefined, opts?.permissionMode, opts?.sentFrom, opts?.author)
       return { steered: false, queued: true }
     }
     return { steered: false, queued: false }
@@ -9917,7 +9949,8 @@ export class OrchestratorService extends EventEmitter {
         source: opts?.source,
         runId: run?.runId,
         permissionMode: opts?.permissionMode,
-        origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined)
+        origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined),
+        ...(opts?.author ? { author: opts.author } : {})
       })
       // The pause ended between the admission and the item (Cancel, Stop): the drain that ending scheduled may have
       // looked before the item was there, so the message is not left waiting for a drain that never comes.
@@ -9962,7 +9995,8 @@ export class OrchestratorService extends EventEmitter {
         ...(opts?.modelOverride ? { modelOverride: opts.modelOverride } : {}),
         ...(opts?.origin ? { origin: opts.origin } : {}),
         ...(opts?.schedule ? { schedule: opts.schedule } : {}),
-        ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {})
+        ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {}),
+        ...(opts?.author ? { author: opts.author } : {})
       })
       if (opts?.awaitMode === 'ack') {
         pending.catch(() => undefined)
@@ -9984,6 +10018,7 @@ export class OrchestratorService extends EventEmitter {
         origin: opts?.origin,
         schedule: opts?.schedule,
         ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {}),
+        ...(opts?.author ? { author: opts.author } : {}),
         ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
         ...(opts?.refuseQueue ? { refuseQueue: true } : {})
       })
@@ -10131,6 +10166,8 @@ export class OrchestratorService extends EventEmitter {
       schedule?: ScheduledTurnRef
       /** The agent that sent this turn's message (`thread_send`): the stored message says so. */
       agent?: AgentOrigin
+      /** The person other than the owner who sent this turn's message: the stored message says so. */
+      author?: HumanAuthor
       onTurnSettled?: (aborted: boolean) => void
       onUserInputAccepted?: () => void
       /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
@@ -10417,6 +10454,7 @@ export class OrchestratorService extends EventEmitter {
       origin?: TurnOrigin
       schedule?: ScheduledTurnRef
       agent?: AgentOrigin
+      author?: HumanAuthor
       onTurnSettled?: (aborted: boolean) => void
       onUserInputAccepted?: () => void
       runId?: string
@@ -10474,7 +10512,7 @@ export class OrchestratorService extends EventEmitter {
         : opts?.agent
           ? agentOriginOf(opts.agent)
           : undefined
-      const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin })
+      const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin, ...(opts?.author ? { author: opts.author } : {}) })
       return { message: '', actions: [], queued: true, queueItem: item }
     }
     // Before recovery and provisioning read the folder synchronously: a pending macOS permission prompt
@@ -10715,7 +10753,8 @@ export class OrchestratorService extends EventEmitter {
             opts?.schedule,
             approvalNote,
             opts?.agent,
-            opts?.backgroundNotice
+            opts?.backgroundNotice,
+            opts?.author
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
@@ -11893,8 +11932,9 @@ export class OrchestratorService extends EventEmitter {
             schedule: { jobId: queued.origin.jobId, occurrenceKey: queued.origin.occurrenceKey, ...(queued.origin.jobName ? { jobName: queued.origin.jobName } : {}) }
           }
         : {}),
-      // An agent's message drains as that agent's, whenever it runs.
-      ...(queued.origin?.kind === 'agent' ? { agent: agentOriginOf(queued.origin) } : {})
+      // An agent's message drains as that agent's, whenever it runs; another person's as theirs.
+      ...(queued.origin?.kind === 'agent' ? { agent: agentOriginOf(queued.origin) } : {}),
+      ...(queued.author ? { author: queued.author } : {})
     })
     }
     let started: Promise<OrchestratorResponse | undefined>

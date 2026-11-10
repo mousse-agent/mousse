@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { isLocalOnlyThread } from '../../../shared/threadLineage'
 import { threadFolderIsLocalOnly } from '../../data/localOnlyThreads'
 import { isAbsolute, win32 } from 'node:path'
-import { NetError, isBlobId, isId, type NodeId, type RpcArtifactRef } from '../../../shared/net'
+import { NetError, isBlobId, isId, type NodeId, type RpcArtifactRef, type UserId } from '../../../shared/net'
+import type { HumanAuthor } from '../../../shared/types'
 import type { NodeCapability } from '../../../shared/net'
 import {
   ROUTED_FORBIDDEN_KEYS,
@@ -109,6 +110,11 @@ export interface OwnerRoutesOptions {
   connected?: (node: NodeId) => boolean
   /** The name this computer knows a device by. */
   deviceName?: (node: NodeId) => string
+  /**
+   * Who a call writes as when the caller is not the account's owner (`routedAuthorOf`); undefined for the owner. Read
+   * once per call from the authenticated caller, never from the call's params.
+   */
+  authorOf?: (caller: { node: NodeId; user: UserId }) => HumanAuthor | undefined
   /**
    * The first terminal a device ever opens here. Where a window of this computer can show a desktop
    * notification it does (the daemon sends the event); a computer with no window has the audit row only.
@@ -1018,8 +1024,9 @@ export class OwnerRoutes {
    * the capability a `/workflow` command needs, and carries the computer's limit for turns and rules.
    */
   private handlerContext(context: RpcContext, slot?: TerminalClaim): HandlerContext {
-    const { services, policy, connectionEvent } = this.options
+    const { services, policy, connectionEvent, authorOf } = this.options
     const node = context.caller.node
+    const author = authorOf?.({ node, user: context.caller.user })
     const connection: DomainConnectionContext = {
       // One id per computer: the Git action it starts can be cancelled by it, and by no other.
       id: `bridge:${node}`,
@@ -1032,6 +1039,8 @@ export class OwnerRoutes {
         node,
         user: context.caller.user,
         maxPermissionMode: policy.get(node).maxPermissionMode,
+        // Another person's messages, queued items and answers carry who they are; the owner's carry nothing.
+        ...(author ? { author } : {}),
         // A terminal is the device's from the moment its shell exists, so a block that lands while it starts catches it.
         ...(slot ? { onTerminalCreated: (ptyId: string) => slot.created(ptyId) } : {})
       },

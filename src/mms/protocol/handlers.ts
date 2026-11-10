@@ -43,7 +43,7 @@ import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
 import { lifecycleForReply } from '../../shared/resourceLifecycle'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, HumanAuthor, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
 import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
@@ -368,6 +368,26 @@ function sentFromOf(ctx: HandlerContext): { node: string } | undefined {
   return caller ? { node: caller.node } : undefined
 }
 
+/**
+ * The person a routed call is from when that is not the account's owner: set by the routed boundary from the
+ * authenticated caller (`BridgeCaller.author`), never from the call's params. Undefined for the owner, at a window
+ * of this computer or at another of their computers.
+ */
+function authorOf(ctx: HandlerContext): HumanAuthor | undefined {
+  return ctx.connection?.bridgeCaller?.author
+}
+
+/**
+ * A request's params without `author`: a client never names who wrote a message. A routed call that carries it is
+ * refused before it gets here (`ROUTED_FORBIDDEN_KEYS`); a window or the CLI on this computer has it ignored.
+ */
+function withoutClientAuthor(params: unknown): Record<string, unknown> {
+  if (!isObject(params)) return {}
+  if (!Object.hasOwn(params, 'author')) return params
+  const { author: _author, ...rest } = params
+  return rest
+}
+
 /** Records on the thread that its latest message came from another computer (a routed call), without moving it in the sidebar. */
 function noteSentFrom(ctx: HandlerContext, threadId: string): void {
   const sentFrom = sentFromOf(ctx)
@@ -387,7 +407,8 @@ function noteSentFrom(ctx: HandlerContext, threadId: string): void {
 function questionAnswerer(ctx: HandlerContext): Answerer {
   if (!ctx.connection) return { kind: 'user', via: 'bridge' }
   const caller = ctx.connection.bridgeCaller
-  if (caller) return { kind: 'user', via: 'bridge', node: caller.node, maxPermissionMode: caller.maxPermissionMode }
+  // Another person's answer records who they are; the owner's records nothing more than before.
+  if (caller) return { kind: 'user', via: 'bridge', node: caller.node, maxPermissionMode: caller.maxPermissionMode, ...(caller.author ? { user: caller.author.user } : {}) }
   return { kind: 'user', via: ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal' }
 }
 
@@ -1049,6 +1070,7 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
       const input = await prepareChatInput(ctx, threadId, { content }, {})
       const limit = deviceLimit(ctx)
       const sentFrom = sentFromOf(ctx)
+      const author = authorOf(ctx)
       // `ack`: the call returns once the message is accepted, not when the turn ends. A first message from another
       // computer is that computer's person's: it runs at no more than the device's limit, the thread's default
       // mode notwithstanding, and says who sent it.
@@ -1058,7 +1080,8 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
         forceQueue: false,
         awaitMode: 'ack',
         ...(limit ? { permissionMode: limit } : {}),
-        ...(sentFrom ? { sentFrom, actor: questionAnswerer(ctx) } : {})
+        ...(sentFrom ? { sentFrom, actor: questionAnswerer(ctx) } : {}),
+        ...(author ? { author } : {})
       })
     }
   })
@@ -2484,7 +2507,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { threadId, removed, rules: ctx.mms.orchestrator.listApprovalRules(threadId) }
     }
     case 'orchestrator.send': {
-      const p = isObject(params) ? params : {}
+      const p = withoutClientAuthor(params)
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
         'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect',
@@ -2524,6 +2547,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const input = conversationBranchId ? { ...(typeof prepared === 'string' ? { content: prepared } : prepared), conversationBranchId } : prepared
       const limit = deviceLimit(ctx)
       const sentFrom = sentFromOf(ctx)
+      const author = authorOf(ctx)
       // A send bound to what the composer showed: compared here, and again inside the engine's admission. The turn is then
       // pinned to the compared model and capped at the compared mode, so a later change can only narrow it.
       // A thread a window made for its first message runs that message only bound to what a window showed: a window here,
@@ -2555,6 +2579,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // engine compares again inside its admission, under the thread's lock, before the run is committed.
         ...(bound ? { permissionMode: bound.permissionMode, refuseQueue: true, bindCheck: () => { boundTurnSettings(ctx, threadId, p.expect, limit) }, ...(bound.model ? { modelOverride: bound.model } : {}) } : {}),
         ...(sentFrom ? { sentFrom } : {}),
+        ...(author ? { author } : {}),
         ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
@@ -2574,14 +2599,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { ok: stopped.ok }
     }
     case 'orchestrator.steer': {
-      const p = isObject(params) ? params : {}
+      const p = withoutClientAuthor(params)
       rejectUnknownKeys(p, ['threadId', 'text', 'runId', 'clientRequestId', 'source'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
       const runId = asOptionalString(p.runId, 256)
       if (runId) {
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
-        const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx)), runId)
+        const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx), authorOf(ctx)), runId)
         noteSentFrom(ctx, threadId)
         return response
       }
@@ -2591,7 +2616,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer'),
         // Text that cannot join the running turn waits as a turn of its own, at no more than the device's limit.
         ...(limit ? { permissionMode: limit } : {}),
-        ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {})
+        ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {}),
+        ...(authorOf(ctx) ? { author: authorOf(ctx) } : {})
       })
       noteSentFrom(ctx, threadId)
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
@@ -2744,7 +2770,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const item = ctx.mms.orchestrator.enqueueForThread(
         threadId,
         await prepareChatInput(ctx, threadId, { content, mode, images }, p),
-        { source, ...(limit ? { permissionMode: limit } : {}), ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {}) }
+        { source, ...(limit ? { permissionMode: limit } : {}), ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {}), ...(authorOf(ctx) ? { author: authorOf(ctx) } : {}) }
       )
       noteSentFrom(ctx, threadId)
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
@@ -2759,9 +2785,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const expectedRevision = asOptionalString(p.expectedRevision, 64)
       // Who wrote the message and the mode limit it carries stay as they are; the edit changes the text and chat mode only.
       // An edit from another computer leaves the message no looser than that computer's limit and records the sender.
+      // Another person's message is edited only by them or the owner (`not_author`); another person's edit makes it theirs.
       const limit = deviceLimit(ctx)
       const sentFrom = sentFromOf(ctx)
-      const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision, ...(limit ? { permissionMode: limit } : {}), ...(sentFrom ? { sentFrom } : {}) }))
+      const author = authorOf(ctx)
+      const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision, ...(limit ? { permissionMode: limit } : {}), ...(sentFrom ? { sentFrom } : {}), ...(author ? { author } : {}) }))
       noteSentFrom(ctx, threadId)
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
     }
@@ -2781,7 +2809,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const itemId = asString(p.itemId, 'itemId', 256)
       const expectedRevision = asOptionalString(p.expectedRevision, 64)
-      const removed = queueRpc(() => ctx.mms.orchestrator.removeQueuedItem(threadId, itemId, { expectedRevision }))
+      // Another person's message is removed only by them or the owner (`not_author`).
+      const byUser = authorOf(ctx)?.user
+      const removed = queueRpc(() => ctx.mms.orchestrator.removeQueuedItem(threadId, itemId, { expectedRevision, ...(byUser ? { byUser } : {}) }))
       if (!removed) {
         const current = ctx.mms.orchestrator
           .getOrCreateSession(threadId)
@@ -2803,7 +2833,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const limit = deviceLimit(ctx)
       // A thread released from memory is read off the event loop before the Steer reaches it.
       if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.getThread(threadId)) await ctx.mms.orchestrator.ensureSessionLoaded(threadId).catch(() => undefined)
-      const sent = queueRpc(() => ctx.mms.orchestrator.promoteQueueItem(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
+      // Another person's message is sent now only by them or the owner (`not_author`).
+      const byUser = authorOf(ctx)?.user
+      const sent = queueRpc(() => ctx.mms.orchestrator.promoteQueueItem(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}), ...(byUser ? { byUser } : {}) }))
       return { ok: sent.ok, ...(sent.notice ? { notice: sent.notice } : {}), items: ctx.mms.orchestrator.listQueue(threadId) }
     }
     case 'orchestrator.contextUsage': {

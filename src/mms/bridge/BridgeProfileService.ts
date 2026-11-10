@@ -38,6 +38,7 @@ import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
 import { isPrivateKey } from './remote/privateStreams'
 import { deviceLabelOf, deviceNameOf } from './routed/deviceName'
+import { routedAuthorOf } from './routed/author'
 import { clearDeviceRules, deviceActivityOf, messageSendersOf, validateActivityParams } from './deviceActivity'
 import type { BridgeActivityMethod, BridgeActivityParams } from '../../shared/bridge/deviceActivity'
 
@@ -277,6 +278,7 @@ export class BridgeProfileService {
         }
       },
       deviceName: (node) => deviceNameOf(rt.identity, node),
+      authorOf: (caller) => routedAuthorOf(rt.identity, caller),
       // The first terminal a device opens: a desktop notification in the windows of this computer (none, for a
       // computer with no window, which has the audit row).
       onFirstTerminal: ({ name, threadId }) =>

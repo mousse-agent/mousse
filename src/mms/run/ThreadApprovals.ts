@@ -1,6 +1,7 @@
 import { redactSecrets } from '../../shared/errors'
 import { isPermissionMode, isStricter, narrowPermissionMode, type PermissionAction, type PermissionMode } from '../../shared/permissionMode'
 import type { UserQuestionAnswers } from '../../shared/types'
+import type { UserId } from '../../shared/net/ids'
 import { canAnswerApproval, type Answerer, type ApprovalRefusal, type LineageLookup } from './approvalRights'
 import { int, json, str, type Row } from './db/rows'
 import type { EffectOutbox } from './EffectOutbox'
@@ -42,9 +43,12 @@ export interface ApprovalQuestion {
   allowMultiple?: boolean
 }
 
-/** Who answered, as stored (an agent's permission mode and access are not kept; the tool call that answered is, when there was one). */
+/**
+ * Who answered, as stored (an agent's permission mode and access are not kept; the tool call that answered is, when there
+ * was one). `user` is set when a person other than the account's owner answered; absent for the owner.
+ */
 export type AnsweredBy =
-  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal'; node?: string }
+  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal'; node?: string; user?: UserId }
   | { kind: 'agent'; threadId: string; runId: string; toolCallId?: string }
 
 export interface ApprovalRecord {
@@ -245,7 +249,7 @@ export function onceAllowOption(questions: readonly ApprovalQuestion[]): Approva
 
 function storedAnswerer(answerer: Answerer): AnsweredBy {
   return answerer.kind === 'user'
-    ? { kind: 'user', ...(answerer.via ? { via: answerer.via } : {}), ...(answerer.node ? { node: answerer.node } : {}) }
+    ? { kind: 'user', ...(answerer.via ? { via: answerer.via } : {}), ...(answerer.node ? { node: answerer.node } : {}), ...(answerer.user ? { user: answerer.user } : {}) }
     : { kind: 'agent', threadId: answerer.threadId, runId: answerer.runId, ...(answerer.toolCallId ? { toolCallId: answerer.toolCallId } : {}) }
 }
 
