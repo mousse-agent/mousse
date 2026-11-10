@@ -270,6 +270,8 @@ interface AppState {
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
   updateMessage: (message: ChatMessage) => void
+  /** Several updates of the selected thread in one store write (one frame of a stream). */
+  updateMessages: (messages: ChatMessage[]) => void
   setAgents: (agents: Agent[]) => void
   setTasks: (tasks: Task[]) => void
   setMainAreaWidth: (width: number | null) => void
@@ -397,8 +399,27 @@ export function upsertMessage(messages: ChatMessage[], message: ChatMessage): Ch
   if (index === -1) return sortMessagesDeterministic([...messages, message])
   const replacement = newerMessageVersion(messages[index], message)
   if (replacement === messages[index]) return messages
-  const next = messages.map((existing) => (existing.id === message.id ? replacement : existing))
-  return sortMessagesDeterministic(next)
+  const next = messages.slice()
+  next[index] = replacement
+  // A streamed update keeps its timestamp, so the order cannot change.
+  return replacement.timestamp === messages[index].timestamp ? next : sortMessagesDeterministic(next)
+}
+
+/**
+ * `messages` with one update of the selected thread. A change to a message in a part of the thread
+ * this window has not loaded stays there; it arrives with that page, instead of appearing out of
+ * place among the loaded ones.
+ */
+function applyMessageUpdate(
+  s: { activeThreadId: string | null; earlierByThread: Record<string, unknown> },
+  messages: ChatMessage[],
+  message: ChatMessage
+): ChatMessage[] {
+  if (s.activeThreadId && s.earlierByThread[s.activeThreadId] && !messages.some((existing) => existing.id === message.id)) {
+    const first = messages[0]
+    if (first && sortMessagesDeterministic([message, first])[0] === message) return messages
+  }
+  return upsertMessage(messages, message)
 }
 
 /**
@@ -654,13 +675,16 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
     }),
   updateMessage: (message) =>
     set((s) => {
-      // A change to a message in a part of the thread this window has not loaded stays there; it arrives with
-      // that page, instead of appearing out of place among the loaded ones.
-      if (s.activeThreadId && s.earlierByThread[s.activeThreadId] && !s.messages.some((existing) => existing.id === message.id)) {
-        const first = s.messages[0]
-        if (first && sortMessagesDeterministic([message, first])[0] === message) return s
-      }
-      const messages = upsertMessage(s.messages, message)
+      const messages = applyMessageUpdate(s, s.messages, message)
+      if (messages === s.messages) return s
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
+    }),
+  updateMessages: (updates) =>
+    set((s) => {
+      let messages = s.messages
+      for (const message of updates) messages = applyMessageUpdate(s, messages, message)
+      if (messages === s.messages) return s
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
     }),
