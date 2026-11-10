@@ -396,9 +396,10 @@ function PaletteDialog({ closing = false, onClosed }: { closing?: boolean; onClo
 export function CommandPalette() {
   const open = useAppStore((state) => state.paletteOpen)
   useCommandOverlay('palette', open)
-  // After closing, the dialog stays to fade out (none with motion off) and unmounts when the fade ends,
-  // so its last frame is drawn; the timer is a fallback for a fade that never ends, as in a hidden
-  // window. Each opening is a fresh dialog, as before. Set while rendering, so it never unmounts for a
+  // After closing, the dialog stays to fade out and unmounts when the fade ends, so its last frame is
+  // drawn; the timer is a fallback for a fade that never ends, as in a hidden window. With motion off
+  // (Animation speed Off or the OS reducing motion, both a scale of 0) there is no fade and no timer:
+  // it unmounts at once. Each opening is a fresh dialog, as before. Set while rendering, so it never unmounts for a
   // frame in between.
   const [session, setSession] = useState(0)
   const [leaving, setLeaving] = useState(false)

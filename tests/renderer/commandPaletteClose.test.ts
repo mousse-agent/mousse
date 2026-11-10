@@ -5,6 +5,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CommandPalette } from '../../src/renderer/components/CommandPalette'
+import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -73,6 +74,31 @@ describe('closing the search palette', () => {
     expect(overlay()).not.toBeNull()
     animationEnd(overlay()!, 'thread-search-dim-out')
     expect(overlay()).toBeNull()
+  })
+
+  describe('with motion off', () => {
+    afterEach(() => {
+      setAnimationSpeed('normal')
+      vi.unstubAllGlobals()
+    })
+
+    // No fade runs, so nothing waits for its end or for the fallback timer.
+    const closesAtOnce = () => {
+      vi.useFakeTimers()
+      act(() => useAppStore.getState().setPaletteOpen(false))
+      expect(overlay()).toBeNull()
+      expect(vi.getTimerCount()).toBe(0)
+    }
+
+    it('closes at once with Animation speed Off', () => {
+      setAnimationSpeed('off')
+      closesAtOnce()
+    })
+
+    it('closes at once when the OS reduces motion', () => {
+      vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), addEventListener: () => {} }))
+      closesAtOnce()
+    })
   })
 
   it('still unmounts when the fade never reports its end, as in a hidden window', () => {
