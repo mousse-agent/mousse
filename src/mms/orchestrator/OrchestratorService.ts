@@ -174,7 +174,8 @@ import {
   type UserQuestionAnswers,
   type AnsweredQuestion,
   type ScheduledRunAgent,
-  DEFAULT_CHAT_MODE
+  DEFAULT_CHAT_MODE,
+  isTurnStoppable
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
@@ -1690,6 +1691,9 @@ export class OrchestratorService extends EventEmitter {
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
   private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause'>> & { blockedOnWait?: boolean }): void {
+    // A stopped turn that is still ending already shows stopped (`showStopped`): what its provider sent before it let go
+    // (a last delta, a tool event, a question) does not make the thread look busy again.
+    if (this.isStopping(threadId) && isTurnStoppable({ phase, turnId: 'any' })) return
     const now = new Date().toISOString()
     const existing = this.turnStates.get(threadId)
     const state: TurnState = {
@@ -2700,6 +2704,29 @@ export class OrchestratorService extends EventEmitter {
     return ended
   }
 
+  /** The thread's session when it is loaded; never creates one. */
+  private loadedSession(threadId: string): ThreadSession | undefined {
+    return this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+  }
+
+  /** Whether the thread's turn was stopped by a person and is still ending; a turn started since is not. */
+  private isStopping(threadId: string): boolean {
+    const session = this.loadedSession(threadId)
+    return Boolean(session?.stopping && session.isTurnRunning() && (!session.activeTurn || session.activeTurn.abort.signal.aborted))
+  }
+
+  /**
+   * A person's Stop ended the thread's turn: the thread shows stopped now, before the provider has let go and before the
+   * turn's checkpoint and cleanup, which go on behind it. Until the turn has ended its late phases are not shown, and a
+   * message sent meanwhile goes first and runs once it has ended (`ThreadSession.stopping`).
+   */
+  private showStopped(threadId: string): void {
+    const session = this.loadedSession(threadId)
+    if (!session?.isTurnRunning()) return
+    session.stopping = true
+    if (isTurnStoppable(this.turnStates.get(threadId))) this.setTurnPhase(threadId, 'stopped')
+  }
+
   /**
    * Ends the setup of the turns of `threadIds` that are still being set up (`ThreadSession.setupStop`): a Stop of a
    * thread whose start waits for its repository or worktree ends that wait, and the turn ends before it started. Only a
@@ -2735,6 +2762,7 @@ export class OrchestratorService extends EventEmitter {
       const ended = this.endFolderWaits([threadId])
       this.endTurnSetups([threadId])
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
+      if (aborted) this.showStopped(threadId)
       return { ok: aborted || ended || compactionStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
@@ -2776,13 +2804,19 @@ export class OrchestratorService extends EventEmitter {
       for (const run of engine.reinterruptStopped(result)) aborted = this.interruptNow(run.runId, run.threadId) || aborted
     } else {
       for (const run of result.activeRuns) {
-        aborted = this.abortActiveTurn(run.threadId, { runId: run.runId }) || aborted
+        if (this.abortActiveTurn(run.threadId, { runId: run.runId })) {
+          aborted = true
+          this.showStopped(run.threadId)
+        }
         // The worker runs the interrupt effect `stopSubtree` queued; without one, the interrupt runs now.
         if (!this.effectsEnabled()) void this.interruptRun(run.runId, run.threadId)
       }
       // A live turn that is not an engine run (a legacy turn) is still the Stop's to end,
       // for the thread the Stop was aimed at; nothing can have started since the transaction.
-      if (!result.activeRuns.some((run) => run.threadId === threadId)) aborted = this.abortActiveTurn(threadId) || aborted
+      if (!result.activeRuns.some((run) => run.threadId === threadId) && this.abortActiveTurn(threadId)) {
+        aborted = true
+        this.showStopped(threadId)
+      }
       this.removeStoppedQueueEntries(result, opts.clearQueue === true, opts.actor !== undefined)
     }
     // A replayed Stop reaches the provider only for threads that have no work newer than the Stop: a process
@@ -9626,6 +9660,17 @@ export class OrchestratorService extends EventEmitter {
       }
       // The same for a compaction that ended in between: its drain may have run before the item was saved.
       if (heldByCompaction) this.drainQueueAfterCompaction(threadId)
+      // A person's message sent once their Stop showed the thread stopped, while the stopped turn still ends (its
+      // checkpoint): it is what they want next, so it goes first and runs as soon as that turn has ended. What they
+      // queued before the Stop stays queued behind it, as a Stop always kept it.
+      if (this.isStopping(threadId) && !opts?.forceQueue && !opts?.agent && !opts?.delegation && !opts?.schedule && !opts?.bindDelivery && !reuseLastUser &&
+        opts?.source !== 'wake' && !externalLease && !waitingOnUser && !heldByPause && !heldByCompaction) {
+        try {
+          this.sendNowAfterTurn(session, item.id)
+        } catch (error) {
+          logDebug('OrchestratorService', 'a message sent after a Stop could not go first', error, { threadId })
+        }
+      }
       return {
         message: '',
         actions: [],
@@ -9864,6 +9909,8 @@ export class OrchestratorService extends EventEmitter {
       }
       session.turnAdmitted = true
     }
+    // A new turn is not the stopped one, unless a Stop already reached it while it was admitted.
+    if (!session.abortRequested) session.stopping = false
     let turnResponse: OrchestratorResponse | undefined
     let turnFailure: unknown
     // While a scheduled occurrence's turn runs, its thread's end-of-work notice is the automation's to give (Tell me).
@@ -9895,6 +9942,7 @@ export class OrchestratorService extends EventEmitter {
       session.turnAdmitted = false
       session.admissionRunId = undefined
       session.abortRequested = false
+      session.stopping = false
       this.effectWorker?.notify()
       // Post-turn drains are deferred to here: while admission is held the drain would see a
       // running turn and skip, stranding queued messages.

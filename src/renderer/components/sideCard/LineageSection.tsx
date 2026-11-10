@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from 'react'
+import { stopThreadNow } from '../../lib/stopThread'
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { useSubagents } from '../../hooks/useSubagents'
 import { ChevronRight } from '../../lib/icons'
@@ -213,7 +214,7 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
         open={open}
         onOpenPart={(part, value) => setOpenState({ threadId, parts: { ...open, [part]: value } })}
         onOpen={(id) => void openThread(id)}
-        onStop={(childThreadId) => void window.mousse.orchestrator.abort(childThreadId)}
+        onStop={(childThreadId) => void stopThreadNow(childThreadId)}
       />
     </SideCardSection>
   )

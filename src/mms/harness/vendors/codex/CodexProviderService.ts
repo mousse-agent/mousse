@@ -74,7 +74,7 @@ import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerE
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from './childPolicy'
-import { STOP_GRACE_MS, stopCommandProcesses } from '../../stopProcesses'
+import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
   closeEvent,
@@ -341,10 +341,12 @@ export type CodexServiceDependencies = {
   stopTiming?: { killAfterMs?: number; exitDeadlineMs?: number }
   /** Kills a process and everything it started (tests substitute it; it may throw). */
   killTree?: (process: CodexProcess) => void
-  /** How long Stop gives Codex to end a thread's running commands before they are killed (tests). */
+  /** How long Stop gives Codex to end a thread's running commands while it reads the process list (tests). */
   stopGraceMs?: number
   /** Kills the processes below `roots` running one of `commands` (`stopCommandProcesses`; tests substitute it). */
   stopCommands?: typeof stopCommandProcesses
+  /** Reads every running process for a Stop (`listProcesses`; tests substitute it). */
+  listProcesses?: typeof listProcesses
   /** How long a stopped `/compact` waits for Codex to end its compaction turn (tests). */
   compactSettleMs?: number
 }
@@ -2415,14 +2417,17 @@ export class CodexProviderService {
    * are still running after the Stop's `turn/interrupt` are killed, with everything they started.
    * Codex ends a command it waits on when the turn is interrupted, but a command it keeps as a
    * background terminal runs on until the app-server closes, and the app-server serves every thread.
-   * So each command gets `STOP_GRACE_MS` to end, and then its processes below the app-server are
-   * found by its script and killed. Rejects, naming the command, when one is still running after
+   * The process list is read at once. Once it is read, or once every command ended (at most
+   * `STOP_GRACE_MS`), the commands still running are killed: Codex's own end of a command is not
+   * waited for on top of the list. Rejects, naming the command, when one is still running after
    * that; the caller says so in the thread.
    */
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     const mine = () => [...this.runningCommands].filter(([, entry]) => entry.owner === threadId)
     if (mine().length === 0) return 'not_active'
-    await this.commandsEnd(() => mine().length === 0, this.dependencies.stopGraceMs ?? STOP_GRACE_MS)
+    // Reading the list takes most of a second on Windows; it is read while Codex ends what it can.
+    const listing = (this.dependencies.listProcesses ?? listProcesses)()
+    await Promise.race([this.commandsEnd(() => mine().length === 0, this.dependencies.stopGraceMs ?? STOP_GRACE_MS), listing.then(() => undefined, () => undefined)])
     const left = mine()
     if (left.length === 0) return 'stopped'
     for (const [key] of left) this.runningCommands.delete(key)
@@ -2432,7 +2437,7 @@ export class CodexProviderService {
     const commands = left.map(([, entry]) => entry.command)
     let survivors: Array<{ pid: number; command: string }>
     try {
-      ;({ survivors } = await (this.dependencies.stopCommands ?? stopCommandProcesses)(roots, commands))
+      ;({ survivors } = await (this.dependencies.stopCommands ?? stopCommandProcesses)(roots, commands, { list: () => listing }))
     } catch (error) {
       throw new Error(`Codex's ${commands.length === 1 ? 'command' : 'commands'} ${commands.join(', ')} may still be running: ${error instanceof Error ? error.message : String(error)}.`)
     }

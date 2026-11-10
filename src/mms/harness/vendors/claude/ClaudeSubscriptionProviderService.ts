@@ -62,7 +62,7 @@ import { checkProxyKey, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
-import { CancelInProgress, claudeQueryPid, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
+import { CancelInProgress, claudeQueryPid, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQueryPid, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
@@ -70,6 +70,13 @@ import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type 
 import type { ChildTurnPolicy } from '../../adapter'
 import type { OneShotSpec } from '../../driver'
 import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
+
+/**
+ * How long a Claude Code process closed by Stop may take to exit by itself before its tree is killed. Claude Code ends
+ * the commands it runs within a few hundred milliseconds of the interrupt; one still running after this ignores the
+ * Stop (seen keeping its requests and helpers going for about 7 s).
+ */
+const CLAUDE_STOP_GRACE_MS = 1_000
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /** What a live process is started for, in the order of the key `chat` builds; a change needs a new process. */
@@ -1405,7 +1412,13 @@ export class ClaudeSubscriptionProviderService {
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     options.abortController?.signal.throwIfAborted()
     if (this.stopped) throw new Error('Claude provider is stopped')
-    return sdk.query({ prompt, options })
+    // The SDK wraps the process without its pid; it reports the pid when it starts it, so Stop can end the process
+    // tree (`reapClosed`). The callback is the SDK's own, not in its published types.
+    let pid: number | undefined
+    const reported = (options as { onProcessSpawned?: (pid: number) => void }).onProcessSpawned
+    const created = sdk.query({ prompt, options: { ...options, onProcessSpawned: (spawned: number) => { pid = spawned; reported?.(spawned) } } as Options })
+    noteClaudeQueryPid(created, () => pid)
+    return created
   }
   /**
    * How Mousse starts Claude Code. It runs as the user set it up: `settingSources` is left out, so
@@ -1825,12 +1838,12 @@ export class ClaudeSubscriptionProviderService {
   /**
    * Issue #417: a closed Claude Code process normally exits at once, ending the commands it runs
    * (the Stop's interrupt already ended the one in the foreground). One that is still running after
-   * the Stop grace is killed with every process below it, so no command outlives the Stop; one that
-   * cannot be killed is said in the thread, so it does not look stopped while it still runs.
+   * `CLAUDE_STOP_GRACE_MS` is killed with every process below it, so no command outlives the Stop; one
+   * that cannot be killed is said in the thread, so it does not look stopped while it still runs.
    */
   private reapClosed(threadId: string, pid: number | undefined): void {
     if (pid === undefined) return
-    const reap = this.dependencies.reap ?? ((target: number) => reapProcessTree(target))
+    const reap = this.dependencies.reap ?? ((target: number) => reapProcessTree(target, { graceMs: CLAUDE_STOP_GRACE_MS }))
     void reap(pid).then(
       (outcome) => {
         if (outcome === 'killed') console.warn('[claude-subscription] Claude Code did not exit after Stop; its processes were killed', { threadId, pid })

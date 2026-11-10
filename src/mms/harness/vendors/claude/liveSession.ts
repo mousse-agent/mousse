@@ -60,13 +60,23 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   interruptTimeoutMs: 10_000
 }
 
+/** The pid each query's Claude Code was started with, as the SDK reported it at spawn (`noteClaudeQueryPid`). */
+const SPAWNED_PIDS = new WeakMap<object, () => number | undefined>()
+
+/** Records where the pid of `query`'s Claude Code is read from once it has started. */
+export function noteClaudeQueryPid(query: object, pid: () => number | undefined): void {
+  SPAWNED_PIDS.set(query, pid)
+}
+
 /**
  * The pid of the Claude Code process a query runs, or undefined. The Agent SDK does not publish it:
- * it is read from the query's process transport (`transport.process.pid` in the SDK version Mousse
- * pins), so a later SDK that moves it leaves Stop with the SDK's own close only.
+ * it is read from the query's process transport (`transport.process.pid`), or, in SDKs that wrap the
+ * process without its pid, from what the SDK reported when it started it (`noteClaudeQueryPid`). Without
+ * either, Stop has the SDK's own close only.
  */
 export function claudeQueryPid(query: unknown): number | undefined {
   const pid = (query as { transport?: { process?: { pid?: unknown } } } | undefined)?.transport?.process?.pid
+    ?? (query && typeof query === 'object' ? SPAWNED_PIDS.get(query)?.() : undefined)
   return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined
 }
 
