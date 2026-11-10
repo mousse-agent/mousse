@@ -32,9 +32,19 @@ export interface SkillsDiscoveryOptions {
   includeDisabled?: boolean
 }
 
+interface ScannedSource {
+  skills: SkillDescriptor[]
+  diagnostics: IntegrationDiagnostic[]
+  fetchedAt: number
+}
+
 export class SkillsRegistry {
+  /** One snapshot per project, most recently used last; expired entries are dropped. */
   private discoveryCache = new Map<string, { snapshot: SkillsRegistrySnapshot; fetchedAt: number }>()
+  /** Shared (user-wide) Skills folders, scanned once for every project. */
+  private sharedScans = new Map<string, ScannedSource>()
   private static readonly DISCOVERY_TTL_MS = 30_000
+  static readonly MAX_DISCOVERY_ENTRIES = 16
   private readonly context: IntegrationRuntimeContext
 
   constructor(context?: IntegrationRuntimeContext) {
@@ -43,6 +53,7 @@ export class SkillsRegistry {
 
   invalidateDiscoveryCache(): void {
     this.discoveryCache.clear()
+    this.sharedScans.clear()
   }
 
   async refresh(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
@@ -52,23 +63,45 @@ export class SkillsRegistry {
 
   async discover(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
     const cacheKey = this.cacheKey(options.projectPath)
+    this.dropExpired(Date.now())
     if (!options.refresh) {
       const cached = this.discoveryCache.get(cacheKey)
-      if (cached && Date.now() - cached.fetchedAt < SkillsRegistry.DISCOVERY_TTL_MS) {
+      if (cached) {
+        this.discoveryCache.delete(cacheKey)
+        this.discoveryCache.set(cacheKey, cached)
         return cached.snapshot
       }
     }
 
-    const snapshot = await this.discoverUncached(options)
-    this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: Date.now() })
+    const { snapshot, scannedAt } = await this.discoverUncached(options)
+    this.discoveryCache.delete(cacheKey)
+    // The snapshot is as old as the oldest scan in it, so it never outlives a shared scan it reused.
+    this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: scannedAt })
+    while (this.discoveryCache.size > SkillsRegistry.MAX_DISCOVERY_ENTRIES) {
+      const oldest = this.discoveryCache.keys().next().value
+      if (oldest === undefined) break
+      this.discoveryCache.delete(oldest)
+    }
     return snapshot
+  }
+
+  private dropExpired(now: number): void {
+    for (const [key, entry] of this.discoveryCache) {
+      if (now - entry.fetchedAt >= SkillsRegistry.DISCOVERY_TTL_MS) this.discoveryCache.delete(key)
+    }
+    for (const [key, entry] of this.sharedScans) {
+      if (now - entry.fetchedAt >= SkillsRegistry.DISCOVERY_TTL_MS) this.sharedScans.delete(key)
+    }
   }
 
   private cacheKey(projectPath?: string): string {
     return `${this.context.profileId}:${projectPath ?? this.context.projectPath ?? ''}`
   }
 
-  private async discoverUncached(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
+  private async discoverUncached(
+    options: SkillsDiscoveryOptions = {}
+  ): Promise<{ snapshot: SkillsRegistrySnapshot; scannedAt: number }> {
+    let scannedAt = Date.now()
     const projectPath = options.projectPath ?? this.context.projectPath
     const external = getSkillRootPaths(projectPath).map(
       (descriptor): SkillSourceDescriptor => ({
@@ -96,21 +129,18 @@ export class SkillsRegistry {
 
     for (const source of sources) {
       if (!source.exists) continue
-      try {
-        const skillFiles = await findSkillFiles(source.path)
-        for (const skillPath of skillFiles) {
-          const parsed = await this.readSkillDescriptor(source, skillPath)
-          if (parsed.skill) skills.push(parsed.skill)
-          diagnostics.push(...parsed.diagnostics)
-        }
-      } catch (err) {
-        diagnostics.push({
-          level: 'error',
-          source: source.source,
-          path: source.path,
-          message: `Failed to scan Skills root: ${formatError(err)}`
-        })
+      if (source.scope === 'global') {
+        // Shared folders read the same for every project; each snapshot gets its own copies,
+        // because managed state and duplicate marking below change them per snapshot.
+        const scanned = await this.scanSharedSource(source, options.refresh === true)
+        scannedAt = Math.min(scannedAt, scanned.fetchedAt)
+        skills.push(...scanned.skills.map((skill) => ({ ...skill })))
+        diagnostics.push(...scanned.diagnostics)
+        continue
       }
+      const scanned = await this.scanSource(source)
+      skills.push(...scanned.skills)
+      diagnostics.push(...scanned.diagnostics)
     }
 
     this.applyManagedState(skills)
@@ -121,10 +151,43 @@ export class SkillsRegistry {
     const duplicateDiagnostics = markDuplicateSkills(sortedSkills)
 
     return {
-      sources,
-      skills: sortedSkills,
-      diagnostics: [...diagnostics, ...duplicateDiagnostics]
+      snapshot: {
+        sources,
+        skills: sortedSkills,
+        diagnostics: [...diagnostics, ...duplicateDiagnostics]
+      },
+      scannedAt
     }
+  }
+
+  private async scanSharedSource(source: SkillSourceDescriptor, refresh: boolean): Promise<ScannedSource> {
+    const key = `${source.source}:${source.profileId ?? ''}:${source.path}`
+    const cached = this.sharedScans.get(key)
+    if (cached && !refresh && Date.now() - cached.fetchedAt < SkillsRegistry.DISCOVERY_TTL_MS) return cached
+    const scanned = await this.scanSource(source)
+    this.sharedScans.set(key, scanned)
+    return scanned
+  }
+
+  private async scanSource(source: SkillSourceDescriptor): Promise<ScannedSource> {
+    const skills: SkillDescriptor[] = []
+    const diagnostics: IntegrationDiagnostic[] = []
+    try {
+      const skillFiles = await findSkillFiles(source.path)
+      for (const skillPath of skillFiles) {
+        const parsed = await this.readSkillDescriptor(source, skillPath)
+        if (parsed.skill) skills.push(parsed.skill)
+        diagnostics.push(...parsed.diagnostics)
+      }
+    } catch (err) {
+      diagnostics.push({
+        level: 'error',
+        source: source.source,
+        path: source.path,
+        message: `Failed to scan Skills root: ${formatError(err)}`
+      })
+    }
+    return { skills, diagnostics, fetchedAt: Date.now() }
   }
 
   async readSkill(
@@ -224,7 +287,18 @@ export class SkillsRegistry {
     }
   }
 
+  /**
+   * Parsed values are slices of the whole SKILL.md text, so keeping one keeps the file. The copy
+   * holds fresh strings only, and the file text can be collected after parsing.
+   */
   private async readSkillDescriptor(
+    source: SkillSourceDescriptor,
+    skillPath: string
+  ): Promise<{ skill?: SkillDescriptor; diagnostics: IntegrationDiagnostic[] }> {
+    return structuredClone(await this.parseSkillDescriptor(source, skillPath))
+  }
+
+  private async parseSkillDescriptor(
     source: SkillSourceDescriptor,
     skillPath: string
   ): Promise<{ skill?: SkillDescriptor; diagnostics: IntegrationDiagnostic[] }> {
