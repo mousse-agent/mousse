@@ -854,7 +854,7 @@ describe('remote composer methods on a real profile', () => {
     ).toMatchObject({ ok: false, error: expect.any(String) })
   })
 
-  it('lists queued messages without image data, removes them, and explains a steer with no turn', async () => {
+  it('lists queued messages without image data, removes them, and sends a steer with no turn at once', async () => {
     const { mms, api } = await profile()
     const thread = mms.threads.createThread('Queue')
     const item = mms.orchestrator.enqueueForThread(thread.id, {
@@ -880,12 +880,6 @@ describe('remote composer methods on a real profile', () => {
     expect(reordered.ok).toBe(true)
     expect(reordered.items.map((row) => row.id)).toEqual([second.id, item.id])
     await call(api, 'queue.remove', { threadId: thread.id, itemId: second.id })
-    expect(
-      await call(api, 'queue.promoteToSteer', { threadId: thread.id, itemId: item.id })
-    ).toMatchObject({
-      ok: false,
-      error: expect.stringMatching(/No active turn/)
-    })
     expect(await call(api, 'queue.remove', { threadId: thread.id, itemId: item.id })).toEqual({
       ok: true,
       items: []
@@ -893,5 +887,8 @@ describe('remote composer methods on a real profile', () => {
     expect(await call(api, 'queue.remove', { threadId: thread.id, itemId: item.id })).toMatchObject(
       { ok: false }
     )
+    // Steer with no turn running sends the message now: it leaves the queue to start its turn at once.
+    const now = mms.orchestrator.enqueueForThread(thread.id, { content: 'now' })
+    expect(await call(api, 'queue.promoteToSteer', { threadId: thread.id, itemId: now.id })).toMatchObject({ ok: true, items: [] })
   })
 })
