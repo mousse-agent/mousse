@@ -33,6 +33,12 @@ const DETECT_CACHE_MS = 60_000
 export const OBSERVED_FRESH_MS = 30 * 60_000
 /** How long a sign-in's own usage read is reused before it is asked again. */
 export const ACCOUNT_READ_REUSE_MS = 5 * 60_000
+/**
+ * How long a sign-in's own read is reused while its listing has recent limits. The listing covers
+ * the 5-hour and weekly windows; this read adds what only it reports: weekly limits per model and
+ * limit resets.
+ */
+export const MODEL_LIMITS_REUSE_MS = 15 * 60_000
 /** How long a sign-in is not asked again after Anthropic answered 429 without saying how long to wait. */
 export const RATE_LIMIT_WAIT_MS = 2 * 60_000
 /** The longest wait a `Retry-After` can set. */
@@ -439,39 +445,48 @@ async function askAccountUsage(reading: ProxyReading, account: ProxyClaudeAccoun
 }
 
 /**
- * One sign-in's usage. In order: the limits the listing carries when they are recent (no request);
- * else its own read from the last few minutes, or the one already in flight; else a new read,
- * unless Anthropic asked to wait. A read that is rate limited or does not arrive shows the last
- * limits known instead (the listing's, else the last good read) when there are any.
+ * One sign-in's usage. In order: its own read from the last few minutes (a quarter hour when the
+ * listing has recent limits), or the one already in flight; else a new read, unless Anthropic
+ * asked to wait. The listing's limits stand in for the 5-hour and weekly windows whenever they are
+ * newer than that read, which adds what the listing leaves out (weekly limits per model, resets).
+ * A read that is rate limited or does not arrive shows the last limits known instead (the
+ * listing's, with the last good read's, else the last good read) when there are any.
  */
 async function readProxyAccount(reading: ProxyReading, account: ProxyClaudeAccount, index: number): Promise<AccountRead> {
   // A disabled sign-in or an API key has no plan limits to read: it is listed, not asked.
   if (account.state !== 'active') return { group: proxyClaudeAccount(account, index, undefined) }
   const { now } = reading
   const observed = account.observed ? observedClaudeLimits(account.observed, now) : undefined
+  const observedFresh = observed !== undefined && now - account.observed!.at <= OBSERVED_FRESH_MS
   const shown = (reply: UpstreamReply): AccountRead => {
     const limits = reply.status === 200 && isRecord(reply.body) ? reply.body : undefined
     return { group: proxyClaudeAccount(account, index, reply), ...(limits ? { limits } : {}) }
   }
-  if (observed && now - account.observed!.at <= OBSERVED_FRESH_MS) return shown({ status: 200, body: observed })
 
   const id = `${reading.origin}\n${account.id}`
   let state = accountReads.get(id)
   if (!state || state.key !== reading.key) accountReads.set(id, (state = { key: reading.key }))
-  const lastKnown = (failed: UpstreamReply | undefined): AccountRead => {
-    // An expired sign-in says so; numbers from before would hide it.
-    if (failed && failed.status !== 429) return shown(failed)
-    if (observed) return shown({ status: 200, body: observed })
-    if (state.good) return shown(state.good.reply)
-    return failed ? shown(failed) : { group: proxyClaudeAccount(account, index, undefined) }
+  /** The last good read, its 5-hour and weekly windows replaced by the listing's when those are newer. */
+  const known = (): AccountRead | undefined => {
+    if (!observed) return state.good ? shown(state.good.reply) : undefined
+    const good = state.good && isRecord(state.good.reply.body) ? state.good : undefined
+    if (good && good.at > account.observed!.at) return shown(good.reply)
+    return shown({ status: 200, body: { ...(good?.reply.body as Record<string, unknown> | undefined), ...observed } })
   }
-  if (state.good && now - state.good.at < ACCOUNT_READ_REUSE_MS) return shown(state.good.reply)
+  const lastKnown = (failed: UpstreamReply | undefined): AccountRead => {
+    // An expired sign-in says so; numbers from before would hide it. Recent listed limits show it still served.
+    if (failed && failed.status !== 429 && !observedFresh) return shown(failed)
+    return known() ?? (failed ? shown(failed) : { group: proxyClaudeAccount(account, index, undefined) })
+  }
+  /** A good read just made: it is newer than the listing, unless it held no limits the listing can stand in for. */
+  const fresh = (reply: UpstreamReply): AccountRead => (isRecord(reply.body) || !observed ? shown(reply) : known()!)
+  if (state.good && now - state.good.at < (observedFresh ? MODEL_LIMITS_REUSE_MS : ACCOUNT_READ_REUSE_MS)) return known()!
   if (state.waitUntil !== undefined && now < state.waitUntil) return lastKnown({ status: 429, body: undefined })
 
   if (state.inFlight) {
     const joined = await state.inFlight
     // The read joined was given up by its caller: this one asks for itself.
-    if (!joined.aborted) return joined.reply?.status === 200 ? shown(joined.reply) : lastKnown(joined.reply)
+    if (!joined.aborted) return joined.reply?.status === 200 ? fresh(joined.reply) : lastKnown(joined.reply)
   }
   const asking = askAccountUsage(reading, account)
   state.inFlight = asking
@@ -485,7 +500,7 @@ async function readProxyAccount(reading: ProxyReading, account: ProxyClaudeAccou
   if (reply?.status === 200) {
     state.good = { at: now, reply }
     state.waitUntil = undefined
-    return shown(reply)
+    return fresh(reply)
   }
   if (reply?.status === 429) state.waitUntil = now + Math.min(MAX_RATE_LIMIT_WAIT_MS, reply.retryAfterMs ?? RATE_LIMIT_WAIT_MS)
   return lastKnown(reply)
