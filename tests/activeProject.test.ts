@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { folderKey, gitScopeFor, resolveActiveProject, type ActiveProjectInput } from '../src/renderer/lib/activeProject'
+import { folderKey, folderRecheckKey, gitScopeFor, resolveActiveProject, type ActiveProjectInput } from '../src/renderer/lib/activeProject'
 
 describe('active project', () => {
   const projects = [
@@ -96,5 +96,17 @@ describe('active project', () => {
 
   it('has no key until the folder is known', () => {
     expect(resolveActiveProject({ ...base, resolved: { path: null, loading: true } }).key).toBeNull()
+  })
+
+  it('looks for a thread folder again on each turn phase until it is the thread worktree', () => {
+    const waiting = { threadId: 't1', threadProjectId: 'p1', resolvedWorkspaceThreadId: null }
+    expect(folderRecheckKey({ ...waiting, turnPhase: null })).toBeNull()
+    expect(folderRecheckKey({ ...waiting, turnPhase: 'queued' })).toBe('queued')
+    expect(folderRecheckKey({ ...waiting, turnPhase: 'streaming' })).toBe('streaming')
+    // Found: the worktree stays, whatever the turn does.
+    expect(folderRecheckKey({ ...waiting, resolvedWorkspaceThreadId: 't1', turnPhase: 'streaming' })).toBeNull()
+    // A thread with no project has no worktree to wait for, and no thread has nothing to look up.
+    expect(folderRecheckKey({ ...waiting, threadProjectId: null, turnPhase: 'streaming' })).toBeNull()
+    expect(folderRecheckKey({ ...waiting, threadId: null, turnPhase: 'streaming' })).toBeNull()
   })
 })

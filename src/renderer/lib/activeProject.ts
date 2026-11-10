@@ -51,6 +51,23 @@ export function resolveActiveProject(input: ActiveProjectInput): ActiveProject {
 }
 
 /**
+ * When to look for a thread's folder again: on each turn phase change of a project thread whose folder is still the
+ * project's. A new worktree thread gets its worktree when its first turn starts, after the thread was selected, so
+ * without this the Git section and the file tree would keep showing the project folder (and its branch) until the
+ * thread is selected again. Null once the folder is the thread's own worktree, or for a thread with no project.
+ */
+export function folderRecheckKey(input: {
+  threadId: string | null
+  threadProjectId: string | null
+  /** The thread whose worktree the last lookup found; null when it found the project folder. */
+  resolvedWorkspaceThreadId: string | null
+  turnPhase: string | null
+}): string | null {
+  if (!input.threadId || !input.threadProjectId || input.resolvedWorkspaceThreadId) return null
+  return input.turnPhase
+}
+
+/**
  * What the folder a scope names is cached under. A thread's own worktree is the thread's; any other folder is
  * its project's. Ids, not paths: two folders with the same path on two computers are two entries, and a
  * path is not parsed or compared on this computer. Null when the scope names no folder.
