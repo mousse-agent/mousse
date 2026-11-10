@@ -30,7 +30,7 @@ import { MOUSSE_COMMIT_EMAIL } from './mousseCommitIdentity'
 import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoProgramsAsync } from './repoPrograms'
-import { readWorkingTreeStatus, type StatusEntry } from './workingTreeStatus'
+import { parseRawDiff, readWorkingTreeStatus, unchangedWorktreePaths, type StatusEntry } from './workingTreeStatus'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
 import type {
@@ -209,6 +209,8 @@ const IN_PROGRESS_KIND: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], GitInPr
 const IN_PROGRESS_ORDER: readonly GitInProgress[] = ['rebase', 'merge', 'cherry-pick', 'revert']
 /** Characters of changed paths a numstat names one by one; past it, it diffs the whole tree (Windows caps a command line at 32K). */
 const NUMSTAT_PATHS_MAX_CHARS = 12_000
+/** Files whose stat data alone may have changed that a whole-tree numstat still compares itself; more are sorted out first. */
+const NUMSTAT_STAT_ONLY_MAX = 50
 
 /** One status line as Git reports it: a code for the index side and one for the working tree side. */
 interface RawEntry {
@@ -849,18 +851,25 @@ export class GitService {
   }
 
   /**
-   * `git diff --numstat` of the working tree against the index, over only the paths the status finds changed. Mousse
-   * never refreshes the index, so a whole-tree diff compares the content of every file whose times changed, on every
-   * read; the status already sorted those out (and remembers them). A long list falls back to the whole tree.
+   * `git diff --numstat` of the working tree against the index. Mousse never refreshes the index, so after another tool
+   * touched many files Git compares the content of every one of them, on every read. When `diff-files` lists more than a
+   * few such files, the ones whose content still matches are sorted out first (`unchangedWorktreePaths`, which
+   * remembers them) and only the rest are diffed; a list too long for a command line diffs the whole tree.
    */
   private async unstagedNumstat(cwd: string): Promise<string> {
+    const whole = () => this.gitFor(cwd).diff([...NO_DIFF_PROGRAMS, '--numstat'])
+    const raw = await this.read(cwd, ['diff-files', '-z', '--raw', '--no-abbrev', '--ignore-submodules=dirty'])
+    if (raw === null) return whole()
+    const records = parseRawDiff(raw)
+    const statOnly = records.filter((record) => record.status === 'M' && /^0+$/.test(record.dstSha)).length
+    if (statOnly <= NUMSTAT_STAT_ONLY_MAX) return whole()
+    // `diff-files` names paths from the top of the repository, wherever it runs.
     const top = await this.toplevel(cwd)
-    const entries = rawEntries(await readWorkingTreeStatus(top))
-    const paths = [...new Set(entries.filter((entry) => entry.workdir !== '' && !isUntracked(entry) && !isIgnored(entry)).map((entry) => entry.path))]
+    const unchanged = await unchangedWorktreePaths(top, raw)
+    const paths = [...new Set(records.map((record) => record.path).filter((path) => !unchanged.has(path)))]
     if (paths.length === 0) return ''
-    const git = this.gitFor(top)
-    if (paths.reduce((total, path) => total + path.length + 12, 0) > NUMSTAT_PATHS_MAX_CHARS) return git.diff([...NO_DIFF_PROGRAMS, '--numstat'])
-    return git.diff([...NO_DIFF_PROGRAMS, '--numstat', '--', ...paths.map((path) => `:(literal)${path}`)])
+    if (paths.reduce((total, path) => total + path.length + 12, 0) > NUMSTAT_PATHS_MAX_CHARS) return whole()
+    return this.gitFor(top).diff([...NO_DIFF_PROGRAMS, '--numstat', '--', ...paths.map((path) => `:(literal)${path}`)])
   }
 
   /**
