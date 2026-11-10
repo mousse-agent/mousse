@@ -207,6 +207,8 @@ const IN_PROGRESS_KIND: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], GitInPr
   'rebase-apply': 'rebase'
 }
 const IN_PROGRESS_ORDER: readonly GitInProgress[] = ['rebase', 'merge', 'cherry-pick', 'revert']
+/** Characters of changed paths a numstat names one by one; past it, it diffs the whole tree (Windows caps a command line at 32K). */
+const NUMSTAT_PATHS_MAX_CHARS = 12_000
 
 /** One status line as Git reports it: a code for the index side and one for the working tree side. */
 interface RawEntry {
@@ -704,27 +706,28 @@ export class GitService {
     }
 
     const git = this.gitFor(cwd)
-    const entries = await this.statusEntries(cwd)
-    const branch = await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((value) => value.trim() || null).catch(() => null)
-    const hasHead = await git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false)
-    const upstream = branch && hasHead ? await this.upstream(git) : null
-    const hasRemote = await git.raw(['remote']).then((value) => Boolean(value.trim())).catch(() => false)
+    // The reads do not depend on each other, so they run together: on Windows each Git process takes tens of
+    // milliseconds to start, and the side card waits for this answer. The count fails, and is not used, without an upstream.
+    const [entries, branch, hasHead, foundUpstream, hasRemote, counts, inProgress] = await Promise.all([
+      this.statusEntries(cwd),
+      git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((value) => value.trim() || null).catch(() => null),
+      git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false),
+      this.upstream(git),
+      git.raw(['remote']).then((value) => Boolean(value.trim())).catch(() => false),
+      git.raw(['rev-list', '--left-right', '--count', '@{upstream}...HEAD']).catch(() => null),
+      this.inProgress(cwd)
+    ])
+    const upstream = branch && hasHead ? foundUpstream : null
     const changes = entries.flatMap(mapStatus)
 
     let ahead = 0
     let behind = 0
-    if (upstream) {
-      try {
-        const summary = await git.raw(['rev-list', '--left-right', '--count', '@{upstream}...HEAD'])
-        const [behindStr, aheadStr] = summary.trim().split(/\s+/)
-        behind = Number(behindStr) || 0
-        ahead = Number(aheadStr) || 0
-      } catch {
-        /* no upstream */
-      }
+    if (upstream && counts !== null) {
+      const [behindStr, aheadStr] = counts.trim().split(/\s+/)
+      behind = Number(behindStr) || 0
+      ahead = Number(aheadStr) || 0
     }
 
-    const inProgress = await this.inProgress(cwd)
     return { isRepo: true, branch, upstream, tracking: !hasHead ? 'unborn' : !branch ? 'detached' : upstream ? 'tracked' : 'none', ahead, behind, changes, inProgress, hasRemote }
   }
 
@@ -765,29 +768,27 @@ export class GitService {
   async getLog(cwd: string, limit = 30): Promise<GitCommit[]> {
     if (!await this.isRepo(cwd)) return []
     const git = this.gitFor(cwd)
-    const log = await git.log({ maxCount: limit })
-
-    // Commits reachable from HEAD but not the upstream are local/un-pushed.
-    const unpushed = new Set<string>()
-    let hasUpstream = false
-    try {
-      if (await this.upstream(git)) {
-        const raw = await git.raw(['rev-list', '@{upstream}..HEAD'])
-        hasUpstream = true
-        for (const line of raw.split('\n')) {
-          const hash = line.trim()
-          if (hash) unpushed.add(hash)
-        }
-      }
-    } catch {
-      /* no upstream / remote — treat commits as local */
+    // Commits reachable from HEAD but not the upstream are local/un-pushed; null without an upstream (or a remote),
+    // when every commit counts as local.
+    const readUnpushed = async (): Promise<Set<string> | null> => {
+      if (!await this.upstream(git)) return null
+      const raw = await git.raw(['rev-list', '@{upstream}..HEAD'])
+      return new Set(raw.split('\n').map((line) => line.trim()).filter(Boolean))
     }
-
     // Commits no remote-tracking branch contains, for example on a branch made from a pushed one.
-    const hasRemotes = await git.raw(['for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes']).then((value) => Boolean(value.trim())).catch(() => false)
-    const localOnly = hasRemotes
-      ? await git.raw(['rev-list', `--max-count=${limit}`, 'HEAD', '--not', '--remotes']).then((value) => new Set(value.split('\n').map((line) => line.trim()).filter(Boolean))).catch(() => null)
-      : null
+    const readLocalOnly = async (): Promise<Set<string> | null> => {
+      const hasRemotes = await git.raw(['for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes']).then((value) => Boolean(value.trim())).catch(() => false)
+      if (!hasRemotes) return null
+      return git.raw(['rev-list', `--max-count=${limit}`, 'HEAD', '--not', '--remotes']).then((value) => new Set(value.split('\n').map((line) => line.trim()).filter(Boolean))).catch(() => null)
+    }
+    // Independent reads, run together so the answer waits for the slowest rather than for all of them in turn.
+    const [log, unpushedOrNull, localOnly] = await Promise.all([
+      git.log({ maxCount: limit }),
+      readUnpushed().catch(() => null),
+      readLocalOnly()
+    ])
+    const hasUpstream = unpushedOrNull !== null
+    const unpushed = unpushedOrNull ?? new Set<string>()
 
     return log.all.map((entry) => ({
       hash: entry.hash,
@@ -834,7 +835,7 @@ export class GitService {
     }
 
     const [unstaged, staged] = await Promise.all([
-      git.diff([...NO_DIFF_PROGRAMS, '--numstat']).catch(() => ''),
+      this.unstagedNumstat(cwd).catch(() => ''),
       git.diff([...NO_DIFF_PROGRAMS, '--cached', '--numstat']).catch(() => '')
     ])
 
@@ -845,6 +846,21 @@ export class GitService {
       deletions: unstagedStats.deletions + stagedStats.deletions,
       filesChanged: unstagedStats.filesChanged + stagedStats.filesChanged
     }
+  }
+
+  /**
+   * `git diff --numstat` of the working tree against the index, over only the paths the status finds changed. Mousse
+   * never refreshes the index, so a whole-tree diff compares the content of every file whose times changed, on every
+   * read; the status already sorted those out (and remembers them). A long list falls back to the whole tree.
+   */
+  private async unstagedNumstat(cwd: string): Promise<string> {
+    const top = await this.toplevel(cwd)
+    const entries = rawEntries(await readWorkingTreeStatus(top))
+    const paths = [...new Set(entries.filter((entry) => entry.workdir !== '' && !isUntracked(entry) && !isIgnored(entry)).map((entry) => entry.path))]
+    if (paths.length === 0) return ''
+    const git = this.gitFor(top)
+    if (paths.reduce((total, path) => total + path.length + 12, 0) > NUMSTAT_PATHS_MAX_CHARS) return git.diff([...NO_DIFF_PROGRAMS, '--numstat'])
+    return git.diff([...NO_DIFF_PROGRAMS, '--numstat', '--', ...paths.map((path) => `:(literal)${path}`)])
   }
 
   /**

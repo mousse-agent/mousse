@@ -45,9 +45,9 @@ export interface GitStatusEntry {
   commits: GitCommit[]
   branches: GitBranchInfo | null
   diffStats: GitDiffStats | null
-  /** The first fetch for this folder is running. Later refreshes keep showing the data they have. */
+  /** The first status read for this folder is running. Later refreshes keep showing the data they have. */
   loading: boolean
-  /** The first fetch for this folder has finished, successfully or not. */
+  /** The first status read for this folder has answered, successfully or not; the commits, branches and diff counts may still be on their way. */
   loaded: boolean
   error: string | null
   fetchedAt: number
@@ -98,23 +98,35 @@ export function keepIfEqual<T>(previous: T, next: T): T {
   return JSON.stringify(previous) === JSON.stringify(next) ? previous : next
 }
 
+type GitDetail = 'commits' | 'branches' | 'diffStats'
+
+/**
+ * Reads the folder's status, commits, branches and diff counts together, and shows each as it arrives: the status
+ * (branch, changed files, ahead and behind) first, so the section never waits for the slower reads to show it. The
+ * other three land once the status says the folder is a repository; until then the previous fetch's values stay.
+ */
 async function fetchInto(key: string, scope: GitScope): Promise<void> {
   const git = window.mousse.git
-  const [status, log, branches, diffStats] = await Promise.allSettled([
-    git.status(scope),
-    git.log(GIT_LOG_LIMIT, scope),
-    git.branches(scope),
-    git.diffStats(scope)
-  ])
-  const previous = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
+  const details: Array<[GitDetail, Promise<GitStatusEntry[GitDetail]>]> = [
+    ['commits', git.log(GIT_LOG_LIMIT, scope)],
+    ['branches', git.branches(scope)],
+    ['diffStats', git.diffStats(scope)]
+  ]
+  // The status decides what becomes of the others; their failures are only theirs.
+  for (const [, read] of details) read.catch(() => undefined)
 
-  if (status.status === 'rejected') {
-    patchEntry(key, { loaded: true, error: errorText(status.reason), fetchedAt: Date.now() })
+  let status: GitStatusSnapshot
+  try {
+    status = await git.status(scope)
+  } catch (error) {
+    patchEntry(key, { loaded: true, error: errorText(error), fetchedAt: Date.now() })
+    await Promise.allSettled(details.map(([, read]) => read))
     return
   }
-  if (!status.value.isRepo) {
+  const previous = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
+  if (!status.isRepo) {
     patchEntry(key, {
-      status: keepIfEqual(previous.status, status.value),
+      status: keepIfEqual(previous.status, status),
       commits: previous.commits.length ? [] : previous.commits,
       branches: null,
       diffStats: null,
@@ -122,17 +134,15 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
       error: null,
       fetchedAt: Date.now()
     })
+    await Promise.allSettled(details.map(([, read]) => read))
     return
   }
-  patchEntry(key, {
-    status: keepIfEqual(previous.status, status.value),
-    commits: log.status === 'fulfilled' ? keepIfEqual(previous.commits, log.value) : previous.commits,
-    branches: branches.status === 'fulfilled' ? keepIfEqual(previous.branches, branches.value) : previous.branches,
-    diffStats: diffStats.status === 'fulfilled' ? keepIfEqual(previous.diffStats, diffStats.value) : previous.diffStats,
-    loaded: true,
-    error: null,
-    fetchedAt: Date.now()
-  })
+  patchEntry(key, { status: keepIfEqual(previous.status, status), loading: false, loaded: true, error: null, fetchedAt: Date.now() })
+  // Each one as it arrives; a failed read keeps what the folder showed before.
+  await Promise.all(details.map(([field, read]) => read.then((value) => {
+    const current = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
+    patchEntry(key, { [field]: keepIfEqual(current[field], value) } as Partial<GitStatusEntry>)
+  }, () => undefined)))
 }
 
 /**

@@ -1,7 +1,8 @@
 import { execFile, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { lstatSync, readFileSync, readlinkSync, type BigIntStats } from 'node:fs'
+import { lstat } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
 import { GitPolicyError } from './gitPolicy'
 import { READ_ONLY_GIT_ENV } from './readOnlyGit'
@@ -23,6 +24,8 @@ export interface StatusEntry {
 const MAX_OUTPUT = 256 * 1024 * 1024
 /** Files hashed per `hash-object` run, well inside every platform's command-line limit. */
 const HASH_BATCH = 200
+/** `hash-object` runs at once: enough to use a few cores, few enough not to flood the machine with processes. */
+const HASH_PARALLEL = 4
 
 /** The environment of every plumbing read: no optional lock (the index is never refreshed and written back), no lazy fetch. */
 function plumbingEnv(): NodeJS.ProcessEnv {
@@ -101,9 +104,47 @@ const REGULAR = new Set(['100644', '100755'])
 const LINK = '120000'
 
 /** A Git read the status needs: `optional` ones yield '' instead of failing the whole read. */
-interface Read { args: readonly string[]; optional?: boolean }
+interface GitRead { args: readonly string[]; optional?: boolean }
+/** The stat data of files (paths relative to the folder), answered one line per path: its {@link fileSignature}, or '' when it cannot be read. */
+interface StatRead { stat: readonly string[] }
+type Read = GitRead | StatRead
 /** The reads of one step, run together; the step gets their output in the same order. */
 type Step = Read[]
+
+/** What a regular file's stat data says about its content: size, modification and change times in nanoseconds, and inode. '' for anything else. */
+function fileSignature(stats: BigIntStats): string {
+  return stats.isFile() ? `${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}:${stats.ino}` : ''
+}
+
+/**
+ * Files whose content was hashed and found to be what the index holds, with the stat data they had then. Mousse never
+ * refreshes the index, so a file whose times changed but whose content did not stays "modified" to `diff-files` for
+ * good, and without this every status read hashed it again: thousands of files after a checkout by another tool. A
+ * file is taken as unchanged without hashing only while its stat data is exactly what it was, against the same index
+ * entry, which is how Git's own index decides it.
+ */
+const verifiedUnchanged = new Map<string, { sha: string; signature: string }>()
+/** Remembered files at most; past it the memory starts over. */
+const VERIFIED_MAX = 200_000
+/**
+ * A file changed within this long of being hashed is not remembered: a write in the same timestamp tick as the hash
+ * would leave its stat data as it was (Git calls this "racily clean").
+ */
+const RACY_MS = 2_000
+
+function rememberUnchanged(path: string, sha: string, signature: string, hashedAt: number): void {
+  if (!signature) return
+  const [, mtimeNs, ctimeNs] = signature.split(':')
+  const changedAt = Number(BigInt(mtimeNs!) > BigInt(ctimeNs!) ? BigInt(mtimeNs!) / 1_000_000n : BigInt(ctimeNs!) / 1_000_000n)
+  if (changedAt > hashedAt - RACY_MS) return
+  if (verifiedUnchanged.size >= VERIFIED_MAX) verifiedUnchanged.clear()
+  verifiedUnchanged.set(path, { sha, signature })
+}
+
+/** For tests: forget which files were found unchanged. */
+export function clearVerifiedUnchanged(): void {
+  verifiedUnchanged.clear()
+}
 
 /** A blob's object name, as Git computes it: for a link's target, which `hash-object <path>` would follow instead. */
 function blobName(format: string, content: Buffer): string {
@@ -138,13 +179,32 @@ function* unchangedSteps(cwd: string, records: readonly RawRecord[], objectForma
     if (content && blobName(objectFormat, content) === record.srcSha) unchanged.add(record.path)
   }
   const files = unsure.filter((item) => REGULAR.has(item.srcMode))
-  for (let start = 0; start < files.length; start += HASH_BATCH) {
-    const batch = files.slice(start, start + HASH_BATCH)
-    // A file that went away meanwhile fails the batch; its files then stay reported as changed.
-    const [output] = yield [{ args: ['hash-object', '--', ...batch.map((record) => record.path)], optional: true }]
-    const hashes = output!.split(/\r?\n/)
-    batch.forEach((record, index) => {
-      if (hashes[index]?.trim() === record.srcSha) unchanged.add(record.path)
+  if (files.length === 0) return unchanged
+  // Taken before the stat data is read, so a write after the read is never remembered as the state that was hashed.
+  const hashedAt = Date.now()
+  const [statOutput] = yield [{ stat: files.map((record) => record.path) }]
+  const signatures = statOutput!.split('\n')
+  const toHash: Array<{ record: RawRecord; path: string; signature: string }> = []
+  files.forEach((record, index) => {
+    const path = resolve(cwd, record.path)
+    const signature = signatures[index] ?? ''
+    const known = verifiedUnchanged.get(path)
+    if (signature && known?.sha === record.srcSha && known.signature === signature) unchanged.add(record.path)
+    else toHash.push({ record, path, signature })
+  })
+  const batches: Array<typeof toHash> = []
+  for (let start = 0; start < toHash.length; start += HASH_BATCH) batches.push(toHash.slice(start, start + HASH_BATCH))
+  for (let start = 0; start < batches.length; start += HASH_PARALLEL) {
+    const group = batches.slice(start, start + HASH_PARALLEL)
+    // A file that went away meanwhile fails its batch; that batch's files then stay reported as changed.
+    const outputs = yield group.map((batch) => ({ args: ['hash-object', '--', ...batch.map(({ record }) => record.path)], optional: true }))
+    group.forEach((batch, batchIndex) => {
+      const hashes = outputs[batchIndex]!.split(/\r?\n/)
+      batch.forEach(({ record, path, signature }, index) => {
+        if (hashes[index]?.trim() !== record.srcSha) return
+        unchanged.add(record.path)
+        rememberUnchanged(path, record.srcSha, signature, hashedAt)
+      })
     })
   }
   return unchanged
@@ -234,12 +294,23 @@ export async function readWorkingTreeStatus(top: string): Promise<StatusEntry[]>
 async function drive<T>(cwd: string, steps: Generator<Step, T, string[]>): Promise<T> {
   let next = steps.next([])
   while (!next.done) {
-    next = steps.next(await Promise.all(next.value.map((read) => plumbing(cwd, read.args).catch((error: unknown) => {
-      if (read.optional && !(error instanceof GitPolicyError)) return ''
-      throw error
-    }))))
+    next = steps.next(await Promise.all(next.value.map((read) => 'stat' in read
+      ? Promise.all(read.stat.map((path) => lstat(join(cwd, path), { bigint: true }).then(fileSignature, () => ''))).then((lines) => lines.join('\n'))
+      : plumbing(cwd, read.args).catch((error: unknown) => {
+        if (read.optional && !(error instanceof GitPolicyError)) return ''
+        throw error
+      }))))
   }
   return next.value
+}
+
+/** {@link fileSignature} of a path, blocking; '' when it cannot be read. */
+function fileSignatureSync(path: string): string {
+  try {
+    return fileSignature(lstatSync(path, { bigint: true }))
+  } catch {
+    return ''
+  }
 }
 
 /** {@link readWorkingTreeStatus}, blocking. */
@@ -248,6 +319,7 @@ export function readWorkingTreeStatusSync(top: string): StatusEntry[] {
   let next = steps.next([])
   while (!next.done) {
     next = steps.next(next.value.map((read) => {
+      if ('stat' in read) return read.stat.map((path) => fileSignatureSync(join(top, path))).join('\n')
       try {
         return plumbingSync(top, read.args)
       } catch (error) {
