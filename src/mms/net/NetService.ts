@@ -453,8 +453,9 @@ export class NetService {
             typeof cfg.features.netSpaces !== 'boolean' ||
             (cfg.features.netBridgeThreads !== undefined &&
               typeof cfg.features.netBridgeThreads !== 'boolean') ||
+            (cfg.features.netTeams !== undefined && typeof cfg.features.netTeams !== 'boolean') ||
             Object.keys(cfg.features).some(
-              (key) => !['netBridge', 'netSpaces', 'netBridgeThreads'].includes(key)
+              (key) => !['netBridge', 'netSpaces', 'netBridgeThreads', 'netTeams'].includes(key)
             ))
         ) {
           throw new NetError('storage_corrupt')
@@ -489,6 +490,9 @@ export class NetService {
           identity,
           executions,
           clock: this.clock,
+          // Teammates: the flag, the default directory (it knows no team) and no thread lookup yet, so every
+          // call from another person is still refused, as before the flag.
+          teams: { enabled: () => this.featureEnabled('netTeams') },
           authorizeMethod: (method, peer) => {
             this.assertEnabled()
             if (method.family === 'bridge' || method.family === 'routed')
@@ -743,14 +747,18 @@ export class NetService {
     const { db } = this.runtime()
     // An earlier version rejects any other key in `features` as corrupt storage and then fails to load Net
     // at all. The routing flag is on by default, so it is written only while it is off: a profile that
-    // never turned it off can go back to an earlier build.
+    // never turned it off can go back to an earlier build. The teams flag is off by default, so it is
+    // written only while it is on.
     const { features, ...rest } = this.config
     const stored: NetConfiguration = features
       ? {
           ...rest,
-          features: features.netBridgeThreads
-            ? ({ netBridge: features.netBridge, netSpaces: features.netSpaces } as NetFeatureFlags)
-            : features
+          features: {
+            netBridge: features.netBridge,
+            netSpaces: features.netSpaces,
+            ...(features.netBridgeThreads ? {} : { netBridgeThreads: features.netBridgeThreads }),
+            ...(features.netTeams === true ? { netTeams: true } : {})
+          } as NetFeatureFlags
         }
       : rest
     const bytes = canonicalJson(stored)
@@ -1101,7 +1109,8 @@ export class NetService {
     this.config.features = {
       netBridge: true,
       netSpaces: true,
-      netBridgeThreads: this.config.features?.netBridgeThreads !== false
+      netBridgeThreads: this.config.features?.netBridgeThreads !== false,
+      ...(this.config.features?.netTeams === true ? { netTeams: true } : {})
     }
     if (input.listen)
       this.config.direct = {
@@ -2655,7 +2664,8 @@ export class NetService {
     this.config.features = {
       netBridge: true,
       netSpaces: true,
-      netBridgeThreads: this.config.features?.netBridgeThreads !== false
+      netBridgeThreads: this.config.features?.netBridgeThreads !== false,
+      ...(this.config.features?.netTeams === true ? { netTeams: true } : {})
     }
     this.config.preparedForJoin = false
     this.saveConfig()
@@ -2856,7 +2866,9 @@ export class NetService {
       !this.stopped &&
       !this.disabled &&
       this.config.enabled &&
-      this.config.features?.[feature] === true
+      this.config.features?.[feature] === true &&
+      // Teams reach threads through Bridge's routed path, so the flag counts only while Bridge is on.
+      (feature !== 'netTeams' || this.config.features.netBridge === true)
     )
   }
   assertFeature(feature: keyof NetFeatureFlags): void {

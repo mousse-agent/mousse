@@ -98,3 +98,62 @@ it('has both switches for other computers on by default, and keeps a choice to t
     rmSync(root, { recursive: true, force: true })
   }
 }, 60_000)
+
+it('stores the teams flag only while it is on, reads it back, and still refuses a key it does not know', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'net-teams-flag-'))),
+    home = join(root, 'home')
+  const open = () =>
+    MousseMainService.create({ homeDir: home, repoRoot: root, headless: true, requireOwnership: false })
+  let main = await open()
+  const stored = (): { features: Record<string, unknown> } =>
+    JSON.parse(
+      main.net.runtime().db.database.prepare('SELECT value FROM net_service_config').get()!.value as string
+    )
+  const restart = async () => {
+    await main.stop()
+    main = await open()
+    await main.net.start()
+    // A profile whose Net configuration did not load refuses the unlock (synchronously).
+    await Promise.resolve()
+      .then(() => main.net.request('net.unlock', { passphrase: 'teams-flag-passphrase' }))
+      .catch(() => {})
+  }
+  try {
+    await main.net.request('net.init', { listen: true })
+    await main.net.request('net.protect', { passphrase: 'teams-flag-passphrase' })
+    // Off, the default: nothing is stored for it, so an earlier version reads the configuration.
+    expect(stored().features).toEqual({ netBridge: true, netSpaces: true })
+    expect(main.net.featureEnabled('netTeams')).toBe(false)
+    // On: it is stored and read back after a restart.
+    const features = (main.net as unknown as { config: { features: Record<string, boolean> } }).config.features
+    features.netTeams = true
+    await main.net.request('bridge.workOnThreads', { enabled: true })
+    expect(stored().features).toEqual({ netBridge: true, netSpaces: true, netTeams: true })
+    await restart()
+    expect(main.net.status().features).toMatchObject({ netTeams: true })
+    expect(main.net.featureEnabled('netTeams')).toBe(true)
+    // It counts only while Bridge is on.
+    const live = (main.net as unknown as { config: { features: Record<string, boolean> } }).config.features
+    live.netBridge = false
+    expect(main.net.featureEnabled('netTeams')).toBe(false)
+    live.netBridge = true
+    // Off again: the key goes, and an earlier version reads the configuration once more.
+    live.netTeams = false
+    await main.net.request('bridge.workOnThreads', { enabled: true })
+    expect(stored().features).toEqual({ netBridge: true, netSpaces: true })
+    expect(olderVersionAccepts(stored())).toBe(true)
+    // A key this version does not know is still corrupt storage, as it always was.
+    const rt = main.net.runtime()
+    const config = stored()
+    config.features.netSomethingNew = true
+    rt.db.transaction(() => {
+      rt.db.charge(1)
+      rt.db.database.prepare('UPDATE net_service_config SET value=?').run(JSON.stringify(config))
+    })
+    await restart()
+    expect(main.net.status()).toMatchObject({ enabled: false, error: 'storage_corrupt' })
+  } finally {
+    await main.stop()
+    rmSync(root, { recursive: true, force: true })
+  }
+}, 60_000)
