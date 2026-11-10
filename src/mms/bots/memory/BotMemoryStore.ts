@@ -916,13 +916,27 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, messageId, botId)
   // What the forgotten message asked for keeps no copy of its words (docs/plans/bot-always-free.md): a reminder it set
   // is cancelled and its text removed, and work it started keeps neither its brief nor the notes passed to it.
-  if (has('bot_reminders'))
+  const redactJournal = (sourceKey: string) => {
+    if (has('bot_journal')) tx.statement("UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = COALESCE(redacted_at, ?) WHERE bot_id = ? AND source_key = ?").run(text, new Date().toISOString(), botId, sourceKey)
+  }
+  if (has('bot_reminders')) {
     tx.statement("UPDATE bot_reminders SET text = ?, work_title = NULL, work_brief = NULL, status = CASE WHEN status = 'waiting' THEN 'cancelled' ELSE status END WHERE bot_id = ? AND reply_to = ?").run(text, botId, messageId)
+    // A reminder already said keeps no copy in its message either.
+    const said = tx.statement('SELECT message_id FROM bot_reminders WHERE bot_id = ? AND reply_to = ? AND message_id IS NOT NULL').all(botId, messageId) as Array<{ message_id: string }>
+    for (const row of said) {
+      tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, row.message_id, botId)
+      redactJournal(`bm:${row.message_id}`)
+    }
+  }
   if (has('bot_activations')) {
-    const work = tx.statement("SELECT id FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'work' AND json_extract(trigger_json, '$.replyTo') = ?").all(botId, messageId) as Array<{ id: string }>
+    const work = tx.statement("SELECT id, status FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'work' AND json_extract(trigger_json, '$.replyTo') = ?").all(botId, messageId) as Array<{ id: string; status: string }>
     for (const row of work) {
       tx.statement("UPDATE bot_activations SET trigger_json = json_set(trigger_json, '$.input', ?, '$.title', ?) WHERE id = ?").run(text, text, row.id)
+      // Work that has not started never runs on a removed request.
+      if (row.status === 'queued') tx.statement("UPDATE bot_activations SET status = 'cancelled', end_reason = 'forgotten', ended_at = ? WHERE id = ? AND status = 'queued'").run(new Date().toISOString(), row.id)
       if (has('bot_work_notes')) tx.statement('UPDATE bot_work_notes SET text = ? WHERE activation_id = ?').run(text, row.id)
+      if (has('bot_dispatches')) tx.statement("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.text', ?) WHERE activation_id = ?").run(text, row.id)
+      redactJournal(`act:${row.id}:start`)
     }
   }
 }

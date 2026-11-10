@@ -19,6 +19,8 @@ const NO_FILES: AttachedFile[] = []
 const NO_VOICE: VoiceMessage[] = []
 const NO_SKILLS: never[] = []
 const NO_WORK: BotWorkItem[] = []
+/** The chat's turn waits for the internet (its work, if any, says so on its own line). */
+const OFFLINE_TEXT = 'Waiting for internet'
 const ignore = () => {}
 
 /** A message's time: the time today, "Yesterday", or the date. */
@@ -174,7 +176,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const chatChip = useBotsStore((s) => (bot.chat ? s.activity[bot.chat.activationId] : undefined)) ?? (legacy || live?.activationId === bot.chat?.activationId ? live?.chip : undefined)
   const work = bot.work ?? NO_WORK
   // The chat's turn waits for the internet: no spinner, and the header says so (work that waits says so on its line).
-  const offline = working && bot.waiting === 'internet'
+  const offline = bot.chat ? Boolean(bot.chat.offline) : working && bot.waiting === 'internet'
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
@@ -223,7 +225,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       <header className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={() => useBotsStore.setState({ aboutOpen: !aboutOpen })}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={40} view="head" />
-          <div><h1>{bot.name}</h1><span>{offline ? bot.stateText : bot.description}</span></div>
+          <div><h1>{bot.name}</h1><span>{offline ? OFFLINE_TEXT : bot.description}</span></div>
         </button>
         <BotMenu bot={bot} />
       </header>
@@ -243,7 +245,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         })}
         {pending.map((message) => <OwnerMessage key={message.id} message={message} pending botName={bot.name} quote={Boolean(message.replyTo)} />)}
         {offline
-          ? <div className="chat-run-status bot-offline-status" role="status">{bot.stateText}</div>
+          ? <div className="chat-run-status bot-offline-status" role="status">{OFFLINE_TEXT}</div>
           : working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{chatChip && <BotChipView chip={{ ...chatChip, live: true }} />}</div>}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}

@@ -140,7 +140,7 @@ describe('notes to work', () => {
     const first = await chat('A job', 'm1')
     const { workId } = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Job', brief: 'Do it.', key: 'k' })
     f.store.moveActivation(workId, ['running'], 'paused', { endReason: 'unknown_calls' })
-    expect(f.bots.tools.work.note(botId, workId, 'Also this.')).toBe('ended')
+    expect(f.bots.tools.work.note(botId, workId, 'Also this.')).toBe('held')
   })
 
   it('waiting work gets the note with its request; ended work says so', async () => {
@@ -217,6 +217,22 @@ describe('reminders', () => {
     expect(f.store.reminder(added.reminderId)!.text).not.toContain('Ames')
   })
 
+  it('forgetting the message that asked for work cancels it if it has not started, and scrubs its brief everywhere', async () => {
+    const turn = await chat('Two jobs about Dr Ames', 'm1')
+    const a = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Ames records', brief: 'Collect the Dr Ames letters.', key: 'a' })
+    const b = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Ames summary', brief: 'Summarise the Dr Ames letters.', key: 'b' })
+    f.bots.tools.work.note(botId, a.workId, 'Include the biopsy one from Ames.')
+    await finish(f, turn.payload, 'completed', { text: 'On both.' })
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+    f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${turn.message.id}`, who: 'owner', text: turn.message.text }))
+    const row = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${turn.message.id}`)!
+    memory.forget(botId, { refs: [`j${row.seq as number}`], by: 'owner_ui' })
+    expect(f.store.activation(b.workId)!.status).toBe('cancelled')
+    for (const id of [a.workId, b.workId]) expect(JSON.stringify(f.store.activation(id)!.trigger)).not.toContain('Ames')
+    expect(JSON.stringify(f.store.dispatch(a.workId, 1)!.prompt)).not.toContain('Ames')
+    expect(JSON.stringify(f.store.all('SELECT text FROM bot_work_notes'))).not.toContain('Ames')
+  })
+
   it('cancelled and deleted bots say nothing', async () => {
     const turn = await chat('Remind me', 'm1')
     const added = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'One.' })
@@ -250,6 +266,8 @@ describe('reminders', () => {
     expect(reminderTime(undefined, '2026-11-14', now)).toMatch(/local date and time/)
     expect(reminderTime(undefined, '2026-13-01T09:00', now)).toMatch(/local date and time/)
     expect(reminderTime(undefined, '2026-11-14T09:00:00Z', now)).toEqual(new Date(Date.UTC(2026, 10, 14, 9)))
+    expect(reminderTime(undefined, '2026-02-31T09:00Z', now)).toMatch(/local date and time/)
+    expect(reminderTime(undefined, '2026-11-14T09:00+05:30', now)).toEqual(new Date(Date.UTC(2026, 10, 14, 3, 30)))
     expect(reminderLabel(new Date(2026, 10, 10, 18, 42), now)).toBe('18:42')
     expect(reminderLabel(new Date(2026, 10, 14, 9, 0), now)).toBe('Sat 14 Nov · 09:00')
   })

@@ -251,7 +251,7 @@ export class BotChatProjection {
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),
-      ...(chatTurn ? { chat: { activationId: chatTurn.id } } : {}),
+      ...(chatTurn ? { chat: { activationId: chatTurn.id, ...(chatTurn.offline ? { offline: true as const } : {}) } } : {}),
       ...(work.length ? { work } : {})
     }
   }

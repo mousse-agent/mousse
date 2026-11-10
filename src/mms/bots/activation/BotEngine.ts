@@ -2622,7 +2622,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (openWalls.length) {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
-        } else if (!reload && !noted) {
+        } else if (noted) {
+          // What this turn found is its result for now: a late final message replaces it, never an older turn's text.
+          this.store.moveActivation(row.id, ['running'], 'running', { result: text ?? '' })
+        } else if (!reload) {
           this.store.moveActivation(row.id, ['running'], 'done', { endReason: null, result: text ?? '' })
           // A successful dispatch resets the automatic-restart allowance, the failure streak (refused
           // asks included) and the bot's stuck error. Work is not a schedule: it never moves the streak.
@@ -2638,7 +2641,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // the same thread, and its report follows with the change.
       this.postReply(next, main, text, options.expectText === true)
       if (noted && next.status === 'running') {
-        await this.continueWith(row.id, ['running'], {})
+        await this.continueWith(row.id, ['running'], { afterReport: true })
         return
       }
       if (reload && next.status === 'running') {
@@ -2705,7 +2708,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
       !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
     const body = (text ?? '').trim()
-    const report = row.lane === 'run' && row.status === 'done'
+    // Only the last turn of a run reports; an earlier one (work that went on with the owner's notes) is an update.
+    const report = row.lane === 'run' && row.status === 'done' && (this.store.lastMainDispatch(row.id)?.n ?? dispatch.n) === dispatch.n
     if (!body && !chips.length && !asks.length && !report) return
     const kind = row.lane === 'chat' ? 'text' : report ? 'run_report' : 'notice'
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
@@ -2788,7 +2792,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     const definition = this.host.definitions.revision(row.botId, row.revision)
@@ -2883,7 +2887,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -2901,13 +2905,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
         : input.restart ? 'Mousse restarted while you were working.'
           : input.network ? 'The internet connection dropped while you were working; it is back now.'
-            : input.notes ? 'The owner added something while you worked; what you had so far was already sent to them.' : 'The owner asked you to continue.'
+            : input.afterReport ? 'The owner added something while you worked; what you had so far was already sent to them.'
+              : input.notes ? 'The owner added something while you worked.' : 'The owner asked you to continue.'
     const calls = this.store.unknownCalls(row.id)
     const interrupted = calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${call.role} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : ''
     // The owner's notes to a run: they change the work, so the run reports again on all of it.
-    if (input.notes) return `[Mousse] ${lead}${interrupted}\n\n${input.notes}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}Update your work for it. Your last message is your updated report: lead with what changed, in plain words.`
+    if (input.notes) return `[Mousse] ${lead}${interrupted}\n\n${input.notes}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}${input.afterReport ? 'Update your work for it. Your last message is your updated report: lead with what changed, in plain words.' : `Take it into account as you continue. ${BOT_RUN_REPORT_LINE}`}`
     // The owner's message is the next input.
     if (input.ownerText !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${input.ownerText}`
     // The walled dispatch never ran (a time wall before it started): its own prompt is sent now.
@@ -3993,14 +3998,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `work_note`: something the owner added, for work that runs or waits. Waiting work gets it with its request;
    * running work gets it when its current turn ends, before it reports (`advance`). Ended work can't take it.
    */
-  noteWork(botId: string, workId: string, note: string): 'noted' | 'ended' | 'not_found' {
+  noteWork(botId: string, workId: string, note: string): 'noted' | 'held' | 'ended' | 'not_found' {
     const text = note.trim().slice(0, MAX_WORK_NOTE_CHARS)
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
     return this.store.db.transaction(() => {
       const current = this.store.activation(workId)
+      if (!current || ENDED_ACTIVATION_STATUSES.has(current.status)) return 'ended' as const
       // Only work that will take it: waiting, or running. Paused or blocked work may never continue.
-      if (!current || !['queued', 'running', 'waiting_grant'].includes(current.status)) return 'ended' as const
+      if (!['queued', 'running', 'waiting_grant'].includes(current.status)) return 'held' as const
       this.store.addWorkNote(workId, botId, text)
       return 'noted' as const
     })
@@ -4065,6 +4071,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Never synchronous: the pass is held below before any of it runs, so its end always lets go of it.
       await Promise.resolve()
       try {
+        // Reminders cancelled, forgotten or purged since they failed are no longer tried.
+        for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
         for (const reminder of this.store.dueReminders(now.toISOString())) {
           if ((this.reminderRetryAt.get(reminder.id) ?? 0) > now.getTime()) continue
           try {

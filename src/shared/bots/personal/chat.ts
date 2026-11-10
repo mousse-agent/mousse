@@ -86,8 +86,8 @@ export interface BotSummary {
   lastOutcome?: 'ok' | 'failed' | 'stopped'
   unread: number
   createdAt: string
-  /** The chat turn that runs now (its status line and Stop); absent while the chat is free. */
-  chat?: { activationId: string }
+  /** The chat turn that runs now (its status line and Stop); absent while the chat is free. `offline`: it waits for the internet. */
+  chat?: { activationId: string; offline?: true }
   /** Work that runs or waits beside the chat (docs/plans/bot-always-free.md), oldest first. */
   work?: BotWorkItem[]
 }

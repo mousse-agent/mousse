@@ -406,6 +406,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         call.deps.activity?.onAppResult(call.activity, 'work_note', { result })
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
         if (result === 'ended') return json({ result, note: 'That work already finished, so it never saw this. Start new work for it if it still matters.' })
+        if (result === 'held') return json({ result, note: 'That work is held (it stopped part-way), so it can\'t take notes. Stop it and start new work with this if it still matters.' })
         return json({ result, note: 'It takes this into account before it reports.' })
       }
     }),
@@ -508,8 +509,13 @@ export function reminderTime(inMinutes: unknown, at: unknown, now: Date = new Da
     const same = date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day && date.getHours() === hour && date.getMinutes() === minute
     return same ? date : usage
   }
-  // Anything else must say its own offset ("…Z", "…+05:30"); a date alone has no time to say it at.
-  if (!/T\d{2}:\d{2}.*(Z|[+-]\d{2}:?\d{2})$/.test(text)) return usage
+  // Anything else must say its own offset ("…Z", "…+05:30"); a date alone has no time to say it at. Its fields must be
+  // in range as written: a day the month doesn't have is refused.
+  const zoned = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.exec(text)
+  if (!zoned) return usage
+  const [year, month, day, hour, minute] = zoned.slice(1, 6).map(Number) as [number, number, number, number, number]
+  const days = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  if (month < 1 || month > 12 || day < 1 || day > days || hour > 23 || minute > 59) return usage
   const date = new Date(text)
   return Number.isNaN(date.getTime()) ? usage : date
 }
