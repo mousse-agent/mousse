@@ -11,8 +11,10 @@ import type { ResourcePurgeService } from './ResourcePurgeService'
 /**
  * Deleting a thread for good. A thread is archived first; deleting it moves it and its subagent threads through
  * the trash (which stops and fences them) and the reviewed purge (which removes exactly what its preview lists).
- * The trash is only a step of a delete: a thread left there by a delete that was cut short is finished at the next
- * start, as it was asked, or put back in Archived when what it asked does not allow it.
+ * Only the threads go: their worktrees, branches, uncommitted files and Git refs stay where they are (`keepWork`), until
+ * the person removes them. Only a thread's expiry takes its worktree with it. The trash is only a step of a delete: a
+ * thread left there by a delete that was cut short is finished at the next start, as it was asked, or put back in
+ * Archived when what it asked does not allow it.
  */
 
 export const ARCHIVE_BEFORE_DELETE = 'Archive the thread before deleting it.'
@@ -54,6 +56,9 @@ export interface DeleteOptions {
   /** The thread's expiry passed (`DeleteIntent.expiry`); the daemon's own expiry pass is the only caller. */
   expiry?: boolean
 }
+
+/** A delete keeps the thread's worktrees, branches and Git refs; only its expiry takes them (`Thread.expiresAt`). */
+const keepsWork = (intent: DeleteIntent): boolean => !intent.expiry
 
 interface ThreadMeta { id: string; settledAt?: string; lineage?: Thread['lineage'] }
 
@@ -197,7 +202,7 @@ export class ThreadDeleter {
 
   /** Refuses what this delete may not do; the preview is read again right before the purge. */
   private async check(taskId: string, intent: DeleteIntent): Promise<Awaited<ReturnType<ThreadDeleteDeps['purge']['preview']>>> {
-    const preview = await this.deps.purge.preview(taskId)
+    const preview = await this.deps.purge.preview(taskId, { keepWork: keepsWork(intent) })
     if (preview.blockers.length) throw new DomainRpcError('thread_delete_blocked', `The thread could not be deleted: ${preview.blockers.join('; ')}`, { threadId: taskId })
     if (preview.items.some((item) => item.discardRequired) && !(intent.human && intent.discard) && !intent.expiry)
       throw new DomainRpcError('thread_has_unpublished_work', 'The thread has unpublished work. Delete it from the Mousse app.', { threadId: taskId })
@@ -209,10 +214,10 @@ export class ThreadDeleter {
     const record = this.deps.store.get(taskId)
     if (!record || record.state === 'purged') { this.setIntent(taskId, undefined); return }
     if (record.state === 'purge-started' && record.purge) {
-      await this.deps.purge.purge({ taskId, operationId: record.purge.operationId, ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
+      await this.deps.purge.purge({ taskId, operationId: record.purge.operationId, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
     } else {
       const preview = await this.check(taskId, intent)
-      await this.deps.purge.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: intent.discard, human: intent.human, ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
+      await this.deps.purge.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: intent.discard, human: intent.human, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
     }
     this.setIntent(taskId, undefined)
   }

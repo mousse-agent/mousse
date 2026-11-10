@@ -23,13 +23,14 @@ export interface DeleteDialogCopy {
   confirm: string
 }
 
-const GOES_WITH = 'with their worktrees and unpublished changes. This can’t be undone.'
+/** Only the threads go: worktrees, their branches and uncommitted changes stay. */
+const WORKTREES_STAY = 'Worktrees stay.'
 
 export function deleteDialogCopy(request: DeleteRequest): DeleteDialogCopy {
   if (request.kind === 'one') {
     return {
       title: `Delete “${request.thread.name}”?`,
-      body: `Deletes it and its subagent threads for good, ${GOES_WITH}`,
+      body: `Deletes it and its subagent threads for good. ${WORKTREES_STAY}`,
       confirm: 'Delete'
     }
   }
@@ -37,7 +38,7 @@ export function deleteDialogCopy(request: DeleteRequest): DeleteDialogCopy {
   const threads = count === 1 ? 'thread' : 'threads'
   return {
     title: `Delete ${count} archived ${threads}?`,
-    body: `Deletes ${count === 1 ? 'it and its' : 'them and their'} subagent threads for good, ${GOES_WITH}${request.elsewhere ? ' Threads on other computers stay.' : ''}`,
+    body: `Deletes ${count === 1 ? 'it and its' : 'them and their'} subagent threads for good. ${WORKTREES_STAY}${request.elsewhere ? ' Threads on other computers stay.' : ''}`,
     confirm: count === 1 ? 'Delete' : `Delete ${count}`
   }
 }

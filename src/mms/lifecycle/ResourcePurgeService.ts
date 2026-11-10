@@ -21,7 +21,7 @@ import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
-import { isKeptFilesItem, unverifiedHolds } from '../../shared/resourceLifecycle'
+import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
 import { threadRecordName } from '../data/threadRecords'
@@ -136,6 +136,12 @@ async function registrationOf(commonDir: string, worktree: string): Promise<Work
   }
   return undefined
 }
+
+/**
+ * A purge's input. `keepWork` leaves the thread's worktrees (with their branches and uncommitted files) and its Git refs
+ * where they are (`keptOnDelete`): a delete removes only the thread. It never applies to an expiry.
+ */
+export interface PurgeInput { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean; authorization?: 'expiry'; keepWork?: boolean }
 
 /** External purge ledger survives deletion of every task-owned source. No Git object pruning. */
 export interface RetireTrashedOptions {
@@ -321,8 +327,13 @@ export class ResourcePurgeService {
     await getExternalResourceClaims(this.store, ownedIds, facts).catch(() => undefined)
     return () => getExternalResourceClaimsFromFacts(this.store, ownedIds, facts)
   }
-  async preview(taskId: string): Promise<LifecyclePurgePreview> {
-    return this.withOwnership(taskId, () => this.previewOwned(taskId))
+  /**
+   * `keepWork`: the preview of a delete that leaves the thread's worktrees (with their branches and uncommitted files)
+   * and its Git refs where they are. They are not read, pinned or listed, so nothing about them can block the delete;
+   * only the thread's own data, scratch folders and scheduled rows are items.
+   */
+  async preview(taskId: string, options: { keepWork?: boolean } = {}): Promise<LifecyclePurgePreview> {
+    return this.withOwnership(taskId, () => this.previewOwned(taskId, false, options.keepWork === true))
   }
   private async withOwnership<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
     const token = randomUUID()
@@ -347,7 +358,7 @@ export class ResourcePurgeService {
   async previewReadOnly(taskId: string): Promise<LifecyclePurgePreview> {
     return this.previewOwned(taskId, true)
   }
-  private async previewOwned(taskId: string, readOnly = false): Promise<LifecyclePurgePreview> {
+  private async previewOwned(taskId: string, readOnly = false, keepWork = false): Promise<LifecyclePurgePreview> {
     const record = this.store.require(taskId)
     const reservation = record.cleanupOwner?.token ?? ''
     if (!readOnly && !reservation) throw new Error('Cleanup reservation is missing')
@@ -391,7 +402,8 @@ export class ResourcePurgeService {
     // gives: one written before the repository moved names it by its old id. A branch name is shared within a repository.
     const idNamed = (identity: string): boolean => identity.startsWith('refs/') && !identity.startsWith('refs/heads/')
     const shared = (identity: string, repositoryId: string | undefined, real: string | undefined): boolean => peers.some((peer) => peer.identity === identity && (!repositoryId || !peer.repositoryId || peer.repositoryId === repositoryId || idNamed(identity)) || real !== undefined && claimOverlapsPath(peer, real))
-    for (const resource of inventory.resources.filter((item) => item.kind === 'worktree' && ownedIds.has(item.ownerTaskId))) {
+    // A delete that keeps the work never reads, pins or removes a worktree, nor any Git ref below: they stay as they are.
+    for (const resource of keepWork ? [] : inventory.resources.filter((item) => item.kind === 'worktree' && ownedIds.has(item.ownerTaskId))) {
       // On a drive that is not connected: there, out of reach, and kept; never taken for already deleted.
       const offline = await disconnectedWorktreeFolder(resource.identity)
       if (offline) { preview.retained.push({ identity: resource.identity, reason: driveNotConnectedText(offline) }); continue }
@@ -461,7 +473,7 @@ export class ResourcePurgeService {
     // receipts' refs and the files its restores kept (`refs/mousse/preserved/<operation>-…`) are released like a worktree
     // thread's refs, before its record goes with the task data. Refs only: nothing in the person's folder is deleted or moved.
     const folderRefs: LifecyclePurgeItem[] = []
-    for (const task of tasks) {
+    for (const task of keepWork ? [] : tasks) {
       if (!ownedIds.has(task.taskId)) continue
       let plan: Awaited<ReturnType<typeof projectFolderPurgeRefs>>
       try { plan = await projectFolderPurgeRefs(task) } catch (error) { preview.blockers.push(`Project folder refs of ${task.taskId}: ${(error as Error).message}`); continue }
@@ -472,7 +484,7 @@ export class ResourcePurgeService {
     }
     // A worktree thread's restores keep files in its repository's refs too; they go with the thread's other refs, and
     // while they may be the only copy of a file a purge asks before dropping them (`threadKeptFilesRefs`).
-    for (const task of tasks) {
+    for (const task of keepWork ? [] : tasks) {
       if (!ownedIds.has(task.taskId)) continue
       const repositoryIds = new Set(inventory.resources.filter((resource) => resource.kind === 'worktree' && resource.ownerTaskId === task.taskId && resource.repositoryId).map((resource) => resource.repositoryId!))
       for (const repositoryId of repositoryIds) {
@@ -492,7 +504,7 @@ export class ResourcePurgeService {
     // A thread in a folder without Git keeps them in its hidden snapshot store, which `releaseThreadSnapshots` empties
     // before any item is removed (the purge's `beforeRemoval`). They are listed here so the same rule applies: while they
     // may be the only copy, the person must discard them and automatic cleanup keeps the thread.
-    for (const task of tasks) {
+    for (const task of keepWork ? [] : tasks) {
       if (!ownedIds.has(task.taskId)) continue
       try {
         const kept = await threadStoreKeptFilesAsync(task.location)
@@ -506,6 +518,7 @@ export class ResourcePurgeService {
     for (const resource of inventory.resources) {
       if (!ownedIds.has(resource.ownerTaskId)) continue
       if (resource.kind === 'worktree' || resource.kind === 'agent-session' || resource.kind === 'artifact') continue
+      if (keepWork && resource.kind === 'git-ref') continue
       const real = await canonical(resource.identity)
       if (shared(resource.identity, resource.repositoryId, real)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
       if (held.has(resource.identity)) continue
@@ -588,12 +601,12 @@ export class ResourcePurgeService {
    * trashed thread's own expiry has passed. The thread's branches (`refs/heads/`) are kept, so committed work stays.
    * A protocol call can never pass it (`threads.purge` builds its input itself).
    */
-  async purge(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean; authorization?: 'expiry' }): Promise<TaskLifecycleRecord> {
+  async purge(input: PurgeInput): Promise<TaskLifecycleRecord> {
     if (!input || typeof input !== 'object' || typeof input.operationId !== 'string' || !input.operationId || input.operationId.length > 256 || /[\x00-\x1f]/.test(input.operationId) || typeof input.taskId !== 'string') throw new Error('Purge requires a valid task and operation identity')
     const release = await this.hooks.quiesceDisk?.()
     try { return await this.withOwnership(input.taskId, () => this.purgeOwned(input)) } finally { release?.() }
   }
-  private async purgeOwned(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean; authorization?: 'expiry' }): Promise<TaskLifecycleRecord> {
+  private async purgeOwned(input: PurgeInput): Promise<TaskLifecycleRecord> {
     const key = `${this.store.root}/${input.taskId}`
     if (active.has(key)) throw new Error('Purge already running')
     active.add(key)
@@ -603,10 +616,12 @@ export class ResourcePurgeService {
       if (record.state === 'purged') return record
       if (record.state !== 'purge-started') {
         this.hooks.assertIdle(input.taskId)
-        const preview = await this.previewOwned(input.taskId)
+        const expiry = input.authorization === 'expiry'
+        // An expiry takes the worktree; every other delete keeps it when asked.
+        const keepWork = input.keepWork === true && !expiry
+        const preview = await this.previewOwned(input.taskId, false, keepWork)
         if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
         if (preview.digest !== input.previewDigest || input.expectedGeneration !== preview.generation) throw purgeErrors.create('resource_purge_preview_stale')
-        const expiry = input.authorization === 'expiry'
         if (expiry && this.hooks.expired?.(record) !== true) throw purgeErrors.create('resource_purge_not_expired')
         const discardAuthorized = Boolean(input.human && input.discard) || expiry
         if (preview.items.some((item) => item.discardRequired) && !discardAuthorized) throw purgeErrors.create('resource_purge_discard_required')
@@ -619,9 +634,17 @@ export class ResourcePurgeService {
         record = this.store.update(input.taskId, (current) => {
           if (current.state !== 'trashed' || current.generation !== preview.generation) throw new Error('Task changed before purge boundary')
           current.state = 'purge-started'; current.generation++
-          current.purge = { ...preview, items, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized, ...(expiry ? { expired: true } : {}) }
+          current.purge = { ...preview, items, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized, ...(expiry ? { expired: true } : {}), ...(keepWork ? { keptWork: true } : {}) }
         })
         await this.hooks.onBoundary?.(record)
+      } else if (input.keepWork === true && record.purge && !record.purge.expired && !record.purge.keptWork) {
+        // A delete an older version began, cut short, still lists the thread's worktrees and refs: resumed by Delete, they
+        // stay now too. One whose reviewed files were already cleared is only an empty checkout left to unregister, and that
+        // finishes.
+        record = this.store.update(input.taskId, (current) => {
+          for (const item of current.purge!.items) if (item.status === 'pending' && keptOnDelete(item) && item.discardState !== 'cleared') item.status = 'retained'
+          current.purge!.keptWork = true
+        })
       }
       if (!record.purge) throw new Error('Purge recovery ledger is absent')
       await this.hooks.beforeRemoval?.(record)
