@@ -105,7 +105,7 @@ export type MessageListProps = {
   lastTurnNotice?: React.ReactNode;
   /**
    * Drawn after the last turn (the thread's queued messages). Outside the windowed rows, so it
-   * follows the end like the breathing space does.
+   * follows the end like the reply gap does.
    */
   afterTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
@@ -1030,10 +1030,6 @@ export const MessageList = memo(function MessageList({
   const followModeRef = useRef<FollowMode>(
     initialScrollBehavior === "top" ? "free" : "following-end",
   );
-  const lastMessageIdRef = useRef<string | null>(
-    messages[messages.length - 1]?.id ?? null,
-  );
-  const assistantSpaceActiveRef = useRef(false);
   const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
   /** The prompt open for editing, by message id. */
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
@@ -1355,7 +1351,7 @@ export const MessageList = memo(function MessageList({
     const resizeObserver = new ResizeObserver(() => {
       if (windowedRef.current) {
         // Windowed: the rows are anchored by `useTurnWindow`. This observer
-        // only follows growth outside them (the breathing space below the
+        // only follows growth outside them (the reply gap below the
         // last turn), before paint and never by a delta.
         if (followModeRef.current === "following-end") {
           programmaticScrollAtRef.current = performance.now();
@@ -1397,9 +1393,6 @@ export const MessageList = memo(function MessageList({
     () => normalizeMessages(messages),
     [messages],
   );
-  const lastMessage = normalizedMessages[normalizedMessages.length - 1];
-  const lastMessageId = lastMessage?.id ?? null;
-  const lastMessageRole = lastMessage?.role ?? null;
   const turns = useMemo(
     () => groupMessagesIntoTurns(normalizedMessages),
     [normalizedMessages],
@@ -1613,24 +1606,10 @@ export const MessageList = memo(function MessageList({
     if (lastMessage.role === "user" && !hasAssistant) return true;
     return isStreaming && !getLastAssistantHasContent(normalizedMessages);
   }, [isStreaming, normalizedMessages, turns]);
-  const isNewAssistantMessage =
-    lastMessageRole === "assistant" &&
-    Boolean(lastMessageId) &&
-    lastMessageId !== lastMessageIdRef.current;
-  const showAssistantBreathingSpace =
-    showAwaitingReply ||
-    showPlanning ||
-    assistantSpaceActiveRef.current ||
-    isNewAssistantMessage;
-
-  useEffect(() => {
-    if (lastMessageRole === "assistant") {
-      if (lastMessageId && lastMessageId !== lastMessageIdRef.current) {
-        assistantSpaceActiveRef.current = true;
-      }
-    }
-    lastMessageIdRef.current = lastMessageId;
-  }, [lastMessageId, lastMessageRole]);
+  // A small gap under the reply in progress, the height of the toolbar a
+  // finished turn shows there, so the newest text sits just above the composer
+  // and the end of the reply swaps one for the other without moving.
+  const showReplyGap = replyActive || showAwaitingReply || showPlanning;
 
   // Follow live output while following the end: every streamed token / tool
   // update produces new `messages`, so snap to the bottom. Instant (not
@@ -1642,7 +1621,7 @@ export const MessageList = memo(function MessageList({
     normalizedMessages,
     isStreaming,
     showPlanning,
-    showAssistantBreathingSpace,
+    showReplyGap,
     scrollToBottomInstant,
   ]);
 
@@ -2055,11 +2034,8 @@ export const MessageList = memo(function MessageList({
           })}
         </div>
         {afterTurns}
-        {showAssistantBreathingSpace && (
-          <div
-            aria-hidden="true"
-            className="min-h-[max(140px,24vh)] mx-auto max-w-an w-full"
-          />
+        {showReplyGap && (
+          <div aria-hidden="true" data-reply-gap className="h-[48px] w-full" />
         )}
       </div>
     </div>
