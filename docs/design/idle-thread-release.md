@@ -49,7 +49,7 @@ So a loaded thread holds about its stored size: transcript rows plus model conte
 - **No lifecycle work.** No `compactions`, `titleWork`, `folderWaits`, `definitionStops`, `agentCreations`, `startupDrainScheduled`, or `scheduledTurnThreads` entry. `ThreadMutex.isLocked(threadId)` is false. No archive, delete, expiry or retention operation is in flight (the lifecycle store's admission is open and the thread is not `deleted`).
 - **Nothing only memory knows.** `failedConnectionRequest === null` (Retry needs it). No transcript row is still open (`isOpenActivityRow`), so a reload's `closeStaleActivity` has nothing to change. The thread is in `thread.db`: threads still on JSON files are not released.
 - **Not the first send.** `firstSendPending` is a flag on disk and holds no memory. A thread that has it has never run a turn, so it is never loaded by one.
-- **Not shown in a window** (built, decided in review). The window sends `threads.focus` for threads of this computer too. The daemon keeps the shown threads per window connection and forgets them when the connection closes. A shown thread stays loaded however long it is idle.
+- **Not shown in a window** (built, decided in review). The window sends `threads.focus` for threads of this computer too. The daemon keeps the shown threads per window connection and forgets them when the connection closes; each new connection of a window (after a daemon restart or a dropped connection) shows the daemon its thread again. A shown thread stays loaded however long it is idle.
 - **Built:** a provider process is reported by Claude only (`hasLiveProcess`). Codex and ACP adapters report none: their process does not reference the session, so a reload works either way.
 
 **Policy.**
@@ -122,7 +122,7 @@ A new `ThreadResidency` (in `src/mms/orchestrator/ThreadResidency.ts`) owns last
 - Each item in §2 holds the thread loaded on its own (table-driven).
 - A subagent child and a scheduled-run thread reload with `sharedWorkspace` and `primaryCheckout` restored. Built: not written; the reload path is `getOrCreateSession`, which restores both for every thread after a restart.
 - Release followed by reload yields the same `thread.snapshot` as before. No `threads.updated` or `threads.touched` is emitted, and `updatedAt` does not move.
-- Kill during release (a child process killed mid-save, as `platformWorkflowDaemonCrash.test.ts` does): on restart the queue and transcript are intact. Built: in process instead. The release's save fails before its transaction commits, the daemon ends without a clean shutdown, and a new daemon on the same home finds the transcript and queue intact and runs the next send once.
+- Kill during release (a child process killed mid-save, as `platformWorkflowDaemonCrash.test.ts` does): on restart the queue and transcript are intact. Built: the daemon runs in a child process and kills itself (SIGKILL) right before, and in a second test right after, the COMMIT of the release's save, while another thread has a queued message. After a restart the transcript is the last committed one, the queued message runs once, and no turn is sent twice. A separate in-process test covers a save refused before it reaches the database.
 - Built, also: a shown thread is never released while any window shows it; the kill switch; the LRU cap; queue, Steer and receipts (a repeated `clientRequestId`) across a release.
 
 **Memory regression** (`tests/idleThreadMemory.test.ts`, heap after forced GC with `v8.setFlagsFromString('--expose-gc')`):
