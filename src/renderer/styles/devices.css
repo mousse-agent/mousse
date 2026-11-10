@@ -399,3 +399,9 @@
   position: absolute;
   inset: 0;
 }
+
+/* A device's detail and the account's notes line up with the name, past the kind glyph (28px + 12px). */
+.devices-group .settings-group-rows > .settings-item.indent,
+.account-group .settings-group-rows > .settings-item.indent {
+  padding-left: calc(var(--settings-surface-x) + 40px);
+}
