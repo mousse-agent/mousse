@@ -86,6 +86,35 @@ describe('Skills discovery cache', () => {
     expect(read).toHaveBeenCalledTimes(3 + 4 + 4)
   })
 
+  it('shares one running scan of the shared Skills between projects discovered together', async () => {
+    const skills = registry()
+    const read = vi.spyOn(skills as unknown as { readSkillDescriptor: () => Promise<unknown> }, 'readSkillDescriptor')
+    // The first turns of threads started together, each in its own worktree, before any scan has finished.
+    const paths = [await project(0), await project(1), await project(2)]
+    const snapshots = await Promise.all(paths.map((projectPath) => skills.discover({ projectPath })))
+    expect(read).toHaveBeenCalledTimes(3 + 3)
+    for (const [index, snapshot] of snapshots.entries()) {
+      expect(snapshot.skills.map((skill) => skill.name).sort()).toEqual(['alpha', 'beta', 'gamma', `local-${index}`])
+    }
+  })
+
+  it('does not keep a shared scan that started before the cache was cleared', async () => {
+    const skills = registry()
+    const shared = join(userHome, '.claude', 'skills', 'beta')
+    const betaOf = (snapshot: SkillsRegistrySnapshot) => snapshot.skills.find((skill) => skill.name === 'beta')?.description
+    try {
+      const early = skills.discover({ projectPath: await project(0) })
+      skills.invalidateDiscoveryCache()
+      await writeFile(join(shared, 'SKILL.md'), ['---', 'name: beta', 'description: Beta after the change', '---', 'Changed.', ''].join('\n'), 'utf-8')
+      expect(betaOf(await skills.discover({ projectPath: await project(1) }))).toBe('Beta after the change')
+      await early
+      // Another project reads the shared scan made after the change, not the one that started before it.
+      expect(betaOf(await skills.discover({ projectPath: await project(2) }))).toBe('Beta after the change')
+    } finally {
+      await writeSkill(shared, 'beta')
+    }
+  })
+
   it('expires a project snapshot with the shared scan it reused', async () => {
     const skills = registry()
     const shared = join(userHome, '.claude', 'skills', 'alpha')
