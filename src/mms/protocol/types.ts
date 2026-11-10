@@ -506,6 +506,7 @@ export const PROTOCOL_CAPABILITIES = [
 export type ProtocolEventType =
   | 'net.updated'
   | 'bots.changed'
+  | 'chats.changed'
   | 'bots.message'
   | 'bots.activity'
   | 'run.event'

@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useRef, useCallback, useState, startTransition, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { useChatsStore } from './stores/chatsStore'
+import { followPushedList } from './lib/followPushedList'
 import { OrchestratorChat } from './components/OrchestratorChat'
 
 import { MainViewTabs } from './components/MainViewTabs'
@@ -64,9 +65,12 @@ function conversationRow(sidebar: HTMLElement | null) {
   return width > 0 && workspaceWidth > 0 ? { right, width, mainWidth, workspaceWidth } : null
 }
 
-// Event delivery is primary. This low-frequency reconciliation covers renderer
-// reload/subscription races without repainting when the list is unchanged.
-const THREAD_LIST_RECONCILE_MS = 2_000
+// The thread list arrives as `threads.updated` pushes (and again after a reconnect or an event gap). It is read
+// again when the window comes back and, for a push lost anyway, once a minute while the window shows.
+const THREAD_LIST_FALLBACK_MS = 60_000
+// Chats are read again when the service says one changed (`chats.changed`). Agents' availability, computers
+// going on or off line and a published Group's posts have no push, so they are read every 30 seconds too.
+const CHATS_FALLBACK_MS = 30_000
 
 
 
@@ -113,8 +117,13 @@ export default function App() {
     useChatsStore.getState().activate(profileId)
     void useChatsStore.getState().refresh()
     if (sidebarMode !== 'chats' && threadsSidebarView !== 'chats') return
-    const timer = setInterval(() => { void useChatsStore.getState().refresh() }, 1000)
-    return () => clearInterval(timer)
+    return followPushedList({
+      refresh: () => { void useChatsStore.getState().refresh() },
+      onChanged: (listener) => window.mousse.chats?.onChanged(listener) ?? (() => undefined),
+      fallbackMs: CHATS_FALLBACK_MS,
+      window,
+      document
+    })
   }, [profileId, profileReady, sidebarMode, threadsSidebarView])
 
   const setMainAreaWidth = useAppStore((s) => s.setMainAreaWidth)
@@ -358,18 +367,16 @@ export default function App() {
       if (isCurrentProfile() && !isSessionClosing(error)) setBootstrapError(error instanceof Error ? error.message : String(error))
     })
 
-    const threadSyncTimer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refreshThreads()
-    }, THREAD_LIST_RECONCILE_MS)
-    const onWindowFocus = (): void => {
-      void refreshThreads()
-    }
-    window.addEventListener('focus', onWindowFocus)
+    const stopFollowingThreads = followPushedList({
+      refresh: () => { void refreshThreads() },
+      fallbackMs: THREAD_LIST_FALLBACK_MS,
+      window,
+      document
+    })
 
     return () => {
       disposed = true
-      window.clearInterval(threadSyncTimer)
-      window.removeEventListener('focus', onWindowFocus)
+      stopFollowingThreads()
       unsubs.forEach((u) => u())
     }
   }, [

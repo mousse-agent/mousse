@@ -13,15 +13,16 @@ import { keepEqualById } from '../lib/keepEqual'
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
  * was read, the live chip of a working bot, owner messages on their way, and About's detail.
  * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the Chats tab is open,
- * `useBotsPolling` lists them again every 2 seconds while the window shows, in case an event was
- * missed. A list that changed nothing keeps the objects held, so nothing renders again for it.
+ * `useBotsPolling` lists them again every 30 seconds while the window shows, and as soon as it shows
+ * again, in case an event was missed. A list that changed nothing keeps the objects held, so nothing renders again for it.
  */
 
 /** Messages one chat page asks for. */
 export const BOT_CHAT_PAGE = 50
 /** How long the face plays "done" after a working bot goes idle with a good outcome. */
 export const BOT_HAPPY_MS = 2500
-const POLL_MS = 2000
+/** A fallback for a missed push: every change to a bot is pushed. */
+const POLL_MS = 30_000
 
 export interface BotChatCache {
   messages: BotChatMessage[]
@@ -484,7 +485,7 @@ function pollVisible(): void {
 }
 
 /**
- * Lists the bots now and every 2 seconds while a view that shows them is mounted: the Chats tab's
+ * Lists the bots now and every 30 seconds while a view that shows them is mounted: the Chats tab's
  * sidebar and the chat pane. The sidebar can be shown without the pane (after a restart the pane
  * opens on Projects), so each lists them; they share one timer. A hidden window skips the ticks.
  */

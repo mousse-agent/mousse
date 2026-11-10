@@ -206,6 +206,11 @@ export function bridgeProtocolEvent(
       broadcast('bots:changed', event.data ?? {})
       return true
     }
+    // A chat was created, sent to, answered or settled: the window reads the chats again.
+    case 'chats.changed': {
+      broadcast('chats:changed', null)
+      return true
+    }
     case 'bots.message': {
       broadcast('bots:message', event.data)
       return true

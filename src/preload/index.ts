@@ -198,6 +198,14 @@ const api = {
   platformRequest: {
     request: platformRequest
   },
+  /** Agent chats: requests go through `platformRequest`; this is told when a chat changes (`chats.changed`). */
+  chats: {
+    onChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('chats:changed', handler)
+      return () => ipcRenderer.removeListener('chats:changed', handler)
+    }
+  },
   chatReferences: {
     resolve: (reference: ChatReference): Promise<ChatReference | null> =>
       platformRequest<ChatReference | null>('chatReferences.resolve', { reference })

@@ -1690,6 +1690,15 @@ export function registerGuiIpc(
     // (full project scan) on the hot path.
   }
 
+  /**
+   * After a call that changes this computer's threads, the daemon sends every window one `threads.updated`
+   * itself, so the list in the reply is not broadcast again. A call another computer answered (a qualified id)
+   * still is: that computer's rows would otherwise arrive only with its next list.
+   */
+  const broadcastIfRouted = (ids: ReadonlyArray<string | undefined>, threads: unknown): void => {
+    if (ids.some((id) => typeof id === 'string' && isQualifiedId(id))) broadcast('threads:updated', threads)
+  }
+
   /** `opts.node`: create the chat on another of the user's computers; the daemon sends the call there. */
   const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> } | undefined) => ({
     name: name?.trim() || 'New Chat',
@@ -1715,7 +1724,8 @@ export function registerGuiIpc(
       'threads.create',
       createParams(name, projectId, opts)
     )
-    broadcast('threads:updated', res.threads)
+    if (opts?.node) broadcast('threads:updated', res.threads)
+    else broadcastIfRouted([projectId], res.threads)
     return res.thread
   })
 
@@ -1726,7 +1736,8 @@ export function registerGuiIpc(
         'threads.create',
         createParams(name, projectId, opts)
       )
-      broadcast('threads:updated', res.threads)
+      if (opts?.node) broadcast('threads:updated', res.threads)
+      else broadcastIfRouted([projectId], res.threads)
       await selectThread(res.thread.id)
       return res.thread
     }
@@ -1767,7 +1778,7 @@ export function registerGuiIpc(
       'threads.delete',
       { threadId, discard: true }
     )
-    broadcast('threads:updated', res.threads)
+    broadcastIfRouted([threadId], res.threads)
     if (currentPresentation().getActiveThreadId() === threadId) {
       // Never fall back to a subagent: it sits under its parent in the sidebar.
       const next = visibleThreads(res.threads).find((t) => !t.settledAt)
@@ -1786,7 +1797,7 @@ export function registerGuiIpc(
       'threads.rename',
       { threadId, name }
     )
-    broadcast('threads:updated', res.threads)
+    broadcastIfRouted([threadId], res.threads)
     return res.thread
   })
 
@@ -1807,8 +1818,10 @@ export function registerGuiIpc(
       ...at,
       clientRequestId: randomUUID()
     })
-    const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
-    broadcast('threads:updated', threads.threads)
+    if (isQualifiedId(threadId)) {
+      const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
+      broadcast('threads:updated', threads.threads)
+    }
     await selectThread(forked.threadId)
     return { threadId: forked.threadId }
   })
@@ -1829,8 +1842,10 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ thread: unknown }>('threads.regenerateTitle', {
       threadId
     })
-    const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
-    broadcast('threads:updated', threads.threads)
+    if (isQualifiedId(threadId)) {
+      const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
+      broadcast('threads:updated', threads.threads)
+    }
     return res.thread
   })
 
@@ -1845,9 +1860,7 @@ export function registerGuiIpc(
         threadId,
         model
       })
-      // Prefer full list when present (multi-client cache), but still broadcast
-      // so model badge updates without waiting for an extra threads.list.
-      broadcast('threads:updated', res.threads)
+      broadcastIfRouted([threadId], res.threads)
       return res.thread
     }
   )
@@ -1857,7 +1870,7 @@ export function registerGuiIpc(
       'threads.pin',
       { threadId, pinned }
     )
-    broadcast('threads:updated', res.threads)
+    broadcastIfRouted([threadId], res.threads)
     return res.thread
   })
   // One thread as the computer that runs it has it now (its settings revision included), or null.
@@ -1871,7 +1884,7 @@ export function registerGuiIpc(
       // Another computer does not remember this computer's picks, and its row takes no `picked`.
       { threadId, enabled, ...(picked === true && !isQualifiedId(threadId) ? { picked: true } : {}) }
     )
-    broadcast('threads:updated', res.threads)
+    broadcastIfRouted([threadId], res.threads)
     return res.thread
   })
   /**
@@ -1908,7 +1921,7 @@ export function registerGuiIpc(
       'threads.setPermissionMode',
       { threadId, mode }
     )
-    broadcast('threads:updated', res.threads)
+    broadcastIfRouted([threadId], res.threads)
     return res.thread
   })
   registerHandler('threads:setExpiry', async (_e, threadId: string, expiresAt: string | null, stopsRun?: boolean) => {
@@ -1916,7 +1929,7 @@ export function registerGuiIpc(
       'threads.setExpiry',
       { threadId, expiresAt, ...(stopsRun === true ? { stopsRun: true } : {}) }
     )
-    broadcast('threads:updated', res.threads)
+    broadcastIfRouted([threadId], res.threads)
     return res.thread
   })
   registerHandler('threads:settle', async (_e, threadId: string, settled: boolean) => {
@@ -1924,7 +1937,7 @@ export function registerGuiIpc(
       'threads.settle',
       { threadId, settled }
     )
-    broadcast('threads:updated', res.threads)
+    broadcastIfRouted([threadId], res.threads)
     return res.thread
   })
   registerHandler(
@@ -1934,7 +1947,7 @@ export function registerGuiIpc(
         'threads.reorder',
         { projectId, threadIds }
       )
-      broadcast('threads:updated', res.all)
+      broadcastIfRouted([projectId, ...threadIds], res.all)
       return res.threads
     }
   )
