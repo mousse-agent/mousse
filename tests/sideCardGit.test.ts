@@ -685,6 +685,16 @@ describe('git section markup', () => {
     expect(html).not.toContain('side-card-git-commit-button')
   })
 
+  it('names the changed files alone while the line counts are still on their way', () => {
+    const html = render({
+      git: view({ status: repoStatus({ changes: [{ path: 'a.ts', status: 'modified', staged: false }] }), diffStats: null }),
+      collapsedLabel: null
+    })
+    expect(html).toMatch(/class="side-card-git-changes" title="Open Changes" aria-label="1 file. Open Changes"/)
+    expect(html).not.toContain('side-card-git-stat')
+    expect(html).not.toContain('+0')
+  })
+
   it('shows no new-file count when nothing is untracked', () => {
     const html = render({
       git: view({

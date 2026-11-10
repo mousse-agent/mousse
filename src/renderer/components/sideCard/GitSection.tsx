@@ -312,7 +312,8 @@ export function GitSectionView({
 
   const branch = git.status?.branch ?? null
   const fileCount = changedFileCount(git.status)
-  const stat = diffStatLabel(git.diffStats, untrackedFileCount(git.status))
+  // The counts arrive after the status; until then the row names the files alone rather than a false +0 −0.
+  const stat = git.diffStats ? diffStatLabel(git.diffStats, untrackedFileCount(git.status)) : null
   const prRow = pullRequestRow(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   const branchActions = branchActionState(scope.workspaceThreadId)
   const rows = pullRequestRows(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
@@ -430,15 +431,17 @@ export function GitSectionView({
             <button
               type="button"
               className="side-card-git-changes"
-              title={`${stat.text}. Open Changes`}
-              aria-label={`${files}, ${stat.text}. Open Changes`}
+              title={stat ? `${stat.text}. Open Changes` : 'Open Changes'}
+              aria-label={stat ? `${files}, ${stat.text}. Open Changes` : `${files}. Open Changes`}
               onClick={() => openSurface('git')}
             >
               <span className="side-card-git-summary">{files}</span>
-              <span className="side-card-git-stat" aria-hidden="true">
-                <span className="side-card-git-added" data-zero={stat.addedZero || undefined}>{stat.added}</span>
-                <span className="side-card-git-removed" data-zero={stat.removedZero || undefined}>{stat.removed}</span>
-              </span>
+              {stat && (
+                <span className="side-card-git-stat" aria-hidden="true">
+                  <span className="side-card-git-added" data-zero={stat.addedZero || undefined}>{stat.added}</span>
+                  <span className="side-card-git-removed" data-zero={stat.removedZero || undefined}>{stat.removed}</span>
+                </span>
+              )}
             </button>
             <button type="button" className="side-card-git-commit-open" title="Write the commit in Changes" onClick={() => openSurface('git')}>
               Commit

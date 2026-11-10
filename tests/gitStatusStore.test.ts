@@ -65,6 +65,26 @@ describe('Git state by thread or project', () => {
     expect(entries['thread:t1']?.status?.branch).toBe('mousse/thread/t1')
   })
 
+  it('shows the status as soon as it answers, and fills in the commits and diff counts when they arrive', async () => {
+    const project = projectScope('p1')
+    const key = folderKey(project)!
+    const { git } = installGit(() => 'main')
+    let answerLog: (commits: []) => void = () => undefined
+    let failDiffStats: (error: Error) => void = () => undefined
+    git.log.mockImplementation(() => new Promise((resolve) => { answerLog = resolve }))
+    git.diffStats.mockImplementation(() => new Promise((_, reject) => { failDiffStats = reject }))
+    const refreshed = refreshGitStatus(key, { scope: project })
+
+    await vi.waitFor(() => expect(useGitStatusStore.getState().entries[key]?.status?.branch).toBe('main'))
+    expect(useGitStatusStore.getState().entries[key]).toMatchObject({ loaded: true, loading: false, diffStats: null, branches: { current: 'main' } })
+
+    failDiffStats(new Error('diff failed'))
+    answerLog([])
+    await refreshed
+    // A failed detail read leaves what the folder showed; the status stays without an error.
+    expect(useGitStatusStore.getState().entries[key]).toMatchObject({ diffStats: null, error: null, commits: [] })
+  })
+
   it('reads again through the same scope after an action, and when the window is focused again', async () => {
     vi.useFakeTimers()
     const worktree = threadScope('p1', 't1')

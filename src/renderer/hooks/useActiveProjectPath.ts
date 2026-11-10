@@ -28,6 +28,18 @@ async function resolveWorkspaceProjectPath(threadId: string | null): Promise<Res
   return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
 }
 
+/** Lookups still running, by profile and thread: the side card, the panels and the toolbar ask at the same moment. */
+const resolving = new Map<string, Promise<ResolvedWorkspace>>()
+
+/** {@link resolveWorkspaceProjectPath}, with every caller that asks while one lookup runs sharing it. */
+function resolveShared(scope: string, threadId: string | null): Promise<ResolvedWorkspace> {
+  const running = resolving.get(scope)
+  if (running) return running
+  const lookup = resolveWorkspaceProjectPath(threadId).finally(() => resolving.delete(scope))
+  resolving.set(scope, lookup)
+  return lookup
+}
+
 /**
  * The project and folder the selected thread works on. A new, empty thread
  * follows the composer's project pick, so every surface agrees with the card.
@@ -53,7 +65,7 @@ export function useActiveProjectLocation(): ActiveProject {
 
   useEffect(() => {
     let cancelled = false
-    void resolveWorkspaceProjectPath(activeThreadId).then((workspace) => {
+    void resolveShared(scope, activeThreadId).then((workspace) => {
       if (!cancelled) setResolved({ scope, ...workspace })
     }).catch(() => { if (!cancelled) setResolved({ scope, path: null, workspaceThreadId: null }) })
     return () => { cancelled = true }
