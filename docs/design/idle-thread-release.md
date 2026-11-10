@@ -1,6 +1,6 @@
 # Releasing idle threads from the daemon's memory
 
-Status: design for review, no code yet. Written against `master` at `c93ad82` (after #848).
+Status: implemented in #852 (phase 1) and #853 (phase 2, stacked on #852), both open. Written against `master` at `c93ad82` (after #848). "Built" notes below record where the code differs from the first draft.
 
 ## Summary
 
@@ -35,10 +35,11 @@ So a loaded thread holds about its stored size: transcript rows plus model conte
 
 - **The text is shared by the session and the cache.** Dropping only the session frees about 0.16 KB per message. A release must also drop the cache entry (`ThreadDbStore.forget`).
 - **Startup.** `restoreOnStartup` calls `loadThreadWorkState` → `ThreadDbStore.readState` → `fresh()` for every thread that is not settled. That is a full `load` on the event loop, and the last 64 stay in `entries`. With a few hundred threads, the daemon holds 64 whole transcripts from the start: 64 × 2 MB ≈ 130 MB. That is about the gap between a fresh home (127 MB) and the user's 306 MB. It is a hypothesis to confirm on an isolated home with about 100 threads (§6).
+- **Measured (#852): the hypothesis does not hold.** The user's real home has 73 `thread.db` files, 20 MB in all (median 208 KB, p90 688 KB, largest 1.4 MB; a size-only listing). On an isolated home with 100 threads sampled from those sizes, startup held 64 threads and 44.5 MB of heap before phase 1, and 0 threads and 37.7 MB after. Private memory went from about 170 MB to 164 MB. Phase 1 saves about 6 MB here, not 130 MB.
 
 ## 2. When a thread is idle
 
-`OrchestratorService.releasableNow(threadId)` is true only when every one of these holds. Each one is a cheap in-memory or indexed read.
+`OrchestratorService.releaseHoldReason(threadId)` returns undefined only when every one of these holds (built: it returns the reason the thread stays, for tests and logs). Each one is a cheap in-memory or indexed read.
 
 - **No turn.** `!session.isTurnRunning()`, `!turnAdmitted`, `!drainAfterSettle`, `!abortRequested`, `!stopping`, `sentAfterStop.length === 0`, `setupStop === null`, `executionLease === null`, no `activeTurn` (so no unread `pendingSteer`).
 - **No run still going.** No run of the thread that has not ended (`engine.listRuns(threadId)`, paused and waiting continuation runs included). No `turnResults` or `pendingContinuations` entry for it. No undelivered effect in the outbox.
@@ -48,13 +49,16 @@ So a loaded thread holds about its stored size: transcript rows plus model conte
 - **No lifecycle work.** No `compactions`, `titleWork`, `folderWaits`, `definitionStops`, `agentCreations`, `startupDrainScheduled`, or `scheduledTurnThreads` entry. `ThreadMutex.isLocked(threadId)` is false. No archive, delete, expiry or retention operation is in flight (the lifecycle store's admission is open and the thread is not `deleted`).
 - **Nothing only memory knows.** `failedConnectionRequest === null` (Retry needs it). No transcript row is still open (`isOpenActivityRow`), so a reload's `closeStaleActivity` has nothing to change. The thread is in `thread.db`: threads still on JSON files are not released.
 - **Not the first send.** `firstSendPending` is a flag on disk and holds no memory. A thread that has it has never run a turn, so it is never loaded by one.
+- **Not shown in a window** (built, decided in review). The window sends `threads.focus` for threads of this computer too. The daemon keeps the shown threads per window connection and forgets them when the connection closes. A shown thread stays loaded however long it is idle.
+- **Built:** a provider process is reported by Claude only (`hasLiveProcess`). Codex and ACP adapters report none: their process does not reference the session, so a reload works either way.
 
 **Policy.**
 
 - Release a thread idle for 10 minutes (`IDLE_RELEASE_MS`), checked by a sweep every 60 s (`unref`'d timer).
 - Every `getOrCreateSession` updates its last use. So do snapshot, `changesSince` and context-gauge reads of a loaded thread.
 - Keep at most 8 idle loaded threads. Past that, release the least recently used one after 60 s idle.
-- The thread database cache gets a byte cap (48 MB of payload) besides its 64 entries.
+- The thread database cache gets a byte cap (48 MB of payload) besides its 64 entries. Built: the cap passes over threads a loaded session holds (their text is the session's, so dropping them frees little and the next save would read them again on the event loop). A use moves a thread to the front, not only its load.
+- Built: the numbers are constants at the top of `src/mms/orchestrator/ThreadResidency.ts` (`IDLE_RELEASE_MS`, `MAX_IDLE_LOADED`, `LRU_MIN_IDLE_MS`, `IDLE_SWEEP_MS`) and `MAX_CACHED_BYTES` in `threadDbStore.ts`.
 
 ## 3. Release and reload
 
@@ -66,12 +70,13 @@ A new `ThreadResidency` (in `src/mms/orchestrator/ThreadResidency.ts`) owns last
 
 1. Skip the thread if `warming > 0`, if `releasableNow` is false, or if the thread is the bound session.
 2. **Make sure disk has everything.** If a persist timer is pending, clear it and persist now. That write was owed anyway. Otherwise ask `ThreadDbStore.unsaved(dir, change)`, a new dry run of `plan()`. If it reports changes, save them and count `residency.unsavedAtRelease`. Never save unconditionally: every save moves `updatedAt` and sends `threads.touched` (#819), which would reorder the sidebar. A failed save throws and leaves the thread loaded.
+   Built: a thread that never saved a model context gets one rebuilt from its transcript at every load (`migrateLegacyContext`). That context is not owed when it equals the rebuild, so loading such a thread and letting it idle writes nothing. The memory test found this: without it every such thread saved at release.
 3. Drop: set `session.released = true`, `sessions.delete(threadId)`, `ThreadDbStore.forget(dir)`, clear `measured` if it is this thread. Keep `ThreadRuntime`, `turnStates`, MCP state and the provider registry. Emit nothing.
 
 **Reload.**
 
 - `getOrCreateSession` already rebuilds a session from disk (`loadThreadData`, `restoreDelegatedWorkspace`, `restoreScheduledWorkspace`, the runtime's agents and tasks). It is the path every thread takes after a daemon restart, so release followed by reload equals a restart of that one thread. The rule in §2 makes sure only state that a restart rebuilds is dropped.
-- A new `ensureSessionLoaded(threadId)` does `warming++`, `await threads.warmThread(threadId)`, `warming--`, then `getOrCreateSession`. That way the parse happens in the read worker and not on the event loop. Callers that can wait use it: `orchestrator.send` (handlers.ts:2515), `queue.promoteToSteer`, the effect worker's `turn.start`, and continuation start.
+- A new `ensureSessionLoaded(threadId)` does `warming++`, `await threads.warmThread(threadId)`, `warming--`, then `getOrCreateSession`. That way the parse happens in the read worker and not on the event loop. Callers that can wait use it: `orchestrator.send` and `queue.promoteToSteer`. Built: the effect worker's `turn.start` and continuation start keep the synchronous load. A thread with a run is never released, so they only cold-load after a restart, as before.
 - Synchronous callers keep `getOrCreateSession`, which is correct, only slower (a cold load).
 
 **Races.**
@@ -84,7 +89,7 @@ A new `ThreadResidency` (in `src/mms/orchestrator/ThreadResidency.ts`) owns last
 | Queue drain | Claims already check delivery against disk under the queue lock (`scheduleQueueDrain`: `acceptedQueueItemIds` against the transcript on disk). Exactly-once never depended on the session. |
 | Two reloads at once | Both may warm, which is harmless: the later `remember` wins, and `warm` returns early when the entry exists. The map insert in `getOrCreateSession` is synchronous, so the first creates the session and the second finds it. |
 | Release during a reload | `warming > 0` skips the thread. If the reload already finished, the session is fresh and was just used, so it is not idle. |
-| Async work holding an old session | Covered by the rule in §2. As a backstop, `get session()` (AsyncLocalStorage), `scheduleQueueDrain` and `persist` re-resolve a session marked `released` by its id, warn once, and count `residency.staleUses`. `liveMessagesForSave` of an unloaded thread returns nothing instead of loading it. |
+| Async work holding an old session | Covered by the rule in §2. As a backstop, `get session()` (AsyncLocalStorage), `scheduleQueueDrain` and `persist` re-resolve a session marked `released` by its id, warn once, and count `residency.staleUses`. Built: instead of `liveMessagesForSave` returning nothing, the profile's persist skips a thread with no session (an empty list handed to the save could remove rows), so a stray persist neither reloads nor writes. |
 | Crash during a release | Release writes at most one save, one transaction that was owed anyway. Nothing on disk records "released". A crash at any point is a crash of an idle loaded thread, and startup recovery (`reclaimForStartup`, `closeStaleActivity`) works as today. |
 | Another process writes the thread | `ThreadDbStore.fresh()` already compares `dbId`, `seq` and `epoch` on every use. A reload reads the newest state. |
 
@@ -115,9 +120,10 @@ A new `ThreadResidency` (in `src/mms/orchestrator/ThreadResidency.ts`) owns last
 - Sweep while `warmThread` is pending: skipped.
 - A failed save at release: the thread stays loaded and nothing is lost.
 - Each item in §2 holds the thread loaded on its own (table-driven).
-- A subagent child and a scheduled-run thread reload with `sharedWorkspace` and `primaryCheckout` restored.
+- A subagent child and a scheduled-run thread reload with `sharedWorkspace` and `primaryCheckout` restored. Built: not written; the reload path is `getOrCreateSession`, which restores both for every thread after a restart.
 - Release followed by reload yields the same `thread.snapshot` as before. No `threads.updated` or `threads.touched` is emitted, and `updatedAt` does not move.
-- Kill during release (a child process killed mid-save, as `platformWorkflowDaemonCrash.test.ts` does): on restart the queue and transcript are intact.
+- Kill during release (a child process killed mid-save, as `platformWorkflowDaemonCrash.test.ts` does): on restart the queue and transcript are intact. Built: in process instead. The release's save fails before its transaction commits, the daemon ends without a clean shutdown, and a new daemon on the same home finds the transcript and queue intact and runs the next send once.
+- Built, also: a shown thread is never released while any window shows it; the kill switch; the LRU cap; queue, Steer and receipts (a repeated `clientRequestId`) across a release.
 
 **Memory regression** (`tests/idleThreadMemory.test.ts`, heap after forced GC with `v8.setFlagsFromString('--expose-gc')`):
 
@@ -126,6 +132,17 @@ A new `ThreadResidency` (in `src/mms/orchestrator/ThreadResidency.ts`) owns last
 
 **By hand, once:** private bytes on an isolated home (agent-isolation rules, no window: `--cli service run`) with about 100 copied threads, before and after each phase.
 
+Measured (100 synthetic threads sized from the real size listing, 3 runs each):
+
+| | Private MB | Heap used | Loaded |
+|---|---|---|---|
+| Startup, master | 170 | 44.5 MB | 64 cached |
+| Startup, phase 1 | 164 | 37.7 MB | 0 |
+| 20 largest touched, then idle 95 s, phase 1 only | 205 | 69.5 MB | 20 sessions |
+| Same, phase 2 (timers shortened to 60 s idle in a local build) | 199 | 48.9 MB | 0 |
+
+Releasing the 20 threads freed the 20 MB of heap they added. Private bytes fell less within the 95 s because V8 keeps freed heap pages for a while.
+
 ## 7. Rollout and risks
 
 1. **Phase 1, storage only:**
@@ -133,7 +150,7 @@ A new `ThreadResidency` (in `src/mms/orchestrator/ThreadResidency.ts`) owns last
    - The cache's byte cap.
    - Low risk; no run-engine change.
 2. **Phase 2, release behind a feature flag:**
-   - The flag is `releaseIdleThreads` in `MousseFeatureFlags`: off by default, on for nightlies first, on by default after a week without `staleUses` or `unsavedAtRelease` reports.
+   - The flag is `releaseIdleThreads` in `MousseFeatureFlags`. Decided in review: on by default, so it saves memory; `features.releaseIdleThreads: false` is the kill switch, read at every sweep.
    - Run-engine change (tier 5): council review if the user agrees.
 3. **Phase 3, later:**
    - Release threads waiting on subagents. Their wake path already reloads.
@@ -148,9 +165,9 @@ A new `ThreadResidency` (in `src/mms/orchestrator/ThreadResidency.ts`) owns last
 | Something only memory knew is lost | The rule refuses while it is set; a table-driven test per field |
 | `closeStaleActivity` on reload marks rows interrupted | Release requires no open activity rows |
 
-## Open questions
+## Decisions (were open questions)
 
-1. Are 10 minutes idle, 8 idle threads kept and a 48 MB cache cap the right numbers, or should the cap follow the machine's memory?
-2. Should a thread a window shows stay loaded however long it is idle? That gives a faster first send but holds more memory.
-3. Can phase 1 ship on its own first? It needs no run-engine review and may explain most of the 306 MB.
-4. To size real threads: may a read-only listing of `thread.db` sizes under the user's home be run? This design did not read `~/.mousse`.
+1. 10 minutes idle, 8 idle threads kept and a 48 MB cache cap, as constants that are easy to change.
+2. A thread a window shows stays loaded however long it is idle.
+3. Phase 1 ships first, on its own (#852).
+4. A read-only listing of `thread.db` sizes under the user's home was allowed and run (sizes only); see §1.
