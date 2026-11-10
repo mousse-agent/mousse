@@ -17,13 +17,17 @@
 {"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-1","itemId":"msg-1","delta":"Working"}}}
 {"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Working","phase":null}}}}
 {"dir":"cue","frame":{"action":"steer","text":"Focus on tests"}}
-{"dir":"out","frame":{"id":6,"method":"turn/steer","params":{"threadId":"thr-replay","expectedTurnId":"turn-1","input":[{"type":"text","text":"Focus on tests","text_elements":[]}]}}}
-{"dir":"in","frame":{"id":6,"result":{"turnId":"turn-1"}}}
-{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"userMessage","id":"item-user-2","content":[{"type":"text","text":"Focus on tests","text_elements":[]}]}}}}
-{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"userMessage","id":"item-user-2","content":[{"type":"text","text":"Focus on tests","text_elements":[]}]}}}}
-{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-2","text":"","phase":null}}}}
-{"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-1","itemId":"msg-2","delta":"Done "}}}
-{"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-1","itemId":"msg-2","delta":"with tests"}}}
-{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-2","text":"Done with tests","phase":null}}}}
-{"dir":"in","frame":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr-replay","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1230,"inputTokens":1200,"cachedInputTokens":800,"cacheWriteInputTokens":0,"outputTokens":30,"reasoningOutputTokens":10},"last":{"totalTokens":1230,"inputTokens":1200,"cachedInputTokens":800,"cacheWriteInputTokens":0,"outputTokens":30,"reasoningOutputTokens":10},"modelContextWindow":272000}}}}
-{"dir":"in","frame":{"method":"turn/completed","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"completed","error":null,"items":[]}}}}
+{"dir":"out","frame":{"id":6,"method":"turn/interrupt","params":{"threadId":"thr-replay","turnId":"turn-1"}}}
+{"dir":"in","frame":{"id":6,"result":{}}}
+{"dir":"in","frame":{"method":"turn/completed","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"interrupted","error":null,"items":[]}}}}
+{"dir":"out","frame":{"id":7,"method":"turn/start","params":{"threadId":"thr-replay","input":[{"type":"text","text":"Focus on tests","text_elements":[]}],"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"model":"gpt-replay-codex","summary":"auto"}}}
+{"dir":"in","frame":{"id":7,"result":{"turn":{"id":"turn-2","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-replay","turn":{"id":"turn-2","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-2","item":{"type":"userMessage","id":"item-user-2","content":[{"type":"text","text":"Focus on tests","text_elements":[]}]}}}}
+{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-2","item":{"type":"userMessage","id":"item-user-2","content":[{"type":"text","text":"Focus on tests","text_elements":[]}]}}}}
+{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-2","item":{"type":"agentMessage","id":"msg-2","text":"","phase":null}}}}
+{"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-2","itemId":"msg-2","delta":"Done "}}}
+{"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-2","itemId":"msg-2","delta":"with tests"}}}
+{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-2","item":{"type":"agentMessage","id":"msg-2","text":"Done with tests","phase":null}}}}
+{"dir":"in","frame":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr-replay","turnId":"turn-2","tokenUsage":{"total":{"totalTokens":1230,"inputTokens":1200,"cachedInputTokens":800,"cacheWriteInputTokens":0,"outputTokens":30,"reasoningOutputTokens":10},"last":{"totalTokens":1230,"inputTokens":1200,"cachedInputTokens":800,"cacheWriteInputTokens":0,"outputTokens":30,"reasoningOutputTokens":10},"modelContextWindow":272000}}}}
+{"dir":"in","frame":{"method":"turn/completed","params":{"threadId":"thr-replay","turn":{"id":"turn-2","status":"completed","error":null,"items":[]}}}}

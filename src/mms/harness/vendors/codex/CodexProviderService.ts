@@ -445,7 +445,11 @@ export type CodexChatInput = {
   onSession?: (session: { codexThreadId: string; turnId?: string }) => void
   drainSteer?: () => string | undefined
   /** `drainSteer` that also says whether the text is a person's (`cut`): see `TurnControl.drainSteerEntry`. */
-  drainSteerEntry?: () => { text: string; cut?: boolean } | undefined
+  drainSteerEntry?: () => { text: string; token?: string; cut?: boolean } | undefined
+  /** The drain `token` names was taken by a turn the server accepted; it will not be handed back. */
+  steerTaken?: (token?: string) => void
+  /** Hands back a drained steer no turn took (a Stop, a failed turn, a refused `turn/start`): it is not lost. */
+  returnSteer?: (text: string, token?: string) => void
   onSteer?: (text: string) => void
   /** Liveness while the turn only waits for the native helpers it started. */
   onHeartbeat?: () => void
@@ -2848,6 +2852,8 @@ export class CodexProviderService {
     const scope = this.scope
     let run: TurnRun | undefined
     let steerTimer: ReturnType<typeof setInterval> | undefined
+    // Hands back cut messages no accepted turn took (set once the turn's steer handling exists).
+    let handBack: () => void = () => {}
     const onAbort = (): void => {
       this.questions.dismissAllForThread(input.threadId)
       if (run) this.requestInterrupt(run)
@@ -2926,7 +2932,15 @@ export class CodexProviderService {
       }
       // A person's message is read now: `turn/steer` would wait for the reply or command in progress to end, so the
       // server turn is interrupted and the next one starts with the message. What the turn wrote and the results of
-      // its finished tools stay. Subagent results and an agent's steer still join natively.
+      // its finished tools stay; Codex's own helpers keep running (an interrupt of the parent leaves them), and their
+      // results join later. Subagent results and an agent's steer still join natively.
+      // A cut message is taken only once the `turn/start` that carries it is accepted. Until then it is held here,
+      // and handed back on any failure (a Stop, a failed turn, a refused start), so it never goes missing.
+      const cutHeld: Array<{ text: string; token?: string }> = []
+      let cutStarting: Array<{ text: string; token?: string }> = []
+      handBack = (): void => {
+        for (const entry of [...cutStarting.splice(0), ...cutHeld.splice(0)]) input.returnSteer?.(entry.text, entry.token)
+      }
       const cutTurns = new Set<string>()
       let cutWaiting = false
       const cutTurn = (): void => {
@@ -2938,11 +2952,15 @@ export class CodexProviderService {
           /* the turn ended meanwhile: the held text starts the next turn all the same */
         })
       }
-      const cut = (text: string): void => {
+      const cut = (entry: { text: string; token?: string }): void => {
         // In order behind native steers already on their way.
         steering = steering.then(() => {
-          hold(text)
+          cutHeld.push(entry)
           cutWaiting = true
+          steerWake?.()
+          // The person answered with a message: approvals and questions the turn asks are settled as theirs, so no
+          // card is left waiting for a turn that is being cut.
+          this.questions.autoRejectPendingForThread(input.threadId)
           cutTurn()
         })
         steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
@@ -2952,9 +2970,9 @@ export class CodexProviderService {
         const entry = input.drainSteerEntry ? input.drainSteerEntry() : undefined
         const steer = (entry ? entry.text : input.drainSteer?.())?.trim()
         if (!steer) return
+        if (entry?.cut) return cut({ text: steer, ...(entry.token ? { token: entry.token } : {}) })
         input.onSteer?.(steer)
-        if (entry?.cut) cut(steer)
-        else deliver(steer)
+        deliver(steer)
       }
       if (input.drainSteer || input.drainSteerEntry) {
         steerTimer = setInterval(() => {
@@ -3014,6 +3032,11 @@ export class CodexProviderService {
         starting.catch(() => undefined)
         await Promise.race([starting, aborted])
         current.turnOpen = true
+        // The server took the turn that carries the cut messages: they are read now, and the reply goes on below them.
+        for (const entry of cutStarting.splice(0)) {
+          input.steerTaken?.(entry.token)
+          input.onSteer?.(entry.text)
+        }
         input.onSession?.({ codexThreadId, turnId: current.turnId })
         // A person's message drained before the turn existed cuts it at once; it goes next with everything held.
         // Otherwise steers drained before the turn existed go in now.
@@ -3029,10 +3052,10 @@ export class CodexProviderService {
         if (lastTurn.status === 'interrupted') {
           signal.throwIfAborted()
           // Cut for a person's message: the run goes on with it.
-          if (!(cutTurns.has(lastTurn.id) && undelivered.length)) throw new Error('Codex interrupted the turn')
+          if (!(cutTurns.has(lastTurn.id) && (undelivered.length || cutHeld.length))) throw new Error('Codex interrupted the turn')
         }
         cutWaiting = false
-        if (!undelivered.length) {
+        if (!undelivered.length && !cutHeld.length) {
           // Codex completes the parent's turn while the helpers it started keep running, so this chat
           // (the child's run) stays open until they settle: the thread's whole helper tree when the
           // process lists it, the helpers seen in the items of the thread and its helpers otherwise. Stop interrupts
@@ -3052,10 +3075,11 @@ export class CodexProviderService {
               abandoned = held
             }
           }
-          if (!undelivered.length) break
+          if (!undelivered.length && !cutHeld.length) break
         }
         if (abandoned) afterCap = true
-        nextInput = [textInput(undelivered.splice(0).join('\n'))]
+        cutStarting = cutHeld.splice(0)
+        nextInput = [textInput([...undelivered.splice(0), ...cutStarting.map((entry) => entry.text)].join('\n'))]
       }
       // A turn that ran after the cap (a held steer) does not wait for helpers; its own are interrupted
       // before the run ends.
@@ -3077,6 +3101,7 @@ export class CodexProviderService {
         usage: current.usage()
       }
     } catch (error) {
+      handBack()
       // A failed or stopped chat leaves nothing of its own running: the thread's turn and every helper
       // under it are interrupted until they are at rest (or the sweep's deadline), after the chat has
       // already been rejected. The run is released when that ends.

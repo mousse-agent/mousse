@@ -389,6 +389,16 @@ describe('queued messages in the conversation', () => {
     expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
   })
 
+  it('shows a message sent now again at once when a Stop puts it back first in the queue', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two', { intent: 'steer', state: 'steering' })] }) })
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+    // The turn was stopped before it read B: the daemon lists it pending, first.
+    await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['b', 'a'])
+  })
+
   it('puts a message back in the queue when Send now is refused', async () => {
     api.promoteToSteer.mockRejectedValueOnce(new Error('No active turn to steer on this thread.'))
     await show([queued('a', 'one'), queued('b', 'two')])
@@ -404,6 +414,11 @@ describe('queued messages in the conversation', () => {
     await key(row, { key: 'Enter', ctrlKey: true })
     expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
     expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'b')
+    // Focus moves on to the next queued message (here the first, as B was last), not to the page, where the same
+    // chord would answer an approval; and that is held off for a moment too.
+    expect(document.activeElement).toBe(rows().find((item) => item.dataset.queuedId === 'a'))
+    const { steerKeyRecently } = await import('../../src/renderer/lib/steerKey')
+    expect(steerKeyRecently()).toBe(true)
     // Enter alone, or with another modifier, does nothing here.
     await key(rows()[0]!, { key: 'Enter' })
     await key(rows()[0]!, { key: 'Enter', ctrlKey: true, shiftKey: true })

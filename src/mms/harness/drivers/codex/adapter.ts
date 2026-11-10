@@ -189,6 +189,10 @@ export class CodexAdapter implements ProviderAdapter {
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       drainSteer: () => ctl.drainSteer(),
       ...(ctl.drainSteerEntry ? { drainSteerEntry: () => ctl.drainSteerEntry!() } : {}),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token),
+      // Called once the turn that reads the text is running: for a cut, when the server accepted the turn that
+      // carries it, so the reply row splits where the interrupt landed.
       onSteer: (text) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.

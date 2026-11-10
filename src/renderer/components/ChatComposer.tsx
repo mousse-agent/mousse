@@ -27,6 +27,7 @@ import {
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
 import { ComposerFooter, STEER_BINDING, isSteerKey, type ComposerRunProps } from './ComposerFooter'
+import { markSteerKey } from '../lib/steerKey'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
@@ -650,7 +651,10 @@ export function ChatComposer({
       e.preventDefault()
       // Ctrl+Enter (Cmd+Enter on macOS) during a run steers the running turn; otherwise it sends like Enter.
       // Alt+Enter, the earlier steer key, still steers.
-      submit(loading && (isSteerKey(e, platform) || (e.altKey && !e.ctrlKey && !e.metaKey)) ? { steer: true } : undefined)
+      const steer = loading && (isSteerKey(e, platform) || (e.altKey && !e.ctrlKey && !e.metaKey))
+      // The chord pressed again a moment later finds an empty composer: it must not answer an approval then.
+      if (steer) markSteerKey()
+      submit(steer ? { steer: true } : undefined)
     }
   }
 

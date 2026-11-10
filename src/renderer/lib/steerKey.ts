@@ -16,3 +16,20 @@ export function queuedMessageFocused(): boolean {
   const active = typeof document === 'undefined' ? null : document.activeElement
   return Boolean(active instanceof HTMLElement && active.closest('.queued-message'))
 }
+
+/**
+ * Right after a steer by key the composer is empty (or the queued message has gone), so the same chord pressed again
+ * would answer a waiting approval (`approval.allow`). For this long after a steer the chord does not approve.
+ */
+export const STEER_KEY_HOLD_MS = 1500
+let lastSteerKeyAt = Number.NEGATIVE_INFINITY
+
+/** A steer was just sent by key. */
+export function markSteerKey(): void {
+  lastSteerKeyAt = Date.now()
+}
+
+/** Whether a steer was sent by key a moment ago (`STEER_KEY_HOLD_MS`). */
+export function steerKeyRecently(): boolean {
+  return Date.now() - lastSteerKeyAt < STEER_KEY_HOLD_MS
+}

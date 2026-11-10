@@ -6,7 +6,7 @@ import type { CurrentPermissionRequest } from '../hooks/usePermissionRequests'
 import { scrollToMessage } from '../stores/chatNavigationStore'
 import { useAppStore } from '../stores/appStore'
 import { useComposerNotice, type ComposerNoticeProps } from './ComposerNotice'
-import { queuedMessageFocused } from '../lib/steerKey'
+import { queuedMessageFocused, steerKeyRecently } from '../lib/steerKey'
 
 /** Why Deny and Approve wait while this window cannot reach the background service. */
 export const APPROVAL_OFFLINE_REASON = "Can't answer until Mousse's background service reconnects"
@@ -53,7 +53,7 @@ export function ApprovalNotice({
   useCommand('approval.allow', () => controls?.onAnswer(controls.options.allow), () =>
     // From the composer with text in it the same key sends, which denies the request. On a queued message it sends
     // that message now (Steer).
-    answerable() && !(composerHasText && composerFocused()) && !queuedMessageFocused()
+    answerable() && !(composerHasText && composerFocused()) && !queuedMessageFocused() && !steerKeyRecently()
   )
   useCommand('approval.deny', () => controls?.onAnswer(controls.options.deny), answerable)
 

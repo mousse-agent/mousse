@@ -1295,6 +1295,153 @@ describe('CodexAdapter', () => {
     expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Focus on tests', 'And lint'])
   })
 
+  describe("a person's steer cuts the turn and is taken only by the turn that starts with it", () => {
+    /** A control whose steers are a person's (`cut`), with every take and hand-back recorded by token. */
+    function cutControl(queue: string[]) {
+      const taken: Array<string | undefined> = []
+      const returned: Array<[string, string | undefined]> = []
+      let drains = 0
+      const ctl: TurnControl = {
+        drainSteer: () => undefined,
+        drainSteerEntry: () => {
+          const text = queue.shift()
+          return text ? { text, token: `drain-${++drains}`, cut: true } : undefined
+        },
+        steerTaken: (token) => void taken.push(token),
+        returnSteer: (text, token) => void returned.push([text, token]),
+        heartbeat: () => {}
+      }
+      return { ctl, taken, returned }
+    }
+    const cutFrames = (): TranscriptFrame[] => [
+      ...handshake(),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
+      ...message('msg-1', ['Working']),
+      cue({ steer: 'Use pnpm' }),
+      out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } })
+    ]
+    const steerCue = (steers: string[]) => (frame: unknown) => void steers.push((frame as { steer: string }).steer)
+
+    it('interrupts the turn and starts the next one with the message, which counts as read only then', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...turnStart(7, 'Use pnpm', 'turn-2'),
+          ...message('msg-2', ['Using pnpm'], 'turn-2'),
+          completed('completed', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      const result = await new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())
+      replay.assertDone()
+      expect(result).toMatchObject({ providerRef: { nativeTurnId: 'turn-2' } })
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Use pnpm'])
+      expect(taken).toEqual(['drain-1'])
+      expect(returned).toEqual([])
+    })
+
+    it('hands the message back when Stop lands before the next turn starts', async () => {
+      const controller = new AbortController()
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          cue({ action: 'stop' }),
+          out({ id: 7, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          inn({ id: 6, result: {} }),
+          inn({ id: 7, result: {} }),
+          completed('interrupted')
+        ],
+        (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) steers.push(steer)
+          else controller.abort(new Error('stopped by the user'))
+        }
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input({ signal: controller.signal }), sink, ctl, host())).rejects.toThrow('stopped by the user')
+      await replay.idle()
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted')).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+    })
+
+    it('hands the message back when the interrupted turn ends failed', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('failed', 'turn-1', { message: 'Upstream overloaded', codexErrorInfo: null })
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow('Upstream overloaded')
+      await replay.idle()
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted')).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+    })
+
+    it('hands the message back when the server refuses the turn that would carry it', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          out({ id: 7, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('Use pnpm'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+          inn({ id: 7, error: { code: -32603, message: 'The app-server could not start the turn' } })
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted')).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+    })
+
+    it('settles the approval the cut turn was asking, as the person, so no card is left waiting', async () => {
+      const steers: string[] = []
+      const asked: string[] = []
+      questions.on('pending', (request: { requestId: string }) => void asked.push(request.requestId))
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'rm -rf build', cwd: '/w', reason: null } }),
+          cue({ steer: 'Keep the build folder' }),
+          out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          out({ id: 'srv-1', result: { decision: 'decline' } }),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...turnStart(7, 'Keep the build folder', 'turn-2'),
+          ...message('msg-2', ['Keeping it'], 'turn-2'),
+          completed('completed', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const { ctl } = cutControl(steers)
+      await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+      replay.assertDone()
+      expect(asked).toHaveLength(1)
+      expect(questions.listPendingForThread('thread-1')).toEqual([])
+    })
+  })
+
   it('stops at once while a steer is still unanswered after the turn completed', async () => {
     const controller = new AbortController()
     const steers: string[] = []

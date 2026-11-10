@@ -1707,7 +1707,8 @@ export const MessageList = memo(function MessageList({
       turns.map((turn, index) => ({
         key: resolveTurnKey(turn, index, turnKeyAliasRef.current),
         userMsg: turn.userMsg,
-        assistantMsgs: turn.assistantMsgs,
+        // A Steer block's messages are found as themselves, in the order they were sent.
+        assistantMsgs: turn.assistantMsgs.flatMap((message) => readSteerGroup(message) ?? [message]),
       })),
     [turns],
   );
@@ -1756,7 +1757,11 @@ export const MessageList = memo(function MessageList({
     }
     const { messageId } = messageRequest;
     const index = turns.findIndex(
-      (turn) => turn.userMsg?.id === messageId || turn.assistantMsgs.some((message) => message.id === messageId),
+      (turn) =>
+        turn.userMsg?.id === messageId ||
+        turn.assistantMsgs.some(
+          (message) => message.id === messageId || Boolean(readSteerGroup(message)?.some((steered) => steered.id === messageId)),
+        ),
     );
     const container = chatContainerRef.current;
     const rows = rowsRef.current;

@@ -101,8 +101,6 @@ describe('OrchestratorService concurrent threads and queue', () => {
     // the queue pill can show sticky "Steering" state.
     const retained = orch.listQueue(thread.id).find((i) => i.id === item.id)
     expect(retained?.state).toBe('steering')
-    // Steers sent one after another are handed over together once the newest has settled (STEER_GATHER_MS).
-    for (const entry of session.activeTurn.pendingSteer) entry.at = 0
     const drained = (orch as unknown as { drainSteerForSession: (s: unknown, t: unknown) => { entries: Array<{ text: string; itemId?: string }> } | undefined }).drainSteerForSession(session, session.activeTurn)
     expect(drained?.entries).toEqual([expect.objectContaining({ text: 'please prefer tests', itemId: item.id })])
     // Drain alone is not an acknowledgement: a crash here must leave the steer
@@ -201,6 +199,27 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'steering'], ['A', 'pending'], ['B', 'pending']])
     expect(orch.getMessages(thread.id).filter((m) => m.role === 'user').map((m) => [m.content, m.steered])).toEqual([['C', true]])
     expect(session.steerOnStart).toEqual([])
+  })
+
+  it('a Stop during setup keeps the order of messages sent now: they go first as sent, nothing joins the stopped turn', () => {
+    const thread = store.createThread('Stop during setup')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    session.turnAdmitted = true
+    orch.enqueueForThread(thread.id, 'A')
+    const b = orch.enqueueForThread(thread.id, 'B')
+    const c = orch.enqueueForThread(thread.id, 'C')
+    expect(orch.promoteQueueItem(thread.id, b.id)).toEqual({ ok: true })
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['B', 'C', 'A'])
+    // Stop lands while the turn is still set up; the turn then starts aborted.
+    session.abortRequested = true
+    session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    session.activeTurn.abort.abort()
+    ;(orch as unknown as { deliverSteersOnStart: (s: unknown) => void }).deliverSteersOnStart(session)
+    expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['B', 'pending'], ['C', 'pending'], ['A', 'pending']])
+    expect(session.drainAfterSettle).toBe(true)
+    expect(orch.getMessages(thread.id).filter((m) => m.role === 'user')).toEqual([])
   })
 
   it('a Stop hides the copy of a sent-now message the turn never read, which then runs once as its own turn', () => {

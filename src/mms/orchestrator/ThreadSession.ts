@@ -41,15 +41,7 @@ export interface SteerEntry {
    * it again: the text then runs as a turn of its own, whose prompt shows it once.
    */
   echoId?: string
-  /** When it was sent (ms): steers sent in quick succession reach the model together (`STEER_GATHER_MS`). */
-  at?: number
 }
-
-/**
- * A person's steers sent within this long of each other reach the model together, in order, as one input: the
- * drain hands them over once the newest is this old. Short enough that the model still reads them at once.
- */
-export const STEER_GATHER_MS = 250
 
 export interface ActiveTurnControl {
   abort: AbortController

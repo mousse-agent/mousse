@@ -9,7 +9,7 @@ import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue
 import { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
 import { formatBinding } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
-import { isSteerKey, STEER_BINDING } from '../lib/steerKey'
+import { isSteerKey, markSteerKey, STEER_BINDING } from '../lib/steerKey'
 import '../styles/queued-messages.css'
 
 export { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
@@ -276,6 +276,12 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
               if (edit || busy || steering || !isSteerKey(event, platform)) return
               event.preventDefault()
               event.stopPropagation()
+              markSteerKey()
+              // This message leaves the list: focus moves on to the next queued one (or the one before, or the
+              // composer), never to the page, where the same chord would answer an approval.
+              const here = event.currentTarget
+              const next = [here.nextElementSibling, here.previousElementSibling].find((el): el is HTMLElement => el instanceof HTMLElement && el.classList.contains('queued-message'))
+              ;(next ?? document.querySelector<HTMLElement>('textarea.composer-input'))?.focus()
               void queue.steer(item.id)
             }}
             draggable={armedId === item.id}

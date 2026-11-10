@@ -337,9 +337,18 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     sentNowTimers.current.clear()
     setSentNow({})
   }, [threadId])
-  // Gone from the daemon's list: nothing left to hide.
+  // Gone from the daemon's list: nothing left to hide. Listed as waiting again after it was on its way (a Stop put
+  // it back first in the queue): it shows again at once.
+  const seenSteering = useRef(new Set<string>())
   useEffect(() => {
-    for (const id of Object.keys(sentNow)) if (!items.some((item) => item.id === id)) unsend(id)
+    for (const item of items) if (item.state === 'steering') seenSteering.current.add(item.id)
+    for (const id of Object.keys(sentNow)) {
+      const item = items.find((entry) => entry.id === id)
+      if (!item || (item.state === 'pending' && seenSteering.current.has(id))) {
+        seenSteering.current.delete(id)
+        unsend(id)
+      }
+    }
   }, [items, sentNow, unsend])
   const steer = useCallback(async (itemId: string) => {
     if (!threadId) return
