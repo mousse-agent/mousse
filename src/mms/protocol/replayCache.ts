@@ -22,9 +22,9 @@ export const NON_REPLAYED_METHODS: ReadonlySet<string> = new Set([
   ...LOCAL_READ_METHODS
 ])
 
-/** The largest answer kept whole; a larger one is replaced by a small marker. */
+/** The largest answer kept whole; a larger one is not kept, and its id answers `alreadyCompleted`. */
 export const MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES = 256 * 1024
-/** Answers kept per connection. */
+/** Answers kept per connection. Ids of every completed change are kept apart, for the connection's lifetime. */
 export const MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS = 64
 /** Bytes of kept answers per connection. */
 export const MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -34,20 +34,17 @@ export function keepsResponseForReplay(method: string): boolean {
 }
 
 /**
- * The entry kept for a completed change. A large answer becomes an error that says the request already
- * ran, so a repeated id still never runs the change twice.
+ * The answer to an id whose change already ran but whose answer is no longer kept (too large, or
+ * pushed out by newer ones). The change is never run twice.
  */
-export function replayEntryFor(res: ProtocolResponse): { entry: ProtocolResponse; bytes: number } {
-  const bytes = Buffer.byteLength(JSON.stringify(res), 'utf8')
-  if (bytes <= MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES) return { entry: res, bytes }
-  const entry: ProtocolResponse = {
+export function alreadyCompleted(id: string): ProtocolResponse {
+  return {
     kind: 'res',
-    id: res.id,
+    id,
     ok: false,
     error: {
       code: 'duplicate_request',
-      message: 'Request already completed; its response is too large to send again'
+      message: 'Request already completed; its response is no longer kept'
     }
   }
-  return { entry, bytes: Buffer.byteLength(JSON.stringify(entry), 'utf8') }
 }

@@ -48,8 +48,9 @@ import { OutboundWriter } from './outboundWriter'
 import {
   MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS,
   MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES,
+  alreadyCompleted,
   keepsResponseForReplay,
-  replayEntryFor
+  MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES
 } from './replayCache'
 import { envelopeFrames } from './envelopeChunks'
 import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
@@ -114,6 +115,11 @@ interface ClientSession {
   completedResponses: Map<string, ProtocolResponse>
   completedResponseSizes: Map<string, number>
   completedResponseBytes: number
+  /**
+   * Ids of every completed change on this connection, kept after its answer is dropped so a repeated
+   * id is refused instead of run again. Ids carry no order, so they stay until the connection closes.
+   */
+  completedIds: Set<string>
   writer: OutboundWriter
   connectionEventPending: number
   connectionEventLifetime: AbortController
@@ -767,6 +773,7 @@ export class MmsProtocolServer {
       completedResponses: new Map(),
       completedResponseSizes: new Map(),
       completedResponseBytes: 0,
+      completedIds: new Set(),
       writer: undefined as unknown as OutboundWriter,
       connectionEventPending: 0,
       connectionEventLifetime: new AbortController()
@@ -929,6 +936,10 @@ export class MmsProtocolServer {
     const cached = session.completedResponses.get(v.req.id)
     if (cached) {
       this.sendRaw(session, cached)
+      return
+    }
+    if (session.completedIds.has(v.req.id)) {
+      this.sendRaw(session, alreadyCompleted(v.req.id))
       return
     }
     if (session.inFlightIds.has(v.req.id)) {
@@ -1211,10 +1222,13 @@ export class MmsProtocolServer {
    */
   private cacheCompleted(session: ClientSession, res: ProtocolResponse, method: string): void {
     if (!keepsResponseForReplay(method)) return
-    const { entry, bytes } = replayEntryFor(res)
+    session.completedIds.add(res.id)
     session.completedResponseBytes -= session.completedResponseSizes.get(res.id) ?? 0
     session.completedResponses.delete(res.id)
-    session.completedResponses.set(res.id, entry)
+    session.completedResponseSizes.delete(res.id)
+    const bytes = Buffer.byteLength(JSON.stringify(res), 'utf8')
+    if (bytes > MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES) return
+    session.completedResponses.set(res.id, res)
     session.completedResponseSizes.set(res.id, bytes)
     session.completedResponseBytes += bytes
     while (session.completedResponses.size > MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS ||
@@ -1442,6 +1456,7 @@ export class MmsProtocolServer {
     session.completedResponses.clear()
     session.completedResponseSizes.clear()
     session.completedResponseBytes = 0
+    session.completedIds.clear()
     this.clients.delete(session.id)
     this.opts.commandRouter?.revoke(session.id, 'close')
     this.opts.mms.domains?.notifyConnectionClosed(session.id)

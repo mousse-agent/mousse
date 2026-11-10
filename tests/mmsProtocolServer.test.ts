@@ -740,28 +740,71 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
   })
 
   it('keeps answers of changes for replay, but not reads or large bodies', () => {
-    const cache = { completedResponses: new Map(), completedResponseSizes: new Map(), completedResponseBytes: 0 }
+    const cache = { completedResponses: new Map(), completedResponseSizes: new Map(), completedResponseBytes: 0, completedIds: new Set<string>() }
     const cacheCompleted = (server as unknown as { cacheCompleted: (session: typeof cache, response: unknown, method: string) => void }).cacheCompleted.bind(server)
     const image = 'x'.repeat(2 * 1024 * 1024)
     for (let index = 0; index < 30; index++) cacheCompleted(cache, { kind: 'res', id: `img-${index}`, ok: true, result: { data: image } }, 'thread.messageImage')
     cacheCompleted(cache, { kind: 'res', id: 'get', ok: true, result: { id: 't' } }, 'threads.get')
     expect(cache.completedResponses.size).toBe(0)
+    expect(cache.completedIds.size).toBe(0)
 
     cacheCompleted(cache, { kind: 'res', id: 'send', ok: true, result: { queued: true } }, 'orchestrator.send')
     expect(cache.completedResponses.get('send')).toEqual({ kind: 'res', id: 'send', ok: true, result: { queued: true } })
 
     cacheCompleted(cache, { kind: 'res', id: 'big', ok: true, result: image }, 'orchestrator.send')
-    const marker = cache.completedResponses.get('big') as { ok: boolean; error?: { code: string } }
-    expect(marker.ok).toBe(false)
-    expect(marker.error?.code).toBe('duplicate_request')
-    expect(cache.completedResponseSizes.get('big')).toBeLessThan(1024)
+    expect(cache.completedResponses.has('big')).toBe(false)
+    expect(cache.completedIds.has('big')).toBe(true)
 
     for (let index = 0; index < 200; index++) cacheCompleted(cache, { kind: 'res', id: `w-${index}`, ok: true, result: 'y'.repeat(200 * 1024) }, 'threads.rename')
     expect(cache.completedResponses.size).toBeLessThanOrEqual(MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS)
     expect(cache.completedResponseBytes).toBeLessThanOrEqual(MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES)
     expect(cache.completedResponseSizes.size).toBe(cache.completedResponses.size)
     expect(cache.completedResponses.has('w-199')).toBe(true)
+    // Answers pushed out of the cache still leave their ids behind.
+    expect(cache.completedResponses.has('w-0')).toBe(false)
+    expect(cache.completedIds.has('w-0')).toBe(true)
   })
+
+  it('refuses a change sent again after 100 later changes pushed its answer out', async () => {
+    const before = mms.threads.listAllThreads().length
+    const resend = await new Promise<{ ok: boolean; code?: string }>((resolve, reject) => {
+      const socket = createConnection(endpoint)
+      const dec = new FrameDecoder()
+      let sent = 0
+      let done = 0
+      const finish = (error: Error | null, value?: { ok: boolean; code?: string }) => {
+        clearTimeout(timer); socket.destroy()
+        if (error) reject(error)
+        else resolve(value!)
+      }
+      const timer = setTimeout(() => finish(new Error(`timeout after ${done} changes`)), 50_000)
+      const create = () => { const index = sent++; socket.write(encodeFrame({ kind: 'req', id: `m-${index}`, method: 'threads.create', params: { name: `replay-${index}` } })) }
+      socket.on('connect', () => socket.write(encodeFrame({ kind: 'hello', protocolVersion: MMS_PROTOCOL_VERSION, ownerToken, clientType: 'test' })))
+      socket.on('data', (chunk) => {
+        dec.push(chunk)
+        for (const frame of dec.shiftAll()) {
+          const env = parseEnvelope(frame)
+          if (env?.kind === 'hello_ok') { create(); continue }
+          if (env?.kind !== 'res') continue
+          if (done > 100) { finish(null, { ok: env.ok, code: env.error?.code }); return }
+          if (!env.ok) { finish(new Error(`${env.id} failed: ${env.error?.message}`)); return }
+          done++
+          if (done === 1) {
+            // m-0 is done; 100 later changes (32 at a time) push its answer out of the cache.
+            while (sent < 33) create()
+          } else if (sent < 101) {
+            create()
+          } else if (done === 101) {
+            socket.write(encodeFrame({ kind: 'req', id: 'm-0', method: 'threads.create', params: { name: 'replay-0' } }))
+          }
+        }
+      })
+      socket.on('error', reject)
+    })
+    expect(resend).toEqual({ ok: false, code: 'duplicate_request' })
+    expect(mms.threads.listAllThreads().length - before).toBe(101)
+    expect(mms.threads.listAllThreads().filter((thread) => thread.name === 'replay-0')).toHaveLength(1)
+  }, 60_000)
 
   it('keeps every routed change for replay and skips only reads', () => {
     for (const [method, row] of Object.entries(ROUTED_METHODS)) {
