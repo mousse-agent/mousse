@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Markdown } from '../src/renderer/chat/components/agent-elements/markdown'
-import { MarkdownPreview } from '../src/renderer/components/editors/MarkdownPreview'
+import { MarkdownPreview, preloadMarkdownHighlight } from '../src/renderer/components/editors/MarkdownPreview'
 import { setRenderMath } from '../src/renderer/markdown/math/renderMathSetting'
 
 function render(content: string): string {
@@ -275,7 +275,22 @@ describe('chat Markdown math', () => {
 })
 
 describe('MarkdownPreview highlighting', () => {
-  it('highlights code in every preview and language with its one shared highlighter', () => {
+  // Runs first: static rendering runs no effects, so nothing in this file has loaded the highlighter yet.
+  it('sets code blocks in their final type before the highlighter has loaded', async () => {
+    const value = '```js\nconst a = 1\n```\n\n```\nplain\n```\n\n```unknownlang\nx\n```\n\nInline `code`.'
+    const codeClasses = (markup: string) => [...markup.matchAll(/<code( class="[^"]*")?>/g)].map((match) => match[1] ?? '')
+    const before = renderToStaticMarkup(createElement(MarkdownPreview, { value }))
+    expect(before).toContain('<code class="hljs language-js">const a = 1\n</code>')
+    expect(before).toContain('<pre><code>plain\n</code></pre>')
+    await preloadMarkdownHighlight()
+    const after = renderToStaticMarkup(createElement(MarkdownPreview, { value }))
+    expect(after).toContain('<span class="hljs-keyword">const</span>')
+    // Only the colours arrive with the highlighter: every code element already had its classes.
+    expect(codeClasses(before)).toEqual(codeClasses(after))
+  })
+
+  it('highlights code in every preview and language with its one shared highlighter', async () => {
+    await preloadMarkdownHighlight()
     const first = renderToStaticMarkup(createElement(MarkdownPreview, { value: '```js\nconst a = 1\n```' }))
     const second = renderToStaticMarkup(createElement(MarkdownPreview, { value: '```python\ndef f():\n    return 1\n```' }))
     expect(first).toContain('<span class="hljs-keyword">const</span>')

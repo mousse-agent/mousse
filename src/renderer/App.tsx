@@ -1,7 +1,5 @@
-import { useEffect, useRef, useCallback, useState, startTransition, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { Suspense, useEffect, useRef, useCallback, useState, startTransition, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
-import { ChatWorkspace } from './components/chats/ChatWorkspace'
-import { NewBotDialogHost } from './components/bots/NewBotDialog'
 import { useChatsStore } from './stores/chatsStore'
 import { OrchestratorChat } from './components/OrchestratorChat'
 
@@ -12,7 +10,6 @@ import { KeepMounted } from './components/KeepMounted'
 
 import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { SlidingThreadsPane } from './components/SlidingThreadsPane'
-import { AutomationsPage } from './components/AutomationsPage'
 import { RunStrip } from './components/automations/inbox/RunStrip'
 import { useInboxShowsThread } from './components/automations/inbox/inboxStore'
 import { NavigationRail } from './components/NavigationRail'
@@ -23,7 +20,6 @@ import { WorkspaceLoading } from './components/WorkspaceLoading'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
-import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 import { CommandPalette } from './components/CommandPalette'
 import { ToastHost } from './components/ui/Toast'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
@@ -38,6 +34,9 @@ import { useAppStore } from './stores/appStore'
 import { useViewSwap } from './lib/motion'
 import { normalizeRunSettings } from '../shared/settings'
 import { useAppCommands } from './commands/useAppCommands'
+import { useBotsStore } from './stores/botsStore'
+// Rail pages, Chats and New bot load as their own chunks; see lib/lazySurfaces.
+import { AutomationsPage, ChatWorkspace, NewBotDialogHost, SubscriptionUsagePage, preloadSplitSurfaces } from './lib/lazySurfaces'
 import { useCommandShortcuts } from './commands/useCommandShortcuts'
 
 import './styles/app.css'
@@ -93,6 +92,15 @@ export default function App() {
   // which takes the threads sidebar's place.
   const inboxThread = useInboxShowsThread() && automationsOpen
   const workspaceReady = useAppStore((s) => s.workspaceReady)
+  const newBotOpen = useBotsStore((s) => s.newBotOpen)
+  // The Automations page's (hidden) shell is there from the profile binding; the page itself, and its first inbox
+  // read, mount once the workspace has painted (or when it is opened first) and then stay mounted.
+  const [automationsMounted, setAutomationsMounted] = useState(false)
+  if (!automationsMounted && profileReady && (workspaceReady || automationsOpen)) setAutomationsMounted(true)
+  // With the workspace on screen, fetch the split-out pages and panels while idle, so opening one is instant.
+  useEffect(() => {
+    if (workspaceReady) preloadSplitSurfaces()
+  }, [workspaceReady])
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the old one
@@ -496,9 +504,11 @@ export default function App() {
         <NavigationRail key={`${profileId}:${bootstrapAttempt}`}
           onMouseEnter={threadsPeek.enterRail} onMouseLeave={threadsPeek.leaveRail} onPointerDown={threadsPeek.cancelIntent} />
 
-        {profileReady && <AutomationsPage />}
+        {profileReady && (automationsMounted
+          ? <Suspense fallback={<div className="automations-page" hidden={!automationsOpen} />}><AutomationsPage /></Suspense>
+          : <div className="automations-page" hidden={!automationsOpen} />)}
         {profileReady && usageOpen && <div className="usage-rail-page">
-          <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />
+          <Suspense fallback={null}><SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} /></Suspense>
         </div>}
         <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} data-inbox-thread={inboxThread || undefined} style={{ display: railPageOpen && !inboxThread ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
@@ -573,7 +583,7 @@ export default function App() {
         {layoutMode === 'chats' && <KeepMounted active={!usageOpen} leaving={workspaceSwap === 'out'} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
-            : <ChatWorkspace key={profileId} />}
+            : <Suspense fallback={null}><ChatWorkspace key={profileId} /></Suspense>}
         </KeepMounted>}
 
         {mainAreaOpen && layoutMode === 'projects' && (
@@ -607,7 +617,7 @@ export default function App() {
       <CommandPalette />
       <ThreadRenameDialog />
       {/* New bot opens from the Chats sidebar, which can show while the pane is on Projects (after a restart). */}
-      {profileReady && <NewBotDialogHost />}
+      {profileReady && newBotOpen && <Suspense fallback={null}><NewBotDialogHost /></Suspense>}
 
       <ToastHost />
 

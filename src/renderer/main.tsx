@@ -1,7 +1,8 @@
-import React from 'react'
+import React, { Suspense, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
-import { SettingsPage } from './components/SettingsPage'
+// Settings loads as its own chunk the first time it opens (preloaded once the workspace has painted).
+import { SettingsPage } from './lib/lazySurfaces'
 import { applyAppearance, useTheme } from './hooks/useTheme'
 import { getDefaultSettings } from '../shared/settings'
 import { useAppStore } from './stores/appStore'
@@ -30,10 +31,17 @@ void document.fonts.load('400 13px "Geist Mono"').catch(() => { /* system monosp
 
 function ProfilePages() {
   useTheme()
+  // Settings mounts once the workspace has painted (or when it is opened first), then stays mounted; closed, it
+  // draws nothing. Until its chunk is in, the app stays as it was: no empty page.
+  const settingsOpen = useAppStore((state) => state.settingsOpen)
+  const workspaceReady = useAppStore((state) => state.workspaceReady)
+  const [mounted, setMounted] = useState(false)
+  if (!mounted && (settingsOpen || workspaceReady)) setMounted(true)
+  if (!mounted) return null
   return (
-    <>
+    <Suspense fallback={null}>
       <SettingsPage />
-    </>
+    </Suspense>
   )
 }
 

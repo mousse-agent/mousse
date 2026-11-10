@@ -1,10 +1,9 @@
 import { useInboxShowsThread } from './automations/inbox/inboxStore'
-import { ProjectTerminalPanel } from './ProjectTerminalPanel'
-import { BrowserPanel } from './BrowserPanel'
-import { FilesPanel } from './FilesPanel'
-import { ChangesPanel } from './changes/ChangesPanel'
-import { PullRequestPanel } from './PullRequestPanel'
-import { DocumentPanel } from './DocumentPanel'
+import { Suspense } from 'react'
+// Each surface is its own chunk, loaded when the panel first draws it and preloaded once the window has painted.
+import { BrowserPanel, ChangesPanel, DocumentPanel, FilesPanel, ProjectTerminalPanel, PullRequestPanel } from '../lib/lazySurfaces'
+// Shared markdown rules, once loaded here with the Documents panel: kept in place so the stylesheet's order holds.
+import '../styles/chat-markdown.css'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { useAppStore } from '../stores/appStore'
 import { surfaceTabItems } from '../lib/surfaces'
@@ -53,18 +52,19 @@ export function MainViewPanel({ open = true }: { open?: boolean }) {
   return (
     <KeepMountedStack>
       {/* xterm keeps its scrollback while another tab shows. The Files tab keeps open files and their edits, but its
-          tree and editor unmount until it shows again; they come back with their open folders, scroll and selection. */}
+          tree and editor unmount until it shows again; they come back with their open folders, scroll and selection.
+          While a surface's chunk loads its pane stays empty: the pane itself keeps its size. */}
       <KeepMounted active={mainView === 'files'} className="keep-mounted-pane">
-        <FilesPanel showing={mainView === 'files' && mainAreaOpen && !overlayOpen} />
+        <Suspense fallback={null}><FilesPanel showing={mainView === 'files' && mainAreaOpen && !overlayOpen} /></Suspense>
       </KeepMounted>
       <KeepMounted active={mainView === 'terminal'} className="keep-mounted-pane">
-        <ProjectTerminalPanel />
+        <Suspense fallback={null}><ProjectTerminalPanel /></Suspense>
       </KeepMounted>
       <KeepMounted active={mainView === 'browser'} preserveLayout className="keep-mounted-pane">
-        <BrowserPanel active={mainView === 'browser' && mainAreaOpen && !overlayOpen} />
+        <Suspense fallback={null}><BrowserPanel active={mainView === 'browser' && mainAreaOpen && !overlayOpen} /></Suspense>
       </KeepMounted>
       {mainView !== 'files' && mainView !== 'terminal' && mainView !== 'browser' && (
-        <div className="keep-mounted-pane">{transientPanel}</div>
+        <div className="keep-mounted-pane"><Suspense fallback={null}>{transientPanel}</Suspense></div>
       )}
       {!empty && <ComputerSurfaceNote />}
     </KeepMountedStack>
