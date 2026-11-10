@@ -75,6 +75,37 @@ describe('reapProcessTree of a process Mousse started', () => {
     expect(kill).toHaveBeenCalledTimes(1)
   })
 
+  it('skips a descendant whose pid was given to another program between the list and its kill, and starts every kill at once', async () => {
+    let exited = false
+    const kill = vi.fn(() => { exited = true })
+    const snapshot = [entry(ROOT, 1, SPAWNED_AT + 50), entry(5001, ROOT, SPAWNED_AT + 1_000), entry(5002, ROOT, SPAWNED_AT + 1_200), entry(5003, ROOT, SPAWNED_AT + 1_400)]
+    // Read again right before the kills: 5002 is now another program, created since; 5003 is gone.
+    const fresh = [entry(ROOT, 1, SPAWNED_AT + 50), entry(5001, ROOT, SPAWNED_AT + 1_000), entry(5002, 77, SPAWNED_AT + 30_000)]
+    const table = vi.fn().mockResolvedValueOnce(snapshot).mockResolvedValueOnce(fresh)
+    // Each kill takes as long as it likes: none waits for another before it starts.
+    const pending: Array<() => void> = []
+    const killPid = vi.fn((_pid: number) => new Promise<void>((resolve) => { pending.push(resolve) }))
+    const reaped = reapProcessTree(ROOT, { platform: 'win32', graceMs: 20, settleMs: 200, root: { spawnedAt: SPAWNED_AT, exited: () => exited, kill }, alive: (target) => target === ROOT ? !exited : false, table, killPid })
+    await vi.waitFor(() => expect(kill).toHaveBeenCalledTimes(1))
+    expect(killPid.mock.calls.map(([target]) => target)).toEqual([5001])
+    expect(table).toHaveBeenCalledTimes(2)
+    for (const resolve of pending) resolve()
+    expect(await reaped).toBe('killed')
+  })
+
+  it('kills every confirmed descendant without waiting for one kill to end before the next starts', async () => {
+    let exited = false
+    const snapshot = [entry(ROOT, 1, SPAWNED_AT + 50), entry(5001, ROOT, SPAWNED_AT + 1_000), entry(5002, 5001, SPAWNED_AT + 1_100), entry(5003, ROOT, SPAWNED_AT + 1_200)]
+    const pending: Array<() => void> = []
+    const killPid = vi.fn((_pid: number) => new Promise<void>((resolve) => { pending.push(resolve) }))
+    const reaped = reapProcessTree(ROOT, { platform: 'win32', graceMs: 20, settleMs: 200, root: { spawnedAt: SPAWNED_AT, exited: () => exited, kill: () => { exited = true } }, alive: (target) => target === ROOT ? !exited : false, table: async () => snapshot, killPid })
+    // All three are under way while none has ended.
+    await vi.waitFor(() => expect(killPid).toHaveBeenCalledTimes(3))
+    expect(killPid.mock.calls.map(([target]) => target).sort()).toEqual([5001, 5002, 5003])
+    for (const resolve of pending) resolve()
+    expect(await reaped).toBe('killed')
+  })
+
   it('kills only the process, through its handle, when the list cannot be read', async () => {
     let exited = false
     const kill = vi.fn(() => { exited = true })

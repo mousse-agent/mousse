@@ -253,8 +253,9 @@ function killPid(pid: number): Promise<void> {
  * - a process its handle shows exited is not killed, whatever now has its pid;
  * - right before the kill the process list is read, and a pid whose creation time is not the anchored one is left alone;
  * - on Windows the tree is the root and the descendants found by identity (`anchoredTree`: parent with the same
- *   creation time, created after it), each killed by its own pid, the root through its handle. Without a list, only
- *   the root is killed, through its handle.
+ *   creation time, created after it). Each descendant is checked again in a fresh list read right before the kills,
+ *   and skipped unless its pid still has the same creation time; the kills by pid all start at once, the root's through
+ *   its handle. Without a list, only the root is killed, through its handle.
  */
 export async function reapProcessTree(
   pid: number,
@@ -336,15 +337,20 @@ async function reapAnchored(
     if (!disproved && !rootGone()) {
       if (platform === 'win32' && root.spawnedAt !== undefined) {
         const kill = options.killPid ?? killPid
-        // The descendants first, while their parents still run; then the root, through its handle when there is one.
-        // Without a list none is known for certain, and only the root is killed.
-        for (const target of table ? anchoredTree(table, pid, root.spawnedAt, 'win32').keys() : []) {
-          if (target === pid) continue
-          await kill(target)
-          killed.push(target)
-        }
+        // The descendants found by identity in that list. Without a list none is known for certain, and only the root is killed.
+        const found = table ? [...anchoredTree(table, pid, root.spawnedAt, 'win32')].filter(([target]) => target !== pid) : []
+        // A `taskkill` can take seconds, so they are not killed one after another from that list: a fresh list, shared by
+        // the kills, is read right before them, a descendant that is gone or whose pid now has another creation time is
+        // skipped (one whose creation time cannot be read cannot be confirmed, and is skipped too), and every kill starts
+        // at once. The root is killed through its handle meanwhile.
+        const fresh = found.length ? await (options.table ?? readProcessEntries)() : undefined
+        const now = new Map((fresh ?? []).map((entry) => [entry.pid, entry]))
+        const confirmed = found.filter(([target, started]) => started !== undefined && now.get(target)?.started === started)
+        const kills = confirmed.map(([target]) => Promise.resolve(kill(target)).catch(() => undefined))
+        killed.push(...confirmed.map(([target]) => target))
         if (root.kill) root.kill()
-        else await kill(pid)
+        else kills.push(Promise.resolve(kill(pid)).catch(() => undefined))
+        await Promise.all(kills)
       } else {
         // POSIX (the pid is the process while its handle shows it running), or a Windows process with no anchor: from the root.
         await (options.killTree ?? ((target: number) => killTree(target, platform)))(pid)
