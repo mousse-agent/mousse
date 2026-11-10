@@ -747,19 +747,18 @@ export type PromptMarkerLayout = {
 /** Width of the tick column (`.chat-prompt-ticks`) and its gap to the transcript text. */
 const PROMPT_RAIL_WIDTH = 40;
 const PROMPT_RAIL_GAP = 8;
-/** The rail is for long threads: shown once the transcript is taller than this many screens. */
-const PROMPT_RAIL_MIN_SCREENS = 3;
+/** The rail shows once the thread has this many prompts to move between, however short the thread is. */
+const PROMPT_RAIL_MIN_PROMPTS = 2;
 
 /**
  * Where the rail sits (px from the left of the list), right beside the transcript's text, or null when
- * the thread is short or the gutter is too narrow for the rail to stay clear of the text.
+ * the thread has a single prompt or the gutter is too narrow for the rail to stay clear of the text.
  */
-export function promptRailLeft({ textLeft, scrollHeight, clientHeight }: {
+export function promptRailLeft({ textLeft, prompts }: {
   textLeft: number;
-  scrollHeight: number;
-  clientHeight: number;
+  prompts: number;
 }): number | null {
-  if (clientHeight <= 0 || scrollHeight <= clientHeight * PROMPT_RAIL_MIN_SCREENS) return null;
+  if (prompts < PROMPT_RAIL_MIN_PROMPTS) return null;
   const left = Math.round(textLeft - PROMPT_RAIL_GAP - PROMPT_RAIL_WIDTH);
   return left >= 4 ? left : null;
 }
@@ -833,6 +832,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   const markerOffsetsRef = useRef<number[]>([]);
   const rafRef = useRef(0);
   const growthTimerRef = useRef(0);
+  /** The transcript column's left edge (viewport px) when the rail was last placed. */
+  const columnLeftRef = useRef<number | null>(null);
   const turns = useMemo(
     () => givenTurns ?? groupMessagesIntoTurns(normalizeMessages(messages ?? [])),
     [givenTurns, messages],
@@ -883,8 +884,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       const container = containerRef.current;
       const content = contentRef.current;
       if (!container || !content) return;
-      const scrollHeight = container.scrollHeight;
-      if (!scrollHeight) return;
+      // Not laid out yet (a hidden pane): the container's observer places the rail once it is.
+      if (!container.scrollHeight) return;
       const escapeId =
         typeof CSS !== "undefined" && typeof CSS.escape === "function"
           ? (id: string) => CSS.escape(id)
@@ -915,10 +916,11 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       markerPositionsRef.current = next;
       markerOffsetsRef.current = next.map((marker) => marker.offset);
       const listLeft = (container.parentElement ?? container).getBoundingClientRect().left;
+      const columnLeft = content.getBoundingClientRect().left;
+      columnLeftRef.current = columnLeft;
       setRailLeft(promptRailLeft({
-        textLeft: content.getBoundingClientRect().left - listLeft + (parseFloat(getComputedStyle(content).paddingLeft) || 0),
-        scrollHeight,
-        clientHeight: container.clientHeight,
+        textLeft: columnLeft - listLeft + (parseFloat(getComputedStyle(content).paddingLeft) || 0),
+        prompts: next.length,
       }));
       updateActiveMarker();
       setMarkers((prev) => {
@@ -984,6 +986,38 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       window.removeEventListener("resize", updateMarkers);
     };
   }, [updateMarkers, updateMarkersSoon, containerRef, contentRef]);
+
+  // The column can move with nothing resizing: the docked side card takes width on the right and the
+  // column slides left, and slides back when the card goes (Chats, Settings, Usage, the card's button).
+  // The pane's style or class changes first, and a slide ends with a transition on the column.
+  useEffect(() => {
+    const container = containerRef.current;
+    const content = contentRef.current;
+    if (!container || !content) return;
+    let frame = 0;
+    const placeIfMoved = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (content.getBoundingClientRect().left !== columnLeftRef.current) updateMarkers();
+      });
+    };
+    const ancestors = new MutationObserver(placeIfMoved);
+    for (let element = container.parentElement; element; element = element.parentElement) {
+      ancestors.observe(element, { attributes: true, attributeFilter: ["style", "class"] });
+    }
+    const onTransitionEnd = (event: TransitionEvent) => {
+      if (event.target === content) placeIfMoved();
+    };
+    content.addEventListener("transitionend", onTransitionEnd);
+    content.addEventListener("transitioncancel", onTransitionEnd);
+    return () => {
+      ancestors.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+      content.removeEventListener("transitionend", onTransitionEnd);
+      content.removeEventListener("transitioncancel", onTransitionEnd);
+    };
+  }, [updateMarkers, containerRef, contentRef]);
 
   const cancelScroll = useCallback(() => {
     if (scrollAnimRef.current) {
