@@ -8,10 +8,13 @@ vi.mock('react', async load => ({
   useState: (initial: unknown) => {
     const index = hooks.stateIndex++
     if (!(index in hooks.states)) hooks.states[index] = initial
-    return [hooks.states[index], (value: unknown) => { hooks.states[index] = value }]
+    return [hooks.states[index], (value: unknown) => {
+      hooks.states[index] = typeof value === 'function' ? (value as (current: unknown) => unknown)(hooks.states[index]) : value
+    }]
   },
   useRef: (initial: unknown) => hooks.refs[hooks.refIndex++] ?? (hooks.refs[hooks.refIndex - 1] = { current: initial }),
   useCallback: (callback: unknown) => callback,
+  useMemo: (create: () => unknown) => create(),
   useEffect: (effect: () => unknown) => { if (hooks.mount) hooks.effects.push(effect) },
   useContext: () => hooks.context
 }))

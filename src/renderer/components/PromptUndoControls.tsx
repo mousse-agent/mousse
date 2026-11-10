@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChevronLeft, ChevronRight, IconArrowBackUp, Pencil } from '../lib/icons'
 import { showToast } from './ui/Toast'
 import { useAppStore } from '../stores/appStore'
@@ -46,6 +46,13 @@ function noticeOf(result: unknown): string | null {
   return typeof notice === 'string' && notice ? notice : null
 }
 
+/** True when two history reads say the same thing (each read arrives as a new object). */
+export function sameHistory(a: ThreadActionHistory | null, b: ThreadActionHistory | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
 /** One authoritative history read for the entire visible transcript. */
 export function PromptUndoProvider({ threadId, busy, revision, children }: {
   threadId?: string | null; busy: boolean; revision: unknown; children: ReactNode
@@ -67,8 +74,9 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
     setHistory(null); setError(null); setChanges(null); setNotice(null)
     if (!threadId || busy) return
     let current = true
+    // Read again every few seconds; an unchanged history keeps its object, so the prompts do not re-render.
     const refresh = () => void readThreadActionHistory(threadId, true).then(value => {
-      if (current && isCurrent()) setHistory(value)
+      if (current && isCurrent()) setHistory(previous => sameHistory(previous, value) ? previous : value)
     }).catch(() => {
       // A background read says nothing: Undo hides until the next read, every few seconds, succeeds.
       // An away computer is shown by the bar above the thread; a closing window needs nothing at all.
@@ -141,9 +149,20 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
     }
   }
 
-  const clearError = () => { setError(null); setChanges(null) }
-  const clearNotice = () => setNotice(null)
-  return <PromptUndoContext.Provider value={{ threadId, history, busy, working, error, changes, notice, undo, redo, clearError, clearNotice }}>
+  // Every prompt in the transcript reads this context: a new value on each render (each keystroke in the
+  // composer re-renders the shell) would re-render all of them. The actions keep one identity and run the
+  // latest closure.
+  const actions = useRef({ undo, redo })
+  actions.current = { undo, redo }
+  const stableUndo = useCallback((messageId: string) => actions.current.undo(messageId), [])
+  const stableRedo = useCallback(() => actions.current.redo(), [])
+  const clearError = useCallback(() => { setError(null); setChanges(null) }, [])
+  const clearNotice = useCallback(() => setNotice(null), [])
+  const value = useMemo(
+    () => ({ threadId, history, busy, working, error, changes, notice, undo: stableUndo, redo: stableRedo, clearError, clearNotice }),
+    [threadId, history, busy, working, error, changes, notice, stableUndo, stableRedo, clearError, clearNotice]
+  )
+  return <PromptUndoContext.Provider value={value}>
     {children}
   </PromptUndoContext.Provider>
 }
