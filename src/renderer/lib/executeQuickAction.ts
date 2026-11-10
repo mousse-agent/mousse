@@ -41,6 +41,7 @@ function settleLoading(profileId: string, threadId: string | null, active: boole
  * (project, new worktree) before the first send, like the composer does.
  * Returns the thread to send to, or null if the user moved away meanwhile.
  * `beforeSwitch` runs with the new thread just before it is shown, when the pick needs a new thread.
+ * `sending`: a message goes to the thread next, so a new thread is listed in the sidebar at once.
  */
 export async function threadForSend(profileId: string, beforeSwitch?: (threadId: string) => void): Promise<string | null> {
   // A thread made for a terminal sends nothing, so it is made on the profile's defaults and nothing is bound.
@@ -87,6 +88,8 @@ async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId
     const threadId = await prepareComposerThread({
       thread,
       workspace,
+      // A thread made for a message is listed at once; one made for a terminal stays an unlisted draft.
+      started: bind,
       ...composerThreadActions(),
       ...(bind ? {
         shown: { ...(permissionMode ? { permissionMode } : {}), ...(workspace.model ? { model: workspace.model } : {}) },

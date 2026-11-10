@@ -81,6 +81,16 @@ describe('blank composer workspace selection', () => {
     expect(deps.select).toHaveBeenCalledWith('created')
   })
 
+  it('creates the thread started only when a message is being sent with it', async () => {
+    const sending = { ...setup(), started: true }
+    await prepareComposerThread(sending)
+    expect(sending.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true, started: true })
+
+    const pickOnly = setup()
+    await prepareComposerThread(pickOnly)
+    expect(pickOnly.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true })
+  })
+
   it('creates a draft in the chosen project instead of sending to the original project', async () => {
     const deps = setup({ id: 'old', projectId: 'project-b' } as Thread)
     expect(await prepareComposerThread(deps)).toBe('created')

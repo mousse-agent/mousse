@@ -2018,6 +2018,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError('invalid_params', 'A private thread can only be started on its own computer')
       const expiresAt = asOptionalString(p.expiresAt, 64)
       const expiryStopsRun = asOptionalBoolean(p.expiryStopsRun, 'expiryStopsRun') === true
+      // A chat made to send a message is listed at once, instead of when that message arrives.
+      const started = asOptionalBoolean(p.started, 'started') === true
       const expiryProblem = expiresAt === undefined ? undefined : expiryRefusal(expiresAt)
       if (expiryProblem) throw new DomainRpcError('invalid_params', expiryProblem)
       const projectPath = projectId
@@ -2050,7 +2052,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // follows the profile's defaults). Any other creator keeps the values it passes, or the profile's defaults.
       const askedForRemembered = asOptionalBoolean(p.rememberedChoices, 'rememberedChoices') === true
       const remembered = rememberedChoiceFor(ctx.connection, projectId ? ctx.mms.projects.getProject(projectId) : undefined, askedForRemembered, (model) => usableProjectModel(ctx, model, projectId!))
-      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled: worktreeEnabled ?? remembered.worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(worktreeStart ? { worktreeStart } : {}) })
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled: worktreeEnabled ?? remembered.worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(started ? { started } : {}), ...(worktreeStart ? { worktreeStart } : {}) })
       if (expiresAt) ctx.mms.threadExpiry?.reschedule()
       // A remembered model that can no longer be used falls back to the profile's default, unless that one can't be used
       // either: then the thread has no model of its own, and the composer offers the first ready one.

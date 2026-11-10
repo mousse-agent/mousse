@@ -1235,6 +1235,7 @@ export function OrchestratorChat() {
       const id = await prepareComposerThread({
         thread: activeThread,
         workspace,
+        started: true,
         ...composerThreadActions(),
         shown: { ...(wanted ? { model: wanted } : {}), ...(!remoteDraft ? { permissionMode } : {}) },
         picked,

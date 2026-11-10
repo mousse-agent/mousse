@@ -1703,7 +1703,7 @@ export function registerGuiIpc(
   }
 
   /** `opts.node`: create the chat on another of the user's computers; the daemon sends the call there. */
-  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> } | undefined) => ({
+  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; started?: boolean; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> } | undefined) => ({
     name: name?.trim() || 'New Chat',
     projectId,
     ...(typeof opts?.worktreeEnabled === 'boolean' ? { worktreeEnabled: opts.worktreeEnabled } : {}),
@@ -1719,10 +1719,12 @@ export function registerGuiIpc(
     ...(opts?.model && !opts.node ? { model: opts.model } : {}),
     ...(typeof opts?.permissionMode === 'string' && !opts.node ? { permissionMode: opts.permissionMode } : {}),
     // Which of them the person picked, so only those are remembered for the project.
-    ...(Array.isArray(opts?.picked) && opts.picked.length && !opts.node ? { picked: opts.picked } : {})
+    ...(Array.isArray(opts?.picked) && opts.picked.length && !opts.node ? { picked: opts.picked } : {}),
+    // A chat created for a message being sent is listed at once; a chat on another computer is listed when its message arrives.
+    ...(opts?.started === true && !opts.node ? { started: true } : {})
   })
 
-  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }) => {
+  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; started?: boolean; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.create',
       createParams(name, projectId, opts)
@@ -1734,7 +1736,7 @@ export function registerGuiIpc(
 
   registerHandler(
     'threads:createAndSelect',
-    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }) => {
+    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; started?: boolean; rememberedChoices?: boolean; model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }; permissionMode?: PermissionMode; picked?: Array<'model' | 'permissionMode' | 'worktreeEnabled'> }) => {
       const res = await guiMms.request<{ thread: { id: string }; threads: unknown[] }>(
         'threads.create',
         createParams(name, projectId, opts)

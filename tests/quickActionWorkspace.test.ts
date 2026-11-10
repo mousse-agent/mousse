@@ -79,7 +79,7 @@ describe('send-in-current-chat on a new chat', () => {
 
     await executeQuickAction(action, 'default')
 
-    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', { worktreeEnabled: true, permissionMode: 'accept_edits', rememberedChoices: true })
+    expect(mousse.create).toHaveBeenCalledWith(undefined, 'p', { worktreeEnabled: true, started: true, permissionMode: 'accept_edits', rememberedChoices: true })
     expect(mousse.select).toHaveBeenCalledWith('made')
     expect(mousse.sendToThread).toHaveBeenCalledWith('made', expect.objectContaining({ content: 'Review this' }))
     const state = useAppStore.getState()
