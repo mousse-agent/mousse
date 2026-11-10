@@ -28,6 +28,10 @@ it('renders unavailable expired Undo, archive, unarchive and permanent deletion 
     await retention.configure(fixture.workspace, { windowMs: 1000, migrationGraceMs: 1000, maxForwardStepMs: 100000 }, true)
     now += 10000; await retention.sweep(fixture.workspace)
     await source.stop()
+    // The checkout's branch and Mousse's refs for the thread, which the delete keeps along with the checkout.
+    const refs = (): string => git(fixture.repo, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/', 'refs/heads/')
+    const refsBefore = refs()
+    expect(git(fixture.workspace, 'branch', '--show-current')).not.toBe('')
     const evidenceDir = process.env.MOUSSE_UI_EVIDENCE_DIR ?? join(fixture.root, 'ui-evidence'); mkdirSync(evidenceDir, { recursive: true })
     const evidence = join(evidenceDir, 'lifecycle-full-shell.json'), config = join(fixture.root, 'lifecycle-shell-config.json')
     writeFileSync(config, JSON.stringify({ ...fixture, evidence, evidenceDir, mainEntry: resolve('out/main/index.js') }))
@@ -41,9 +45,9 @@ it('renders unavailable expired Undo, archive, unarchive and permanent deletion 
     })
     expect(result.code, result.output).toBe(0)
     expect(existsSync(evidence), 'The full-shell driver exited without producing evidence.\n' + result.output).toBe(true)
-    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, noDeleteBeforeArchive: true, archivedFromSidebar: true, unarchived: true, purged: true, primaryPreserved: true })
+    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, noDeleteBeforeArchive: true, archivedFromSidebar: true, unarchived: true, purged: true, checkoutKept: true, primaryPreserved: true })
     expect(git(fixture.repo, 'rev-parse', 'HEAD')).toBe(fixture.baseSha)
-    expect(git(fixture.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/')).toBe('')
+    expect(refs()).toBe(refsBefore)
   } finally {
     await source.stop(); vi.restoreAllMocks(); await terminateChild(child)
     await promisify(execFile)(process.execPath, [resolve('out/cli/index.js'), 'service', 'stop', '--home', fixture.home], { windowsHide: true, timeout: 15000 }).catch((error: { stderr?: string }) => { if (!error.stderr?.includes('MMS is not running')) throw error })

@@ -166,15 +166,18 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     return started
   }
 
-  it('deleting a thread holds only that thread: other requests answer while its purge waits on Git', async () => {
+  it('deleting an expired thread holds only that thread: other requests answer while its purge waits on Git', async () => {
     const { ctx, thread, worktree, project } = await threadWithTurn()
     const other = mms.threads.createThread('Another thread', project.id)
-    mms.threads.setThreadSettled(thread.id, true)
+    // A person's delete keeps the checkout and reads nothing in it; only an expiry takes the checkout, so only its purge
+    // reads the checkout's status.
+    mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
     const started = slowRetirementStatus(worktree, 3)
-    const begun = Date.now()
     // The trash is a step of the delete; the purge preview after it reads the checkout's status, and that read takes 3 seconds.
-    const deleting = mms.deleteThreadForGood(thread.id, { human: true, discard: true })
+    const deleting = mms.deleteThreadForGood(thread.id, { human: false, discard: false, expiry: true })
     await vi.waitFor(() => expect(existsSync(started)).toBe(true), { timeout: 10_000 })
+    // Timed from the slow read: the other requests answer well inside its 3 seconds.
+    const begun = Date.now()
     expect(readFileSync(started, 'utf8')).toMatch(/ status --porcelain=v1 --untracked-files=all$/m)
     expect(await pending(deleting)).toBe(true)
     await expect(dispatchMethod(ctx, 'threads.get', { threadId: other.id })).resolves.toBeDefined()
