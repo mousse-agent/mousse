@@ -50,7 +50,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveVariable } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveEnvironment, claudeEffectiveVariable } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -2233,10 +2233,13 @@ export class ClaudeSubscriptionProviderService {
     // results that fill its context, so only its auto-compact can keep it under the threshold.
     const compaction = claudeAutoCompactEnv(input.autoCompactTokens)
     // A bot turn on the owner's own entry runs in that entry's environment (their sign-in), without
-    // the variables of the user's MCP servers, which it never gets.
+    // the variables of the user's MCP servers, which it never gets. It loads no settings files, so
+    // the `env` of the owner's Claude settings, where a proxy sign-in often lives, is applied here.
     const env = locked && !locked.ownerEntry
       ? this.finalEnv({ ...this.dependencies.lockedEnv!(locked.cwd), ...compaction })
-      : this.finalEnv({ ...this.environment(), ...integrations?.env, ...compaction })
+      : locked
+        ? this.finalEnv({ ...claudeEffectiveEnvironment(this.environment()), ...compaction })
+        : this.finalEnv({ ...this.environment(), ...integrations?.env, ...compaction })
     // A bot turn's gate knows Claude Code's own storage for it (its saved tool output), in the home
     // this turn runs with: reading that back never needs the bot's file access.
     const lockedTurn = locked ? { ...locked, own: claudeOwnStorage(claudeHomeOf(env), locked.cwd) } : undefined
@@ -2842,7 +2845,8 @@ function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows): 
 /** The error a result frame stands for, or undefined when the turn succeeded. */
 function resultFailure(message: SDKResultMessage): Error | undefined {
   if (message.subtype === 'success' && !message.is_error) return undefined
-  const failure = 'errors' in message ? message.errors.join('\n') : 'Claude Code turn failed'
+  // A failed `success` frame carries Claude Code's reason (a sign-in failure, say) as its result text.
+  const failure = 'errors' in message ? message.errors.join('\n') : message.result?.trim() || 'Claude Code turn failed'
   if (/Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh/i.test(failure)) {
     return new AppError({
       code: 'claude_subscription_auth_refresh_busy',
