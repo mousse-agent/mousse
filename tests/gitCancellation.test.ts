@@ -150,8 +150,8 @@ describe('gitCancellationScope', () => {
     setTimeout(() => controller.abort(), 500)
     const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env }), undefined, undefined, controller.signal)
     expect(ran.error?.code).toBe('ABORT_ERR')
-    await new Promise((resolve) => setTimeout(resolve, 800))
-    expect(logged).toHaveBeenCalledWith(expect.stringContaining('until it ends or Mousse restarts'), expect.anything())
+    // The watch starts once the stop's look at the process list is done, which can take a while on a busy machine.
+    await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(expect.stringContaining('until it ends or Mousse restarts'), expect.anything()), { timeout: 10_000 })
     // Past the limit it is still held, and still watched.
     await expect(acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 300 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
     lingering = false
