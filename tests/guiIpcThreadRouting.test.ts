@@ -154,8 +154,10 @@ describe('a terminal on another computer', () => {
 describe('selecting a thread on another computer', () => {
   it('holds it open before reading it, and lets go of it when the selection moves on', async () => {
     await invoke('threads:select', REMOTE)
-    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'snapshot'])
+    // Opening it clears its Done on the computer that owns it.
+    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'threads.markSeen', 'snapshot'])
     expect(calls[0].params).toEqual({ threadId: REMOTE, focused: true })
+    expect(calls[1].params).toEqual({ threadId: REMOTE })
     calls.length = 0
     await invoke('threads:select', OTHER_REMOTE)
     expect(sent('threads.focus').map((call) => call.params)).toEqual([
@@ -165,7 +167,7 @@ describe('selecting a thread on another computer', () => {
     calls.length = 0
     await invoke('threads:select', 'local-thread')
     // A thread of this computer is marked shown (it stays loaded in the daemon); nothing waits for that.
-    expect(calls.map((call) => call.params)).toEqual([{ threadId: OTHER_REMOTE, focused: false }, { threadId: 'local-thread', focused: true }, { threadId: 'local-thread' }])
+    expect(calls.map((call) => call.params)).toEqual([{ threadId: OTHER_REMOTE, focused: false }, { threadId: 'local-thread', focused: true }, { threadId: 'local-thread' }, { threadId: 'local-thread' }])
   })
 
   it('marks a thread of this computer shown, and the one it leaves not shown, without waiting', async () => {
@@ -176,7 +178,8 @@ describe('selecting a thread on another computer', () => {
       { threadId: 'local-a', focused: false },
       { threadId: 'local-b', focused: true }
     ])
-    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'snapshot', 'threads.focus', 'threads.focus', 'snapshot'])
+    expect(calls.map((call) => call.method)).toEqual(['threads.focus', 'threads.markSeen', 'snapshot', 'threads.focus', 'threads.focus', 'threads.markSeen', 'snapshot'])
+    expect(sent('threads.markSeen').map((call) => call.params)).toEqual([{ threadId: 'local-a' }, { threadId: 'local-b' }])
   })
 
   it('names the thread its waiting questions belong to, so a window showing another thread drops them', async () => {

@@ -80,4 +80,12 @@ export class NotificationThreadIndex {
     const projectName = thread?.projectId ? this.projectNames.get(profileId)?.get(thread.projectId)?.trim() || undefined : undefined
     return { ...target, ...(threadName ? { threadName } : {}), ...(projectName ? { projectName } : {}) }
   }
+
+  /** The row the sidebar lists `threadId` under: itself, or for a subagent its nearest listed ancestor. */
+  listedAs(profileId: string, threadId: string): string | undefined {
+    const threads = this.byProfile.get(profileId)
+    const thread = threads?.get(threadId)
+    if (!threads || !thread || !isSubagentThread(thread)) return threadId
+    return nearestVisibleAncestor(threadId, [...threads.values()])
+  }
 }

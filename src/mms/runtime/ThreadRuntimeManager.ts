@@ -12,6 +12,7 @@ import type { OrchestratorService } from '../orchestrator/OrchestratorService'
 import type { PtyManager } from '../terminals/PtyManager'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { ThreadRuntime } from './ThreadRuntime'
+import type { UnseenDoneStore } from './UnseenDoneStore'
 import type { Agent, AgentStatus, Task, ThreadActivityState } from '../../shared/types'
 
 const BUSY_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
@@ -56,17 +57,21 @@ export class ThreadRuntimeManager extends EventEmitter {
   private orchestrator: OrchestratorService | null = null
   private ptyManager: PtyManager | null = null
   private questions: UserQuestionService | null = null
+  /** Threads showing Done: finished, and not seen in a window since. Kept across restarts. */
+  private unseenDone: UnseenDoneStore | null = null
 
   attach(deps: {
     threadStore: ThreadDataStore
     orchestrator: OrchestratorService
     ptyManager: PtyManager
     questions: UserQuestionService
+    unseenDone?: UnseenDoneStore
   }): void {
     this.threadStore = deps.threadStore
     this.orchestrator = deps.orchestrator
     this.ptyManager = deps.ptyManager
     this.questions = deps.questions
+    this.unseenDone = deps.unseenDone ?? null
 
     // Wire per-session agent/task registries from orchestrator hydration.
     deps.orchestrator.setRuntimeManager(this)
@@ -235,10 +240,54 @@ export class ThreadRuntimeManager extends EventEmitter {
     )
     if (!force && state === rt.activity) return
     if (state !== rt.activity) rt.setActivity(state)
+    this.noteDone(threadId, state)
     // Always fan out a full authoritative map so clients merge, never clobber.
     const activity = this.getActivitySnapshot()
     this.emit('activity', { threadId, state, activity })
     this.emit('activity.snapshot', { activity })
+  }
+
+  /**
+   * Done means the thread finished and nobody has looked since: the mark is set when its work cycle ends and
+   * dropped when the next one starts (or the thread is seen). A personal bot's chat is never listed, so never marked.
+   */
+  private noteDone(threadId: string, state: ThreadActivityState): void {
+    if (!this.unseenDone) return
+    if (state !== 'completed') {
+      this.unseenDone.delete(threadId)
+      return
+    }
+    if (this.unseenDone.has(threadId) || this.threadStore?.getThread(threadId)?.botOwned) return
+    this.unseenDone.add(threadId)
+  }
+
+  /**
+   * A window opened the thread, or showed it in focus: its Done, and the Done of its subagents (which its row
+   * shows rolled up), is cleared and every window is told. Seeing a thread is not activity on it: it moves no
+   * updated time and no list. True when something showed Done.
+   */
+  markSeen(threadId: string): boolean {
+    const ids = [threadId, ...(this.unseenDone?.list() ?? []).filter((id) => id !== threadId && this.descendsFrom(id, threadId))]
+    let cleared = false
+    for (const id of ids) {
+      if (this.unseenDone?.delete(id)) cleared = true
+      const rt = this.runtimes.get(id)
+      // Still waiting on its background work: Done is set again when that finishes.
+      if (!rt || rt.activity !== 'completed' || this.turnActivity.get(id) !== 'completed') continue
+      this.turnActivity.set(id, 'idle')
+      this.publishDerivedActivity(id, rt)
+      cleared = true
+    }
+    return cleared
+  }
+
+  private descendsFrom(threadId: string, ancestorId: string): boolean {
+    let current = this.threadStore?.getThread(threadId)?.lineage?.parentThreadId
+    for (let depth = 0; current && depth < 64; depth++) {
+      if (current === ancestorId) return true
+      current = this.threadStore?.getThread(current)?.lineage?.parentThreadId
+    }
+    return false
   }
 
   getActivity(threadId: string): ThreadActivityState {
@@ -305,6 +354,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.turnActivity.delete(threadId)
     this.pendingDelegations.delete(threadId)
     this.pendingBackgroundWork.delete(threadId)
+    this.unseenDone?.delete(threadId)
   }
 
   /**
@@ -334,6 +384,19 @@ export class ThreadRuntimeManager extends EventEmitter {
           rt.tasks.updateStatus(task.id, 'interrupted')
         }
       }
+    }
+    // Done outlives the service: threads that finished unseen before the restart show Done again. A thread that
+    // is gone or archived since is no longer listed, so its mark is dropped.
+    for (const threadId of this.unseenDone?.list() ?? []) {
+      const thread = this.threadStore.getThread(threadId)
+      if (!thread || thread.settledAt) {
+        this.unseenDone?.delete(threadId)
+        continue
+      }
+      // Hydrated first: a runtime made here starts its turn state from its own (idle) activity.
+      const rt = this.getOrHydrate(threadId)
+      this.turnActivity.set(threadId, 'completed')
+      this.publishDerivedActivity(threadId, rt)
     }
   }
 }
