@@ -6,7 +6,7 @@ import { normalizePermissionMode } from '../../shared/permissionMode'
 import type { SendExpectation, Thread } from '../../shared/types'
 import { composerCreatesThread } from './createComposerThread'
 import { isNewEmptyThread, isWorkspacePending, localWorkspaceFor, rememberedChoiceOf } from './newThread'
-import { boundSendRefusal } from './threadSetup'
+import { boundSendRefusal, sendIsFirst } from './threadSetup'
 
 const TERMINAL_SPAWN_TIMEOUT_MS = 15_000
 const TERMINAL_SPAWN_POLL_MS = 150
@@ -71,8 +71,8 @@ async function preparedThreadForSend(profileId: string, beforeSwitch?: (threadId
   if (!isNewEmptyThread(startId, thread, store.messages.length)) {
     if (!startId) return null
     // A thread made for its first message and still without one is bound like a new chat's first send
-    // (`Thread.firstSendPending`), whichever route reaches it.
-    if (bind && thread?.firstSendPending) {
+    // (`Thread.firstSendPending`), whichever route reaches it; with a turn under way it is not the first, and queues.
+    if (bind && thread && sendIsFirst(thread, store.turnStates[startId]?.phase, store.threadActivity[startId])) {
       const defaultMode = normalizePermissionMode((await window.mousse.settings.get()).permissions?.defaultMode)
       const expect = expectationOf(thread, defaultMode)
       return { threadId: startId, ...(expect ? { expect } : {}) }

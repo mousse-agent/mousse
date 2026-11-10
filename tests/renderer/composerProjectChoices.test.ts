@@ -178,6 +178,10 @@ function daemonForSend(made: Thread, options: {
   afterCreate?: () => void
   /** Runs when the send reaches the daemon, before it is admitted. */
   beforeSend?: () => void
+  /** A turn of the thread is admitted and under way (its first, still setting up its worktree, say). */
+  running?: () => boolean
+  /** The first message is saved only later in its turn, so the send leaves `firstSendPending` set for now. */
+  keepsFlag?: boolean
   defaultMode?: Thread['permissionMode']
 } = {}) {
   const calls: Array<[string, ...unknown[]]> = []
@@ -234,13 +238,26 @@ function daemonForSend(made: Thread, options: {
         calls.push(['refused', 'thread_settings_changed'])
         return { requestAcknowledged: false, error: { code: 'thread_settings_changed', message: 'changed' } }
       }
-      if (!bound && current.firstSendPending) {
+      const running = options.running?.() ?? false
+      // A bound send never waits in the queue.
+      if (bound && running) {
+        calls.push(['refused', 'thread_busy'])
+        return { requestAcknowledged: false, error: { code: 'thread_busy', message: 'busy' } }
+      }
+      // With a turn admitted, a send is not the thread's first: it is queued unbound.
+      if (!bound && current.firstSendPending && !running) {
         calls.push(['refused', 'first_send_unbound'])
         return { requestAcknowledged: false, error: { code: 'first_send_unbound', message: 'Send it again.' } }
       }
+      if (running) {
+        calls.push(['queued'])
+        return { queued: true, message: '', actions: [] }
+      }
       calls.push(['send', runsIn, current.modelOverride?.model])
-      const { firstSendPending: _sent, ...rest } = current
-      current = rest
+      if (!options.keepsFlag) {
+        const { firstSendPending: _sent, ...rest } = current
+        current = rest
+      }
       return { message: '', actions: [] }
     }),
     isTurnActive: vi.fn(async () => false)
@@ -395,6 +412,48 @@ describe('a first send that fails after its thread was made (review reproduction
     expect(daemon.calls.some((call) => call[0] === 'refused' && call[1] === 'thread_settings_changed')).toBe(true)
     expect(daemon.sentWith()).toBeUndefined()
     expect(daemon.calls.some((call) => call[0] === 'refused' && call[1] === 'first_send_unbound')).toBe(false)
+  })
+
+  // Review repro: a second message typed while the first turn was still setting up was bound, so refused as busy.
+  it('a second message sent while the first turn sets up its worktree is queued, not refused', async () => {
+    let turnRunning = false
+    defaultMode = 'full'
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [project('remembers', { permissionMode: 'ask' })],
+      threads: [], activeThreadId: null, messages: [], threadActivity: {},
+      composerWorkspaceDrafts: { __blank__: { projectId: 'remembers', worktreeEnabled: true } }
+    })
+    const daemon = daemonForSend(threadRow('made', { worktreeEnabled: true, modelOverride: OPUS }), { keepsFlag: true, running: () => turnRunning })
+    await mountComposer()
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+    // The first turn is admitted and making its worktree; its message is not saved yet, so the flag is still set.
+    turnRunning = true
+    useAppStore.setState({ threadActivity: { made: 'processing' } })
+    expect(useAppStore.getState().threads.find((entry) => entry.id === 'made')?.firstSendPending).toBe(true)
+    await send('And the lexer')
+    expect(daemon.calls.some((call) => call[0] === 'refused')).toBe(false)
+    expect(daemon.calls.filter((call) => call[0] === 'queued')).toHaveLength(1)
+    useAppStore.setState({ threadActivity: {} })
+  })
+
+  // Review: "Send it again" never read the thread again, so the same unbound send was refused every time.
+  it('reads the thread again after a first-send refusal, so sending again binds it', async () => {
+    defaultMode = 'full'
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const listed = threadRow('made', { startedAt: '2026-11-10T00:00:01Z', permissionMode: 'ask', worktreeEnabled: true, modelOverride: OPUS, settingsRevision: 0 })
+    // This window has the row from before the service marked it (a list it missed).
+    useAppStore.setState({ projects: [project('remembers', { permissionMode: 'ask' })], threads: [listed], activeThreadId: 'made', messages: [], threadActivity: {} })
+    const daemon = daemonForSend({ ...listed, firstSendPending: true })
+    await mountComposer()
+    await send('Fix the parser')
+    expect(daemon.calls.some((call) => call[0] === 'refused' && call[1] === 'first_send_unbound')).toBe(true)
+    expect(useAppStore.getState().threads.find((entry) => entry.id === 'made')?.firstSendPending).toBe(true)
+    await send('Fix the parser')
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
   })
 
   it('a thread made here needs no call after it: it is made in Ask, and the send runs in Ask', async () => {

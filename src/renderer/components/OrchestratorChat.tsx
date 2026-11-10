@@ -66,7 +66,7 @@ import '../chat/components/agent-elements/agent-ui.css'
 import type { NodeId } from '../../shared/net'
 import { qualifyId } from '../../shared/threadRef'
 import { composerCreatesThread, prepareComposerThread } from '../lib/createComposerThread'
-import { boundSendRefusal, errorCodeOf, needsSetup, setupRefusalLine, type ThreadSetup } from '../lib/threadSetup'
+import { boundSendRefusal, errorCodeOf, needsSetup, sendIsFirst, setupRefusalLine, type ThreadSetup } from '../lib/threadSetup'
 import { openRemoteProject, refreshRemoteComposerOptions, remoteErrorMessage, remotePermissionCeiling, remotePermissionView, workspaceOnDevice } from '../lib/remoteComputers'
 import { UNKNOWN_COMPUTER_NAME, useComputer } from '../lib/computers'
 import { useRemoteComposerOptions, useRunOnDevices } from '../hooks/useRunOnDevices'
@@ -987,7 +987,8 @@ export function OrchestratorChat() {
         setSendError(boundSendRefusal(error, Boolean(expect)) ?? sendErrorLine(error))
         // Settings changed since they were shown: the composer shows what the thread really runs now, and for a thread of
         // another computer that computer's default mode and this device's limit too, which the thread may run in.
-        if (errorCodeOf(error) === 'thread_settings_changed' && targetThreadId) {
+        const refusedCode = errorCodeOf(error)
+        if ((refusedCode === 'thread_settings_changed' || refusedCode === 'first_send_unbound') && targetThreadId) {
           void window.mousse.threads.get(targetThreadId).then((thread) => { if (thread && stillVisible()) useAppStore.getState().upsertThread(thread) }).catch(() => undefined)
           const node = useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)?.node
           if (node) void refreshRemoteComposerOptions(node as NodeId).catch(() => undefined)
@@ -1310,7 +1311,9 @@ export function OrchestratorChat() {
     // what this composer showed at the click (render-time values, never the store after an await): a change made in
     // another window since is refused by the service, and the composer then shows it.
     // The service clears the flag once the first message is saved, so it, not the transcript this window holds, decides.
-    if (!bound && !newChat && activeThreadId && activeThread?.firstSendPending) {
+    // A turn already under way (the first one still setting up its worktree, say) means this message is not the first:
+    // it is sent unbound and queued, as any other.
+    if (!bound && !newChat && activeThreadId && activeThread && sendIsFirst(activeThread, turnState?.phase, activeThreadActivity)) {
       const shownModel = autoModel ?? (selectedProviderId && selectedModelId
         ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
         : undefined)

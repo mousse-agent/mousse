@@ -119,6 +119,19 @@ describe('send-in-current-chat on a new chat', () => {
     }))
   })
 
+  it('sends unbound, to be queued, while the first turn of such a thread is already under way', async () => {
+    const mousse = stubMousse()
+    const listed = thread({ projectId: 'p', startedAt: '2026-01-01T00:00:01Z', firstSendPending: true, permissionMode: 'ask', settingsRevision: 3 })
+    useAppStore.setState({ activeThreadId: 't1', threads: [listed], messages: [], threadActivity: { t1: 'processing' } })
+    try {
+      await executeQuickAction(action, 'default')
+      expect(mousse.sendToThread).toHaveBeenCalledTimes(1)
+      expect(mousse.sendToThread.mock.calls[0]![1]).not.toHaveProperty('expect')
+    } finally {
+      useAppStore.setState({ threadActivity: {} })
+    }
+  })
+
   it('leaves a started thread alone', async () => {
     const mousse = stubMousse()
     useAppStore.setState({

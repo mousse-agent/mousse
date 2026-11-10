@@ -1,4 +1,5 @@
 import type { PermissionMode } from '../../shared/permissionMode'
+import { isThreadActivityActive, isTurnActivePhase, type Thread, type ThreadActivityState, type TurnPhase } from '../../shared/types'
 import type { ModelOverride } from '../../shared/providerInstances'
 
 /**
@@ -30,12 +31,27 @@ export function errorCodeOf(error: unknown): string | undefined {
 export function boundSendRefusal(error: unknown, bound = false): string | undefined {
   const code = errorCodeOf(error)
   if (code === 'thread_settings_changed') return 'Not sent: settings changed. Check and send again.'
+  // This window had not heard that the chat was made for its first message; it reads the thread again.
+  if (code === 'first_send_unbound') return 'Not sent: this chat changed. Check and send again.'
   if (code === 'thread_busy' && bound) return 'Not sent: this chat is busy. Send again when it is free.'
   if (code === 'computer_outdated') {
     const details = (error as { details?: { name?: unknown } }).details
     return typeof details?.name === 'string' ? setupRefusalLine(code, details.name) : 'Update Mousse on that computer to send from here.'
   }
   return undefined
+}
+
+/**
+ * Whether a send to `thread` is its first message, which a window binds to the settings it shows
+ * (`Thread.firstSendPending`). A thread with a turn under way has had a message admitted already, so a send now is not
+ * its first: it is sent unbound and waits in the queue like any other.
+ */
+export function sendIsFirst(
+  thread: Pick<Thread, 'firstSendPending'> | undefined,
+  turn: TurnPhase | undefined,
+  activity: ThreadActivityState | undefined
+): boolean {
+  return thread?.firstSendPending === true && !isTurnActivePhase(turn ?? 'idle') && !isThreadActivityActive(activity)
 }
 
 /** The line a send shows when its thread's settings could not be applied on `computer`; nothing was sent. */

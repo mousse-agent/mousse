@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { FIRST_SEND_BINDING_CAPABILITY } from '../src/mms/protocol/types'
@@ -81,6 +81,22 @@ describe('threads.create for a message being sent', () => {
       // The CLI, and an agent or an older computer over the Bridge (no window mark), may send it unbound.
       expect((await send({ ctx: caller({ clientType: 'cli' }) }, (await made()).id)).code).not.toBe('first_send_unbound')
       expect((await send(bridge(), (await made()).id)).code).not.toBe('first_send_unbound')
+    })
+
+    // Review repro: the first turn was admitted and setting up its worktree; a second message must queue, not be refused.
+    it('lets a second message through to the queue while the first turn is under way, from a window here or elsewhere', async () => {
+      const { thread } = (await dispatchMethod(gui(), 'threads.create', { name: 'New Chat', started: true, permissionMode: 'ask' })) as { thread: Thread }
+      vi.spyOn(mms.orchestrator, 'isActiveTurnRunning').mockImplementation((id?: string) => id === thread.id)
+      const send = vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({ queued: true } as never)
+      try {
+        await dispatchMethod(gui(), 'orchestrator.send', { threadId: thread.id, content: 'And the lexer' })
+        await dispatchMethod(bridge('binds').ctx, 'orchestrator.send', { threadId: thread.id, content: 'And the tests', window: 'binds' })
+        expect(send).toHaveBeenCalledTimes(2)
+      } finally {
+        vi.restoreAllMocks()
+      }
+      // Once no turn is under way and the message was never saved (the turn failed first), the next send is the first again.
+      expect(await codeOf(dispatchMethod(gui(), 'orchestrator.send', { threadId: thread.id, content: 'hello' }))).toBe('first_send_unbound')
     })
 
     it('bound to Ask is refused after another window switched the chat to Full before it was admitted', async () => {

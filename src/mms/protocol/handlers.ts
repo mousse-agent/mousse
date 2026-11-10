@@ -2520,7 +2520,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // or one on another computer (its router marks the send, `ROUTED_SEND_WINDOW_KEY`). A window that binds and did not
       // (a lost update) is refused, so it reads the thread again; an older one is told to update. The CLI, automations,
       // bots and agents may send it unbound.
-      if (p.expect === undefined && ctx.mms.threads.getThread(threadId)?.firstSendPending) {
+      // A thread with a turn already admitted (the first still setting up its worktree, say) has had its first message:
+      // this one is queued as any other.
+      if (p.expect === undefined && ctx.mms.threads.getThread(threadId)?.firstSendPending && !ctx.mms.orchestrator.isActiveTurnRunning(threadId)) {
         const window = ctx.connection?.clientType === 'gui'
           ? (ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older')
           : ctx.connection?.clientType === 'bridge' ? routedWindow : undefined
