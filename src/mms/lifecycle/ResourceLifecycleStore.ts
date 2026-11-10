@@ -5,6 +5,7 @@ import { lstat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { cacheSignature, sameFileIdentity, type FileIdentityStats } from '../data/FileSignature'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { canonicalizeAbsolutePath } from '../profiles/pathSafety'
 import { RESOURCE_LIFECYCLE_VERSION, RETENTION_CLAIM_KINDS, type LifecycleAdmission, type ResourceInventorySnapshot, type TaskLifecycleRecord } from '../../shared/resourceLifecycle'
@@ -31,17 +32,14 @@ const identity = (value: string): string => {
 // checked for links. Only external root ingress is physically canonicalized.
 function pathsEqual(a: string, b: string): boolean { return relative(resolve(a), resolve(b)) === '' }
 
-type FileIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
-const signatureOf = (stats: FileIdentity): string => `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`
-const sameFile = (a: Pick<FileIdentity, 'dev' | 'ino'>, b: Pick<FileIdentity, 'dev' | 'ino'>): boolean => a.dev === b.dev && a.ino === b.ino
 /**
- * The signature of the regular file at `path` itself: undefined when it is missing, null when it is not a
- * regular file (a link), which callers send down the full, checked read.
+ * The signature (`cacheSignature`) of the regular file at `path` itself: undefined when it is missing, null when
+ * it has none to trust or is not a regular file (a link). Callers send null down the full, checked read.
  */
 function regularFileSignature(path: string): string | undefined | null {
   try {
     const stats = lstatSync(path, { bigint: true })
-    return stats.isFile() ? signatureOf(stats) : null
+    return stats.isFile() ? cacheSignature(stats) ?? null : null
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
@@ -159,12 +157,12 @@ export class ResourceLifecycleStore {
     this.checkedFiles.delete(path)
     assertLifecyclePath(this.root, path)
     if (signature === undefined) return undefined
-    let read: { signature: string; text: string }
+    let read: { signature: string | undefined; text: string }
     try {
       const fd = openSync(path, 'r')
       try {
         // The signature of the open file, so it always matches the bytes read.
-        read = { signature: signatureOf(fstatSync(fd, { bigint: true })), text: readFileSync(fd, 'utf8') }
+        read = { signature: cacheSignature(fstatSync(fd, { bigint: true })), text: readFileSync(fd, 'utf8') }
       } finally { closeSync(fd) }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
@@ -174,7 +172,7 @@ export class ResourceLifecycleStore {
     try { value = JSON.parse(read.text) }
     catch (error) { throw new ResourceLifecycleError('ambiguous', 'Lifecycle source unreadable. Check the owned storage and report this error.', error) }
     validate(value)
-    this.checkedFiles.set(path, read)
+    if (read.signature) this.checkedFiles.set(path, { signature: read.signature, text: read.text })
     return read.text
   }
 
@@ -463,7 +461,7 @@ export class ResourceLifecycleStore {
       unlinkSync(path)
       try { fd = openSync(path, 'wx') } catch { throw new ResourceLifecycleError('busy', 'Task lifecycle gate is busy') }
     }
-    let created: FileIdentity | undefined
+    let created: FileIdentityStats | undefined
     try {
       writeFileSync(fd, JSON.stringify(owner))
       created = fstatSync(fd, { bigint: true })
@@ -473,15 +471,15 @@ export class ResourceLifecycleStore {
       return result
     } finally {
       gateDepth.delete(path)
-      closeSync(fd)
       try {
-        // The gate is still ours while it is the file this process created. Reading its token back is needed
-        // only on a file system without file identities.
-        const ours = created && created.ino !== 0n
-          ? sameFile(lstatSync(path, { bigint: true }), created)
-          : (this.readJson(path) as typeof owner).token === owner.token
+        // The gate is still ours while it is the file this process created. Its descriptor stays open until it
+        // is removed, so a gate another process made after ours was removed cannot be given our file's identity.
+        // Reading the token back is needed only on a file system without file identities.
+        const ours = (created && sameFileIdentity(lstatSync(path, { bigint: true }), created)) ??
+          (this.readJson(path) as typeof owner).token === owner.token
         if (ours) unlinkSync(path)
       } catch { /* leave ambiguous gate protected */ }
+      finally { closeSync(fd) }
     }
   }
 

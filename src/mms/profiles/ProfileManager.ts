@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { cacheSignature } from '../data/FileSignature'
 import { withFileLock } from '../scheduled/fileLock'
 import {
   canonicalizeProfileId,
@@ -40,23 +41,20 @@ export interface ProfileManagerOptions {
 }
 
 /**
- * The registry files as last read in this process, by path, with the identity of the file they came from.
- * Every write replaces a file with a rename, so a file that still has the same identity, size and times holds
+ * The registry files as last read in this process, by path, with the signature of the file they came from
+ * (`cacheSignature`). Every write replaces a file with a rename, so a file whose signature is unchanged holds
  * the same bytes: a read checks that with one `stat` and reuses the parsed value. A write from any process,
- * the CLI or another daemon included, gives the file a new identity, and the next read takes it from disk.
+ * the CLI or another daemon included, changes the signature, and the next read takes it from disk. A file
+ * system whose signatures cannot be trusted is read every time.
  */
 const registryFiles = new Map<string, { signature: string; value: unknown }>()
 
-function fileSignature(stats: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }): string {
-  return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`
-}
-
-/** The file's current signature, or undefined when it is missing. */
-function currentSignature(path: string): string | undefined {
+/** The file's current signature (undefined when it has none to trust), or null when it is missing. */
+function currentSignature(path: string): string | undefined | null {
   try {
-    return fileSignature(statSync(path, { bigint: true }))
+    return cacheSignature(statSync(path, { bigint: true }))
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw error
   }
 }
@@ -68,16 +66,17 @@ function currentSignature(path: string): string | undefined {
 function readRegistryFile<T>(path: string, parse: (raw: unknown) => T): T {
   const signature = currentSignature(path)
   const cached = registryFiles.get(path)
-  if (signature !== undefined && cached?.signature === signature) return structuredClone(cached.value as T)
+  if (signature && cached?.signature === signature) return structuredClone(cached.value as T)
+  registryFiles.delete(path)
   const fd = openSync(path, 'r')
-  let read: { signature: string; text: string }
+  let read: { signature: string | undefined; text: string }
   try {
-    read = { signature: fileSignature(fstatSync(fd, { bigint: true })), text: readFileSync(fd, 'utf8') }
+    read = { signature: cacheSignature(fstatSync(fd, { bigint: true })), text: readFileSync(fd, 'utf8') }
   } finally {
     closeSync(fd)
   }
   const value = parse(JSON.parse(read.text))
-  registryFiles.set(path, { signature: read.signature, value })
+  if (read.signature) registryFiles.set(path, { signature: read.signature, value })
   return structuredClone(value)
 }
 
