@@ -20,6 +20,11 @@ export interface MessageUpdateBatcherOptions {
   apply(threadId: string, messages: ChatMessage[]): void
   /** True while updates of `threadId` still belong on screen. */
   isCurrent(threadId: string): boolean
+  /**
+   * True while the transcript is out of sight, such as behind the Usage page: updates wait, each
+   * message keeping only its latest version, until `flush` runs (call it when the transcript shows again).
+   */
+  held?(): boolean
   /** Runs `run` before the next frame. Defaults to `requestAnimationFrame`. */
   schedule?(run: () => void): () => void
 }
@@ -77,9 +82,11 @@ export function createMessageUpdateBatcher(options: MessageUpdateBatcherOptions)
       // Re-inserted so the batch keeps the order of the latest updates.
       pending.delete(message.id)
       pending.set(message.id, message)
+      // Out of sight, the transcript would re-render every frame for nothing.
+      if (options.held?.()) return
       cancel ??= schedule(() => {
         cancel = null
-        flush()
+        if (!options.held?.()) flush()
       })
     },
     flush,
