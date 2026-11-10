@@ -17,6 +17,8 @@ export function useVisiblePromptIds(
     const targets = new Set<Element>();
     const visible = new Map<Element, string>();
     let frame = 0;
+    // A prompt id moved to another node (recycling): measure even if the set of nodes is the same.
+    let recycled = false;
 
     const publish = () => {
       const next = new Set(visible.values());
@@ -57,40 +59,52 @@ export function useVisiblePromptIds(
         }, { root: container, threshold: 0 })
       : undefined;
 
-    const reconcile = () => {
+    const reconcile = (force = true) => {
       frame = 0;
+      let changed = force || recycled;
+      recycled = false;
       const mounted = new Set(content.querySelectorAll("[data-prompt-id]"));
       for (const target of targets) {
         if (!mounted.has(target)) {
           observer?.unobserve(target);
           targets.delete(target);
           visible.delete(target);
+          changed = true;
         }
       }
       for (const target of mounted) {
         if (!targets.has(target)) {
           targets.add(target);
           observer?.observe(target);
+          changed = true;
         }
       }
+      // A streamed reply mutates the DOM many times a second without adding or removing a prompt:
+      // nothing to measure then.
+      if (!changed) return;
       // Attribute recycling need not cross an intersection threshold.
       measure();
       layoutChangeRef.current();
     };
-    const scheduleReconcile = () => {
-      if (!frame) frame = requestAnimationFrame(reconcile);
+    const scheduleReconcile = (records?: MutationRecord[]) => {
+      if (records?.some((record) => record.type === "attributes")) recycled = true;
+      if (!frame) frame = requestAnimationFrame(() => reconcile(false));
     };
     const mutations = new MutationObserver(scheduleReconcile);
     mutations.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-prompt-id"] });
     reconcile();
     if (!observer) container.addEventListener("scroll", measure, { passive: true });
-    window.addEventListener("resize", scheduleReconcile);
+    const onResize = () => {
+      recycled = true;
+      scheduleReconcile();
+    };
+    window.addEventListener("resize", onResize);
     return () => {
       observer?.disconnect();
       mutations.disconnect();
       if (frame) cancelAnimationFrame(frame);
       container.removeEventListener("scroll", measure);
-      window.removeEventListener("resize", scheduleReconcile);
+      window.removeEventListener("resize", onResize);
     };
   }, [containerRef, contentRef]);
 

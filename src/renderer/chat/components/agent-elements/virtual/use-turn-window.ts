@@ -154,6 +154,8 @@ function createEngine(
   let layout: TurnLayout = buildLayout([], measured, () => 0);
   let keyIndex = new Map<string, number>();
   let committed = { start: 1, end: 1 };
+  /** The window last asked of React (or committed), so an unchanged one asks for no render. */
+  let requested: WindowState | null = null;
   let anchor: HeldAnchor | null = null;
   let observer: ResizeObserver | null = null;
   let scrollFrame = 0;
@@ -242,6 +244,8 @@ function createEngine(
       container.scrollTop - computeOrigin(),
       container.clientHeight || DEFAULT_VIEWPORT,
     );
+    if (requested && requested.start === next.start && requested.end === next.end && requested.n === n) return;
+    requested = { start: next.start, end: next.end, n };
     setWindowState((prev) =>
       prev.start === next.start && prev.end === next.end && prev.n === n
         ? prev
@@ -560,6 +564,7 @@ function createEngine(
     keysChanged: boolean,
   ) => {
     committed = window;
+    requested = { start: window.start, end: window.end, n: getOptions().keys.length };
     // Spacers for the new window first, from the heights known so far, so the
     // content is whole again before any row is measured (see `rowRef`).
     rebuildLayout();
