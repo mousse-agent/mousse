@@ -9,6 +9,20 @@ import type { TurnState, TurnStateSnapshot } from '../../shared/types'
 export type BroadcastFn = (channel: string, data: unknown) => void
 
 /**
+ * A thread list as the `threads:updated` channel carries it: `{ threads, version }` when the service versioned the
+ * snapshot (a push or a `threads.list` reply), so the window can drop one older than a list it already holds;
+ * the bare list otherwise.
+ */
+export function threadListPayload(data: unknown): unknown {
+  const value = data as { threads?: unknown; version?: unknown } | null
+  if (!value || Array.isArray(value) || !Array.isArray(value.threads)) return value
+  const version = value.version as { epoch?: unknown; seq?: unknown } | undefined
+  return version && typeof version.epoch === 'string' && typeof version.seq === 'number'
+    ? { threads: value.threads, version: { epoch: version.epoch, seq: version.seq } }
+    : value.threads
+}
+
+/**
  * Bridge a protocol event onto the preload-compatible IPC bus.
  * Returns true if the event was mapped.
  */
@@ -35,8 +49,7 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'threads.updated': {
-      const threads = (event.data as { threads?: unknown } | null)?.threads ?? event.data
-      broadcast('threads:updated', threads)
+      broadcast('threads:updated', threadListPayload(event.data))
       return true
     }
     case 'subagents.updated': {

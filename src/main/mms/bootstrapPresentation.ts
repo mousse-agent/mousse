@@ -2,7 +2,7 @@ import type { Thread } from '../../shared/types'
 import { visibleThreads } from '../../shared/threadLineage'
 import type { GuiMmsController } from './GuiMmsController'
 import type { PresentationState } from './PresentationState'
-import { broadcastThreadSnapshot } from './protocolEventBridge'
+import { broadcastThreadSnapshot, threadListPayload } from './protocolEventBridge'
 
 /** Hydrate a subscribed window without delaying its first paint. */
 export async function bootstrapPresentation(
@@ -19,7 +19,7 @@ export async function bootstrapPresentation(
   ])
   if (!isCurrent()) return
   broadcast('projects:updated', projectsRes.projects)
-  broadcast('threads:updated', threadsRes.threads)
+  broadcast('threads:updated', threadListPayload(threadsRes))
 
   let activeId = presentation.getActiveThreadId()
   const usable = threadsRes.threads.filter((t) => !t.settledAt)
@@ -36,7 +36,7 @@ export async function bootstrapPresentation(
       activeId = presentation.getActiveThreadId() ?? created.thread.id
       const refreshed = await guiMms.request<{ threads: unknown[] }>('threads.list')
       if (!isCurrent()) return
-      broadcast('threads:updated', refreshed.threads)
+      broadcast('threads:updated', threadListPayload(refreshed))
       const selectedNow = presentation.getActiveThreadId()
       if (selectedNow && selectedNow !== initialActiveId) activeId = selectedNow
     }

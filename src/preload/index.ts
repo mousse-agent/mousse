@@ -81,6 +81,7 @@ import type {
   Task,
   TaskStatus,
   Thread,
+  ThreadListVersion,
   ThreadActivitySnapshot,
   TurnState,
   TurnStateSnapshot,
@@ -922,8 +923,10 @@ const api = {
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
     search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
       ipcRenderer.invoke('threads:search', query, limit),
-    onUpdated: (cb: (threads: Thread[]) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, threads: Thread[]) => cb(threads)
+    /** `version` names the service's snapshot when it has one (`ThreadListVersion`): an older one is dropped. */
+    onUpdated: (cb: (threads: Thread[], version?: ThreadListVersion) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, data: Thread[] | { threads: Thread[]; version: ThreadListVersion }) =>
+        Array.isArray(data) ? cb(data) : cb(data.threads, data.version)
       ipcRenderer.on('threads:updated', handler)
       return () => ipcRenderer.removeListener('threads:updated', handler)
     },

@@ -1995,10 +1995,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.list': {
       const p = isObject(params) ? params : {}
       const projectId = asOptionalString(p.projectId)
-      const inventory = ctx.mms.threads.listAllThreads()
+      const { threads: inventory, version } = ctx.mms.threads.listAllThreadsVersioned()
       const threads = projectId ? ctx.mms.threads.listThreads(projectId) : inventory
       // One project's list gets only the rows of other computers that belong to that project.
-      return { threads: listedThreadsFor(ctx, threads, inventory, projectId ? { projectId } : undefined) }
+      return { threads: listedThreadsFor(ctx, threads, inventory, projectId ? { projectId } : undefined), version }
     }
     case 'threads.get': {
       const p = isObject(params) ? params : {}

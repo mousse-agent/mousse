@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
+import { MmsRemoteBackend } from '../src/mms/bridge/remote/MmsBackend'
 import type { Thread } from '../src/shared/types'
 
 type Event = { type: string; data?: unknown; threadId?: string }
@@ -63,7 +64,7 @@ describe('windows hear of list changes once, as pushes', () => {
     expect(lists).toHaveLength(1)
     expect(lists[0].map((thread) => thread.id)).toContain(created!.id)
     const others = seenByOther.filter((event) => event.type === 'threads.updated')
-    expect(others.at(-1)?.data).toEqual({ threads: lists[0] })
+    expect((others.at(-1)?.data as { threads: Thread[] }).threads).toEqual(lists[0])
   })
 
   it('sends one thread list for a rename, a pin and a settle, each with the change made', async () => {
@@ -84,6 +85,52 @@ describe('windows hear of list changes once, as pushes', () => {
     const lists = await listsAfter(seen, async () => { mms.threads.createThread('Made by an agent', undefined, undefined, { started: true }) })
     expect(lists).toHaveLength(1)
     expect(lists[0].some((thread) => thread.name === 'Made by an agent')).toBe(true)
+  })
+
+  it('versions every list it sends, so a list read before a change is older than the push after it', async () => {
+    const read = await window.request<{ threads: Thread[]; version: { epoch: string; seq: number } }>('threads.list', {})
+    expect(read.version).toMatchObject({ epoch: expect.any(String), seq: expect.any(Number) })
+    const from = seen.length
+    await window.request('threads.create', { name: 'After the read', started: true })
+    await vi.waitFor(() => expect(seen.slice(from).some((event) => event.type === 'threads.updated')).toBe(true))
+    const pushed = seen.slice(from).filter((event) => event.type === 'threads.updated').at(-1)!.data as { version: { epoch: string; seq: number } }
+    expect(pushed.version.epoch).toBe(read.version.epoch)
+    expect(pushed.version.seq).toBeGreaterThan(read.version.seq)
+  })
+
+  it('tells windows when an expired thread is deleted, with no request behind it', async () => {
+    const thread = mms.threads.createThread('Expiring', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
+    const lists = await listsAfter(seen, () => mms.threadExpiry.pass())
+    expect(lists.length).toBeGreaterThanOrEqual(1)
+    expect(lists.at(-1)!.some((entry) => entry.id === thread.id)).toBe(false)
+  })
+
+  it('tells windows of a pin and a delete a phone made through its backend', async () => {
+    const thread = mms.threads.createThread('From the phone', undefined, undefined, { started: true })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const backend = new MmsRemoteBackend(mms)
+    const pinned = await listsAfter(seen, () => backend.execute('threads.pin' as never, { threadId: thread.id, pinned: true }))
+    expect(pinned).toHaveLength(1)
+    expect(pinned[0].find((entry) => entry.id === thread.id)?.pinnedAt).toBeTruthy()
+    const settled = await listsAfter(seen, () => backend.execute('threads.settle' as never, { threadId: thread.id, settled: true }))
+    expect(settled).toHaveLength(1)
+    // The delete's reply carries the trash's file identity, which an NTFS file id can push past what the phone's JSON
+    // allows; what is checked here is the push, made before the reply is encoded.
+    const deleted = await listsAfter(seen, () => backend.execute('threads.delete' as never, { threadId: thread.id }).catch(() => undefined))
+    expect(deleted.length).toBeGreaterThanOrEqual(1)
+    expect(deleted.at(-1)!.some((entry) => entry.id === thread.id)).toBe(false)
+  })
+
+  it("tells windows of a change only the service bus announced, and of a store write with no request", async () => {
+    const quiet = mms.threads.createThread('Quiet', undefined, undefined, { started: true })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const bus = await listsAfter(seen, async () => { mms.events.broadcast('threads:updated', mms.threads.listAllThreads()) })
+    expect(bus).toHaveLength(1)
+    const store = await listsAfter(seen, async () => { mms.threads.setThreadPinned(quiet.id, true) })
+    expect(store).toHaveLength(1)
+    expect(store[0].find((entry) => entry.id === quiet.id)?.pinnedAt).toBeTruthy()
   })
 
   it('tells windows when a chat changes, once for several changes together', async () => {

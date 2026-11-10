@@ -74,6 +74,7 @@ export class AgentChatService {
   private networkBindingGuard?: (chatId: string) => boolean
   private readonly changeListeners = new Set<() => void>()
   private recoveryTimer?: ReturnType<typeof setTimeout>
+  private stopFollowingQuestions?: () => void
   constructor(private readonly options: AgentChatServiceOptions) {
     this.profileId = options.services.profileId
     if (options.registry.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Chat agents do not belong to this profile')
@@ -81,6 +82,24 @@ export class AgentChatService {
     if (!this.device.isLocal || !this.device.online) throw new Error('Chats require the current local device')
     this.store = new ChatStore(options.services.getProfileHomeDir(), this.profileId)
     this.recoverInterrupted()
+    this.followQuestions()
+  }
+  /**
+   * An approval a running chat waits for (or one answered, dismissed or expired) changes what its conversation shows
+   * (`pendingQuestions`), though nothing in the chat's record moves: listeners hear of it like any other change.
+   */
+  private followQuestions(): void {
+    const questions = this.options.services.questions as { on?: (event: string, listener: (payload: { threadId?: string }) => void) => unknown; off?: (event: string, listener: (payload: { threadId?: string }) => void) => unknown }
+    if (typeof questions.on !== 'function' || typeof questions.off !== 'function') return
+    const onQuestion = (payload: { threadId?: string }): void => {
+      if (payload?.threadId && [...this.active.values()].some((run) => run.threadId === payload.threadId)) this.changed()
+    }
+    questions.on('pending', onQuestion)
+    questions.on('cleared', onQuestion)
+    this.stopFollowingQuestions = () => {
+      questions.off!('pending', onQuestion)
+      questions.off!('cleared', onQuestion)
+    }
   }
   setBrowserRuntime(port: BrowserRuntimePort | undefined): void { this.browserRuntime = port }
   setNetworkBindingGuard(guard: (chatId: string) => boolean): void { this.networkBindingGuard = guard }
@@ -104,6 +123,8 @@ export class AgentChatService {
     this.lifecycle.beginShutdown()
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer)
     this.recoveryTimer = undefined
+    this.stopFollowingQuestions?.()
+    this.stopFollowingQuestions = undefined
     for (const run of this.active.values()) this.options.services.questions.dismissAllForThread(run.threadId)
   }
   async dispose(): Promise<void> { this.beginShutdown(); await this.lifecycle.waitForIdle() }

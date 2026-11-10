@@ -34,6 +34,7 @@ import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
 import { useViewSwap } from './lib/motion'
 import { normalizeRunSettings } from '../shared/settings'
+import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
 import { useBotsStore } from './stores/botsStore'
 // Rail pages, Chats and New bot load as their own chunks; see lib/lazySurfaces.
@@ -212,6 +213,9 @@ export default function App() {
     // Do not let list reconciliation overwrite newer events that arrive while
     // the IPC request is in flight.
     let threadListRevision = 0
+    // The newest list snapshot this window holds (`ThreadListVersion`). A list older than it, such as the startup
+    // list arriving after a push made while the projects were still loading, is dropped.
+    let heldThreadList: ThreadListVersion | undefined
     let threadRefreshInFlight = false
     let threadRefreshQueued = false
     let disposed = false
@@ -228,8 +232,10 @@ export default function App() {
       }
     }
 
-    const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>) => {
+    const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>, version?: ThreadListVersion) => {
       if (!isCurrentProfile()) return
+      if (isOlderThreadList(version, heldThreadList)) return
+      if (version) heldThreadList = version
       threadListRevision += 1
       setThreads(threads)
     }

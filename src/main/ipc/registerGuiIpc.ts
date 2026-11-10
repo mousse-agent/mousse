@@ -40,7 +40,8 @@ import { guiChatRequestError } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
-  broadcastThreadSnapshot
+  broadcastThreadSnapshot,
+  threadListPayload
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
@@ -1165,7 +1166,7 @@ export function registerGuiIpc(
       const projects = await guiMms.request<{ projects: unknown[] }>('projects.list')
       const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
       broadcast('projects:updated', projects.projects)
-      broadcast('threads:updated', threads.threads)
+      broadcast('threads:updated', threadListPayload(threads))
       guiMms.clearResnapshotFlag()
     } catch (err) {
       console.error('resnapshot failed:', err)
@@ -1492,7 +1493,7 @@ export function registerGuiIpc(
     )
     broadcast('projects:updated', res.projects)
     const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
-    broadcast('threads:updated', threads.threads)
+    broadcast('threads:updated', threadListPayload(threads))
     return res.project
   })
 
@@ -1768,7 +1769,7 @@ export function registerGuiIpc(
     const activeId = currentPresentation().getActiveThreadId()
     if (!activeId || parseQualifiedId(activeId)?.node !== node) return
     void selectThread(activeId).catch(() => undefined)
-    void guiMms.request<{ threads: unknown[] }>('threads.list').then((res) => broadcast('threads:updated', res.threads), () => undefined)
+    void guiMms.request<{ threads: unknown[] }>('threads.list').then((res) => broadcast('threads:updated', threadListPayload(res)), () => undefined)
   }
 
   // Deletes an archived thread for good; its worktrees, branches and Git refs stay. The window asked first, so scratch
@@ -1820,7 +1821,7 @@ export function registerGuiIpc(
     })
     if (isQualifiedId(threadId)) {
       const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
-      broadcast('threads:updated', threads.threads)
+      broadcast('threads:updated', threadListPayload(threads))
     }
     await selectThread(forked.threadId)
     return { threadId: forked.threadId }
@@ -1844,7 +1845,7 @@ export function registerGuiIpc(
     })
     if (isQualifiedId(threadId)) {
       const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
-      broadcast('threads:updated', threads.threads)
+      broadcast('threads:updated', threadListPayload(threads))
     }
     return res.thread
   })

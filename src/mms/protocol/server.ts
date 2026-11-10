@@ -410,10 +410,22 @@ export class MmsProtocolServer {
         const pending = threadListPending
         threadListPending = undefined
         threadListTimer = undefined
-        emitToSubscribers(this.ring.push('threads.updated', { threads: services.threads.listAllThreads() }, pending?.threadId))
+        // The snapshot's version lets a window drop a list it receives after a newer one (`ThreadListVersion`).
+        emitToSubscribers(this.ring.push('threads.updated', services.threads.listAllThreadsVersioned(), pending?.threadId))
       })
     }
     this.threadListPushers.set(services.profileId, pushThreadsUpdated)
+    // Changes no request or store event above announces reach the windows too, each as part of the same one push:
+    // - the store's other list writes (pin, settle, archive, reorder, trash, restore, purge, a first message);
+    // - the service bus's `threads:updated`, which in-daemon producers raise (an expiry deletion, a routed pin,
+    //   settle, reorder or delete through the phone's backend, agent executions, chats). A request's own
+    //   `threads.updated` also reaches the bus (`pushRequestEvent`); it is already pending then and adds nothing.
+    const threadListChanged = (threadId?: string): void => {
+      if (threadListPending) return
+      pushThreadsUpdated(threadId)
+    }
+    onEmitter(services.threads, 'list-changed', (change: { id?: string } | undefined) => threadListChanged(change?.id))
+    onEmitter(services.events, 'threads:updated', () => threadListChanged())
     disposers.push(() => {
       if (this.threadListPushers.get(services.profileId) === pushThreadsUpdated) this.threadListPushers.delete(services.profileId)
       if (threadListTimer) clearImmediate(threadListTimer)
