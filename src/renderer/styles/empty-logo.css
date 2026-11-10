@@ -3,6 +3,9 @@
  * sways with the ambient glow (ambient-glow.css), a tilt towards the cursor and a pour on send.
  * Inside the SVG, px lengths are the logo's own 514-unit space. Everything animates transform or opacity
  * (the draw-in also stroke-dashoffset), scales with Animation speed and is still when motion is off.
+ * The two loops move in small steps, about 12 a second, not on every screen refresh. The swirl is its own
+ * element over the glass, so its sway moves a finished layer; a transform inside the SVG would lay out and
+ * repaint the logo on every frame.
  */
 
 .app .chat-empty-logo.empty-logo {
@@ -37,8 +40,15 @@ html[data-theme='light'] .empty-logo {
   transform-box: view-box;
 }
 
-/* The swirl turns and bobs about where it sits in the rim. */
-.empty-logo-swirl,
+/* The swirl turns and bobs about where it sits in the rim: (256, 152) of the logo's 514 units. */
+.empty-logo-swirl {
+  position: absolute;
+  inset: 0;
+  transform-origin: 49.8% 29.57%;
+  /* ease-in-out as 24 equal steps: the curve sampled at the middle of each step. */
+  --empty-logo-wobble-ease: linear(0.0008 0% 4.167%, 0.0076 4.167% 8.333%, 0.0214 8.333% 12.5%, 0.0427 12.5% 16.667%, 0.0715 16.667% 20.833%, 0.108 20.833% 25%, 0.1522 25% 29.167%, 0.2035 29.167% 33.333%, 0.2616 33.333% 37.5%, 0.3253 37.5% 41.667%, 0.3933 41.667% 45.833%, 0.4641 45.833% 50%, 0.5359 50% 54.167%, 0.6067 54.167% 58.333%, 0.6747 58.333% 62.5%, 0.7384 62.5% 66.667%, 0.7965 66.667% 70.833%, 0.8478 70.833% 75%, 0.892 75% 79.167%, 0.9285 79.167% 83.333%, 0.9573 83.333% 87.5%, 0.9786 87.5% 91.667%, 0.9924 91.667% 95.833%, 0.9992 95.833% 100%);
+}
+
 .empty-logo-swirl-bob {
   transform-origin: 256px 152px;
 }
@@ -71,19 +81,24 @@ html[data-theme='light'] .empty-logo {
    leans left with wave B at 10% of the loop, right with wave A at 35%, left with wave A at 60% and right
    with wave B at 85%, overshooting a touch as it settles into each lean. */
 .empty-logo[data-drawn] .empty-logo-swirl {
-  animation: empty-logo-wobble calc(var(--ambient-glow-loop, calc(18s * var(--ui-motion-scale, 1))) / 2) ease-in-out var(--empty-logo-glow-delay, 0s) infinite;
+  animation: empty-logo-wobble calc(var(--ambient-glow-loop, calc(18s * var(--ui-motion-scale, 1))) / 2) var(--empty-logo-wobble-ease) var(--empty-logo-glow-delay, 0s) infinite;
 }
 
+.chat--empty[data-ambient-rest] .empty-logo-swirl {
+  animation-play-state: paused;
+}
+
+/* The half-second settles between leans take 6 plain steps each. */
 @keyframes empty-logo-wobble {
   0%, 100% { transform: none; }
-  20% { transform: rotate(-9deg) skewX(4deg); }
-  26% { transform: rotate(-5.5deg) skewX(1.5deg) scale(1.015, 0.985); }
+  20% { transform: rotate(-9deg) skewX(4deg); animation-timing-function: steps(6); }
+  26% { transform: rotate(-5.5deg) skewX(1.5deg) scale(1.015, 0.985); animation-timing-function: steps(6); }
   31% { transform: rotate(-7.5deg) skewX(3deg); }
-  50% { transform: scale(0.97, 1.05); }
-  55% { transform: scale(1.025, 0.975); }
+  50% { transform: scale(0.97, 1.05); animation-timing-function: steps(6); }
+  55% { transform: scale(1.025, 0.975); animation-timing-function: steps(6); }
   59% { transform: scale(0.99, 1.02); }
-  70% { transform: rotate(9deg) skewX(-4deg); }
-  76% { transform: rotate(5.5deg) skewX(-1.5deg) scale(1.015, 0.985); }
+  70% { transform: rotate(9deg) skewX(-4deg); animation-timing-function: steps(6); }
+  76% { transform: rotate(5.5deg) skewX(-1.5deg) scale(1.015, 0.985); animation-timing-function: steps(6); }
   81% { transform: rotate(7.5deg) skewX(-3deg); }
 }
 
@@ -107,7 +122,8 @@ html[data-theme='light'] .empty-logo {
 }
 
 .empty-logo-liquid[data-filled] .empty-logo-wave {
-  animation: empty-logo-wave calc(2.6s * var(--ui-motion-scale, 1)) linear infinite;
+  /* 32 steps a loop: each is a third of a pixel on screen. */
+  animation: empty-logo-wave calc(2.6s * var(--ui-motion-scale, 1)) steps(32) infinite;
 }
 
 @keyframes empty-logo-wave {
@@ -129,8 +145,9 @@ html[data-theme='light'] .empty-logo {
   transition: transform var(--empty-logo-spring);
 }
 
+/* 22 and 12 of the logo's 514 units. */
 .empty-logo-swirl {
-  translate: calc(var(--empty-logo-tilt-x) * 22px) calc(var(--empty-logo-tilt-y) * 12px);
+  translate: calc(var(--empty-logo-tilt-x) * 4.28%) calc(var(--empty-logo-tilt-y) * 2.33%);
   transition: translate var(--empty-logo-spring);
 }
 
@@ -214,6 +231,7 @@ html[data-theme='light'] .empty-logo {
 /* ---------- Still with Animation speed Off or reduced motion ---------- */
 
 [data-motion='off'] .empty-logo-art *,
+[data-motion='off'] .empty-logo-swirl,
 [data-motion='off'] .empty-logo-tilt {
   animation: none !important;
   transition: none !important;
@@ -227,6 +245,7 @@ html[data-theme='light'] .empty-logo {
 
 @media (prefers-reduced-motion: reduce) {
   .empty-logo-art *,
+  .empty-logo-swirl,
   .empty-logo-tilt {
     animation: none !important;
     transition: none !important;
