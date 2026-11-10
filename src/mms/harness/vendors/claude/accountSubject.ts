@@ -65,6 +65,22 @@ export function claudeEffectiveEnvironment(env: NodeJS.ProcessEnv, options: Acco
   return readClaudeSettings(env, options).effective
 }
 
+/** The settings `env` variables a sign-in needs: Anthropic's own (address, token, key, headers), Claude's sign-in token, and the proxy. */
+const SIGN_IN_VARIABLE = /^(ANTHROPIC_[A-Z0-9_]+|CLAUDE_CODE_OAUTH_TOKEN|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy)$/
+
+/**
+ * `env` with only the sign-in variables of the user's and the managed settings' `env` applied over it
+ * (`SIGN_IN_VARIABLE`), for a request that loads no settings files yet must keep a sign-in kept there
+ * (a proxy's address and token). Nothing that changes what runs at start-up is copied: no
+ * `NODE_OPTIONS`, `NODE_PATH`, `PATH`, `LD_*`/`DYLD_*`, `PYTHON*` or `ELECTRON_RUN_AS_NODE`.
+ */
+export function claudeSignInEnvironment(env: NodeJS.ProcessEnv, options: AccountSubjectOptions = {}): NodeJS.ProcessEnv {
+  const { effective } = readClaudeSettings(env, options)
+  const signIn: NodeJS.ProcessEnv = { ...env }
+  for (const [name, value] of Object.entries(effective)) if (SIGN_IN_VARIABLE.test(name) && value !== env[name]) signIn[name] = value
+  return signIn
+}
+
 /**
  * A stable id of the account Claude Code runs as, read from the files and variables it reads,
  * without starting it (never shown or stored; the gateway hashes it). Undefined when Mousse cannot

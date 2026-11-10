@@ -145,7 +145,7 @@ export interface HarnessGateway {
   /**
    * One model request with no tools (a chat title), on an instance whose driver runs one-shots
    * (`HarnessDriver.oneShot`). Resolves the selection like a turn for `purpose` (scope, hidden models,
-   * disabled instances); agent runtimes are refused with `unsupported`. Ends with `timeout` after
+   * disabled instances); a driver without one-shots is refused with `unsupported`. Ends with `timeout` after
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
@@ -1024,9 +1024,9 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
     const config = driver.decodeConfig(resolved.entry.config, resolved.instanceId)
-    // Chat titles are a one-shot completion of an API provider's model; agent runtimes run turns only.
+    // Chat titles are a one-shot request; a driver without one-shots runs turns only.
     if (options.purpose === 'title' && !driver.oneShot)
-      harnessFail('unsupported', `${driver.label} cannot name chats. Choose an API provider's model for chat titles, or Automatic.`, resolved.instanceId)
+      harnessFail('unsupported', `${driver.label} cannot name chats. Choose another model for chat titles, or Automatic.`, resolved.instanceId)
     if (!options.allowDisabled) {
       if (options.scope?.kind === 'project' && !this.scopes.enabled(resolved.instanceId, true, options.scope).effective)
         harnessFail('instance_disabled', `Provider instance "${resolved.instanceId}" is turned off for this project. Turn it on or choose another model.`, resolved.instanceId)

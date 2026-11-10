@@ -42,7 +42,7 @@ export function AgentsSettings({
   const titleProvider = settings.title?.llmProvider ?? ''
   const titleModel = settings.title?.model ?? ''
   const titleIsAutomatic = !titleProvider || !titleModel
-  // A stored choice the picker no longer offers (a Bedrock model, an agent runtime) cannot run:
+  // A stored choice the picker no longer offers (a Bedrock model, an agent without one-shots) cannot run:
   // say so instead of showing an empty picker while titles quietly fall back.
   const titleInstance = settings.title?.instanceId
   const titleUnavailable = !titleIsAutomatic && providers.length > 0 && !titleProviders.some((provider) =>

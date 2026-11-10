@@ -90,9 +90,12 @@ import {
 } from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
+import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy } from '../../adapter'
+import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
+import { harnessAppError } from '../../../../shared/harness/types'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
 
 export const CODEX_PROVIDER_ID = 'codex'
@@ -158,7 +161,9 @@ export function codexModelOption(model: CodexModel): LlmModelOption {
     label: model.displayName || model.id,
     ...(efforts.length ? { efforts, thinkingOff: false as const } : {}),
     ...(efforts.length && efforts.includes(model.defaultReasoningEffort) ? { defaultEffort: model.defaultReasoningEffort } : {}),
-    ...(Object.keys(descriptions).length ? { effortDescriptions: descriptions } : {})
+    ...(Object.keys(descriptions).length ? { effortDescriptions: descriptions } : {}),
+    // Its subagent tools cannot be turned off for a single request: never offered for titles.
+    ...(codexOneShotRunsOn(model.multiAgentVersion) ? {} : { oneShot: false as const })
   }
 }
 
@@ -1123,6 +1128,8 @@ export class CodexProviderService {
    * its end, resolved by the compaction's `turn/completed`.
    */
   private readonly compactions = new Map<string, CompactionTurn>()
+  /** One-shots running, by their ephemeral Codex thread: every notification of that thread goes to its handler. */
+  private readonly oneShots = new Map<string, (notification: CodexNotification) => void>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
   /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
@@ -1665,6 +1672,139 @@ export class CodexProviderService {
   }
 
   /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
+   * commit message on the chosen model. It runs as one turn on an ephemeral Codex thread (never written
+   * to Codex's history) with the system text as its base instructions, a read-only sandbox in a folder
+   * of its own, no approvals (any request is refused: no run owns the thread), Codex's native tools and
+   * web search off, and every MCP server off (`codexOneShotConfig`); it is refused when the user's MCP
+   * servers cannot be listed. Any tool call Codex reports ends it, its turn interrupted. The answer is
+   * the turn's last agent message. It never retries.
+   */
+  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    // Held for the whole request, so the idle close never ends the process under it.
+    const key = `one-shot:${randomUUID()}`
+    this.activeThreads.add(key)
+    let codexThreadId: string | undefined
+    let conn: CodexConnection | undefined
+    let turnId: string | undefined
+    let ended = false
+    let lost: (() => void) | undefined
+    try {
+      if (this.checkDue()) await abortable(this.status(), signal)
+      if (!this.configured())
+        throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      conn = await this.verifiedConnection(signal)
+      const cwd = this.standaloneWorkspace('one-shot')
+      const locked = codexOneShotConfig((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers)
+      if (!locked)
+        throw new AppError({ code: 'policy_unenforceable', message: 'Mousse could not read which MCP servers Codex has on, so it did not send this request.', errorInfo: { category: 'unavailable', retryable: false } })
+      const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      // Checked with this Codex, not a saved listing: a model whose subagents cannot be turned off never runs one.
+      const listed = await abortable(this.listedModel(conn, baseId), signal)
+      if (!listed || !codexOneShotRunsOn(listed.multiAgentVersion))
+        throw harnessAppError({ code: 'unsupported', message: `${listed?.displayName || baseId} can start subagents that Mousse cannot turn off for a single request, so it cannot ${ONE_SHOT_TASK_TEXT[spec.task ?? 'title']}. Choose another title model in Settings → Agents, or Automatic.` })
+      const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
+      // Always the checked model, `default` included: left out, Codex would run the model the user's or a
+      // profile's config names, which was never checked.
+      const pinned = listed.model || listed.id
+      const model = { model: pinned }
+      const started = pinnedProvider(this.modelProvider, await conn.request('thread/start', {
+        cwd,
+        approvalPolicy: 'never',
+        sandbox: 'read-only',
+        ...model,
+        modelProvider: this.modelProvider,
+        config: { ...locked, model_provider: this.modelProvider },
+        baseInstructions: spec.system,
+        ephemeral: true
+      }, { signal }))
+      const threadId = started.thread.id
+      codexThreadId = threadId
+      // A thread Codex opened on another model than the checked one never runs a turn.
+      if (started.model !== pinned)
+        throw harnessAppError({ code: 'unsupported', message: `Codex opened this request on ${started.model} instead of ${pinned}, so Mousse did not send it.` })
+      spec.onActivity()
+      // The turn's agent messages by item, and its end.
+      const messages = new Map<string, string>()
+      let done!: (turn: CodexTurn) => void
+      let refuse!: (reason: Error) => void
+      const completed = new Promise<CodexTurn>((resolve, reject) => { done = resolve; refuse = reject })
+      completed.catch(() => undefined)
+      this.oneShots.set(threadId, (notification) => {
+        // A tool is refused before anything else runs, a slow activity callback included.
+        const started = notificationParams(notification, 'item/started')?.item
+        if (started && !CODEX_ONE_SHOT_ITEMS.has(started.type)) {
+          refuse(new AppError({ code: 'policy_unenforceable', message: `Codex tried to use a tool (${started.type}) in a request that runs none, so Mousse stopped it.`, errorInfo: { category: 'unavailable', retryable: false } }))
+          return
+        }
+        spec.onActivity()
+        const delta = notificationParams(notification, 'item/agentMessage/delta')
+        if (delta) {
+          messages.set(delta.itemId, (messages.get(delta.itemId) ?? '') + delta.delta)
+          return
+        }
+        const item = notificationParams(notification, 'item/completed')?.item
+        if (item?.type === 'agentMessage' && 'text' in item) {
+          messages.delete(item.id)
+          messages.set(item.id, item.text)
+          return
+        }
+        const end = notificationParams(notification, 'turn/completed')
+        if (end && (turnId === undefined || end.turn.id === turnId)) done(end.turn)
+      })
+      const turn = await conn.request('turn/start', {
+        threadId,
+        input: [textInput(spec.prompt)],
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        ...model,
+        ...(effort ? { effort } : {})
+      })
+      // Not tied to the signal: once sent, a stop has to interrupt the turn Codex started.
+      turnId = turn.turn.id
+      const connection = conn
+      const gone = new Promise<never>((_resolve, reject) => {
+        lost = (): void => reject(new Error('Codex stopped before it answered.'))
+        if (connection.signal.aborted) lost()
+        else connection.signal.addEventListener('abort', lost, { once: true })
+      })
+      gone.catch(() => undefined)
+      const result = await abortable(Promise.race([completed, gone]), signal)
+      ended = true
+      if (result.status === 'failed') throw new Error(this.redact(result.error?.message ?? 'Codex could not answer.'))
+      if (result.status !== 'completed') throw new Error('Codex stopped before it answered.')
+      return { text: [...messages.values()].pop() ?? '' }
+    } finally {
+      if (lost) conn?.signal.removeEventListener('abort', lost)
+      if (codexThreadId) this.oneShots.delete(codexThreadId)
+      if (conn && codexThreadId && !conn.signal.aborted) {
+        // A stopped request ends its turn on Codex's side too; then the thread is let go.
+        if (!ended && turnId) await conn.request('turn/interrupt', { threadId: codexThreadId, turnId }, { timeoutMs: 5_000 }).catch(() => undefined)
+        await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { timeoutMs: 5_000 }).catch(() => undefined)
+      }
+      this.activeThreads.delete(key)
+      this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
+    }
+  }
+
+  /**
+   * `model` as this Codex lists it (`model/list`, hidden models included), or its default model for
+   * `default`. Undefined when Codex does not list it.
+   */
+  private async listedModel(conn: CodexConnection, model: string): Promise<CodexModel | undefined> {
+    let cursor: string | null = null
+    for (let page = 0; page < 10; page += 1) {
+      const response: ModelListResponse = await conn.request('model/list', { includeHidden: true, ...(cursor ? { cursor } : {}) })
+      const found = response.data.find((entry) => (model === CODEX_DEFAULT_MODEL_ID ? entry.isDefault : entry.id === model || entry.model === model))
+      if (found) return found
+      cursor = response.nextCursor
+      if (!cursor) return undefined
+    }
+    return undefined
+  }
+
+  /**
    * Ends a stopped `/compact` on Codex's side: once Codex accepted it, its compaction turn (by id when Codex named
    * it, else whatever turn the thread runs) is interrupted, and its end awaited. True when the thread still holds the
    * full history: Codex refused the compaction, or its turn ended interrupted or failed. False when that cannot be
@@ -2046,6 +2186,8 @@ export class CodexProviderService {
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
     if (typeof threadId !== 'string') return
+    const oneShot = this.oneShots.get(threadId)
+    if (oneShot) return oneShot(notification)
     const compaction = this.compactions.get(threadId)
     if (compaction?.sent) {
       // Only the compaction's own turn: the first that starts once it was asked for, then that turn by id. An end

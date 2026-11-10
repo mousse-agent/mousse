@@ -540,7 +540,7 @@ export interface LlmProviderOption {
   models: LlmModelOption[]
   /**
    * The instance runs a single request with no tools (chat titles, pull request drafts, commit
-   * messages). Set by the gateway on every listing; agent runtimes are `false`.
+   * messages). Set by the gateway on every listing; runtimes that only run turns are `false`.
    */
   oneShot?: boolean
 }

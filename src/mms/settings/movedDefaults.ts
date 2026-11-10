@@ -12,7 +12,7 @@ function names(selection: { llmProvider?: string; instanceId?: string } | undefi
 /**
  * The device defaults a move rewrites (`instances.move`), with a line for each:
  * - the default model follows the entry to the agent, with the agent's model for it;
- * - a title model on the moved entry becomes Automatic, since an agent runtime names no chats.
+ * - a title model on the moved entry becomes Automatic; the person may choose the agent's model again.
  */
 /** A model as the list of what moved names it, from its id: no listing is on hand here. */
 const named = (model: string): string => modelLabel(modelChoiceOf({ provider: '', model }), { effort: false })

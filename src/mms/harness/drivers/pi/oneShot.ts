@@ -2,16 +2,9 @@ import type { Api, Model, Models, ThinkingLevel } from '@earendil-works/pi-ai'
 import { harnessAppError } from '../../../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
 import { customModelDefinition } from '../../catalog'
-import type { OneShotSpec, OneShotTask } from '../../driver'
+import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
 import { piOneShotRunsOn } from './oneShotApis'
 import { assertAssistantResponseSucceeded, consumeAssistantStream, getCacheSessionId, getReasoningStreamOptions } from './stream'
-
-/** What each one-shot task does, for a refusal that names it. */
-const ONE_SHOT_TASK_TEXT: Record<OneShotTask, string> = {
-  title: 'name chats',
-  pull_request: 'draft pull requests',
-  commit_message: 'write commit messages'
-}
 
 /** What a pi one-shot reads of the profile's pi-ai models: the catalogue, credentials and transport. */
 export type PiOneShotModels = Pick<Models, 'getModel' | 'getModels' | 'getAuth' | 'stream' | 'streamSimple'>

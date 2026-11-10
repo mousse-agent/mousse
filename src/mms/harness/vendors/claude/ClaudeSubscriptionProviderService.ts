@@ -50,7 +50,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveEnvironment, claudeEffectiveVariable } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -68,6 +68,7 @@ import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
+import type { OneShotSpec } from '../../driver'
 import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
@@ -1011,6 +1012,82 @@ export class ClaudeSubscriptionProviderService {
       signal.removeEventListener('abort', abort)
       this.controllers.delete(controller)
       this.activeThreads.delete(threadId)
+    }
+  }
+  /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
+   * commit message on the chosen model (`oneShotOptions`): one turn, no tools, no saved session (it
+   * never shows in the user's `claude --resume`), and nothing of the user's setup that could run a
+   * command. It never retries.
+   */
+  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    if (this.checkDue()) await this.status()
+    signal.throwIfAborted()
+    if (!this.configured())
+      throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+    const controller = new AbortController()
+    this.controllers.add(controller)
+    const abort = (): void => controller.abort(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    let query: Query | undefined
+    try {
+      const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      // A level the model does not offer runs at the model's default; Ultracode is a turn setting, not a level.
+      const level = spec.effort ?? supportedEffortOf(spec.model, this.listedByClaude() ? this.models() : [], CLAUDE_EFFORTS)
+      const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
+      query = await this.createQuery(spec.prompt, {
+        ...this.oneShotOptions(controller),
+        model: baseId,
+        ...(effort ? { effort } : {}),
+        systemPrompt: spec.system
+      })
+      for await (const message of query) {
+        spec.onActivity()
+        if (message.type !== 'result') continue
+        const failure = resultFailure(message)
+        if (failure) throw failure
+        return { text: message.subtype === 'success' ? message.result : '' }
+      }
+      signal.throwIfAborted()
+      throw new Error('Claude Code ended without an answer.')
+    } finally {
+      query?.close()
+      signal.removeEventListener('abort', abort)
+      this.controllers.delete(controller)
+    }
+  }
+  /**
+   * The options of a one-shot. Claude Code loads no settings files (`settingSources: []`), so no hook,
+   * plugin, MCP server, permission rule or CLAUDE.md of the user's or a project's applies; hooks are
+   * also switched off in the flag settings, with none passed in code. None of the user's launch
+   * arguments, no tools, one turn, no saved session, and any tool request is denied. The owner's entry
+   * keeps its sign-in: the sign-in and proxy variables of the user's and the managed settings' `env`
+   * (where a proxy's address and token often live) are applied to its environment, and nothing else
+   * from it, so a settings `NODE_OPTIONS` or `PATH` never runs code at start-up (`claudeSignInEnvironment`). A locked entry runs in its own
+   * folder and environment, as its model discovery does. Hooks an organisation's managed settings
+   * enforce still run: Claude Code gives no caller a switch over those.
+   */
+  private oneShotOptions(controller: AbortController): Options {
+    const base = this.dependencies.lockedEnv
+      ? this.housekeepingOptions(this.standaloneWorkspace('one-shot'), controller)
+      : this.options(this.standaloneWorkspace('one-shot'), controller, this.finalEnv(claudeSignInEnvironment(this.environment())))
+    return {
+      ...base,
+      settingSources: [],
+      settings: { disableAllHooks: true },
+      hooks: {},
+      plugins: [],
+      extraArgs: {},
+      mcpServers: {},
+      strictMcpConfig: true,
+      tools: [],
+      allowedTools: [],
+      permissionMode: 'default',
+      maxTurns: 1,
+      persistSession: false,
+      includePartialMessages: true,
+      canUseTool: async () => ({ behavior: 'deny', message: 'No tools run for a single request.' })
     }
   }
   /** The executable path, launch args and environment set in Settings → Providers. */

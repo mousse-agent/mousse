@@ -63,6 +63,16 @@ function fixture(
     settings: () => JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))
   }
 }
+/** Settings `env` variables that change what runs when Claude Code starts; a one-shot never copies them. */
+const LOADER_VARIABLES: Record<string, string> = {
+  NODE_OPTIONS: '--require=/tmp/evil.js',
+  NODE_PATH: '/tmp/evil-modules',
+  PATH: '/tmp/evil-bin',
+  LD_PRELOAD: '/tmp/evil.so',
+  DYLD_INSERT_LIBRARIES: '/tmp/evil.dylib',
+  PYTHONPATH: '/tmp/evil-python',
+  ELECTRON_RUN_AS_NODE: '1'
+}
 function fakeQuery(events: unknown[] = []) {
   const generator = (async function* () {
     for (const event of events) yield event
@@ -352,6 +362,59 @@ describe('Claude Subscription native provider', () => {
     service.commitConversation('thread', 'history')
     expect(await service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)).toBe(false)
     expect(inputs[1].prompt).toBe('/compact')
+  })
+  it('a one-shot runs one turn with no tools and no saved session, and returns the answer', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const { service, settings, setLaunch, home } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery([{ type: 'stream_event', event: {} }, { ...result, result: 'Login redirect fix' }])
+    })
+    // The user's Claude settings: a proxy sign-in in their `env`, and a hook that would run a command.
+    const configDir = join(home, 'claude-config')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(join(configDir, 'settings.json'), JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'http://proxy.test:8317',
+        ANTHROPIC_AUTH_TOKEN: 'proxy-key',
+        ANTHROPIC_CUSTOM_HEADERS: 'X-Team: titles',
+        HTTPS_PROXY: 'http://corp-proxy.test:3128',
+        // Each of these would change what runs when Claude Code starts.
+        ...LOADER_VARIABLES
+      },
+      hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo pwned' }] }] }
+    }))
+    setLaunch({ args: ['--verbose', '--plugin-dir', join(home, 'plugins')], env: { CLAUDE_CONFIG_DIR: configDir } })
+    const onActivity = vi.fn()
+    const answer = await service.oneShot({ model: 'sonnet:high', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+    expect(answer).toEqual({ text: 'Login redirect fix' })
+    expect(inputs).toHaveLength(1)
+    const { options, prompt } = inputs[0]!
+    expect(prompt).toBe('Request: fix the login redirect')
+    expect(options).toMatchObject({ model: 'sonnet', effort: 'high', systemPrompt: 'Name the chat.', tools: [], allowedTools: [], mcpServers: {}, strictMcpConfig: true, plugins: [], maxTurns: 1, persistSession: false, permissionMode: 'default' })
+    expect(options.resume).toBeUndefined()
+    // No settings file loads (no hook, plugin, MCP server or rule of the user's), hooks are off in the
+    // flag settings, none are passed in code, and none of the user's launch arguments are kept.
+    expect(options.settingSources).toEqual([])
+    expect(options.settings).toEqual({ disableAllHooks: true })
+    expect(options.hooks).toEqual({})
+    expect(options.extraArgs).toEqual({})
+    // The sign-in kept in the settings' `env` still reaches Claude Code.
+    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', ANTHROPIC_CUSTOM_HEADERS: 'X-Team: titles', HTTPS_PROXY: 'http://corp-proxy.test:3128', CLAUDE_CONFIG_DIR: configDir })
+    // Nothing from the settings that loads code at start-up is copied.
+    for (const [name, value] of Object.entries(LOADER_VARIABLES)) expect(options.env?.[name], name).not.toBe(value)
+    const denied = await options.canUseTool!('Bash', {}, { signal: new AbortController().signal, suggestions: [], toolUseID: 'x' } as never)
+    expect(denied.behavior).toBe('deny')
+    expect(onActivity).toHaveBeenCalledTimes(2)
+    // No thread session is recorded for it.
+    expect(settings().sessions ?? {}).toEqual({})
+  })
+  it('a one-shot reports a failed answer and needs a sign-in', async () => {
+    const failed = fixture(() => fakeQuery([{ ...result, subtype: 'error_during_execution', is_error: true, errors: ['model not found'] }]))
+    await expect(failed.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('model not found')
+    const query = vi.fn(() => fakeQuery([result]))
+    const signedOut = fixture(query, false)
+    await expect(signedOut.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'claude_subscription_sign_in_required' })
+    expect(query).not.toHaveBeenCalled()
   })
   it('resumes a saved session only on the instance that created it', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []

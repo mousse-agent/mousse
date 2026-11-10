@@ -11,6 +11,8 @@ export interface ChatGptModel {
   id: string
   label: string
   capabilities: ModelCapabilities
+  /** The catalog's `multi_agent_version` (null for none); absent when the entry does not say. */
+  multiAgentVersion?: string | null
 }
 
 const MODELS_TIMEOUT_MS = 15_000
@@ -52,7 +54,8 @@ export function parseChatGptModels(body: unknown): ChatGptModel[] {
         efforts: efforts(entry.supported_reasoning_levels),
         images: Array.isArray(entry.input_modalities) && entry.input_modalities.includes('image'),
         ...(window ? { contextWindow: window } : {})
-      }
+      },
+      ...('multi_agent_version' in entry ? { multiAgentVersion: typeof entry.multi_agent_version === 'string' ? entry.multi_agent_version : null } : {})
     })
   }
   return models

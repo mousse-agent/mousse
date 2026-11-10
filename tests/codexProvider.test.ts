@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events'
+import { EventEmitter, getEventListeners } from 'node:events'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,10 +14,12 @@ import {
   CodexProviderService,
   CodexTurnFailure,
   codexEnvironment,
+  codexModelOption,
   type CodexServiceDependencies,
   type CodexServiceOptions
 } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
+import { CODEX_ONE_SHOT_FEATURES_OFF, codexOneShotRunsOn } from '../src/mms/harness/vendors/codex/oneShot'
 
 type Message = { id?: number | string; method?: string; params?: unknown }
 type Reply = { result?: unknown; error?: { code: number; message: string } }
@@ -239,10 +241,10 @@ describe('CodexProviderService', () => {
       const cursor = (message.params as { cursor?: string }).cursor
       return {
         result: cursor
-          ? { data: [{ id: 'gpt-b', model: 'gpt-b', displayName: 'GPT B', description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false }], nextCursor: null }
+          ? { data: [{ id: 'gpt-b', model: 'gpt-b', displayName: 'GPT B', description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false, multiAgentVersion: 'v2' }], nextCursor: null }
           : {
               data: [
-                { id: 'gpt-a', model: 'gpt-a', displayName: 'GPT A', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fast responses' }, { reasoningEffort: 'ultra', description: 'Maximum reasoning with automatic task delegation' }, { reasoningEffort: 'turbo-new', description: '' }], defaultReasoningEffort: 'low', isDefault: true },
+                { id: 'gpt-a', model: 'gpt-a', displayName: 'GPT A', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fast responses' }, { reasoningEffort: 'ultra', description: 'Maximum reasoning with automatic task delegation' }, { reasoningEffort: 'turbo-new', description: '' }], defaultReasoningEffort: 'low', isDefault: true, multiAgentVersion: null },
                 { id: 'gpt-hidden', model: 'gpt-hidden', displayName: 'Hidden', description: '', hidden: true, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false }
               ],
               nextCursor: 'page-2'
@@ -252,10 +254,11 @@ describe('CodexProviderService', () => {
     const service = create(server, { models: [{ id: 'stale', label: 'Stale' }] })
     await service.status()
     const models = await service.refreshModels()
-    // Every level Codex reports, its extra `ultra` level included, with its descriptions and default.
+    // Every level Codex reports, its extra `ultra` level included, with its descriptions and default. A
+    // model with `v2` subagents runs no one-shot (titles).
     expect(models).toEqual([
       { id: 'gpt-a', label: 'GPT A', efforts: ['low', 'ultra'], thinkingOff: false, defaultEffort: 'low', effortDescriptions: { low: 'Fast responses', ultra: 'Maximum reasoning with automatic task delegation' } },
-      { id: 'gpt-b', label: 'GPT B' }
+      { id: 'gpt-b', label: 'GPT B', oneShot: false }
     ])
     expect(service.llmProvider()).toEqual({ id: 'codex', label: 'Codex', models })
 
@@ -724,6 +727,201 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(server.requests('turn/interrupt')).toHaveLength(1)
       await chat(service, { history: 'h' })
       expect(server.requests('thread/start')).toHaveLength(2)
+    })
+  })
+
+  describe('one-shot', () => {
+    type Event = { method: string; params: Record<string, unknown> }
+    /**
+     * A server whose turn sends `events` of the turn's thread, then the turn's end (none when `end` is null).
+     * `config/read` answers with `mcp` (an error when null). A thread runs the model it is asked for; one
+     * started without a model runs the user's configured `gpt-configured` (a `v2` model), or always does
+     * when `honourModel` is false.
+     */
+    function oneShotServer(events: Event[], end: Turn | null = { status: 'completed' }, mcp: Record<string, unknown> | null = { github: {}, mousse: {}, 'mousse-relay': {}, off: { enabled: false } }, models: Array<Record<string, unknown>> = LISTED, honourModel = true) {
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        if (method === 'account/read') return chatgpt
+        if (method === 'model/list') return { result: { data: models, nextCursor: null } }
+        if (method === 'config/read') return mcp ? { result: { config: { mcp_servers: mcp }, layers: [] } } : { error: { code: -32603, message: 'config unreadable' } }
+        if (method === 'thread/start') {
+          const asked = (message.params as { model?: string }).model
+          return { result: { thread: { id: 'thr-once' }, model: (honourModel && asked) || 'gpt-configured', modelProvider: 'openai', cwd: home } }
+        }
+        if (method === 'turn/start') {
+          const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+          setImmediate(() => {
+            for (const event of events) write(event.method, { threadId: 'thr-once', turnId: 'turn-1', ...event.params })
+            if (end) write('turn/completed', { threadId: 'thr-once', turn: { id: 'turn-1', error: null, ...end } })
+          })
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        return { result: {} }
+      })
+      return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
+    }
+    /** `model/list` entries: gpt-x, Codex's catalog default, has no subagent tools (null). */
+    const listed = (id: string, multiAgentVersion?: string | null, isDefault = false) => ({
+      id, model: id, displayName: id.toUpperCase(), description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault,
+      ...(multiAgentVersion === undefined ? {} : { multiAgentVersion })
+    })
+    const LISTED = [listed('gpt-x', null, true), listed('gpt-v1', 'v1'), listed('gpt-v2', 'v2'), listed('gpt-old'), listed('gpt-configured', 'v2')]
+    const once = (service: CodexProviderService, signal = new AbortController().signal, onActivity: () => void = () => {}) =>
+      service.oneShot({ model: 'gpt-x', system: 's', prompt: 'p', onActivity }, signal)
+    /** The `abort` listeners on the service's app-server connection. */
+    const connectionListeners = (service: CodexProviderService) =>
+      getEventListeners((service as unknown as { app: { conn: { signal: AbortSignal } } }).app.conn.signal, 'abort').length
+
+    it('runs one turn on an ephemeral read-only thread with every native tool and MCP server off', async () => {
+      const server = oneShotServer([
+        { method: 'item/agentMessage/delta', params: { itemId: 'a', delta: 'Thinking' } },
+        { method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Thinking about it' } } },
+        { method: 'item/started', params: { item: { type: 'reasoning', id: 'r' } } },
+        { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'Login ' } },
+        { method: 'item/agentMessage/delta', params: { itemId: 'b', delta: 'redirect fix' } }
+      ])
+      const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'high'] }] })
+      const onActivity = vi.fn()
+      const answer = await service.oneShot({ model: 'gpt-x:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+      expect(answer).toEqual({ text: 'Login redirect fix' })
+      const [start] = server.requests('thread/start').map((message) => message.params as Record<string, unknown>)
+      expect(start).toMatchObject({ approvalPolicy: 'never', sandbox: 'read-only', model: 'gpt-x', baseInstructions: 'Name the chat.', ephemeral: true })
+      // Every feature that adds a native tool is off, web search is off, and every MCP server the user
+      // has on is off, Mousse's own server names included.
+      expect(start!.config).toEqual({
+        ...Object.fromEntries(CODEX_ONE_SHOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false])),
+        web_search: 'disabled',
+        'mcp_servers.github.enabled': false,
+        'mcp_servers.mousse.enabled': false,
+        'mcp_servers.mousse-relay.enabled': false,
+        model_provider: 'openai'
+      })
+      expect(CODEX_ONE_SHOT_FEATURES_OFF).toEqual(expect.arrayContaining(['shell_tool', 'unified_exec', 'view_image', 'image_generation', 'multi_agent', 'multi_agent_v2', 'apps', 'plugins', 'hooks']))
+      expect(server.requests('turn/start').map((message) => message.params)).toEqual([expect.objectContaining({
+        threadId: 'thr-once',
+        input: [{ type: 'text', text: 'Request: fix the login redirect', text_elements: [] }],
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        effort: 'low'
+      })])
+      expect(onActivity).toHaveBeenCalled()
+      // The thread is let go once answered; nothing is kept for a later turn.
+      expect(server.requests('thread/unsubscribe').map((message) => message.params)).toEqual([{ threadId: 'thr-once' }])
+      expect(server.requests('turn/interrupt')).toEqual([])
+    })
+
+    it('is refused, with no thread started, when the MCP servers cannot be listed or one cannot be turned off', async () => {
+      const unreadable = oneShotServer([], { status: 'completed' }, null)
+      await expect(once(create(unreadable))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+      expect(unreadable.requests('thread/start')).toEqual([])
+      const unnamed = oneShotServer([], { status: 'completed' }, { 'my.server': {} })
+      await expect(once(create(unnamed))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+      expect(unnamed.requests('thread/start')).toEqual([])
+    })
+
+    it('runs only on a model whose subagent tools a one-shot turns off, as this Codex lists it', async () => {
+      const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }])
+      const service = create(server)
+      const run = (model: string) => service.oneShot({ model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+      // Subagents of any version start a child before Codex reports the call (`v1` through its handler even
+      // with the feature off); an unlisted version is refused too.
+      await expect(run('gpt-v2')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V2 can start subagents') })
+      await expect(run('gpt-v1')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V1 can start subagents') })
+      await expect(run('gpt-old')).rejects.toMatchObject({ code: 'unsupported' })
+      await expect(run('gpt-missing')).rejects.toMatchObject({ code: 'unsupported' })
+      await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', task: 'commit_message', onActivity: () => {} }, new AbortController().signal)).rejects.toThrow('cannot write commit messages')
+      expect(server.requests('thread/start')).toEqual([])
+      // `model/list` is asked with hidden models included.
+      expect(server.requests('model/list').at(-1)!.params).toMatchObject({ includeHidden: true })
+      expect(await run('gpt-x')).toEqual({ text: 'Title' })
+      expect(server.requests('thread/start')).toHaveLength(1)
+    })
+
+    it('pins the checked model, `default` included, so a configured model never runs instead', async () => {
+      // The user's config names gpt-configured (`v2`); the catalog's default, gpt-x, has no subagents.
+      const server = oneShotServer([{ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'a', text: 'Title' } } }])
+      const service = create(server)
+      const run = (model: string) => service.oneShot({ model, system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+      expect(await run('default')).toEqual({ text: 'Title' })
+      expect(await run('gpt-x')).toEqual({ text: 'Title' })
+      // Both requests name the checked model: none is left to Codex's config.
+      expect(server.requests('thread/start').map((message) => (message.params as { model?: string }).model)).toEqual(['gpt-x', 'gpt-x'])
+      expect(server.requests('turn/start').map((message) => (message.params as { model?: string }).model)).toEqual(['gpt-x', 'gpt-x'])
+
+      // A Codex that opens the thread on its configured model anyway: no turn runs, and the thread is let go.
+      const stubborn = oneShotServer([], { status: 'completed' }, undefined, LISTED, false)
+      await expect(create(stubborn).oneShot({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
+        .rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('gpt-configured instead of gpt-x') })
+      expect(stubborn.requests('turn/start')).toEqual([])
+      expect(stubborn.requests('thread/unsubscribe')).toHaveLength(1)
+    })
+
+    it('marks listed models whose subagents cannot be turned off as unable to run one-shots', () => {
+      expect(codexModelOption(listed('gpt-x', null) as never).oneShot).toBeUndefined()
+      expect(codexModelOption(listed('gpt-v1', 'v1') as never).oneShot).toBe(false)
+      expect(codexModelOption(listed('gpt-v2', 'v2') as never).oneShot).toBe(false)
+      expect(codexModelOption(listed('gpt-old') as never).oneShot).toBe(false)
+      expect([null, 'v1', 'v2', 'v3', undefined].map(codexOneShotRunsOn)).toEqual([true, false, false, false, false])
+    })
+
+    it('ends as refused and interrupts the turn when Codex starts any tool', async () => {
+      for (const type of ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'collabAgentToolCall', 'dynamicToolCall']) {
+        const server = oneShotServer([{ method: 'item/started', params: { item: { type, id: 'tool-1' } } }], null)
+        await expect(once(create(server))).rejects.toMatchObject({ code: 'policy_unenforceable', message: expect.stringContaining(type) })
+        expect(server.requests('turn/interrupt').map((message) => message.params)).toEqual([{ threadId: 'thr-once', turnId: 'turn-1' }])
+        expect(server.requests('thread/unsubscribe')).toHaveLength(1)
+      }
+    })
+
+    it('reports a failed turn, and a stop interrupts the turn and lets the thread go', async () => {
+      const failed = create(oneShotServer([], { status: 'failed', error: { message: 'model not available' } }))
+      await expect(once(failed)).rejects.toThrow('model not available')
+
+      const server = oneShotServer([{ method: 'turn/started', params: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }], null)
+      const service = create(server)
+      const stop = new AbortController()
+      // Stopped once the turn runs (its first event), with no end coming.
+      let events = 0
+      await expect(once(service, stop.signal, () => { if (++events === 2) stop.abort(new Error('Stopped')) })).rejects.toThrow('Stopped')
+      expect(server.requests('turn/interrupt').map((message) => message.params)).toEqual([{ threadId: 'thr-once', turnId: 'turn-1' }])
+      expect(server.requests('thread/unsubscribe')).toHaveLength(1)
+    })
+
+    it('leaves no listener on the connection after an answer, a failure or a stop', async () => {
+      let mode: 'answer' | 'fail' | 'hold' = 'answer'
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        if (method === 'account/read') return chatgpt
+        if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
+        if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
+        if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'turn/start') {
+          const write = (name: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+          setImmediate(() => {
+            write('turn/started', { threadId: 'thr-once', turn: { id: 'turn-1', status: 'inProgress', error: null } })
+            if (mode === 'answer') write('turn/completed', { threadId: 'thr-once', turn: { id: 'turn-1', status: 'completed', error: null } })
+            if (mode === 'fail') write('turn/completed', { threadId: 'thr-once', turn: { id: 'turn-1', status: 'failed', error: { message: 'no' } } })
+          })
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        return { result: {} }
+      })
+      const service = create(server)
+      await service.status()
+      const baseline = connectionListeners(service)
+      for (let run = 0; run < 3; run += 1) {
+        mode = 'answer'
+        await once(service)
+        expect(connectionListeners(service)).toBe(baseline)
+        mode = 'fail'
+        await expect(once(service)).rejects.toThrow('no')
+        expect(connectionListeners(service)).toBe(baseline)
+        mode = 'hold'
+        const stop = new AbortController()
+        let events = 0
+        await expect(once(service, stop.signal, () => { if (++events === 2) stop.abort(new Error('Stopped')) })).rejects.toThrow('Stopped')
+        expect(connectionListeners(service)).toBe(baseline)
+      }
     })
   })
 
