@@ -6,7 +6,9 @@ import { join } from 'node:path'
 
 const directory = process.env.MOUSSE_TURN_WINDOW_DIRECTORY!
 app.setPath('userData', join(directory, 'electron-user-data'))
-runWithoutGpu({ app, BrowserWindow })
+// OS reduced motion stays at its default here: with it on, the windowed transcript loops in useTurnWindow's layout
+// effects (commit -> syncWindow) until React stops it with "Maximum update depth exceeded". The GPU stays off.
+runWithoutGpu({ app, BrowserWindow, reducedMotion: false })
 app.on('window-all-closed', () => {})
 setTimeout(() => app.exit(1), 150000).unref()
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms))

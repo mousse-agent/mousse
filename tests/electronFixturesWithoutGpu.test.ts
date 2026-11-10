@@ -106,6 +106,13 @@ describe('runWithoutGpu', () => {
     expect(app.commandLine.appendSwitch.mock.calls.map(([name]) => name)).toEqual(['disable-gpu', 'disable-gpu-compositing', 'force-prefers-reduced-motion'])
   })
 
+  it('keeps the GPU off when a fixture keeps the OS motion setting', () => {
+    const { app, BrowserWindow } = fakeElectron([])
+    runWithoutGpu({ app, BrowserWindow, reducedMotion: false })
+    expect(app.disableHardwareAcceleration).toHaveBeenCalledOnce()
+    expect(app.commandLine.appendSwitch.mock.calls.map(([name]) => name)).toEqual(['disable-gpu', 'disable-gpu-compositing'])
+  })
+
   it('fails a passing exit while a window is still open', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const { app, BrowserWindow, exits } = fakeElectron([{ destroyed: false, url: 'http://127.0.0.1:1/' }, { destroyed: true, url: 'about:blank' }])
