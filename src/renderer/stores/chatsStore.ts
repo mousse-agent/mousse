@@ -40,6 +40,8 @@ const pendingPublications = new Map<string, string>()
 let epoch = 0
 let stopOpenBot: (() => void) | undefined
 let refreshOperation: Promise<void> | undefined
+/** A refresh was asked for while one ran: it may have read the chats before the change that asked, so it runs once more. */
+let refreshAgain = false
 // Polling still checks current authorization and metadata. I retain only the
 // already fetched original prefix when the fresh first page proves it unchanged.
 function retainLoadedPages(current: ChatConversation | null, fresh: ChatConversation): ChatConversation {
@@ -65,6 +67,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     pendingSends.clear()
     pendingPublications.clear()
     refreshOperation = undefined
+    refreshAgain = false
     set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, error: null, errorSource: null, loading: false,
       newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {} })
     useBotsStore.getState().activate(profileId)
@@ -73,13 +76,16 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     stopOpenBot = window.mousse?.app?.onOpenBot?.((botId) => { void get().openBot(botId) })
   },
   async refresh() {
-    if (refreshOperation) return refreshOperation
+    if (refreshOperation) {
+      refreshAgain = true
+      return refreshOperation
+    }
     const owner = epoch
     const operation = (async () => {
       try {
         const snapshot = await window.mousse.platformRequest.request<ChatsSnapshot>('chats.snapshot', {})
         if (owner !== epoch) return
-        // The chats are listed every second: a list that changed nothing keeps the one held, so nothing renders again.
+        // A list that changed nothing keeps the one held, so nothing renders again.
         set({ snapshot: keepEqual(get().snapshot, snapshot), ...(get().errorSource === 'refresh' ? { error: null, errorSource: null } : {}) })
         const chatId = get().activeChatId
         if (chatId) {
@@ -94,7 +100,15 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       }
     })()
     refreshOperation = operation
-    try { await operation } finally { if (refreshOperation === operation) refreshOperation = undefined }
+    try { await operation } finally {
+      if (refreshOperation === operation) {
+        refreshOperation = undefined
+        if (refreshAgain && owner === epoch) {
+          refreshAgain = false
+          void get().refresh()
+        }
+      }
+    }
   },
   async openChat(chatId) {
     if (chatId !== get().activeChatId && !await confirmNavigation()) return

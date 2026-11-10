@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useRef, useCallback, useState, startTransition, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { useChatsStore } from './stores/chatsStore'
+import { followPushedList } from './lib/followPushedList'
 import { OrchestratorChat } from './components/OrchestratorChat'
 
 import { MainViewTabs } from './components/MainViewTabs'
@@ -30,9 +31,10 @@ import { DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKe
 import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './lib/panelSplit'
 import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
-import { useAppStore } from './stores/appStore'
+import { useAppStore, withNewerTimes } from './stores/appStore'
 import { useViewSwap } from './lib/motion'
 import { normalizeRunSettings } from '../shared/settings'
+import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
 import { useBotsStore } from './stores/botsStore'
 // Rail pages, Chats and New bot load as their own chunks; see lib/lazySurfaces.
@@ -64,9 +66,12 @@ function conversationRow(sidebar: HTMLElement | null) {
   return width > 0 && workspaceWidth > 0 ? { right, width, mainWidth, workspaceWidth } : null
 }
 
-// Event delivery is primary. This low-frequency reconciliation covers renderer
-// reload/subscription races without repainting when the list is unchanged.
-const THREAD_LIST_RECONCILE_MS = 2_000
+// The thread list arrives as `threads.updated` pushes (and again after a reconnect or an event gap). It is read
+// again when the window comes back and, for a push lost anyway, once a minute while the window shows.
+const THREAD_LIST_FALLBACK_MS = 60_000
+// Chats are read again when the service says one changed (`chats.changed`). Agents' availability, computers
+// going on or off line and a published Group's posts have no push, so they are read every 30 seconds too.
+const CHATS_FALLBACK_MS = 30_000
 
 
 
@@ -113,8 +118,13 @@ export default function App() {
     useChatsStore.getState().activate(profileId)
     void useChatsStore.getState().refresh()
     if (sidebarMode !== 'chats' && threadsSidebarView !== 'chats') return
-    const timer = setInterval(() => { void useChatsStore.getState().refresh() }, 1000)
-    return () => clearInterval(timer)
+    return followPushedList({
+      refresh: () => { void useChatsStore.getState().refresh() },
+      onChanged: (listener) => window.mousse.chats?.onChanged(listener) ?? (() => undefined),
+      fallbackMs: CHATS_FALLBACK_MS,
+      window,
+      document
+    })
   }, [profileId, profileReady, sidebarMode, threadsSidebarView])
 
   const setMainAreaWidth = useAppStore((s) => s.setMainAreaWidth)
@@ -203,6 +213,9 @@ export default function App() {
     // Do not let list reconciliation overwrite newer events that arrive while
     // the IPC request is in flight.
     let threadListRevision = 0
+    // The newest list snapshot this window holds (`ThreadListVersion`). A list older than it, such as the startup
+    // list arriving after a push made while the projects were still loading, is dropped.
+    let heldThreadList: ThreadListVersion | undefined
     let threadRefreshInFlight = false
     let threadRefreshQueued = false
     let disposed = false
@@ -219,10 +232,12 @@ export default function App() {
       }
     }
 
-    const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>) => {
+    const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>, version?: ThreadListVersion) => {
       if (!isCurrentProfile()) return
+      if (isOlderThreadList(version, heldThreadList)) return
+      if (version) heldThreadList = version
       threadListRevision += 1
-      setThreads(threads)
+      setThreads(withNewerTimes(threads, useAppStore.getState().threads))
     }
 
     const refreshThreads = async (): Promise<void> => {
@@ -234,10 +249,13 @@ export default function App() {
       threadRefreshInFlight = true
       const requestedAtRevision = threadListRevision
       try {
-        const threads = await window.mousse.threads.listAll()
-        // Never let an older list request overwrite a newer live event.
-        if (isCurrentProfile() && requestedAtRevision === threadListRevision) {
-          setThreads(threads)
+        const { threads, version } = window.mousse.threads.listAllVersioned
+          ? await window.mousse.threads.listAllVersioned()
+          : { threads: await window.mousse.threads.listAll(), version: undefined }
+        // Never let an older list request overwrite a newer live event, nor a list older than the one held.
+        if (isCurrentProfile() && requestedAtRevision === threadListRevision && !isOlderThreadList(version, heldThreadList)) {
+          if (version) heldThreadList = version
+          setThreads(withNewerTimes(threads, useAppStore.getState().threads))
         }
       } catch {
         // Reconnect handling will retry; keep the last good sidebar snapshot.
@@ -316,6 +334,8 @@ export default function App() {
       window.mousse.tasks.onUpdated(applyIfCurrent(setTasks)),
       window.mousse.projects.onUpdated(applyIfCurrent(setProjects)),
       window.mousse.threads.onUpdated(applyThreadList),
+      // A save moved only threads' times: those rows move ("Needs me", recent threads, row ages) without a whole list.
+      window.mousse.threads.onTouched?.(applyIfCurrent(useAppStore.getState().applyThreadTouches)) ?? (() => undefined),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
       // and other main-driven selection without showing the previous transcript.
       window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id))),
@@ -358,18 +378,16 @@ export default function App() {
       if (isCurrentProfile() && !isSessionClosing(error)) setBootstrapError(error instanceof Error ? error.message : String(error))
     })
 
-    const threadSyncTimer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refreshThreads()
-    }, THREAD_LIST_RECONCILE_MS)
-    const onWindowFocus = (): void => {
-      void refreshThreads()
-    }
-    window.addEventListener('focus', onWindowFocus)
+    const stopFollowingThreads = followPushedList({
+      refresh: () => { void refreshThreads() },
+      fallbackMs: THREAD_LIST_FALLBACK_MS,
+      window,
+      document
+    })
 
     return () => {
       disposed = true
-      window.clearInterval(threadSyncTimer)
-      window.removeEventListener('focus', onWindowFocus)
+      stopFollowingThreads()
       unsubs.forEach((u) => u())
     }
   }, [

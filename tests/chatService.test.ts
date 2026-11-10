@@ -426,6 +426,35 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
     expect(() => f.service.assertBrowserExecution(context)).toThrow(/active chat agent/)
   })
 
+  it('tells its listeners when a running chat starts waiting for an approval and when it is answered', async () => {
+    const f = fixture([
+      providerResponse([{ type: 'toolCall', id: 'chat-write', name: 'write', arguments: { path: 'hello.txt', content: 'approved contents' } }], 'toolUse'),
+      'I wrote the file'
+    ])
+    const draft = f.registry.get(f.alice)
+    const updated = f.registry.saveDraft(f.alice, { expectedDraftHash: draft.draftHash,
+      settings: { approval: { ...draft.settings.approval, policy: 'always' } } })
+    f.registry.publish(f.alice, updated.draftHash)
+    const group = await f.service.create({ kind: 'group', name: 'Writer', agentIds: [f.alice, f.bob] })
+    // What a window would see each time it is told of a change.
+    const shown: number[] = []
+    f.service.onChange(() => { shown.push(f.service.get(group.id).pendingQuestions?.length ?? 0) })
+    f.service.send({ chatId: group.id, text: '@alice write hello.txt' })
+    await vi.waitFor(() => expect(shown).toContain(1))
+    const pending = f.service.get(group.id).pendingQuestions![0]!
+    // Another thread's question is not this chat's: it tells nothing.
+    const before = shown.length
+    const other = new AbortController()
+    void f.questions.requestAnswers([{ id: 'other', prompt: 'Other?', options: [] }] as never, 'not-a-chat-thread', { signal: other.signal }).catch(() => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    other.abort()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(shown.length).toBe(before)
+    expect(f.questions.submitAnswers(pending.requestId, { approval: 'approve' })).toBe(true)
+    await vi.waitFor(() => expect(shown.at(-1)).toBe(0))
+    await f.service.waitForIdle()
+  })
+
   it('hydrates live tool approvals on chat reload and performs a real provider write only after exact approval', async () => {
     const f = fixture([
       providerResponse([{ type: 'toolCall', id: 'chat-write', name: 'write', arguments: { path: 'hello.txt', content: 'approved contents' } }], 'toolUse'),

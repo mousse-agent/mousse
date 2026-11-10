@@ -234,6 +234,37 @@ describe('a chat is created on another computer', () => {
   })
 })
 
+describe('the thread list after a change', () => {
+  const received: Array<{ channel: string; data: unknown }> = []
+  const lists = () => received.filter((entry) => entry.channel === 'threads:updated')
+  beforeEach(() => {
+    received.length = 0
+    windows.push({ isDestroyed: () => false, webContents: { id: 7, send: (channel, data) => { received.push({ channel, data }) } } })
+    request.mockImplementation(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      return { thread: { id: 'made' }, threads: [{ id: 'made' }], all: [{ id: 'made' }] }
+    })
+  })
+  afterEach(() => { request.mockReset() })
+
+  it('is not sent again by the window process for this computer: the service already sent it', async () => {
+    await invoke('threads:create', 'Fix it', undefined, { worktreeEnabled: false })
+    await invoke('threads:rename', 'local-a', 'Renamed')
+    await invoke('threads:pin', 'local-a', true)
+    await invoke('threads:settle', 'local-a', true)
+    await invoke('threads:setModel', 'local-a', { llmProvider: 'p', model: 'm' })
+    await invoke('threads:reorder', undefined, ['local-a', 'local-b'])
+    expect(lists()).toEqual([])
+  })
+
+  it('is sent for a change another computer answered, whose rows reach this computer only with its next list', async () => {
+    await invoke('threads:create', 'Fix it', qualifyId(NODE, 'project-1'), { node: NODE })
+    await invoke('threads:rename', REMOTE, 'Renamed')
+    await invoke('threads:reorder', undefined, ['local-a', REMOTE])
+    expect(lists().map((entry) => entry.data)).toEqual([[{ id: 'made' }], [{ id: 'made' }], [{ id: 'made' }]])
+  })
+})
+
 describe('a long thread of another computer', () => {
   it('reads a page of older messages and a missing image, naming the thread for the router', async () => {
     await invoke('threads:loadEarlier', REMOTE, 'message-9')

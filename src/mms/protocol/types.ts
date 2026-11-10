@@ -506,6 +506,7 @@ export const PROTOCOL_CAPABILITIES = [
 export type ProtocolEventType =
   | 'net.updated'
   | 'bots.changed'
+  | 'chats.changed'
   | 'bots.message'
   | 'bots.activity'
   | 'run.event'
@@ -514,6 +515,7 @@ export type ProtocolEventType =
   | 'run.interrupted-on-boot'
   | 'projects.updated'
   | 'threads.updated'
+  | 'threads.touched'
   | 'pullRequests.updated'
   | 'git.selectionChanged'
   | 'thread.title-generation-failed'

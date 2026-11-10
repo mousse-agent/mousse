@@ -80,6 +80,24 @@ export function sameMessageSnapshot(a: ChatMessage[], b: ChatMessage[]): boolean
   return true
 }
 
+/**
+ * A whole thread list with each row's time no older than the one this window holds for it. Touches
+ * (`threads.touched`) move times without a new list version, so a list read or pushed before a touch can land
+ * after it; taking it as it is would move "Needs me" and recent order back until the next change.
+ */
+export function withNewerTimes(incoming: Thread[], held: readonly Thread[]): Thread[] {
+  if (held.length === 0) return incoming
+  const heldTimes = new Map(held.map((entry) => [entry.id, entry.updatedAt]))
+  let out: Thread[] | undefined
+  incoming.forEach((entry, index) => {
+    const heldAt = heldTimes.get(entry.id)
+    if (!heldAt || !(Date.parse(heldAt) > Date.parse(entry.updatedAt))) return
+    out ??= incoming.slice()
+    out[index] = { ...entry, updatedAt: heldAt }
+  })
+  return out ?? incoming
+}
+
 /** Skip sidebar updates when a protocol event/reconciliation returns the same list. */
 export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
   if (a === b) return true
@@ -275,6 +293,8 @@ interface AppState {
   setThreads: (threads: Thread[]) => void
   /** Merge one thread meta into the sidebar list (model/rename/pin without full rescan). */
   upsertThread: (thread: Thread) => void
+  /** Moves listed threads' `updatedAt` forward (`threads.touched`); an older or unknown one changes nothing. */
+  applyThreadTouches: (touches: ReadonlyArray<{ id: string; updatedAt: string }>) => void
   setThreadActivity: (activity: ThreadActivitySnapshot) => void
   setTurnState: (state: TurnState) => void
   setTurnSnapshot: (snap: TurnStateSnapshot) => void
@@ -761,6 +781,18 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       const threads = s.threads.slice()
       threads[idx] = thread
       return { threads }
+    }),
+  applyThreadTouches: (touches) =>
+    set((s) => {
+      let threads: Thread[] | undefined
+      for (const touch of touches) {
+        const index = s.threads.findIndex((entry) => entry.id === touch.id)
+        const current = index === -1 ? undefined : (threads ?? s.threads)[index]
+        if (!current || !(Date.parse(touch.updatedAt) > Date.parse(current.updatedAt))) continue
+        threads ??= s.threads.slice()
+        threads[index] = { ...current, updatedAt: touch.updatedAt }
+      }
+      return threads ? { threads } : s
     }),
   setThreadActivity: (threadActivity) => set({ threadActivity }),
   setMainView: (mainView) => set({ mainView, sidebarMode: 'projects' }),

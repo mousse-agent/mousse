@@ -160,17 +160,20 @@ describe('after a restart', () => {
     expect(host.querySelector('.bot-roster')?.textContent).toContain('noobesh')
   })
 
-  it('shares one 2-second poll between the sidebar and the pane, and stops it when both are gone', async () => {
+  it('shares one 30-second fallback poll between the sidebar and the pane, and stops it when both are gone', async () => {
     vi.useFakeTimers()
     try {
       await show([summary('b1', { name: 'noobesh' })])
       const lists = () => fake.calls.filter(([name]) => name === 'list').length
       const before = lists()
-      await act(async () => { vi.advanceTimersByTime(2000) })
+      // Every change to a bot is pushed: the poll only covers a missed push.
+      await act(async () => { vi.advanceTimersByTime(29_000) })
+      expect(lists()).toBe(before)
+      await act(async () => { vi.advanceTimersByTime(1000) })
       expect(lists() - before).toBe(1)
       act(() => root.unmount())
       const after = lists()
-      await act(async () => { vi.advanceTimersByTime(6000) })
+      await act(async () => { vi.advanceTimersByTime(90_000) })
       expect(lists()).toBe(after)
       root = createRoot(host)
     } finally {
@@ -208,11 +211,11 @@ describe('the poll', () => {
       const lists = () => fake.calls.filter(([name]) => name === 'list').length
       const before = lists()
       act(() => setVisibility('hidden'))
-      await act(async () => { vi.advanceTimersByTime(10_000) })
+      await act(async () => { vi.advanceTimersByTime(60_000) })
       expect(lists()).toBe(before)
       await act(async () => setVisibility('visible'))
       expect(lists()).toBe(before + 1)
-      await act(async () => { vi.advanceTimersByTime(2000) })
+      await act(async () => { vi.advanceTimersByTime(30_000) })
       expect(lists()).toBe(before + 2)
     } finally {
       vi.useRealTimers()

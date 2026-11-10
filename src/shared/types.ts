@@ -1307,6 +1307,31 @@ export interface ThreadRunsOn {
   ref?: string
 }
 
+/**
+ * Which snapshot of the thread list a push or a `threads.list` reply carries. `seq` rises with every snapshot the
+ * service takes; `epoch` names the service's store, so a restarted service's lower numbers are never read as old.
+ * A window keeps the newest it has seen and drops an older one of the same epoch.
+ */
+export interface ThreadListVersion {
+  epoch: string
+  seq: number
+  /**
+   * The order in which the window process first saw `epoch` (`threadListPayload`): a restarted service's store has a
+   * higher one than the store it replaced, whatever their clocks say, so a late list of a retired store is older.
+   */
+  generation?: number
+}
+
+/**
+ * Whether `next` is older than `held`: from a store seen before the held one (a lower generation), or from the same
+ * store with a lower sequence. A list of a newer store is never older. Anything unversioned is never older.
+ */
+export function isOlderThreadList(next: ThreadListVersion | undefined, held: ThreadListVersion | undefined): boolean {
+  if (!next || !held) return false
+  if (next.generation !== undefined && held.generation !== undefined && next.generation !== held.generation) return next.generation < held.generation
+  return next.epoch === held.epoch && next.seq < held.seq
+}
+
 export interface Thread {
   id: string
   name: string

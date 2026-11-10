@@ -438,4 +438,17 @@ describe('another computer’s lists over a real link', () => {
       t.routing(true)
     }
   }, 60_000)
+
+  it("answers a routed call with this computer's list version, newer than a list read before it", async () => {
+    const remote = t.owner.threads.createThread('Renamed over the link')
+    await vi.waitFor(() => expect(lists().threads().some((row: { id: string }) => row.id === t.qualified(remote.id))).toBe(true), { timeout: 30_000 })
+    const before = await t.dispatch('threads.list', {})
+    const routed = await t.dispatch('threads.rename', { threadId: t.qualified(remote.id), name: 'Renamed there' })
+    const ours = t.caller.threads.listAllThreadsVersioned().version
+    const theirs = t.owner.threads.listAllThreadsVersioned().version
+    // The other computer's version means nothing to this computer's windows: the reply carries this daemon's.
+    expect(routed.version.epoch).toBe(ours.epoch)
+    expect(routed.version.epoch).not.toBe(theirs.epoch)
+    expect(routed.version.seq).toBeGreaterThan(before.version.seq)
+  }, 60_000)
 })

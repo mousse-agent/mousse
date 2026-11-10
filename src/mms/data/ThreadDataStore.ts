@@ -30,6 +30,7 @@ import type {
   Thread,
   ThreadData,
   ThreadLineage,
+  ThreadListVersion,
   ThreadRunsOn,
   ThreadSentFrom,
   ThreadStartedFrom
@@ -836,7 +837,10 @@ export class ThreadDataStore extends EventEmitter {
         console.warn('half-created owned thread kept', { threadId: id, error: error instanceof Error ? error.message : String(error) })
       }
     }
-    if (discarded.length) this.invalidateListCache()
+    if (discarded.length) {
+      this.invalidateListCache()
+      this.emit('list-changed', {})
+    }
     return discarded
   }
 
@@ -929,7 +933,18 @@ export class ThreadDataStore extends EventEmitter {
     return standalone
   }
 
+  /** See `ThreadListVersion`: names each snapshot `listAllThreads` takes. */
+  private readonly listEpoch = uuidv4()
+  private listSeq = 0
+
+  /** `listAllThreads()` with the version of the snapshot it returns, for what is sent to windows. */
+  listAllThreadsVersioned(): { threads: Thread[]; version: ThreadListVersion } {
+    const threads = this.listAllThreads()
+    return { threads, version: { epoch: this.listEpoch, seq: this.listSeq } }
+  }
+
   listAllThreads(): Thread[] {
+    this.listSeq += 1
     const projectsKey = this.projectsCacheKey()
     if (this.listCache && this.listCacheProjectsKey === projectsKey) {
       return this.listCache
@@ -1088,6 +1103,7 @@ export class ThreadDataStore extends EventEmitter {
     }
 
     this.patchListCache(updated)
+    this.emit('list-changed', { id })
     return updated
   }
 
@@ -1113,6 +1129,7 @@ export class ThreadDataStore extends EventEmitter {
     this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
+    this.emit('list-changed', { id })
     return updated
   }
 
@@ -1141,6 +1158,7 @@ export class ThreadDataStore extends EventEmitter {
     }
 
     this.patchListCache(updated)
+    this.emit('list-changed', { id })
     return updated
   }
 
@@ -1159,6 +1177,7 @@ export class ThreadDataStore extends EventEmitter {
     }
     if (!projectId) this.writeVisibleStandaloneProjection(reordered)
     this.invalidateListCache()
+    this.emit('list-changed', {})
     return reordered
   }
 
@@ -1200,6 +1219,7 @@ export class ThreadDataStore extends EventEmitter {
       this.setActiveThreadId(null)
     }
     this.invalidateListCache()
+    this.emit('list-changed', { id: record.taskId })
   }
 
   /** Purge projection uses only stable IDs; it never reads already removed conversation data. */
@@ -1213,6 +1233,7 @@ export class ThreadDataStore extends EventEmitter {
       atomicWriteJsonSync(legacyIndex, entries.filter((entry) => entry.threadId !== record.taskId))
     }
     this.invalidateListCache()
+    this.emit('list-changed', { id: record.taskId })
   }
 
   loadThreadData(id: string): ThreadData {
@@ -1423,6 +1444,7 @@ export class ThreadDataStore extends EventEmitter {
       if (options.throttle && !starting && Date.now() - lastWrite < META_TOUCH_INTERVAL_MS) {
         this.pendingMetaTouch.set(threadDir, now)
         this.patchListCache(meta)
+        this.emitTouched(meta)
         return
       }
       this.writeJsonAtomic(metaPath, meta)
@@ -1431,9 +1453,22 @@ export class ThreadDataStore extends EventEmitter {
       if (!meta.projectId) this.updateStandaloneIndexEntry(meta)
       // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
       this.patchListCache(meta)
+      // A thread's first message lists it; a later save changes only its time, which windows hear in a small push.
+      if (starting) this.emit('list-changed', { id: meta.id })
+      else this.emitTouched(meta)
     } catch {
       // Corrupt meta: do not overwrite with a stale reconstructed fallback.
     }
+  }
+
+  /**
+   * A save moved a thread's `updatedAt` and nothing else a list shows (`touched`). The protocol server sends these
+   * as a small, throttled `threads.touched`, so "Needs me", the recent-threads order and row ages follow saves without
+   * the whole list. A personal bot's threads are never listed, so their times are not sent either.
+   */
+  private emitTouched(meta: ThreadMeta): void {
+    if (meta.botOwned) return
+    this.emit('touched', { id: meta.id, updatedAt: meta.updatedAt })
   }
 
   private readonly metaTouchedAt = new Map<string, number>()
@@ -1525,6 +1560,7 @@ export class ThreadDataStore extends EventEmitter {
     this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
+    this.emit('list-changed', { id })
     return { thread: updated, newlyStarted: true }
   }
 

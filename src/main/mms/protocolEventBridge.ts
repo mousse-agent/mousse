@@ -9,6 +9,35 @@ import type { TurnState, TurnStateSnapshot } from '../../shared/types'
 export type BroadcastFn = (channel: string, data: unknown) => void
 
 /**
+ * A thread list as the `threads:updated` channel carries it: `{ threads, version }` when the service versioned the
+ * snapshot (a push or a `threads.list` reply), so the window can drop one older than a list it already holds;
+ * the bare list otherwise.
+ */
+export function threadListPayload(data: unknown, list: 'threads' | 'all' = 'threads'): unknown {
+  const value = data as { threads?: unknown; all?: unknown; version?: unknown } | null
+  if (!value || Array.isArray(value) || !Array.isArray(value[list])) return value
+  const version = value.version as { epoch?: unknown; seq?: unknown } | undefined
+  return version && typeof version.epoch === 'string' && typeof version.seq === 'number'
+    ? { threads: value[list], version: { epoch: version.epoch, seq: version.seq, generation: listGeneration(version.epoch) } }
+    : value[list]
+}
+
+/**
+ * Each service store's list epoch, numbered in the order this process first saw it. A store that replaced another (the
+ * service restarted, or a profile's services were made again) is first seen later, so it always has the higher number;
+ * a list a retired store sent, arriving late, carries the lower one and is dropped by the window.
+ */
+const epochGenerations = new Map<string, number>()
+export function listGeneration(epoch: string): number {
+  let generation = epochGenerations.get(epoch)
+  if (generation === undefined) {
+    generation = epochGenerations.size + 1
+    epochGenerations.set(epoch, generation)
+  }
+  return generation
+}
+
+/**
  * Bridge a protocol event onto the preload-compatible IPC bus.
  * Returns true if the event was mapped.
  */
@@ -35,8 +64,13 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'threads.updated': {
-      const threads = (event.data as { threads?: unknown } | null)?.threads ?? event.data
-      broadcast('threads:updated', threads)
+      broadcast('threads:updated', threadListPayload(event.data))
+      return true
+    }
+    // Saves that moved only threads' times (`threads.touched`): the window patches those rows.
+    case 'threads.touched': {
+      const touches = (event.data as { touches?: unknown } | null)?.touches
+      if (Array.isArray(touches)) broadcast('threads:touched', touches)
       return true
     }
     case 'subagents.updated': {
@@ -204,6 +238,11 @@ export function bridgeProtocolEvent(
     }
     case 'bots.changed': {
       broadcast('bots:changed', event.data ?? {})
+      return true
+    }
+    // A chat was created, sent to, answered or settled: the window reads the chats again.
+    case 'chats.changed': {
+      broadcast('chats:changed', null)
       return true
     }
     case 'bots.message': {
