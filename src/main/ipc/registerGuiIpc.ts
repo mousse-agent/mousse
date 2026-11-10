@@ -1106,12 +1106,20 @@ export function registerGuiIpc(
     const binding = guiMms.getWindowBindingForSender(senderId)
     if (!win || win.isDestroyed() || !binding) return
     const activeId = presentationForSender(senderId).getActiveThreadId()
+    const target = (channel: string, data: unknown): void => {
+      if (!win.isDestroyed()) win.webContents.send(channel, data)
+    }
+    // The missed events may have changed any thread's status (a turn ended, the service restarted): read them all again.
+    try {
+      const tracker = activityTrackerFor(binding.profileId)
+      tracker.reconcileSnapshot(await guiMms.activityForSender(senderId, !activeId))
+      target('threads:activity', tracker.getSnapshot())
+    } catch (error) {
+      console.error('window thread statuses resnapshot failed:', error)
+    }
     if (!activeId) return
     try {
       const snap = await guiMms.snapshotThreadForSender(senderId, activeId)
-      const target = (channel: string, data: unknown): void => {
-        if (!win.isDestroyed()) win.webContents.send(channel, data)
-      }
       const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }> }
       target('queue:updated', { threadId: activeId, items: snap.queue })
       target('agents:updated', full.agents ?? [])
@@ -1579,7 +1587,19 @@ export function registerGuiIpc(
   // The window's own fallback read, with the snapshot's version, so it is ordered like every pushed list.
   registerHandler('threads:listAllVersioned', async () => threadListPayload(await guiMms.request<{ threads: unknown[] }>('threads.list')))
   registerHandler('threads:active', () => currentPresentation().getActiveThreadId())
-  registerHandler('threads:activity', () => activityTrackerFor().getSnapshot())
+  // A window reads what every thread is doing from the service when it opens. The events it replays on connecting
+  // are the service's last 512 (less when they are large), so after a long reply they hold no status at all, and the
+  // sidebar showed no Done, Working or Input icon until some thread's status changed.
+  registerHandler('threads:activity', async () => {
+    const tracker = activityTrackerFor()
+    try {
+      const result = await guiMms.request<{ activity?: ThreadActivitySnapshot }>('activity.snapshot')
+      if (result?.activity && typeof result.activity === 'object' && !Array.isArray(result.activity)) tracker.reconcileSnapshot(result.activity)
+    } catch (error) {
+      console.warn('thread statuses could not be read; showing the last ones received', error)
+    }
+    return tracker.getSnapshot()
+  })
 
   // The renderer calls this after it knows its trusted profile and subscribes.
   // Coalesce Strict Mode's concurrent effects without caching across reloads.
