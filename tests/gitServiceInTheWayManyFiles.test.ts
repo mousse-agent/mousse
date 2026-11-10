@@ -32,11 +32,6 @@ function everyFile(parent: string, text: string, message: string): string {
   const tree = execFileSync('git', ['write-tree'], { cwd, env, encoding: 'utf8' }).trim()
   return gitIn(cwd, message, 'commit-tree', tree, '-p', parent)
 }
-const timed = async <T>(work: () => Promise<T>): Promise<{ result: T; ms: number }> => {
-  const start = performance.now()
-  const result = await work()
-  return { result, ms: Math.round(performance.now() - start) }
-}
 const refusal = (promise: Promise<unknown>) => promise.then(() => { throw new Error('expected a refusal') }, (error: unknown) => error as Error & { code?: string })
 
 beforeAll(() => {
@@ -71,43 +66,33 @@ describe('switch and pull in a repository with many files', () => {
 
   it('switches back and forth', async () => {
     const service = new GitService()
-    const there = await timed(() => service.checkout(cwd, USER, 'feature'))
-    expect(there.result).toEqual({})
+    expect(await service.checkout(cwd, USER, 'feature')).toEqual({})
     expect(readFileSync(join(cwd, path(12_345)), 'utf8')).toBe('export const version = 2\n')
-    const back = await timed(() => service.checkout(cwd, USER, 'main'))
-    expect(back.result).toEqual({})
+    expect(await service.checkout(cwd, USER, 'main')).toEqual({})
     expect(readFileSync(join(cwd, log(12_345)), 'utf8')).toBe('local log 12345\n')
-    console.info(`switch with ${FILES} files: ${there.ms} ms there, ${back.ms} ms back`)
-    expect(Math.max(there.ms, back.ms)).toBeLessThan(30_000)
   }, 120_000)
 
   it('refuses a switch over the ignored log, naming it', async () => {
-    const { result: error, ms } = await timed(() => refusal(new GitService().checkout(cwd, USER, 'trap')))
+    const error = await refusal(new GitService().checkout(cwd, USER, 'trap'))
     expect(error.message).toBe(`Switching to trap would overwrite an ignored file: ${TRAP}. Move it aside, then try again. Nothing was changed.`)
     expect([git(cwd, 'branch', '--show-current'), readFileSync(join(cwd, TRAP), 'utf8')]).toEqual(['main', 'local log 0\n'])
-    console.info(`refused switch with ${FILES} files: ${ms} ms`)
-    expect(ms).toBeLessThan(30_000)
   }, 120_000)
 
   it('refuses a pull over the ignored log, then fast-forwards and rebases', async () => {
     const service = new GitService()
     git(cwd, 'push', '-q', '-f', 'origin', 'trap:main')
-    const refused = await timed(() => refusal(service.pull(cwd, USER)))
-    expect(refused.result.message).toBe(`Pulling origin/main would overwrite an ignored file: ${TRAP}. Move it aside, then try again. Nothing was changed.`)
+    const refused = await refusal(service.pull(cwd, USER))
+    expect(refused.message).toBe(`Pulling origin/main would overwrite an ignored file: ${TRAP}. Move it aside, then try again. Nothing was changed.`)
     expect(readFileSync(join(cwd, TRAP), 'utf8')).toBe('local log 0\n')
 
     git(cwd, 'push', '-q', '-f', 'origin', 'feature:main')
-    const forward = await timed(() => service.pull(cwd, USER))
-    expect(forward.result).toEqual({ result: 'fast-forwarded' })
+    expect(await service.pull(cwd, USER)).toEqual({ result: 'fast-forwarded' })
     expect(readFileSync(join(cwd, path(0)), 'utf8')).toBe('export const version = 2\n')
 
     git(cwd, 'push', '-q', 'origin', `${everyFile(git(cwd, 'rev-parse', 'feature'), 'export const version = 3\n', 'every file changed again')}:refs/heads/main`)
     writeFileSync(join(cwd, 'local.txt'), 'local\n'); git(cwd, 'add', 'local.txt'); git(cwd, 'commit', '-qm', 'local')
-    const rebased = await timed(() => service.pull(cwd, USER, { strategy: 'rebase' }))
-    expect(rebased.result).toEqual({ result: 'rebased' })
+    expect(await service.pull(cwd, USER, { strategy: 'rebase' })).toEqual({ result: 'rebased' })
     expect([readFileSync(join(cwd, path(FILES - 1)), 'utf8'), readFileSync(join(cwd, 'local.txt'), 'utf8'), readFileSync(join(cwd, log(FILES - 1)), 'utf8')])
       .toEqual(['export const version = 3\n', 'local\n', `local log ${FILES - 1}\n`])
-    console.info(`pull with ${FILES} files: refused in ${refused.ms} ms, fast-forward ${forward.ms} ms, rebase ${rebased.ms} ms`)
-    expect(Math.max(refused.ms, forward.ms, rebased.ms)).toBeLessThan(30_000)
   }, 180_000)
 })

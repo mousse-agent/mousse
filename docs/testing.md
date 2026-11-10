@@ -43,11 +43,11 @@ Three outcomes short-circuit the graph:
 - `tests/support/daemon.ts`: `startDaemon()` launches the bundled CLI as a daemon and waits for its owner and runtime records; `runCli()` and `cliJson()` run commands with a timeout and an output bound.
 - `tests/support/phaseTiming.ts`: set `MOUSSE_TEST_PHASE_TIMING=1` to print fixture phase durations as JSON records on stderr. Daemon startup, CLI operations and drain, plus lifecycle host/profile/socket setup and teardown are measured. Arguments, paths and credentials are not logged; observations are silent by default.
 - `tests/support/tmp.ts`: `ownedTemp()` is a canonical temp directory with deferred disposers.
-- `tests/fixtures/electronWithoutGpu.mjs`: every Electron app a test starts calls `runWithoutGpu({ app, BrowserWindow })` before the app is ready. It turns the GPU off (`disableHardwareAcceleration`, `--disable-gpu`, `--disable-gpu-compositing`), turns reduced motion on so the renderer's own rules cut animations short, and fails a passing exit while a window is still open. `tests/electronFixturesWithoutGpu.test.ts` checks every fixture calls it. Windows stay hidden (`show: false`, offscreen where the page allows it).
+- `tests/fixtures/electronWithoutGpu.mjs`: every Electron app a test starts calls `runWithoutGpu({ app, BrowserWindow })` before the app is ready. It turns the GPU off (`disableHardwareAcceleration`, `--disable-gpu`, `--disable-gpu-compositing`), turns reduced motion on so the renderer's own rules cut animations short, and fails a passing exit while a window is still open. `tests/electronFixturesWithoutGpu.test.ts` lists every Electron entry point, fails when `tests/` holds one it does not list (an app written into a string in a test included), and parses each to check the call runs at top level before any ready handler. Put a new Electron app in a file under `tests/fixtures/` and add it to that list. Windows stay hidden (`show: false`, offscreen where the page allows it).
 
 ## No GPU, no benchmarks
 
-Tests check behaviour. They do not measure frame rates, frame timing, motion, throughput or visual smoothness, and they do not keep a window open beyond the check. Report such numbers from a one-off script, not from the suite.
+Tests check behaviour. They do not measure frame rates, frame timing, motion, throughput or visual smoothness, do not hold work to a speed budget (a time limit on how fast something runs), and do not keep a window open beyond the check. A bound that only proves something does not hang or wait for a timer is fine. Report such numbers from a one-off script, not from the suite.
 
 ## What must stay
 

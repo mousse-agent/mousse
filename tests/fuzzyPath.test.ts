@@ -107,15 +107,11 @@ describe('rankFuzzyPaths', () => {
     expect(result.results.length).toBeLessThan(100)
   })
 
-  it.skipIf(process.env.CI)('ranks 100k synthetic paths in under 200 ms (timing guard; the PR states the hand-run number)', async () => {
+  it('ranks 100k synthetic paths to completion, keeping the limit', async () => {
     const paths = Array.from({ length: 100_000 }, (_, i) => `packages/pkg${i % 400}/src/module${i % 97}/component${i}.tsx`)
-    const input = candidates(paths)
-    const started = performance.now()
-    const { complete, results } = await rankFuzzyPaths('modcomp', input, { limit: 50 })
-    const elapsed = performance.now() - started
+    const { complete, results } = await rankFuzzyPaths('modcomp', candidates(paths), { limit: 50 })
     expect(complete).toBe(true)
     expect(results.length).toBe(50)
-    expect(elapsed).toBeLessThan(200)
   })
 })
 

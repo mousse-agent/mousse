@@ -349,7 +349,6 @@ fi
 
     // 4 MiB through the proxy's standard input and output, byte for byte.
     const payload = randomBytes(4 * 1024 * 1024)
-    const started = Date.now()
     const child = spawn(
       'ssh',
       [...b.sshArgs, 'mousse-owner', '~/.zed_server/zed-remote-server proxy --identifier test'],
@@ -369,9 +368,7 @@ fi
     child.stdin.on('error', () => {})
     child.stdin.end(payload)
     await until(() => received >= payload.length, 120_000)
-    const seconds = (Date.now() - started) / 1000
     expect(hash.digest('hex')).toBe(createHash('sha256').update(payload).digest('hex'))
-    console.info(`zed-style round trip: 4 MiB each way in ${seconds.toFixed(1)} s`)
     await closed
 
     // The proxy channel is over; the daemon it started is not, and it dies with a block.

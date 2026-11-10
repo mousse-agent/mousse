@@ -34,25 +34,7 @@ describe('browser worker build and Electron host', () => {
     expect(browserWorkerModulePath(root)).toBe(developmentModule)
 
     const probePath = join(root, 'host.cjs')
-    const source = `
-      import { app } from 'electron';
-      import { join } from 'node:path';
-      import { BrowserBroker } from ${JSON.stringify(resolve('src/mms/browser/BrowserBroker.ts'))};
-      const fixtureRoot = process.argv[2];
-      const workerPath = process.argv[3];
-      app.setPath('userData', join(fixtureRoot, 'electron-data'));
-      const deadline = setTimeout(() => app.exit(2), 15000);
-      let broker;
-      app.whenReady().then(async () => {
-        broker = new BrowserBroker({ profileRoot: join(fixtureRoot,'profiles'), browserRoot: join(fixtureRoot,'browser'), artifactRoot: join(fixtureRoot,'artifacts'), workerModulePath: workerPath, policy: { authorize: async () => ({ allowed: false, code: 'policy_denied' }) } });
-        const capability = await broker.start();
-        if (!capability.setupRequired || capability.ready) throw new Error('Unexpected empty-fixture capability');
-        await broker.close();
-        process.stdout.write('MOUSSE_BROWSER_BUILD_PROBE:' + JSON.stringify({ success:true, hostElectron: Boolean(process.versions.electron), setupRequired: capability.setupRequired }) + '\\n');
-        clearTimeout(deadline); app.exit(0);
-      }).catch(async (error) => { process.stderr.write(error.message+'\\n'); await broker?.close(); clearTimeout(deadline); app.exit(1); });
-    `
-    await build({ stdin: { contents: source, resolveDir: process.cwd(), sourcefile: 'browser-host-probe.ts' }, outfile: probePath, bundle: true, platform: 'node', format: 'cjs', target: 'node22', external: ['electron'] })
+    await build({ entryPoints: [resolve('tests/fixtures/browser-host-probe/main.ts')], outfile: probePath, bundle: true, platform: 'node', format: 'cjs', target: 'node22', external: ['electron'] })
     const require = createRequire(import.meta.url)
     const electronPath = require('electron') as string
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((done, reject) => {
