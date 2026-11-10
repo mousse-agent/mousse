@@ -19,11 +19,24 @@ export function useSubagentCardModels(threadId: string | null | undefined, messa
   const previous = useRef<ReadonlyMap<string, SubagentCardModel>>(NONE)
   const cards = useMemo(() => {
     const calls = collectSubagentCalls(messages)
-    return calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current, turnActive })
+    const next = calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current, turnActive })
+    // A streamed delta changes no card: the same map keeps every row that reads it from rendering again.
+    return sameCards(previous.current, next) ? previous.current : next
   }, [messages, subagents, loaded, turnActive])
   // Remembered once the render is committed, so a render never writes it.
   useEffect(() => {
     previous.current = cards
   }, [cards])
   return cards
+}
+
+function sameCards(a: ReadonlyMap<string, SubagentCardModel>, b: ReadonlyMap<string, SubagentCardModel>): boolean {
+  if (a === b) return true
+  if (a.size !== b.size) return false
+  for (const [key, card] of b) {
+    const before = a.get(key)
+    if (!before) return false
+    if (before !== card && JSON.stringify(before) !== JSON.stringify(card)) return false
+  }
+  return true
 }

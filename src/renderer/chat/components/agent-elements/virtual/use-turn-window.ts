@@ -154,6 +154,8 @@ function createEngine(
   let layout: TurnLayout = buildLayout([], measured, () => 0);
   let keyIndex = new Map<string, number>();
   let committed = { start: 1, end: 1 };
+  /** The window last asked of React (or committed), so an unchanged one asks for no render. */
+  let requested: WindowState | null = null;
   let anchor: HeldAnchor | null = null;
   let observer: ResizeObserver | null = null;
   let scrollFrame = 0;
@@ -242,6 +244,8 @@ function createEngine(
       container.scrollTop - computeOrigin(),
       container.clientHeight || DEFAULT_VIEWPORT,
     );
+    if (requested && requested.start === next.start && requested.end === next.end && requested.n === n) return;
+    requested = { start: next.start, end: next.end, n };
     setWindowState((prev) =>
       prev.start === next.start && prev.end === next.end && prev.n === n
         ? prev
@@ -364,7 +368,7 @@ function createEngine(
    * layout change being corrected, so they land before the anchor is measured
    * and `end` is read after them.
    */
-  const transact = (openAtEnd = false) => {
+  const transact = (openAtEnd = false, quiet = false) => {
     const prevLayout = layout;
     rebuildLayout();
     writeSpacers();
@@ -376,19 +380,24 @@ function createEngine(
     }
     captureAnchor(prevLayout);
     syncWindow();
-    notify();
+    if (!quiet) notify();
   };
 
   const onRowsResized = (entries: ResizeObserverEntry[]) => {
     const { containerRef } = getOptions();
     let rowResized = false;
+    let otherRowResized = false;
+    const lastKey = layout.keys[layout.keys.length - 1];
     for (const entry of entries) {
       const key = keyOfEl.get(entry.target);
       if (key === undefined) continue;
       measured.set(key, entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height);
       rowResized = true;
+      if (key !== lastKey) otherRowResized = true;
     }
-    if (rowResized) transact();
+    // Only the last row grew (a streamed reply): no other row moved, so listeners (the prompt ticks)
+    // are not told.
+    if (rowResized) transact(false, !otherRowResized);
     else if (entries.some((entry) => entry.target === containerRef.current)) syncWindow();
   };
 
@@ -555,6 +564,7 @@ function createEngine(
     keysChanged: boolean,
   ) => {
     committed = window;
+    requested = { start: window.start, end: window.end, n: getOptions().keys.length };
     // Spacers for the new window first, from the heights known so far, so the
     // content is whole again before any row is measured (see `rowRef`).
     rebuildLayout();

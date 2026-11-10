@@ -107,6 +107,12 @@ export function MousseAgentChatShell({
   const subagentCards = useSubagentCardModels(threadId, messages)
   const threadProvider = useThreadProviderId(threadId)
   const queued = useMemo(() => (queue ? <QueuedMessages queue={queue} /> : null), [queue])
+  // The same element while nothing in it changes, so the last turn does not render again with every delta.
+  const continueRun = turnActions && !busy ? turnActions.continueRun : undefined
+  const lastTurnNotice = useMemo(() => <>
+    <WorkspaceRecoveryBanner threadId={threadId} />
+    {interrupted ? <RunInterruptedNotice onContinue={continueRun} /> : undefined}
+  </>, [threadId, interrupted, continueRun])
   return (
     <MousseComposerContext.Provider value={composer}>
       <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
@@ -124,10 +130,7 @@ export function MousseAgentChatShell({
           error={error}
           toolRenderers={toolRenderers}
           slots={slots}
-          lastTurnNotice={<>
-            <WorkspaceRecoveryBanner threadId={threadId} />
-            {interrupted ? <RunInterruptedNotice onContinue={turnActions && !busy ? turnActions.continueRun : undefined} /> : undefined}
-          </>}
+          lastTurnNotice={lastTurnNotice}
           afterTurns={queued}
           showCopyToolbar
           enableImagePreview

@@ -666,3 +666,42 @@ export function chatStatusFromTurn(state: { phase: string; turnId?: string | nul
   if (state?.phase === 'awaiting_input') return state.turnId ? 'streaming' : 'ready'
   return chatStatusFromPhase(state?.phase ?? 'idle')
 }
+
+/** Structural equality of the plain values a UI message holds; the same reference is equal at once. */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  if (a instanceof Date || b instanceof Date) return a instanceof Date && b instanceof Date && a.getTime() === b.getTime()
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i += 1) if (!sameValue(a[i], b[i])) return false
+    return true
+  }
+  if (Array.isArray(b)) return false
+  const keysA = Object.keys(a)
+  const keysB = Object.keys(b)
+  if (keysA.length !== keysB.length) return false
+  for (const key of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false
+    if (!sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false
+  }
+  return true
+}
+
+/**
+ * `next` with every message that equals the message of the same id in `previous` replaced by that
+ * earlier object, so a streamed delta leaves every other message (and its `parts`) the same object
+ * and memoised rows skip rendering. Returns `previous` itself when nothing changed.
+ */
+export function reuseUIMessages(previous: readonly UIMessage[], next: UIMessage[]): UIMessage[] {
+  if (previous.length === 0) return next
+  const byId = new Map(previous.map((message) => [message.id, message]))
+  let unchanged = previous.length === next.length
+  const out = next.map((message, index) => {
+    const before = byId.get(message.id)
+    const kept = before && sameValue(before, message) ? before : message
+    if (kept !== previous[index]) unchanged = false
+    return kept
+  })
+  return unchanged ? (previous as UIMessage[]) : out
+}

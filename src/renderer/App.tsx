@@ -32,6 +32,7 @@ import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './li
 import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore, withNewerTimes } from './stores/appStore'
+import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
 import { useViewSwap } from './lib/motion'
 import { normalizeRunSettings } from '../shared/settings'
 import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
@@ -140,7 +141,6 @@ export default function App() {
   const setAppInfo = useAppStore((s) => s.setAppInfo)
 
   const addMessage = useAppStore((s) => s.addMessage)
-  const updateMessage = useAppStore((s) => s.updateMessage)
 
   const setMainView = useAppStore((s) => s.setMainView)
   const openDocument = useAppStore((s) => s.openDocument)
@@ -293,9 +293,17 @@ export default function App() {
       return active === threadId
     }
 
+    // Streamed updates of the selected thread reach the store once per frame (see messageUpdateBatcher).
+    // Anything else that changes the transcript applies the held updates first, so order is kept.
+    const messageUpdates = createMessageUpdateBatcher({
+      apply: (_threadId, messages) => useAppStore.getState().updateMessages(messages),
+      isCurrent: isSelectedThread
+    })
+
     const unsubs = [
       window.mousse.orchestrator.onThreadMessage(({ threadId, message }) => {
         if (!isSelectedThread(threadId)) return
+        messageUpdates.flush()
         if (message.role === 'user') {
           const cur = useAppStore.getState().messages
           const idx = cur.findIndex((m) => m.id.startsWith('optimistic:') && m.content === message.content)
@@ -309,11 +317,12 @@ export default function App() {
       }),
       window.mousse.orchestrator.onThreadMessageUpdated(({ threadId, message }) => {
         if (!isSelectedThread(threadId)) return
-        updateMessage(message)
+        messageUpdates.push(threadId, message)
       }),
       // Non-selected or legacy full-sync path (select/resnapshot use thread:view instead).
       window.mousse.orchestrator.onThreadMessages((snapshot) => {
         if (!isCurrentProfile()) return
+        if (isSelectedThread(snapshot.threadId)) messageUpdates.flush()
         // Restore events replace retired rows; hydration snapshots retain a live tail.
         // The store checks selection/profile atomically, including a switch in flight.
         startTransition(() => applyThreadMessages(snapshot, profileId))
@@ -325,6 +334,7 @@ export default function App() {
       // Combined select/resnapshot payload: one store update for messages + agents + tasks.
       window.mousse.threads.onView((view) => {
         if (!isSelectedThread(view.threadId)) return
+        messageUpdates.flush()
         startTransition(() => applyThreadView(view))
         hydrationReceived = true
         finishHydration()
@@ -348,8 +358,9 @@ export default function App() {
         setShortcuts(settings?.shortcuts ?? {})
         useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
       })),
-      window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
-      window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
+      // A turn that ends shows with its last text, never a frame before it.
+      window.mousse.turn.onTurnState(applyIfCurrent(messageUpdates.flushBefore(setTurnState))),
+      window.mousse.turn.onTurnSnapshot(applyIfCurrent(messageUpdates.flushBefore(setTurnSnapshot))),
       window.mousse.app.onNavigateMainView((view) => {
         if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git' || view === 'pullRequest') {
           openSurface(view)
@@ -389,6 +400,7 @@ export default function App() {
       disposed = true
       stopFollowingThreads()
       unsubs.forEach((u) => u())
+      messageUpdates.clear()
     }
   }, [
     applyThreadMessages,
@@ -398,7 +410,6 @@ export default function App() {
     setAppInfo,
     setShortcuts,
     addMessage,
-    updateMessage,
     setProjects,
     setThreads,
     switchToThread,
