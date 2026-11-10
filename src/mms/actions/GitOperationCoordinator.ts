@@ -1,4 +1,5 @@
 import { acquireRepositoryLease } from '../git/RepositoryLease'
+import { withGitCancellation } from '../git/runGitProcess'
 import { resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import { hiddenStoreIdentity, inHiddenStore, type HiddenStore } from '../git/hiddenStore'
 import { threadSnapshotStoreAsync } from '../workspace/SnapshotWorkspace'
@@ -50,7 +51,9 @@ export async function withGitMutationLocks<T>(
   source: string,
   operation: () => Promise<T> | T,
   signal?: AbortSignal,
-  heldThreadLease?: ThreadLeaseHandle
+  heldThreadLease?: ThreadLeaseHandle,
+  /** Ends the operation's Git commands too (see `withGitCancellation`); they are waited for before the locks go. */
+  workSignal?: AbortSignal
 ): Promise<T> {
   if (heldThreadLease) assertHeldThreadLease(threadDirectory, heldThreadLease)
   const heldRepositories = mutationContext.getStore()
@@ -70,7 +73,7 @@ export async function withGitMutationLocks<T>(
     const repositoryLease = await acquireRepositoryLease(repository, { signal })
     try {
       const held = new Set([...(heldRepositories ?? []), repository.key])
-      return await mutationContext.run(held, () => store ? inHiddenStore(store, operation) : operation())
+      return await mutationContext.run(held, () => withGitCancellation(workSignal, async () => store ? inHiddenStore(store, operation) : operation()))
     } finally {
       repositoryLease.release()
     }

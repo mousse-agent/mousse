@@ -5,7 +5,7 @@
  * repository's lease, as a long or stuck operation of another thread would.
  */
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -15,6 +15,8 @@ import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { acquireRepositoryLease, getRepositoryLeasePath, type RepositoryLeaseHandle } from '../../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
+import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
+import { hiddenStoreIdentity } from '../../src/mms/git/hiddenStore'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -70,19 +72,21 @@ describe('Stop while the thread\'s repository is busy', () => {
     home = undefined
   })
 
-  const world = () => {
+  const world = (options: { git?: boolean } = {}) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-stop-busy-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     const projectDir = join(home, 'project')
     mkdirSync(projectDir)
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: projectDir, stdio: 'ignore' })
-    git('init', '-q')
-    git('config', 'user.email', 'test@example.test')
-    git('config', 'user.name', 'Test')
     writeFileSync(join(projectDir, 'README.md'), 'hello\n')
-    git('add', '.')
-    git('commit', '-qm', 'init')
+    if (options.git !== false) {
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: projectDir, stdio: 'ignore' })
+      git('init', '-q')
+      git('config', 'user.email', 'test@example.test')
+      git('config', 'user.name', 'Test')
+      git('add', '.')
+      git('commit', '-qm', 'init')
+    }
     const adapter = new HeldAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES)
     const d = phase6Daemon(home, [adapter])
     daemon = d
@@ -97,7 +101,7 @@ describe('Stop while the thread\'s repository is busy', () => {
     const freeRepository = () => { held?.release(); held = undefined }
     const running = (threadId: string) => d.orch.getOrCreateSession(threadId).isTurnRunning()
     const queue = (threadId: string) => readDurableQueue(d.store, threadId).filter((item) => item.state === 'pending')
-    return { d, adapter, projectDir, thread, holdRepository, freeRepository, running, queue }
+    return { d, adapter, project, projectDir, thread, holdRepository, freeRepository, running, queue, home: home! }
   }
 
   it('ends a stopped turn whose checkpoint cannot get the repository, and the queued messages go as the next turns', async () => {
@@ -131,6 +135,38 @@ describe('Stop while the thread\'s repository is busy', () => {
     expect(w.adapter.turns[1]!.prompt).toContain('carry on')
     expect(w.adapter.turns[2]!.prompt).toContain('resume')
     await waitFor(() => !w.running(thread.id) && w.queue(thread.id).length === 0, 'the queue to empty')
+
+    // The next turn's recovery recorded the stopped turn's checkpoint with where that turn ended, not where it began.
+    const stopped = w.d.engine.listRuns(thread.id).find((run) => run.status === 'interrupted')!
+    const actions = new ThreadActionService(w.d.store.getThreadDir(thread.id)).list()
+    const action = actions.find((item) => item.turnId === stopped.runId)!
+    expect(action).toMatchObject({ state: 'stopped' })
+    expect(action.presentationMessageEnd).toBeGreaterThan(action.presentationMessageStart)
+    expect(action.nativeContextBoundary).not.toEqual(action.nativeContextStartBoundary)
+    // The next turn starts where the stopped one ended.
+    const next = actions.find((item) => item.turnId === w.d.engine.listRuns(thread.id).find((run) => run.status === 'completed' && run.runId !== stopped.runId)?.runId)
+    if (next) expect(next.presentationMessageStart).toBeGreaterThanOrEqual(action.presentationMessageEnd)
+  })
+
+  it('lets a Stop end the next turn\'s start in a folder without Git while its snapshot store is busy', async () => {
+    const w = world({ git: false })
+    const thread = w.thread('No Git')
+    await w.d.orch.send('Hello', false, { threadId: thread.id, clientRequestId: 'hello', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.turns.length === 1 && !w.running(thread.id), 'the first turn to finish')
+    // The folder's snapshots live in its project's store; another operation holds that store.
+    const gitDir = join(w.home, 'project-data', w.project.id, 'snapshots.git')
+    expect(existsSync(join(gitDir, 'HEAD'))).toBe(true)
+    held = await acquireRepositoryLease(hiddenStoreIdentity({ workTree: gitDir, gitDir }))
+    await w.d.orch.send('Again', false, { threadId: thread.id, clientRequestId: 'again', awaitMode: 'ack' })
+    await waitFor(() => w.running(thread.id), 'the next turn to be admitted')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(w.adapter.turns).toHaveLength(1)
+    await w.d.orch.stopThread(thread.id, 'user')
+    await waitFor(() => !w.running(thread.id), 'the stopped start to end while the store is still held')
+    expect(w.adapter.turns).toHaveLength(1)
+    w.freeRepository()
+    await w.d.orch.send('Once more', false, { threadId: thread.id, clientRequestId: 'more', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.turns.length === 2, 'the thread to run once the store is free', 20_000)
   })
 
   it('lets a Stop end a new thread whose start waits for the repository, and leaves the project free', async () => {

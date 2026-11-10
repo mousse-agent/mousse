@@ -11,6 +11,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
+import { gitWorkCancelled } from '../git/runGitProcess'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
 import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
@@ -35,6 +36,11 @@ export interface RunThreadActionOptions {
   /** Compare under the owning mutation lock before changing Git or metadata. */
   expectedJournalRevision?: number
   signal?: AbortSignal
+  /**
+   * `signal` also ends the checkpoint's work, not only its wait for the repository: its Git commands are stopped (and
+   * waited for) and the checkpoint is left for recovery. For a stopped turn, which must end in bounded time.
+   */
+  signalEndsWork?: boolean
   /** Kept on the action as `startNote`; see `ThreadAction.startNote`. */
   startNote?: string
 }
@@ -231,7 +237,28 @@ export class ThreadActionService {
     startSha: string,
     state: 'completed' | 'stopped' | 'failed'
   ): Promise<ThreadAction> {
-    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => this.checkpointTurnHeld(options, startSha, state), options.signal, options.heldThreadLease)
+    // Where the turn ended is saved first, under the thread's lease alone: a checkpoint that never gets the repository
+    // (or is stopped part way) is recovered with this end, not the boundaries the turn began with.
+    if (options.heldThreadLease) this.recordTurnEnd(options, state)
+    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => this.checkpointTurnHeld(options, startSha, state), options.signal, options.heldThreadLease, options.signalEndsWork ? options.signal : undefined)
+  }
+
+  /**
+   * Saves on a running turn's action where the turn ended: its last message, its context boundary, its external effects
+   * and the state it ended in, in the action list and in the journal entry that recovery reads. Needs only the thread's
+   * lease (as `beginTurn`); nothing in the repository is touched.
+   */
+  private recordTurnEnd(options: RunThreadActionOptions, state: 'completed' | 'stopped' | 'failed'): void {
+    assertHeldThreadLease(this.threadDirectory, options.heldThreadLease!)
+    const actions = this.list()
+    const action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
+    if (!action) return
+    action.presentationMessageEnd = options.presentationMessageEnd
+    action.nativeContextBoundary = options.nativeContextBoundary
+    action.externalEffects = options.externalEffects ?? action.externalEffects
+    if (options.startNote) action.startNote = options.startNote
+    this.replace(actions)
+    this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha: action.startSha, actionId: action.id }, details: { action: structuredClone(action), actionState: state } })
   }
 
   /** `checkpointExistingTurn` for a caller that already holds the mutation locks. */
@@ -413,6 +440,8 @@ export class ThreadActionService {
     try {
       snapshot = await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
     } catch (error) {
+      // A checkpoint that was stopped is not a snapshot that cannot be taken: it fails, and recovery takes it again.
+      if (gitWorkCancelled()) throw error
       // A snapshot that cannot be taken never locks the thread: the action ends where it started, says nothing of its
       // files was covered and why, and cannot be undone (there is nothing recorded to restore). A hidden store has no
       // HEAD or branch of the folder's to report.

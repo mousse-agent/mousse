@@ -10278,11 +10278,13 @@ export class OrchestratorService extends EventEmitter {
           checkpointCwd = prepared.record.workTree
           turnStartSha = (await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
-            heldThreadLease: session.executionLease ?? undefined,
+            heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
             presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
           })).startSha
           setSnapshotsOff(snapshotFolder.directory, undefined)
         } catch (error) {
+          // A Stop that ended the wait for the folder's store ends the turn; it says nothing about the folder's snapshots.
+          if (setupSignal.aborted) throw error
           const message = error instanceof Error ? error.message : String(error)
           snapshotsOff = error instanceof SnapshotRefusedError ? message : `Undo is off for this folder: ${message}`
           snapshotsNotCovered = coverageNotice([{ path: '.', reason: error instanceof SnapshotRefusedError ? error.gapReason : `no snapshot could be taken (${message.split(/\r?\n/)[0]})` }])
@@ -10438,7 +10440,8 @@ export class OrchestratorService extends EventEmitter {
         threadId: session.threadId,
         turnId,
         heldThreadLease: session.executionLease ?? undefined,
-        ...(signal ? { signal } : {}),
+        // A stopped turn's checkpoint ends with its signal, its Git commands too: the Stop ends the turn in bounded time.
+        ...(signal ? { signal, signalEndsWork: true } : {}),
         externalEffects,
         ...(turnStartNote ? { startNote: turnStartNote } : {}),
         conversationBranchId,
