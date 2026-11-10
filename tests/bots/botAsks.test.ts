@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
@@ -370,7 +370,7 @@ describe('"run commands": one permission, asked for once and remembered', () => 
   const command = (text: string): NormalisedCall => ({ kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: text } })
   const shellFingerprint = askFingerprintOf({ tool: 'shell' })
 
-  it('in the chat a command is a wall with one card; Allow puts it in the grant, and every later command runs with no new ask', async () => {
+  it('in the chat a command is a wall with one card; Allow puts it in the grant, and every later command runs in work with no new ask', async () => {
     const { activation, payload, prepared } = await chat('Count the lines in my notes', 'm1')
     expect(prepared.authority.check(command('wc -l *.md'))).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'run commands' } })
     await finish(f, payload, 'interrupted', { text: 'I need to run a command for that.', outcome: { interruptedBy: 'bot_wall' } })
@@ -381,16 +381,16 @@ describe('"run commands": one permission, asked for once and remembered', () => 
     expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
     expect(f.host.definitions.get(botId)!.published!.permissions.tools).toContain('shell')
     const continued = await start(f, activation.id, 2)
-    // Any command, wherever it says it runs: no per-command ask.
-    for (const text of ['wc -l *.md', 'rm -rf build', 'git status']) expect(continued.prepared.authority.check(command(text)), text).toEqual({ ok: true })
-    expect(continued.prepared.authority.check({ kind: 'builtin', tool: 'shell', nativeName: 'shell', args: { command: 'ls', cwd: invoices } })).toEqual({ ok: true })
-    await finish(f, continued.payload, 'completed', { text: 'Done.' })
-    // A later chat and a later run run commands too, and nothing new is asked.
+    // The chat is the front desk: commands are its work's now, and no new card is made for them.
+    expect(continued.prepared.authority.check(command('wc -l *.md'))).toEqual({ ok: false, refused: { text: BOT_WORK_HAS_TEXT, askId: '' } })
+    await finish(f, continued.payload, 'completed', { text: 'On it.' })
     const later = await chat('And again', 'm2')
-    expect(later.prepared.authority.check(command('ls'))).toEqual({ ok: true })
-    await finish(f, later.payload, 'completed', { text: 'Done.' })
+    expect(later.prepared.authority.check(command('ls'))).toEqual({ ok: false, refused: { text: BOT_WORK_HAS_TEXT, askId: '' } })
+    await finish(f, later.payload, 'completed', { text: 'On it.' })
+    // Work runs any command, wherever it says it runs: no per-command ask.
     const runLater = await run('r1')
-    expect(runLater.prepared.authority.check(command('ls'))).toEqual({ ok: true })
+    for (const text of ['wc -l *.md', 'rm -rf build', 'git status']) expect(runLater.prepared.authority.check(command(text)), text).toEqual({ ok: true })
+    expect(runLater.prepared.authority.check({ kind: 'builtin', tool: 'shell', nativeName: 'shell', args: { command: 'ls', cwd: invoices } })).toEqual({ ok: true })
     await finish(f, runLater.payload, 'completed', { text: 'Report.' })
     expect(f.store.openAsks(botId)).toEqual([])
     expect(chatOf(f, botId).filter((row) => row.ask)).toHaveLength(1)
@@ -448,10 +448,14 @@ describe('asks nobody needs', () => {
     expect(f.store.activation(first.id)).toMatchObject({ status: 'done' })
   })
 
-  it('the web tools the starter grant holds are no ask', async () => {
-    const { prepared } = await chat('look something up', 'm-web')
+  it('the web tools the starter grant holds are no ask: the chat hands the work off, and work has them', async () => {
+    const { prepared, payload } = await chat('look something up', 'm-web')
     for (const tool of ['web_fetch', 'web_search'])
-      expect(prepared.authority.escalate!({ permission: { tool }, reason: 'To read pages.' })).toMatch(/^The owner already allowed this/)
+      expect(prepared.authority.escalate!({ permission: { tool }, reason: 'To read pages.' })).toBe(BOT_WORK_HAS_TEXT)
+    await finish(f, payload, 'completed', { text: 'On it.' })
+    const work = await run('r-web')
+    for (const tool of ['web_fetch', 'web_search'])
+      expect(work.prepared.authority.escalate!({ permission: { tool }, reason: 'To read pages.' })).toMatch(/^The owner already allowed this/)
     expect(f.store.openAsks(botId)).toEqual([])
   })
 

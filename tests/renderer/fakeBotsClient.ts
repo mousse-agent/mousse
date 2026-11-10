@@ -30,7 +30,7 @@ export interface FakeBots {
   emit: {
     changed(botId: string): void
     message(botId: string, message: BotChatMessage): void
-    activity(botId: string, chip: BotChip | null): void
+    activity(botId: string, chip: BotChip | null, activationId?: string): void
   }
 }
 
@@ -53,7 +53,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
       message: (botId, row) => { for (const cb of listeners.message) cb({ botId, message: row }) },
-      activity: (botId, chip) => { for (const cb of listeners.activity) cb({ botId, activationId: 'act1', chip }) }
+      activity: (botId, chip, activationId = 'act1') => { for (const cb of listeners.activity) cb({ botId, activationId, chip }) }
     }
   }
   const find = (botId: string) => {
@@ -82,14 +82,16 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       const before = page.beforeSeq === undefined ? all : all.filter((row) => row.seq < page.beforeSeq!)
       return { messages: before.slice(-(page.limit ?? 100)), ...(fake.live[botId] ? { live: fake.live[botId] } : {}) }
     })),
-    send: vi.fn((botId, text, clientRequestId, attachments) => record('send', [botId, text, clientRequestId, attachments], () => {
+    send: vi.fn((botId, text, clientRequestId, attachments, replyTo) => record('send', [botId, text, clientRequestId, attachments, ...(replyTo ? [replyTo] : [])], () => {
       // The service saves the files in the bot's files folder; the row names the copies.
       const saved = attachments?.map((file) => ({ name: file.name, path: `/home/me/.mousse/bots/files/${botId}/attachments/2026-11-08/${file.name}` }))
-      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, ...(saved?.length ? { attachments: saved } : {}) })
+      const quoted = replyTo ? (fake.chats[botId] ?? []).find((entry) => entry.id === replyTo) : undefined
+      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, ...(saved?.length ? { attachments: saved } : {}), ...(quoted ? { replyTo: { id: quoted.id, author: quoted.author, text: quoted.text } } : {}) })
       fake.chats[botId] = [...(fake.chats[botId] ?? []), row]
       return row
     })),
     stop: vi.fn((botId) => record('stop', [botId], () => undefined)),
+    stopWork: vi.fn((botId, workId) => record('stopWork', [botId, workId], () => undefined)),
     markRead: vi.fn((botId, at) => record('markRead', [botId, at], () => undefined)),
     answer: vi.fn((botId, askId, answer) => record('answer', [botId, askId, answer], () => {
       const rows = fake.chats[botId] ?? []

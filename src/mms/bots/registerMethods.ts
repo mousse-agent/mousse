@@ -1,4 +1,4 @@
-import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotSchedule } from '../../shared/bots/personal/definition'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
@@ -25,8 +25,9 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.personal.resume': ['botId'],
   'bots.delete': ['botId'],
   'bots.chat.list': ['botId', 'beforeSeq', 'limit'],
-  'bots.chat.send': ['botId', 'text', 'attachments', 'clientRequestId'],
+  'bots.chat.send': ['botId', 'text', 'attachments', 'clientRequestId', 'replyTo'],
   'bots.chat.stop': ['botId'],
+  'bots.work.stop': ['botId', 'workId'],
   'bots.chat.markRead': ['botId', 'seq'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
@@ -93,6 +94,10 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       // Files alone are a message too.
       if (typeof p.text !== 'string' || p.text.length > MAX_CHAT_TEXT || (!p.text.trim() && !(p.attachments as BotChatAttachment[] | undefined)?.length))
         throw new DomainRpcError('invalid_params', 'The message is empty or too long')
+      if (p.replyTo !== undefined && !text(p.replyTo, 200)) throw new DomainRpcError('invalid_params', 'replyTo is a message id')
+      break
+    case 'bots.work.stop':
+      if (typeof p.workId !== 'string' || !/^act_[0-9a-f-]{36}$/.test(p.workId)) throw new DomainRpcError('invalid_params', 'A work id is required')
       break
     case 'bots.chat.markRead':
       if (!whole(p.seq, 0)) throw new DomainRpcError('invalid_params', 'seq must be a whole number')
@@ -146,8 +151,9 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.personal.resume': return bots.resume(botId)
     case 'bots.delete': return bots.delete(botId)
     case 'bots.chat.list': return bots.chatList(botId, { ...(p.beforeSeq !== undefined ? { beforeSeq: p.beforeSeq as number } : {}), ...(p.limit !== undefined ? { limit: p.limit as number } : {}) })
-    case 'bots.chat.send': return bots.chatSend({ botId, text: p.text as string, ...(p.attachments ? { attachments: p.attachments as BotChatAttachment[] } : {}), clientRequestId: p.clientRequestId as string })
+    case 'bots.chat.send': return bots.chatSend({ botId, text: p.text as string, ...(p.attachments ? { attachments: p.attachments as BotChatAttachment[] } : {}), clientRequestId: p.clientRequestId as string, ...(typeof p.replyTo === 'string' ? { replyTo: p.replyTo } : {}) })
     case 'bots.chat.stop': return bots.chatStop(botId)
+    case 'bots.work.stop': return bots.workStop(botId, p.workId as string)
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
@@ -165,7 +171,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
 
 /** Bind once before server seal. The bots come from the daemon's admitted profile, never a client path. */
 export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsForProfile: (profileId: string) => BotChatService | null | undefined | Promise<BotChatService | null | undefined>): void {
-  for (const method of BOTS_PERSONAL_V2_METHODS) {
+  for (const method of [...BOTS_PERSONAL_V2_METHODS, ...BOTS_WORK_METHODS]) {
     domains.register({
       method,
       scope: 'profile',

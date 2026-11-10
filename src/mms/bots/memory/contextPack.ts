@@ -29,6 +29,10 @@ export interface BotSituation {
   openAsks?: string[]
   /** The bot's schedules, by label. */
   schedules?: Array<{ label: string; nextAt?: string }>
+  /** Work running or waiting (docs/plans/bot-always-free.md): its title, since when, and what it is doing. */
+  work?: Array<{ workId: string; title: string; status: string; startedAt: string; doing?: string }>
+  /** One-off reminders still to come. */
+  reminders?: Array<{ dueAt: string; text: string }>
 }
 
 export interface BotContextPackOptions {
@@ -99,7 +103,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     return renderMemoryBlocks(store.active(botId), zone())
   }
 
-  const situation = (botId: string): string => {
+  /** `chat`: the front desk's pack, which also lists the bot's work and reminders (a run is one of that work). */
+  const situation = (botId: string, chat = false): string => {
     const now = store.clock()
     const facts = options.situation?.(botId) ?? {}
     const tz = zone() ?? Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -111,6 +116,11 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     if (facts.openAsks?.length) lines.push(`Waiting for the owner: ${facts.openAsks.map((ask) => cut(ask, 80)).join('; ')}.`)
     if (facts.schedules?.length)
       lines.push(`Schedules: ${facts.schedules.map((s) => `${s.label}${s.nextAt ? ` (next ${timeLabel(s.nextAt, tz)})` : ''}`).join('; ')}.`)
+    if (chat && facts.work?.length)
+      lines.push(`Your work now: ${facts.work.map((w) => `${cut(w.title, 60)} (${w.workId}, ${w.status === 'queued' ? 'waiting its turn' : w.status === 'running' ? `started ${agoLabel(w.startedAt, now)}` : w.status.replaceAll('_', ' ')}${w.doing ? `, ${cut(w.doing, 50)}` : ''})`).join('; ')}.`)
+    else if (chat) lines.push('Your work now: nothing running.')
+    if (chat && facts.reminders?.length)
+      lines.push(`Reminders: ${facts.reminders.slice(0, 5).map((r) => `${timeLabel(r.dueAt, tz)}: ${cut(r.text, 50)}`).join('; ')}${facts.reminders.length > 5 ? `; and ${facts.reminders.length - 5} more` : ''}.`)
     const lastEnd = store.lastOfKind(botId, 'run_end')
     if (lastEnd) {
       const reason = typeof lastEnd.json?.reason === 'string' ? lastEnd.json.reason : firstLine(lastEnd.text)
@@ -146,7 +156,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const own = all.find((row) => row.activationId === activationId)?.seq
     const rows = all.filter((row) => row.activationId !== activationId && !(own !== undefined && row.kind === 'owner_msg' && row.seq > own))
     const window = rows.length ? `Recent chat (oldest first):\n${rows.map(windowLine).join('\n')}` : 'Recent chat: (nothing yet)'
-    return wrap([BOT_MEMORY_PROTOCOL, core, runNotes, chat?.text ?? '', window, situation(botId)])
+    return wrap([BOT_MEMORY_PROTOCOL, core, runNotes, chat?.text ?? '', window, situation(botId, true)])
   }
 
   const runPack = (botId: string, activationId: string, scheduleId: string | undefined): string => {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import type { BotAskCard, BotAskStatus, BotChatMessage, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotAskCard, BotAskStatus, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
 import { type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
@@ -48,6 +48,13 @@ export function clockTime(iso: string): string {
   return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
 }
 
+/** The Recent line of a bot whose chat is free while its work runs: "Working on Vacuum comparison", "Working on 2 things". */
+function workingOn(work: readonly BotWorkItem[]): string {
+  const running = work.filter((item) => item.status !== 'queued')
+  if (running.length === 1 && work.length === 1) return `Working on ${running[0]!.title}`
+  return `Working on ${work.length} things`
+}
+
 /** One line of text for a list ("Recent"): the first line, cut. */
 function oneLine(text: string, max = 120): string {
   const line = text.trim().split('\n').find((part) => part.trim())?.trim() ?? ''
@@ -69,6 +76,8 @@ export interface PostInput {
   clientRequestId?: string
   lane?: BotLane
   threadId?: string
+  /** The message this one answers. */
+  replyTo?: string
 }
 
 /** The chat rows of every bot of a profile, and the summaries built from `bots.db`. */
@@ -108,7 +117,8 @@ export class BotChatProjection {
         error: input.error ?? null,
         activationId: input.activationId ?? null,
         attachments: input.attachments?.length ? input.attachments : null,
-        clientRequestId: input.clientRequestId ?? null
+        clientRequestId: input.clientRequestId ?? null,
+        replyTo: input.replyTo ?? null
       })
       if (input.askId) this.store.setEscalationMessage(input.askId, id)
       // The journal row joins this transaction: a chat row is never kept without it (bot-context.md §4).
@@ -127,7 +137,8 @@ export class BotChatProjection {
           ...(input.askId ? { askId: input.askId } : {}),
           ...(input.chips?.length ? { chips: input.chips } : {}),
           ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-          ...(input.error ? { error: input.error } : {})
+          ...(input.error ? { error: input.error } : {}),
+          ...(input.replyTo ? { replyTo: input.replyTo } : {})
         }
       })
       return { row: this.store.message(id)!, inserted: true }
@@ -168,8 +179,17 @@ export class BotChatProjection {
       ...(escalation ? { ask: this.card(escalation) } : {}),
       ...(row.error ? { error: row.error } : {}),
       ...(row.activationId ? { activationId: row.activationId } : {}),
-      ...(row.attachments?.length ? { attachments: row.attachments } : {})
+      ...(row.attachments?.length ? { attachments: row.attachments } : {}),
+      ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {})
     }
+  }
+
+  /** What a reply shows of the message it answers: who wrote it and its first line. A message that is gone shows as such. */
+  private quoteOf(messageId: string): BotChatQuote {
+    const quoted = this.store.message(messageId)
+    if (!quoted) return { id: messageId, author: 'owner', text: '', gone: true }
+    const text = oneLine(quoted.text || quoted.error?.text || (quoted.attachments?.length ? quoted.attachments.map((file) => file.name).join(', ') : ''), 160)
+    return { id: quoted.id, author: quoted.author, text }
   }
 
   card(escalation: BotEscalationRow): BotAskCard {
@@ -194,6 +214,18 @@ export class BotChatProjection {
     const asks = this.store.openAsks(definition.id).filter((ask) => ask.messageId !== null)
     const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant'])
     const live = liveRows.length
+    // The chat and its work are apart: the chat's turn has the status line and Stop, work its own line.
+    const chatTurn = liveRows.find((row) => row.lane === 'chat' && row.status === 'running')
+    const work: BotWorkItem[] = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused'])
+      .filter((row) => row.lane === 'run')
+      .sort((a, b) => (a.status === 'queued' ? 1 : 0) - (b.status === 'queued' ? 1 : 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+      .map((row) => ({
+        id: row.id,
+        title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
+        status: row.status === 'queued' ? 'queued' as const : row.status === 'paused' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
+        startedAt: row.createdAt,
+        ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {})
+      }))
     const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length, liveActivations: live })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
@@ -204,7 +236,7 @@ export class BotChatProjection {
       ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
       : state === 'stuck' ? `Needs you: ${error!.text}`
         : state === 'needs_you' ? `Wants to ${this.card(asks[0]!).title}`
-          : state === 'working' ? (offline ? 'Waiting for internet' : 'Working…')
+          : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn || !work.length ? 'Working…' : workingOn(work))
             : last ? oneLine(last.text || last.error?.text || '') : ''
     return {
       id: definition.id,
@@ -218,7 +250,9 @@ export class BotChatProjection {
       ...(last ? { last: { text: oneLine(last.text || last.error?.text || '', 200), at: last.at, author: last.author } } : {}),
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
-      createdAt: registry?.createdAt ?? new Date(now).toISOString()
+      createdAt: registry?.createdAt ?? new Date(now).toISOString(),
+      ...(chatTurn ? { chat: { activationId: chatTurn.id } } : {}),
+      ...(work.length ? { work } : {})
     }
   }
 

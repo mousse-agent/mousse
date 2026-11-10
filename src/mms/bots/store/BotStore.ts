@@ -275,6 +275,39 @@ ${BOT_MEMORY_SCHEMA_SQL}
 ALTER TABLE bot_schedules ADD COLUMN migrated_at TEXT;
 ALTER TABLE bot_schedules ADD COLUMN migrated_job_id TEXT;
 `
+  },
+  {
+    // A bot that stays free while it works (docs/plans/bot-always-free.md): a message names the message it answers,
+    // and a bot keeps one-off reminders of its own (repeating ones stay schedules in the shared store).
+    version: 6,
+    sql: `
+ALTER TABLE bot_messages ADD COLUMN reply_to TEXT;
+CREATE TABLE bot_reminders(
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  text TEXT NOT NULL,
+  work_title TEXT,
+  work_brief TEXT,
+  reply_to TEXT,
+  created_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('waiting', 'delivered', 'cancelled')),
+  delivered_at TEXT,
+  message_id TEXT,
+  activation_id TEXT
+) STRICT;
+CREATE INDEX bot_reminders_due ON bot_reminders(status, due_at);
+CREATE INDEX bot_reminders_bot ON bot_reminders(bot_id, status);
+CREATE TABLE bot_work_notes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  activation_id TEXT NOT NULL,
+  bot_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  at TEXT NOT NULL,
+  applied_at TEXT
+) STRICT;
+CREATE INDEX bot_work_notes_pending ON bot_work_notes(activation_id, applied_at);
+`
   }
 ]
 
@@ -341,6 +374,44 @@ export interface BotMessageRow {
   activationId: string | null
   attachments: Array<{ name: string; path: string }> | null
   clientRequestId: string | null
+  /** The message this one answers (a reply to the owner, or the owner's reply to the bot); null for none. */
+  replyTo: string | null
+}
+
+/** One one-off reminder (`bot_reminders`): a message at a time, or work started then. */
+export interface BotReminderRow {
+  id: string
+  botId: string
+  dueAt: string
+  /** What the reminder says (for work: a one-line summary of it). */
+  text: string
+  /** Work to start at the time, instead of only saying `text`. */
+  work: { title: string; brief: string } | null
+  /** The owner's message that asked for it. */
+  replyTo: string | null
+  createdAt: string
+  status: 'waiting' | 'delivered' | 'cancelled'
+  deliveredAt: string | null
+  messageId: string | null
+  activationId: string | null
+}
+
+function reminderOf(row: Row): BotReminderRow {
+  const title = str(row.work_title)
+  const brief = str(row.work_brief)
+  return {
+    id: row.id as string,
+    botId: row.bot_id as string,
+    dueAt: row.due_at as string,
+    text: row.text as string,
+    work: title !== null && brief !== null ? { title, brief } : null,
+    replyTo: str(row.reply_to),
+    createdAt: row.created_at as string,
+    status: row.status as BotReminderRow['status'],
+    deliveredAt: str(row.delivered_at),
+    messageId: str(row.message_id),
+    activationId: str(row.activation_id)
+  }
 }
 
 function messageOf(row: Row): BotMessageRow {
@@ -357,7 +428,8 @@ function messageOf(row: Row): BotMessageRow {
     error: json<BotError>(row.error_json),
     activationId: str(row.activation_id),
     attachments: json<BotMessageRow['attachments']>(row.attachments_json),
-    clientRequestId: str(row.client_request_id)
+    clientRequestId: str(row.client_request_id),
+    replyTo: str(row.reply_to)
   }
 }
 
@@ -1171,9 +1243,9 @@ export class BotStore {
    */
   insertMessage(row: Omit<BotMessageRow, 'seq'>): boolean {
     return this.run(
-      'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, row.at, row.author, row.kind, row.text, JSON.stringify(row.chips), row.askId, row.error ? JSON.stringify(row.error) : null,
-      row.activationId, row.attachments ? JSON.stringify(row.attachments) : null, row.clientRequestId
+      row.activationId, row.attachments ? JSON.stringify(row.attachments) : null, row.clientRequestId, row.replyTo ?? null
     ) > 0
   }
 
@@ -1225,7 +1297,70 @@ export class BotStore {
     this.run('DELETE FROM bot_escalations WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_grants WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_contexts WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_reminders WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_work_notes WHERE bot_id = ?', botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
+  }
+
+  // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
+
+  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId'>): void {
+    this.run(
+      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting')",
+      row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt
+    )
+  }
+
+  reminder(id: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE id = ?', id)
+    return row ? reminderOf(row) : undefined
+  }
+
+  /** A bot's reminders still to come, soonest first. */
+  waitingReminders(botId: string): BotReminderRow[] {
+    return this.all("SELECT * FROM bot_reminders WHERE bot_id = ? AND status = 'waiting' ORDER BY due_at, id", botId).map(reminderOf)
+  }
+
+  /** Every bot's reminders due at or before `at`, oldest first. */
+  dueReminders(at: string): BotReminderRow[] {
+    return this.all("SELECT * FROM bot_reminders WHERE status = 'waiting' AND due_at <= ? ORDER BY due_at, id", at).map(reminderOf)
+  }
+
+  /** The soonest reminder still to come, of any bot. */
+  nextReminder(): BotReminderRow | undefined {
+    const row = this.get("SELECT * FROM bot_reminders WHERE status = 'waiting' ORDER BY due_at, id LIMIT 1")
+    return row ? reminderOf(row) : undefined
+  }
+
+  /** Moves a waiting reminder on; false when it was not waiting (delivered or cancelled meanwhile). */
+  settleReminder(id: string, status: 'delivered' | 'cancelled', result: { messageId?: string; activationId?: string } = {}): boolean {
+    return this.run(
+      "UPDATE bot_reminders SET status = ?, delivered_at = ?, message_id = ?, activation_id = ? WHERE id = ? AND status = 'waiting'",
+      status, this.now(), result.messageId ?? null, result.activationId ?? null, id
+    ) > 0
+  }
+
+  // -- Notes to work (bot_work_notes, v6): what the owner added while a piece of work ran -------------------------
+
+  addWorkNote(activationId: string, botId: string, text: string): void {
+    this.run('INSERT INTO bot_work_notes(activation_id, bot_id, text, at) VALUES(?, ?, ?, ?)', activationId, botId, text, this.now())
+  }
+
+  /** The notes a piece of work has not been given yet, oldest first. */
+  pendingWorkNotes(activationId: string): Array<{ id: number; text: string; at: string }> {
+    return this.all('SELECT id, text, at FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NULL ORDER BY id', activationId)
+      .map((row) => ({ id: num(row.id)!, text: row.text as string, at: row.at as string }))
+  }
+
+  /** The notes are in the dispatch just written (inside its transaction). */
+  applyWorkNotes(ids: readonly number[]): void {
+    const at = this.now()
+    for (const id of ids) this.run('UPDATE bot_work_notes SET applied_at = ? WHERE id = ? AND applied_at IS NULL', at, id)
+  }
+
+  /** A deleted bot's reminders never fire. */
+  cancelReminders(botId: string): number {
+    return this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE bot_id = ? AND status = 'waiting'", this.now(), botId)
   }
 
   deleteMessages(botId: string): void {

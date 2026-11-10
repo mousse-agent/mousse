@@ -59,6 +59,35 @@ export interface BotToolHost {
   setProfile(botId: string, p: { name?: string; description?: string }): void
   /** `now`: this activation only, by a reload; `always`: the definition's `main.model`, with no re-approval. */
   setModel(botId: string, activationId: string, scope: 'now' | 'always', choice: Partial<BotModelChoice>): void
+  /**
+   * The chat's work (docs/plans/bot-always-free.md): runs beside the chat that report back. `from` is the chat
+   * activation that hands it off; `key` makes a repeated call start nothing new.
+   */
+  work: {
+    start(botId: string, from: string, input: { title: string; brief: string; key: string }): Promise<BotWorkStarted>
+    list(botId: string): BotWorkList
+    stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
+    note(botId: string, workId: string, note: string): 'noted' | 'ended' | 'not_found'
+  }
+  /** One-off reminders: said at a time, or work started then. */
+  reminders: {
+    add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }
+    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; work?: string }>
+    cancel(botId: string, reminderId: string): boolean
+  }
+}
+
+/** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
+export interface BotWorkStarted {
+  workId: string
+  status: 'started' | 'queued'
+  ahead: string[]
+}
+
+/** `work_list`'s answer: what runs or waits now, and the last few that ended. */
+export interface BotWorkList {
+  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule' }>
+  recent: Array<{ workId: string; title: string; status: 'done' | 'failed' | 'stopped'; endedAt: string; report?: string }>
 }
 
 /** Where a call happened, for the activity sink. */

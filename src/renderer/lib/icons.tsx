@@ -7,6 +7,7 @@ import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
 import Alert02Icon from '@hugeicons/core-free-icons/Alert02Icon'
 import AlertCircleIcon from '@hugeicons/core-free-icons/AlertCircleIcon'
 import Archive01Icon from '@hugeicons/core-free-icons/Archive01Icon'
+import ArrowTurnBackwardIcon from '@hugeicons/core-free-icons/ArrowTurnBackwardIcon'
 import ArchiveRestoreIcon from '@hugeicons/core-free-icons/ArchiveRestoreIcon'
 import ArrowShrink02Icon from '@hugeicons/core-free-icons/ArrowShrink02Icon'
 import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
@@ -320,6 +321,7 @@ export const Terminal = /* @__PURE__ */ createIcon('Terminal', TerminalIcon)
 export const TerminalSquare = /* @__PURE__ */ createIcon('TerminalSquare', ComputerTerminal01Icon)
 export const Trash2 = /* @__PURE__ */ createIcon('Trash2', Delete02Icon)
 export const Undo2 = /* @__PURE__ */ createIcon('Undo2', Undo02Icon)
+export const Reply = /* @__PURE__ */ createIcon('Reply', ArrowTurnBackwardIcon)
 export const Upload = /* @__PURE__ */ createIcon('Upload', Upload04Icon)
 export const User = /* @__PURE__ */ createIcon('User', UserIcon)
 export const UserCircle = /* @__PURE__ */ createIcon('UserCircle', UserCircleIcon)

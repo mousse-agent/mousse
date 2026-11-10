@@ -28,6 +28,7 @@ export interface BotChipCall {
 type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile'
+  | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look'
 
 interface Classified {
   kind: ChipKind
@@ -161,6 +162,14 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
       return { kind: 'tool', icon: 'think', live: 'using a tool', ...(server ? { detail: shortChipText(server, 30) } : {}) }
     }
     case 'shell': return { kind: 'tool', icon: 'think', live: 'running a command' }
+    // The chat's work and reminders (docs/plans/bot-always-free.md).
+    case 'work_start': return { kind: 'work', icon: 'think', live: 'starting on it' }
+    case 'work_stop': return { kind: 'work_stop', icon: 'think', live: 'stopping work' }
+    case 'work_note': return { kind: 'work_note', icon: 'think', live: 'passing it on' }
+    case 'work_list': return { kind: 'work_look', icon: 'think', live: 'checking on its work' }
+    case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
+    case 'reminder_cancel': return { kind: 'unremind', icon: 'schedule', live: 'cancelling a reminder' }
+    case 'reminder_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its reminders' }
     // `escalate`: its card is the chip. `use_model`: the model is never shown.
     default: return null
   }
@@ -204,6 +213,17 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     }
     // Never the forgotten text: the chip is stored with the message (`chips_json`), and the owner asked for it to go.
     case 'forget': return { icon: 'memory', text: 'forgot something you asked me to' }
+    case 'work': {
+      const title = str(input.title)
+      return { icon: 'think', text: result.status === 'queued' ? 'will start' : 'started', ...(title ? { highlight: shortChipText(title, 40) } : {}) }
+    }
+    case 'work_stop': return result.result === 'stopped' ? { icon: 'think', text: 'stopped work' } : null
+    case 'work_note': return result.result === 'noted' ? { icon: 'think', text: 'passed on your note' } : null
+    case 'remind': {
+      const label = str(result.label)
+      return { icon: 'schedule', text: 'reminder', ...(label ? { highlight: label } : {}) }
+    }
+    case 'unremind': return { icon: 'schedule', text: 'cancelled a reminder' }
     case 'profile': {
       const name = str(input.name)
       if (name) return { icon: 'name', text: 'renamed itself', highlight: shortChipText(name) }
@@ -241,11 +261,11 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
 }
 
 /** Kinds whose every successful call is its own chip. */
-const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget'])
+const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind'])
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */
-const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules'])
+const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look'])
 
 /**
  * The settled chips of one dispatch: grouped by kind, with counts and a short highlight (a domain,

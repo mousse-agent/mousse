@@ -407,3 +407,60 @@ describe('the store behind the chats', () => {
     expect(useBotsStore.getState().chats.inbox!.messages.map((row) => row.seq)).toEqual(Array.from({ length: 80 }, (_, index) => index + 1))
   })
 })
+
+describe('free while it works (docs/plans/bot-always-free.md)', () => {
+  const working = summary('inbox', {
+    name: 'Inbox helper', state: 'working', stateText: 'Working on Vacuum comparison',
+    work: [
+      { id: 'act_w1', title: 'Vacuum comparison', status: 'running', startedAt: new Date(Date.now() - 4 * 60_000).toISOString() },
+      { id: 'act_w2', title: 'Train times', status: 'queued', startedAt: new Date().toISOString() }
+    ]
+  })
+
+  it('shows each piece of work above the composer, keeps send (not Stop), and stops one piece by its own button', async () => {
+    await open(working)
+    const lines = [...host.querySelectorAll('.bot-work-line')].map((line) => line.textContent)
+    expect(lines).toEqual(['Vacuum comparisonworking · 4 min', 'Train timeswaiting its turn · just now'])
+    // The chat is free: no status line, and the composer sends.
+    expect(transcript().querySelector('.chat-run-status')).toBeNull()
+    expect(button('Stop run')).toBeUndefined()
+    await act(async () => fake.emit.activity('inbox', { icon: 'search', text: 'searching the web', highlight: 'vacuum', live: true }, 'act_w1'))
+    expect(host.querySelector('.bot-work-line')!.textContent).toBe('Vacuum comparisonsearching the web vacuum · 4 min')
+    await click(button('Stop Vacuum comparison'))
+    expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
+  })
+
+  it("the chat's own turn has the status line and Stop, with its own chip", async () => {
+    await open({ ...working, chat: { activationId: 'act_c1' }, work: [] })
+    await act(async () => fake.emit.activity('inbox', { icon: 'memory', text: 'remembering', live: true }, 'act_c1'))
+    expect(transcript().querySelector('.chat-run-status')!.textContent).toBe('Inbox helper is working…remembering')
+    expect(button('Stop run')).toBeDefined()
+  })
+
+  it('a reply shows what it answers only when that is not right above it; Reply quotes a message and sends with it', async () => {
+    fake.chats.inbox = [
+      message(1, { id: 'o1', author: 'owner', text: 'Research vacuums' }),
+      message(2, { id: 'b1', text: 'On it.', replyTo: { id: 'o1', author: 'owner', text: 'Research vacuums' } }),
+      message(3, { id: 'o2', author: 'owner', text: 'Add batteries' }),
+      message(4, { id: 'b2', text: 'Added.', replyTo: { id: 'o2', author: 'owner', text: 'Add batteries' } }),
+      message(5, { id: 'b3', kind: 'run_report', text: 'The Q7 is the pick.', replyTo: { id: 'o1', author: 'owner', text: 'Research vacuums' } })
+    ]
+    await open(inbox)
+    const quotes = [...transcript().querySelectorAll('.bot-reply-quote')].map((quote) => quote.textContent)
+    expect(quotes).toEqual(['YouResearch vacuums'])
+    expect(transcript().querySelector('[data-message-id="b3"] .bot-reply-quote')).not.toBeNull()
+
+    // Replying to an older message: the sent message shows what it answers.
+    await click(transcript().querySelector('[data-message-id="b2"] .bot-reply-button'))
+    expect(host.querySelector('.bot-replying')!.textContent).toBe('Replying to Inbox helperAdded.')
+    await click(button("Don't reply to this message"))
+    expect(host.querySelector('.bot-replying')).toBeNull()
+    await click(transcript().querySelector('[data-message-id="b1"] .bot-reply-button'))
+    await type(box(), 'Make it under £200')
+    await press('Enter')
+    await settle()
+    expect(fake.calls.find((call) => call[0] === 'send')).toEqual(['send', 'inbox', 'Make it under £200', expect.any(String), [], 'b1'])
+    expect(host.querySelector('.bot-replying')).toBeNull()
+    expect(transcript().querySelector('[data-message-id^="sent:"] .bot-reply-quote')!.textContent).toBe('Inbox helperOn it.')
+  })
+})

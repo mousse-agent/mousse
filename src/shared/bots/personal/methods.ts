@@ -71,7 +71,12 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.memory.forget',
   'bots.memory.export'
 ] as const
-export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number]
+/**
+ * Methods added after the required Bot UI set (docs/plans/bot-always-free.md): the app calls them when they are there,
+ * and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
+ */
+export const BOTS_WORK_METHODS = ['bots.work.stop'] as const
+export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
 /** Most messages one `bots.chat.list` page returns. */
@@ -105,8 +110,10 @@ export interface BotsPersonalV2Api {
     params: { botId: string; beforeSeq?: number; limit?: number }
     result: { messages: BotChatMessage[]; live?: { activationId: string; chip?: BotChip } }
   }
-  'bots.chat.send': { params: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string }; result: { message: BotChatMessage } }
+  'bots.chat.send': { params: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string }; result: { message: BotChatMessage } }
   'bots.chat.stop': { params: { botId: string }; result: Record<string, never> }
+  /** Stops one piece of work (or a scheduled run) of the bot; the chat goes on. `stopped` is false when it had ended. */
+  'bots.work.stop': { params: { botId: string; workId: string }; result: { stopped: boolean } }
   'bots.chat.markRead': { params: { botId: string; seq: number }; result: Record<string, never> }
   'bots.asks.answer': { params: { botId: string; askId: string; answer: 'allow' | 'not_now' }; result: { message: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */

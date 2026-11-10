@@ -57,6 +57,16 @@ export interface BotChatMessage {
   error?: BotError
   activationId?: string
   attachments?: Array<{ name: string; path: string }>
+  /** The message this one answers, as a short quote: a bot's reply to the owner's message, or the owner's reply to the bot's. */
+  replyTo?: BotChatQuote
+}
+
+/** A quoted message: its id (to scroll to it), who wrote it and its first line. `gone` when it was removed. */
+export interface BotChatQuote {
+  id: string
+  author: 'owner' | 'bot'
+  text: string
+  gone?: boolean
 }
 
 /** One bot as the Bots section and Recent list it. */
@@ -76,6 +86,20 @@ export interface BotSummary {
   lastOutcome?: 'ok' | 'failed' | 'stopped'
   unread: number
   createdAt: string
+  /** The chat turn that runs now (its status line and Stop); absent while the chat is free. */
+  chat?: { activationId: string }
+  /** Work that runs or waits beside the chat (docs/plans/bot-always-free.md), oldest first. */
+  work?: BotWorkItem[]
+}
+
+/** One piece of work in the line above the composer: what it is about, and whether it runs, waits or is held. */
+export interface BotWorkItem {
+  id: string
+  title: string
+  status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'
+  startedAt: string
+  /** A scheduled run rather than work the chat started. */
+  scheduled?: true
 }
 
 /** One thing a bot may use, in About → Can use. `id` is the permission's fingerprint. */

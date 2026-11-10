@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
+import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment } from '../../shared/bots/personal/methods'
@@ -18,6 +18,14 @@ import { keepEqualById } from '../lib/keepEqual'
  */
 
 /** Messages one chat page asks for. */
+/** A record without one key. */
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record
+  const next = { ...record }
+  delete next[key]
+  return next
+}
+
 export const BOT_CHAT_PAGE = 50
 /** How long the face plays "done" after a working bot goes idle with a good outcome. */
 export const BOT_HAPPY_MS = 2500
@@ -54,6 +62,8 @@ interface BotsState {
   chats: Record<string, BotChatCache>
   /** The current step of a working bot. */
   live: Record<string, { activationId: string; chip?: BotChip }>
+  /** The live chip of each running activation (the chat's turn and each piece of work), by activation id. */
+  activity: Record<string, BotChip>
   /** Owner messages sent and not yet confirmed, shown as sent. */
   pending: Record<string, BotChatMessage[]>
   details: Record<string, BotDetail>
@@ -62,6 +72,8 @@ interface BotsState {
   drafts: Record<string, string>
   /** The files in each bot's composer: picked, dropped or pasted. */
   attachments: Record<string, AttachedFile[]>
+  /** The message each bot's composer replies to (Reply on a message), shown above the box until sent or dismissed. */
+  replyingTo: Record<string, BotChatQuote>
   error: string | null
   /** The bot `error` is about; null when it is about none (a new bot). Only that bot's chat shows it. */
   errorBotId: string | null
@@ -77,8 +89,12 @@ interface BotsState {
   markRead(botId: string): void
   setDraft(botId: string, text: string): void
   setAttachments(botId: string, attachments: AttachedFile[]): void
+  /** Reply to a message (null: not any more). */
+  setReplyingTo(botId: string, quote: BotChatQuote | null): void
   send(botId: string): Promise<void>
   stop(botId: string): Promise<void>
+  /** Stops one piece of work (the line above the composer); the chat goes on. */
+  stopWork(botId: string, workId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
   exportMemory(botId: string, askId: string): Promise<void>
   openNewBot(): void
@@ -191,13 +207,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
       events.onMessage?.((event) => { if (event?.botId && event.message) putMessages(event.botId, [event.message]) }),
       events.onActivity?.((event) => {
         if (!event?.botId) return
-        set((state) => ({ live: { ...state.live, [event.botId]: { activationId: event.activationId, ...(event.chip ? { chip: event.chip } : {}) } } }))
+        set((state) => ({
+          live: { ...state.live, [event.botId]: { activationId: event.activationId, ...(event.chip ? { chip: event.chip } : {}) } },
+          activity: event.chip ? { ...state.activity, [event.activationId]: event.chip } : withoutKey(state.activity, event.activationId)
+        }))
       })
     ].filter((stop): stop is () => void => typeof stop === 'function')
   }
 
   return {
-    profileId: null, bots: [], loaded: false, chats: {}, live: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {},
+    profileId: null, bots: [], loaded: false, chats: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
     error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
 
     activate(profileId) {
@@ -210,7 +229,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       created.clear()
       readSeq.clear()
       removed.clear()
-      set({ profileId, bots: [], loaded: false, chats: {}, live: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {},
+      set({ profileId, bots: [], loaded: false, chats: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
         error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
       subscribe()
     },
@@ -228,7 +247,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
             // A live chip lasts while its bot works.
             const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))
             const live = working.length === Object.keys(state.live).length ? state.live : Object.fromEntries(working)
-            return { bots, loaded: true, live, ...celebrate(state.bots, bots) }
+            // A chip lasts while its activation (a chat turn or a piece of work) runs.
+            const running = new Set(list.flatMap((bot) => [...(bot.chat ? [bot.chat.activationId] : []), ...(bot.work ?? []).map((item) => item.id)]))
+            const kept = Object.entries(state.activity).filter(([id]) => running.has(id))
+            const activity = kept.length === Object.keys(state.activity).length ? state.activity : Object.fromEntries(kept)
+            return { bots, loaded: true, live, activity, ...celebrate(state.bots, bots) }
           })
         } catch {
           // A missed list is listed again by the next event or poll; the open chat keeps what it has.
@@ -286,10 +309,19 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     setDraft(botId, text) { set((state) => ({ drafts: { ...state.drafts, [botId]: text } })) },
     setAttachments(botId, attachments) { set((state) => ({ attachments: { ...state.attachments, [botId]: attachments } })) },
+    setReplyingTo(botId, quote) {
+      set((state) => {
+        const replyingTo = { ...state.replyingTo }
+        if (quote) replyingTo[botId] = quote
+        else delete replyingTo[botId]
+        return { replyingTo }
+      })
+    },
 
     async send(botId) {
       const text = (get().drafts[botId] ?? '').trim()
       const attachments = get().attachments[botId] ?? []
+      const replyTo = get().replyingTo[botId]
       if (!text && !attachments.length) return
       const refusal = attachmentsRefusal(attachments)
       if (refusal) {
@@ -303,17 +335,19 @@ export const useBotsStore = create<BotsState>((set, get) => {
       pendingSends.set(botId, admission)
       const shown: BotChatMessage = {
         seq: Number.MAX_SAFE_INTEGER, id: `pending:${admission.clientRequestId}`, at: new Date().toISOString(), author: 'owner', kind: 'text',
-        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '' })) } : {})
+        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '' })) } : {}),
+        ...(replyTo ? { replyTo } : {})
       }
       set((state) => ({
         error: null,
         drafts: { ...state.drafts, [botId]: '' },
         attachments: { ...state.attachments, [botId]: [] },
+        replyingTo: withoutKey(state.replyingTo, botId),
         pending: { ...state.pending, [botId]: [...(state.pending[botId] ?? []), shown] }
       }))
       try {
         const files = await Promise.all(attachments.map(attachmentOf))
-        const message = await bots().send(botId, text, admission.clientRequestId, files)
+        const message = await bots().send(botId, text, admission.clientRequestId, files, replyTo?.id)
         for (const attached of attachments) if (attached.previewUrl) URL.revokeObjectURL(attached.previewUrl)
         if (owner !== epoch) return
         pendingSends.delete(botId)
@@ -327,6 +361,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
           errorBotId: botId,
           drafts: { ...state.drafts, [botId]: state.drafts[botId] || text },
           attachments: { ...state.attachments, [botId]: state.attachments[botId]?.length ? state.attachments[botId]! : attachments },
+          replyingTo: replyTo && !state.replyingTo[botId] ? { ...state.replyingTo, [botId]: replyTo } : state.replyingTo,
           pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) }
         }))
       }
@@ -335,6 +370,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
     async stop(botId) {
       const owner = epoch
       try { await bots().stop(botId); if (owner === epoch) void get().refresh() } catch (cause) { fail(owner, cause, botId) }
+    },
+
+    async stopWork(botId, workId) {
+      const owner = epoch
+      try { await bots().stopWork(botId, workId); if (owner === epoch) void get().refresh() } catch (cause) { fail(owner, cause, botId) }
     },
 
     async answer(botId, askId, answer) {
