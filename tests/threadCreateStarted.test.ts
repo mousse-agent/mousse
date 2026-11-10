@@ -35,4 +35,17 @@ describe('threads.create for a message being sent', () => {
     expect(isThreadStarted(draft.threads.find((thread) => thread.id === draft.thread.id)!)).toBe(false)
     await expect(dispatchMethod(ctx, 'threads.create', { name: 'New Chat', started: 'yes' })).rejects.toThrow()
   })
+
+  it('makes a listed chat with the chosen permission mode in the same call, or makes nothing', async () => {
+    const ctx = { mms, globalSequence: () => 0 }
+    const before = mms.threads.listAllThreads().length
+    await expect(dispatchMethod(ctx, 'threads.create', { name: 'New Chat', started: true, permissionMode: 'not-a-mode' })).rejects.toThrow()
+    expect(mms.threads.listAllThreads()).toHaveLength(before)
+
+    const { thread } = (await dispatchMethod(ctx, 'threads.create', { name: 'New Chat', started: true, permissionMode: 'ask' })) as { thread: Thread }
+    // Even if every call after this fails, the thread a retry sends on is listed and already has the chosen mode.
+    const stored = mms.threads.getThread(thread.id)!
+    expect(isThreadStarted(stored)).toBe(true)
+    expect(stored.permissionMode).toBe('ask')
+  })
 })
