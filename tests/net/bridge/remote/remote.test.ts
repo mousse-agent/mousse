@@ -257,8 +257,10 @@ describe('P3 real MMS remote Bridge', () => {
   it('enforces current read-only capability and closes an actual active TLS session on revoke', async () => {
     const p = await setup(['read']),
       { a, b } = await p.connect()
+    // Thread lists carry the answering daemon's list version (#819).
     expect(await b.rpc('threads.list', {}, { id: newId('rpc'), deadlineMs: 2000 })).toEqual({
-      threads: []
+      threads: [],
+      version: { epoch: expect.any(String), seq: expect.any(Number) }
     })
     for (const [method, params] of [
       ['threads.create', { name: 'No' }],
