@@ -29,6 +29,18 @@ describe('Go to latest', () => {
     expect(list).toMatch(/"chat-jump absolute left-1\/2 [^"]*-translate-x-1\/2"/)
   })
 
+  it('stays centred over the composer while a docked side card narrows it', () => {
+    const sideCard = readFileSync(new URL('../../src/renderer/components/sideCard/sideCard.css', import.meta.url), 'utf8')
+    // The composer is centred in the pane minus the card's reservation, whatever its max width.
+    expect(rule(sideCard, '.sidebar.sidebar-full .chat-input-area')).toContain('margin-left: max(0px, calc((100% - var(--side-card-reserved, 0px) - var(--an-max-width, 680px)) / 2))')
+    // The pill is anchored to the middle of the same space, in the same pane, and moves with it.
+    const jump = rule(sideCard, '.sidebar.sidebar-full .chat-jump')
+    expect(jump).toContain('left: calc((100% - var(--side-card-reserved, 0px)) / 2)')
+    expect(jump).toMatch(/left calc\(180ms \* var\(--ui-motion-scale\)\) ease/)
+    const reduced = sideCard.slice(sideCard.indexOf('prefers-reduced-motion'))
+    expect(rule(reduced, '.sidebar.sidebar-full .chat-jump')).not.toMatch(/left /)
+  })
+
   it('is a quiet pill: chevron and "Go to latest" in muted text on a subtle fill, no border', () => {
     const jump = rule(polish, '.chat-jump')
     expect(jump).toContain('border: 0')
