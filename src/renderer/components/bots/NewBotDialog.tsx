@@ -45,7 +45,7 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
     if (bot && onCreated) onCreated(bot)
     else if (bot) await useChatsStore.getState().openBot(bot.id)
   }
-  return <BotDialogFrame title="New bot" onClose={close} busy={busy} keepOnBackdrop={draft.touched} width={520}>
+  return <BotDialogFrame title="New bot" onClose={close} busy={busy} keepOnBackdrop={draft.touched} width={560}>
     <form className="bot-new-form" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void submit() }}>
       <BotLookPicker look={look} onChange={(next) => setNewBotDraft({ look: next })} existingLooks={bots.map((bot) => bot.look)} />
       <label className="bot-new-label" htmlFor="bot-new-name">Name</label>

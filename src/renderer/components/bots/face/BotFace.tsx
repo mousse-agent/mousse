@@ -55,7 +55,8 @@ function a11y(label: string | undefined) {
 
 /**
  * The live mouse, drawn by the shared WebGL renderer (`faceRenderer.ts`). Falls back to
- * `BotFaceStill` when WebGL is missing, context creation fails or the shader doesn't compile.
+ * `BotFaceStill` when WebGL is missing or refused, context creation fails, or the shader doesn't
+ * compile, or is still compiling after a few seconds (`PENDING_TIMEOUT_MS`).
  */
 export function BotFace(props: BotFaceProps) {
   const status = useSyncExternalStore(subscribeSharedFaceRenderer, sharedFaceRendererStatus, () => 'unavailable' as const)

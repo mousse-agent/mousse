@@ -61,7 +61,7 @@ function LookDialog({ bot, others }: { bot: BotSummary; others: BotLook[] }) {
   const [look, setLook] = useState<BotLook>(bot.look)
   const busy = useBotsStore((s) => s.busy)
   const error = useBotsStore((s) => s.error)
-  return <BotDialogFrame title="Change look" onClose={close} busy={busy} width={520}>
+  return <BotDialogFrame title="Change look" onClose={close} busy={busy} width={560}>
     <BotLookPicker look={look} onChange={setLook} existingLooks={others} />
     {error && <p role="alert" className="chat-error">{error}</p>}
     <div className="bot-new-foot">
