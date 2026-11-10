@@ -94,10 +94,10 @@ import {
   asBoundedInt,
   isObject
 } from './validators'
-import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
+import { FIRST_SEND_BINDING_CAPABILITY, PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
 import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes } from './transcriptPaging'
 import { isOpenActivityRow } from '../run/restartNote'
-import { ROUTED_MESSAGES_PAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
+import { ROUTED_MESSAGES_PAGE_BYTES, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
@@ -2477,10 +2477,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect'
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect',
+        ROUTED_SEND_WINDOW_KEY
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
+      const routedWindow = asOptionalString(p[ROUTED_SEND_WINDOW_KEY], 16)
+      if (routedWindow !== undefined && routedWindow !== 'binds' && routedWindow !== 'older')
+        throw new DomainRpcError('invalid_params', `${ROUTED_SEND_WINDOW_KEY} must be binds or older`)
       // A parent's follow-up to a subagent on this computer: a paused thread refuses it, as for a parent here.
       const refuseWhilePaused = asOptionalBoolean(p.refuseWhilePaused, 'refuseWhilePaused') === true
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
@@ -2512,10 +2516,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const sentFrom = sentFromOf(ctx)
       // A send bound to what the composer showed: compared here, and again inside the engine's admission. The turn is then
       // pinned to the compared model and capped at the compared mode, so a later change can only narrow it.
-      // A thread a window made for its first message runs that message only bound to what the window showed. A window
-      // always binds it; one that did not (an older window, a lost update) is refused, so it reads the thread again.
-      if (p.expect === undefined && ctx.connection?.clientType === 'gui' && ctx.mms.threads.getThread(threadId)?.firstSendPending)
-        throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
+      // A thread a window made for its first message runs that message only bound to what a window showed: a window here,
+      // or one on another computer (its router marks the send, `ROUTED_SEND_WINDOW_KEY`). A window that binds and did not
+      // (a lost update) is refused, so it reads the thread again; an older one is told to update. The CLI, automations,
+      // bots and agents may send it unbound.
+      if (p.expect === undefined && ctx.mms.threads.getThread(threadId)?.firstSendPending) {
+        const window = ctx.connection?.clientType === 'gui'
+          ? (ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older')
+          : ctx.connection?.clientType === 'bridge' ? routedWindow : undefined
+        if (window === 'binds')
+          throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
+        if (window === 'older')
+          throw new DomainRpcError('first_send_unbound', 'Update Mousse to send the first message in this chat.', { threadId, update: true })
+      }
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,

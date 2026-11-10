@@ -217,7 +217,7 @@ describe('a send bound to what was shown (expect)', () => {
   it('takes expect at a new version of the routed row, and setModel refuses unknown keys', async () => {
     const row = ROUTED_METHODS['orchestrator.send']!
     expect(routedKeysAt(row, row.version)).toContain('expect')
-    expect(routedKeysAt(row, row.version - 1)).not.toContain('expect')
+    expect(routedKeysAt(row, row.since!.expect! - 1)).not.toContain('expect')
     const thread = await projectThread()
     await expect(call('threads.setModel', { threadId: thread.id, model: sonnet, ifRevison: 0 })).rejects.toMatchObject({ code: 'invalid_params' })
   })
@@ -246,5 +246,23 @@ describe("another computer's thread rows", () => {
     expect(row.permissionMode).toBe('ask')
     const older = threadRow({ id: 'node-1:x', name: 'x', permissionMode: 'ask' }, 0, { node: 'node-1', offline: false })
     expect(older).not.toHaveProperty('settingsRevision')
+  })
+
+  it("carry a chat's pending first message, so a window there binds it too", async () => {
+    const { threadRow } = await import('../src/mms/bridge/routed/listRows')
+    const { MmsListsSource } = await import('../src/mms/bridge/remote/MmsListsSource')
+    const made = (await call('threads.create', { name: 'New Chat', started: true, permissionMode: 'ask' })) as { thread: Thread }
+    const plain = await projectThread()
+    const source = new MmsListsSource({
+      projects: { listProjects: () => [] },
+      threads: { listAllThreads: () => mms.threads.listAllThreads() },
+      orchestrator: { getTurnSnapshot: () => ({}) },
+      threadRuntimes: { getActivitySnapshot: () => ({}) },
+      platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } }
+    } as never, undefined, { private: true })
+    const sent = source.snapshot().threads as Array<Record<string, unknown>>
+    const row = (id: string) => threadRow({ ...sent.find((entry) => entry.id === id)!, id: 'node-1:' + id }, 0, { node: 'node-1', offline: false })
+    expect(row(made.thread.id).firstSendPending).toBe(true)
+    expect(row(plain.id)).not.toHaveProperty('firstSendPending')
   })
 })

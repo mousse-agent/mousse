@@ -123,6 +123,18 @@ const write = (target: RoutedTarget, keys: readonly string[], extra?: Partial<Ro
   row('write', target, keys, extra)
 
 /**
+ * On a routed send, set by the calling computer's router (never by a window): a window sent it, and whether that window
+ * binds a chat's first message (`'binds'`) or is older (`'older'`). The owner holds such a send to the rule for its own
+ * windows (`Thread.firstSendPending`). An owner from before it is sent the call without it (`ROUTED_DROPPABLE_KEYS`).
+ */
+export const ROUTED_SEND_WINDOW_KEY = 'window'
+
+/** Keys that only tell an owner more about the caller: one whose version of the row predates them goes without. */
+export const ROUTED_DROPPABLE_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'orchestrator.send': [ROUTED_SEND_WINDOW_KEY]
+})
+
+/**
  * Keys no routed call may ever carry, whatever a row says: they would name a folder, a command or
  * an identity of the caller instead of a thread of the owner.
  */
@@ -288,12 +300,14 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       ROUTED_STAGED_KEY,
       'refuseWhilePaused',
       'conversationBranchId',
-      'expect'
+      'expect',
+      ROUTED_SEND_WINDOW_KEY
     ],
     // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
     // Version 4: `conversationBranchId`, the branch an edited prompt must land on.
     // Version 5: `expect`, the model, mode and settings revision the sender saw; the owner runs nothing on other ones.
-    { required: ['content'], ...staging(['content', 'images']), version: 5, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5 } }
+    // Version 6: `window`, set by the calling computer: a window sent this (`ROUTED_SEND_WINDOW_KEY`).
+    { required: ['content'], ...staging(['content', 'images']), version: 6, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3, conversationBranchId: 4, expect: 5, [ROUTED_SEND_WINDOW_KEY]: 6 } }
   ),
   'orchestrator.steer': chat(
     'thread',
@@ -764,6 +778,13 @@ export const routedMethodOf = (name: string): string | undefined =>
  */
 export function routedParamsForOwner(method: string, version: number, params: Record<string, unknown>): Record<string, unknown> {
   if (method === 'threads.setPermissionMode' && version < 2 && params.mode === 'auto') return { ...params, mode: 'accept_edits' }
+  const row = ROUTED_METHODS[method]
+  const dropped = (ROUTED_DROPPABLE_KEYS[method] ?? []).filter((key) => key in params && (row?.since?.[key] ?? 1) > version)
+  if (dropped.length) {
+    const kept = { ...params }
+    for (const key of dropped) delete kept[key]
+    return kept
+  }
   return params
 }
 

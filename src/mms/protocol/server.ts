@@ -27,6 +27,7 @@ import {
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
   MMS_PROTOCOL_VERSION,
   GIT_OPERATIONS_CAPABILITY,
+  FIRST_SEND_BINDING_CAPABILITY,
   PROTOCOL_CAPABILITIES,
   type ProtocolConnectionEventType,
   type ProtocolEvent,
@@ -960,6 +961,8 @@ export class MmsProtocolServer {
       )
       if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
+      // A window says it binds a chat's first message; nothing else may claim it.
+      if (v.hello.clientType === 'gui' && requested.has(FIRST_SEND_BINDING_CAPABILITY)) session.capabilities.add(FIRST_SEND_BINDING_CAPABILITY)
       if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
         session.capabilities.add(PROFILES_V1_CAPABILITY)
       }

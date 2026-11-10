@@ -2,8 +2,10 @@ import {
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_JOB_METHODS,
   ROUTED_METHODS,
+  ROUTED_SEND_WINDOW_KEY,
   type RoutedRow
 } from '../../../shared/bridge/routed'
+import { FIRST_SEND_BINDING_CAPABILITY } from '../../protocol/types'
 import {
   outgoingMessageText,
   qualifyRoutedResult,
@@ -250,6 +252,9 @@ export class ThreadRouter implements ThreadRouterPort {
     if (!row) throw notAvailableRemotely(computer, method)
     const context: QualifyContext = { node, self: this.selfNode() }
     const owner = this.ownerParams(method, row, split.params, context)
+    // Only a window routes (above): the owner holds its send to the rule for a chat's first message, as for its own.
+    if (method === 'orchestrator.send')
+      owner[ROUTED_SEND_WINDOW_KEY] = ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older'
 
     if (method === 'thread.snapshot') {
       const threadId = owner.threadId as string
@@ -350,6 +355,8 @@ export class ThreadRouter implements ThreadRouterPort {
       if (LOCAL_BINDING_KEYS.includes(key)) continue
       // A window labels a send `gui`; the owner decides the source of a routed call itself.
       if (key === 'source' && value === 'gui') continue
+      // Set by this router below, never taken from a window.
+      if (key === ROUTED_SEND_WINDOW_KEY && method === 'orchestrator.send') continue
       // The owner answers a send once the turn is admitted, however long the turn runs.
       if (key === 'await' && method === 'orchestrator.send') continue
       // Numbers belong to the router: a window never picks one.
