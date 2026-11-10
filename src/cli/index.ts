@@ -1,6 +1,6 @@
 import { exitWithError } from './output'
 import { isElectronMainProcess, stripCliModeArgs } from './cliLaunch'
-import { configureElectronContext, finishElectronCli } from './electronContext'
+import { configureElectronContext, configureWindowlessElectron, finishElectronCli } from './electronContext'
 import { isChatgptTokenArgv } from './fastpath/chatgptToken'
 import { isSshProxyArgv } from './fastpath/sshProxy'
 
@@ -26,6 +26,7 @@ async function main(): Promise<void> {
   if (isElectronMainProcess()) {
     const { app } = await import('electron')
     configureElectronContext(app, argv)
+    configureWindowlessElectron(app)
     await app.whenReady()
     try {
       await runCliMain(argv)
