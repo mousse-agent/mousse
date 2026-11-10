@@ -1609,6 +1609,11 @@ export class OrchestratorService extends EventEmitter {
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
   private boundSession = new ThreadSession('__unbound__')
   private sessions = new Map<string, ThreadSession>()
+  /**
+   * The last thread the context gauge measured without a session (`measuredSession`), kept while the thread is
+   * unchanged so typing in its composer does not read it again. Only one: nothing else releases what it holds.
+   */
+  private measured?: { threadId: string; version?: string; session: ThreadSession }
   /** Threads running a scheduled occurrence's turn now (`isScheduledTurn`). */
   private readonly scheduledTurnThreads = new Set<string>()
   private readonly transcripts = new WeakMap<ThreadSession, TranscriptAssembler>()
@@ -7049,6 +7054,7 @@ export class OrchestratorService extends EventEmitter {
     }
     // Hydrate runtime after session is registered to avoid re-entrant create.
     this.sessions.set(threadId, session)
+    if (this.measured?.threadId === threadId) this.measured = undefined
     this.restoreDelegatedWorkspace(session)
     this.restoreScheduledWorkspace(session)
     if (this.runtimeManager) {
@@ -8530,10 +8536,31 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     if (threadId && threadId !== this.session.threadId) {
-      const session = this.getOrCreateSession(threadId)
+      const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId) ?? this.measuredSession(threadId)
       return this.sessionAls.run(session, () => run())
     }
     return run()
+  }
+
+  /**
+   * A thread for the context gauge, read from storage without registering a session. A window measures every
+   * thread it shows; a registered session holds the whole thread and stays until the daemon stops, so measuring
+   * used to keep every thread a person looked at in memory. Measuring only reads, so a copy is enough.
+   */
+  private measuredSession(threadId: string): ThreadSession {
+    const store = this.threadStore
+    if (store?.lifecycleStore?.get(threadId)) store.assertThreadAdmission(threadId)
+    const thread = store?.getThread(threadId)
+    const version = thread ? `${thread.updatedAt}\0${JSON.stringify(thread.modelOverride ?? null)}` : undefined
+    const cached = this.measured
+    if (cached?.threadId === threadId && cached.version === version) return cached.session
+    const session = new ThreadSession(threadId)
+    if (store && thread) {
+      const data = store.loadThreadData(threadId)
+      session.load(data.messages, data.llmContext ?? migrateLegacyContext(data.messages), [], undefined, undefined, this.harness.instanceMap.migrate(thread.modelOverride))
+    }
+    this.measured = { threadId, version, session }
+    return session
   }
 
   private addSystemMessage(content: string): void {

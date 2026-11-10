@@ -1110,6 +1110,20 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
+  it('showing a thread (its queue and context gauge) leaves it unloaded, so it is not held in memory', async () => {
+    const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await client.connect()
+    const thread = mms.threads.createThread('Only looked at')
+    mms.orchestrator.enqueueForThread(thread.id, { content: 'waiting' }, { source: 'gui' })
+    mms.orchestrator.markThreadRestored(thread.id)
+    expect(mms.orchestrator.hasSession(thread.id)).toBe(false)
+    const queue = await client.request<{ items: { content: string }[] }>('queue.list', { threadId: thread.id })
+    expect(queue.items.map((item) => item.content)).toEqual(['waiting'])
+    await client.request('orchestrator.contextUsage', { threadId: thread.id, draftInput: 'draft' })
+    expect(mms.orchestrator.hasSession(thread.id)).toBe(false)
+    await client.close()
+  })
+
   it('queue.edit changes a queued message and keeps whose it is; queue.list hands out the revision, and every change that names a stale one is refused', async () => {
     const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
     await client.connect()
