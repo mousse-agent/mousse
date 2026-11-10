@@ -200,6 +200,12 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.publishDerivedActivity(threadId, rt, true)
   }
 
+  /** Whether the thread waits on delegated tasks, provider background work or a busy agent of its own. */
+  waitsOnWork(threadId: string): boolean {
+    if (this.pendingDelegations.has(threadId) || this.pendingBackgroundWork.has(threadId)) return true
+    return Boolean(this.runtimes.get(threadId)?.agents.list().some((agent) => BUSY_AGENT_STATUSES.has(agent.status)))
+  }
+
   /** Whether `threadId` has delegated tasks still running; they wake it when they finish. */
   setPendingDelegations(threadId: string, pending: boolean): void {
     if (pending === this.pendingDelegations.has(threadId)) return

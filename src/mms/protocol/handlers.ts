@@ -1840,6 +1840,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['threadId', 'focused'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const focused = asOptionalBoolean(p.focused, 'focused') !== false
+      // A thread of this computer a window shows stays loaded in memory (`ThreadResidency`).
+      if (!parseQualifiedId(threadId)) {
+        if (ctx.connection?.clientType === 'gui') ctx.mms.orchestrator.setThreadViewed(ctx.connection.id, threadId, focused, ctx.connection.lifetime)
+        return { routed: false, focused: false }
+      }
       return ctx.mms.threadRouter?.focus(ctx, threadId, focused) ?? { routed: false, focused: false }
     }
     case 'applets.get':
@@ -2496,8 +2501,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
-      // A turn loads the whole thread; one kept in thread.db is read off the event loop first.
-      if (ctx.mms.threads.getThread(threadId)) await ctx.mms.threads.warmThread(threadId).catch(() => undefined)
+      // A turn loads the whole thread; one kept in thread.db (or released from memory) is read off the event loop first.
+      if (ctx.mms.threads.getThread(threadId)) await ctx.mms.orchestrator.ensureSessionLoaded(threadId).catch(() => undefined)
       if (!ctx.mms.threads.getThread(threadId)) {
         throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
@@ -2796,6 +2801,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const expectedRunId = asOptionalString(p.expectedRunId, 256)
       // A message an agent wrote keeps the mode limit it carries: a run that runs looser than that limit refuses it.
       const limit = deviceLimit(ctx)
+      // A thread released from memory is read off the event loop before the Steer reaches it.
+      if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.getThread(threadId)) await ctx.mms.orchestrator.ensureSessionLoaded(threadId).catch(() => undefined)
       const sent = queueRpc(() => ctx.mms.orchestrator.promoteQueueItem(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
       return { ok: sent.ok, ...(sent.notice ? { notice: sent.notice } : {}), items: ctx.mms.orchestrator.listQueue(threadId) }
     }

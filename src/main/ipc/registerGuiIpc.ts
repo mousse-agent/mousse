@@ -1624,6 +1624,12 @@ export function registerGuiIpc(
     if (previous && previous !== threadId && isQualifiedId(previous)) {
       void guiMms.request('threads.focus', { threadId: previous, focused: false }).catch(() => undefined)
     }
+    // A thread of this computer the window shows stays loaded in the daemon; the one left behind may be released
+    // once idle. Nothing waits for these.
+    if (previous && previous !== threadId && !isQualifiedId(previous)) {
+      void guiMms.request('threads.focus', { threadId: previous, focused: false }).catch(() => undefined)
+    }
+    if (!isQualifiedId(threadId)) void guiMms.request('threads.focus', { threadId, focused: true }).catch(() => undefined)
     if (isQualifiedId(threadId)) {
       try {
         await guiMms.request('threads.focus', { threadId, focused: true })

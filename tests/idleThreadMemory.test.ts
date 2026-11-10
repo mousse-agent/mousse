@@ -4,6 +4,9 @@
  * Startup: the restart pass (`ThreadRuntimeManager.restoreOnStartup`) reads the agents and tasks of every thread that
  * is not settled. It reads them from the thread's state alone: no transcript is loaded, and none is kept in the
  * thread database cache.
+ *
+ * Release: a thread that ran and then sat idle is released from memory (`ThreadResidency`). Its session and its thread
+ * database cache entry go, and the heap returns to where it was before the thread loaded.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -18,6 +21,7 @@ import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ThreadRuntimeManager } from '../src/mms/runtime/ThreadRuntimeManager'
 import type { ChatMessage, Task } from '../src/shared/types'
+import { createOrchestrator } from './run/phase6Fixture'
 
 vi.setConfig({ testTimeout: 120_000 })
 
@@ -256,5 +260,68 @@ describe('thread database cache byte cap', () => {
     writer.save(threadDir!, { tasks: [{ id: 't3' }] as never })
     expect(store.readState(threadDir!).tasks).toEqual([{ id: 't3' }])
     expect(store.stateReads).toBe(1)
+  })
+})
+
+describe('releasing idle threads frees what they held', () => {
+  let home: string
+  const previous = { home: process.env.MOUSSE_HOME, sqlite: process.env.MOUSSE_SQLITE_THREAD_STORE }
+
+  beforeEach(() => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-idle-release-memory-')))
+    process.env.MOUSSE_HOME = home
+    process.env.MOUSSE_SQLITE_THREAD_STORE = '1'
+  })
+
+  afterEach(() => {
+    try { rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) } catch { /* left for the OS */ }
+    if (previous.home === undefined) delete process.env.MOUSSE_HOME
+    else process.env.MOUSSE_HOME = previous.home
+    if (previous.sqlite === undefined) delete process.env.MOUSSE_SQLITE_THREAD_STORE
+    else process.env.MOUSSE_SQLITE_THREAD_STORE = previous.sqlite
+  })
+
+  it('5 threads of 1,100 messages, loaded and then idle, leave the heap where it started once released', () => {
+    const writer = new ThreadDataStore(new ProjectManager())
+    const ids: string[] = []
+    for (let i = 0; i < 5; i++) {
+      const thread = writer.createThread(`Long ${i}`, undefined, undefined, { started: true })
+      // 550 turns: 1,100 messages of about 2.2 MB.
+      writer.mutateThreadData(thread.id, () => ({ messages: transcript(2_200, `long${i}`) }))
+      expect(writer.loadThreadData(thread.id).messages).toHaveLength(1_100)
+      ids.push(thread.id)
+    }
+    writer.closeThreadStorage()
+
+    const store = new ThreadDataStore(new ProjectManager())
+    const orch = createOrchestrator(home, store)
+    // Saved as the profile saves (`persistOrchestratorThread`).
+    orch.setPersistCallback((threadId) => {
+      if (!threadId || !orch.hasSession(threadId)) return
+      store.mutateThreadData(threadId, () => ({ messages: orch.liveMessagesForSave(threadId) as ChatMessage[], llmContext: orch.getNativeContext(threadId) }))
+    })
+    let clock = Date.parse('2026-11-10T12:00:00.000Z')
+    orch.residency.now = () => clock
+    try {
+      const before = heapUsed()
+      for (const id of ids) orch.getOrCreateSession(id)
+      const loaded = heapUsed()
+      // Each thread holds about its stored size while loaded.
+      expect((loaded - before) / MB).toBeGreaterThan(8)
+      expect(store.threadDbCacheStats().threads).toBe(5)
+
+      clock += 11 * 60_000
+      expect(orch.residency.sweepNow().sort()).toEqual([...ids].sort())
+      const after = heapUsed()
+      for (const id of ids) expect(orch.hasSession(id)).toBe(false)
+      expect(store.threadDbCacheStats()).toMatchObject({ threads: 0, bytes: 0 })
+      expect(orch.residency.counters).toMatchObject({ released: 5, unsavedAtRelease: 0, staleUses: 0 })
+      expect(Math.abs(after - before) / MB).toBeLessThan(1)
+
+      // Released threads open as before.
+      expect(orch.getOrCreateSession(ids[0]!).messages).toHaveLength(1_100)
+    } finally {
+      store.closeThreadStorage()
+    }
   })
 })

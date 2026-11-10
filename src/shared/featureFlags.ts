@@ -11,6 +11,11 @@ export interface MousseFeatureFlags {
   threadTrashGc: boolean
   /** Threads kept in one SQLite database per thread (`docs/thread-storage.md`). */
   sqliteThreadStore: boolean
+  /**
+   * Threads idle for a while are released from the daemon's memory and reload from disk when next needed
+   * (`docs/design/idle-thread-release.md`). Off is the kill switch; it takes effect at the next sweep.
+   */
+  releaseIdleThreads: boolean
 }
 
 export const DEFAULT_FEATURE_FLAGS: MousseFeatureFlags = {
@@ -24,7 +29,8 @@ export const DEFAULT_FEATURE_FLAGS: MousseFeatureFlags = {
   conversationBranches: false,
   codeRevertRedo: false,
   threadTrashGc: false,
-  sqliteThreadStore: true
+  sqliteThreadStore: true,
+  releaseIdleThreads: true
 }
 
 const PREDECESSORS: Array<[keyof MousseFeatureFlags, keyof MousseFeatureFlags]> = [

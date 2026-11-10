@@ -96,6 +96,8 @@ import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow } from '../run/restartNote'
+import { ThreadResidency } from './ThreadResidency'
+import { isDeepStrictEqual } from 'node:util'
 import type { OneShotTask } from '../harness/driver'
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
@@ -978,6 +980,7 @@ export class OrchestratorService extends EventEmitter {
 
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
+    this.residency.stop()
     for (const retry of this.releaseRetries) clearTimeout(retry)
     this.releaseRetries.clear()
     for (const [runId, entry] of [...this.turnResults]) {
@@ -1609,6 +1612,12 @@ export class OrchestratorService extends EventEmitter {
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
   private boundSession = new ThreadSession('__unbound__')
   private sessions = new Map<string, ThreadSession>()
+  /** Which loaded threads stay in memory; idle ones are released (`releaseIfIdle`). */
+  readonly residency = new ThreadResidency({
+    loadedThreadIds: () => this.sessions.keys(),
+    holdReason: (threadId) => this.releaseHoldReason(threadId),
+    releaseIfIdle: (threadId) => this.releaseIfIdle(threadId)
+  })
   /**
    * The last thread the context gauge measured without a session (`measuredSession`), kept while the thread is
    * unchanged so typing in its composer does not read it again. Only one: nothing else releases what it holds.
@@ -1756,7 +1765,13 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private get session(): ThreadSession {
-    return this.sessionAls.getStore() ?? this.boundSession
+    const scoped = this.sessionAls.getStore()
+    if (scoped?.released) {
+      // Backstop: work that kept a released session is moved to the thread's current one.
+      this.residency.noteStaleUse(scoped.threadId)
+      return this.getOrCreateSession(scoped.threadId)
+    }
+    return scoped ?? this.boundSession
   }
 
   private get messages(): ChatMessage[] {
@@ -7029,6 +7044,7 @@ export class OrchestratorService extends EventEmitter {
     }
     let session = this.sessions.get(threadId)
     if (session) {
+      this.residency.touch(threadId)
       if (this.runtimeManager) {
         const rt = this.runtimeManager.getOrHydrate(threadId)
         session.agents = rt.agents
@@ -7056,6 +7072,7 @@ export class OrchestratorService extends EventEmitter {
     }
     // Hydrate runtime after session is registered to avoid re-entrant create.
     this.sessions.set(threadId, session)
+    this.residency.loaded(threadId)
     if (this.measured?.threadId === threadId) this.measured = undefined
     this.restoreDelegatedWorkspace(session)
     this.restoreScheduledWorkspace(session)
@@ -7162,6 +7179,7 @@ export class OrchestratorService extends EventEmitter {
    * credentials revoked.
    */
   markThreadDeleted(threadId: string): void {
+    this.residency.forget(threadId)
     this.revokeMcp(threadId)
     this.appToolTurns.forgetThread(threadId)
     this.dropContinuationsOf(threadId)
@@ -7222,6 +7240,7 @@ export class OrchestratorService extends EventEmitter {
 
   /** A restored task starts from durable conversation state without replaying old work. */
   markThreadRestored(threadId: string): void {
+    this.residency.forget(threadId)
     this.sessions.delete(threadId)
     if (this.boundSession.threadId === threadId) this.boundSession = new ThreadSession('__unbound__')
     this.turnStates.delete(threadId)
@@ -7321,6 +7340,121 @@ export class OrchestratorService extends EventEmitter {
   /** True when the thread's session is loaded (reading it then costs nothing). */
   hasSession(threadId: string): boolean {
     return this.boundSession.threadId === threadId || this.sessions.has(threadId)
+  }
+
+  /**
+   * Why a loaded thread must stay in memory, or undefined when it may be released
+   * (`docs/design/idle-thread-release.md` section 2). Every check is an in-memory or indexed read.
+   */
+  releaseHoldReason(threadId: string): string | undefined {
+    const session = this.sessions.get(threadId)
+    if (!session) return 'not loaded'
+    if (this.boundSession.threadId === threadId) return 'bound session'
+    const store = this.threadStore
+    if (!store || !this.persistFn) return 'no saver'
+    if (this.lifecycle.stopping) return 'stopping'
+    if (this.residency.isWarming(threadId)) return 'reloading'
+    if (this.residency.isViewed(threadId)) return 'shown in a window'
+    // No turn.
+    if (session.isTurnRunning() || session.turnAdmitted || session.activeTurn) return 'turn running'
+    if (session.drainAfterSettle || session.abortRequested || session.stopping || session.sentAfterStop.length || session.setupStop || session.executionLease)
+      return 'turn settling'
+    if (session.deleted) return 'deleted'
+    // Nothing only memory knows.
+    if (session.failedConnectionRequest) return 'retry pending'
+    if (session.messages.some(isOpenActivityRow)) return 'open activity row'
+    // Lifecycle work of the orchestrator.
+    if (this.compactions.has(threadId) || this.titleWork.has(threadId) || this.folderWaits.has(threadId) || this.definitionStops.get(threadId)?.size)
+      return 'lifecycle work'
+    if (this.agentCreations.size || this.startupDrainScheduled.has(threadId) || this.scheduledTurnThreads.has(threadId)) return 'lifecycle work'
+    if (this.providerBackground.has(threadId)) return 'provider background work'
+    for (const result of this.turnResults.values()) if (result.payload.threadId === threadId) return 'turn result pending'
+    for (const continuation of this.pendingContinuations.values()) if (continuation.threadId === threadId) return 'continuation pending'
+    try {
+      // Kept in thread.db, so a reload reads exactly what is saved; threads still on JSON files stay.
+      if (!store.getThread(threadId) || !store.usesThreadDb(threadId)) return 'not in thread.db'
+      // Archive, delete, expiry and retention close the thread's admission while they run.
+      if (store.lifecycleStore?.get(threadId)) store.assertThreadAdmission(threadId)
+      // Empty queue on disk, steer items and claims included, and no unfinished agent queue command.
+      if (store.loadMessageQueue(threadId).length) return 'queue not empty'
+      if (store.getQueueJournal()?.commands.listUnfinished(threadId).length) return 'queue command unfinished'
+    } catch {
+      return 'thread unavailable'
+    }
+    // Nothing it waits on.
+    if (this.runtimeManager?.waitsOnWork(threadId)) return 'waiting on work'
+    if (this.questions.listPendingForThread(threadId).length) return 'question pending'
+    const engineWork = this.runEngine?.threadWorkInFlight(threadId)
+    if (engineWork) return engineWork
+    if (this.harness.hasLiveProcess?.(threadId)) return 'provider process open'
+    return undefined
+  }
+
+  /**
+   * Releases an idle thread from memory in one synchronous step: checks the rule, saves only what is owed, then drops
+   * the session and the thread database cache entry. Emits nothing. A send, Steer or reload runs entirely before or
+   * after it. Returns true when released; a failed save leaves the thread loaded.
+   */
+  releaseIfIdle(threadId: string): boolean {
+    if (!this.residency.isEnabled()) return false
+    if (this.releaseHoldReason(threadId) !== undefined) return false
+    const session = this.sessions.get(threadId)!
+    const store = this.threadStore!
+    try {
+      // Disk must have everything. A pending persist was owed anyway; otherwise a dry run says whether a save is.
+      // Never an unconditional save: a save moves the thread's time and would reorder the sidebar.
+      const timer = this.persistTimers.get(threadId)
+      const owed = (): boolean => {
+        if (store.threadDataUnsaved(threadId, { messages: session.messages })) return true
+        if (!store.threadDataUnsaved(threadId, { llmContext: session.nativeContext })) return false
+        // A thread that never saved a model context gets one rebuilt from its transcript at every load: it is owed
+        // only when it differs from that rebuild.
+        if (store.threadDataHasContext(threadId)) return true
+        return !isDeepStrictEqual(session.nativeContext, migrateLegacyContext(session.messages))
+      }
+      if (timer || owed()) {
+        if (timer) clearTimeout(timer)
+        this.persistTimers.delete(threadId)
+        this.residency.counters.unsavedAtRelease += 1
+        this.persistFn!(threadId)
+        if (owed()) throw new Error('the save left changes unsaved')
+      }
+    } catch (error) {
+      this.residency.counters.failedReleases += 1
+      console.warn('an idle thread could not be released; it stays loaded', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return false
+    }
+    session.released = true
+    this.sessions.delete(threadId)
+    if (this.measured?.threadId === threadId) this.measured = undefined
+    try {
+      store.forgetThreadData(threadId)
+    } catch {
+      // Gone meanwhile: nothing is held for it.
+    }
+    this.residency.noteReleased(threadId)
+    return true
+  }
+
+  /**
+   * The thread's session, loaded first in the read worker when it is not in memory, so a reload does not parse the
+   * thread on the event loop. The thread is not released while it is read.
+   */
+  async ensureSessionLoaded(threadId: string): Promise<ThreadSession> {
+    if (!this.hasSession(threadId) && this.threadStore?.getThread(threadId)) {
+      this.residency.beginWarm(threadId)
+      try {
+        await this.threadStore.warmThread(threadId).catch(() => undefined)
+      } finally {
+        this.residency.endWarm(threadId)
+      }
+    }
+    return this.getOrCreateSession(threadId)
+  }
+
+  /** A window shows the thread, or stopped showing it: a shown thread is never released. */
+  setThreadViewed(connectionId: string, threadId: string, focused: boolean, lifetime?: AbortSignal): void {
+    this.residency.setViewed(connectionId, threadId, focused, lifetime)
   }
 
   getMessages(threadId?: string): ChatMessage[] {
@@ -11524,6 +11658,11 @@ export class OrchestratorService extends EventEmitter {
       opts?.onSettled?.(result)
     }
     if (this.lifecycle.stopping) { settle('idle'); return }
+    if (session.released) {
+      // Backstop: a drain asked for with a released session drains the thread's current one.
+      this.residency.noteStaleUse(session.threadId)
+      session = this.getOrCreateSession(session.threadId)
+    }
     if (session.deleted || session.threadId === '__unbound__') {
       settle('idle')
       return

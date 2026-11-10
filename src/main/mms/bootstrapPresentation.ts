@@ -1,5 +1,6 @@
 import type { Thread } from '../../shared/types'
 import { visibleThreads } from '../../shared/threadLineage'
+import { isQualifiedId } from '../../shared/threadRef'
 import type { GuiMmsController } from './GuiMmsController'
 import type { PresentationState } from './PresentationState'
 import { broadcastThreadSnapshot, threadListPayload } from './protocolEventBridge'
@@ -42,6 +43,9 @@ export async function bootstrapPresentation(
     }
   }
   presentation.setActiveThreadId(activeId)
+  // The daemon keeps a thread the window shows loaded; nothing waits for it. Threads of other computers are focused
+  // when they are selected.
+  if (!isQualifiedId(activeId)) void guiMms.request('threads.focus', { threadId: activeId, focused: true }).catch(() => undefined)
   // Select before the snapshot: the renderer filters view events by its selection.
   broadcast('thread:selected', { id: activeId })
   const snap = await guiMms.snapshotThread(activeId)

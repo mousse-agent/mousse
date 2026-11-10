@@ -371,6 +371,13 @@ export class RunStore {
       .map(toRun)
   }
 
+  /** Whether the thread has a run that has not ended (queued, active, waiting or paused). */
+  hasNonTerminalRun(threadId: string): boolean {
+    return this.db
+      .statement(`SELECT 1 FROM runs WHERE thread_id = ? AND status NOT IN (${TERMINAL_PLACEHOLDERS}) LIMIT 1`)
+      .get(threadId, ...TERMINAL_LIST) !== undefined
+  }
+
   listNonTerminalRuns(): RunRecord[] {
     return this.db
       .statement(

@@ -436,6 +436,8 @@ export interface ProviderAdapter {
    * outlives a turn have it. Resolves `stopped` when there was a process to end.
    */
   stopThread?(threadId: string): Promise<'stopped' | 'not_active'>
+  /** Whether the adapter keeps a process for `threadId` between turns now (Claude's live query). */
+  hasLiveProcess?(threadId: string): boolean
   steer?(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'>
   /**
    * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or

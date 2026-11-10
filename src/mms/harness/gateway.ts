@@ -240,6 +240,8 @@ export interface HarnessGateway {
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
    */
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  /** Whether any instance keeps a process for the thread between turns now (`ProviderAdapter.hasLiveProcess`). */
+  hasLiveProcess?(threadId: string): boolean
   /**
    * `/compact` on the instance a thread runs on: its own compaction of the thread's native session.
    * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
@@ -1851,6 +1853,11 @@ export class Harness implements HarnessGateway {
 
   standaloneWorkspace(instanceId: string, threadId: string): string | undefined {
     return this.recordOrUndefined(instanceId)?.runtime.adapter.standaloneWorkspace?.(threadId)
+  }
+
+  hasLiveProcess(threadId: string): boolean {
+    for (const record of this.records.values()) if (record.runtime.adapter.hasLiveProcess?.(threadId)) return true
+    return false
   }
 
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {

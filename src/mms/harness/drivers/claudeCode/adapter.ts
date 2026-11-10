@@ -39,7 +39,7 @@ export interface ClaudeLockedProfile {
 export type ClaudeSubscriptionClient = Pick<
   ClaudeSubscriptionProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured'
-> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread' | 'forkConversation'>>
+> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread' | 'forkConversation' | 'hasLiveProcess'>>
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
@@ -315,6 +315,10 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
   /** Stop: interrupts the turn and closes the thread's Claude process, which ends its background agents and shells. */
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     return this.service()?.stopThread?.(threadId) ?? 'not_active'
+  }
+
+  hasLiveProcess(threadId: string): boolean {
+    return this.service()?.hasLiveProcess?.(threadId) ?? false
   }
 
   /**
