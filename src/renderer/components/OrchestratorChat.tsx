@@ -1223,10 +1223,13 @@ export function OrchestratorChat() {
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
-      // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue.
-      const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined)
+      // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue. The composer
+      // clears at once, as a send does: what is typed while this steer is on its way is the next message, and a clear
+      // when the steer answers would wipe it.
+      clearComposer(false)
+      const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined).catch(() => false)
       if (steered) {
-        clearComposer()
+        releaseComposerUrls()
         return
       }
       // The turn cannot take it yet (it is still being set up, or it was stopped): it is queued and sent now, so it

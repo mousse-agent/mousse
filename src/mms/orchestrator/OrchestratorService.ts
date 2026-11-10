@@ -7779,9 +7779,9 @@ export class OrchestratorService extends EventEmitter {
       if (session.turnAdmitted && !session.activeTurn && !session.stopping && !session.abortRequested) return this.steerWhenStarted(session, itemId, opts?.expectedRevision)
       return this.sendNowAfterTurn(session, itemId, opts?.expectedRevision)
     }
-    if (!localActive && !externalActive) {
-      throw new QueueValidationError('No active turn to steer on this thread.')
-    }
+    // Nothing runs (a Stop ended the turn, or it ended as the click landed): Send now is still immediate. The
+    // message goes first and its turn starts now; what was queued behind it follows in order.
+    if (!localActive && !externalActive) return this.sendNowIdle(session, itemId, opts?.expectedRevision)
     let item: QueuedMessage
     let promotedRunId: string | undefined
     let steerRunId: string | undefined
@@ -7848,6 +7848,13 @@ export class OrchestratorService extends EventEmitter {
   private sendNowAfterTurn(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
     this.moveQueueItemToFront(session, itemId, expectedRevision)
     session.drainAfterSettle = true
+    return { ok: true }
+  }
+
+  /** Send now with nothing running on the thread: the message goes first and its turn starts at once. */
+  private sendNowIdle(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
+    this.moveQueueItemToFront(session, itemId, expectedRevision)
+    this.scheduleQueueDrain(session)
     return { ok: true }
   }
 
@@ -11683,9 +11690,12 @@ export class OrchestratorService extends EventEmitter {
     // the turn's steer buffer until the user has answered.
     const asking = this.questions.listPendingForThread(session.threadId).length > 0
     // A person still sending steers one after another: they are handed over together once the newest has settled.
-    const newest = Math.max(0, ...turn.pendingSteer.filter((entry) => !entry.origin && !entry.byAgent).map((entry) => entry.at ?? 0))
+    // Subagent results a steer carries are not a person's typing: they are never held back.
+    const notices = new Set((turn.carriedSteers ?? []).map((entry) => entry.text.trim()))
+    const persons = (entry: SteerEntry): boolean => !entry.origin && !entry.byAgent && !notices.has(entry.text.trim())
+    const newest = Math.max(0, ...turn.pendingSteer.filter(persons).map((entry) => entry.at ?? 0))
     const gathering = Date.now() - newest < STEER_GATHER_MS
-    const held = asking || gathering ? turn.pendingSteer.filter((entry) => (asking && (entry.origin || entry.byAgent)) || (gathering && !entry.origin && !entry.byAgent)) : []
+    const held = asking || gathering ? turn.pendingSteer.filter((entry) => (asking && (entry.origin || entry.byAgent)) || (gathering && persons(entry))) : []
     const taking = held.length ? turn.pendingSteer.filter((entry) => !held.includes(entry)) : turn.pendingSteer
     if (taking.length > 0) {
       entries.push(...taking)

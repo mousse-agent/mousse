@@ -75,6 +75,9 @@ export class CursorAdapter implements ProviderAdapter {
       drainSteer: () => ctl.drainSteer(),
       onSteer: (steer) => {
         progress()
+        // The reply goes on below the steered message: what it wrote before keeps its row, above it.
+        streams.thinking.break()
+        streams.text.break()
         sink.steerAccepted(steer)
       },
       onText: (content) => {

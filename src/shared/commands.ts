@@ -519,7 +519,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     id: 'composer.steer',
     title: 'Steer: send into the running reply',
     category: 'Thread',
-    searchTerms: ['steer', 'send now', 'queue', 'interrupt'],
+    searchTerms: ['steer', 'send now', 'queue'],
     defaultBinding: `${MOD}+Enter`,
     scope: 'global',
     textInput: 'deny',

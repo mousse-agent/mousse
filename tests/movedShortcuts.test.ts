@@ -149,7 +149,8 @@ describe('each moved shortcut can be rebound and is listed', () => {
       'workflow.undo',
       'workflow.redo',
       'editor.save',
-      'git.commit'
+      'git.commit',
+      'composer.steer'
     ])
   })
 

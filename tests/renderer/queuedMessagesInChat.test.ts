@@ -379,6 +379,16 @@ describe('queued messages in the conversation', () => {
     expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
   })
 
+  it('a double click on Send now sends only the clicked message, not the one that moves under the pointer', async () => {
+    await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    await click(button('c', 'Send'))
+    // C left the list; the second click of the double click lands on B's button, which moved under the pointer.
+    await act(async () => { button('b', 'Send')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 2 })) })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'c')
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
   it('puts a message back in the queue when Send now is refused', async () => {
     api.promoteToSteer.mockRejectedValueOnce(new Error('No active turn to steer on this thread.'))
     await show([queued('a', 'one'), queued('b', 'two')])

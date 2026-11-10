@@ -9,6 +9,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MessageList, groupMessagesIntoTurns, readSteerGroup } from '../../src/renderer/chat/components/agent-elements/message-list'
+import { analyzeAssistantMessage, settleFinishedTurn } from '../../src/renderer/chat/components/agent-elements/utils/assistant-blocks'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -105,6 +106,20 @@ describe('messages steered into a running reply', () => {
     const text = host.textContent ?? ''
     expect(text.indexOf('Looking at the queue')).toBeLessThan(text.indexOf('use the id'))
     expect(text.indexOf('no duplicates')).toBeLessThan(text.indexOf('Understood'))
+  })
+
+  it('leave the reply written before them as it was once the turn ends; only what came after settles', () => {
+    const rows = groupMessagesIntoTurns([
+      ask('u1', 'Write the notes'),
+      answer('a1', 'Paragraph 1 of the long answer'),
+      steered('s1', 'shorter please'),
+      answer('a2', 'Noted, here is the short version')
+    ])[0]!.assistantMsgs
+    const analyses = rows.map((row) => analyzeAssistantMessage((row.parts ?? []) as never[], false, new Set()))
+    const settled = settleFinishedTurn(rows, analyses)
+    // Nothing moves, and the long reply is not folded into a collapsed note: the reader keeps their place.
+    expect(settled.order).toEqual([0, 1, 2])
+    expect(settled.analyses[0]!.toolsOnly).toBe(false)
   })
 
   it('keep the same group row while nothing in it changed, and split around reply text between them', () => {

@@ -287,6 +287,25 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
   })
 
 
+  it('Steer once a stopped turn has ended sends the message now: it runs first, then the rest in order', async () => {
+    const w = world()
+    const { first, c } = await w.queuedBehindTurn()
+
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    await w.d.orch.abortRun(runId, 'stop-1', w.thread.id)
+    await first
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    // The queue waits after a Stop.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(w.adapter.prompts).toEqual(['first'])
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
   it('Steer on C while the queue drains A runs every message once', async () => {
     const w = world()
     const { first, c } = await w.queuedBehindTurn()

@@ -320,7 +320,9 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                       title={sendLabel}
                       aria-label={steering ? 'Sending the queued message now' : skipsCompaction ? sendLabel : 'Send the queued message now'}
                       disabled={busy || steering}
-                      onClick={() => void queue.steer(item.id)}
+                      // A message sent now leaves the list at the click, so the next one moves under the pointer:
+                      // the second click of a double click must not send that one too.
+                      onClick={(event) => { if (event.detail <= 1) void queue.steer(item.id) }}
                     >
                       <ArrowTurnForward size={14} strokeWidth={1.8} />
                     </button>

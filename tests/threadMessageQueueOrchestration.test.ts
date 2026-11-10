@@ -167,10 +167,14 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(orch.promoteQueueItem(thread.id, later.id)).toEqual({ ok: true })
     expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['carry on', 'pending'], ['resume', 'pending']])
     expect(session.drainAfterSettle).toBe(true)
-    // With nothing running at all there is still nothing to steer.
+    // With nothing running at all, Send now is still immediate: the message stays first and its turn is started.
     session.activeTurn = null
     session.turnAdmitted = false
-    expect(() => orch.promoteQueueItem(thread.id, later.id)).toThrow('No active turn to steer on this thread.')
+    const drain = vi.spyOn(orch as unknown as { scheduleQueueDrain: (s: unknown) => void }, 'scheduleQueueDrain').mockImplementation(() => {})
+    expect(orch.promoteQueueItem(thread.id, later.id)).toEqual({ ok: true })
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['carry on', 'resume'])
+    expect(drain).toHaveBeenCalledTimes(1)
+    drain.mockRestore()
   })
 
   it('Send now while the turn is still being set up puts the message first and joins the turn once it runs', () => {
