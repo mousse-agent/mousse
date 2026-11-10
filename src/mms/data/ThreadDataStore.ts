@@ -1656,7 +1656,7 @@ export class ThreadDataStore extends EventEmitter {
   private resolveThreadDir(meta: ThreadMeta, projectPath?: string): string {
     const managed = this.lifecycleStore.get(meta.id)
     if (managed) {
-      this.lifecycleStore.withPathAdmission(managed.location, 'write', () => undefined)
+      this.lifecycleStore.assertPathAdmission(managed.location, 'write')
       return managed.location
     }
     if (meta.projectId) {
