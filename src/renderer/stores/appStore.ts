@@ -23,6 +23,7 @@ import { parseChatReference, type ChatReference } from '../../shared/chatReferen
 import { queueEditDraftsForStorage, queueEditDraftsFromStorage, type QueueEditDraft } from '../lib/queuedContent'
 import { isQualifiedId } from '../../shared/threadRef'
 import type { SubagentSummary } from '../../shared/subagents'
+import type { AppletReference } from '../../shared/applets'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
@@ -320,6 +321,8 @@ interface AppState {
     patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title'>>
   ) => void
   openDocument: (title: string, markdown: string) => string
+  /** Shows a thread's applet in the side panel's Documents tab, reusing its tab when it is already open. */
+  openAppletDocument: (threadId: string, reference: AppletReference) => string
   closeDocumentTab: (tabId: string) => void
   setActiveDocumentTab: (tabId: string | null) => void
   setChatMode: (mode: ChatMode) => void
@@ -871,6 +874,24 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       activeDocumentTabId: id,
       documentsTabVisible: true,
       mainView: 'documents'
+    }))
+    return id
+  },
+  openAppletDocument: (threadId, reference) => {
+    const state = get()
+    const open = state.documentTabs.find((tab) =>
+      tab.applet?.threadId === threadId &&
+      tab.applet.profileId === state.profileId &&
+      tab.applet.reference.revisionId === reference.revisionId)
+    const id = open?.id ?? crypto.randomUUID()
+    set((s) => ({
+      documentTabs: open
+        ? s.documentTabs
+        : [...s.documentTabs, { id, title: reference.title, markdown: '', applet: { threadId, profileId: s.profileId, reference } }],
+      activeDocumentTabId: id,
+      documentsTabVisible: true,
+      mainView: 'documents',
+      mainAreaOpen: true
     }))
     return id
   },

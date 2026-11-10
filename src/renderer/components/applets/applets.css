@@ -1,62 +1,61 @@
+/* Inline, an applet is only its content: no card, border or padding, under a quiet name. */
 .mousse-applet {
-  margin: 16px 0;
-  border: 1px solid var(--border, #383840);
-  border-radius: 12px;
-  overflow: hidden;
-  background: var(--surface-base, #1b1c23);
+  margin: 12px 0;
   color: var(--text-primary, #e8e8ec);
 }
-.mousse-applet-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  min-width: 0;
-  border-bottom: 1px solid var(--border, #383840);
-}
-.mousse-applet-title {
-  flex: 1;
-  min-width: 0;
+.mousse-applet-name {
+  display: inline-flex;
+  font-family: inherit;
+  max-width: 100%;
+  margin: 0 0 4px -6px;
+  padding: 1px 6px;
   overflow: hidden;
+  border-radius: var(--ui-control-radius, 6px);
+  color: var(--text-muted, #8b8b94);
+  font-size: 12px;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
 }
-.mousse-applet-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 2px;
+button.mousse-applet-name:hover:not(:disabled) {
+  background: var(--ui-hover, rgba(255, 255, 255, 0.06));
+  color: var(--text-secondary, #b1b1ba);
 }
-.mousse-applet-actions .mousse-applet-icon-button {
-  width: 28px;
-  height: 28px;
-  min-width: 28px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.mousse-applet-actions button:focus-visible {
+button.mousse-applet-name:focus-visible {
   outline: 2px solid var(--accent, #ac86ce);
-  outline-offset: 2px;
-}
-.mousse-applet-actions button:disabled {
-  opacity: 0.4;
-  cursor: default;
+  outline-offset: 1px;
 }
 .mousse-applet-preview {
   position: relative;
-  display: grid;
-  place-items: center;
   width: 100%;
-  background: var(--surface-base, #1b1c23);
-  color: var(--text-secondary, #b1b1ba);
-  font-size: 12px;
   contain: layout paint;
 }
+/* In the side panel the applet fills the panel below the toolbar. */
+.mousse-applet-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.mousse-applet-preview-fill {
+  height: 100%;
+}
+.mousse-applet-offline {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  border-radius: var(--ui-control-radius, 6px);
+  color: var(--text-muted, #8b8b94);
+}
+.mousse-applet-offline:focus-visible {
+  outline: 2px solid var(--accent, #ac86ce);
+  outline-offset: 1px;
+}
 .mousse-applet-source {
-  max-height: 620px;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: 12px 16px;
   font-size: 12px;
@@ -70,14 +69,12 @@
   margin: 12px 0 6px;
 }
 .mousse-applet-error {
-  padding: 8px 16px;
+  padding: 4px 0;
   font-size: 12px;
   color: #ec9a9a;
 }
-.mousse-applet footer {
+.document-panel .mousse-applet-error {
   padding: 8px 16px;
-  font-size: 10px;
-  opacity: 0.6;
 }
 .mousse-applet-error button {
   display: block;
@@ -85,9 +82,12 @@
   text-decoration: underline;
 }
 .mousse-applet-conversation-input {
-  padding: 12px 16px;
+  padding: 8px 0;
   font-size: 12px;
-  border-top: 1px solid var(--border, #383840);
+}
+.document-panel .mousse-applet-conversation-input {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-subtle, #383840);
 }
 .mousse-applet-conversation-input p {
   white-space: pre-wrap;
@@ -99,13 +99,10 @@
   text-decoration: underline;
 }
 
-.mousse-applet button {
+.mousse-applet-error button,
+.mousse-applet-conversation-input button {
   color: inherit;
   font-family: inherit;
-}
-.mousse-applet-pending .mousse-applet-preview {
-  background: var(--surface-strong, #24242c);
-  color: var(--text-secondary, #b1b1ba);
 }
 
 .mousse-applet-scroll-frame {

@@ -1,4 +1,5 @@
 import type { AgentActivityItem } from './agentActivity'
+import type { AppletReference } from './applets'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
@@ -651,6 +652,8 @@ export interface DocumentTab {
   id: string
   title: string
   markdown: string
+  /** Set when the tab shows an applet from a thread rather than Markdown. */
+  applet?: { threadId: string; profileId: string | null; reference: AppletReference }
 }
 
 export type CliType = 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli'

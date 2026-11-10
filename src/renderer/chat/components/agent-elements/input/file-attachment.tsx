@@ -82,6 +82,33 @@ function renderFileIcon(iconName: FileIconName) {
   }
 }
 
+/** An image thumbnail: a button that opens it large when it can, a plain box otherwise. */
+function PreviewTarget({
+  canPreview,
+  filename,
+  onOpen,
+  className,
+  children,
+}: {
+  canPreview: boolean;
+  filename: string;
+  onOpen: (event: React.MouseEvent) => void;
+  className: string;
+  children: React.ReactNode;
+}) {
+  if (!canPreview) return <div className={className}>{children}</div>;
+  return (
+    <button
+      type="button"
+      className={cn(className, "block p-0 cursor-zoom-in")}
+      aria-label={`Open ${filename}`}
+      onClick={onOpen}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function FileAttachment({
   id,
   filename,
@@ -103,6 +130,7 @@ export function FileAttachment({
   const canPreview = Boolean(enableImagePreview && isImage && url);
 
   const openLightbox = (event: React.MouseEvent) => {
+    event.preventDefault();
     event.stopPropagation();
     setIsLightboxOpen(true);
   };
@@ -119,35 +147,33 @@ export function FileAttachment({
       title={isImageOnly ? filename : undefined}
     >
       {isImageOnly ? (
-        <div
-          className={cn(
-            "size-28 overflow-hidden shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]",
-            canPreview && "cursor-pointer",
-          )}
-          onClick={canPreview ? openLightbox : undefined}
+        <PreviewTarget
+          canPreview={canPreview}
+          filename={filename}
+          onOpen={openLightbox}
+          className="size-28 overflow-hidden shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]"
         >
           <img
             src={url}
             alt={filename}
             className="w-full h-full object-cover"
           />
-        </div>
+        </PreviewTarget>
       ) : (
         <>
           {isImage && url ? (
-            <div
-              className={cn(
-                "w-8 self-stretch overflow-hidden shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]",
-                canPreview && "cursor-pointer",
-              )}
-              onClick={canPreview ? openLightbox : undefined}
+            <PreviewTarget
+              canPreview={canPreview}
+              filename={filename}
+              onOpen={openLightbox}
+              className="w-8 self-stretch overflow-hidden shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]"
             >
               <img
                 src={url}
                 alt={filename}
                 className="w-full h-full object-cover aspect-square"
               />
-            </div>
+            </PreviewTarget>
           ) : (
             <div className="flex items-center justify-center w-8 self-stretch bg-an-background-tertiary shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]">
               {renderFileIcon(iconName)}

@@ -4,6 +4,7 @@ import { memo, useRef, type ComponentProps, type ReactNode } from "react";
 import { parseMarkdownIntoBlocks, Streamdown, type Components } from "streamdown";
 import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
+import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
@@ -378,6 +379,8 @@ const markdownComponents: Components = {
   hr: ({ ...props }) => (
     <hr className="an-md-hr my-4 border-an-border-color" {...props} />
   ),
+  // Images open large on click or Enter, in place of Streamdown's hover download button.
+  img: (props) => <MessageImage {...props} />,
   table: ({ children, ...props }) => (
     <div className="overflow-x-auto my-3 border border-an-border-color rounded-an-tool-border-radius">
       <table
