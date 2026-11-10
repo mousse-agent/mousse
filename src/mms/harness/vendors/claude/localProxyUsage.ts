@@ -6,11 +6,12 @@ import { claudeLimitWindows, claudeResetGrants } from './usage'
  * Plan limits of a Claude sign-in that runs through a local CLI-to-API proxy (CLIProxyAPI): when
  * Claude Code's base URL points at one on this computer or the private network, its management API
  * lists the proxy's Claude sign-ins. Each listed sign-in carries the limits Claude sent on the last
- * reply it served (`quota.signals`), so one listing usually answers for every sign-in. Only a
- * sign-in with no recent limits there is read on its own, with the proxy's own credential
- * (`api-call` with `$TOKEN$`), at most once every few minutes and never while Anthropic asks the
- * proxy to wait. Mousse never sees those credentials; it needs only the management key the user
- * set in Claude's environment. Nothing here runs for any other address.
+ * reply it served (`quota.signals`): the 5-hour and weekly limits. Each sign-in is also read on its
+ * own, with the proxy's own credential (`api-call` with `$TOKEN$`), for what only that read reports
+ * (weekly limits per model, limit resets): once a quarter hour while its listing is recent, every
+ * few minutes otherwise, and never while Anthropic asks the proxy to wait. Mousse never sees those
+ * credentials; it needs only the management key the user set in Claude's environment. Nothing
+ * here runs for any other address.
  */
 
 export const LOCAL_PROXY_SOURCE = 'via local proxy'
@@ -39,7 +40,16 @@ export const ACCOUNT_READ_REUSE_MS = 5 * 60_000
  * limit resets.
  */
 export const MODEL_LIMITS_REUSE_MS = 15 * 60_000
-/** How long a sign-in is not asked again after Anthropic answered 429 without saying how long to wait. */
+/**
+ * How long a sign-in is not asked again after a read that failed other than with a 429 (expired,
+ * a server error, no answer). Under the usage page's 5-minute refresh, so the next one asks.
+ */
+export const FAILED_READ_WAIT_MS = 4 * 60_000
+/** How old a sign-in's last good read may be and still stand in when a newer one fails. */
+export const KNOWN_READ_MAX_MS = 60 * 60_000
+/** How far ahead of this computer's clock a listing's time may be and still count as recent. */
+export const LISTING_CLOCK_AHEAD_MS = 5 * 60_000
+/** How long a sign-in is not asked again after a 429: at least this, longer when `Retry-After` says so. */
 export const RATE_LIMIT_WAIT_MS = 2 * 60_000
 /** The longest wait a `Retry-After` can set. */
 const MAX_RATE_LIMIT_WAIT_MS = 30 * 60_000
@@ -285,11 +295,24 @@ export function proxyApiCallBody(value: unknown, now: number = Date.now()): Upst
   return { status, body, ...(wait !== undefined ? { retryAfterMs: wait } : {}) }
 }
 
-/** The windows of one account's Claude usage reply; several accounts are told apart by their label. */
-export function proxyClaudeWindows(body: unknown, account: ProxyClaudeAccount, index: number, several: boolean): ProviderUsageWindow[] {
-  if (!isRecord(body)) return []
+/** One account's windows in a flat list: told apart by the account's label when there are several. */
+export function accountWindows(windows: readonly ProviderUsageWindow[], account: ProxyClaudeAccount, index: number, several: boolean): ProviderUsageWindow[] {
   const name = account.label ?? `account ${index + 1}`
-  return claudeLimitWindows(body).map((window) => several ? { ...window, id: `${index}:${window.id}`, label: `${window.label} · ${name}` } : window)
+  return windows.map((window) => several ? { ...window, id: `${index}:${window.id}`, label: `${window.label} · ${name}` } : window)
+}
+
+/**
+ * Windows from a read that is not this moment's: one whose reset time has passed shows as unused
+ * (it reset since). Extra usage is not a window that resets.
+ */
+function agedWindows(windows: readonly ProviderUsageWindow[], now: number): ProviderUsageWindow[] {
+  return windows.map((window) => {
+    const reset = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN
+    if (window.id === 'extra_usage' || !(reset <= now)) return window
+    const unused = { ...window, remainingPercent: 100 }
+    delete unused.resetsAt
+    return unused
+  })
 }
 
 /**
@@ -366,6 +389,8 @@ interface ProxyReading {
   proxy: UsageProxyState
   fetchImpl: ProxyFetch
   reads: ProxyUsageOptions
+  /** The caller's own signal, without the read's deadline: only this one gives a read up. */
+  callerSignal?: AbortSignal
   accounts: ProxyClaudeAccount[]
   now: number
   unavailable: (message?: string, problem?: UsageProxyState['problem']) => ProxyUsage
@@ -395,7 +420,8 @@ async function openProxy(options: ProxyUsageOptions): Promise<ProxyReading | Pro
   const now = options.now?.() ?? Date.now()
   for (const [listedOrigin, listing] of listings) if (now - listing.at >= LISTING_REUSE_MS) listings.delete(listedOrigin)
   const cached = options.reuseListing ? listings.get(origin) : undefined
-  if (cached && cached.key === key) return { origin, key, proxy, fetchImpl, reads, accounts: cached.accounts, now, unavailable }
+  const callerSignal = options.signal
+  if (cached && cached.key === key) return { origin, key, proxy, fetchImpl, reads, callerSignal, accounts: cached.accounts, now, unavailable }
   try {
     const listed = await management(fetchImpl, origin, key, ['/credentials', '/auth-files'], { method: 'GET' }, reads)
     if (listed.status === 401 || listed.status === 403) return unavailable(PROXY_LIMITS_UNAVAILABLE, 'rejected')
@@ -403,29 +429,51 @@ async function openProxy(options: ProxyUsageOptions): Promise<ProxyReading | Pro
     const accounts = claudeProxyAccounts(listed.body)
     if (!accounts.length) return unavailable()
     listings.set(origin, { at: now, key, accounts })
-    return { origin, key, proxy, fetchImpl, reads, accounts, now, unavailable }
+    return { origin, key, proxy, fetchImpl, reads, callerSignal, accounts, now, unavailable }
   } catch {
     return unavailable(PROXY_LIMITS_UNAVAILABLE, 'unreachable')
   }
 }
 
-/** One sign-in's group, and the limits behind its windows (Claude's account usage shape) when it has any. */
-interface AccountRead {
-  group: UsageAccount
-  limits?: Record<string, unknown>
-}
-
 /**
- * Each sign-in's own usage read, per proxy and sign-in: the last good reply, the wait a 429 set,
- * and the read in flight that later callers join. Kept only for the key it was read with.
+ * Each sign-in's own usage read, per proxy and sign-in: the last read that reported limits, the
+ * last attempt of any outcome (which sets when the next one may go), and the read in flight that
+ * later callers join. Kept only for the key it was read with.
  */
 interface AccountReadState {
   key: string
-  good?: { at: number; reply: UpstreamReply }
-  waitUntil?: number
+  /** `at` on this computer's clock; `listedAt`: the listing's time when it was made, on the proxy's clock. */
+  good?: { at: number; reply: UpstreamReply; listedAt?: number }
+  /** The last finished attempt: `reply` is undefined when the proxy did not answer; `waitMs` until the next. */
+  last?: { at: number; reply?: UpstreamReply; ok: boolean; waitMs: number }
   inFlight?: Promise<{ reply?: UpstreamReply; aborted?: true }>
 }
 const accountReads = new Map<string, AccountReadState>()
+
+/** A usage reply that reports at least one limit: only such a read replaces the last good one. */
+function reportsLimits(reply: UpstreamReply | undefined): boolean {
+  return reply !== undefined && reply.status === 200 && isRecord(reply.body) && claudeLimitWindows(reply.body).length > 0
+}
+
+/** A window entry of Claude's account usage that holds a number. */
+function usableWindow(value: unknown): boolean {
+  return isRecord(value) && typeof value.utilization === 'number' && Number.isFinite(value.utilization)
+}
+
+/**
+ * The limits shown for a sign-in: everything from its own read, with the 5-hour and weekly
+ * windows from the listing where the listing is newer or the read has no number for them.
+ */
+function mergedLimits(read: Record<string, unknown> | undefined, listed: Record<string, unknown> | undefined, listedNewer: boolean): Record<string, unknown> | undefined {
+  if (!listed) return read
+  if (!read) return listed
+  const limits = { ...read }
+  for (const [id] of OBSERVED_WINDOWS) {
+    const fromRead = !listedNewer && usableWindow(read[id])
+    if (!fromRead && listed[id] !== undefined) limits[id] = listed[id]
+  }
+  return limits
+}
 
 /** Asks Anthropic for one sign-in's usage through the proxy's `api-call`. */
 async function askAccountUsage(reading: ProxyReading, account: ProxyClaudeAccount): Promise<{ reply?: UpstreamReply; aborted?: true }> {
@@ -440,53 +488,60 @@ async function askAccountUsage(reading: ProxyReading, account: ProxyClaudeAccoun
     const reply = answer.status === 200 ? proxyApiCallBody(answer.body, reading.now) : undefined
     return reply ? { reply } : {}
   } catch {
-    return reading.reads.signal?.aborted ? { aborted: true } : {}
+    // Given up by the caller: not an attempt. The read's own deadline is one: it did not answer.
+    return reading.callerSignal?.aborted ? { aborted: true } : {}
   }
 }
 
 /**
- * One sign-in's usage. In order: its own read from the last few minutes (a quarter hour when the
- * listing has recent limits), or the one already in flight; else a new read, unless Anthropic
- * asked to wait. The listing's limits stand in for the 5-hour and weekly windows whenever they are
- * newer than that read, which adds what the listing leaves out (weekly limits per model, resets).
- * A read that is rate limited or does not arrive shows the last limits known instead (the
- * listing's, with the last good read's, else the last good read) when there are any.
+ * One sign-in's usage. Its own read goes at most once a quarter hour while its listing has recent
+ * limits, every few minutes otherwise; after a failed read it waits a few minutes, after a 429 as
+ * long as Anthropic asks. Reads at the same time share one request. What shows is that read with
+ * the listing's 5-hour and weekly numbers where the listing is newer (on the proxy's own clock) or
+ * the read has none; weekly limits per model and resets come from the read. When a read fails,
+ * the last limits known stand in: an older read for an hour at most, its windows past their reset
+ * shown unused. A 401 says the sign-in expired whatever the listing says; a 403 only without
+ * recent listed limits, since a token may serve requests and still not be allowed to read usage.
  */
-async function readProxyAccount(reading: ProxyReading, account: ProxyClaudeAccount, index: number): Promise<AccountRead> {
+async function readProxyAccount(reading: ProxyReading, account: ProxyClaudeAccount, index: number): Promise<UsageAccount> {
   // A disabled sign-in or an API key has no plan limits to read: it is listed, not asked.
-  if (account.state !== 'active') return { group: proxyClaudeAccount(account, index, undefined) }
+  if (account.state !== 'active') return proxyClaudeAccount(account, index, undefined)
   const { now } = reading
+  const listedAt = account.observed?.at
   const observed = account.observed ? observedClaudeLimits(account.observed, now) : undefined
-  const observedFresh = observed !== undefined && now - account.observed!.at <= OBSERVED_FRESH_MS
-  const shown = (reply: UpstreamReply): AccountRead => {
-    const limits = reply.status === 200 && isRecord(reply.body) ? reply.body : undefined
-    return { group: proxyClaudeAccount(account, index, reply), ...(limits ? { limits } : {}) }
-  }
+  // A listing stamped well ahead of this computer's clock has an age no one can tell: not recent.
+  const listingAge = listedAt === undefined ? Number.NaN : now - listedAt
+  const observedFresh = observed !== undefined && listingAge <= OBSERVED_FRESH_MS && listingAge >= -LISTING_CLOCK_AHEAD_MS
 
   const id = `${reading.origin}\n${account.id}`
   let state = accountReads.get(id)
   if (!state || state.key !== reading.key) accountReads.set(id, (state = { key: reading.key }))
-  /** The last good read, its 5-hour and weekly windows replaced by the listing's when those are newer. */
-  const known = (): AccountRead | undefined => {
-    if (!observed) return state.good ? shown(state.good.reply) : undefined
-    const good = state.good && isRecord(state.good.reply.body) ? state.good : undefined
-    if (good && good.at > account.observed!.at) return shown(good.reply)
-    return shown({ status: 200, body: { ...(good?.reply.body as Record<string, unknown> | undefined), ...observed } })
-  }
-  const lastKnown = (failed: UpstreamReply | undefined): AccountRead => {
-    // An expired sign-in says so; numbers from before would hide it. Recent listed limits show it still served.
-    if (failed && failed.status !== 429 && !observedFresh) return shown(failed)
-    return known() ?? (failed ? shown(failed) : { group: proxyClaudeAccount(account, index, undefined) })
-  }
-  /** A good read just made: it is newer than the listing, unless it held no limits the listing can stand in for. */
-  const fresh = (reply: UpstreamReply): AccountRead => (isRecord(reply.body) || !observed ? shown(reply) : known()!)
-  if (state.good && now - state.good.at < (observedFresh ? MODEL_LIMITS_REUSE_MS : ACCOUNT_READ_REUSE_MS)) return known()!
-  if (state.waitUntil !== undefined && now < state.waitUntil) return lastKnown({ status: 429, body: undefined })
 
+  /** The last good read (an hour old at most) with the listing; `aged` when that read is not this moment's. */
+  const known = (aged: boolean): UsageAccount | undefined => {
+    const good = state.good && now - state.good.at <= KNOWN_READ_MAX_MS ? state.good : undefined
+    const listedNewer = good !== undefined && listedAt !== undefined && listedAt > (good.listedAt ?? good.at)
+    const limits = mergedLimits(good && isRecord(good.reply.body) ? good.reply.body : undefined, observed, listedNewer)
+    if (!limits) return undefined
+    const group = proxyClaudeAccount(account, index, { status: 200, body: limits })
+    return aged ? { ...group, windows: agedWindows(group.windows, now) } : group
+  }
+  /** After a read that failed; `failed` is undefined when the proxy did not answer. */
+  const afterFailure = (failed: UpstreamReply | undefined): UsageAccount => {
+    if (failed?.status === 401 || (failed?.status === 403 && !observedFresh)) return proxyClaudeAccount(account, index, failed)
+    return known(true) ?? proxyClaudeAccount(account, index, failed)
+  }
+  const answer = (reply: UpstreamReply | undefined): UsageAccount => (reportsLimits(reply) ? known(false) ?? afterFailure(reply) : afterFailure(reply))
+
+  const { last } = state
+  if (last) {
+    const waitMs = last.ok ? (observedFresh ? MODEL_LIMITS_REUSE_MS : ACCOUNT_READ_REUSE_MS) : last.waitMs
+    if (now - last.at < waitMs) return last.ok ? known(true) ?? afterFailure(last.reply) : afterFailure(last.reply)
+  }
   if (state.inFlight) {
     const joined = await state.inFlight
     // The read joined was given up by its caller: this one asks for itself.
-    if (!joined.aborted) return joined.reply?.status === 200 ? fresh(joined.reply) : lastKnown(joined.reply)
+    if (!joined.aborted) return answer(joined.reply)
   }
   const asking = askAccountUsage(reading, account)
   state.inFlight = asking
@@ -497,13 +552,12 @@ async function readProxyAccount(reading: ProxyReading, account: ProxyClaudeAccou
     if (state.inFlight === asking) state.inFlight = undefined
   }
   const { reply } = result
-  if (reply?.status === 200) {
-    state.good = { at: now, reply }
-    state.waitUntil = undefined
-    return fresh(reply)
-  }
-  if (reply?.status === 429) state.waitUntil = now + Math.min(MAX_RATE_LIMIT_WAIT_MS, reply.retryAfterMs ?? RATE_LIMIT_WAIT_MS)
-  return lastKnown(reply)
+  if (result.aborted) return known(true) ?? proxyClaudeAccount(account, index, undefined)
+  const ok = reportsLimits(reply)
+  if (ok && reply) state.good = { at: now, reply, ...(listedAt !== undefined ? { listedAt } : {}) }
+  const waitMs = ok ? 0 : reply?.status === 429 ? Math.min(MAX_RATE_LIMIT_WAIT_MS, Math.max(RATE_LIMIT_WAIT_MS, reply.retryAfterMs ?? 0)) : FAILED_READ_WAIT_MS
+  state.last = { at: now, ok, waitMs, ...(reply ? { reply } : {}) }
+  return answer(reply)
 }
 
 /**
@@ -517,12 +571,11 @@ export async function readLocalProxyClaudeUsage(options: ProxyUsageOptions): Pro
   if (!reading || !('accounts' in reading && 'key' in reading)) return reading as ProxyUsage | undefined
   const { accounts, proxy, unavailable } = reading
   const several = accounts.length > 1
-  const read = await Promise.all(accounts.map((account, index) => readProxyAccount(reading, account, index)))
-  if (read.every(({ group }) => group.problem === 'Not reachable') && accounts.some((account) => account.state === 'active'))
+  const groups = await Promise.all(accounts.map((account, index) => readProxyAccount(reading, account, index)))
+  if (groups.every((group) => group.problem === 'Not reachable') && accounts.some((account) => account.state === 'active'))
     return unavailable(PROXY_LIMITS_UNAVAILABLE, 'unreachable')
-  const groups = read.map(({ group }) => group)
   // The flat windows (labelled by account when there are several) serve text readers; the page groups by account.
-  const windows = read.flatMap(({ limits }, index) => (limits ? proxyClaudeWindows(limits, accounts[index]!, index, several) : []))
+  const windows = groups.flatMap((group, index) => accountWindows(group.windows, accounts[index]!, index, several))
   if (!windows.length) return several ? { ...unavailable(), accounts: groups } : unavailable()
   // One sign-in: its resets go on the card itself.
   const resets = !several ? groups[0]?.resets : undefined
@@ -549,7 +602,7 @@ export async function readLocalProxyClaudeAccount(options: ProxyUsageOptions, ac
   if (!reading || !('key' in reading)) return undefined
   const index = reading.accounts.findIndex((account) => account.id === accountId)
   if (index < 0) return undefined
-  return (await readProxyAccount(reading, reading.accounts[index]!, index)).group
+  return readProxyAccount(reading, reading.accounts[index]!, index)
 }
 
 /**
