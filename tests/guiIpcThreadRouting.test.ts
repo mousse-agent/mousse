@@ -222,6 +222,16 @@ describe('a chat is created on another computer', () => {
       { name: 'New Chat', projectId: qualifyId(NODE, 'project-1'), node: NODE }
     ])
   })
+
+  it('makes a thread here with the model and mode the composer shows; another computer gets them set afterwards', async () => {
+    const model = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
+    await invoke('threads:create', undefined, 'project-1', { worktreeEnabled: true, model, permissionMode: 'ask' })
+    await invoke('threads:create', undefined, qualifyId(NODE, 'project-1'), { worktreeEnabled: true, model, permissionMode: 'ask', node: NODE })
+    expect(sent('threads.create').map((call) => call.params)).toEqual([
+      { name: 'New Chat', projectId: 'project-1', worktreeEnabled: true, model, permissionMode: 'ask' },
+      { name: 'New Chat', projectId: qualifyId(NODE, 'project-1'), worktreeEnabled: true, node: NODE }
+    ])
+  })
 })
 
 describe('a long thread of another computer', () => {

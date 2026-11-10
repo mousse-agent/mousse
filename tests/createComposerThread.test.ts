@@ -196,6 +196,16 @@ describe('blank composer thread on another computer', () => {
     expect(back.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: false })
   })
 
+  it('makes a thread here with the shown model and mode, and leaves them to be set afterwards on another computer', async () => {
+    const shown = { model: { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }, permissionMode: 'ask' as const }
+    const here = setup(undefined, { projectId: 'project-a', worktreeEnabled: true })
+    await prepareComposerThread({ ...here, shown })
+    expect(here.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true, ...shown })
+    const there = setup(undefined)
+    await prepareComposerThread({ ...there, shown })
+    expect(there.create).toHaveBeenCalledWith(remoteProject, { worktreeEnabled: true, node })
+  })
+
   it('reuses an empty chat that is already on the picked computer and in its project', async () => {
     const deps = setup({ id: `${node}:draft`, node, projectId: remoteProject, worktreeEnabled: true } as Thread)
     expect(await prepareComposerThread(deps)).toBe(`${node}:draft`)

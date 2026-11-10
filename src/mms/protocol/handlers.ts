@@ -207,6 +207,32 @@ function usableProjectModel(ctx: HandlerContext, model: ModelOverride, projectId
   return { ...override, ...(model.name && override.model === model.model ? { name: model.name } : {}) }
 }
 
+/**
+ * A model a caller names (`threads.setModel`, `threads.create`), as it is stored. Unknown or disabled instances are
+ * rejected before anything is stored, and so are hidden models and instances the project turned off. A level packed
+ * into the model (an older client) is moved into its own field.
+ */
+function namedModel(ctx: HandlerContext, model: unknown, projectId: string | undefined): ModelOverride {
+  if (!isObject(model)) throw new DomainRpcError('invalid_params', 'model must be an object')
+  // `instanceId` is the selection (SPEC §13.8); the current GUI still sends `llmProvider`.
+  const instanceId = asOptionalString(model.instanceId, 256)
+  // A supplied provider name is validated even when the instance decides the stored value.
+  const llmProvider = instanceId
+    ? (model.llmProvider === undefined ? undefined : asString(model.llmProvider, 'model.llmProvider', 256))
+    : asString(model.llmProvider, 'model.llmProvider', 256)
+  const modelId = asString(model.model, 'model.model', 512)
+  const effort = asOptionalString(model.effort, 64)
+  if ((!instanceId && !llmProvider) || !modelId) throw new DomainRpcError('invalid_params', 'Model provider and id are required')
+  const override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId, ...(effort ? { effort } : {}) })
+  ctx.mms.harness?.resolveStored(override, { purpose: 'composer', scope: projectId ? { kind: 'project', projectId } : { kind: 'device' } })
+  return override
+}
+
+/** The same instance, model and level. */
+function sameSelection(a: ModelOverride, b: ModelOverride | undefined): boolean {
+  return Boolean(b) && (a.instanceId ?? '') === (b!.instanceId ?? '') && a.model === b!.model && (a.effort ?? '') === (b!.effort ?? '')
+}
+
 /** Whether `check` passes without throwing. */
 function canUse(check: () => unknown): boolean {
   try {
@@ -1921,6 +1947,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
         worktreeStart = { sha, branch: baseBranch }
       }
+      // What the creator names for the new thread: the composer passes the model and permission mode it shows, so the
+      // thread is made with them and its first turn needs nothing set afterwards. Both are checked before anything is made.
+      const namedMode = p.permissionMode === undefined ? undefined : asString(p.permissionMode, 'permissionMode', 32)
+      if (namedMode !== undefined && !isPermissionMode(namedMode)) throw new DomainRpcError('invalid_params', `permissionMode must be one of ${PERMISSION_MODES.join(', ')}`)
+      const creatorDevice = ctx.connection?.bridgeCaller
+      if (namedMode && creatorDevice && isStricter(creatorDevice.maxPermissionMode, namedMode))
+        throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${describePermissionMode(creatorDevice.maxPermissionMode)} at most.`, { limit: creatorDevice.maxPermissionMode, reason: 'device_limit' })
+      const namedThreadModel = p.model === undefined || p.model === null ? undefined : namedModel(ctx, p.model, projectId)
       // A new chat of a window starts with what the person last picked in this project's threads (what they never picked
       // follows the profile's defaults). Any other creator keeps the values it passes, or the profile's defaults.
       const askedForRemembered = asOptionalBoolean(p.rememberedChoices, 'rememberedChoices') === true
@@ -1930,13 +1964,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A remembered model that can no longer be used falls back to the profile's default, unless that one can't be used
       // either: then the thread has no model of its own, and the composer offers the first ready one.
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
-      const model = remembered.model ?? (remembered.unusableModel && lastUsed && !canUse(() => usableProjectModel(ctx, lastUsed, projectId!)) ? undefined : lastUsed)
+      const model = namedThreadModel ?? remembered.model ?? (remembered.unusableModel && lastUsed && !canUse(() => usableProjectModel(ctx, lastUsed, projectId!)) ? undefined : lastUsed)
       if (model) {
         thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: model })
       }
-      if (remembered.permissionMode) thread = ctx.mms.orchestrator.setThreadPermissionMode(thread.id, remembered.permissionMode)
-      // A window that names the checkout of a new thread in a project picked it in its composer.
-      if (worktreeEnabled !== undefined) rememberPick(ctx, thread.id, { worktreeEnabled })
+      const mode = (namedMode as PermissionMode | undefined) ?? remembered.permissionMode
+      if (mode) thread = ctx.mms.orchestrator.setThreadPermissionMode(thread.id, mode, creatorDevice ? { node: creatorDevice.node, maxPermissionMode: creatorDevice.maxPermissionMode } : undefined)
+      // A named model becomes the profile's last-used model, as `threads.setModel` makes it.
+      if (namedThreadModel && !sameSelection(namedThreadModel, lastUsed)) {
+        ctx.mms.settings.set({ provider: { instanceId: namedThreadModel.instanceId, llmProvider: namedThreadModel.llmProvider, model: namedThreadModel.model, effort: namedThreadModel.effort, name: namedThreadModel.name } })
+        ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
+      }
+      // What a window names for a new thread in a project was picked, or shown, in its composer.
+      const named: NewThreadChoice = {
+        ...(worktreeEnabled !== undefined ? { worktreeEnabled } : {}),
+        ...(namedThreadModel ? { model: namedThreadModel } : {}),
+        ...(namedMode ? { permissionMode: namedMode as PermissionMode } : {})
+      }
+      if (Object.keys(named).length) rememberPick(ctx, thread.id, named)
       const threads = listedThreadsFor(ctx, ctx.mms.threads.listAllThreads())
       return { thread, threads }
     }
@@ -2233,24 +2278,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const model = p.model
       let override: ModelOverride | undefined
-      if (model !== undefined && model !== null) {
-        if (!isObject(model)) throw new DomainRpcError('invalid_params', 'model must be an object')
-        // `instanceId` is the selection (SPEC §13.8); the current GUI still sends `llmProvider`.
-        const instanceId = asOptionalString(model.instanceId, 256)
-        // A supplied provider name is validated even when the instance decides the stored value.
-        const llmProvider = instanceId
-          ? (model.llmProvider === undefined ? undefined : asString(model.llmProvider, 'model.llmProvider', 256))
-          : asString(model.llmProvider, 'model.llmProvider', 256)
-        const modelId = asString(model.model, 'model.model', 512)
-        const effort = asOptionalString(model.effort, 64)
-        if ((!instanceId && !llmProvider) || !modelId) throw new DomainRpcError('invalid_params', 'Model provider and id are required')
-        // Unknown or disabled instances are rejected here, before anything is stored. A level
-        // packed into the model (an older client) is moved into its own field.
-        override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId, ...(effort ? { effort } : {}) })
-        // Hidden models and instances the thread's project turned off are rejected too.
-        const projectId = ctx.mms.threads.getThread(threadId)?.projectId
-        ctx.mms.harness?.resolveStored(override, { purpose: 'composer', scope: projectId ? { kind: 'project', projectId } : { kind: 'device' } })
-      }
+      if (model !== undefined && model !== null) override = namedModel(ctx, model, ctx.mms.threads.getThread(threadId)?.projectId)
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
       if (next) {
         // The global default keeps the instance, so later default turns resolve the same agent.

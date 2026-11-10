@@ -1205,12 +1205,19 @@ export function OrchestratorChat() {
     }
 
     if (newChat) {
+      // The model the composer shows, in the shape a thread stores.
+      const wanted = selectedProviderId && selectedModelId
+        ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
+        : undefined
       // Apply this draft's workspace before sending; a project change creates a
       // new hidden draft instead of moving another thread's transcript storage.
+      // A thread made on this computer is made with the shown model and permission mode, so nothing is left to set
+      // before the first turn, and a send retried after a failure runs on that thread with them.
       const id = await prepareComposerThread({
         thread: activeThread,
         workspace,
         ...composerThreadActions(),
+        shown: { ...(wanted ? { model: wanted } : {}), ...(!remoteDraft ? { permissionMode } : {}) },
         stillVisible,
         activate: (thread) => {
           const store = useAppStore.getState()
@@ -1234,23 +1241,18 @@ export function OrchestratorChat() {
       })
       if (!id) return
       if (!stillVisible()) return
-      // Blank composer keeps model in local state only. Stamp it onto the new
-      // thread before the first turn so the pick survives without touching the
-      // shared settings default used by other threads.
-      // Skipped when the new thread already has exactly that model (account, model and level): on
-      // another computer each call is a round trip the first message would wait for.
-      const wanted = selectedProviderId && selectedModelId
-        ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
-        : undefined
+      // A thread made on another computer (or an empty one reused here) gets the shown model now. Skipped when the
+      // thread already has exactly that model (account, model and level), as one made here does: on another
+      // computer each call is a round trip the first message would wait for.
       const stamped = useAppStore.getState().threads.find((entry) => entry.id === id)?.modelOverride
       if (wanted && !sameModel(stamped, wanted)) {
         const updated = await window.mousse.threads.setModel(id, wanted)
         if (!stillVisible()) return
         if (updated) useAppStore.getState().upsertThread(updated)
       }
-      // The first turn runs in the permission mode the composer showed. A thread this send made gets that mode
-      // whenever it would otherwise run in another one: picked for this chat, or its project's remembered mode. A
-      // mode picked for a chat on another computer goes there as picked; a reused empty thread already has its own.
+      // The first turn runs in the permission mode the composer showed. A thread made here was made with it, so this
+      // only sets it when the thread still runs in another one; a mode picked for a chat on another computer goes there
+      // as picked, and a reused empty thread already has its own.
       const madeMode = useAppStore.getState().threads.find((entry) => entry.id === id)?.permissionMode
       const runMode = remoteDraft
         ? blankPermissionMode

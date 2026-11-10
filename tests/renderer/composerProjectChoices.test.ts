@@ -18,9 +18,11 @@ vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 const catalog = (): LlmProviderOption[] => [
   { id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus 5.5' }, { id: 'sonnet', label: 'Sonnet 5.5' }] }
 ]
+/** The profile's default permission mode; a test may set another. */
+let defaultMode = 'accept_edits'
 const settings = (): MousseSettings => ({
   provider: { llmProvider: 'claude-subscription', model: 'opus' },
-  permissions: { defaultMode: 'accept_edits' },
+  permissions: { defaultMode },
   integrations: { skills: { enabledSkills: [] } }
 } as unknown as MousseSettings)
 
@@ -78,6 +80,7 @@ beforeEach(async () => {
   reads = { get: 0, getOptions: 0 }
   settingsListeners = []
   bridge = {}
+  defaultMode = 'accept_edits'
   stubBridge()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
   useAppStore.setState({ profileId: 'prf_test', profileReady: true, workspaceReady: true })
@@ -164,14 +167,29 @@ const OPUS = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 
  * The daemon side of a first send: `threads.create` returns `made`, the setters echo what they set, and the send is
  * accepted. Calls are recorded in order, so a test can check what the first turn runs with.
  */
-function daemonForSend(made: Thread) {
+function daemonForSend(made: Thread, failures: { select?: number; setPermissionMode?: boolean } = {}) {
   const calls: Array<[string, ...unknown[]]> = []
   let current = made
+  let selectFailures = failures.select ?? 0
   bridge.threads = {
-    create: vi.fn(async (...args: unknown[]) => { calls.push(['create', ...args]); return current }),
-    select: vi.fn(async () => undefined),
+    // Made with the model and permission mode the composer names, as the daemon does.
+    create: vi.fn(async (...args: unknown[]) => {
+      calls.push(['create', ...args])
+      const opts = (args[2] ?? {}) as { model?: Thread['modelOverride']; permissionMode?: Thread['permissionMode'] }
+      current = { ...current, ...(opts.model ? { modelOverride: opts.model } : {}), ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}) }
+      return current
+    }),
+    // A setup step after the thread was made can fail; the person sends again.
+    select: vi.fn(async () => {
+      if (selectFailures > 0) { selectFailures -= 1; throw new Error('The service did not answer.') }
+    }),
     setModel: vi.fn(async (id: string, value: Thread['modelOverride']) => { calls.push(['setModel', id, value]); current = { ...current, modelOverride: value }; return current }),
-    setPermissionMode: vi.fn(async (id: string, mode: Thread['permissionMode']) => { calls.push(['setPermissionMode', id, mode]); current = { ...current, permissionMode: mode }; return current }),
+    setPermissionMode: vi.fn(async (id: string, mode: Thread['permissionMode']) => {
+      calls.push(['setPermissionMode', id, mode])
+      if (failures.setPermissionMode) throw new Error('The service did not answer.')
+      current = { ...current, permissionMode: mode }
+      return current
+    }),
     setWorktreeEnabled: vi.fn(async (id: string, enabled: boolean) => { calls.push(['setWorktreeEnabled', id, enabled]); current = { ...current, worktreeEnabled: enabled }; return current })
   }
   bridge.orchestrator = {
@@ -217,7 +235,7 @@ describe('the first send of a new chat runs with what the composer shows', () =>
     expect(daemon.sentWith()).toEqual(['full', 'opus'])
   })
 
-  it('a mode picked for the new chat runs, even when the new thread comes back in another one', async () => {
+  it('a mode picked for the new chat runs, and the thread is made with it', async () => {
     await listModels(['remembers'])
     const { useAppStore } = await import('../../src/renderer/stores/appStore')
     useAppStore.setState({
@@ -236,6 +254,8 @@ describe('the first send of a new chat runs with what the composer shows', () =>
 
     await send('Fix the parser')
     expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+    expect(daemon.calls.find((call) => call[0] === 'create')?.[3]).toMatchObject({ permissionMode: 'ask', model: { model: 'opus' } })
+    expect(daemon.calls.some((call) => call[0] === 'setPermissionMode')).toBe(false)
   })
 
   it('a remembered model that is hidden is not shown, and the first send keeps the daemon fallback instead of stamping it back', async () => {
@@ -255,5 +275,44 @@ describe('the first send of a new chat runs with what the composer shows', () =>
     await send('Fix the parser')
     expect(daemon.calls.some((call) => call[0] === 'setModel')).toBe(false)
     expect(daemon.sentWith()?.[1]).toBe('opus')
+  })
+})
+
+describe('a first send that fails after its thread was made (review reproductions)', () => {
+  /** Global default Full access; the project remembered Ask; a new chat in it. */
+  async function askChatUnderFullDefault(failures: { select?: number; setPermissionMode?: boolean }) {
+    defaultMode = 'full'
+    await listModels(['remembers'])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({
+      projects: [project('remembers', { permissionMode: 'ask' })],
+      threads: [], activeThreadId: null, messages: [],
+      composerWorkspaceDrafts: { __blank__: { projectId: 'remembers', worktreeEnabled: true } }
+    })
+    // Made on the profile defaults unless told otherwise, as the daemon makes a composer's thread.
+    const daemon = daemonForSend(threadRow('made', { worktreeEnabled: true, modelOverride: OPUS }), failures)
+    await mountComposer()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+    return daemon
+  }
+
+  it('a setup step that fails after the thread was made: the retry reuses the thread and still runs in Ask', async () => {
+    const daemon = await askChatUnderFullDefault({ select: 1 })
+    await send('Fix the parser')
+    // Nothing was sent: opening the new thread failed after it was made.
+    expect(daemon.sentWith()).toBeUndefined()
+    expect(permissionChip()).toBe('Permissions: Ask before acting')
+
+    await send('Fix the parser')
+    expect(daemon.calls.filter((call) => call[0] === 'create')).toHaveLength(1)
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
+  })
+
+  it('a permission call that would fail is never needed: the thread is made in Ask, and the send runs in Ask', async () => {
+    const daemon = await askChatUnderFullDefault({ setPermissionMode: true })
+    await send('Fix the parser')
+    expect(daemon.calls.find((call) => call[0] === 'create')?.[3]).toMatchObject({ permissionMode: 'ask' })
+    expect(daemon.calls.some((call) => call[0] === 'setPermissionMode')).toBe(false)
+    expect(daemon.sentWith()).toEqual(['ask', 'opus'])
   })
 })

@@ -162,6 +162,44 @@ describe('new threads remember the choices last made in their project', () => {
   })
 })
 
+describe('a new thread made with the model and mode its creator names', () => {
+  const SONNET: ModelOverride = { instanceId: 'claude', llmProvider: 'claude-code', model: 'claude-sonnet-5-5' }
+
+  it('the composer names what it shows: the thread is born with it, it is remembered, and it becomes the last-used model', async () => {
+    const { call, project, remembered, ctx } = daemon()
+    const made = (await call<{ thread: Thread }>('threads.create', { name: 'New Chat', projectId: project.id, worktreeEnabled: false, model: SONNET, permissionMode: 'ask' })).thread
+    expect(made.modelOverride).toEqual(SONNET)
+    expect(made.permissionMode).toBe('ask')
+    expect(made.worktreeEnabled).toBe(false)
+    expect(remembered()).toEqual({ worktreeEnabled: false, model: SONNET, permissionMode: 'ask' })
+    expect(ctx.mms.settings.set).toHaveBeenCalledWith({ provider: expect.objectContaining({ instanceId: 'claude', model: 'claude-sonnet-5-5' }) })
+  })
+
+  it('a named mode wins over the remembered one', async () => {
+    const { create, call } = daemon()
+    const first = await create()
+    await call('threads.setPermissionMode', { threadId: first.id, mode: 'full' })
+    expect((await create({ permissionMode: 'ask' })).permissionMode).toBe('ask')
+  })
+
+  it('refuses a model it cannot use, or a mode above the device limit, before any thread is made', async () => {
+    const { call, project, threads, ctx } = daemon({ usable: (model) => model.instanceId !== 'claude' })
+    await expect(call('threads.create', { name: 'New Chat', projectId: project.id, model: SONNET })).rejects.toThrow(/turned off/)
+    await expect(call('threads.create', { name: 'New Chat', projectId: project.id, permissionMode: 'root' })).rejects.toThrow(/permissionMode/)
+    const routed = { ...ctx, connection: { clientType: 'bridge', bridgeCaller: { node: 'n1', user: 'u', maxPermissionMode: 'ask' } } } as unknown as HandlerContext
+    await expect(dispatchMethod(routed, 'threads.create', { name: 'New Chat', projectId: project.id, permissionMode: 'full' })).rejects.toThrow(/at most/)
+    expect(threads.size).toBe(0)
+  })
+
+  it('the CLI keeps the mode it names, and that is no person\'s pick', async () => {
+    const { ctx, project, remembered } = daemon()
+    const cli = { ...ctx, connection: { clientType: 'cli' } } as unknown as HandlerContext
+    const made = (await dispatchMethod(cli, 'threads.create', { name: 'New Chat', projectId: project.id, permissionMode: 'ask' }) as { thread: Thread }).thread
+    expect(made.permissionMode).toBe('ask')
+    expect(remembered()).toBeUndefined()
+  })
+})
+
 describe('ProjectManager.rememberNewThreadChoice', () => {
   it('merges a pick into the project, keeps it after a reload, and reports when nothing changed', () => {
     const projects = new ProjectManager(home)

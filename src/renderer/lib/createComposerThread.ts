@@ -1,4 +1,6 @@
 import type { NodeId } from '../../shared/net'
+import type { PermissionMode } from '../../shared/permissionMode'
+import type { ModelOverride } from '../../shared/providerInstances'
 import type { Thread } from '../../shared/types'
 
 /** Keep an asynchronous blank-composer creation from overriding later navigation. */
@@ -49,7 +51,12 @@ export function composerCreatesThread(
 export async function prepareComposerThread(deps: {
   thread?: Thread
   workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiryMs?: number; expiryStopsRun?: boolean; baseBranch?: string }
-  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }) => Promise<Thread>
+  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string; model?: ModelOverride; permissionMode?: PermissionMode }) => Promise<Thread>
+  /**
+   * The model and permission mode the composer shows. A thread made on this computer is made with them, so a send that
+   * fails after it was made, and is retried on it, still runs with them. Another computer sets them afterwards.
+   */
+  shown?: { model?: ModelOverride; permissionMode?: PermissionMode }
   setWorktreeEnabled: (id: string, enabled: boolean) => Promise<Thread>
   /** Gives a reused empty draft the expiry picked for it. */
   setExpiry?: (id: string, expiresAt: string, stopsRun: boolean) => Promise<Thread>
@@ -74,7 +81,9 @@ export async function prepareComposerThread(deps: {
           worktreeEnabled: enabled,
           ...(workspace.localOnly ? { localOnly: true } : workspace.node ? { node: workspace.node } : {}),
           ...expiry,
-          ...(baseBranch ? { baseBranch } : {})
+          ...(baseBranch ? { baseBranch } : {}),
+          ...(!workspace.node && deps.shown?.model ? { model: deps.shown.model } : {}),
+          ...(!workspace.node && deps.shown?.permissionMode ? { permissionMode: deps.shown.permissionMode } : {})
         })
     })
   }
