@@ -55,7 +55,9 @@ async function check() {
   writeFileSync(config.evidence, JSON.stringify({ actualMain: config.mainEntry, cycles: 2, transcriptUndo: true, transcriptRedo: true, taskBytesUndo: true, taskBytesRedo: true, primaryPreserved: true }))
 }
 
-await import(pathToFileURL(config.mainEntry).href)
+// A main entry that fails to load (no build in out/, a broken bundle) exits here: left alone, Electron shows
+// its error dialog, a real window, until the test times out.
+try { await import(pathToFileURL(config.mainEntry).href) } catch (error) { console.error(error); app.exit(1) }
 // Electron delays ready until its ESM entrypoint finishes evaluating.
 if (!isCli) void check().then(() => {
   clearTimeout(timer)

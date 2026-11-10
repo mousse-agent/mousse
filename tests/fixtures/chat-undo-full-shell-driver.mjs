@@ -83,5 +83,7 @@ async function run() {
   }
   writeFileSync(config.evidence, JSON.stringify({ phase: config.phase, actualMessageToolbar: true, nativeContextExact: true, unchangedFiles: true, restartRedo: config.phase === 'restart' }))
 }
-await import(pathToFileURL(config.mainEntry).href)
+// A main entry that fails to load (no build in out/, a broken bundle) exits here: left alone, Electron shows
+// its error dialog, a real window, until the test times out.
+try { await import(pathToFileURL(config.mainEntry).href) } catch (error) { console.error(error); app.exit(1) }
 if (!cli) void run().then(() => { clearTimeout(timer); app.quit() }, error => { console.error(error); clearTimeout(timer); app.exit(1) })
