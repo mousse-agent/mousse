@@ -79,6 +79,8 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
  * codex-cli 0.162: a steer sent while a shell command ran returned the running turn's id, the
  * command finished normally (exit 0), and the same turn went on to answer with the steer applied.
  * Nothing is cancelled, so reconciler rule 4 may deliver delegation notices into a live run.
+ * A person's message is not left to wait for the command: the service cuts the server turn and starts
+ * the next one with it (`drainSteerEntry`'s `cut`).
  */
 export const CODEX_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'native',
@@ -186,6 +188,7 @@ export class CodexAdapter implements ProviderAdapter {
       autoCompactTokens: host.context.compactionTokens,
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       drainSteer: () => ctl.drainSteer(),
+      ...(ctl.drainSteerEntry ? { drainSteerEntry: () => ctl.drainSteerEntry!() } : {}),
       onSteer: (text) => {
         progress()
         sink.steerAccepted(text)

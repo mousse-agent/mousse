@@ -7,6 +7,9 @@ import { UserMessage } from '../chat/components/agent-elements/user-message'
 import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
 import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue'
 import { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
+import { formatBinding } from '../../shared/commands'
+import { useAppStore } from '../stores/appStore'
+import { isSteerKey, STEER_BINDING } from '../lib/steerKey'
 import '../styles/queued-messages.css'
 
 export { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
@@ -136,6 +139,8 @@ function QueuedEditor({ draft, width, saving, canBeEmpty, changed, label, onDraf
  */
 export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
   const { items, busyIds, hold } = queue
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  const steerKey = formatBinding(STEER_BINDING, platform)
   // The open edit lives in the queue (by thread), so a switch to another thread and back keeps it.
   const editing = queue.editDraft
   // Drag to reorder starts only from the grip (`armedId`), so the text stays selectable. While dragging
@@ -254,7 +259,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         const edit = editing?.itemId === item.id ? editing : null
         // While a compaction holds the queue, the first message's Send now skips it.
         const skipsCompaction = hold !== null && item.id === firstHeldId
-        const sendLabel = steering ? 'Sending now…' : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : 'Send now'
+        const sendLabel = steering ? 'Sending now…' : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : `Steer: send now (${steerKey})`
         const label = !last ? null : hold
           ? <span className="queued-message-state is-held" title="Sends after compacting"><Loader2 size={12} className="animate-spin" aria-hidden="true" />Queued</span>
           : <span className="queued-message-state" title="Sends when the current reply ends">Queued</span>
@@ -264,6 +269,15 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
             role="listitem"
             className={['queued-message', dragId === item.id ? 'is-dragging' : '', edit ? 'is-editing' : ''].filter(Boolean).join(' ')}
             data-queued-id={item.id}
+            // Focusable, so the steer chord can send it now (from the item or one of its buttons).
+            tabIndex={edit ? undefined : 0}
+            aria-label={edit ? undefined : `Queued message. ${steerKey} sends it now.`}
+            onKeyDown={(event) => {
+              if (edit || busy || steering || !isSteerKey(event, platform)) return
+              event.preventDefault()
+              event.stopPropagation()
+              void queue.steer(item.id)
+            }}
             draggable={armedId === item.id}
             onDragStart={(event) => onDragStart(event, item.id)}
             onDragOver={(event) => onDragOverItem(event, item.id)}

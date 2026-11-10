@@ -444,6 +444,8 @@ export type CodexChatInput = {
   /** The Codex thread (and, once known, turn) serving this chat. */
   onSession?: (session: { codexThreadId: string; turnId?: string }) => void
   drainSteer?: () => string | undefined
+  /** `drainSteer` that also says whether the text is a person's (`cut`): see `TurnControl.drainSteerEntry`. */
+  drainSteerEntry?: () => { text: string; cut?: boolean } | undefined
   onSteer?: (text: string) => void
   /** Liveness while the turn only waits for the native helpers it started. */
   onHeartbeat?: () => void
@@ -2922,14 +2924,39 @@ export class CodexProviderService {
         })
         steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
       }
+      // A person's message is read now: `turn/steer` would wait for the reply or command in progress to end, so the
+      // server turn is interrupted and the next one starts with the message. What the turn wrote and the results of
+      // its finished tools stay. Subagent results and an agent's steer still join natively.
+      const cutTurns = new Set<string>()
+      let cutWaiting = false
+      const cutTurn = (): void => {
+        const turnId = current.turnId
+        if (!current.turnOpen || !turnId || cutTurns.has(turnId) || signal.aborted) return
+        cutTurns.add(turnId)
+        cutWaiting = false
+        void conn.request('turn/interrupt', { threadId: codexThreadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
+          /* the turn ended meanwhile: the held text starts the next turn all the same */
+        })
+      }
+      const cut = (text: string): void => {
+        // In order behind native steers already on their way.
+        steering = steering.then(() => {
+          hold(text)
+          cutWaiting = true
+          cutTurn()
+        })
+        steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
+      }
       const collectSteer = (): void => {
         if (signal.aborted) return
-        const steer = input.drainSteer?.()?.trim()
+        const entry = input.drainSteerEntry ? input.drainSteerEntry() : undefined
+        const steer = (entry ? entry.text : input.drainSteer?.())?.trim()
         if (!steer) return
         input.onSteer?.(steer)
-        deliver(steer)
+        if (entry?.cut) cut(steer)
+        else deliver(steer)
       }
-      if (input.drainSteer) {
+      if (input.drainSteer || input.drainSteerEntry) {
         steerTimer = setInterval(() => {
           try {
             collectSteer()
@@ -2988,8 +3015,10 @@ export class CodexProviderService {
         await Promise.race([starting, aborted])
         current.turnOpen = true
         input.onSession?.({ codexThreadId, turnId: current.turnId })
-        // Steers drained before the turn existed go in now.
-        for (const steer of undelivered.splice(0)) deliver(steer)
+        // A person's message drained before the turn existed cuts it at once; it goes next with everything held.
+        // Otherwise steers drained before the turn existed go in now.
+        if (cutWaiting) cutTurn()
+        else for (const steer of undelivered.splice(0)) deliver(steer)
         lastTurn = await Promise.race([completion, aborted])
         current.turnOpen = false
         // Stop must not wait for a steer the server has not answered yet.
@@ -2999,8 +3028,10 @@ export class CodexProviderService {
         if (lastTurn.status === 'failed') throw await this.limitOrFailure(this.turnFailure(lastTurn.error, current.lastError), current, conn, signal)
         if (lastTurn.status === 'interrupted') {
           signal.throwIfAborted()
-          throw new Error('Codex interrupted the turn')
+          // Cut for a person's message: the run goes on with it.
+          if (!(cutTurns.has(lastTurn.id) && undelivered.length)) throw new Error('Codex interrupted the turn')
         }
+        cutWaiting = false
         if (!undelivered.length) {
           // Codex completes the parent's turn while the helpers it started keep running, so this chat
           // (the child's run) stays open until they settle: the thread's whole helper tree when the

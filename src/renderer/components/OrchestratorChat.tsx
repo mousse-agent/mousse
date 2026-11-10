@@ -868,7 +868,9 @@ export function OrchestratorChat() {
       /** The conversation branch the message must land on (an edited prompt's); refused on another. */
       conversationBranchId?: string,
       /** The settings the composer showed, which the turn must run on (a new chat's first send). */
-      expect?: SendExpectation
+      expect?: SendExpectation,
+      /** Steer: a message the running turn could not take yet (it is still being set up) is sent now once queued. */
+      steer?: boolean
     ) => {
       if (!content && !(images && images.length)) return
 
@@ -907,7 +909,8 @@ export function OrchestratorChat() {
           images
         })
       }
-      const optimisticQueueId = queuesNow && targetThreadId ? `optimistic:${crypto.randomUUID()}` : null
+      // A steered message is not painted in the queue: it is on its way into the reply.
+      const optimisticQueueId = queuesNow && targetThreadId && !steer ? `optimistic:${crypto.randomUUID()}` : null
       if (optimisticQueueId && targetThreadId) {
         setOptimisticQueueItems((current) => [...current, {
           id: optimisticQueueId,
@@ -956,6 +959,9 @@ export function OrchestratorChat() {
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
         }
+        // Steered while the turn could not take it: the queued message is sent now, by its id, so it joins the turn
+        // as soon as it can (or goes first), and never twice.
+        if (steer && result.queued && result.queueItem && targetThreadId === queue.threadId) void queue.steer(result.queueItem.id)
         // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
         // queue: it is shown there, not also in the transcript.
         if (result.queued && optimisticMessageId) {
@@ -1048,7 +1054,7 @@ export function OrchestratorChat() {
         return false
       }
     },
-    [activeThreadId, profileId, chatMode, loading, compactionRunning, setLoading]
+    [activeThreadId, profileId, chatMode, loading, compactionRunning, setLoading, queue.threadId, queue.steer]
   )
 
   const handleStop = useCallback(async () => {
@@ -1203,6 +1209,7 @@ export function OrchestratorChat() {
     // (`lib/slashCommands.ts`). The usage dialog intentionally contains every configured provider.
     const attached = images.length > 0 || attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || resolvedReferences.length > 0
     const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
+    let steerQueued = false
     if (command) {
       if (command.kind === 'done') {
         setInput('')
@@ -1216,13 +1223,15 @@ export function OrchestratorChat() {
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
-      // Alt+Enter during a run: the text goes into the running turn instead of the queue.
+      // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue.
       const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined)
       if (steered) {
         clearComposer()
         return
       }
-      // The turn ended meanwhile: send it like Enter would.
+      // The turn cannot take it yet (it is still being set up, or it was stopped): it is queued and sent now, so it
+      // goes into the turn as soon as it runs, or first.
+      steerQueued = true
     }
 
     if (!text && images.length === 0) return
@@ -1389,7 +1398,7 @@ export function OrchestratorChat() {
       resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     }
     if (typedMeanwhile) setInput(typedMeanwhile)
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound)
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued)
     if (sent === false && stillVisible()) {
       restoreUnsent()
     } else if (sent !== 'uncertain') {

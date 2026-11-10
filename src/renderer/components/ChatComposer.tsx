@@ -26,7 +26,7 @@ import {
   type MentionItem
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
-import { ComposerFooter, STEER_BINDING, type ComposerRunProps } from './ComposerFooter'
+import { ComposerFooter, STEER_BINDING, isSteerKey, type ComposerRunProps } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
@@ -648,8 +648,9 @@ export function ChatComposer({
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      // Alt+Enter during a run steers the running turn; otherwise it sends like Enter.
-      submit(e.altKey && !e.ctrlKey && !e.metaKey && loading ? { steer: true } : undefined)
+      // Ctrl+Enter (Cmd+Enter on macOS) during a run steers the running turn; otherwise it sends like Enter.
+      // Alt+Enter, the earlier steer key, still steers.
+      submit(loading && (isSteerKey(e, platform) || (e.altKey && !e.ctrlKey && !e.metaKey)) ? { steer: true } : undefined)
     }
   }
 

@@ -17,6 +17,7 @@ import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
 
+const NL = String.fromCharCode(10)
 const MODEL = { llmProvider: 'claude-subscription', model: 'vendor-model' }
 
 /** A provider whose turns take steers while they run, and hold until released or interrupted. */
@@ -134,6 +135,8 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     const queue = () => readDurableQueue(d.store, thread.id)
     const pending = () => d.orch.listQueue(thread.id).map((item) => item.content)
     const userMessages = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user').map((message) => message.content)
+    /** The person's messages as the transcript shows them (hidden copies left out). */
+    const shownUserMessages = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden).map((message) => message.content)
     const idle = async (label: string): Promise<void> => {
       await waitFor(() => !d.orch.isActiveTurnRunning(thread.id) && queue().length === 0 && d.engine.getActiveRun(thread.id) === null, label)
       // Nothing more starts once the queue is empty.
@@ -151,7 +154,7 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       expect(pending()).toEqual(['A', 'B', 'C'])
       return { first, a: a.queueItem!, b: b.queueItem!, c: c.queueItem! }
     }
-    return { d, adapter, thread, send, queue, pending, userMessages, idle, queuedBehindTurn }
+    return { d, adapter, thread, send, queue, pending, userMessages, shownUserMessages, idle, queuedBehindTurn }
   }
 
   /** Each text reached the provider once: as a turn's prompt or as a steer, never both, never twice. */
@@ -178,6 +181,46 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expect(w.adapter.steers).toEqual(['C'])
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
     expect(w.userMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('the steered message reaches the model while the turn still runs, not when it ends', async () => {
+    const w = world()
+    const { first, c } = await w.queuedBehindTurn()
+
+    const clicked = Date.now()
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    // The transcript shows it as sent at once, inside the running turn.
+    expect(w.shownUserMessages()).toEqual(['first', 'C'])
+    await waitFor(() => w.adapter.steers.length > 0, 'steer taken')
+    // Read within a moment of the click, while the first turn is still held open.
+    expect(Date.now() - clicked).toBeLessThan(2_000)
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.d.orch.isActiveTurnRunning(w.thread.id)).toBe(true)
+
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first', 'A', 'B'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('messages steered one after another reach the model together, in order, as one input', async () => {
+    const w = world()
+    const { first, a, b, c } = await w.queuedBehindTurn()
+
+    for (const item of [c, a, b]) expect(w.d.orch.promoteQueueItem(w.thread.id, item.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.steers.length > 0, 'steers taken')
+    expect(w.adapter.steers).toEqual(['C' + NL + 'A' + NL + 'B'])
+    expect(w.pending()).toEqual([])
+
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expectEachOnce(w.adapter, ['first', 'C' + NL + 'A' + NL + 'B'])
+    // One after another in the transcript, inside the first turn: one group.
+    const shown = w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => message.role === 'user' && !message.hidden)
+    expect(shown.map((message) => [message.content, Boolean(message.steered)])).toEqual([['first', false], ['C', true], ['A', true], ['B', true]])
   })
 
   it('a second Steer click on the same message changes nothing', async () => {
@@ -221,6 +264,8 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
     // A message sent now goes first: C runs before A and B, which keep their order.
     expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    // C shows once: as the prompt of its own turn, not also inside the turn that never read it.
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
   })
 
   it('Steer after Stop sends C first, as the next turn, and A and B follow once each', async () => {
@@ -238,7 +283,9 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
     if (outcome instanceof Error) expect(w.adapter.prompts).toEqual(['first', 'A', 'B', 'C'])
     else expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expect(w.shownUserMessages().filter((text) => text === 'C')).toHaveLength(1)
   })
+
 
   it('Steer on C while the queue drains A runs every message once', async () => {
     const w = world()

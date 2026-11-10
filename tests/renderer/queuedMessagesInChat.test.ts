@@ -371,11 +371,38 @@ describe('queued messages in the conversation', () => {
     await act(async () => { send.click(); send.click() })
     expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
     expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'c')
+    // C leaves the queue at the click: the transcript shows it as sent, in the reply it joins.
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
     await act(async () => { answer() })
-    // The daemon's list is what shows: C is steering, A and B wait in order.
+    // The daemon lists C as steering until the reply reads it; it stays out of the queue, A and B wait in order.
     await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('b', 'two'), queued('c', 'three', { intent: 'steer', state: 'steering' })] }) })
-    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b', 'c'])
-    expect(button('c', 'Sending')!.disabled).toBe(true)
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('puts a message back in the queue when Send now is refused', async () => {
+    api.promoteToSteer.mockRejectedValueOnce(new Error('No active turn to steer on this thread.'))
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a', 'b'])
+  })
+
+  it('sends a focused queued message now with the steer key, once', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    const row = rows().find((item) => item.dataset.queuedId === 'b')!
+    row.focus()
+    await key(row, { key: 'Enter', ctrlKey: true })
+    await key(row, { key: 'Enter', ctrlKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'b')
+    // Enter alone, or with another modifier, does nothing here.
+    await key(rows()[0]!, { key: 'Enter' })
+    await key(rows()[0]!, { key: 'Enter', ctrlKey: true, shiftKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the steer key in the Send now tooltip', async () => {
+    await show([queued('a', 'one')])
+    expect(button('a', 'Send')!.title).toBe('Steer: send now (Ctrl+Enter)')
   })
 
   it('shows a queued subagent result by what it reports, never by the text the model reads, and offers no edit', async () => {
@@ -608,7 +635,7 @@ describe('queued messages while a compaction runs', () => {
     expect(skip.title).toBe('Send now: skip compacting and keep the full 182K history')
     expect(skip.getAttribute('aria-label')).toBe(skip.title)
     // The others keep their usual actions.
-    expect(button('b', 'Send the queued message now')?.title).toBe('Send now')
+    expect(button('b', 'Send the queued message now')?.title).toBe('Steer: send now (Ctrl+Enter)')
     expect(button('b', 'Edit')).not.toBeNull()
     expect(button('b', 'Remove')).not.toBeNull()
     await click(skip)

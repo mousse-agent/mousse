@@ -101,6 +101,8 @@ describe('OrchestratorService concurrent threads and queue', () => {
     // the queue pill can show sticky "Steering" state.
     const retained = orch.listQueue(thread.id).find((i) => i.id === item.id)
     expect(retained?.state).toBe('steering')
+    // Steers sent one after another are handed over together once the newest has settled (STEER_GATHER_MS).
+    for (const entry of session.activeTurn.pendingSteer) entry.at = 0
     const drained = (orch as unknown as { drainSteerForSession: (s: unknown, t: unknown) => { entries: Array<{ text: string; itemId?: string }> } | undefined }).drainSteerForSession(session, session.activeTurn)
     expect(drained?.entries).toEqual([expect.objectContaining({ text: 'please prefer tests', itemId: item.id })])
     // Drain alone is not an acknowledgement: a crash here must leave the steer
@@ -171,6 +173,48 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(() => orch.promoteQueueItem(thread.id, later.id)).toThrow('No active turn to steer on this thread.')
   })
 
+  it('Send now while the turn is still being set up puts the message first and joins the turn once it runs', () => {
+    const thread = store.createThread('Setting up')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    // Admitted, still setting up: no active turn yet.
+    session.turnAdmitted = true
+    orch.enqueueForThread(thread.id, 'A')
+    orch.enqueueForThread(thread.id, 'B')
+    const c = orch.enqueueForThread(thread.id, 'C')
+
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'pending'], ['A', 'pending'], ['B', 'pending']])
+    // A second click changes nothing; nothing waits for the turn's end.
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    expect(session.steerOnStart).toEqual([c.id])
+    expect(session.drainAfterSettle).toBe(false)
+
+    // The turn runs: C joins it at once, shown as sent inside it.
+    session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    ;(orch as unknown as { deliverSteersOnStart: (s: unknown) => void }).deliverSteersOnStart(session)
+    expect(session.activeTurn.pendingSteer).toEqual([expect.objectContaining({ text: 'C', itemId: c.id })])
+    expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'steering'], ['A', 'pending'], ['B', 'pending']])
+    expect(orch.getMessages(thread.id).filter((m) => m.role === 'user').map((m) => [m.content, m.steered])).toEqual([['C', true]])
+    expect(session.steerOnStart).toEqual([])
+  })
+
+  it('a Stop hides the copy of a sent-now message the turn never read, which then runs once as its own turn', () => {
+    const thread = store.createThread('Stop unread')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
+    const c = orch.enqueueForThread(thread.id, 'C')
+    expect(orch.promoteQueueItem(thread.id, c.id)).toEqual({ ok: true })
+    const shown = () => orch.getMessages(thread.id).filter((m) => m.role === 'user' && !m.hidden).map((m) => m.content)
+    expect(shown()).toEqual(['C'])
+
+    expect(orch.abortActiveTurn(thread.id)).toBe(true)
+    expect(shown()).toEqual([])
+    // Still queued, to go first.
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['C'])
+  })
+
   it('does not use process.chdir when resolving project cwd for turns', () => {
     const cwdBefore = process.cwd()
     const spy = vi.spyOn(process, 'chdir')
@@ -207,7 +251,8 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const session = orch.getOrCreateSession(thread.id)
     session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
     expect(orch.steerThread(thread.id, 'local-fast')).toBe(true)
-    expect(session.activeTurn.pendingSteer).toEqual([{ text: 'local-fast' }])
+    expect(session.activeTurn.pendingSteer).toEqual([expect.objectContaining({ text: 'local-fast' })])
+    expect(session.activeTurn.pendingSteer[0]!.itemId).toBeUndefined()
   })
 
   it('promotes a queued GUI item for a live external owner', () => {

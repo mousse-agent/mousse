@@ -36,7 +36,20 @@ export interface SteerEntry {
   images?: ChatImageAttachment[]
   /** An agent promoted the item: nothing here may settle a question or approval the user has been asked. */
   byAgent?: true
+  /**
+   * The transcript message that shows this steer inside the running turn. A turn that never reads the text hides
+   * it again: the text then runs as a turn of its own, whose prompt shows it once.
+   */
+  echoId?: string
+  /** When it was sent (ms): steers sent in quick succession reach the model together (`STEER_GATHER_MS`). */
+  at?: number
 }
+
+/**
+ * A person's steers sent within this long of each other reach the model together, in order, as one input: the
+ * drain hands them over once the newest is this old. Short enough that the model still reads them at once.
+ */
+export const STEER_GATHER_MS = 250
 
 export interface ActiveTurnControl {
   abort: AbortController
@@ -75,6 +88,12 @@ export class ThreadSession {
   stopping = false
   /** The messages a person sent while the stopped turn still ended, in the order sent (`stopping`). */
   sentAfterStop: string[] = []
+  /**
+   * Queued messages sent now (Steer) while the turn was still being set up, in the order sent. They wait at the
+   * front of the queue and join the turn as soon as it runs; a turn that ends before it runs leaves them to go
+   * first. Cleared with the admission.
+   */
+  steerOnStart: string[] = []
   /**
    * Ends the waits of a turn that is still being set up (its worktree, the snapshot it starts from) when a Stop comes
    * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.
