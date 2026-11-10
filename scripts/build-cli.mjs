@@ -6,6 +6,7 @@ import { buildPackagedNativeReader } from './build-net-native-reader.mjs'
 import { buildBrowserWorker, getBrowserWorkerBuildOptions } from './build-browser-worker.mjs'
 import { buildPiRuntime } from './build-pi-runtime.mjs'
 import { cachedBuild } from './cached-build.mjs'
+import { asciiSourceEsbuildPlugin } from './ascii-source.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const entry = resolve(root, 'src/cli/index.ts')
@@ -26,7 +27,9 @@ export function getCliBuildOptions(projectRoot = root) {
       js: '#!/usr/bin/env node\nimport { fileURLToPath as __mousse_fileURLToPath } from "url";\nimport { dirname as __mousse_dirname } from "path";\nconst __filename = __mousse_fileURLToPath(import.meta.url);\nconst __dirname = __mousse_dirname(__filename);',
     },
     // Runtime deps stay external (resolved from node_modules).
-    packages: 'external'
+    packages: 'external',
+    // The daemon and every command load this file: keep its text at one byte per character in V8.
+    plugins: [asciiSourceEsbuildPlugin()]
   }
 }
 
@@ -137,6 +140,7 @@ export async function buildCli(opts = {}) {
   const ctx = await context({
     ...options,
     plugins: [
+      ...options.plugins,
       {
         name: 'cli-rebuild-notify',
         setup(api) {
