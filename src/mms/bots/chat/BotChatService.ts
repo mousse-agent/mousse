@@ -76,6 +76,29 @@ export function chatInput(text: string, attachments: readonly SavedBotAttachment
   return text ? `${text}\n\n${files}` : files
 }
 
+/**
+ * An owner's message row as the bot's input, as `chatSend` built it: the reply line when it answers an earlier
+ * message of the same chat, its text, and its files. Rebuilt from the rows after a restart, so it must match.
+ */
+export function messageInput(row: { botId: string; text: string; attachments: readonly SavedBotAttachment[] | null; replyTo: string | null }, quoted: (id: string) => { botId: string; author: 'owner' | 'bot'; text: string } | undefined): string {
+  const body = chatInput(row.text, row.attachments ?? undefined)
+  const reply = row.replyTo ? quoted(row.replyTo) : undefined
+  return reply && reply.botId === row.botId ? `${replyLine(reply)}\n\n${body}` : body
+}
+
+/** The longest part of a quoted message the bot is shown with a reply. */
+const REPLY_QUOTE_CHARS = 600
+
+/**
+ * The line before the owner's message when it replies to an earlier one, so the bot knows what "this" or "done" is
+ * about: the bot's own message, or one the owner wrote before.
+ */
+export function replyLine(quoted: { author: 'owner' | 'bot'; text: string }): string {
+  const text = quoted.text.replace(/\s+/g, ' ').trim()
+  const cut = text.length > REPLY_QUOTE_CHARS ? `${text.slice(0, REPLY_QUOTE_CHARS - 1)}…` : text
+  return quoted.author === 'bot' ? `(Replying to your message: "${cut}")` : `(About their earlier message: "${cut}")`
+}
+
 export class BotChatService {
   constructor(private readonly engine: BotEngine, private readonly options: {
     store: BotStore
@@ -199,7 +222,7 @@ export class BotChatService {
    * transaction) starts behind the lane. Sending the same request again answers a wall the first
    * one never reached.
    */
-  async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string }): Promise<{ message: BotChatMessage }> {
+  async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string }): Promise<{ message: BotChatMessage }> {
     const definition = this.engine.definitionOf(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
@@ -214,7 +237,10 @@ export class BotChatService {
     const target = this.engine.chatActivationFor(input.botId)
     // The files are copied into the bot's files folder first: the bot reads its copies, so its grant needs nothing more.
     const saved = input.attachments?.length ? copyBotAttachments(this.engine.filesFolder(input.botId), input.attachments, this.options.now()) : []
-    const prompt = chatInput(text, saved)
+    // A reply names a message of this bot's chat; any other id is dropped, never shown or sent.
+    const quoted = input.replyTo ? this.store.message(input.replyTo) : undefined
+    const replyTo = quoted && quoted.botId === input.botId ? quoted : undefined
+    const prompt = messageInput({ botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null }, (id) => this.store.message(id))
     const key = `chat:${input.clientRequestId}`
     let message: BotChatMessage
     let refused: BotEngineError | undefined
@@ -228,7 +254,8 @@ export class BotChatService {
           ...(saved.length ? { attachments: saved } : {}),
           clientRequestId: input.clientRequestId,
           activationId: target.activationId,
-          lane: 'chat'
+          lane: 'chat',
+          ...(replyTo ? { replyTo: replyTo.id } : {})
         })
         if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId)
         return posted
@@ -263,6 +290,14 @@ export class BotChatService {
   async chatStop(botId: string): Promise<Record<string, never>> {
     await this.engine.stopChat(botId)
     return {}
+  }
+
+  /** `bots.work.stop`: one piece of work (or a scheduled run) of the bot stops; the chat goes on. */
+  async workStop(botId: string, workId: string): Promise<{ stopped: boolean }> {
+    this.engine.definitionOf(botId)
+    const result = await this.engine.stopWork(botId, workId)
+    if (result === 'not_found') throw new BotEngineError('work_not_found', 'This bot has no such work.')
+    return { stopped: result === 'stopped' }
   }
 
   /** `bots.chat.markRead`: the owner has read up to `seq`. */

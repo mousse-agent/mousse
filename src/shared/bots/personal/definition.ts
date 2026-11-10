@@ -197,6 +197,12 @@ export const MAX_BOT_SCHEDULES = 8
 export type BotActivationTrigger =
   | { kind: 'manual'; input: string }
   | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
+  /**
+   * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
+   * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
+   * reminder that started it.
+   */
+  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string }
 
 /** The default active time of one activation: an hour. */
 export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000

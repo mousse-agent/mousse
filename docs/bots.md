@@ -12,14 +12,15 @@ A bot is an agent a person makes from a **look** and one sentence ("What should 
 
 ## Lanes
 
-Each bot has two lanes. At most one chat activation and one run activation exist at a time, side by side, sharing one spend ledger.
+Each bot has two lanes. At most one chat activation and one run activation exist at a time, side by side, sharing one spend ledger. The chat is the bot's front desk and the run lane does its work, so the owner can always talk to it (see "The chat and its work").
 
 | | Chat lane | Run lane |
 |---|---|---|
-| Started by | the owner's message (`bots.chat.send`), or the bot's creation | a schedule, or by hand (`bots.activate`, internal) |
+| Started by | the owner's message (`bots.chat.send`), or the bot's creation | work the chat hands off (`work_start`), a reminder's work, a schedule, or by hand (`bots.activate`, internal) |
 | Thread | the home thread, execution key `bot:<id>` | a new child thread, `bot:<id>:act:<activationId>` |
 | Context | cleared at each activation's first dispatch (`clearConversationContext`), then the chat pack | the run brief, keyed by the schedule id |
 | Missing permission | a wall: the turn ends with an ask card, and the answer continues it | refused; the run carries on (see Asks) |
+| Tools | the grant without what takes long (the web, the browser, `shell`), plus the work and reminder tools | the whole grant, no work tools |
 | Ends with | a reply (`text` row) | a run report (`run_report` row), also the notification |
 
 - Clearing the home context keeps the transcript but sends no thread history, so no bot turn depends on a runtime session surviving. Claude Code and Codex resume their native session only while the history Mousse sends is the one saved after the last turn, so a cleared context starts a new one. Continuations inside one activation (a wall answer, a reload) keep the activation's own turns and may resume.
@@ -29,6 +30,32 @@ Each bot has two lanes. At most one chat activation and one run activation exist
 - Each activation has a scratch folder, deleted when it ends. Documents the bot keeps go to its **files folder**, `<profile>/bots/files/<botId>/`, which every bot may write and which About never lists.
 - **The bot chat's composer** is the thread composer (`ChatComposer`) without a thread's run settings: no model picker, reasoning level, permission mode, context ring, `/` commands or skills, since a bot picks its own model. It keeps the same box, attach (the button, dropping files and pasting images), dictation, Up for the last message, and Send or Stop.
 - **Attached files** are copied into the bot's files folder, under `attachments/<date>/`, and the message and the bot's input name the copies (`copyBotAttachments`). The starter grant reads them, so the bot never needs the folder the owner keeps them in, and its edits never touch the originals. A pasted file has no path: it waits in a temporary folder until it is copied. At most 10 files of 50 MB each per message. Images reach the bot as files it reads, not as pictures in the message.
+
+## The chat and its work
+
+A person who works for you keeps talking to you while they work. A bot does the same (`docs/plans/bot-always-free.md`):
+
+- **The chat answers in moments.** A chat turn is compiled with `frontDesk` (`compileBotThread`, `frontDeskManifest`): it is not offered `web_search`, `web_fetch`, the browser or `shell`, even when the grant holds them, and it gets the work and reminder tools (`BOT_WORK_TOOLS`), which are always on and never grantable, like memory. So a chat turn is a model call and a few local tool calls, and the queue behind it is seconds long. The grant and its digest do not change.
+- **Work runs beside it.** `work_start({ title, brief })` inserts a run-lane activation with the trigger `{ kind: 'work', input, title, replyTo, from }` and returns at once; the chat then says it is on it. The brief stands on its own: a run sees the bot's memory, not the chat. Work runs one at a time in the run lane, after scheduled runs and other work already there; `work_start` says what it waits behind. Its report is posted as a `run_report` that answers the owner's message that asked (`replyTo`).
+- **While it runs.** The chat pack's situation lists the work in progress with its live activity ("Your work now: …"), so "how's it going?" needs no tool. `work_list` gives the same with ids and the last three that ended; `work_stop` stops one; `work_note` keeps a note in `bot_work_notes`. Waiting work gets its notes with its request. Running work gets them when its turn ends: `advance` posts what it had (a `notice`, so it is never lost if what follows fails or is stopped), keeps it running and continues the same thread with the notes (`continueWith`); its report then leads with what changed. Every run continuation (a restart, the internet back, Continue) also takes pending notes. Notes go only to work that waits or runs, never to paused or blocked work. Each note keeps the owner's message it came from, so forgetting that message removes the note and its copy in the prompt. With under 30 seconds of work time left the work reports as it is, and the notes stay unread.
+- **Asks.** An ask for something only work uses (`workHolds`) is answered "your work already has this" with no card, in `escalate` and at the gate. When work needs a permission the bot lacks, the chat asks for it first, as before, and hands the work off once the owner answered; a run that meets one carries on and asks, as any run.
+- **What the owner sees.** The status line and the composer's Stop follow the chat's own turn only (`BotSummary.chat`). Work is a line each above the composer (`BotSummary.work`): its title, what it is doing (the live chip of that activation), how long it has run, and Stop (`bots.work.stop`). The Recent line reads "Working on <title>" while only work runs.
+- **Failures.** Failed work never counts toward pausing the schedules (`countFailure`), and done work doesn't reset the count. Work dropped from a full queue says so in the chat.
+
+## Replies
+
+Every bot message can name the message it answers (`bot_messages.reply_to`, bots.db v6): a chat reply the owner's message its turn holds (`ownerMessageOf`), a work report and a reminder the message that asked for them. The chat shows a short quote of it (who wrote it and its first line, `BotChatQuote`) when it is not the message right above; clicking it scrolls there. The owner can reply to any message (Reply on hover): `bots.chat.send` carries `replyTo`, a message of the same bot only, and the bot's input starts with `(Replying to your message: "…")` (`messageInput`, which also rebuilds the input from the row after a restart).
+
+## Reminders
+
+`remind({ text, inMinutes | at, work? })` keeps a one-off reminder in `bot_reminders` (v6); `reminder_list` and `reminder_cancel` manage them, at most 50 waiting per bot, at most a year ahead. `at` is a local date and time on this computer. One engine timer waits for the soonest (`armReminders`, re-armed at most every 6 hours), and each scheduler tick checks again (`maintain`). When one is due (`deliverDueReminders`):
+
+- a text reminder is posted as a `run_report` answering the message that asked, in the same transaction that marks it delivered, with no model run;
+- a reminder with `work` starts that work (`reminder:<id>`), whose report answers the same message; when the bot can't run then (its permissions wait for approval, its thread is in the trash), the reminder is said with why;
+- one that fails to be said (a full disk) is tried again a minute later, never in a loop;
+- one that fell due while Mousse was off is said at the next start, prefixed with its time ("(For 14:30) …").
+
+A deleted bot's reminders are cancelled at once and purged with it. Forgetting the owner's message that asked for a reminder or work (`memory_forget`, Forget in About) cancels the reminder and removes its words, and the work's brief and notes. Repeating reminders are schedules.
 
 ## Asks
 
@@ -44,7 +71,7 @@ An ask is a request for one permission, shown as a card with Allow and Not now (
 
 ## Run commands
 
-"Run commands" (the neutral tool `shell`) is one permission for any command. The bot asks for it once (a card reading "run commands"); after Allow it is in the grant like any other tool, and no command is asked about again. Not now, the ask caps and About → Remove work as for every other permission. The authority allows every `shell` call once the grant holds it, whatever command or folder the call names (`botAuthority.ts`); without it, a command is a wall in the chat and a refusal with an ask in a run. Commands start in the bot's files folder. How far a command reaches depends on the runtime:
+"Run commands" (the neutral tool `shell`) is one permission for any command. The bot asks for it once (a card reading "run commands"); after Allow it is in the grant like any other tool, and no command is asked about again. Commands run in the bot's work: a chat turn hands them off. Not now, the ask caps and About → Remove work as for every other permission. The authority allows every `shell` call once the grant holds it, whatever command or folder the call names (`botAuthority.ts`); without it, a command is a wall in the chat and a refusal with an ask in a run. Commands start in the bot's files folder. How far a command reaches depends on the runtime:
 
 - **Claude Code** (owner's entry): Bash is offered only when the grant holds `shell`. Where Claude Code's own sandbox can run (bubblewrap and socat on Linux, Seatbelt on macOS), Bash runs in it: writable are the bot's files folder and its scratch folder; without file access the home folder is unreadable except for those; with it commands read and write the whole file system but Mousse's own data (see File access); the network is closed; `dangerouslyDisableSandbox` is refused (`claudeLockedSandbox`). Where the sandbox can't run (Windows, or Linux without bubblewrap or socat), Bash still runs, outside any sandbox, because the owner allowed commands as a whole.
 - **Codex**: with `shell` the thread runs in the `workspace-write` sandbox over exactly the bot's files folder and its scratch folder, and with file access every entry beside Mousse's own data too, with no network and no temporary folder (`codexTurnPolicy`, `codexBotSandbox`). Approvals stay `untrusted`, and the grant answers every command approval with accept. A retry outside the sandbox ("retry without sandbox?") is always declined. Without `shell` the sandbox stays read-only and command approvals are walls or asks.
@@ -64,7 +91,7 @@ So a command can read, and on Pi or an unsandboxed Claude Code change, files out
 
 ## Use the browser
 
-"Use the browser" is one permission for every browser tool (`browser` in the grant, `BOT_BROWSER_PERMISSION`). The bot asks for it once (a card reading "use the browser"); an ask for any single browser tool, such as `browser_act`, is the same ask, and its card never names a tool. After Allow, `compileBotThread` turns it into the browser tools (all but `browser_request_human`: the bot asks its owner in its reply instead) and the bot has them in every chat and run, with no new ask. Not now, About → Remove and the ask caps work as for every other permission. Other Mousse tools stay refused: an `escalate` for one no bot can hold is refused at once, with no card.
+"Use the browser" is one permission for every browser tool (`browser` in the grant, `BOT_BROWSER_PERMISSION`). The bot asks for it once (a card reading "use the browser"); an ask for any single browser tool, such as `browser_act`, is the same ask, and its card never names a tool. After Allow, `compileBotThread` turns it into the browser tools (all but `browser_request_human`: the bot asks its owner in its reply instead) and the bot's work has them in every run, with no new ask; a chat turn hands browsing to work. Not now, About → Remove and the ask caps work as for every other permission. Other Mousse tools stay refused: an `escalate` for one no bot can hold is refused at once, with no card.
 
 The browser is the bot's own (`src/mms/bots/browser/BotBrowsers.ts`), never the owner's tabs or a thread's:
 
@@ -177,6 +204,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Chips | `src/shared/bots/personal/chips.ts`, `src/mms/bots/activity/BotActivitySink.ts` |
 | Instructions | `src/mms/bots/instructions.ts` |
 | Bot app tools | `src/mms/run/mcp/appTools/bots.ts`, `src/mms/run/mcp/appTools/botMemory.ts` |
+| Work and reminders | `BotEngine` (`startWork`, `listWork`, `noteWork`, `addReminder`, `deliverDueReminders`), `src/mms/bots/grants/compile.ts` (`frontDeskManifest`) |
 | The bot's own browser, its methods | `src/mms/bots/browser/`, `src/shared/bots/personal/browser.ts` |
 | Memory and context | `src/mms/bots/memory/` |
 | Wiring | `src/mms/MmsProfileServices.ts` |

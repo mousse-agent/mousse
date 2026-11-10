@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
@@ -75,9 +75,11 @@ export interface CompileInput {
    * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
    * `consult` on the activation thread of a bot with context threads. `memory`: the five
    * `memory_*` tools (Bot Phase 1 §5.10), always on and never grantable, so a bot whose stored
-   * grant predates them has them too.
+   * grant predates them has them too. `frontDesk`: a chat turn (docs/plans/bot-always-free.md): it gets the work
+   * and reminder tools (`BOT_WORK_TOOLS`), and not what can take long (`BOT_WORK_ONLY_TOOLS`, the browser), which
+   * its work runs with instead. The grant and its digest stay the same: only what this turn is offered narrows.
    */
-  botTools?: { escalate: boolean; consult: boolean; memory?: boolean }
+  botTools?: { escalate: boolean; consult: boolean; memory?: boolean; frontDesk?: boolean }
 }
 
 export type CompileResult =
@@ -155,7 +157,8 @@ export function systemTempDirs(): string[] {
 }
 
 export function compileBotThread(input: CompileInput): CompileResult {
-  const manifest = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
+  const held = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
+  const manifest = input.botTools?.frontDesk ? frontDeskManifest(held) : held
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return unenforceable(`The Mousse tool ${refusedApp} would reach other threads, act in your name or ask you.`)
@@ -188,7 +191,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
     ...(input.botTools?.escalate ? ['escalate'] : []),
     ...(input.botTools?.consult ? ['consult'] : []),
-    ...(input.botTools?.memory ? BOT_MEMORY_TOOLS : [])
+    ...(input.botTools?.memory ? BOT_MEMORY_TOOLS : []),
+    ...(input.botTools?.frontDesk ? BOT_WORK_TOOLS : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {
@@ -218,5 +222,16 @@ export function compileBotThread(input: CompileInput): CompileResult {
           }
         : null
     }
+  }
+}
+
+const WORK_ONLY: ReadonlySet<string> = new Set(BOT_WORK_ONLY_TOOLS)
+
+/** What a chat turn is offered of a grant: everything but what can take long, which its work does (`BOT_WORK_ONLY_TOOLS`, the browser). */
+export function frontDeskManifest(manifest: BotManifest): BotManifest {
+  return {
+    ...manifest,
+    tools: manifest.tools.filter((tool) => !WORK_ONLY.has(tool)),
+    appTools: manifest.appTools.filter((tool) => !WORK_ONLY.has(tool) && tool !== BOT_BROWSER_PERMISSION)
   }
 }

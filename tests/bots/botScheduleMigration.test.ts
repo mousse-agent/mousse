@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
+import { BOTS_DB_VERSION, BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
 import { jobToDefinition, MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { botJobThreadGuard } from '../../src/mms/scheduled/botJobs'
@@ -59,9 +59,9 @@ afterEach(() => {
 const move = () => migrateBotSchedules({ bots: bots!, jobs, now: () => NOW })
 
 describe('moving bot schedules to the shared store', () => {
-  it('opens the old bots.db at v5 and keeps a copy of it as it was', () => {
-    expect(bots!.db.userVersion()).toBe(5)
-    expect(readdirSync(join(profile, 'bots')).some((name) => name === 'bots.db.pre-v5')).toBe(true)
+  it('opens the old bots.db at the newest version and keeps a copy of it as it was', () => {
+    expect(bots!.db.userVersion()).toBe(BOTS_DB_VERSION)
+    expect(readdirSync(join(profile, 'bots')).some((name) => name === `bots.db.pre-v${BOTS_DB_VERSION}`)).toBe(true)
   })
 
   it('copies each schedule once, keeping its id, prompt, who added it, when it was made and its next run', () => {

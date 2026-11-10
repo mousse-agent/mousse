@@ -74,7 +74,8 @@ describe('offline before a dispatch starts', () => {
     net.online = true
     await fire(BOT_OFFLINE_POLL_MAX_MS)
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', offline: false })
-    expect(summary().stateText).toBe('Working…')
+    // A run beside a free chat says what it is working on.
+    expect(summary().stateText).toBe('Working on Top science news')
     expect(summary().waiting).toBeUndefined()
     await runDispatch(f, activation.id, 1, { text: 'Three stories.' })
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'done' })

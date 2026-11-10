@@ -18,8 +18,10 @@ export interface PersonalBotsClient {
   /** Archives the bot now; its chat and memory are erased at `purgeAt`. */
   remove(botId: string): Promise<{ purgeAt: string }>
   messages(botId: string, page?: { beforeSeq?: number; limit?: number }): Promise<BotsPersonalV2Result<'bots.chat.list'>>
-  send(botId: string, text: string, clientRequestId: string, attachments?: BotChatAttachment[]): Promise<BotChatMessage>
+  send(botId: string, text: string, clientRequestId: string, attachments?: BotChatAttachment[], replyTo?: string): Promise<BotChatMessage>
   stop(botId: string): Promise<void>
+  /** Stops one piece of work; the chat goes on. */
+  stopWork(botId: string, workId: string): Promise<void>
   markRead(botId: string, seq: number): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
@@ -44,9 +46,10 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     resume: async (botId) => (await call('bots.personal.resume', { botId })).bot,
     remove: (botId) => call('bots.delete', { botId }),
     messages: (botId, page = {}) => call('bots.chat.list', { botId, ...page }),
-    send: async (botId, text, clientRequestId, attachments) =>
-      (await call('bots.chat.send', { botId, text, clientRequestId, ...(attachments?.length ? { attachments } : {}) })).message,
+    send: async (botId, text, clientRequestId, attachments, replyTo) =>
+      (await call('bots.chat.send', { botId, text, clientRequestId, ...(attachments?.length ? { attachments } : {}), ...(replyTo ? { replyTo } : {}) })).message,
     stop: async (botId) => { await call('bots.chat.stop', { botId }) },
+    stopWork: async (botId, workId) => { await call('bots.work.stop', { botId, workId }) },
     markRead: async (botId, seq) => { await call('bots.chat.markRead', { botId, seq }) },
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),

@@ -56,7 +56,7 @@ import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
 import { BotMemoryStore } from './bots/memory/BotMemoryStore'
 import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
-import { createBotContextProvider } from './bots/memory/contextPack'
+import { createBotContextProvider, type BotSituation } from './bots/memory/contextPack'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -1726,14 +1726,20 @@ export class MmsProfileServices {
   }
 
   /** What a bot's context pack says about the present (bot-context.md §5.1): the owner's name, open asks and schedules. */
-  private botSituation(botId: string): { ownerName?: string; openAsks?: string[]; schedules?: Array<{ label: string; nextAt?: string }> } {
+  private botSituation(botId: string): BotSituation {
     const engine = this.personalBots
     const store = this.botStore
     if (!engine || !store) return {}
     const ownerName = this.settings.get().profile.username.trim()
     const openAsks = store.openAsks(botId).filter((ask) => ask.messageId !== null).map((ask) => engine.chat.card(ask).title)
     const schedules = engine.listSchedules(botId).map((schedule) => ({ label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
-    return { ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}) }
+    // What its work is doing and what it will say later, so a chat turn answers "how's it going?" without a tool.
+    const work = engine.listWork(botId).now
+    const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.text }))
+    return {
+      ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
+      work, ...(reminders.length ? { reminders } : {})
+    }
   }
 
   /** A provider family in plain words for a bot's usage-limit pause ("your Claude usage limit"); never a model. */

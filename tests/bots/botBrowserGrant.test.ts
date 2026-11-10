@@ -4,7 +4,7 @@
  * one ask whatever browser tool it names; other Mousse tools that reach other threads stay refused.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { compileBotThread } from '../../src/mms/bots/grants/compile'
@@ -102,7 +102,7 @@ describe('a bot asking for and using the browser', () => {
     return { activation, ...(await start(f, activation.id)) }
   }
 
-  it('without the grant: no browser for the turn, one human-worded ask, then Allow is remembered across chats and runs', async () => {
+  it('without the grant: no browser for the turn, one human-worded ask, then Allow is remembered, and the browser is its work\'s', async () => {
     const first = await chat('Look at my bank statement page', 'm1')
     expect(first.prepared.browser).toBeUndefined()
     expect(first.prepared.authority.appTools.has('browser_act')).toBe(false)
@@ -119,32 +119,30 @@ describe('a bot asking for and using the browser', () => {
     expect(message.error).toBeUndefined()
     expect(f.store.activeGrant(botId)!.manifest.appTools).toContain('browser')
     expect(f.host.definitions.get(botId)!.published!.permissions.appTools).toContain('browser')
-    // The turn continues with the browser.
+    // The chat is the front desk: it continues with no browser, and the browser is its work's, with no new card.
     const continued = await start(f, first.activation.id, 2)
-    expect(continued.prepared.browser).toBeDefined()
-    expect(continued.prepared.authority.check(act)).toEqual({ ok: true })
-    await finish(f, continued.payload, 'completed', { text: 'Here it is.' })
-
-    // Every later chat and run has the browser, with no new ask.
+    expect(continued.prepared.browser).toBeUndefined()
+    expect(continued.prepared.authority.check(act)).toEqual({ ok: false, refused: { text: BOT_WORK_HAS_TEXT, askId: '' } })
+    await finish(f, continued.payload, 'completed', { text: 'On it.' })
     const later = await chat('And again', 'm2')
-    expect(later.prepared.browser).toBeDefined()
-    expect(later.prepared.authority.check(act)).toEqual({ ok: true })
-    for (const tool of BOT_BROWSER_TOOLS) expect(later.prepared.policy.tools!.allow).toContain(tool)
-    await finish(f, later.payload, 'completed', { text: 'Done.' })
+    expect(later.prepared.browser).toBeUndefined()
+    for (const tool of BOT_BROWSER_TOOLS) expect(later.prepared.policy.tools!.allow).not.toContain(tool)
+    await finish(f, later.payload, 'completed', { text: 'On it.' })
+
+    // Every run has the browser, with no new ask.
     const scheduled = await run('r1')
     expect(scheduled.prepared.browser).toBeDefined()
     expect(scheduled.prepared.authority.check(act)).toEqual({ ok: true })
+    for (const tool of BOT_BROWSER_TOOLS) expect(scheduled.prepared.policy.tools!.allow).toContain(tool)
     await finish(f, scheduled.payload, 'completed', { text: 'Report.' })
     expect(f.store.openAsks(botId)).toEqual([])
-    // Asking again for what it holds is no new card.
+    // Asking again for what its work holds is no new card.
     const again = await chat('Once more', 'm3')
-    expect(again.prepared.authority.escalate!({ permission: { tool: 'browser_open' }, reason: 'Again.' })).toBe('The owner already allowed this (use the browser). Use it now.')
-    await finish(f, again.payload, 'completed', { text: 'Done.' })
+    expect(again.prepared.authority.escalate!({ permission: { tool: 'browser_open' }, reason: 'Again.' })).toBe(BOT_WORK_HAS_TEXT)
+    await finish(f, again.payload, 'completed', { text: 'On it.' })
     expect(f.store.openAsks(botId)).toEqual([])
-    expect(turns.map((turn) => turn.lane)).toEqual(['chat', 'chat', 'run', 'chat'])
-    // Both lanes drive the one browser its home thread owns.
-    expect(new Set(turns.map((turn) => turn.homeThreadId)).size).toBe(1)
-    expect(ended).toEqual(expect.arrayContaining([later.activation.id, scheduled.activation.id]))
+    expect(turns.map((turn) => turn.lane)).toEqual(['run'])
+    expect(ended).toEqual(expect.arrayContaining([scheduled.activation.id]))
   })
 
   it('a browser call without the grant is a wall in the chat and one ask in a run, both "use the browser"', async () => {
