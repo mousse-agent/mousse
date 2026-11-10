@@ -331,3 +331,16 @@ button.subagent-notice-row:focus-visible {
 .subagent-notice-dot[data-tone="failed"] {
   background: var(--danger);
 }
+
+/* A runtime's own subagent (Claude Code's Agent) has no thread: its card opens in place on the calls it made. */
+.subagent-card-native .subagent-card-chevron {
+  /* A down chevron: open turns it to point up (collapse.css turns it). */
+  --ui-collapse-chevron-turn: 180deg;
+}
+
+.subagent-card-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px 2px 40px;
+}

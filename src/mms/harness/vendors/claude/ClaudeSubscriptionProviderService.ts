@@ -68,7 +68,7 @@ import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
-import type { OneShotSpec } from '../../driver'
+import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
 import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
 
 /**
@@ -224,9 +224,11 @@ export interface ClaudeLiveHost {
    * Claude started a turn of its own because background tasks finished. The host runs it as a run of
    * the thread, which calls `chat({ continuation: true, continuationId: info.id })`.
    */
-  continuationStarted?(threadId: string, info: { id: string; taskIds: string[]; summaries: string[] }): void
+  continuationStarted?(threadId: string, info: ContinuationInfo): void
   /** Something the thread's user should know: a helper's result may not have been delivered. */
   notice?(threadId: string, text: string): void
+  /** A task a tool call started (a background agent or shell) ended, possibly after the call's turn settled. */
+  taskEnded?(threadId: string, info: ProviderTaskEnd): void
 }
 /** What a turn's permission hooks and callback read: the turn running now, not the one that created the query. */
 type TurnContext = {
@@ -1962,6 +1964,7 @@ export class ClaudeSubscriptionProviderService {
         backgroundWork: (active) => this.notifyHost(() => this.liveHost?.backgroundWork?.(threadId, active)),
         continuationStarted: (run, info) => this.continuationStarted(created, run, info),
         notice: (text) => this.notifyHost(() => this.liveHost?.notice?.(threadId, text)),
+        taskEnded: (info) => this.notifyHost(() => this.liveHost?.taskEnded?.(threadId, info)),
         ended: () => {
           if (this.live.get(threadId) === created) this.live.delete(threadId)
         }
@@ -1996,7 +1999,7 @@ export class ClaudeSubscriptionProviderService {
    * thread; without a host it is stopped, and its tasks stay owed until the next committed turn on the
    * process clears them (Claude has read them by then) or Stop or the cap ends the process.
    */
-  private continuationStarted(live: LiveSession<TurnContext>, run: LiveRun, info: { id: string; taskIds: string[]; summaries: string[] }): void {
+  private continuationStarted(live: LiveSession<TurnContext>, run: LiveRun, info: ContinuationInfo): void {
     const host = this.liveHost
     if (host?.continuationStarted) {
       try {

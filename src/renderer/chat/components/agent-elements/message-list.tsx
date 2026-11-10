@@ -39,10 +39,11 @@ import {
   isWaitingPermissionRequest,
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
-import { SubagentNotice } from "./tools/SubagentNotice";
+import { BackgroundNotice, SubagentNotice } from "./tools/SubagentNotice";
 import { isRunningSubagent } from "../../../../shared/subagents";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
+import { readBackgroundNotice } from "../../adapters/nativeSubagents";
 import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import { getToolStatus } from "./utils/format-tool";
@@ -678,6 +679,11 @@ function MessageToolbar({
  */
 type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[] };
 
+/** A message that reports results (a subagent's, or the runtime's own background tasks): not something the user wrote. */
+function isResultNotice(msg: UIMessage | undefined): boolean {
+  return Boolean(readSubagentNotice(msg) || readBackgroundNotice(msg));
+}
+
 /** The empty-parts copy of a subagent-results message that joins a reply, one per message. */
 const noticeCopies = new WeakMap<UIMessage, UIMessage>();
 
@@ -687,7 +693,7 @@ function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
 
   for (const msg of messages) {
     if (msg.role === "user") {
-      if (current && readSubagentNotice(msg)) {
+      if (current && isResultNotice(msg)) {
         let copy = noticeCopies.get(msg);
         if (!copy) {
           copy = { ...msg, parts: [] };
@@ -844,7 +850,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   const promptKey = useMemo(
     () =>
       turns
-        .map((turn) => (turn.userMsg && !readSubagentNotice(turn.userMsg) ? turn.userMsg.id : ""))
+        .map((turn) => (turn.userMsg && !isResultNotice(turn.userMsg) ? turn.userMsg.id : ""))
         .join("\n"),
     [turns],
   );
@@ -895,7 +901,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       for (const turn of turnsRef.current) {
         const userMsg = turn.userMsg;
         // A message that delivers subagent results is not a prompt the user wrote.
-        if (!userMsg || readSubagentNotice(userMsg)) continue;
+        if (!userMsg || isResultNotice(userMsg)) continue;
         const target: Element | null = layout
           ? null
           : content.querySelector(`[data-prompt-id="${escapeId(userMsg.id)}"]`);
@@ -1218,6 +1224,7 @@ export const MessageList = memo(function MessageList({
     for (const card of subagentCards.values()) {
       if (card.delegationId) ids.add(card.delegationId);
       if (card.childThreadId) ids.add(card.childThreadId);
+      if (card.native?.taskId) ids.add(card.native.taskId);
     }
     return ids;
   }, [subagentCards]);
@@ -1962,6 +1969,14 @@ const TurnRow = memo(function TurnRow({
               </div>
             );
           }
+          const background = readBackgroundNotice(turn.userMsg);
+          if (background) {
+            return (
+              <div data-notice-id={turn.userMsg.id}>
+                <BackgroundNotice items={background} />
+              </div>
+            );
+          }
           const text = getTextFromParts(
             turn.userMsg!.parts ?? [],
             "",
@@ -2089,6 +2104,12 @@ const TurnRow = memo(function TurnRow({
                   // the thread show there, as the card's state: the
                   // results add no line of their own.
                   const turnMsgs = turn.assistantMsgs.flatMap((msg) => {
+                    const background = readBackgroundNotice(msg);
+                    if (background) {
+                      const rest = background.filter((item) => !cardedSubagents.has(item.taskId));
+                      if (rest.length === 0) return [];
+                      return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), backgroundNotice: rest } }];
+                    }
                     const notice = readSubagentNotice(msg);
                     if (!notice) return [msg];
                     const rest = notice.filter(
@@ -2120,6 +2141,11 @@ const TurnRow = memo(function TurnRow({
                       const cardParts = segment.msgIndices.flatMap(
                         (msgIndex) => analyses[msgIndex]!.cardParts,
                       );
+                      const cardNested = new Map(
+                        segment.msgIndices.flatMap((msgIndex) => [
+                          ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),
+                        ]),
+                      );
                       const chatStreamingStatus = isLastTurn && isStreaming
                         ? "streaming"
                         : undefined;
@@ -2134,6 +2160,7 @@ const TurnRow = memo(function TurnRow({
                             <CustomToolRenderer
                               key={part.toolCallId}
                               part={part}
+                              nestedTools={cardNested.get(part.toolCallId!)}
                               chatStatus={chatStreamingStatus}
                               toolRenderers={toolRenderers}
                             />
@@ -2149,6 +2176,14 @@ const TurnRow = memo(function TurnRow({
                         return (
                           <div key={msg.id} data-notice-id={msg.id}>
                             <SubagentNotice items={notice} />
+                          </div>
+                        );
+                      }
+                      const background = readBackgroundNotice(msg);
+                      if (background) {
+                        return (
+                          <div key={msg.id} data-notice-id={msg.id}>
+                            <BackgroundNotice items={background} />
                           </div>
                         );
                       }

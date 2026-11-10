@@ -1,4 +1,5 @@
-import type { SubagentNoticeItem } from "../../../../../shared/subagents";
+import type { BackgroundTaskNoticeItem, SubagentNoticeItem } from "../../../../../shared/subagents";
+import { backgroundNoticeName } from "../../../adapters/nativeSubagents";
 import { noticeItemName, noticeOutcome } from "../../../adapters/subagentNotice";
 import { openThread } from "../../../../lib/openThread";
 import "./subagent-card.css";
@@ -46,4 +47,26 @@ export function SubagentNoticeView({ items, onOpen }: SubagentNoticeViewProps) {
 
 export function SubagentNotice({ items }: { items: readonly SubagentNoticeItem[] }) {
   return <SubagentNoticeView items={items} onOpen={(threadId) => void openThread(threadId)} />;
+}
+
+/**
+ * Background tasks of the runtime (a Claude Code background agent or shell) that finished and that the
+ * agent's own turn reads now. Drawn from the structured payload on the message that opens that turn; a task
+ * whose subagent card is in the thread shows there instead.
+ */
+export function BackgroundNotice({ items }: { items: readonly BackgroundTaskNoticeItem[] }) {
+  const shown = items.slice(0, SUBAGENT_NOTICE_ROWS);
+  const hidden = items.length - shown.length;
+  return (
+    <div className="subagent-notice">
+      {shown.map((item) => (
+        <span key={item.taskId} className="subagent-notice-row">
+          <span className="subagent-notice-dot" data-tone="done" aria-hidden="true" />
+          <span className="subagent-notice-name">{backgroundNoticeName(item)}</span>
+          <span className="subagent-notice-detail">finished</span>
+        </span>
+      ))}
+      {hidden > 0 && <span className="subagent-notice-row">and {hidden} more</span>}
+    </div>
+  );
 }

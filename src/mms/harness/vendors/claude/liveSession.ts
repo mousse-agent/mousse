@@ -521,7 +521,12 @@ export interface LiveSessionHooks {
   /** The thread's set of obligations became non-empty (`true`) or empty. */
   backgroundWork(active: boolean): void
   /** Claude started a turn of its own: `taskIds` finished and nobody was waiting for them. */
-  continuationStarted(run: LiveRun, info: { id: string; taskIds: string[]; summaries: string[] }): void
+  continuationStarted(run: LiveRun, info: { id: string; taskIds: string[]; summaries: string[]; tasks: Array<{ taskId: string; description?: string }> }): void
+  /**
+   * A task Claude started from a tool call (a background agent or shell) reported its end. Sent for every
+   * such report, also one whose call's turn has settled: the owner updates that call's row.
+   */
+  taskEnded?(info: { toolUseId: string; taskId: string; status: string; summary?: string; durationMs?: number }): void
   /** Something the thread's user should know about the process (a helper's result that may be lost). */
   notice?(text: string): void
   /** The process ended or was released. */
@@ -1177,12 +1182,33 @@ export class LiveSession<Turn = unknown> {
       if (this.obligations.observeRoster(tasks)) this.backgroundChanged()
       return
     }
-    if (frame.subtype === 'task_notification' && typeof frame.task_id === 'string')
+    if (frame.subtype === 'task_notification' && typeof frame.task_id === 'string') {
+      if (typeof frame.tool_use_id === 'string') this.reportTaskEnd(frame.tool_use_id, frame.task_id, frame)
       this.routeNotification(frame.task_id, typeof frame.summary === 'string' ? frame.summary : '', typeof frame.status === 'string' ? frame.status : '')
+    }
     // A task's start and end name the call that spawned it: the run that owns the frames shows them on its row.
     // With no owner the frame is dropped (the call's row was closed when its turn settled).
     if ((frame.subtype === 'task_started' || frame.subtype === 'task_notification') && typeof frame.tool_use_id === 'string')
       this.notificationOwner()?.deliver(message)
+  }
+
+  /** Tells the owner a tool call's task ended, so a row its settled turn closed as "in the background" learns the outcome. */
+  private reportTaskEnd(toolUseId: string, taskId: string, frame: Record<string, unknown>): void {
+    if (!this.hooks.taskEnded) return
+    const usage = isRecord(frame.usage) ? frame.usage : undefined
+    const durationMs = typeof usage?.duration_ms === 'number' && Number.isFinite(usage.duration_ms) ? usage.duration_ms : undefined
+    const summary = typeof frame.summary === 'string' && frame.summary.trim() ? frame.summary : undefined
+    try {
+      this.hooks.taskEnded({
+        toolUseId,
+        taskId,
+        status: typeof frame.status === 'string' ? frame.status : '',
+        ...(summary ? { summary } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {})
+      })
+    } catch (error) {
+      console.warn('[claude-live] task end could not be reported', error instanceof Error ? error.message : String(error))
+    }
   }
 
   /**
@@ -1249,7 +1275,11 @@ export class LiveSession<Turn = unknown> {
       this.obligations.consume(id, run, summary)
     }
     const summaries = entries.flatMap((entry) => (entry.summary ? [entry.summary] : []))
-    this.hooks.continuationStarted(run, { id: run.id, taskIds: entries.map((entry) => entry.id), summaries })
+    const tasks = entries.map(({ id }) => {
+      const description = this.obligations.describe(id)?.replace(/\s+/g, ' ').trim()
+      return { taskId: id, ...(description ? { description } : {}) }
+    })
+    this.hooks.continuationStarted(run, { id: run.id, taskIds: entries.map((entry) => entry.id), summaries, tasks })
     return run
   }
 

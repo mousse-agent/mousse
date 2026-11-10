@@ -858,6 +858,11 @@ export interface ChatMessage {
    * steer): the tasks it reports, so the app never parses the text.
    */
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
+  /**
+   * Set on the message that opens a turn the provider started itself because background tasks finished
+   * (a continuation run): the tasks it reports, so the app shows them as a notice instead of a message the user wrote.
+   */
+  backgroundNotice?: import('./subagents').BackgroundTaskNoticeItem[]
   /** Set on a user message a scheduled job sent, so the thread can show "Scheduled: <name>" instead of passing it off as typed. */
   scheduled?: { jobId: string; jobName?: string }
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */

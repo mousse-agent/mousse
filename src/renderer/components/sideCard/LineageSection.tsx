@@ -1,7 +1,8 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { stopThreadNow } from '../../lib/stopThread'
-import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
+import { isRunningSubagent } from '../../../shared/subagents'
 import { useSubagents } from '../../hooks/useSubagents'
+import { useNativeSubagents } from '../../hooks/useNativeSubagents'
 import { ChevronRight } from '../../lib/icons'
 import { openThread } from '../../lib/openThread'
 import { ComputerBadgeView } from '../ComputerBadge'
@@ -17,7 +18,9 @@ import {
   lineageStatusLabel,
   lineageSubagentName,
   lineageTitle,
+  nativeLineageEntry,
   sliceLineage,
+  type LineageEntry,
   stopAllSubagents
 } from './lineageLogic'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
@@ -47,7 +50,7 @@ export interface LineageOpenParts {
 export const LINEAGE_CLOSED: LineageOpenParts = { running: false, finished: false, finishedAll: false }
 
 interface LineageListProps {
-  subagents: readonly SubagentSummary[]
+  subagents: readonly LineageEntry[]
   now: number
   /** The provider the thread runs on, for subagents that name none. */
   inheritedProvider?: string | null
@@ -55,21 +58,26 @@ interface LineageListProps {
   onOpenPart: (part: keyof LineageOpenParts, value: boolean) => void
   /** Opens a subagent's own thread (a remote subagent's thread on its computer). */
   onOpen: (threadId: string) => void
+  /** Shows a native subagent's card in the conversation (it has no thread). */
+  onReveal?: (callId: string) => void
   /** Stops the work a running subagent is doing. */
   onStop: (childThreadId: string) => void
 }
 
 interface LineageRowProps {
-  subagent: SubagentSummary
+  subagent: LineageEntry
   now: number
   inheritedProvider?: string | null
   onOpen: (threadId: string) => void
+  onReveal?: (callId: string) => void
   onStop: (childThreadId: string) => void
 }
 
-function LineageRow({ subagent, now, inheritedProvider, onOpen, onStop }: LineageRowProps) {
+function LineageRow({ subagent, now, inheritedProvider, onOpen, onReveal, onStop }: LineageRowProps) {
   const name = lineageSubagentName(subagent)
   const running = isRunningSubagent(subagent)
+  // A native subagent runs inside the thread's own process: only the thread's Stop ends it.
+  const stoppable = running && !subagent.native
   const model = lineageModelLabel(subagent)
   return (
     <li className="lineage-item">
@@ -78,7 +86,7 @@ function LineageRow({ subagent, now, inheritedProvider, onOpen, onStop }: Lineag
         className={`lineage-row${running ? ' is-working' : ''}`}
         title={name}
         // A remote subagent opens on its computer, where its turns run and its questions are answered.
-        onClick={() => onOpen(subagent.computer?.ref ?? subagent.childThreadId)}
+        onClick={() => (subagent.native ? onReveal?.(subagent.childThreadId) : onOpen(subagent.computer?.ref ?? subagent.childThreadId))}
       >
         <SubagentAvatar providerId={subagentIconId(subagent.provider, inheritedProvider)} tone={subagentBadgeTone(subagent)} />
         <span className="lineage-text">
@@ -97,7 +105,7 @@ function LineageRow({ subagent, now, inheritedProvider, onOpen, onStop }: Lineag
         </span>
         <span className="lineage-status">{lineageStatusLabel(subagent, now)}</span>
       </button>
-      {running && (
+      {stoppable && (
         <button
           type="button"
           className="lineage-stop"
@@ -125,14 +133,14 @@ function ShowMoreRow({ count, onExpand }: { count: number; onExpand: () => void 
  * Subagents this thread started. A few running ones show first; finished ones fold into one
  * "N finished" row that opens to list them. Renders nothing for an empty list; the section collapses instead.
  */
-export function LineageList({ subagents, now, inheritedProvider, open, onOpenPart, onOpen, onStop }: LineageListProps) {
+export function LineageList({ subagents, now, inheritedProvider, open, onOpenPart, onOpen, onReveal, onStop }: LineageListProps) {
   const finishedId = useId()
   if (subagents.length === 0) return null
 
   const { running, finished } = groupLineageSubagents(subagents)
   const runningSlice = sliceLineage(running, open.running, LINEAGE_RUNNING_COUNT)
   const finishedSlice = sliceLineage(finished, open.finishedAll)
-  const rowProps = { now, inheritedProvider, onOpen, onStop }
+  const rowProps = { now, inheritedProvider, onOpen, onReveal, onStop }
   return (
     <ul className="lineage-list">
       {runningSlice.visible.map((subagent) => <LineageRow key={subagent.childThreadId} subagent={subagent} {...rowProps} />)}
@@ -164,19 +172,31 @@ export function LineageList({ subagents, now, inheritedProvider, open, onOpenPar
   )
 }
 
+/** Brings a native subagent's card into view in the conversation and opens it. */
+function revealNativeSubagent(callId: string): void {
+  const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(callId) : callId.replace(/["\\]/g, '\\$&')
+  const card = document.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`)
+  if (!card) return
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  card.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
+  card.querySelector<HTMLButtonElement>('button.subagent-card')?.focus({ preventScroll: true })
+}
+
 /** Lists the subagents the selected thread started. */
 export function LineageSection({ threadId }: SideCardSectionContext) {
   const subagents = useSubagents(threadId)
+  const native = useNativeSubagents(threadId)
+  const entries = useMemo<LineageEntry[]>(() => (native.length ? [...subagents, ...native.map(nativeLineageEntry)] : subagents), [subagents, native])
   const inheritedProvider = useThreadProviderId(threadId)
   // Remembering which thread the choices belong to resets the list on a thread change
   // without an effect.
   const [openState, setOpenState] = useState<{ threadId: string | null; parts: LineageOpenParts }>({ threadId: null, parts: LINEAGE_CLOSED })
   const open = threadId !== null && openState.threadId === threadId ? openState.parts : LINEAGE_CLOSED
 
-  const now = useLineageNow(subagents.length > 0)
+  const now = useLineageNow(entries.length > 0)
 
   // With nothing to list the section is one quiet line without a heading, like Git without a repository.
-  if (subagents.length === 0) {
+  if (entries.length === 0) {
     return (
       <div className="side-card-section lineage-collapsed" data-thread-id={threadId ?? undefined}>
         <p className="lineage-empty">No subagents started yet</p>
@@ -186,7 +206,7 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
 
   return (
     <SideCardSection
-      title={lineageTitle(subagents)}
+      title={lineageTitle(entries)}
       collapseKey="Lineage"
       threadId={threadId}
       action={
@@ -208,12 +228,13 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
       <LineageList
         // A thread switch starts a fresh list, so the finished group's reset to closed does not animate.
         key={threadId ?? ''}
-        subagents={subagents}
+        subagents={entries}
         now={now}
         inheritedProvider={inheritedProvider}
         open={open}
         onOpenPart={(part, value) => setOpenState({ threadId, parts: { ...open, [part]: value } })}
         onOpen={(id) => void openThread(id)}
+        onReveal={revealNativeSubagent}
         onStop={(childThreadId) => void stopThreadNow(childThreadId)}
       />
     </SideCardSection>

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { UIMessage } from 'ai'
 import { collectSubagentCalls, joinSubagentCards, type SubagentCardModel } from '../chat/adapters/subagentCards'
+import { collectNativeSubagentCards } from '../chat/adapters/nativeSubagents'
 import { isTurnActivePhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { useSubagents } from './useSubagents'
@@ -16,13 +17,17 @@ export function useSubagentCardModels(threadId: string | null | undefined, messa
   const subagents = useSubagents(threadId)
   const loaded = useAppStore((s) => (threadId ? s.subagentsByParent[threadId] !== undefined : false))
   const turnActive = useAppStore((s) => (threadId ? isTurnActivePhase(s.turnStates[threadId]?.phase ?? 'idle') : false))
+  // Background agents a settled turn left running are still going while the thread waits on background work.
+  const backgroundLive = useAppStore((s) => (threadId ? s.threadActivity[threadId] === 'waiting' : false)) || turnActive
   const previous = useRef<ReadonlyMap<string, SubagentCardModel>>(NONE)
   const cards = useMemo(() => {
     const calls = collectSubagentCalls(messages)
-    const next = calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current, turnActive })
+    const joined = calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current, turnActive })
+    const native = collectNativeSubagentCards(messages, backgroundLive)
+    const next = native.size === 0 ? joined : new Map([...joined, ...native])
     // A streamed delta changes no card: the same map keeps every row that reads it from rendering again.
     return sameCards(previous.current, next) ? previous.current : next
-  }, [messages, subagents, loaded, turnActive])
+  }, [messages, subagents, loaded, turnActive, backgroundLive])
   // Remembered once the render is committed, so a render never writes it.
   useEffect(() => {
     previous.current = cards

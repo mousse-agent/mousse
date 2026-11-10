@@ -158,6 +158,86 @@ function LiveSubagentCard({ card }: { card: SubagentCardModel }) {
   );
 }
 
+export type NativeSubagentCardViewProps = {
+  card: SubagentCardModel;
+  now: number;
+  /** The calls the subagent made, in order. */
+  nestedTools: readonly any[];
+  chatStatus?: string;
+  inheritedProvider?: string | null;
+};
+
+/**
+ * A subagent the runtime started with its own tool (Claude Code's `Agent`). It has no thread of its own,
+ * so the card opens in place to list the calls the subagent made.
+ */
+export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inheritedProvider }: NativeSubagentCardViewProps) {
+  const [open, setOpen] = useState(false);
+  const title = cardTitle(card);
+  const elapsed = cardElapsedLabel(card, now);
+  const tone = subagentBadgeTone(card);
+  const note = cardStateNote(card);
+  const status = cardStatusLabel(card);
+  const result = card.error ?? card.native?.result ?? null;
+  const expandable = nestedTools.length > 0;
+  return (
+    <div className="subagent-card-native" data-native-subagent={card.toolCallId}>
+      <button
+        type="button"
+        className="subagent-card"
+        data-state={card.state}
+        title={title}
+        aria-label={`${title}, ${status}`}
+        aria-expanded={expandable ? open : undefined}
+        disabled={!expandable}
+        onClick={() => setOpen(!open)}
+      >
+        <SubagentAvatar providerId={subagentIconId(card.provider, inheritedProvider)} tone={tone} chip />
+        <span className="subagent-card-body">
+          <span className="subagent-card-head">
+            <span className="subagent-card-title">{title}</span>
+            {note && <span className="subagent-card-note" data-tone={tone}>{note}</span>}
+            {card.native?.agentType && <span className="subagent-card-model">{card.native.agentType}</span>}
+          </span>
+          {result && <span className="subagent-card-result">{result}</span>}
+        </span>
+        {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
+        {expandable && <IconChevronDown className="subagent-card-chevron ui-collapse-chevron" data-open={open || undefined} aria-hidden="true" />}
+      </button>
+      {expandable && (
+        <Collapse open={open} className="subagent-card-calls" itemCount={nestedTools.length}>
+          {nestedTools.map((nestedPart, index) => {
+            const meta = toolRegistry[nestedPart.type];
+            if (!meta) return null;
+            const { isPending, isError } = getToolStatus(nestedPart, chatStatus);
+            return (
+              <GenericTool
+                key={nestedPart.toolCallId ?? index}
+                icon={meta.icon}
+                title={meta.title(nestedPart)}
+                subtitle={meta.subtitle?.(nestedPart)}
+                isPending={isPending}
+                isError={isError}
+              />
+            );
+          })}
+        </Collapse>
+      )}
+    </div>
+  );
+}
+
+/** A native subagent's card with a running clock. */
+export const NativeSubagentCard = memo(function NativeSubagentCard({ card, nestedTools, chatStatus }: { card: SubagentCardModel; nestedTools: readonly any[]; chatStatus?: string }) {
+  const now = useTick(isCardRunning(card));
+  const inheritedProvider = useInheritedProvider();
+  return (
+    <div className="subagent-card-slot">
+      <NativeSubagentCardView card={card} now={now} nestedTools={nestedTools} chatStatus={chatStatus} inheritedProvider={inheritedProvider} />
+    </div>
+  );
+});
+
 /** What the tool-registry row says for a call: used when a call has no card. */
 function RawSubagentRow({ part, chatStatus }: { part: any; chatStatus?: string }) {
   const meta = toolRegistry["tool-Subagent"]!;

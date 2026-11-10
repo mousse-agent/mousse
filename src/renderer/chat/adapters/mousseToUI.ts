@@ -165,10 +165,16 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
       const isTask = normalizeToolName(activity.toolName) === 'Task'
       return {
         type: isTask ? 'tool-Task' : 'tool-Agent',
-        input: compact({ subagent_type: activity.agentType, description: activity.description }),
+        // The task id and the background flag let the card follow a background agent to its end.
+        input: compact({
+          subagent_type: activity.agentType,
+          description: activity.description,
+          run_in_background: activity.background ? true : undefined,
+          task_id: activity.nativeId,
+        }),
         output: running
           ? undefined
-          : withInterruption(activity, compact({ totalDurationMs: activity.durationMs, summary: activity.summary })),
+          : withInterruption(activity, compact({ totalDurationMs: activity.durationMs, summary: activity.summary, startedAt: activity.startedAt, endedAt: activity.endedAt })),
       }
     }
     default:
@@ -529,8 +535,11 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
     const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
+    // The same for the message a turn the provider started itself opens with: the background tasks it reports.
+    const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined
+    if (backgroundNotice) base.metadata = { ...(base.metadata as object | undefined), backgroundNotice }
     if (msg.role === 'assistant' && msg.scheduledRun) base.metadata = { ...(base.metadata as object | undefined), scheduledRun: msg.scheduledRun }
-    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0 && !subagentNotice) {
+    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,
