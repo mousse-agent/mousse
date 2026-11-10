@@ -630,6 +630,24 @@ export class ThreadDataStore extends EventEmitter {
     this.projectListCache.clear()
   }
 
+  /**
+   * Adds a thread this store just created to the warm lists of its group, so the listing that follows a
+   * create (every client is sent the whole list) is rebuilt from memory instead of reading every thread's
+   * `meta.json` and lifecycle record again. A group that is not cached yet is read from disk as before.
+   */
+  private addToListCaches(thread: Thread): void {
+    this.listCache = null
+    if (!this.isLifecycleVisible(thread.id)) return
+    const withThread = (threads: Thread[]): Thread[] =>
+      this.sortThreads([...threads.filter((entry) => entry.id !== thread.id), { ...thread }])
+    if (!thread.projectId) {
+      if (this.standaloneListCache) this.standaloneListCache = withThread(this.standaloneListCache)
+      return
+    }
+    const cached = this.projectListCache.get(thread.projectId)
+    if (cached) this.projectListCache.set(thread.projectId, withThread(cached))
+  }
+
   /** Replace one thread in the warm cache (avoids full rescan after meta updates). */
   private patchListCache(thread: Thread): void {
     if (this.listCache) {
@@ -697,7 +715,6 @@ export class ThreadDataStore extends EventEmitter {
   ): Thread {
     const id = opts?.id ?? uuidv4()
     if (opts?.id && this.getThread(opts.id)) throw new Error(`Thread ${opts.id} already exists`)
-    this.invalidateListCache()
     const now = new Date().toISOString()
     const meta: ThreadMeta = {
       id,
@@ -705,7 +722,7 @@ export class ThreadDataStore extends EventEmitter {
       projectId,
       createdAt: now,
       updatedAt: now,
-      order: this.nextThreadOrder(projectId, projectPath)
+      order: this.nextThreadOrder(projectId)
     }
     if (opts?.started === true) meta.startedAt = now
     // `false` is kept: a thread that chose its project's folder never gets a worktree (`WorkspaceResolver`).
@@ -727,26 +744,33 @@ export class ThreadDataStore extends EventEmitter {
       meta.worktreeBaseBranch = opts.worktreeStart.branch
     }
 
-    const threadDir = this.resolveThreadDir(meta, projectPath)
-    // An owner without a lifecycle record yet (an older thread) is registered first; the child's
-    // registration requires an active owner.
-    if (opts?.ownerThreadId) this.getThreadDir(opts.ownerThreadId)
-    this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true })
-    this.ensureThreadDir(threadDir)
+    try {
+      const threadDir = this.resolveThreadDir(meta, projectPath)
+      // An owner without a lifecycle record yet (an older thread) is registered first; the child's
+      // registration requires an active owner.
+      if (opts?.ownerThreadId) this.getThreadDir(opts.ownerThreadId)
+      this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true })
+      this.ensureThreadDir(threadDir)
 
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
-    if (this.sqliteStoreEnabled()) {
-      this.threadDb().client.callSync('create', threadDir)
-    } else {
-      this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
-      this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
-      this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
-    }
-    mkdirSync(join(threadDir, 'terminals'), { recursive: true })
+      this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
+      if (this.sqliteStoreEnabled()) {
+        this.threadDb().client.callSync('create', threadDir)
+      } else {
+        this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
+        this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
+        this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
+      }
+      mkdirSync(join(threadDir, 'terminals'), { recursive: true })
 
-    if (!projectId) {
-      this.addToStandaloneIndex(meta)
+      if (!projectId) {
+        this.addToStandaloneIndex(meta)
+      }
+    } catch (error) {
+      // A half-made thread may be on disk: the next listing reads it from there.
+      this.invalidateListCache()
+      throw error
     }
+    this.addToListCaches(meta)
 
     // This is the authoritative creation notification for every producer:
     // GUI/CLI protocol calls, remote sends, and scheduled jobs.
@@ -856,7 +880,7 @@ export class ThreadDataStore extends EventEmitter {
       throw new Error('Execution thread identity has unresolved legacy trash ownership')
     }
     const now = new Date().toISOString()
-    const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
+    const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId) }
     if (opts?.localOnly === true) initial.localOnly = true
     if (opts?.botOwned === true) initial.botOwned = true
     if (opts?.automationManager === true) initial.automationManager = true
@@ -1815,10 +1839,9 @@ export class ThreadDataStore extends EventEmitter {
     return threads.sort((a, b) => a.order - b.order)
   }
 
-  private nextThreadOrder(projectId?: string, projectPath?: string): number {
-    const threads = projectId
-      ? this.scanProjectThreads(projectPath ?? this.projectManager.getProject(projectId)?.path ?? '')
-      : this.readStandaloneIndex()
+  private nextThreadOrder(projectId?: string): number {
+    // The group's warm list, read from disk only when it is not cached.
+    const threads = this.listThreads(projectId)
     // A group that also holds rows of other computers starts below their first.
     const floor = this.remoteFloor?.(projectId)
     return threads.reduce((min, thread) => Math.min(min, thread.order), Math.min(0, floor ?? 0)) - 1

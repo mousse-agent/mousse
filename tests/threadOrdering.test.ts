@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -174,6 +174,56 @@ describe('persisted sidebar ordering', () => {
         secondProject.id,
         firstProject.id
       ])
+    })
+  })
+
+  it('lists a new thread first without reading its group from disk again', () => {
+    withTemporaryMousseHome((root) => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const project = projects.openProject(join(root, 'proj'))
+      const older = threads.createThread('Older', project.id)
+      const loose = threads.createThread('Loose')
+      threads.listAllThreads()
+
+      const store = threads as unknown as { scanProjectThreads: () => unknown; readStandaloneIndex: () => unknown }
+      const scans = vi.spyOn(store, 'scanProjectThreads')
+      const indexReads = vi.spyOn(store, 'readStandaloneIndex')
+      const newer = threads.createThread('Newer', project.id)
+      const newerLoose = threads.createThread('Newer loose')
+      const listed = threads.listAllThreads()
+
+      expect(scans).not.toHaveBeenCalled()
+      expect(indexReads).not.toHaveBeenCalled()
+      expect(listed.map((thread) => thread.id)).toEqual([newerLoose.id, loose.id, newer.id, older.id])
+      expect(newer.order).toBeLessThan(older.order)
+      expect(threads.getThread(newer.id)?.name).toBe('Newer')
+
+      // The same lists come back from disk.
+      const fresh = new ThreadDataStore(projects)
+      expect(fresh.listAllThreads().map((thread) => [thread.id, thread.order])).toEqual(
+        listed.map((thread) => [thread.id, thread.order])
+      )
+    })
+  })
+
+  it('reads the lists from disk again after a create that failed part way', () => {
+    withTemporaryMousseHome(() => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      threads.createThread('First')
+      threads.listAllThreads()
+      const store = threads as unknown as { addToStandaloneIndex: () => void; readStandaloneIndex: () => unknown }
+      vi.spyOn(store, 'addToStandaloneIndex').mockImplementationOnce(() => {
+        throw new Error('disk full')
+      })
+      expect(() => threads.createThread('Broken')).toThrow('disk full')
+
+      const indexReads = vi.spyOn(store, 'readStandaloneIndex')
+      threads.listAllThreads()
+      expect(indexReads).toHaveBeenCalled()
     })
   })
 })
