@@ -14,6 +14,7 @@ import { SerializedAutosave, normalizeWorkspacePath, reconcileExternalContent } 
 import { isAssetView, isBinaryContent, languageForPath, viewKindForPath, type FileViewKind } from '../utils/fileEditor'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { MarkdownDocumentEditor } from './editors/MarkdownDocumentEditor'
+import type { MarkdownEditorViewMode } from './editors/markdownEditorState'
 import { FileTree, FileTreeToolbar } from './FileTree'
 import { FileTreeMemories } from './fileTreeState'
 import { FilesPathBar, type FilesPlaceItem } from './FilesPathBar'
@@ -147,6 +148,8 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const [files, setFiles] = useState<Record<string, OpenFileState>>({})
   const [preview, setPreview] = useState<Record<string, boolean>>({})
   const [positions, setPositions] = useState<Record<string, { line: number; column: number }>>({})
+  /** Source or preview, per Markdown file; it outlives the editor, which unmounts while the panel is hidden. */
+  const [markdownViews, setMarkdownViews] = useState<Record<string, MarkdownEditorViewMode>>({})
   const [refreshKey, setRefreshKey] = useState(0)
   const [availableLanguageIds, setAvailableLanguageIds] = useState<Set<string>>(() => new Set(['plaintext']))
   const filesRef = useRef(files)
@@ -464,6 +467,13 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
 
   // The editor keeps a file's model when it unmounts; a closed file's model goes with it.
   useEffect(() => {
+    setMarkdownViews((views) => {
+      const closed = Object.keys(views).filter((key) => !files[key])
+      if (closed.length === 0) return views
+      const next = { ...views }
+      for (const key of closed) delete next[key]
+      return next
+    })
     const monaco = monacoRef.current
     if (!monaco) return
     if (selectedKey && editorRef.current?.getModel()) editorModels.current.add(selectedKey)
@@ -522,13 +532,19 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     return true
   }, [closeFileInStore, fileKey, flushPath, replaceFiles, scope])
 
-  /** Puts focus on the file's row in the tree, or on the first row when that one is not shown. */
+  /**
+   * Puts focus on the file's row in the tree, or on the first drawn row when the tree does not show it. The tree draws
+   * only the rows on screen, so a row scrolled away is brought back first.
+   */
   const focusTreeRow = useCallback((path: string) => {
     const panel = panelRef.current
     const treePath = treePathOf(path)
     const rows = [...(panel?.querySelectorAll<HTMLElement>('.file-tree-row') ?? [])]
-    ;(rows.find((element) => element.dataset.path === treePath) ?? rows[0])?.focus()
-  }, [treePathOf])
+    const drawn = rows.find((element) => element.dataset.path === treePath)
+    if (drawn) { drawn.focus(); return }
+    if (treePath && treeMemories.current.get(`${navKey}|${browseRoot}`).requestFocus(treePath)) return
+    rows[0]?.focus()
+  }, [browseRoot, navKey, treePathOf])
 
   // With other files open the strip moves focus to the next tab. Closing the last one removes the strip and
   // the preview, so focus goes to the closed file's row in the tree.
@@ -622,6 +638,11 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       instance.setPosition({ lineNumber: Math.max(1, pending.line), column: Math.max(1, pending.column) })
       instance.revealLineInCenter(Math.max(1, pending.line)); instance.focus(); pendingPosition.current = null
     }
+  }
+
+  const onMarkdownMount: OnMount = (_instance, monaco) => {
+    monacoRef.current = monaco
+    if (selectedKeyRef.current) editorModels.current.add(selectedKeyRef.current)
   }
 
   // A saved file says nothing; only a state that needs attention or is in progress shows.
@@ -748,7 +769,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
           : selected && selected.kind === 'image' && selected.assetUrl ? <div className="files-asset-preview"><img src={selected.assetUrl} alt={selected.path} /></div>
           : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview"><video src={selected.assetUrl} controls /></div>
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
-          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selected.path} value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} defaultViewMode="preview" aria-label={selected.path} />
+          : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selectedKey ?? selected.path} keepModel value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} onEditorMount={onMarkdownMount} viewMode={(selectedKey && markdownViews[selectedKey]) || 'preview'} onViewModeChange={(mode) => selectedKey && setMarkdownViews((views) => ({ ...views, [selectedKey]: mode }))} aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
           : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} keepCurrentModel beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
           : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}

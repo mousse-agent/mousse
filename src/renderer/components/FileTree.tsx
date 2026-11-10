@@ -224,7 +224,30 @@ export function FileTree({
     scrollRestored.current = true
     scroller.scrollTop = memory.scrollTop
   }, [memory, rows.length])
-  const { start, end } = useFixedRowWindow(scrollRef, listRef, rows.length, FILE_TREE_ROW_HEIGHT)
+  const { start, end, sync } = useFixedRowWindow(scrollRef, listRef, rows.length, FILE_TREE_ROW_HEIGHT)
+
+  // A row asked for focus (the preview of its file closed) may be outside the drawn rows: scroll it into them,
+  // then focus it once it is drawn.
+  useLayoutEffect(() => {
+    const path = memory.focusRequest
+    const scroller = scrollRef.current
+    if (path === null || !scroller) return
+    const drawn = [...scroller.querySelectorAll<HTMLElement>('.file-tree-row')].find((row) => row.dataset.path === path)
+    if (drawn) {
+      memory.focusRequest = null
+      drawn.focus()
+      return
+    }
+    const index = memory.indexOf(path)
+    // Gone from the tree, or in the drawn rows yet not found: give up rather than retry on every render.
+    if (index < 0 || (index >= start && index < end)) {
+      memory.focusRequest = null
+      return
+    }
+    const top = (listRef.current?.offsetTop ?? 0) + index * FILE_TREE_ROW_HEIGHT
+    scroller.scrollTop = Math.max(0, top - Math.max(0, scroller.clientHeight - FILE_TREE_ROW_HEIGHT) / 2)
+    sync()
+  })
 
   const toggleExpand = useCallback((path: string) => memory.toggle(path, list), [list, memory])
 

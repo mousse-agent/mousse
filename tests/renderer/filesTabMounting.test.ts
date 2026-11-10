@@ -12,7 +12,13 @@ import { rowWindow, UNMEASURED_ROWS } from '../../src/renderer/lib/virtualRows'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock('@monaco-editor/react', () => ({ default: () => createElement('div', { className: 'editor-stub' }) }))
-vi.mock('../../src/renderer/components/editors/MarkdownDocumentEditor', () => ({ MarkdownDocumentEditor: () => null }))
+// The Markdown editor shows what the panel hands it, with its Source and Preview switch.
+vi.mock('../../src/renderer/components/editors/MarkdownDocumentEditor', () => ({
+  MarkdownDocumentEditor: ({ path, keepModel, viewMode, onViewModeChange }: {
+    path: string; keepModel?: boolean; viewMode?: string; onViewModeChange?: (mode: 'source' | 'preview') => void
+  }) => createElement('div', { className: 'markdown-stub', 'data-path': path, 'data-keep': String(Boolean(keepModel)), 'data-view': viewMode },
+    createElement('button', { type: 'button', className: 'markdown-source', onClick: () => onViewModeChange?.('source') }, 'Source'))
+}))
 // The other tabs: each says it is mounted. Terminals and browsers are not what these tests read.
 vi.mock('../../src/renderer/components/ProjectTerminalPanel', () => ({ ProjectTerminalPanel: () => createElement('div', { className: 'terminal-stub' }) }))
 vi.mock('../../src/renderer/components/BrowserPanel', () => ({ BrowserPanel: () => createElement('div', { className: 'browser-stub' }) }))
@@ -187,6 +193,44 @@ describe('Files tab while hidden', () => {
     await flush()
     await scrollTo(0)
     expect(rowNames().slice(0, 2)).toEqual(['dir-000', 'inner.ts'])
+  })
+
+  it('focuses the row of a closed preview after bringing it back into the drawn rows', async () => {
+    await renderPanel(true)
+    sizeViewport(10)
+    await scrollTo(500 * FILE_TREE_ROW_HEIGHT)
+    await act(async () => host.querySelector<HTMLButtonElement>('.file-tree-row[data-path="file-500"]')!.click())
+    await flush()
+    await scrollTo(0)
+    expect(host.querySelector('.file-tree-row[data-path="file-500"]')).toBeNull()
+
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close preview"]')!.click())
+    await flush()
+    expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe('file-500')
+    const top = scroller().scrollTop
+    expect(top).toBeLessThanOrEqual(500 * FILE_TREE_ROW_HEIGHT)
+    expect(top + 10 * FILE_TREE_ROW_HEIGHT).toBeGreaterThan(500 * FILE_TREE_ROW_HEIGHT)
+  })
+
+  it('brings a Markdown file back in the view it was left in, on its own kept model', async () => {
+    listDir.mockImplementation(async (dir: string) => (dir === '' ? [{ name: 'notes.md', path: 'notes.md', kind: 'file' } as FileEntry] : []))
+    await renderPanel(true)
+    await act(async () => host.querySelector<HTMLButtonElement>('.file-tree-row[data-path="notes.md"]')!.click())
+    await flush()
+    const markdown = () => host.querySelector<HTMLElement>('.markdown-stub')
+    expect(markdown()?.dataset.view).toBe('preview')
+    // Named by the workspace, as other files are, so another thread's notes.md keeps its own model.
+    expect(markdown()?.dataset.path).toBe(`${scope()} notes.md`)
+    expect(markdown()?.dataset.keep).toBe('true')
+    await act(async () => host.querySelector<HTMLButtonElement>('.markdown-source')!.click())
+    expect(markdown()?.dataset.view).toBe('source')
+
+    act(() => useAppStore.setState({ mainAreaOpen: false }))
+    await flush()
+    expect(markdown()).toBeNull()
+    act(() => useAppStore.setState({ mainAreaOpen: true }))
+    await flush()
+    expect(markdown()?.dataset.view).toBe('source')
   })
 
   it('does not mount the Changes tab while the panel is closed', async () => {

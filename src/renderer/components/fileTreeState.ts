@@ -27,6 +27,8 @@ export class FileTreeMemory {
   readonly folders = new Map<string, FolderListing>()
   readonly expanded = new Set<string>()
   scrollTop = 0
+  /** A row the tree should scroll into its drawn rows and focus (a tree path), until it has. */
+  focusRequest: string | null = null
   private version = 0
   private readonly listeners = new Set<() => void>()
   private readonly reads = new Map<string, number>()
@@ -79,6 +81,19 @@ export class FileTreeMemory {
   refresh(list: ListFolder): Promise<void> {
     const open = [...this.expanded].filter((path) => this.folders.get(path)?.entries)
     return Promise.all([this.load('', list, true), ...open.map((path) => this.load(path, list, true))]).then(() => undefined)
+  }
+
+  /** The row's place in the flattened tree, or -1 when it is not shown (not listed, or in a closed folder). */
+  indexOf(path: string): number {
+    return this.rows().findIndex((row) => row.kind === 'entry' && row.entry.path === path)
+  }
+
+  /** Asks the tree to bring a shown row on screen and focus it. False when the row is not in the tree. */
+  requestFocus(path: string): boolean {
+    if (this.indexOf(path) < 0) return false
+    this.focusRequest = path
+    this.changed()
+    return true
   }
 
   toggle(path: string, list: ListFolder) {

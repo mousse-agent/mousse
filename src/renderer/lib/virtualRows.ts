@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState, type RefObject } from 'react'
+import { useCallback, useLayoutEffect, useState, type RefObject } from 'react'
 
 /** Rows drawn before the list has a measured height, so a list never opens blank. */
 export const UNMEASURED_ROWS = 40
@@ -8,6 +8,11 @@ export interface RowWindow {
   start: number
   /** One past the last row drawn. */
   end: number
+}
+
+export interface TrackedRowWindow extends RowWindow {
+  /** Reads the scroll offset now, for an offset set by code (no scroll event has arrived yet). */
+  sync: () => void
 }
 
 /**
@@ -31,17 +36,20 @@ export function useFixedRowWindow(
   count: number,
   rowHeight: number,
   overscan = 8
-): RowWindow {
+): TrackedRowWindow {
   const [view, setView] = useState({ first: 0, rows: 0 })
+  const sync = useCallback(() => {
+    const scroller = scrollRef.current
+    if (!scroller) return
+    const top = Math.max(0, scroller.scrollTop - (listRef.current?.offsetTop ?? 0))
+    const first = Math.floor(top / rowHeight)
+    const rows = Math.ceil(scroller.clientHeight / rowHeight)
+    setView((current) => (current.first === first && current.rows === rows ? current : { first, rows }))
+  }, [listRef, rowHeight, scrollRef])
   useLayoutEffect(() => {
     const scroller = scrollRef.current
     if (!scroller) return
-    const measure = () => {
-      const top = Math.max(0, scroller.scrollTop - (listRef.current?.offsetTop ?? 0))
-      const first = Math.floor(top / rowHeight)
-      const rows = Math.ceil(scroller.clientHeight / rowHeight)
-      setView((current) => (current.first === first && current.rows === rows ? current : { first, rows }))
-    }
+    const measure = sync
     measure()
     scroller.addEventListener('scroll', measure, { passive: true })
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
@@ -50,6 +58,6 @@ export function useFixedRowWindow(
       scroller.removeEventListener('scroll', measure)
       observer?.disconnect()
     }
-  }, [listRef, rowHeight, scrollRef])
-  return rowWindow(view.first, view.rows, count, overscan)
+  }, [scrollRef, sync])
+  return { ...rowWindow(view.first, view.rows, count, overscan), sync }
 }
