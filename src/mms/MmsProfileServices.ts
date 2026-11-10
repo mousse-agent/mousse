@@ -1045,7 +1045,7 @@ export class MmsProfileServices {
     this.platform.onDispose(() => this.chatNetwork.close())
     this.threadDeletes = new ThreadDeleter({
       store: this.threads.lifecycleStore,
-      purge: { preview: (taskId) => this.lifecycle.cleanup.preview(taskId), purge: (input) => this.lifecycle.cleanup.purge(input) },
+      purge: { preview: (taskId, options) => this.lifecycle.cleanup.preview(taskId, options), purge: (input) => this.lifecycle.cleanup.purge(input) },
       getThread: (threadId) => this.threads.getThread(threadId),
       listThreads: () => this.threads.listAllThreads(),
       trash: (threadId, operationId, expectedGeneration) => this.trashThread(threadId, operationId, expectedGeneration),
@@ -1121,6 +1121,8 @@ export class MmsProfileServices {
       },
       quiesceDisk: () => { this.threads.quiesceAllThreadStorage(); return this.storageUsage.pause() },
       beforePurgeRemoval: async (record) => {
+        // A delete that keeps the thread's work keeps its snapshots too: nothing is released, and no store is collected.
+        if (record.purge?.keptWork) return
         // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
         // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
         // tries again instead of leaving the refs or the store behind for good.

@@ -1750,7 +1750,8 @@ export function registerGuiIpc(
     void guiMms.request<{ threads: unknown[] }>('threads.list').then((res) => broadcast('threads:updated', res.threads), () => undefined)
   }
 
-  // Deletes an archived thread for good. The window asked first, so unpublished work goes with it.
+  // Deletes an archived thread for good; its worktrees, branches and Git refs stay. The window asked first, so scratch
+  // files only the thread had go with it.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',

@@ -52,6 +52,67 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
 })
+/** What a worktree thread's delete must leave: the folder with its files as they are, its branch, and Mousse's refs. */
+function expectWorkKept(f: ReturnType<typeof fixture>) {
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')
+  expect(readFileSync(join(f.worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+  expect(git(f.worktree, ['status', '--porcelain']).split(/\r?\n/).sort()).toEqual([' M a.txt', '?? notes.txt'])
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/heads/mousse/', 'refs/mousse/threads/']).split(/\r?\n/).sort()).toEqual(['refs/heads/mousse/thread/task/main', 'refs/mousse/threads/task/main'])
+  expect(git(f.repo, ['worktree', 'list', '--porcelain'])).toContain(`branch refs/heads/mousse/thread/task/main`)
+}
+const changeWorktree = (f: ReturnType<typeof fixture>) => { writeFileSync(join(f.worktree, 'a.txt'), 'changed, not committed\n'); writeFileSync(join(f.worktree, 'notes.txt'), 'only here\n') }
+
+test('a delete that keeps the work removes only the thread: its worktree, uncommitted files, branch and refs stay', async () => {
+  const f = fixture({ git: true }); changeWorktree(f)
+  const refsBefore = git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)'])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task', { keepWork: true })
+  // Nothing of the worktree or its refs is listed, so nothing about them needs a discard or can block the delete.
+  expect(preview.blockers).toEqual([])
+  expect(preview.items.filter((item) => item.kind === 'worktree' || item.kind === 'ref')).toEqual([])
+  expect(preview.items.some((item) => item.discardRequired)).toBe(false)
+  const record = await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, keepWork: true })
+  expect(record.state).toBe('purged'); expect(record.purge?.keptWork).toBe(true)
+  expect(existsSync(record.location)).toBe(false)
+  expectWorkKept(f)
+  // Not one ref was written or deleted: the preview pinned nothing either.
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)'])).toBe(refsBefore)
+  // The start's recovery finds nothing left to do.
+  await f.coordinator.recoverAll()
+  expectWorkKept(f)
+})
+
+test('a delete preview made to keep the work cannot be used for a purge that removes it', async () => {
+  const f = fixture({ git: true })
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task', { keepWork: true })
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_preview_stale' })
+  expect(existsSync(f.worktree)).toBe(true)
+})
+
+test('a delete an older version began and was cut short keeps the worktree when Delete resumes it', async () => {
+  const f = fixture({ git: true }); changeWorktree(f)
+  let stop = true
+  const coordinator = new ResourceLifecycleCoordinator(f.store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {},
+    beforePurgeRemoval: () => { if (stop) throw new Error('the process ended') } })
+  await coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  // As an older version did it: the worktree and its refs are in the ledger, to be removed.
+  const preview = await coordinator.cleanup.preview('task')
+  expect(preview.items.some((item) => item.kind === 'worktree')).toBe(true)
+  await expect(coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).rejects.toThrow()
+  expect(f.store.require('task').state).toBe('purge-started')
+  stop = false
+  // Delete again resumes it, as ThreadDeleter does.
+  await coordinator.purge({ taskId: 'task', operationId: 'purge', keepWork: true })
+  const record = f.store.require('task')
+  expect(record.state).toBe('purged'); expect(record.purge?.keptWork).toBe(true)
+  expect(record.purge?.items.filter((item) => item.kind === 'worktree' || item.kind === 'ref').every((item) => item.status === 'retained')).toBe(true)
+  expect(existsSync(record.location)).toBe(false)
+  expect(readFileSync(join(f.worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+  expect(git(f.worktree, ['status', '--porcelain'])).toContain('?? notes.txt')
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/heads/mousse/'])).toBe('refs/heads/mousse/thread/task/main')
+})
+
 test('a purge releases the files the thread’s aborts kept, asks first while they may be the only copy, and leaves another thread’s', async () => {
   const f = fixture({ git: true })
   const keep = async (operationId: string, at: number) => {

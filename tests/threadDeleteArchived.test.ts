@@ -6,6 +6,8 @@ import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import { ERROR_INFO_CAPABILITY } from '../src/shared/errors'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
+import { fixtureGit as git } from './support/fixtureGit'
+import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 
 /** Puts a file only this thread has in its scratch folder: unpublished work a purge may discard only with consent. */
 function soleCopy(services: MmsProfileServices, threadId: string): string {
@@ -16,6 +18,31 @@ function soleCopy(services: MmsProfileServices, threadId: string): string {
   return path
 }
 const subagentOf = (parentThreadId: string, rootThreadId = parentThreadId) => ({ parentThreadId, rootThreadId, relationship: 'subagent' as const })
+
+/**
+ * Gives `threadId` a worktree of a fresh repository, as a thread's first editing turn makes it, with a changed tracked
+ * file and a new one nobody committed: work that exists only in that folder.
+ */
+function worktreeWithChanges(services: MmsProfileServices, home: string, root: string, threadId: string) {
+  const repo = join(root, `repo-${threadId.slice(0, 8)}`)
+  mkdirSync(repo); git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
+  writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'base'])
+  const repositoryId = resolveRepositoryIdentity(repo).key
+  const worktree = join(home, 'repositories', repositoryId, 'worktrees', 'threads', threadId, 'main')
+  mkdirSync(join(worktree, '..'), { recursive: true })
+  const branch = `mousse/thread/${threadId}/main`, retainedRef = `refs/mousse/threads/${threadId}/main`
+  git(repo, ['worktree', 'add', '-b', branch, worktree])
+  const sha = git(repo, ['rev-parse', 'HEAD']); git(repo, ['update-ref', retainedRef, sha])
+  const location = services.threads.getThreadDir(threadId)
+  writeFileSync(join(location, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId, worktreePath: worktree, branch, repositoryId, retainedRef, baseSha: sha, headSha: sha, integrationTarget: { baseSha: sha, checkoutPath: repo }, lifecycle: 'ready' }))
+  mkdirSync(join(location, 'journal'), { recursive: true })
+  writeFileSync(join(location, 'journal', '0000000000000001.json'), JSON.stringify({ schemaVersion: 1, sequence: 1, operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } }))
+  writeFileSync(join(location, 'journal', '0000000000000002.json'), JSON.stringify({ schemaVersion: 1, sequence: 2, operationId: 'provision', operationType: 'workspace-provision', state: 'completed' }))
+  writeFileSync(join(worktree, 'a.txt'), 'changed, not committed\n')
+  writeFileSync(join(worktree, 'notes.txt'), 'only here\n')
+  const refs = () => git(repo, ['for-each-ref', '--format=%(refname) %(objectname)'])
+  return { repo, worktree, branch, retainedRef, refs, before: refs() }
+}
 
 /** Archive first, then delete: only an archived thread is deleted, for good, with its subagent threads. */
 describe('threads.delete', () => {
@@ -55,6 +82,53 @@ describe('threads.delete', () => {
       // Nothing waits in a trash: the inventory lists no thread that could be restored.
       const inventory = await f.rpc.request<{ lifecycles: Array<{ taskId: string; state: string }> }>('threads.inventory', {})
       expect(inventory.lifecycles.filter((record) => record.state === 'trashed')).toEqual([])
+    } finally { await f.close() }
+  })
+
+  it('keeps the worktrees of the thread and its subagent threads: their folders, branches, uncommitted changes and refs stay', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const parent = f.services.threads.createThread('Archived with a worktree')
+      const child = f.services.threads.createThread('Its subagent, with its own worktree', undefined, undefined, { lineage: subagentOf(parent.id) })
+      const work = [parent, child].map((thread) => worktreeWithChanges(f.services, f.home, f.root, thread.id))
+      const folders = [parent, child].map((thread) => f.services.threads.getThreadDir(thread.id))
+      await f.rpc.request('threads.settle', { threadId: parent.id, settled: true })
+      // As the app's Delete sends it, after its confirmation.
+      const reply = await f.rpc.request<{ lifecycle: { state: string; purge?: { keptWork?: boolean } } }>('threads.delete', { threadId: parent.id, discard: true })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(reply.lifecycle.purge?.keptWork).toBe(true)
+      // The threads are gone.
+      for (const thread of [parent, child]) expect(f.services.threads.getThread(thread.id), thread.name).toBeUndefined()
+      for (const folder of folders) expect(existsSync(folder), folder).toBe(false)
+      // Their work is where it was.
+      for (const { repo, worktree, branch, retainedRef, refs, before } of work) {
+        expect(readFileSync(join(worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')
+        expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+        expect(git(worktree, ['status', '--porcelain']).split(/\r?\n/).sort()).toEqual([' M a.txt', '?? notes.txt'])
+        expect(git(worktree, ['branch', '--show-current'])).toBe(branch)
+        expect(git(repo, ['worktree', 'list', '--porcelain'])).toContain(`branch refs/heads/${branch}`)
+        expect(git(repo, ['for-each-ref', '--format=%(refname)', retainedRef])).toBe(retainedRef)
+        // Not one ref was written, moved or deleted.
+        expect(refs()).toBe(before)
+      }
+      // The next start does not take them either.
+      await f.services.lifecycle.recoverAll()
+      expect(await f.services.finishCutShortDeletes()).toEqual([])
+      for (const { worktree } of work) expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+    } finally { await f.close() }
+  })
+
+  it('deletes a thread for good from the CLI too, without asking to discard the work in its worktree, which stays', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const thread = f.services.threads.createThread('Archived, deleted from a script')
+      const { worktree, refs, before } = worktreeWithChanges(f.services, f.home, f.root, thread.id)
+      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      await cli.request('threads.delete', { threadId: thread.id })
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
+      expect(readFileSync(join(worktree, 'notes.txt'), 'utf8')).toBe('only here\n')
+      expect(refs()).toBe(before)
     } finally { await f.close() }
   })
 

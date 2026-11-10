@@ -187,16 +187,16 @@ describe('the Archived section', () => {
 })
 
 describe('the words and the loop', () => {
-  it('names one thread, or how many, and says the subagent threads go too', () => {
+  it('names one thread, or how many, and says the subagent threads go too and the worktrees stay', () => {
     expect(deleteDialogCopy({ kind: 'one', thread: { id: 'a', name: 'Fix login' } })).toEqual({
       title: 'Delete “Fix login”?',
-      body: 'Deletes it and its subagent threads for good, with their worktrees and unpublished changes. This can’t be undone.',
+      body: 'Deletes it and its subagent threads for good. Worktrees stay.',
       confirm: 'Delete'
     })
     const all = deleteDialogCopy(clearAllRequest([{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C', node: LAPTOP }]))
     expect(all.title).toBe('Delete 2 archived threads?')
     expect(all.confirm).toBe('Delete 2')
-    expect(all.body).toContain('Threads on other computers stay.')
+    expect(all.body).toBe('Deletes them and their subagent threads for good. Worktrees stay. Threads on other computers stay.')
   })
 
   it('goes on after a failure and says which thread stayed', async () => {

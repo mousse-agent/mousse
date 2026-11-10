@@ -171,6 +171,16 @@ export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   discardAuthorized: boolean
   /** The thread's expiry deleted it (`Thread.expiresAt`), not a person: it is never listed in Recently deleted. */
   expired?: true
+  /**
+   * A delete that kept the thread's work (`ResourcePurgeService.purge`'s `keepWork`): its worktrees, branches and Git refs
+   * (`keptOnDelete`) stay where they are, and its snapshots are not released.
+   */
+  keptWork?: true
+}
+
+/** What deleting a thread leaves in place: its worktrees (with their branches and uncommitted files) and its Git refs. */
+export function keptOnDelete(item: Pick<LifecyclePurgeItem, 'kind'>): boolean {
+  return item.kind === 'worktree' || item.kind === 'ref'
 }
 export interface TrashRetentionPolicy { schemaVersion: 1; graceDays: number; automaticPurge: boolean }
 export interface LifecycleAdmission {
