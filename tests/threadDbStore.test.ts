@@ -1,10 +1,12 @@
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { randomUUID } from 'crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
 import { ThreadDbEngine } from '../src/mms/data/threadDb/threadDbEngine'
+import { sqliteFilePath } from '../src/mms/data/sqliteFilePath'
 import { sameAsSkeleton, skeletonOf } from '../src/mms/data/threadDb/jsonSkeleton'
 import { legacyFingerprint } from '../src/mms/data/legacyThreadData'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
@@ -141,6 +143,31 @@ describe('ThreadDbStore', () => {
     rmSync(join(dir, 'thread.db'))
     expect(() => client.callSync('load', dir)).toThrow(/No thread database/)
     expect(existsSync(join(dir, 'thread.db'))).toBe(false)
+  })
+
+  it('creates, saves and reads a thread database whose path is past 260 characters', async () => {
+    // A thread folder as deep as one in a long Mousse home: the database's temporary name crosses 260 characters.
+    let deep = dir
+    while (deep.length < 240) deep = join(deep, randomUUID())
+    mkdirSync(deep, { recursive: true })
+    expect(join(deep, `thread.db.create-${process.pid}-${randomUUID()}`).length).toBeGreaterThan(260)
+    client.callSync('create', deep)
+    store.save(deep, { messages: [message('a', 'kept')] })
+    await client.close()
+    client = new ThreadDbClient({ script: null })
+    expect(new ThreadDbStore(client).load(deep).messages.map((m) => m.content)).toEqual(['kept'])
+  })
+})
+
+describe('sqliteFilePath', () => {
+  it('gives SQLite a \\\\?\\ path on Windows, and the path unchanged elsewhere', () => {
+    expect(sqliteFilePath('C:\\Users\\me\\.mousse\\thread.db', 'win32')).toBe('\\\\?\\C:\\Users\\me\\.mousse\\thread.db')
+    expect(sqliteFilePath('C:/Users/me/.mousse/./x/../thread.db', 'win32')).toBe('\\\\?\\C:\\Users\\me\\.mousse\\thread.db')
+    expect(sqliteFilePath('\\\\server\\share\\thread.db', 'win32')).toBe('\\\\?\\UNC\\server\\share\\thread.db')
+    expect(sqliteFilePath('\\\\?\\C:\\a\\thread.db', 'win32')).toBe('\\\\?\\C:\\a\\thread.db')
+    expect(sqliteFilePath(':memory:', 'win32')).toBe(':memory:')
+    expect(sqliteFilePath('/home/me/.mousse/thread.db', 'linux')).toBe('/home/me/.mousse/thread.db')
+    expect(sqliteFilePath('/Users/me/.mousse/thread.db', 'darwin')).toBe('/Users/me/.mousse/thread.db')
   })
 })
 

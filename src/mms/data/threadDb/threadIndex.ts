@@ -14,6 +14,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, renameSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { sqliteFilePath } from '../sqliteFilePath'
 import type { ThreadDbEngine } from './threadDbEngine'
 import { THREAD_DB_FILE } from './threadDbEngine'
 
@@ -102,7 +103,7 @@ export class ThreadIndex {
   }
 
   private prepare(path: string): DatabaseSync {
-    const db = new DatabaseSync(path)
+    const db = new DatabaseSync(sqliteFilePath(path))
     try {
       // A cache: losing the last writes on power loss costs a catch-up, never data.
       db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;')
