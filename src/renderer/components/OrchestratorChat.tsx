@@ -103,6 +103,8 @@ import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
 
 /** A steer whose request got no answer: it may have reached the reply, so it is not sent again. */
 export const STEER_UNCONFIRMED = 'The steer was not confirmed. Checking whether it reached the reply…'
+/** The running turn could not take the steer: it was queued at the end instead. */
+export const STEER_QUEUED = 'The reply could not take that steer, so it was queued instead.'
 /** That steer did not arrive: its text is back in the composer. */
 export const STEER_NOT_ARRIVED = 'The steer did not reach the reply, so it is back in the composer.'
 
@@ -1234,7 +1236,7 @@ export function OrchestratorChat() {
       clearComposer(false)
       const steerThread = activeThreadId
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
-      let steered: boolean | 'uncertain'
+      let steered: boolean | 'queued' | 'uncertain'
       try {
         steered = await window.mousse.orchestrator.steer(trimmed, steerThread ?? undefined)
       } catch {
@@ -1262,6 +1264,12 @@ export function OrchestratorChat() {
             }
           })
         }
+        return
+      }
+      if (steered === 'queued') {
+        // Not steered: the running turn could not take it, so it waits at the end of the queue. Said, not hidden.
+        setSendError(STEER_QUEUED)
+        releaseComposerUrls()
         return
       }
       if (steered) {

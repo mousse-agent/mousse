@@ -34,6 +34,10 @@ function Chat({ hold = null }: { hold?: QueueHold | null }) {
     createElement(QueuedMessages, { queue: thread }))
 }
 
+beforeEach(async () => {
+  ;(await import('../../src/renderer/lib/steerKey')).forgetSteerKey()
+})
+
 beforeEach(() => {
   host = document.createElement('div')
   document.body.append(host)
@@ -397,6 +401,27 @@ describe('queued messages in the conversation', () => {
     // The turn was stopped before it read B: the daemon lists it pending, first.
     await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
     expect(rows().map((item) => item.dataset.queuedId)).toEqual(['b', 'a'])
+  })
+
+  it('offers no Send now on a steer another process takes, and says why', async () => {
+    await show([queued('a', 'one'), queued('s', 'steer elsewhere', { intent: 'steer' })])
+    const send = row('s').querySelector<HTMLButtonElement>('.queued-message-send')!
+    expect(send.disabled).toBe(true)
+    expect(send.title).toBe('Sent into the running reply')
+    expect(host.textContent).not.toContain('Sending now')
+  })
+
+  it('a second steer key press right after the first does not send the next queued message too', async () => {
+    await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    const row = rows().find((item) => item.dataset.queuedId === 'a')!
+    row.focus()
+    await key(row, { key: 'Enter', ctrlKey: true })
+    // Focus moved on to B; the same chord pressed again a moment later lands there.
+    const next = document.activeElement as HTMLElement
+    expect(next.dataset.queuedId).toBe('b')
+    await key(next, { key: 'Enter', ctrlKey: true })
+    expect(api.promoteToSteer).toHaveBeenCalledTimes(1)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'a')
   })
 
   it('puts a message back in the queue when Send now is refused', async () => {

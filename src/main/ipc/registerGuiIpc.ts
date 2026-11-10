@@ -1341,11 +1341,13 @@ export function registerGuiIpc(
   registerHandler('orchestrator:steer', async (_e, text: string, threadId?: string) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false
-    const res = await guiMms.request<{ ok: boolean }>('orchestrator.steer', {
+    const res = await guiMms.request<{ ok: boolean; steered?: boolean; queued?: boolean }>('orchestrator.steer', {
       threadId: id,
       text: String(text ?? ''),
       source: 'gui-steer'
     })
+    // Queued instead (the running turn could not take it): said apart, so the composer does not call it steered.
+    if (res.ok && res.steered === false && res.queued) return 'queued'
     return res.ok
   })
 

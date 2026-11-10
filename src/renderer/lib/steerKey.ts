@@ -33,3 +33,8 @@ export function markSteerKey(): void {
 export function steerKeyRecently(): boolean {
   return Date.now() - lastSteerKeyAt < STEER_KEY_HOLD_MS
 }
+
+/** Forgets the last steer by key: a test's fresh start. */
+export function forgetSteerKey(): void {
+  lastSteerKeyAt = Number.NEGATIVE_INFINITY
+}

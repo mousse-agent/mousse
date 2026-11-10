@@ -331,6 +331,33 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expect(w.shownUserMessages()).toEqual(['first'])
   })
 
+  it('Stop while the turn is still being set up stops a message sent now too: it waits first in the queue, nothing runs', async () => {
+    const w = world()
+    // The turn is held in its setup (the wait for its folders) until released.
+    let release!: () => void
+    const held = new Promise<'ready'>((resolve) => { release = () => resolve('ready') })
+    const folders = vi.spyOn(w.d.orch as unknown as { waitForThreadFolders: () => Promise<string> }, 'waitForThreadFolders').mockReturnValueOnce(held)
+    const first = w.send('first')
+    await waitFor(() => w.d.orch.getOrCreateSession(w.thread.id).turnAdmitted, 'turn admitted')
+    const a = (await w.send('A')).queueItem!
+    const c = (await w.send('C')).queueItem!
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    expect(w.pending()).toEqual(['C', 'A'])
+    // Stop lands while the turn is set up, then the setup ends.
+    await w.d.orch.stopThread(w.thread.id, 'user')
+    release()
+    await first.catch(() => undefined)
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    // As after a Stop of a running turn: the message sent now waits first, and nothing runs until the person acts.
+    expect(w.adapter.prompts).toEqual([])
+    expect(w.adapter.steers).toEqual([])
+    expect(w.d.orch.listQueue(w.thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'pending'], ['A', 'pending']])
+    expect(w.shownUserMessages().filter((text) => text === 'C')).toEqual([])
+    folders.mockRestore()
+    void a
+  })
+
   it('Steer once a stopped turn has ended sends the message now: it runs first, then the rest in order', async () => {
     const w = world()
     const { first, c } = await w.queuedBehindTurn()

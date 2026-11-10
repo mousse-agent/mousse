@@ -119,3 +119,19 @@ describe('a steer from the composer', () => {
     expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('Use the id')
   })
 })
+
+describe('a steer the running turn could not take', () => {
+  it('is said to be queued, not shown as steered, and is not sent again', async () => {
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    orchestrator.steer = vi.fn(async () => 'queued')
+    orchestrator.sendToThread = vi.fn(async () => ({ message: '', actions: [], queued: true }))
+    await mount()
+    await send('Use the id', { ctrlKey: true })
+    await settle()
+    expect(orchestrator.steer).toHaveBeenCalledTimes(1)
+    expect(orchestrator.sendToThread).not.toHaveBeenCalled()
+    const { STEER_QUEUED } = await import('../../src/renderer/components/OrchestratorChat')
+    expect(host.textContent).toContain(STEER_QUEUED)
+    expect(host.querySelector<HTMLTextAreaElement>('.composer-input')!.value).toBe('')
+  })
+})

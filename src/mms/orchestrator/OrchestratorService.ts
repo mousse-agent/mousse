@@ -7935,12 +7935,9 @@ export class OrchestratorService extends EventEmitter {
   /** The turn now runs: the messages sent now while it was set up join it, in the order they were sent. */
   private deliverSteersOnStart(session: ThreadSession): void {
     const ids = session.steerOnStart.splice(0)
-    // A Stop reached the turn while it was set up: nothing joins it. The messages are already first in the queue, in
-    // the order they were sent, and go as soon as the stopped turn has ended.
-    if (session.activeTurn?.abort.signal.aborted || session.abortRequested || session.stopping) {
-      if (ids.length) session.drainAfterSettle = true
-      return
-    }
+    // A Stop reached the turn while it was set up: nothing joins it, and nothing runs them after it, as after a Stop of
+    // a running turn. They wait first in the queue, in the order they were sent, until the person sends again.
+    if (session.activeTurn?.abort.signal.aborted || session.abortRequested || session.stopping) return
     for (const itemId of ids) {
       try {
         if (!session.queue.some((entry) => entry.id === itemId && entry.state === 'pending')) continue
@@ -9683,7 +9680,7 @@ export class OrchestratorService extends EventEmitter {
       try {
         if (this.promoteQueueItem(threadId, item.id).ok) return { steered: true, queued: false, item }
       } catch (error) {
-        console.warn('a steer could not join the running turn; it waits first in the queue', { threadId, error: error instanceof Error ? error.message : String(error) })
+        console.warn('a steer could not join the running turn; it is queued at the end, as a message sent with Enter is', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
       return { steered: false, queued: true, item }
     }
@@ -10344,16 +10341,17 @@ export class OrchestratorService extends EventEmitter {
       if (opts?.schedule && opts.runId && !requeued) this.reportScheduledOccurrence(session, opts.schedule, opts.runId, turnResponse)
       if (opts?.schedule) this.scheduledTurnThreads.delete(session.threadId)
       this.releaseSessionExecutionLease(session)
+      // Sent now while this turn was set up but it never ran: they are first in the queue. They go next when the
+      // turn ended on its own (it failed before it ran); after a Stop they wait for the person, as a stopped turn's do.
+      if (session.steerOnStart.length) {
+        if (!session.abortRequested && !session.stopping) session.drainAfterSettle = true
+        session.steerOnStart = []
+      }
       session.turnAdmitted = false
       session.admissionRunId = undefined
       session.abortRequested = false
       session.stopping = false
       session.sentAfterStop = []
-      // Sent now while this turn was set up but it never ran: they are first in the queue, and go next.
-      if (session.steerOnStart.length) {
-        session.steerOnStart = []
-        session.drainAfterSettle = true
-      }
       this.effectWorker?.notify()
       // Post-turn drains are deferred to here: while admission is held the drain would see a
       // running turn and skip, stranding queued messages.

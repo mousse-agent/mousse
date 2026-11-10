@@ -201,7 +201,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(session.steerOnStart).toEqual([])
   })
 
-  it('a Stop during setup keeps the order of messages sent now: they go first as sent, nothing joins the stopped turn', () => {
+  it('a Stop during setup keeps the order of messages sent now: they wait first as sent, nothing joins the stopped turn or runs after it', () => {
     const thread = store.createThread('Stop during setup')
     orch.bindThread(thread.id, [], undefined, [])
     const session = orch.getOrCreateSession(thread.id)
@@ -218,7 +218,8 @@ describe('OrchestratorService concurrent threads and queue', () => {
     session.activeTurn.abort.abort()
     ;(orch as unknown as { deliverSteersOnStart: (s: unknown) => void }).deliverSteersOnStart(session)
     expect(orch.listQueue(thread.id).map((item) => [item.content, item.state])).toEqual([['B', 'pending'], ['C', 'pending'], ['A', 'pending']])
-    expect(session.drainAfterSettle).toBe(true)
+    // As after a Stop of a running turn: nothing runs them until the person sends again.
+    expect(session.drainAfterSettle).toBe(false)
     expect(orch.getMessages(thread.id).filter((m) => m.role === 'user')).toEqual([])
   })
 
