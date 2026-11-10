@@ -832,6 +832,18 @@ export interface MessageModelSelection {
   name?: string
 }
 
+/**
+ * The person who wrote a message, queued item or answer when that is not the account's owner: a person
+ * on another account who reached this thread through a routed call. Set only by the daemon that receives
+ * the call, from the authenticated caller; a client never names it. Absent means the owner.
+ */
+export interface HumanAuthor {
+  user: import('./net/ids').UserId
+  /** The computer they sent it from. */
+  node?: import('./net/ids').NodeId
+  displayName: string
+}
+
 export interface ChatMessage {
   /** Durable completed-response applets; generated code never executes in the shell. */
   presentationParts?: import('./applets').AppletPresentationPart[]
@@ -867,6 +879,8 @@ export interface ChatMessage {
   scheduled?: { jobId: string; jobName?: string }
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
   origin?: AgentOrigin
+  /** Set on a user message from a person other than the account's owner (`HumanAuthor`); absent for the owner's own. */
+  author?: HumanAuthor
   /**
    * Set on the message that records the answers to the agent's questions: each question with the
    * options chosen and any reply typed instead. The transcript shows it as one step of the agent's
@@ -1114,6 +1128,11 @@ export interface QueuedMessage {
   permissionMode?: PermissionMode
   /** The other computer of the user this message was sent or last edited from (a routed call); absent for this computer's own. */
   sentFrom?: ThreadSentFrom
+  /**
+   * The person other than the account's owner who queued it (`HumanAuthor`); absent for the owner's own. Only they,
+   * or the owner, may edit, remove or promote it.
+   */
+  author?: HumanAuthor
   /**
    * The run a promoted item (`steering`) was promoted into. Only that run's steer drain takes the text, and
    * only when the run's mode is no stricter than the item's own; any other run that meets the item reverts it

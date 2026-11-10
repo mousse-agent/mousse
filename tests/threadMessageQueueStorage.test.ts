@@ -39,6 +39,20 @@ describe('queue persistence on ThreadDataStore', () => {
     expect(data.messageQueue?.[0].content).toBe('pending hello')
   })
 
+  it("keeps another person's author across a reload, and drops one that is not well formed", () => {
+    const thread = store.createThread('Authors')
+    const author = { user: 'usr_0000000000000000000000000a', node: 'nod_0000000000000000000000000a', displayName: 'Ana' } as const
+    const theirs = enqueueMessage([], { threadId: thread.id, content: 'from Ana', author }).item
+    const owners = enqueueMessage([theirs], { threadId: thread.id, content: 'mine' }).item
+    const forged = { ...enqueueMessage([], { threadId: thread.id, content: 'bad' }).item, author: { user: 'not-a-user', displayName: 'Eve' } } as never
+    store.saveMessageQueue(thread.id, [theirs, owners, forged])
+    const reloaded = store.loadMessageQueue(thread.id)
+    expect(reloaded.find((item) => item.id === theirs.id)?.author).toEqual(author)
+    // The owner's item, and the one whose author is not a user id, have no author field at all.
+    expect('author' in reloaded.find((item) => item.id === owners.id)!).toBe(false)
+    expect(reloaded.filter((item) => 'author' in item)).toHaveLength(1)
+  })
+
   it('saveThreadData does not overwrite concurrent queue.json mutations', () => {
     const thread = store.createThread('No Stale Queue')
     const first = enqueueMessage([], {

@@ -1,5 +1,6 @@
 import { permissionModeAllows, type PermissionAction, type PermissionMode } from '../../shared/permissionMode'
 import type { AgentAccessLevel } from '../../shared/settings'
+import type { UserId } from '../../shared/net/ids'
 import type { LineageRecord } from './types'
 
 /**
@@ -27,7 +28,7 @@ export type Answerer =
    * their own computers (a routed call): `maxPermissionMode` is what this computer lets that device
    * run a standing rule in. A `bridge` answer without a `node` is a linked phone.
    */
-  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal'; node?: string; maxPermissionMode?: PermissionMode }
+  | { kind: 'user'; via?: 'gui' | 'cli' | 'bridge' | 'internal'; node?: string; maxPermissionMode?: PermissionMode; user?: UserId }
   /**
    * An agent, acting within its own run's permission mode. It answers for its own subagent, and for a thread
    * outside its lineage only when `access` says the profile allows it. `toolCallId` is the call that answers,

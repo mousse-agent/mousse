@@ -12,6 +12,8 @@ import type {
 import { normalizeChatMode } from '../../shared/chatMode'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
+import { humanAuthorOf } from '../../shared/humanAuthor'
+import type { UserId } from '../../shared/net/ids'
 
 export interface EnqueueMessageInput {
   /**
@@ -38,6 +40,8 @@ export interface EnqueueMessageInput {
   permissionMode?: PermissionMode
   origin?: QueuedMessage['origin']
   sentFrom?: QueuedMessage['sentFrom']
+  /** The person other than the owner who queued it; set by the daemon from the authenticated caller. */
+  author?: QueuedMessage['author']
 }
 
 export interface ClaimOwnerInput {
@@ -70,6 +74,8 @@ export type QueueConflictCode =
   | 'item_started'
   | 'request_conflict'
   | 'command_failed'
+  /** The item is another person's: only they, or the account's owner, may change it. */
+  | 'not_author'
 
 export class QueueConflictError extends Error {
   constructor(
@@ -206,6 +212,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
     const state: QueuedMessageState = recognizedState ?? 'pending'
     const claim = state === 'claimed' ? normalizeClaim(item.claim) : undefined
     const origin = normalizeOrigin(item.origin)
+    const author = humanAuthorOf(item.author)
     out.push({
       id: item.id,
       threadId: item.threadId,
@@ -230,6 +237,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
       ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {}),
       ...(typeof item.sentFrom?.node === 'string' && item.sentFrom.node ? { sentFrom: { node: item.sentFrom.node } } : {}),
+      ...(author ? { author } : {}),
       // Only a steering item is bound to a run.
       ...(state === 'steering' && typeof item.steerRunId === 'string' && item.steerRunId ? { steerRunId: item.steerRunId } : {}),
       ...(origin ? { origin } : {})
@@ -301,6 +309,7 @@ export function enqueueMessage(
     ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
     ...(input.sentFrom ? { sentFrom: input.sentFrom } : {}),
+    ...(input.author ? { author: input.author } : {}),
     ...(input.origin ? { origin: input.origin } : {})
   }
 
@@ -359,6 +368,18 @@ export function reorderQueuedMessages(
   return sortQueue([...preserved, ...reordered])
 }
 
+/**
+ * Refuses a change to a queued item by a person other than the account's owner (`by`) when the item is someone
+ * else's. An item with no author is the owner's and, as before authors existed, anyone who reaches the thread may
+ * change it; the owner (`by` absent) may change every item. A missing item is left to the change itself to report.
+ */
+export function assertQueueAuthor(items: readonly QueuedMessage[], id: string, by: UserId | undefined): void {
+  if (!by) return
+  const author = items.find((entry) => entry.id === id)?.author
+  if (author && author.user !== by)
+    throw new QueueConflictError('not_author', `This message is ${author.displayName}'s; only they can change it.`, { itemId: id })
+}
+
 /** What changes in an edit of a queued message; a field left out stays as it is. */
 export interface QueuedMessagePatch {
   content?: string
@@ -369,6 +390,8 @@ export interface QueuedMessagePatch {
   permissionMode?: PermissionMode
   /** The computer the edit came from: the text is theirs now. */
   sentFrom?: QueuedMessage['sentFrom']
+  /** The person other than the owner who made the edit: the text is theirs now. An owner's edit leaves the author as it is. */
+  author?: QueuedMessage['author']
   /**
    * The item no longer owns the queued run it had (the caller cancels it): the run was made for the earlier
    * sender, and the item gets a fresh one, with the new sender's count, when it drains.
@@ -418,7 +441,8 @@ export function editQueuedMessage(
     ...(patch.mode !== undefined ? { mode: normalizeChatMode(patch.mode) } : {}),
     ...(patch.origin ? { origin: patch.origin } : {}),
     ...(patch.permissionMode ? { permissionMode: patch.permissionMode } : {}),
-    ...(patch.sentFrom ? { sentFrom: patch.sentFrom } : {})
+    ...(patch.sentFrom ? { sentFrom: patch.sentFrom } : {}),
+    ...(patch.author ? { author: patch.author } : {})
   }
   const next = [...items]
   next[index] = item

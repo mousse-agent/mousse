@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import type { QueuedMessage } from '../src/shared/types'
 import {
+  assertQueueAuthor,
   assertQueueRevision,
   claimNextNormal,
   clearPendingQueue,
@@ -520,5 +521,27 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
       const notice = enqueueMessage(claimed.items, { threadId: 't1', content: 'result', intent: 'steer', inboxIds: ['row-1'] }).items
       expect(listPendingQueue(demoteSteerItems(notice, undefined, { toFront: true })).map((item) => item.content)).toEqual(['C', 'D', 'B', 'result'])
     })
+  })
+})
+
+describe('queued items of a person other than the owner', () => {
+  const ana = { user: 'usr_0000000000000000000000000a', displayName: 'Ana' } as const
+  const ben = 'usr_0000000000000000000000000b'
+
+  it('may be changed only by their author or the owner; an item without an author by anyone', () => {
+    const theirs = enqueueMessage([], { threadId: 't', content: 'from Ana', author: ana })
+    const items = enqueueMessage(theirs.items, { threadId: 't', content: 'owner' }).items
+    const owners = items.find((item) => !item.author)!
+    expect(() => assertQueueAuthor(items, theirs.item.id, ben)).toThrow(expect.objectContaining({ code: 'not_author' }))
+    expect(() => assertQueueAuthor(items, theirs.item.id, ana.user)).not.toThrow()
+    expect(() => assertQueueAuthor(items, theirs.item.id, undefined)).not.toThrow()
+    expect(() => assertQueueAuthor(items, owners.id, ben)).not.toThrow()
+  })
+
+  it("is another person's once they edit an owner's item, and an owner's edit keeps the author", () => {
+    const items = enqueueMessage([], { threadId: 't', content: 'owner' }).items
+    const edited = editQueuedMessage(items, items[0].id, { content: 'Ana now', author: ana })
+    expect(edited.item.author).toEqual(ana)
+    expect(editQueuedMessage(edited.items, items[0].id, { content: 'owner again' }).item.author).toEqual(ana)
   })
 })

@@ -2,6 +2,7 @@ import type { HandlerContext } from './handlers'
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH, PROTOCOL_METHODS } from './types'
 import type { ProtocolClientType, ProtocolConnectionEventType } from './types'
 import type { PermissionMode } from '../../shared/permissionMode'
+import type { HumanAuthor } from '../../shared/types'
 
 export interface TrustedProfileBinding {
   readonly profileId: string
@@ -33,6 +34,11 @@ export interface BridgeCaller {
   readonly node: string
   readonly user: string
   readonly maxPermissionMode: PermissionMode
+  /**
+   * The person the call is from when that is not the account's owner, set by the routed boundary from the
+   * authenticated caller. Messages, queued items and answers the call makes carry it; absent for the owner.
+   */
+  readonly author?: HumanAuthor
   /**
    * Called by `pty.create` the moment the shell exists, before anything else is done with it, so the terminal is
    * the device's (and ends with its permission) even if the rest of the call fails.

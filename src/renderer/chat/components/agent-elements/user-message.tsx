@@ -5,6 +5,7 @@ import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
+import { MessageAuthorBadge, messageAuthor } from "./message-author";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -144,6 +145,8 @@ export const UserMessage = memo(function UserMessage({
   // A turn sent from another of the user's computers says which one.
   const sentFromName = (message.metadata as { sentFrom?: { name?: unknown } } | undefined)?.sentFrom?.name;
   const sentFrom = typeof sentFromName === "string" && sentFromName ? sentFromName : undefined;
+  // A message from a person other than the account's owner says who wrote it.
+  const author = messageAuthor(message.metadata);
 
   const lightboxImages = images.map(({ url, name }, i) => ({
     id: `${message.id}-img-${i}`,
@@ -222,9 +225,11 @@ export const UserMessage = memo(function UserMessage({
         </p>
       )}
       </div>
-      {sentFrom && (
-        <span className="chat-user-sent-from" title={`Sent from ${sentFrom}`}>
-          from {sentFrom}
+      {(author || sentFrom) && (
+        <span className="chat-user-sent-from" title={[author && `Sent by ${author.name}`, sentFrom && `Sent from ${sentFrom}`].filter(Boolean).join(", ")}>
+          {author && <MessageAuthorBadge author={author} />}
+          {author && sentFrom && " · "}
+          {sentFrom && <>from {sentFrom}</>}
         </span>
       )}
     </div>

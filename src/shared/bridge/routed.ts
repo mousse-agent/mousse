@@ -148,7 +148,9 @@ export const ROUTED_FORBIDDEN_KEYS = [
   'profileId',
   'expectedProfileId',
   // The folder the Files panel of a window on the computer itself browses (any folder of that computer).
-  'root'
+  'root',
+  // Who wrote a message: the owner stamps it from the authenticated caller, so a caller never names it.
+  'author'
 ] as const
 
 export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({

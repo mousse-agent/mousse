@@ -592,6 +592,26 @@ html.platform-darwin .overlay-titlebar {
 .chat-user-bubble .chat-user-image-carousel {
   margin-left: 0;
 }
+/* Under a message a person other than the account's owner wrote: their initial and name. */
+.chat-message-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+.chat-message-author-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  color: white;
+  font-size: 8.5px;
+  font-weight: 700;
+}
+.chat-message-author-name {
+  color: var(--text-primary);
+}
 /* "from <computer>" under a turn that a person on another of the user's computers sent. */
 .chat-user-sent-from {
   max-width: calc(95% - 40px);

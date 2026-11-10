@@ -27,8 +27,9 @@ function moveId(ids: string[], id: string, to: number): string[] {
 /** A queued message drawn as the prompt it will be, so it reads the same once it is sent. */
 const QueuedBubble = memo(function QueuedBubble({ item }: { item: QueuedMessage }) {
   const message = useMemo(
-    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content: item.content, timestamp: item.enqueuedAt, images: item.images }])[0],
-    [item.id, item.content, item.enqueuedAt, item.images]
+    // Another person's queued message shows who wrote it, as it will once it is sent.
+    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content: item.content, timestamp: item.enqueuedAt, images: item.images, ...(item.author ? { author: item.author } : {}) }])[0],
+    [item.id, item.content, item.enqueuedAt, item.images, item.author]
   )
   if (item.subagentNotice?.length) return <SubagentNotice items={item.subagentNotice} />
   return message ? <UserMessage message={message} /> : null
