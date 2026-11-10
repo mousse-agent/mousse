@@ -19,7 +19,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
 import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
-import { acquireRepositoryLease, describeLeaseHolder, RepositoryLeaseBusyError, stoppedGitText, type RepositoryLeaseHandle } from '../git/RepositoryLease'
+import { acquireRepositoryLease, describeLeaseHolder, olderBuildText, RepositoryLeaseBusyError, stoppedGitText, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import {
   releaseExecutionLeaseHandle,
@@ -103,8 +103,9 @@ async function acquireWorkspaceRepositoryLease(identity: RepositoryIdentity, sig
     if (!(error instanceof RepositoryLeaseBusyError)) throw error
     // Who holds it, so a stuck holder can be found; a stopped Git command still running is said as what to do.
     const stopped = stoppedGitText(error.holder)
-    const message = stopped ?? `${REPOSITORY_BUSY_TEXT}${error.holder ? ` It is ${describeLeaseHolder(error.holder)}.` : ''}`
-    throw new RepositoryLeaseBusyError(message, { ...(error.holder ? { holder: error.holder } : {}), cause: error })
+    const older = olderBuildText(error.holder, error.leasePath)
+    const message = stopped ?? `${REPOSITORY_BUSY_TEXT}${error.holder ? ` It is ${describeLeaseHolder(error.holder)}.` : ''}${older ? ` ${older}` : ''}`
+    throw new RepositoryLeaseBusyError(message, { ...(error.holder ? { holder: error.holder } : {}), cause: error, ...(error.leasePath ? { leasePath: error.leasePath } : {}) })
   }
 }
 

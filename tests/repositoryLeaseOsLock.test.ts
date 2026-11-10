@@ -156,6 +156,9 @@ describe('the repository lease between processes', () => {
     expect(error.holder).toMatchObject({ pid: older.pid, olderBuild: true })
     expect(error.message).toContain(`process ${older.pid}`)
     expect(error.message).toContain('older Mousse')
+    // It may be a leftover of an older Mousse whose pid another program got: what clears it, and where the file is.
+    expect(error.message).toContain('restart that Mousse')
+    expect(error.message).toContain(getRepositoryLeasePath(identity))
     older.kill('SIGKILL'); await exited(older)
     expect(await acquires(identity)).toBeLessThan(2_000)
   }, 30_000)
@@ -169,7 +172,8 @@ describe('the repository lease between processes', () => {
 
   it('removes at once a lease file a holder of this build left unfinished, and keeps the older rule for others', async () => {
     const root = repo(); const identity = resolveRepositoryIdentity(root); const path = getRepositoryLeasePath(identity)
-    const old = new Date(Date.now() - 60_000)
+    // Every build writes its whole record right after creating the file: one left empty or cut short for 5 s is abandoned.
+    const old = new Date(Date.now() - 6_000)
     // Cut short while being written (no current build publishes this way; a file system without hard links does).
     writeFileSync(path, '{"osLock":true,"pid":')
     expect(await acquires(identity)).toBeLessThan(2_000)
@@ -178,7 +182,7 @@ describe('the repository lease between processes', () => {
     writeFileSync(staged, '{"osLock":true}')
     await acquires(identity)
     expect(existsSync(staged)).toBe(false)
-    // Empty, or an older build's unfinished record: its writer may still be writing it, so it waits out the stale window.
+    // Empty, or an older build's unfinished record: its writer may still be writing it for a moment, so it waits.
     for (const text of ['', '{"pid":12']) {
       writeFileSync(path, text)
       await busy(identity, { maxWaitMs: 300 })

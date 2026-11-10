@@ -29,7 +29,7 @@
  *
  * The lease file is put in place whole (linked from a complete record). On a file system without hard links it is
  * written with one create-only write: a process that ends inside that write can leave it empty, and then the next holder
- * waits {@link DEFAULT_REPOSITORY_LEASE_STALE_MS} for it, and older builds wait until it is removed.
+ * waits {@link UNFINISHED_LEASE_MS} for it, and older builds wait until it is removed.
  */
 import { execFile } from 'node:child_process'
 import { closeSync, existsSync, linkSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync, ftruncateSync, readSync, fsyncSync } from 'node:fs'
@@ -46,6 +46,11 @@ export const REPOSITORY_LEASE_FILENAME = 'repository-mutation.lease'
 export const REPOSITORY_LOCK_FILENAME = 'repository-mutation.lock'
 /** How long a lease file nobody can read, and that a holder of the OS lock did not start, stays its writer's. */
 export const DEFAULT_REPOSITORY_LEASE_STALE_MS = 30_000
+/**
+ * Every Mousse writes its whole lease record right after creating the file, in one write; a file still empty or cut
+ * short this long after it was made was left by a process that ended inside that write.
+ */
+export const UNFINISHED_LEASE_MS = 5_000
 /** How often a holder refreshes the lease file, well inside the 30 s stale window older builds use. */
 export const REPOSITORY_LEASE_HEARTBEAT_MS = 10_000
 /**
@@ -115,11 +120,22 @@ export function stoppedGitText(holder: RepositoryLeaseHolder | undefined): strin
 
 export class RepositoryLeaseBusyError extends Error {
   readonly holder?: RepositoryLeaseHolder
-  constructor(message = 'Repository mutation lease is busy', options: { holder?: RepositoryLeaseHolder; cause?: unknown } = {}) {
+  /** The lease file that names the holder. */
+  readonly leasePath?: string
+  constructor(message = 'Repository mutation lease is busy', options: { holder?: RepositoryLeaseHolder; cause?: unknown; leasePath?: string } = {}) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined)
     this.name = 'RepositoryLeaseBusyError'
     if (options.holder) this.holder = options.holder
+    if (options.leasePath) this.leasePath = options.leasePath
   }
+}
+/**
+ * For a holder of an older build: its process may be one that got the pid of an older Mousse that ended, so the lease
+ * may be that Mousse's leftover. What clears it.
+ */
+export function olderBuildText(holder: RepositoryLeaseHolder | undefined, leasePath: string | undefined): string | undefined {
+  if (!holder?.olderBuild) return undefined
+  return `This may be a lock an older Mousse left behind: restart that Mousse, or, once no Mousse is running, delete ${leasePath ?? REPOSITORY_LEASE_FILENAME}.`
 }
 export class RepositoryLeaseAbortedError extends Error { constructor() { super('Repository mutation lease acquisition was aborted'); this.name = 'RepositoryLeaseAbortedError' } }
 export class RepositoryLockOrderError extends Error { constructor(message: string) { super(message); this.name = 'RepositoryLockOrderError' } }
@@ -182,6 +198,9 @@ class LockConnection {
 
   /** `locked` once this connection holds the OS lock, `busy` while another connection does. */
   tryLock(): 'locked' | 'busy' {
+    // Off Windows a kept connection may have a file that is no longer at the lock path (its folder trashed, or deleted and
+    // made again): it is opened again before it tries.
+    if (this.db && this.opened && !sameFile(this.opened, fileIdentity(this.path))) this.close()
     try {
       if (!this.db) {
         this.db = new DatabaseSync(sqliteFilePath(this.path), { timeout: 0 })
@@ -201,12 +220,9 @@ class LockConnection {
       throw error
     }
     // Off Windows a lock file can be removed while it is open; a lock on a file no longer at the path excludes nobody.
-    if (this.opened) {
-      const now = fileIdentity(this.path)
-      if (!now || now.dev !== this.opened.dev || now.ino !== this.opened.ino) {
-        this.close()
-        return 'busy'
-      }
+    if (this.opened && !sameFile(this.opened, fileIdentity(this.path))) {
+      this.close()
+      return 'busy'
     }
     return 'locked'
   }
@@ -224,6 +240,9 @@ class LockConnection {
 
 function fileIdentity(path: string): { dev: number; ino: number } | undefined {
   try { const stat = statSync(path); return { dev: stat.dev, ino: stat.ino } } catch { return undefined }
+}
+function sameFile(opened: { dev: number; ino: number }, now: { dev: number; ino: number } | undefined): boolean {
+  return now !== undefined && now.dev === opened.dev && now.ino === opened.ino
 }
 
 /** When the computer last started, as the time now less how long it has run. */
@@ -263,7 +282,7 @@ function lookUpProcessStart(pid: number): Promise<number | null> {
  * - one a holder of the OS lock wrote, complete or not, was left by one that let go of it or ended: it goes at once;
  * - one of an older build goes once its process is gone, and never while it lives, however old its heartbeat;
  * - one nobody can read that does not begin as this build's (empty, or an older build's unfinished record) goes once it
- *   was unreadable for `staleAfterMs`, as older builds decide.
+ *   was left so for {@link UNFINISHED_LEASE_MS} (or `staleAfterMs`, if shorter): every build writes its record at once.
  */
 function leaseFound(path: string, staleAfterMs: number): { remove: boolean; holder?: RepositoryLeaseHolder } {
   let text: string
@@ -271,7 +290,7 @@ function leaseFound(path: string, staleAfterMs: number): { remove: boolean; hold
   const owner = parseOwner(text)
   if (!owner) {
     if (text.startsWith(OS_LOCK_RECORD_PREFIX)) return { remove: true }
-    try { return { remove: Date.now() - statSync(path).mtimeMs > staleAfterMs } } catch { return { remove: !existsSync(path) } }
+    try { return { remove: Date.now() - statSync(path).mtimeMs > Math.min(staleAfterMs, UNFINISHED_LEASE_MS) } } catch { return { remove: !existsSync(path) } }
   }
   if (locallyHeldTokens.has(owner.token)) return { remove: false, holder: holderOf(owner) }
   if (owner.osLock) return { remove: true }
@@ -461,7 +480,7 @@ async function pump(key: string): Promise<void> {
         waitNotes.set(key, { cause: error.cause })
         // A lock file that stays unusable ends the wait, with or without a limit of the caller's.
         unavailableSince ??= Date.now()
-        if (Date.now() - unavailableSince >= REPOSITORY_LEASE_TIMING.unavailableLimitMs) throw busyError(key)
+        if (Date.now() - unavailableSince >= REPOSITORY_LEASE_TIMING.unavailableLimitMs) throw busyError(key, getRepositoryLeasePath(waiter.identity))
       }
       if (attempt && 'handle' in attempt) {
         granted = true
@@ -482,7 +501,7 @@ async function pump(key: string): Promise<void> {
     if (queue.length === 0) queues.delete(key)
     removeAbortListener(waiter)
     // What this wait saw goes with its rejection, so a later wait never reports it.
-    waiter.reject(error instanceof RepositoryLeaseAbortedError ? Object.assign(error, { busy: busyError(key) }) : error instanceof Error ? error : new RepositoryLeaseBusyError())
+    waiter.reject(error instanceof RepositoryLeaseAbortedError ? Object.assign(error, { busy: busyError(key, getRepositoryLeasePath(waiter.identity)) }) : error instanceof Error ? error : new RepositoryLeaseBusyError())
   } finally {
     if (!granted) connection.close()
     pumping.delete(key)
@@ -496,16 +515,17 @@ function releaseLocal(key: string): void {
 }
 
 /** The busy error for a wait on `key` that ran out: who holds the lease, as last seen, and what last failed. */
-function busyError(key: string): RepositoryLeaseBusyError {
+function busyError(key: string, leasePath: string): RepositoryLeaseBusyError {
   const local = localHolders.get(key)
   const note = waitNotes.get(key)
   const holder = local ? holderOf(local) : note?.holder
   const failed = note?.cause instanceof Error ? note.cause.message : undefined
   const stopped = stoppedGitText(holder)
+  const older = olderBuildText(holder, leasePath)
   const message = stopped
     ? `Repository mutation lease is busy. ${stopped}`
-    : ['Repository mutation lease is busy', holder ? `: ${describeLeaseHolder(holder)}` : '', failed ? ` (the lock file could not be used: ${failed})` : ''].join('')
-  return new RepositoryLeaseBusyError(message, { ...(holder ? { holder } : {}), ...(note?.cause !== undefined ? { cause: note.cause } : {}) })
+    : ['Repository mutation lease is busy', holder ? `: ${describeLeaseHolder(holder)}` : '', failed ? ` (the lock file could not be used: ${failed})` : '', older ? `. ${older}` : ''].join('')
+  return new RepositoryLeaseBusyError(message, { ...(holder ? { holder } : {}), ...(note?.cause !== undefined ? { cause: note.cause } : {}), leasePath })
 }
 
 /** Acquire in FIFO order within this process and retry asynchronously across processes. */
@@ -517,7 +537,7 @@ export function acquireRepositoryLease(identity: RepositoryIdentity, opts: Acqui
     const waited = acquireRepositoryLease(identity, { ...opts, maxWaitMs: undefined, signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout })
     return waited.catch((error: unknown) => {
       if (!(error instanceof RepositoryLeaseAbortedError) || !timeout.aborted || opts.signal?.aborted) throw error
-      throw (error as RepositoryLeaseAbortedError & { busy?: RepositoryLeaseBusyError }).busy ?? busyError(identity.key)
+      throw (error as RepositoryLeaseAbortedError & { busy?: RepositoryLeaseBusyError }).busy ?? busyError(identity.key, getRepositoryLeasePath(identity))
     })
   }
   return new Promise((resolve, reject) => {
@@ -532,7 +552,7 @@ export function acquireRepositoryLease(identity: RepositoryIdentity, opts: Acqui
           queue!.splice(index, 1)
           if (queue!.length === 0) queues.delete(identity.key)
           removeAbortListener(waiter)
-          reject(Object.assign(new RepositoryLeaseAbortedError(), { busy: busyError(identity.key) }))
+          reject(Object.assign(new RepositoryLeaseAbortedError(), { busy: busyError(identity.key, getRepositoryLeasePath(identity)) }))
         }
       }
       opts.signal.addEventListener('abort', waiter.abort, { once: true })
