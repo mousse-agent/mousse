@@ -48,20 +48,22 @@ const gap = () => host.querySelector<HTMLElement>('[data-reply-gap]')
 /** What sits below the last turn, in order: the rows column first. */
 const belowRows = () => [...list().firstElementChild!.children].slice(1)
 
+/** The toolbar under each finished reply, in thread order (a prompt's toolbar is 28px). */
+const toolbars = () => [...host.querySelectorAll<HTMLElement>('.chat-message-toolbar')].filter((el) => el.className.includes('h-[48px]'))
+
 describe('the gap under a streaming reply', () => {
-  it('is a fixed 48px, the height of the toolbar a finished turn shows, never a share of the viewport', () => {
+  it('is a fixed 28px, about two lines above the composer, never a share of the viewport', () => {
     render([ask('u1'), answer('a1', 'The renderer keeps a bounded window of rows')], 'streaming')
     expect(gap()).not.toBeNull()
-    expect(gap()!.className).toContain('h-[48px]')
+    expect(gap()!.className).toContain('h-[28px]')
     expect(gap()!.className).not.toMatch(/vh|min-h/)
     // Directly under the rows: nothing else pushes the newest text up from the composer.
     expect(belowRows()).toEqual([gap()])
-    expect(host.innerHTML).not.toMatch(/\d+vh/)
+    expect(host.innerHTML).not.toMatch(/d+vh/)
   })
 
   it('holds the same size while the reply grows', () => {
-    const turn = [ask('u1'), answer('a1', 'The renderer')]
-    render(turn, 'streaming')
+    render([ask('u1'), answer('a1', 'The renderer')], 'streaming')
     const before = gap()!.outerHTML
     render([ask('u1'), answer('a1', 'The renderer keeps a bounded window of rows and recycles their nodes.')], 'streaming')
     expect(gap()!.outerHTML).toBe(before)
@@ -73,25 +75,44 @@ describe('the gap under a streaming reply', () => {
     expect(belowRows()).toEqual([gap()])
   })
 
-  it('gives way to the turn toolbar when the reply ends, and does not come back on a finished thread', () => {
+  it('gives way to the last turn toolbar when the reply ends, which takes the same space', () => {
     render([ask('u1'), answer('a1', 'Done streaming.')], 'streaming')
     expect(gap()).not.toBeNull()
+    expect(toolbars()).toEqual([])
     render([ask('u1'), answer('a1', 'Done streaming.')], 'ready')
     expect(gap()).toBeNull()
     expect(belowRows()).toEqual([])
-    // The toolbar takes the gap's place under the reply, at the same 48px height.
-    const lastTurn = host.querySelector('[data-turn-key]:last-of-type') ?? list()
-    expect(lastTurn.innerHTML).toContain('h-[48px]')
-    // A thread that had a reply in this view keeps no leftover space under it.
+    // 48px tall, pulled 20px (-mb-5) into the end padding: 28px of space, like the gap, so the text does not move.
+    const [toolbar] = toolbars()
+    expect(toolbar!.className).toContain('h-[48px]')
+    expect(toolbar!.className).toContain('-mb-5')
+  })
+
+  it('leaves earlier turns their full toolbar, and no leftover space under a finished thread', () => {
     render([ask('u1'), answer('a1', 'Done streaming.'), ask('u2', 'And then?'), answer('a2', 'That is all.')], 'ready')
     expect(gap()).toBeNull()
+    const [first, last] = toolbars()
+    expect(first!.className).toContain('h-[48px]')
+    expect(first!.className).not.toContain('-mb-5')
+    expect(last!.className).toContain('-mb-5')
+  })
+
+  it('keeps queued messages clear of the last turn toolbar', () => {
+    act(() => root.render(createElement(MessageList, {
+      messages: [ask('u1'), answer('a1', 'Done.')],
+      status: 'ready',
+      afterTurns: createElement('div', { 'data-queued': '' }, 'Queued: and then?'),
+    })))
+    const after = host.querySelector<HTMLElement>('[data-after-turns]')!
+    expect(after.className).toContain('[&:not(:empty)]:mt-5')
+    expect(after.querySelector('[data-queued]')).not.toBeNull()
   })
 
   it('is the same fixed gap on a long, windowed thread', () => {
     const messages = [...history(RENDER_ALL_THRESHOLD + 5), ask('live'), answer('streaming', 'Point A11: the store keeps one entry per thread')]
     render(messages, 'streaming')
     expect(list().dataset.windowed).toBe('true')
-    expect(gap()!.className).toContain('h-[48px]')
+    expect(gap()!.className).toContain('h-[28px]')
     // Below the last turn; the turn window's spacers stay inside the rows column, above it.
     expect(belowRows()).toEqual([gap()])
     expect(list().firstElementChild!.firstElementChild!.querySelector('[data-reply-gap]')).toBeNull()

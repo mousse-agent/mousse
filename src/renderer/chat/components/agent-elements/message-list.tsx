@@ -104,8 +104,8 @@ export type MessageListProps = {
   onComposerCompactChange?: (compact: boolean) => void;
   lastTurnNotice?: React.ReactNode;
   /**
-   * Drawn after the last turn (the thread's queued messages). Outside the windowed rows, so it
-   * follows the end like the reply gap does.
+   * Drawn after the last turn (the thread's queued messages), above the reply gap. Outside the
+   * windowed rows, so it follows the end.
    */
   afterTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
@@ -143,6 +143,15 @@ export type MessageListProps = {
 };
 
 const SCROLL_THRESHOLD = 80;
+/**
+ * The space under the newest text while a reply is in progress: about two lines above the
+ * composer (with the list's end padding). A finished last turn's toolbar takes the same space,
+ * since it overlaps that padding by the rest of its height, so the text does not move when the
+ * reply ends.
+ */
+const REPLY_GAP_CLASS = "h-[28px]";
+const TURN_TOOLBAR_CLASS = "h-[48px] flex items-start w-full";
+const LAST_TURN_TOOLBAR_CLASS = `${TURN_TOOLBAR_CLASS} -mb-5`;
 const timeFormatter = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -1606,9 +1615,9 @@ export const MessageList = memo(function MessageList({
     if (lastMessage.role === "user" && !hasAssistant) return true;
     return isStreaming && !getLastAssistantHasContent(normalizedMessages);
   }, [isStreaming, normalizedMessages, turns]);
-  // A small gap under the reply in progress, the height of the toolbar a
-  // finished turn shows there, so the newest text sits just above the composer
-  // and the end of the reply swaps one for the other without moving.
+  // A small, fixed gap under the reply in progress (REPLY_GAP_CLASS), so the
+  // newest text sits about two lines above the composer, never a share of the
+  // viewport. The last turn's toolbar takes its place when the reply ends.
   const showReplyGap = replyActive || showAwaitingReply || showPlanning;
 
   // Follow live output while following the end: every streamed token / tool
@@ -1982,7 +1991,7 @@ export const MessageList = memo(function MessageList({
                         {showToolbar ? (
                           <MessageToolbar
                             text={toolbarText}
-                            heightClass="h-[48px] flex items-start w-full"
+                            heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
                             hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
                             isVisible={activeCopyId === copyKey}
                             alignClass="justify-start"
@@ -1995,7 +2004,7 @@ export const MessageList = memo(function MessageList({
                         ) : activeCopyId === copyKey ? (
                           <MessageToolbar
                             text={toolbarText}
-                            heightClass="h-[48px] flex items-start w-full"
+                            heightClass={isLastTurn ? LAST_TURN_TOOLBAR_CLASS : TURN_TOOLBAR_CLASS}
                             hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
                             isVisible={true}
                             alignClass="justify-start"
@@ -2033,9 +2042,14 @@ export const MessageList = memo(function MessageList({
             );
           })}
         </div>
-        {afterTurns}
+        {afterTurns != null && (
+          // Clear of the last turn's toolbar, which reaches into the space below the rows.
+          <div data-after-turns className="[&:not(:empty)]:mt-5">
+            {afterTurns}
+          </div>
+        )}
         {showReplyGap && (
-          <div aria-hidden="true" data-reply-gap className="h-[48px] w-full" />
+          <div aria-hidden="true" data-reply-gap className={cn(REPLY_GAP_CLASS, "w-full")} />
         )}
       </div>
     </div>
