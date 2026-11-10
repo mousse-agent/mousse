@@ -10159,23 +10159,23 @@ export class OrchestratorService extends EventEmitter {
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
       if (primary) {
-        const settled = await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+        const settled = await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease, setupSignal)
         const merging = [...new Set(settled.flatMap((item) => item.state === 'cancelled' && item.mergeInProgress ? [item.mergeInProgress] : []))]
         if (merging.length) this.sessionAls.run(session, () => this.addSystemMessage(`A publish merge from an earlier version is still in progress in ${merging.join(', ')}; abort it (operations abort) or finish it with Git. It was not run again.`))
       }
-      await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
-      await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
+      await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
       await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
         if (!action.nativeContextStartBoundary) return
         if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
         else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary)
-      }, heldLease)
+      }, heldLease, setupSignal)
       await new ConversationBranchService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (branch) => {
         const path = join(recoveryDirectory, 'conversation-contexts', `${encodeURIComponent(branch.id)}.json`)
         const saved = JSON.parse(readFileSync(path, 'utf8')) as { schemaVersion: number; messages: ChatMessage[]; nativeContext: NativeLlmContext }
         if (saved.schemaVersion !== 1 || !Array.isArray(saved.messages) || !saved.nativeContext) throw new Error('Conversation recovery snapshot is invalid')
         this.replaceConversationState(session.threadId, saved.messages, saved.nativeContext)
-      }, heldLease)
+      }, heldLease, setupSignal)
     }
     const request = normalizeSendRequest(input)
     // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.

@@ -98,7 +98,7 @@ export class CodeRevertService {
     return record
   }
 
-  async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
+  async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'code-revert-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
       for (const entry of this.journal.latestByOperation().values()) {
@@ -116,7 +116,7 @@ export class CodeRevertService {
         const gitNotice = details.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', details.target)
         await this.complete(workspacePath, entry.operationId, details, applied.startSha, applied.end, intent!.createdAt, [gitNotice ?? '', coverageNotice(details.target.git?.coverageGaps, await namedGapsAsync(workspacePath, applied.startSha, applied.end.sha, applied.end.coverageGaps)) ?? ''].filter(Boolean).join(' ') || undefined)
       }
-    }, undefined, heldThreadLease)
+    }, signal, heldThreadLease)
   }
 
   /**

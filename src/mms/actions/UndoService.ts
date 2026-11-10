@@ -170,7 +170,7 @@ export class UndoService {
   }
 
   /** Called before another turn and by explicit operation recovery. The restore is never replayed: the files tell whether it landed. */
-  async recoverPending(workspacePath: string, restoreContext: RestoreActionContext, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
+  async recoverPending(workspacePath: string, restoreContext: RestoreActionContext, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'context-recovery', async () => {
       for (const record of this.journal.latestByOperation().values()) {
         if (!['undo', 'redo', 'change-undo', 'change-redo'].includes(record.operationType) || !['prepared', 'git_applied', 'context_pending'].includes(record.state)) continue
@@ -206,7 +206,7 @@ export class UndoService {
         this.actions.replace(all)
         await this.completeContext(record.operationId, recovery, restoreContext)
       }
-    }, undefined, heldThreadLease)
+    }, signal, heldThreadLease)
   }
 
   /**

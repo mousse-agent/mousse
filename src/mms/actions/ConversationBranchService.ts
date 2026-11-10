@@ -432,7 +432,7 @@ export class ConversationBranchService {
    * stays pending for a person. One that stopped with only the conversation left (`context_pending`) restores the
    * conversation.
    */
-  async recoverPending(workspacePath: string, restoreContext: (branch: ConversationBranch) => void | Promise<void>, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
+  async recoverPending(workspacePath: string, restoreContext: (branch: ConversationBranch) => void | Promise<void>, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'branch-context-recovery', async () => {
       for (const entry of this.journal.latestByOperation().values()) {
         if (entry.operationType !== 'conversation-activate') continue
@@ -468,7 +468,7 @@ export class ConversationBranchService {
         if (details.restoreContext) await restoreContext(branch)
         this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: branch.id, recovered: true } })
       }
-    }, undefined, heldThreadLease)
+    }, signal, heldThreadLease)
   }
 
   /**

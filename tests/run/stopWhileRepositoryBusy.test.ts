@@ -4,7 +4,7 @@
  * project, with a scripted provider whose "Sync" turns are held until a Stop interrupts them. The test holds the
  * repository's lease, as a long or stuck operation of another thread would.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../../src/mms/git/RepositoryLease'
+import { acquireRepositoryLease, getRepositoryLeasePath, type RepositoryLeaseHandle } from '../../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -97,7 +97,7 @@ describe('Stop while the thread\'s repository is busy', () => {
     const freeRepository = () => { held?.release(); held = undefined }
     const running = (threadId: string) => d.orch.getOrCreateSession(threadId).isTurnRunning()
     const queue = (threadId: string) => readDurableQueue(d.store, threadId).filter((item) => item.state === 'pending')
-    return { d, adapter, thread, holdRepository, freeRepository, running, queue }
+    return { d, adapter, projectDir, thread, holdRepository, freeRepository, running, queue }
   }
 
   it('ends a stopped turn whose checkpoint cannot get the repository, and the queued messages go as the next turns', async () => {
@@ -156,5 +156,46 @@ describe('Stop while the thread\'s repository is busy', () => {
     await waitFor(() => w.adapter.turns.some((turn) => turn.threadId === other.id), 'the other thread to start', 20_000)
     await w.d.orch.send('Try again', false, { threadId: thread.id, clientRequestId: 'again', awaitMode: 'ack' })
     await waitFor(() => w.adapter.turns.some((turn) => turn.threadId === thread.id), 'the stopped thread to start again', 20_000)
+  })
+
+  it('lets a Stop end a turn\'s start while another live process (another Mousse home) keeps the repository\'s lease fresh', async () => {
+    const w = world()
+    const existing = w.thread('Existing')
+    await w.d.orch.send('Hello', false, { threadId: existing.id, clientRequestId: 'hello', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.turns.length === 1 && !w.running(existing.id), 'the first turn to finish')
+
+    // Another process holds the lease and keeps its heartbeat fresh, so it is never taken over as stale.
+    const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' })
+    const leasePath = getRepositoryLeasePath(resolveRepositoryIdentity(w.projectDir))
+    const writeLease = () => {
+      const now = new Date().toISOString()
+      writeFileSync(leasePath, JSON.stringify({ pid: other.pid, processInstanceId: 'another-home', token: 'another-home', acquiredAt: now, heartbeatAt: now }))
+    }
+    writeLease()
+    const refresh = setInterval(writeLease, 1_000)
+    try {
+      // The next turn of a thread that already has a worktree: its recovery at the start waits for the repository.
+      await w.d.orch.send('Again', false, { threadId: existing.id, clientRequestId: 'again', awaitMode: 'ack' })
+      await waitFor(() => w.running(existing.id), 'the next turn to be admitted')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(w.adapter.turns).toHaveLength(1)
+      await w.d.orch.stopThread(existing.id, 'user')
+      await waitFor(() => !w.running(existing.id), 'the stopped start of an existing thread to end')
+
+      // A new thread's first turn waits for its worktree.
+      const fresh = w.thread('Fresh')
+      await w.d.orch.send(SYNC, false, { threadId: fresh.id, clientRequestId: 'fresh', awaitMode: 'ack' })
+      await waitFor(() => w.running(fresh.id), 'the new thread\'s turn to be admitted')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      await w.d.orch.stopThread(fresh.id, 'user')
+      await waitFor(() => !w.running(fresh.id), 'the stopped start of a new thread to end')
+      expect(w.adapter.turns).toHaveLength(1)
+    } finally {
+      clearInterval(refresh)
+      other.kill()
+      rmSync(leasePath, { force: true })
+    }
+    await w.d.orch.send('Hello again', false, { threadId: existing.id, clientRequestId: 'after', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.turns.length === 2, 'the thread to run once the other process let go', 20_000)
   })
 })

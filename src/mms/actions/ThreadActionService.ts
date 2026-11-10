@@ -355,7 +355,7 @@ export class ThreadActionService {
   }
 
   /** Recover an interrupted writer as captured code, never replay its model/tools. */
-  async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
+  async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'checkpoint-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
       for (const entry of [...this.journal.latestByOperation().values()].reverse()) {
@@ -392,7 +392,7 @@ export class ThreadActionService {
         all.push(action); this.replace(all)
         this.appendCheckpointCompleted(action, state)
       }
-    }, undefined, heldThreadLease)
+    }, signal, heldThreadLease)
   }
 
   /**
