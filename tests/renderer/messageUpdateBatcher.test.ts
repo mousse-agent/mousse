@@ -62,6 +62,38 @@ describe('createMessageUpdateBatcher', () => {
     expect(applied).toEqual([])
   })
 
+  it('holds updates while the transcript is out of sight, then applies the latest of each at once', () => {
+    const clock = frames()
+    let held = true
+    const applied: string[][] = []
+    const batcher = createMessageUpdateBatcher({ apply: (_t, messages) => applied.push(messages.map((m) => m.content)), isCurrent: () => true, held: () => held, schedule: clock.schedule })
+    for (let i = 1; i <= 20; i++) batcher.push('t1', reply('x'.repeat(i)))
+    // Behind the Usage page no frame is asked for, so the hidden transcript never re-renders.
+    expect(clock.pending()).toBe(0)
+    clock.tick()
+    expect(applied).toEqual([])
+    held = false
+    batcher.flush()
+    expect(applied).toEqual([['x'.repeat(20)]])
+    batcher.push('t1', reply('x'.repeat(21)))
+    clock.tick()
+    expect(applied).toEqual([['x'.repeat(20)], ['x'.repeat(21)]])
+  })
+
+  it('a frame asked for before the hold does not apply while held', () => {
+    const clock = frames()
+    let held = false
+    const applied: string[] = []
+    const batcher = createMessageUpdateBatcher({ apply: (_t, messages) => applied.push(messages[0]!.content), isCurrent: () => true, held: () => held, schedule: clock.schedule })
+    batcher.push('t1', reply('a'))
+    held = true
+    clock.tick()
+    expect(applied).toEqual([])
+    held = false
+    batcher.flush()
+    expect(applied).toEqual(['a'])
+  })
+
   it('applies the first thread before queueing another', () => {
     const clock = frames()
     const applied: string[] = []

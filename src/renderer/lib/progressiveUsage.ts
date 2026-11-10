@@ -83,12 +83,23 @@ export function removeEntry(entries: UsageEntries, id: string): UsageEntry[] {
   return entries.filter((entry) => entry.slot.id !== id)
 }
 
+const withInstanceCache = new WeakMap<ProviderUsage, ProviderUsage>()
+
+/** `usage` with its Settings entry, the same object each time for the same reading, so its row can skip re-rendering. */
+function withInstance(usage: ProviderUsage, instanceId: string): ProviderUsage {
+  const kept = withInstanceCache.get(usage)
+  if (kept?.instanceId === instanceId) return kept
+  const next = { ...usage, instanceId }
+  withInstanceCache.set(usage, next)
+  return next
+}
+
 /**
  * The providers as the page draws them, in the list's order, with when this reading was made. Each
  * carries its Settings entry from the list (`instanceId`), for Reconnect and Disable.
  */
 export function entriesResponse(entries: UsageEntries, now: number): ProvidersUsageResponse {
-  const providers = entries.map((entry) => (entry.slot.instanceId ? { ...entry.usage, instanceId: entry.slot.instanceId } : entry.usage))
+  const providers = entries.map((entry) => (entry.slot.instanceId ? withInstance(entry.usage, entry.slot.instanceId) : entry.usage))
   return { providers, fetchedAt: new Date(now).toISOString() }
 }
 

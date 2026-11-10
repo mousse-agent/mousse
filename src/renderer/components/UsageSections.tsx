@@ -1,9 +1,10 @@
-import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, memo, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ChevronDown } from '../lib/icons'
 import { attentionReason, otherUsageFigure, usageInstanceId } from '../lib/usageSections'
 import type { ProviderUsage } from '../../shared/providerAuth'
 import { Collapse, COLLAPSE_OPEN_MS, COLLAPSE_STAGGER_ITEMS, COLLAPSE_STAGGER_MS } from './ui/Collapse'
 import { UsageBar } from './UsageBar'
+import { UsageRowMenu, type UsageRowActions } from './UsageRowMenu'
 
 /** Whether the list a row joins is open and done opening: only then does a joining row grow in itself. */
 const ListSettledContext = createContext(false)
@@ -72,6 +73,31 @@ export function AttentionRow({ provider, computerName, onReconnect, menu }: { pr
     </span>
   </div>
 }
+
+/**
+ * One provider's place in Other usage or Needs attention: its skeleton or its row, and its "…" menu
+ * (`actions`, not for another computer's rows). Memoized on plain props, so one provider's answer
+ * during a refresh re-renders that row only.
+ */
+export const UsageListRow = memo(function UsageListRow({ kind, provider, computerName, loading, hidden, actions, onReconnect }: {
+  kind: 'other' | 'attention'
+  provider: ProviderUsage
+  computerName?: string
+  loading: boolean
+  hidden: boolean
+  actions?: UsageRowActions
+  onReconnect?: (instanceId: string) => void
+}) {
+  const menu = actions && !computerName ? <UsageRowMenu provider={provider} hidden={hidden} actions={actions} /> : undefined
+  const place = computerName ? { computerName } : {}
+  return <UsageRowSlot hidden={hidden} loading={loading}>
+    {loading
+      ? <UsageRowSkeleton provider={provider} />
+      : kind === 'other'
+        ? <OtherUsageRow provider={provider} {...place} menu={menu} />
+        : <AttentionRow provider={provider} {...place} {...(onReconnect ? { onReconnect } : {})} menu={menu} />}
+  </UsageRowSlot>
+})
 
 /**
  * A compact list under its own header, "Other usage · 1 ⌄": a background, no border; it opens and

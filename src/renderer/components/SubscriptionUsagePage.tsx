@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ArrowLeft, ExternalLink, RefreshCw } from '../lib/icons'
 import { useComputers } from '../lib/computers'
 import {
@@ -16,13 +16,13 @@ import { UsageBar } from './UsageBar'
 import { activeAccountsLabel, UsageAccountsView } from './UsageAccountsView'
 import { UsageResetsChip } from './UsageResetsChip'
 import { soonestCredit, UsageResetButton, UsageResetConfirm, type ResetFlow } from './UsageResetAction'
-import { UsageRowMenu, type UsageRowActions } from './UsageRowMenu'
+import type { UsageRowActions } from './UsageRowMenu'
 import { Modal } from './ui/Modal'
 import { showToast } from './ui/Toast'
 import { readHiddenUsage, writeHiddenUsage } from '../lib/usageHidden'
 import { DEVICE_SCOPE, onProviderSignInChanged } from '../lib/providerSnapshots'
 import { usageInstanceId } from '../lib/usageSections'
-import { AttentionRow, OtherUsageRow, UsageCardSkeleton, UsageCollapsibleSection, UsageRowSkeleton, UsageRowSlot } from './UsageSections'
+import { UsageCardSkeleton, UsageCollapsibleSection, UsageListRow } from './UsageSections'
 import { motionAllowed } from './ui/Collapse'
 import { orderAttention, rememberedSectionOpen, rememberSectionOpen, slotSection, usageSection } from '../lib/usageSections'
 import { applyAccount, applyFailure, applyPreview, applyProvider, entriesResponse, loadingIds as entriesLoading, refreshEntries, removeEntry, startEntries, type UsageEntry } from '../lib/progressiveUsage'
@@ -65,6 +65,82 @@ function UsageReadAt({ provider, now }: { provider: ProviderUsage; now: number }
   if (!label) return null
   return <span className="usage-provider-read-at settings-muted" data-testid="usage-read-at" title={`Reported ${new Date(provider.readAt!).toLocaleString()}`}>{label}</span>
 }
+
+interface UsageProviderCardProps {
+  provider: ProviderUsage
+  /** Another computer's reading: its name. */
+  computerName?: string
+  /** Its fresh usage is still on the way. */
+  waiting: boolean
+  /** This computer's reading: proxy controls act on it. */
+  local: boolean
+  now: number
+  /** It can use one of its limit resets here. */
+  canReset: boolean
+  /** The reset flow, when it is this card's. */
+  flow: ResetFlow | null
+  onRefresh: () => void
+  onManage: (url: string) => void
+  onSaveProxyKey?: SaveProxyKey
+  onClearProxyKey?: (providerId: string) => Promise<void>
+  onStartReset: (providerId: string) => void
+  onConfirmReset: (provider: ProviderUsage) => void
+  onCancelReset: () => void
+}
+
+/**
+ * One working plan's card: its limit windows, or its accounts' table. Memoized on its props, so one
+ * provider's answer during a refresh re-renders that card only.
+ */
+const UsageProviderCard = memo(function UsageProviderCard({ provider, computerName, waiting, local, now, canReset, flow, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, onStartReset, onConfirmReset, onCancelReset }: UsageProviderCardProps) {
+  // Several sign-ins (a proxy): a summary strip and a table instead of one bar per window.
+  const multi = provider.accounts && provider.accounts.length > 1 ? provider.accounts : undefined
+  return <SettingsGroup
+    // A proxy is named in the gear's tooltip, not in the title.
+    title={provider.source && !provider.proxy ? `${provider.label} · ${provider.source}` : provider.label}
+    titleAction={provider.plan || multi || resetsLabel(provider.resets) || (provider.proxy && onSaveProxyKey && onClearProxyKey && local)
+      ? <>
+          {provider.plan && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-plan">{provider.plan}</span>}
+          {multi && provider.proxy && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-source">via CLI API proxy</span>}
+          {!multi && <UsageResetsChip resets={provider.resets} now={now} />}
+          {!multi && canReset && <UsageResetButton
+            resets={provider.resets}
+            hint={provider.windows.some((window) => (remainingNow(window, now) ?? 100) < 20)}
+            onStart={() => onStartReset(provider.id)}
+          />}
+          {provider.proxy && onSaveProxyKey && onClearProxyKey && local && <UsageSettingsButton provider={provider} onSave={onSaveProxyKey} onClear={onClearProxyKey} onSaved={onRefresh} />}
+        </>
+      : undefined}
+    className="usage-provider usage-enter"
+    action={computerName || provider.manageUrl || provider.readAt || multi
+      ? <span className="usage-provider-actions">
+          <UsageReadAt provider={provider} now={now} />
+          {multi && totalResets(multi) > 0 && <span className="usage-provider-active settings-muted" data-testid="usage-resets-total">{totalResets(multi)} reset{totalResets(multi) === 1 ? '' : 's'} across accounts</span>}
+          {multi && <span className="usage-provider-active settings-muted" data-testid="usage-accounts-active">{activeAccountsLabel(multi)}</span>}
+          {computerName && <span className="usage-provider-computer settings-muted" data-testid="usage-provider-computer">{computerName}</span>}
+          {provider.manageUrl && <button type="button" className="settings-icon-btn" onClick={() => onManage(provider.manageUrl!)} aria-label={`Open ${provider.label} usage page`} title="Open the provider's usage page">
+            <ExternalLink size={14} aria-hidden="true" />
+          </button>}
+        </span>
+      : undefined}
+  >
+    {waiting && !multi && <UsageCardSkeleton />}
+    {multi
+      ? <UsageAccountsView accounts={multi} now={now} />
+      : provider.windows.length > 0 && <div className="usage-windows">
+          {orderUsageWindows(provider.windows).map((entry) => <UsageBarRow key={entry.id} entry={entry} now={now} />)}
+        </div>}
+    {needsProxyKey(provider) && onSaveProxyKey && local
+      ? <ProxyKeyNote provider={provider} onSave={onSaveProxyKey} onSaved={onRefresh} />
+      : !multi && !waiting && <UsageNote provider={provider} />}
+    {!multi && canReset && <UsageResetConfirm
+      resets={provider.resets}
+      flow={flow}
+      onConfirm={() => onConfirmReset(provider)}
+      onCancel={onCancelReset}
+    />}
+  </SettingsGroup>
+})
 
 export interface SubscriptionUsageViewProps {
   /** The last reading, kept after a failed refresh. Null before the first one arrives. */
@@ -130,6 +206,12 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
       resetRunning.current = false
     }
   }
+  // The cards' reset callbacks keep their identity, so a card re-renders only when its own props change.
+  const runResetRef = useRef(runReset)
+  runResetRef.current = runReset
+  const confirmReset = useCallback((provider: ProviderUsage) => void runResetRef.current(provider), [])
+  const startReset = useCallback((providerId: string) => setResetFlow({ providerId, phase: 'confirm' }), [])
+  const cancelReset = useCallback(() => setResetFlow(null), [])
   const [otherOpen, setOtherOpen] = useState<boolean | undefined>(() => rememberedSectionOpen('other'))
   const [attentionOpen, setAttentionOpen] = useState<boolean>(() => rememberedSectionOpen('attention') ?? false)
   const readAt = usage ? usageReadingTime(usage.fetchedAt) : undefined
@@ -150,8 +232,16 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
   const visible = (row: (typeof listed)[number]) => showHidden || !isHidden(row)
   const others = listed.filter((row) => row.section === 'other' && visible(row))
   const attention = orderAttention(listed.filter((row) => row.section === 'attention' && visible(row)))
-  const menuFor = (row: { provider: ProviderUsage; computerName?: string }) =>
-    rowActions && !row.computerName ? <UsageRowMenu provider={row.provider} hidden={isHidden(row)} actions={rowActions} /> : undefined
+  const listRow = (kind: 'other' | 'attention', row: (typeof listed)[number]) => <UsageListRow
+    key={row.key}
+    kind={kind}
+    provider={row.provider}
+    {...(row.computerName ? { computerName: row.computerName } : {})}
+    loading={row.loading}
+    hidden={isHidden(row)}
+    {...(rowActions ? { actions: rowActions } : {})}
+    {...(onReconnect ? { onReconnect } : {})}
+  />
   const otherShown = otherOpen ?? subscriptions.length === 0
   const toggleOther = () => { const next = !otherShown; setOtherOpen(next); rememberSectionOpen('other', next) }
   const toggleAttention = () => { const next = !attentionOpen; setAttentionOpen(next); rememberSectionOpen('attention', next) }
@@ -199,64 +289,29 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
         {subscriptions.map(({ key, provider, computerName, loading: waiting }) => {
           // Proxy controls act on this computer's Claude only.
           const local = !computerName || computerName === computers?.selfName
-          // Several sign-ins (a proxy): a summary strip and a table instead of one bar per window.
-          const multi = provider.accounts && provider.accounts.length > 1 ? provider.accounts : undefined
-          return <SettingsGroup
-          key={key}
-          // A proxy is named in the gear's tooltip, not in the title.
-          title={provider.source && !provider.proxy ? `${provider.label} · ${provider.source}` : provider.label}
-          titleAction={provider.plan || multi || resetsLabel(provider.resets) || (provider.proxy && onSaveProxyKey && onClearProxyKey && local)
-            ? <>
-                {provider.plan && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-plan">{provider.plan}</span>}
-                {multi && provider.proxy && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-source">via CLI API proxy</span>}
-                {!multi && <UsageResetsChip resets={provider.resets} now={now} />}
-                {!multi && onUseReset && local && provider.resettable && <UsageResetButton
-                  resets={provider.resets}
-                  hint={provider.windows.some((window) => (remainingNow(window, now) ?? 100) < 20)}
-                  onStart={() => setResetFlow({ providerId: provider.id, phase: 'confirm' })}
-                />}
-                {provider.proxy && onSaveProxyKey && onClearProxyKey && local && <UsageSettingsButton provider={provider} onSave={onSaveProxyKey} onClear={onClearProxyKey} onSaved={onRefresh} />}
-              </>
-            : undefined}
-          className="usage-provider usage-enter"
-          action={computerName || provider.manageUrl || provider.readAt || multi
-            ? <span className="usage-provider-actions">
-                <UsageReadAt provider={provider} now={now} />
-                {multi && totalResets(multi) > 0 && <span className="usage-provider-active settings-muted" data-testid="usage-resets-total">{totalResets(multi)} reset{totalResets(multi) === 1 ? '' : 's'} across accounts</span>}
-                {multi && <span className="usage-provider-active settings-muted" data-testid="usage-accounts-active">{activeAccountsLabel(multi)}</span>}
-                {computerName && <span className="usage-provider-computer settings-muted" data-testid="usage-provider-computer">{computerName}</span>}
-                {provider.manageUrl && <button type="button" className="settings-icon-btn" onClick={() => onManage(provider.manageUrl!)} aria-label={`Open ${provider.label} usage page`} title="Open the provider's usage page">
-                  <ExternalLink size={14} aria-hidden="true" />
-                </button>}
-              </span>
-            : undefined}
-        >
-          {waiting && !multi && <UsageCardSkeleton />}
-          {multi
-            ? <UsageAccountsView accounts={multi} now={now} />
-            : provider.windows.length > 0 && <div className="usage-windows">
-                {orderUsageWindows(provider.windows).map((entry) => <UsageBarRow key={entry.id} entry={entry} now={now} />)}
-              </div>}
-          {needsProxyKey(provider) && onSaveProxyKey && local
-            ? <ProxyKeyNote provider={provider} onSave={onSaveProxyKey} onSaved={onRefresh} />
-            : !multi && !waiting && <UsageNote provider={provider} />}
-          {!multi && onUseReset && local && provider.resettable && <UsageResetConfirm
-            resets={provider.resets}
+          return <UsageProviderCard
+            key={key}
+            provider={provider}
+            {...(computerName ? { computerName } : {})}
+            waiting={waiting}
+            local={local}
+            now={now}
+            canReset={!!onUseReset && local && !!provider.resettable}
             flow={resetFlow?.providerId === provider.id ? resetFlow : null}
-            onConfirm={() => void runReset(provider)}
-            onCancel={() => setResetFlow(null)}
-          />}
-        </SettingsGroup>
+            onRefresh={onRefresh}
+            onManage={onManage}
+            {...(onSaveProxyKey ? { onSaveProxyKey } : {})}
+            {...(onClearProxyKey ? { onClearProxyKey } : {})}
+            onStartReset={startReset}
+            onConfirmReset={confirmReset}
+            onCancelReset={cancelReset}
+          />
         })}
         {others.length > 0 && <UsageCollapsibleSection id="usage-other" title="Other usage" count={others.length} open={otherShown} onToggle={toggleOther}>
-          {others.map((row) => <UsageRowSlot key={row.key} hidden={isHidden(row)} loading={row.loading}>
-            {row.loading ? <UsageRowSkeleton provider={row.provider} /> : <OtherUsageRow provider={row.provider} {...(row.computerName ? { computerName: row.computerName } : {})} menu={menuFor(row)} />}
-          </UsageRowSlot>)}
+          {others.map((row) => listRow('other', row))}
         </UsageCollapsibleSection>}
         {attention.length > 0 && <UsageCollapsibleSection id="usage-attention" title="Needs attention" count={attention.length} open={attentionOpen} onToggle={toggleAttention} dimmed>
-          {attention.map((row) => <UsageRowSlot key={row.key} hidden={isHidden(row)} loading={row.loading}>
-            {row.loading ? <UsageRowSkeleton provider={row.provider} /> : <AttentionRow provider={row.provider} {...(row.computerName ? { computerName: row.computerName } : {})} {...(onReconnect ? { onReconnect } : {})} menu={menuFor(row)} />}
-          </UsageRowSlot>)}
+          {attention.map((row) => listRow('attention', row))}
         </UsageCollapsibleSection>}
         {disableAsk && onDisableAnswer && <Modal
           open
@@ -279,6 +334,12 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
     </div>
   </section>
 }
+
+// What the page asks of the app, defined once so the cards and rows they reach keep their props.
+const manageUsage = (url: string) => void window.mousse.providers.openLoginUrl(url)
+const saveProxyKey: SaveProxyKey = (providerId, key) => window.mousse.providers.setUsageProxyKey(providerId, key)
+const clearProxyKey = (providerId: string) => window.mousse.providers.clearUsageProxyKey(providerId)
+const useReset = (providerId: string, creditId: string | undefined) => window.mousse.providers.useLimitReset({ providerId, ...(creditId ? { creditId } : {}) })
 
 export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   // One computer: no picker. With others, a picker defaults to All computers and is kept for the session.
@@ -338,7 +399,9 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
       if (mounted.current && generation.current === run) { setLoading(false); setNow(Date.now()) }
     }
   }, [])
-  const usage: ProvidersUsageResponse | null = entries ? entriesResponse(entries, now) : null
+  // Kept between renders, with each provider's own object, so the cards and rows that did not change skip re-rendering.
+  const usage: ProvidersUsageResponse | null = useMemo(() => (entries ? entriesResponse(entries, now) : null), [entries, now])
+  const loadingIds = useMemo(() => (entries ? entriesLoading(entries) : undefined), [entries])
   const profileId = useAppStore((state) => state.profileId)
   const [hidden, setHidden] = useState<Set<string>>(() => readHiddenUsage(profileId))
   useEffect(() => setHidden(readHiddenUsage(profileId)), [profileId])
@@ -357,14 +420,18 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
     await window.mousse.providers.instances.setEnabled(usageInstanceId(provider), DEVICE_SCOPE, false)
     void loadUsage()
   }
-  const rowActions: UsageRowActions = {
+  const rowActions = useMemo<UsageRowActions>(() => ({
     onHide: (provider) => {
       changeHidden((next) => next.add(provider.id))
       showToast({ message: 'Hidden', key: 'usage-hidden', action: { label: 'Undo', run: () => changeHidden((next) => next.delete(provider.id)) } })
     },
     onUnhide: (provider) => changeHidden((next) => next.delete(provider.id)),
     onDisable: (provider) => setDisableAsk(provider)
-  }
+  }), [changeHidden])
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+  const refresh = useCallback(() => void loadUsage(), [loadUsage])
+  const reconnect = useCallback((instanceId: string) => { closeRef.current(); openProvider(instanceId) }, [])
   useEffect(() => {
     mounted.current = true
     void loadUsage()
@@ -384,15 +451,15 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
     selected={effective}
     onSelect={(value) => { setPicked(value); rememberUsageComputer(value) }}
     onBack={onClose}
-    onRefresh={() => void loadUsage()}
-    onManage={(url) => void window.mousse.providers.openLoginUrl(url)}
-    onSaveProxyKey={(providerId, key) => window.mousse.providers.setUsageProxyKey(providerId, key)}
-    onClearProxyKey={(providerId) => window.mousse.providers.clearUsageProxyKey(providerId)}
-    loadingIds={entries ? entriesLoading(entries) : undefined}
-    onReconnect={(instanceId) => { onClose(); openProvider(instanceId) }}
+    onRefresh={refresh}
+    onManage={manageUsage}
+    onSaveProxyKey={saveProxyKey}
+    onClearProxyKey={clearProxyKey}
+    loadingIds={loadingIds}
+    onReconnect={reconnect}
     hidden={hidden}
     rowActions={rowActions}
-    onUseReset={(providerId, creditId) => window.mousse.providers.useLimitReset({ providerId, ...(creditId ? { creditId } : {}) })}
+    onUseReset={useReset}
     disableAsk={disableAsk}
     onDisableAnswer={(confirmed) => (confirmed && disableAsk ? void disable(disableAsk) : setDisableAsk(null))}
   />

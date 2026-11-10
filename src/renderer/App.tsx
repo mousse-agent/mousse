@@ -295,9 +295,14 @@ export default function App() {
 
     // Streamed updates of the selected thread reach the store once per frame (see messageUpdateBatcher).
     // Anything else that changes the transcript applies the held updates first, so order is kept.
+    // The Usage page covers the workspace: the transcript catches up in one write when it closes.
     const messageUpdates = createMessageUpdateBatcher({
       apply: (_threadId, messages) => useAppStore.getState().updateMessages(messages),
-      isCurrent: isSelectedThread
+      isCurrent: isSelectedThread,
+      held: () => useAppStore.getState().usageOpen
+    })
+    const stopHoldingUpdates = useAppStore.subscribe((state, previous) => {
+      if (previous.usageOpen && !state.usageOpen) messageUpdates.flush()
     })
 
     const unsubs = [
@@ -399,6 +404,7 @@ export default function App() {
     return () => {
       disposed = true
       stopFollowingThreads()
+      stopHoldingUpdates()
       unsubs.forEach((u) => u())
       messageUpdates.clear()
     }
