@@ -73,9 +73,10 @@ export class SkillsRegistry {
       }
     }
 
-    const snapshot = await this.discoverUncached(options)
+    const { snapshot, scannedAt } = await this.discoverUncached(options)
     this.discoveryCache.delete(cacheKey)
-    this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: Date.now() })
+    // The snapshot is as old as the oldest scan in it, so it never outlives a shared scan it reused.
+    this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: scannedAt })
     while (this.discoveryCache.size > SkillsRegistry.MAX_DISCOVERY_ENTRIES) {
       const oldest = this.discoveryCache.keys().next().value
       if (oldest === undefined) break
@@ -97,7 +98,10 @@ export class SkillsRegistry {
     return `${this.context.profileId}:${projectPath ?? this.context.projectPath ?? ''}`
   }
 
-  private async discoverUncached(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
+  private async discoverUncached(
+    options: SkillsDiscoveryOptions = {}
+  ): Promise<{ snapshot: SkillsRegistrySnapshot; scannedAt: number }> {
+    let scannedAt = Date.now()
     const projectPath = options.projectPath ?? this.context.projectPath
     const external = getSkillRootPaths(projectPath).map(
       (descriptor): SkillSourceDescriptor => ({
@@ -129,6 +133,7 @@ export class SkillsRegistry {
         // Shared folders read the same for every project; each snapshot gets its own copies,
         // because managed state and duplicate marking below change them per snapshot.
         const scanned = await this.scanSharedSource(source, options.refresh === true)
+        scannedAt = Math.min(scannedAt, scanned.fetchedAt)
         skills.push(...scanned.skills.map((skill) => ({ ...skill })))
         diagnostics.push(...scanned.diagnostics)
         continue
@@ -146,9 +151,12 @@ export class SkillsRegistry {
     const duplicateDiagnostics = markDuplicateSkills(sortedSkills)
 
     return {
-      sources,
-      skills: sortedSkills,
-      diagnostics: [...diagnostics, ...duplicateDiagnostics]
+      snapshot: {
+        sources,
+        skills: sortedSkills,
+        diagnostics: [...diagnostics, ...duplicateDiagnostics]
+      },
+      scannedAt
     }
   }
 

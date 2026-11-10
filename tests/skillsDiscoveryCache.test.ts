@@ -86,6 +86,28 @@ describe('Skills discovery cache', () => {
     expect(read).toHaveBeenCalledTimes(3 + 4 + 4)
   })
 
+  it('expires a project snapshot with the shared scan it reused', async () => {
+    const skills = registry()
+    const shared = join(userHome, '.claude', 'skills', 'alpha')
+    const alphaOf = (snapshot: SkillsRegistrySnapshot) => snapshot.skills.find((skill) => skill.name === 'alpha')?.description
+    const start = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+    try {
+      await skills.discover({ projectPath: await project(0) })
+      now.mockReturnValue(start + 1_000)
+      await writeFile(join(shared, 'SKILL.md'), ['---', 'name: alpha', 'description: Alpha after the change', '---', 'Changed.', ''].join('\n'), 'utf-8')
+      // Within the shared scan's 30 s, a new project reuses it.
+      now.mockReturnValue(start + 29_000)
+      expect(alphaOf(await skills.discover({ projectPath: await project(1) }))).toBe('The alpha skill for this test run')
+      // Once that scan is 30 s old, the project's snapshot goes with it.
+      now.mockReturnValue(start + 31_000)
+      expect(alphaOf(await skills.discover({ projectPath: await project(1) }))).toBe('Alpha after the change')
+    } finally {
+      now.mockRestore()
+      await writeSkill(shared, 'alpha')
+    }
+  })
+
   it('keeps no SKILL.md text alive through parsed names and descriptions', async () => {
     const marker = 'skill-text-retention-probe'
     const dir = join(root, 'big-project')
