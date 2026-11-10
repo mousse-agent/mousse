@@ -257,6 +257,11 @@
   border-radius: var(--an-tool-border-radius);
   background: transparent;
   gap: 0;
+  /* Streamdown sets `content-visibility: auto` inline. Each block that scrolls into view then lays out all
+     its highlighted lines in that frame, and one that has never been on screen counts as 200px tall, so the
+     content moves when it shows. The transcript already mounts only the turns near the viewport. */
+  content-visibility: visible !important;
+  contain-intrinsic-size: none !important;
 }
 
 .an-markdown [data-streamdown="code-block-header"] {
