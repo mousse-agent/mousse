@@ -370,8 +370,7 @@ describe('the repository lease, round 2', () => {
     const first = JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8')) as { heartbeatAt: string; stoppedGitPids?: number[] }
     expect(first.stoppedGitPids?.length).toBeGreaterThan(0)
     // Past the survivor limit the lease is still refreshed, and an older build never takes it.
-    await new Promise((done) => setTimeout(done, 700))
-    expect(logged).toHaveBeenCalled()
+    await vi.waitFor(() => expect(logged).toHaveBeenCalled(), { timeout: 10_000 })
     const later = JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8')) as { heartbeatAt: string }
     expect(Date.parse(later.heartbeatAt)).toBeGreaterThan(Date.parse(first.heartbeatAt))
     const older = child(['legacy-try', root, '300', '1500'])
