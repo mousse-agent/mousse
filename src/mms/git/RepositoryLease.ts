@@ -2,7 +2,7 @@
  * Fair, abortable mutation lease shared by all worktrees of a repository.
  * The on-disk lease coordinates processes; the in-process queue preserves FIFO fairness.
  */
-import { closeSync, existsSync, linkSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync, ftruncateSync, readSync, fsyncSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync, ftruncateSync, readSync, fsyncSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { RepositoryIdentity } from './RepositoryIdentity'
@@ -63,113 +63,30 @@ function stale(owner: RepositoryLeaseOwner, staleAfterMs: number): boolean {
 }
 /** Protect a live in-process holder even if its heartbeat was delayed. */
 const locallyHeldTokens = new Set<string>()
-/** Leases this process let go whose file it could not remove: nobody holds them, so the next caller takes the file over at once. */
-const releasedTokens = new Set<string>()
-/** A lease file nobody could read for longer than a holder may go without a heartbeat. */
-function unreadableFor(path: string, staleAfterMs: number): boolean {
-  try { return readOwner(path) === null && Date.now() - statSync(path).mtimeMs > staleAfterMs } catch { return false }
-}
-function reclaimable(owner: RepositoryLeaseOwner, staleAfterMs: number): boolean {
-  return !locallyHeldTokens.has(owner.token) && (releasedTokens.has(owner.token) || stale(owner, staleAfterMs))
-}
-
-/**
- * Every removal of a lease file (a release, a reclaim) happens under the lease's removal guard: a file made with
- * `O_EXCL` beside it, held only for the few file operations of one check and removal. Making a lease needs no guard (it
- * only succeeds where no lease file is), so with every removal guarded, nothing can remove or replace the lease file
- * between the check that it may go and its removal: a lease another process has just taken is never removed by a
- * reclaim that looked at the file before it was taken.
- */
-const GUARD_SUFFIX = '.guard'
-/** A guard nobody could read for this long was left by a process that stopped while writing it. */
-const UNREADABLE_GUARD_MS = 2_000
-const sleeper = new Int32Array(new SharedArrayBuffer(4))
-function sleepSync(ms: number): void { Atomics.wait(sleeper, 0, 0, ms) }
-
-/**
- * Removes a guard whose holder is gone (its process ended while it held it). It is moved aside first: only one move of
- * that file can succeed, and what was moved is compared with what was found before it is deleted. A guard taken
- * meanwhile by someone else is put back, unless yet another one was made since.
- */
-function clearDeadGuard(guard: string): void {
-  let text: string
-  try { text = readFileSync(guard, 'utf8') } catch { return }
-  let dead: boolean
-  try {
-    const owner = JSON.parse(text) as { pid?: unknown; processInstanceId?: unknown }
-    dead = typeof owner.pid !== 'number' || !isOwnerLive({ pid: owner.pid, ...(typeof owner.processInstanceId === 'string' ? { processInstanceId: owner.processInstanceId } : {}) })
-  } catch {
-    try { dead = Date.now() - statSync(guard).mtimeMs > UNREADABLE_GUARD_MS } catch { return }
-  }
-  if (!dead) return
-  const aside = `${guard}.${createRepositoryLeaseToken()}`
-  try { renameSync(guard, aside) } catch { return }
-  let moved: string | undefined
-  try { moved = readFileSync(aside, 'utf8') } catch { moved = undefined }
-  if (moved !== text) try { linkSync(aside, guard) } catch { /* another guard was made since: it stands */ }
-  try { unlinkSync(aside) } catch { /* left beside the lease; nothing reads it */ }
-}
-
-/** Runs `work` under the removal guard of the lease at `path`, waiting up to `waitMs` for it; undefined when it stayed busy. */
-function underRemovalGuard<T>(path: string, work: () => T, waitMs = 0): { value: T } | undefined {
-  const guard = `${path}${GUARD_SUFFIX}`
-  const record = JSON.stringify({ pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, token: createRepositoryLeaseToken() })
-  const until = Date.now() + waitMs
-  for (;;) {
-    try {
-      const fd = openSync(guard, 'wx')
-      try { writeSync(fd, record) } finally { closeSync(fd) }
-      break
-    } catch {
-      // Held by another (or, on Windows, a removed guard another program still has open): wait a moment.
-      clearDeadGuard(guard)
-      if (Date.now() >= until) return undefined
-      sleepSync(1)
-    }
-  }
-  try {
-    return { value: work() }
-  } finally {
-    try { if (readFileSync(guard, 'utf8') === record) unlinkSync(guard) } catch { /* a dead-guard clear took it; nothing else holds it */ }
-  }
-}
-
 function safeReclaim(path: string, staleAfterMs: number): boolean {
   if (!existsSync(path)) return true
-  return underRemovalGuard(path, () => {
-    try {
-      if (!existsSync(path)) return true
-      const owner = readOwner(path)
-      // A partial publication is not stolen while its creator may still be writing. One that stayed unreadable for
-      // longer than the stale window was left by a process that stopped while writing it, and would otherwise hold
-      // the repository for good.
-      if (!owner) {
-        if (!unreadableFor(path, staleAfterMs)) return false
-        unlinkSync(path)
-        return true
-      }
-      if (!reclaimable(owner, staleAfterMs)) return false
-      unlinkSync(path)
-      releasedTokens.delete(owner.token)
-      return true
-    } catch { return false }
-  })?.value ?? false
+  const owner = readOwner(path)
+  // A partial publication is deliberately never stolen; its creator may still be writing.
+  if (!owner || locallyHeldTokens.has(owner.token) || !stale(owner, staleAfterMs)) return false
+  try {
+    const again = readOwner(path)
+    if (!again || again.token !== owner.token || !stale(again, staleAfterMs)) return false
+    unlinkSync(path)
+    return true
+  } catch { return false }
 }
 /**
- * Removes the lease file, under its removal guard, while it still names `token`, trying again when it cannot be read or
- * removed for a moment (on Windows another program may have it open). False when it names another holder, is gone, or
- * could not be removed.
+ * Removes the lease file while it still names `token`, trying again when it cannot be read or removed for a moment (on
+ * Windows another program may have it open). False when it names another holder, is gone, or could not be removed.
  */
 function removeOwnLease(path: string, token: string): boolean {
-  return underRemovalGuard(path, () => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const current = readOwner(path)
-      if (current ? current.token !== token : !existsSync(path)) return false
-      if (!current) continue
-      try { unlinkSync(path); return true } catch { /* busy: try again */ }
-    }
-    return false
-  }, 500)?.value ?? false
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = readOwner(path)
+    if (current ? current.token !== token : !existsSync(path)) return false
+    if (!current) continue
+    try { unlinkSync(path); return true } catch { /* busy: try again */ }
+  }
+  return false
 }
 /**
  * Update through the opened inode after verifying the token, never a replacement owner: a reclaim that unlinked the file
@@ -221,7 +138,6 @@ function tryAcquire(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOp
       released = true
       locallyHeldTokens.delete(owner.token)
       const removed = removeOwnLease(path, owner.token)
-      if (!removed && existsSync(path)) releasedTokens.add(owner.token)
       releaseLocal(identity.key)
       return removed
     }

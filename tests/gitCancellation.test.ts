@@ -54,6 +54,18 @@ describe('withGitCancellation', () => {
     expect(existsSync(`${index}.lock`)).toBe(false)
   }, 30_000)
 
+  it('leaves a lock of the private index that was there before the stopped command started', async () => {
+    const cwd = repo()
+    const index = join(cwd, 'private-index')
+    writeFileSync(`${index}.lock`, '')
+    const controller = new AbortController()
+    const running = withGitCancellation(controller.signal, () => runGitProcess(SLOW, { cwd, env: { ...process.env, GIT_INDEX_FILE: index } }))
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    controller.abort()
+    expect((await running).error?.code).toBe('ABORT_ERR')
+    expect(existsSync(`${index}.lock`)).toBe(true)
+  }, 30_000)
+
   it('lets a command that writes a ref finish', async () => {
     const cwd = repo()
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()
