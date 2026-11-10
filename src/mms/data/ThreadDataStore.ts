@@ -52,7 +52,7 @@ import { ThreadTrashService, type LegacyTrashDiagnostic } from './ThreadTrashSer
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import type { ThreadPullRequestLink } from '../../shared/pullRequests'
-import { registerThreadLifecycleGate, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
+import { registerThreadLifecycleGate, withThreadLifecyclePath, withThreadLifecyclePaths } from '../queue/ThreadLifecycleAdmission'
 import { FileLockBusyError, withFileLock } from '../scheduled/fileLock'
 import { pathsEqual } from '../profiles/pathSafety'
 import {
@@ -174,6 +174,56 @@ export interface ThreadDataPatch {
 const META_TOUCH_INTERVAL_MS = 30_000
 /** How long a project's list lock held by another process is waited for (`withProjectListLock`). */
 const LIST_LOCK_WAIT_MS = 5_000
+
+/**
+ * Orders for rows in a new sequence that keep as many rows' orders as they can: the longest run of rows whose orders
+ * already rise in the new sequence keeps them, and every other row gets an order between its kept neighbours, so moving
+ * one thread changes one row. When a gap is too small to split, every row is numbered again from 0.
+ */
+export function ordersKeeping(orders: readonly number[]): number[] {
+  const n = orders.length
+  // The longest strictly rising run (patience sorting): `tails[k]` ends the best run of length k + 1.
+  const tails: number[] = []
+  const previous = new Array<number>(n).fill(-1)
+  for (let index = 0; index < n; index += 1) {
+    const order = orders[index]!
+    if (!Number.isFinite(order)) continue
+    let low = 0
+    let high = tails.length
+    while (low < high) {
+      const middle = (low + high) >> 1
+      if (orders[tails[middle]!]! < order) low = middle + 1
+      else high = middle
+    }
+    previous[index] = low > 0 ? tails[low - 1]! : -1
+    tails[low] = index
+  }
+  const kept = new Array<boolean>(n).fill(false)
+  for (let index = tails.length ? tails[tails.length - 1]! : -1; index >= 0; index = previous[index]!) kept[index] = true
+  const renumbered = (): number[] => orders.map((_order, index) => index)
+  if (!kept.some(Boolean)) return renumbered()
+  const result = [...orders]
+  let start = 0
+  while (start < n) {
+    if (kept[start]) { start += 1; continue }
+    let end = start
+    while (end < n && !kept[end]) end += 1
+    // Rows start..end-1 move; they go between the kept rows around them.
+    const below = start > 0 ? result[start - 1] : undefined
+    const above = end < n ? result[end] : undefined
+    const count = end - start
+    for (let offset = 0; offset < count; offset += 1) {
+      const value = below === undefined ? above! - count + offset
+        : above === undefined ? below + 1 + offset
+          : below + ((above - below) * (offset + 1)) / (count + 1)
+      const floor = offset > 0 ? result[start + offset - 1]! : below
+      if (!(floor === undefined || value > floor) || !(above === undefined || value < above)) return renumbered()
+      result[start + offset] = value
+    }
+    start = end
+  }
+  return result
+}
 
 /** A project's list lock was not had in time (`LIST_LOCK_WAIT_MS`). Nothing was changed: the caller can try again. */
 export class ThreadListBusyError extends Error {
@@ -770,16 +820,14 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
-  /** Takes these lifecycle gates by task id (re-entrant in a process), in order, then runs `fn` under them. */
+  /** Takes these lifecycle gates by task id (re-entrant in a process), one after another, then runs `fn` under them. */
   private withLifecycleGates<T>(taskIds: readonly string[], fn: () => T): T {
-    const take = (index: number): T => index === taskIds.length ? fn() : this.lifecycleStore.withGate(taskIds[index]!, () => take(index + 1))
-    return take(0)
+    return this.lifecycleStore.withGates(taskIds, fn)
   }
 
-  /** Takes the lifecycle admission of each path for a write (the gates its own write takes), then runs `fn`. */
+  /** Takes the lifecycle admission of each path for a write (the gates its own write takes), in one loop, then runs `fn`. */
   private withPathGates<T>(paths: readonly string[], fn: () => T): T {
-    const take = (index: number): T => index === paths.length ? fn() : withThreadLifecyclePath(paths[index]!, 'write', () => take(index + 1))
-    return take(0)
+    return withThreadLifecyclePaths(paths, 'write', fn)
   }
 
   /** A task and its owners, the outermost owner first, as lifecycle records name them. */
@@ -801,12 +849,14 @@ export class ThreadDataStore extends EventEmitter {
    * 2. the revision is marked pending, `write` runs, and the revision is marked done with a new id;
    * 3. only then is this store's signature for the project moved to the new revision, if its list was trusted
    *    throughout. Another store of this process writing inside the same lock (it is re-entrant per process) shows as a
-   *    revision that is no longer this write's pending one, and the list is dropped too.
+   *    revision that is no longer this write's pending one, and the list is dropped too. A write that adds or removes
+   *    no thread folder (`changesFolder` unset) must also find the project's folder as it was before it: a trash or
+   *    restore another process made meanwhile moved a folder outside this lock, and the list is dropped.
    */
   private projectListWrite<T>(
     projectId: string,
     write: (cacheTrusted: boolean) => T,
-    options: { repair?: boolean } = {}
+    options: { repair?: boolean; changesFolder?: boolean } = {}
   ): T {
     if (this.heldProjectLocks.has(projectId)) return write(this.projectListCache.has(projectId))
     return this.withProjectListLock(projectId, () => {
@@ -834,6 +884,7 @@ export class ThreadDataStore extends EventEmitter {
       }
       const folderAfterWrite = this.stamp(this.storageLayout.repositoryRoot(projectId))
       if (pending === undefined || this.readRevisionToken(projectId) !== pending) trusted = false
+      if (!options.changesFolder && folderAfterWrite !== current?.split('|')[0]) trusted = false
       let done: string
       try {
         done = this.publishListRevision(projectId, 'done')
@@ -848,6 +899,37 @@ export class ThreadDataStore extends EventEmitter {
       else this.dropGroupCache(projectId)
       return result
     })
+  }
+
+  /**
+   * Writes a thread's `meta.json` as `change` makes it from the thread as it is now. A project thread is written under
+   * its project's list lock: from `known` while this store's list of the project is trusted, else from its `meta.json`
+   * read again under the lock, so a change another process made since `known` was read (a mode, a rename) is kept and
+   * the settings revision moves on from the one on disk. A standalone thread is written from `known`, as before.
+   */
+  private writeThreadMeta<T extends Thread>(known: T, change: (base: T, cacheTrusted: boolean) => T): T {
+    const path = join(this.getThreadDir(known.id), 'meta.json')
+    const projectId = known.projectId
+    if (!projectId) {
+      const updated = change(known, false)
+      this.writeJsonAtomic(path, updated)
+      return updated
+    }
+    return this.withPathGates([path], () => this.projectListWrite(projectId, (cacheTrusted) => {
+      const updated = change(cacheTrusted ? known : this.metaOnDisk(path, known), cacheTrusted)
+      atomicWriteJsonSync(path, updated)
+      return updated
+    }))
+  }
+
+  /** A thread's `meta.json` as it is now, or `known` when it cannot be read as that thread. */
+  private metaOnDisk<T extends Thread>(path: string, known: T): T {
+    try {
+      const meta = readThreadMeta<T>(path)
+      return meta.id === known.id ? meta : known
+    } catch {
+      return known
+    }
   }
 
   /**
@@ -1040,7 +1122,7 @@ export class ThreadDataStore extends EventEmitter {
             this.ensureThreadDir(threadDir)
             meta.order = this.projectOrderUnderLock(projectId, cacheTrusted)
             atomicWriteJsonSync(join(threadDir, 'meta.json'), meta)
-          })
+          }, { changesFolder: true })
         })
       } else {
         register()
@@ -1101,7 +1183,7 @@ export class ThreadDataStore extends EventEmitter {
         this.projectListWrite(projectId, () => {
           forget()
           rmSync(threadDir, { recursive: true, force: true })
-        })
+        }, { changesFolder: true })
       })
     } else {
       forget()
@@ -1233,8 +1315,7 @@ export class ThreadDataStore extends EventEmitter {
     for (const id of new Set(threadIds)) {
       const thread = this.getThread(id)
       if (!thread || thread.botOwned) continue
-      const updated: Thread = { ...thread, botOwned: true }
-      this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
+      const updated = this.writeThreadMeta(thread, (base) => ({ ...base, botOwned: true }))
       if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
       this.patchListCache(updated)
       this.emit('updated', updated)
@@ -1393,16 +1474,14 @@ export class ThreadDataStore extends EventEmitter {
     }
     if (partial.name !== undefined && partial.name !== thread.name) this.nameGuard?.(thread, partial.name)
 
-    const updated: Thread = {
-      ...thread,
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => ({
+      ...base,
       ...partial,
       // Every write of the model or the permission mode, by any route, moves the revision on (`ifRevision`).
-      ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (thread.settingsRevision ?? 0) + 1 } : {}),
-      updatedAt: opts.touch === false ? thread.updatedAt : new Date().toISOString()
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+      ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (base.settingsRevision ?? 0) + 1 } : {}),
+      updatedAt: opts.touch === false ? base.updatedAt : now
+    }))
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
@@ -1425,14 +1504,8 @@ export class ThreadDataStore extends EventEmitter {
     if (this.messageCountAt(this.getThreadDir(id)) > 0) {
       throw threadErrors.create('thread_worktree_locked')
     }
-    const updated: Thread = {
-      ...thread,
-      worktreeEnabled: enabled,
-      updatedAt: new Date().toISOString()
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => ({ ...base, worktreeEnabled: enabled, updatedAt: now }))
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
@@ -1449,20 +1522,17 @@ export class ThreadDataStore extends EventEmitter {
       throw new Error(`Thread not found: ${id}`)
     }
 
-    const updated: Thread = {
-      ...thread,
-      updatedAt: new Date().toISOString()
-    }
-
-    if (settled) {
-      updated.settledAt = updated.updatedAt
-      delete updated.pinnedAt
-    } else {
-      delete updated.settledAt
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base, updatedAt: now }
+      if (settled) {
+        next.settledAt = now
+        delete next.pinnedAt
+      } else {
+        delete next.settledAt
+      }
+      return next
+    })
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
     this.emit('list-changed', { id })
@@ -1475,19 +1545,13 @@ export class ThreadDataStore extends EventEmitter {
       throw new Error(`Thread not found: ${id}`)
     }
 
-    const updated: Thread = {
-      ...thread,
-      updatedAt: new Date().toISOString()
-    }
-
-    if (pinned) {
-      updated.pinnedAt = updated.updatedAt
-    } else {
-      delete updated.pinnedAt
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base, updatedAt: now }
+      if (pinned) next.pinnedAt = now
+      else delete next.pinnedAt
+      return next
+    })
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
@@ -1507,22 +1571,31 @@ export class ThreadDataStore extends EventEmitter {
     if (threadIds.some((id) => !byId.has(id))) {
       throw new Error('Threads may only be reordered within their current group')
     }
-    const reordered = threadIds.map((id, order) => ({ ...byId.get(id)!, order }))
-    const paths = reordered.map((thread) => join(this.resolveThreadDir(thread), 'meta.json'))
-    // All or nothing: every row's gates are taken before the list lock and before any write, so a busy one changes
-    // nothing; a write that still fails puts the rows already written back as they were.
-    const writeAll = (): void => {
+    // Only the rows whose order changes are written (moving one thread writes one row), so the list lock and their
+    // gates are held for those writes alone.
+    const listed = threadIds.map((id) => byId.get(id)!)
+    const orders = ordersKeeping(listed.map((thread) => thread.order))
+    const reordered = listed.map((thread, index) => (orders[index] === thread.order ? thread : { ...thread, order: orders[index]! }))
+    const changed = reordered.filter((thread, index) => thread !== listed[index])
+    const paths = changed.map((thread) => join(this.resolveThreadDir(thread), 'meta.json'))
+    // All or nothing: every changed row's gates are taken before the list lock and before any write, so a busy one
+    // changes nothing; a write that still fails puts the rows already written back as they were.
+    const writeChanged = (cacheTrusted: boolean): void => {
+      // Orders are kept relative to the rows around them, so they must be the ones on disk: a list another process
+      // changed since it was read is refused before anything is written, and the person tries again.
+      if (!cacheTrusted && listed.some((thread) => this.metaOnDisk(join(this.resolveThreadDir(thread), 'meta.json'), thread).order !== thread.order))
+        throw new ThreadListBusyError()
       let written = 0
       try {
-        for (; written < reordered.length; written += 1) this.writeJsonAtomic(paths[written]!, reordered[written])
+        for (; written < changed.length; written += 1) this.writeJsonAtomic(paths[written]!, changed[written])
       } catch (error) {
         for (let index = 0; index < written; index += 1) {
-          try { this.writeJsonAtomic(paths[index]!, byId.get(reordered[index]!.id)) } catch { /* the original failure is reported */ }
+          try { this.writeJsonAtomic(paths[index]!, byId.get(changed[index]!.id)) } catch { /* the original failure is reported */ }
         }
         throw error
       }
     }
-    this.withPathGates(paths, () => (projectId ? this.projectListWrite(projectId, writeAll) : writeAll()))
+    if (changed.length) this.withPathGates(paths, () => (projectId ? this.projectListWrite(projectId, writeChanged) : writeChanged(true)))
     if (!projectId) this.writeVisibleStandaloneProjection(reordered)
     this.invalidateListCache()
     this.emit('list-changed', {})
@@ -1907,18 +1980,12 @@ export class ThreadDataStore extends EventEmitter {
     if (thread.startedAt) return { thread, newlyStarted: false }
 
     const now = new Date().toISOString()
-    const updated: ThreadMeta = {
-      ...thread,
-      startedAt: now,
-      updatedAt: now
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    // Started by another process meanwhile: kept as it is.
+    const updated = this.writeThreadMeta(thread, (base) => (base.startedAt ? base : { ...base, startedAt: now, updatedAt: now }))
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
     this.emit('list-changed', { id })
-    return { thread: updated, newlyStarted: true }
+    return { thread: updated, newlyStarted: updated.startedAt === now }
   }
 
   /**
@@ -1944,8 +2011,13 @@ export class ThreadDataStore extends EventEmitter {
       (min, entry) => Math.min(min, entry.order),
       Math.min(thread.order, floor ?? thread.order)
     )
-    const updated: Thread = { ...thread, order: minOrder - 1 }
-    this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
+    // A project thread's order is taken under the project's list lock, below every order on disk when its list is not
+    // trusted, as a new thread's is.
+    const projectId = thread.projectId
+    const updated = this.writeThreadMeta(thread, (base, cacheTrusted) => ({
+      ...base,
+      order: projectId ? this.projectOrderUnderLock(projectId, cacheTrusted) : minOrder - 1
+    }))
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.invalidateListCache()
     this.emit('updated', updated)

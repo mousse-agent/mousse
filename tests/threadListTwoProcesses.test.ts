@@ -14,10 +14,16 @@ const ITERATIONS = 300
 const CHILD = `
 import { ProjectManager } from './src/mms/data/ProjectManager'
 import { ThreadDataStore } from './src/mms/data/ThreadDataStore'
-const [projectId, iterations, tag] = process.argv.slice(2)
+const [projectId, iterations, tag, scenario, ids] = process.argv.slice(2)
 const projects = new ProjectManager()
 const store = new ThreadDataStore(projects)
 projects.setThreadStore(store)
+if (scenario === 'modes') {
+  // Sets each named thread to Ask, as another window's permission change does.
+  for (const id of ids.split(',')) store.updateThreadMeta(id, { permissionMode: 'ask' })
+  process.stdout.write('{}')
+  process.exit(0)
+}
 const made: string[] = []
 const renamed: Record<string, string> = {}
 // The lifecycle store's own per-task gates refuse a second process for a moment ("gate is busy"); retried here, as
@@ -65,6 +71,40 @@ describe('two processes changing one project at once', () => {
     else process.env.MOUSSE_HOME = previousHome
     try { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) } catch { /* left for the OS */ }
   })
+
+  const runChild = (args: string[]): { exited: Promise<number | null>; out: () => string; err: () => string } => {
+    const child = spawn(process.execPath, [childScript, ...args], {
+      env: { ...process.env, MOUSSE_HOME: join(root, 'home'), MOUSSE_THREAD_DB_WORKER: 'inline', ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (chunk) => { out += chunk })
+    child.stderr.on('data', (chunk) => { err += chunk })
+    return { exited: new Promise((resolve) => child.on('exit', resolve)), out: () => out, err: () => err }
+  }
+
+  // Review repro: a rename built from this process's cached thread wrote back the mode it had before another process
+  // changed it, and moved the settings revision back.
+  it("keeps another process's mode change when this process renames the same threads from its cached list", async () => {
+    const projects = new ProjectManager()
+    const a = new ThreadDataStore(projects)
+    projects.setThreadStore(a)
+    const project = projects.openProject(join(root, 'modes'))
+    const made = Array.from({ length: 12 }, (_unused, i) => a.createThread('Mode ' + i, project.id))
+    // This process holds the list in memory, as a running daemon does.
+    a.listAllThreads()
+    const other = runChild([project.id, '0', 'B', 'modes', made.map((thread) => thread.id).join(',')])
+    expect(await other.exited, other.err()).toBe(0)
+    for (const thread of made) a.updateThreadMeta(thread.id, { name: 'Renamed ' + thread.name })
+    const fromDisk = new ThreadDataStore(new ProjectManager())
+    for (const thread of made) {
+      const now = fromDisk.getThread(thread.id)!
+      expect(now.name).toBe('Renamed ' + thread.name)
+      expect(now.permissionMode).toBe('ask')
+      expect(now.settingsRevision).toBe((thread.settingsRevision ?? 0) + 1)
+    }
+  }, 120_000)
 
   it(`keeps every thread, rename and order across ${ITERATIONS} concurrent creates and renames on each side`, async () => {
     const projects = new ProjectManager()

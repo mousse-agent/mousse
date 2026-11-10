@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
-import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
+import { ThreadDataStore, ordersKeeping } from '../src/mms/data/ThreadDataStore'
 
 function withTemporaryMousseHome(run: (root: string) => void): void {
   const previousHome = process.env.MOUSSE_HOME
@@ -32,7 +32,8 @@ describe('persisted sidebar ordering', () => {
       threads.saveThreadData(first.id, { messages: [], agents: [], tasks: [] })
 
       expect(threads.listThreads().map((thread) => thread.id)).toEqual([second.id, first.id])
-      expect(threads.listThreads().map((thread) => thread.order)).toEqual([0, 1])
+      const [front, back] = threads.listThreads().map((thread) => thread.order)
+      expect(front!).toBeLessThan(back!)
     })
   })
 
@@ -478,16 +479,92 @@ describe('persisted sidebar ordering', () => {
         const revision = revisionOf(threads, project.id)
         const busy = gatePath(threads, made[0]!.id)
         holdAsAnotherProcess(busy)
-        // Reversed: the busy row is written last.
-        expect(() => threads.reorderThreads(project.id, made.map((thread) => thread.id).reverse())).toThrow(/busy/)
+        // The listed order reversed: every row but one moves, the busy one among them.
+        const reversed = threads.listThreads(project.id).map((thread) => thread.id).reverse()
+        expect(() => threads.reorderThreads(project.id, reversed)).toThrow(/busy/)
         expect(made.map((thread) => orderOnDisk(threads, thread.id))).toEqual(before)
         expect(revisionOf(threads, project.id)).toBe(revision)
         // A single write refused the same way leaves the revision done too, so lists stay reusable.
         expect(() => threads.updateThreadMeta(made[0]!.id, { name: 'Renamed' })).toThrow(/busy/)
         expect(revisionOf(threads, project.id)).toBe(revision)
         rmSync(busy)
-        threads.reorderThreads(project.id, made.map((thread) => thread.id).reverse())
-        expect(made.map((thread) => orderOnDisk(threads, thread.id))).toEqual([2, 1, 0])
+        threads.reorderThreads(project.id, reversed)
+        expect(threads.listThreads(project.id).map((thread) => thread.id)).toEqual(reversed)
+      })
+    })
+
+    // Review repro: every drag rewrote every row of the project, holding the list lock and every row's gate for seconds.
+    it('moving one thread among 300 writes one row and holds the list lock briefly', () => {
+      withTemporaryMousseHome((root) => {
+        const { threads, project } = store(root)
+        // One thread made by the store, and 299 copies of its folder (a listing registers each, as for an older thread).
+        const first = threads.createThread('Thread 0', project.id)
+        const folder = threads.getThreadDir(first.id)
+        const meta = JSON.parse(readFileSync(join(folder, 'meta.json'), 'utf8'))
+        for (let i = 1; i < 300; i += 1) {
+          const id = randomUUID()
+          const copy = join(dirname(folder), id)
+          cpSync(folder, copy, { recursive: true })
+          writeFileSync(join(copy, 'meta.json'), JSON.stringify({ ...meta, id, name: 'Thread ' + i, order: meta.order - i }))
+        }
+        const listed = threads.listThreads(project.id).map((thread) => thread.id)
+        const internals = threads as unknown as {
+          writeJsonAtomic: (path: string, value: unknown) => void
+          withProjectListLock: <T>(projectId: string, fn: () => T) => T
+        }
+        const writeJson = internals.writeJsonAtomic.bind(threads)
+        const lock = internals.withProjectListLock.bind(threads)
+        const written: string[] = []
+        const held: number[] = []
+        vi.spyOn(internals, 'writeJsonAtomic').mockImplementation((path: string, value: unknown) => {
+          if (path.endsWith('meta.json')) written.push((value as { id: string }).id)
+          return writeJson(path, value)
+        })
+        vi.spyOn(internals, 'withProjectListLock').mockImplementation(<T>(projectId: string, fn: () => T): T => lock(projectId, () => {
+          const started = performance.now()
+          try { return fn() } finally { held.push(performance.now() - started) }
+        }))
+        try {
+          // The last thread to the top, then one from the middle further down.
+          const first = [listed[299]!, ...listed.slice(0, 299)]
+          threads.reorderThreads(project.id, first)
+          expect(written).toEqual([listed[299]])
+          const second = [...first]
+          const [moved] = second.splice(100, 1)
+          second.splice(200, 0, moved!)
+          threads.reorderThreads(project.id, second)
+          expect(written).toEqual([listed[299], moved])
+          expect(threads.listThreads(project.id).map((thread) => thread.id)).toEqual(second)
+          expect(new ThreadDataStore(new ProjectManager()).listThreads(project.id).map((thread) => thread.id)).toEqual(second)
+          expect(Math.max(...held)).toBeLessThan(250)
+        } finally {
+          vi.restoreAllMocks()
+        }
+      })
+    }, 120_000)
+
+    // Review repro: a trash in another process during a rename moved a folder; the rename certified the list with it.
+    it("drops its list when another process moves a thread folder while it writes, instead of certifying it", () => {
+      withTemporaryMousseHome((root) => {
+        const { threads, project } = store(root)
+        const kept = threads.createThread('Kept', project.id)
+        const trashed = threads.createThread('Trashed elsewhere', project.id)
+        threads.listThreads(project.id)
+        const folder = threads.getThreadDir(trashed.id)
+        const internals = threads as unknown as { publishListRevision: (id: string, phase: 'pending' | 'done') => string }
+        const publish = internals.publishListRevision.bind(threads)
+        vi.spyOn(internals, 'publishListRevision').mockImplementation((id: string, phase: 'pending' | 'done') => {
+          const token = publish(id, phase)
+          // Another process's trash moves the folder out of the project outside this lock, while the rename writes.
+          if (phase === 'pending' && existsSync(folder)) renameSync(folder, join(root, 'moved-away'))
+          return token
+        })
+        try {
+          threads.updateThreadMeta(kept.id, { name: 'Renamed' })
+        } finally {
+          vi.restoreAllMocks()
+        }
+        expect(threads.listThreads(project.id).map((thread) => thread.id)).toEqual([kept.id])
       })
     })
 
@@ -523,5 +600,30 @@ describe('persisted sidebar ordering', () => {
         expect(existsSync(folder)).toBe(false)
       })
     })
+  })
+})
+
+describe('the orders a reorder gives', () => {
+  const rising = (orders: number[]) => orders.every((order, index) => index === 0 || order > orders[index - 1]!)
+
+  it('keeps every row it can, and moves the others between their neighbours', () => {
+    expect(ordersKeeping([-3, -2, -1])).toEqual([-3, -2, -1])
+    // The last row to the top, the first to the bottom, one into a gap.
+    expect(ordersKeeping([-1, -3, -2])).toEqual([-4, -3, -2])
+    expect(ordersKeeping([-2, -1, -3])).toEqual([-2, -1, 0])
+    expect(ordersKeeping([0, 2, 1])).toEqual([0, 0.5, 1])
+    // Equal orders (an older build's) and an unreadable one are given orders of their own.
+    expect(ordersKeeping([1, 1, 1])).toEqual([-1, 0, 1])
+    expect(ordersKeeping([Number.NaN, 0])).toEqual([-1, 0])
+  })
+
+  it('numbers every row again only when a gap is too small to split', () => {
+    expect(ordersKeeping([1, 5, 1 + Number.EPSILON])).toEqual([0, 1, 2])
+  })
+
+  it('reverses 5000 rows in a rising order, without nesting', () => {
+    const orders = ordersKeeping(Array.from({ length: 5000 }, (_unused, index) => -index))
+    expect(orders).toHaveLength(5000)
+    expect(rising(orders)).toBe(true)
   })
 })

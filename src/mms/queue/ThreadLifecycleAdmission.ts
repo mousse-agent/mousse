@@ -9,6 +9,8 @@ export interface ThreadLifecycleGate {
   captureAdmission(taskId: string, expectedLocation?: string): LifecycleAdmission
   assertAdmission(admission: LifecycleAdmission): void
   withPathAdmission<T>(path: string, kind: 'execution' | 'write', work: () => T): T
+  /** `withPathAdmission` for several paths, every gate taken in one loop rather than nested. */
+  withPathsAdmission?<T>(paths: readonly string[], kind: 'execution' | 'write', work: () => T): T
 }
 
 /** Raise the durable minimum writer before adding contracts that Phase 1 binaries cannot honor. */
@@ -58,6 +60,19 @@ function gateFor(path: string): ThreadLifecycleGate | undefined {
 export function withThreadLifecyclePath<T>(path: string, kind: 'execution' | 'write', work: () => T): T {
   const gate = gateFor(path)
   return gate ? gate.withPathAdmission(path, kind, work) : work()
+}
+
+/** `withThreadLifecyclePath` for several paths of one profile: their gates are taken in a loop, not nested. */
+export function withThreadLifecyclePaths<T>(paths: readonly string[], kind: 'execution' | 'write', work: () => T): T {
+  if (paths.length === 0) return work()
+  const gate = gateFor(paths[0]!)
+  if (!gate) {
+    if (paths.every((path) => !gateFor(path))) return work()
+  } else if (gate.withPathsAdmission && paths.every((path) => gateFor(path) === gate)) {
+    return gate.withPathsAdmission(paths, kind, work)
+  }
+  const take = (index: number): T => index === paths.length ? work() : withThreadLifecyclePath(paths[index]!, kind, () => take(index + 1))
+  return take(0)
 }
 
 /** Capture once before waiting, so trash/restore cannot revive an old queued writer. */

@@ -439,12 +439,62 @@ export class ResourceLifecycleStore {
 
   /** Short, cross-process, reentrant only for synchronous callbacks. Never held while draining. */
   withGate<T>(taskId: string, fn: () => T): T {
+    return this.withGates([taskId], fn)
+  }
+
+  /**
+   * {@link withGate} for several tasks: the gates are taken one after another (not nested, so any number of them),
+   * and given back in the reverse order. One that is busy gives back those already taken and throws.
+   */
+  withGates<T>(taskIds: readonly string[], fn: () => T): T {
+    const releases: Array<() => void> = []
+    let fresh = false
+    try {
+      for (const taskId of taskIds) {
+        const gate = this.acquireGate(taskId)
+        releases.push(gate.release)
+        fresh ||= gate.fresh
+      }
+      const result = fn()
+      // As before: a callback run only under gates this process already held is not checked again here.
+      if (fresh && result && typeof (result as { then?: unknown }).then === 'function') throw new ResourceLifecycleError('unsupported', 'Lifecycle gate callbacks must be synchronous')
+      return result
+    } finally {
+      for (let index = releases.length - 1; index >= 0; index -= 1) releases[index]!()
+    }
+  }
+
+  /**
+   * {@link withPathAdmission} for several paths at once: every gate they need (each task and its owners) is taken in
+   * one loop, then each admission is checked under them, then `fn` runs.
+   */
+  withPathsAdmission<T>(paths: readonly string[], kind: 'execution' | 'write', fn: () => T): T {
+    const admissions: LifecycleAdmission[] = []
+    for (const path of paths) {
+      if (contains(this.root, path)) continue
+      const record = this.findByLocation(path)
+      if (!record) {
+        if (this.allowedTaskRoots.some((root) => contains(root, path)) || contains(join(this.profileHome, 'trash'), path)) throw new ResourceLifecycleError('unavailable', 'Task must be registered before accessing managed storage')
+        continue
+      }
+      if (!contains(record.location, path)) throw new ResourceLifecycleError('stale', 'Task path is no longer current')
+      admissions.push(this.admission(record))
+    }
+    const ids = [...new Set(admissions.flatMap((admission) => [...(admission.ancestors ?? []).map((item) => item.taskId), admission.taskId]))]
+    return this.withGates(ids, () => {
+      for (const admission of admissions) this.checkAdmission(admission, kind)
+      return fn()
+    })
+  }
+
+  /** Takes one task gate (re-entrant in this process): what gives it back, and whether it was taken here (not re-entered). */
+  private acquireGate(taskId: string): { release: () => void; fresh: boolean } {
     const path = join(this.root, 'gates', identity(taskId), 'gate.lock')
     assertLifecyclePath(this.profileHome, path)
     const depth = gateDepth.get(path) ?? 0
     if (depth) {
       gateDepth.set(path, depth + 1)
-      try { return fn() } finally { gateDepth.set(path, depth) }
+      return { release: () => { gateDepth.set(path, depth) }, fresh: false }
     }
     mkdirSync(dirname(path), { recursive: true })
     const owner = { pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, token: randomUUID() }
@@ -462,14 +512,7 @@ export class ResourceLifecycleStore {
       try { fd = openSync(path, 'wx') } catch { throw new ResourceLifecycleError('busy', 'Task lifecycle gate is busy') }
     }
     let created: FileIdentityStats | undefined
-    try {
-      writeFileSync(fd, JSON.stringify(owner))
-      created = fstatSync(fd, { bigint: true })
-      gateDepth.set(path, 1)
-      const result = fn()
-      if (result && typeof (result as { then?: unknown }).then === 'function') throw new ResourceLifecycleError('unsupported', 'Lifecycle gate callbacks must be synchronous')
-      return result
-    } finally {
+    const release = (): void => {
       gateDepth.delete(path)
       try {
         // The gate is still ours while it is the file this process created. Its descriptor stays open until it
@@ -481,6 +524,15 @@ export class ResourceLifecycleStore {
       } catch { /* leave ambiguous gate protected */ }
       finally { closeSync(fd) }
     }
+    try {
+      writeFileSync(fd, JSON.stringify(owner))
+      created = fstatSync(fd, { bigint: true })
+    } catch (error) {
+      release()
+      throw error
+    }
+    gateDepth.set(path, 1)
+    return { release, fresh: true }
   }
 
   private admission(record: TaskLifecycleRecord): LifecycleAdmission { return { profileId: this.profileId, taskId: record.taskId, generation: record.generation, location: record.location, ancestors: this.ancestorRecords(record).map((item) => ({ taskId: item.taskId, generation: item.generation })) } }
