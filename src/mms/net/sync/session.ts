@@ -376,7 +376,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         if (!self) throw new NetError('not_enrolled')
         const roster = options.identity.roster()
         if (!roster) throw new NetError('not_enrolled')
-        const delegation = this.currentDelegation(self.user, self.node)
+        // A delegation that lapsed while this computer was away still introduces it: the peer may
+        // hold a newer roster that renews it, which it then sends back in its own hello.
+        const delegation = this.currentDelegation(self.user, self.node, true)
         void this.send({
           t: 'hello',
           protoMajor: NET_PROTO_MAJOR,
@@ -1390,8 +1392,10 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       !equalKey(delegation.keys.transport, this.options.channel.peerTransportKey)
     )
       throw new NetError('peer_key_mismatch')
-    if (delegation.issuedAt > this.clock.now() || delegation.expiresAt <= this.clock.now())
-      throw new NetError('bad_delegation')
+    // The hello's own delegation may have lapsed while the peer was away. Its roster is still
+    // root-signed, so it is merged first; the peer is then admitted only when the merged roster
+    // holds a current delegation for the same keys (checked below).
+    if (delegation.issuedAt > this.clock.now()) throw new NetError('bad_delegation')
     this.options.identity.acceptRoster(h.roster, root)
     const current = this.currentDelegation(delegation.owner, delegation.subject)
     if (
@@ -1471,7 +1475,8 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   }
   private currentDelegation(
     user: SyncSession['peer']['user'],
-    node: SyncSession['peer']['node']
+    node: SyncSession['peer']['node'],
+    allowLapsed = false
   ): { signed: Signed; document: NodeDelegation } {
     const root = this.options.identity.pinnedRootKey(user),
       signed = this.options.identity.roster(user)
@@ -1499,7 +1504,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       !validateSignedDocument('nodeDelegation', current.document) ||
       current.document.owner !== user ||
       current.document.issuedAt > this.clock.now() ||
-      current.document.expiresAt <= this.clock.now()
+      (!allowLapsed && current.document.expiresAt <= this.clock.now())
     )
       throw new NetError('bad_delegation')
     if (

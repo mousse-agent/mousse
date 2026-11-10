@@ -1475,7 +1475,7 @@ export class NetService {
     this.syncPhoneWebRtc()
     this.lastError = undefined
     this.refreshPeers()
-    this.scheduleRenewal()
+    this.scheduleRenewal(5_000)
     this.emit()
     this.domain?.onActivated?.()
   }
@@ -2761,7 +2761,11 @@ export class NetService {
       // A roster conflict leaves it for the next renewal; it must not fail activation.
     }
   }
-  private scheduleRenewal(): void {
+  /**
+   * Renews delegations that are due or lapsed. The first run is soon after start-up, so an
+   * authority that was off for days renews the network as soon as it is back, then hourly.
+   */
+  private scheduleRenewal(delayMs = 60 * 60 * 1000): void {
     this.renewal?.cancel()
     this.grantAuthoritySettings()
     this.renewal = this.clock.setTimeout(
@@ -2775,7 +2779,7 @@ export class NetService {
         }
         this.scheduleRenewal()
       },
-      60 * 60 * 1000
+      delayMs
     )
   }
   status(): NetStatus {

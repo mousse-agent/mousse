@@ -8,7 +8,11 @@ import { encodeMessage } from '../../../src/mms/net/sync/codec'
 import { signedDocument } from '../../../src/mms/net/identity/crypto'
 import { NetError } from '../../../src/shared/net/errors'
 import { newId } from '../../../src/shared/net/ids'
-import { NODE_DELEGATION_TTL_MS, PREAUTH_MAX_BYTES } from '../../../src/shared/net/limits'
+import {
+  NODE_DELEGATION_TTL_MS,
+  PREAUTH_MAX_BYTES,
+  RENEW_LAPSED_MAX_MS
+} from '../../../src/shared/net/limits'
 import type { Roster, NodeDelegation } from '../../../src/shared/net'
 import type { Clock } from '../../../src/mms/net/contracts'
 
@@ -668,6 +672,37 @@ describe('NetIdentityService durable security foundation', () => {
     expect(() =>
       a.identity.issueBotDelegation({ bot, key, name: 'Bot', hostNode: target })
     ).toThrow(expect.objectContaining({ code: 'forbidden' }))
+  })
+
+  it('renews delegations that lapsed while the authority was off, including its own', async () => {
+    const a = await authority(),
+      follower = newId('node'),
+      followerKeys = new FileKeyStore(profile())
+    await followerKeys.initialize({ asAuthority: false })
+    a.identity.issueNodeDelegation({
+      node: follower,
+      keys: followerKeys.nodeKeys(),
+      name: 'Follower',
+      caps: ['read']
+    })
+    a.timer.advance(NODE_DELEGATION_TTL_MS + 3 * 24 * 3600000)
+    expect(a.identity.self()!.isAuthority).toBe(false)
+    const renewed = a.identity.renewExpiring()!
+    const roster = a.identity.verifySigned<Roster>(renewed, a.keys.rootKey()!)
+    const live = roster.nodes
+      .map((row) => a.identity.verifySigned<NodeDelegation>(row, a.keys.rootKey()!))
+      .filter((row) => row.expiresAt > a.timer.clock.now())
+      .map((row) => row.subject)
+    expect(live).toEqual(expect.arrayContaining([a.identity.self()!.node, follower]))
+    expect(a.identity.self()!.isAuthority).toBe(true)
+  })
+
+  it('does not revive a lapsed authority after the renewal limit', async () => {
+    const a = await authority()
+    a.timer.advance(NODE_DELEGATION_TTL_MS + RENEW_LAPSED_MAX_MS)
+    expect(() => a.identity.renewExpiring()).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
   })
 
   it('renews independently of sessions without making old signatures unverifiable', async () => {

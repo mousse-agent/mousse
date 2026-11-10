@@ -196,6 +196,10 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       return 'Your other computer signed in to this Mousse ID adds this one to your devices. Open Mousse on it, then sign in again.'
     case 'expired':
       return 'The sign-in code expired. Sign in again.'
+    case 'bad_delegation':
+    case 'revoked':
+      // This computer's 7-day pass lapsed and nobody has renewed it yet (or it was removed).
+      return 'This computer was away too long to reconnect on its own. Open Mousse on the computer that owns your devices, then sign in again.'
     default:
       return String((cause as Error | null)?.message ?? cause)
   }

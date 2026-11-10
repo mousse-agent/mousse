@@ -147,7 +147,8 @@ function caps(values: NodeCapability[]): void {
 function currentNode(
   roster: Roster,
   node: NodeId,
-  at: number
+  at: number,
+  allowLapsed = false
 ): { signed: Signed; delegation: NodeDelegation } {
   const rows = roster.nodes
     .map((signed) => ({
@@ -165,7 +166,7 @@ function currentNode(
     !found ||
     found.delegation.owner !== roster.owner ||
     found.delegation.issuedAt > at ||
-    at >= found.delegation.expiresAt ||
+    (!allowLapsed && at >= found.delegation.expiresAt) ||
     found.delegation.expiresAt - found.delegation.issuedAt > NODE_DELEGATION_TTL_MS ||
     (roster.revoked.find((row) => row.subject === node)?.throughKeyEpoch ?? 0) >=
       found.delegation.keyEpoch
@@ -766,13 +767,17 @@ export class EnrollmentService {
     if (!this.options.identity.self()?.isAuthority) throw new NetError('forbidden')
     return this.localHello()
   }
-  localHello(): HelloMessage {
+  /**
+   * This computer's hello. `allowLapsed` accepts its own delegation after it expired, for Mousse ID
+   * sign-in, which only proves this computer's keys and then fetches a renewed roster.
+   */
+  localHello(allowLapsed = false): HelloMessage {
     const identity = this.options.identity,
       self = identity.self()
     if (!self) throw new NetError('not_enrolled')
     const roster = identity.roster()!,
       current = verifyDocument<Roster>(roster, identity.pinnedRootKey(self.user)!, 'roster'),
-      delegation = currentNode(current, self.node, this.options.clock.now())
+      delegation = currentNode(current, self.node, this.options.clock.now(), allowLapsed)
     if (!same(delegation.delegation.keys, this.options.keys.nodeKeys()))
       throw new NetError('bad_delegation')
     return {

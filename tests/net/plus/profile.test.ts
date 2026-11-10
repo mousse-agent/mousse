@@ -645,3 +645,43 @@ it('renews within seconds of waking when the computer slept through the renewal 
     vi.useRealTimers()
   }
 })
+
+it('adopts the newer roster Mousse ID holds before registering after sign-in', async () => {
+  const p = await fixture({ member: true }),
+    base = p.hostedOptions.identity(),
+    newer = { ...base.roster, payload: base.roster.payload },
+    order: string[] = []
+  const fetchWithInventory: typeof fetch = async (url, input) => {
+    const path = new URL(String(url)).pathname
+    order.push(path)
+    if (path === '/v1/net/inventory')
+      return Response.json({
+        bindings: [
+          { userId: base.user, rootKey: 'another-root', revokedAt: null, roster: { other: true } },
+          { userId: base.user, rootKey: base.rootKey, revokedAt: null, roster: newer }
+        ]
+      })
+    return p.hostedOptions.fetch(url, input)
+  }
+  const adoptRoster = vi.fn(() => {
+    order.push('adopt')
+    return true
+  })
+  const service = new HostedProfileService({
+    ...p.hostedOptions,
+    fetch: fetchWithInventory,
+    adoptRoster
+  })
+  const status = await service.useGrant(configuration, p.accountToken, false)
+  expect(status.connected).toBe(true)
+  expect(adoptRoster).toHaveBeenCalledWith(newer)
+  expect(order.indexOf('adopt')).toBeLessThan(order.indexOf('/v1/net/registrations'))
+})
+
+it('still signs in when Mousse ID has no roster to adopt', async () => {
+  const p = await fixture({ member: true }),
+    adoptRoster = vi.fn(() => true)
+  const service = new HostedProfileService({ ...p.hostedOptions, adoptRoster })
+  expect((await service.useGrant(configuration, p.accountToken, false)).connected).toBe(true)
+  expect(adoptRoster).not.toHaveBeenCalled()
+})

@@ -29,6 +29,12 @@ export const BACKOFF_MAX_MS = 60_000
 export const BACKOFF_RESET_AFTER_SESSION_MS = 30_000
 
 export const NODE_DELEGATION_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/**
+ * How long after a delegation lapses the authority still renews it. A device that was off or out
+ * of reach for longer is treated as gone and has to be added again; a device that should not come
+ * back is removed (revoked), which renewal never undoes.
+ */
+export const RENEW_LAPSED_MAX_MS = 30 * 24 * 60 * 60 * 1000
 export const NODE_INVITE_TTL_MS = 10 * 60 * 1000
 export const SPACE_INVITE_TTL_MS = 24 * 60 * 60 * 1000
 
