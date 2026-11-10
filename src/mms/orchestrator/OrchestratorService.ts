@@ -1910,6 +1910,8 @@ export class OrchestratorService extends EventEmitter {
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
   setThreadStore(store: ThreadDataStore | null): void {
     this.threadStore = store
+    // The thread database cache's byte cap passes over threads a session holds: their text is the session's.
+    store?.setThreadsInUse?.((threadId) => this.sessions.has(threadId))
     this.installTitleGuard()
     this.installQueueJournal()
   }
