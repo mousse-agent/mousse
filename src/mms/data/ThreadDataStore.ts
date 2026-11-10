@@ -15,7 +15,8 @@ import {
   statSync,
   writeFileSync
 } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
+import { cacheSignature } from './FileSignature'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4, v5 as uuidv5, validate as uuidValidate, version as uuidVersion } from 'uuid'
 import type {
@@ -51,8 +52,9 @@ import { ThreadTrashService, type LegacyTrashDiagnostic } from './ThreadTrashSer
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import type { ThreadPullRequestLink } from '../../shared/pullRequests'
-import { registerThreadLifecycleGate, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
-import { withFileLock } from '../scheduled/fileLock'
+import { registerThreadLifecycleGate, withThreadLifecyclePath, withThreadLifecyclePaths } from '../queue/ThreadLifecycleAdmission'
+import { FileLockBusyError, withFileLock } from '../scheduled/fileLock'
+import { DomainRpcError } from '../protocol/domainRegistry'
 import { pathsEqual } from '../profiles/pathSafety'
 import {
   legacyFingerprint,
@@ -173,6 +175,94 @@ export interface ThreadDataPatch {
 
 /** How often a thread in `thread.db` rewrites `meta.json` just to move `updatedAt` (`touchAfterSave`). */
 const META_TOUCH_INTERVAL_MS = 30_000
+/** How long a project's list lock held by another process is waited for (`withProjectListLock`). */
+const LIST_LOCK_WAIT_MS = 5_000
+
+/**
+ * Orders for rows in a new sequence that keep as many rows' orders as they can: the longest run of rows whose orders
+ * already rise in the new sequence keeps them, and every other row gets an order between its kept neighbours, so moving
+ * one thread changes one row. When a gap is too small to split, every row is numbered again from 0.
+ */
+export function ordersKeeping(orders: readonly number[]): number[] {
+  const n = orders.length
+  // The longest strictly rising run (patience sorting): `tails[k]` ends the best run of length k + 1.
+  const tails: number[] = []
+  const previous = new Array<number>(n).fill(-1)
+  for (let index = 0; index < n; index += 1) {
+    const order = orders[index]!
+    if (!Number.isFinite(order)) continue
+    let low = 0
+    let high = tails.length
+    while (low < high) {
+      const middle = (low + high) >> 1
+      if (orders[tails[middle]!]! < order) low = middle + 1
+      else high = middle
+    }
+    previous[index] = low > 0 ? tails[low - 1]! : -1
+    tails[low] = index
+  }
+  const kept = new Array<boolean>(n).fill(false)
+  for (let index = tails.length ? tails[tails.length - 1]! : -1; index >= 0; index = previous[index]!) kept[index] = true
+  const renumbered = (): number[] => orders.map((_order, index) => index)
+  if (!kept.some(Boolean)) return renumbered()
+  const result = [...orders]
+  let start = 0
+  while (start < n) {
+    if (kept[start]) { start += 1; continue }
+    let end = start
+    while (end < n && !kept[end]) end += 1
+    // Rows start..end-1 move; they go between the kept rows around them.
+    const below = start > 0 ? result[start - 1] : undefined
+    const above = end < n ? result[end] : undefined
+    const count = end - start
+    for (let offset = 0; offset < count; offset += 1) {
+      const value = below === undefined ? above! - count + offset
+        : above === undefined ? below + 1 + offset
+          : below + ((above - below) * (offset + 1)) / (count + 1)
+      const floor = offset > 0 ? result[start + offset - 1]! : below
+      if (!(floor === undefined || value > floor) || !(above === undefined || value < above)) return renumbered()
+      result[start + offset] = value
+    }
+    start = end
+  }
+  return result
+}
+
+/** Runs `write`, and once more if the project's list lock was busy; a second busy list is thrown. */
+function retryOnceWhenListBusy<T>(write: () => T): T {
+  try {
+    return write()
+  } catch (error) {
+    if (!(error instanceof ThreadListBusyError)) throw error
+    return write()
+  }
+}
+
+/** Refuses a conditional change of a thread's model or mode when its settings revision is no longer `ifRevision`. */
+function refuseChangedRevision(thread: Thread, ifRevision: number): void {
+  const revision = thread.settingsRevision ?? 0
+  if (revision === ifRevision) return
+  throw new DomainRpcError('thread_settings_changed', "This thread's model or permissions changed since it was read.", {
+    threadId: thread.id,
+    revision,
+    ...(thread.modelOverride ? { modelOverride: thread.modelOverride } : {}),
+    ...(thread.permissionMode ? { permissionMode: thread.permissionMode } : {})
+  })
+}
+
+/** A project's list lock was not had in time (`LIST_LOCK_WAIT_MS`). Nothing was changed: the caller can try again. */
+export class ThreadListBusyError extends Error {
+  readonly code = 'thread_list_busy'
+  constructor() {
+    super('Thread list busy, try again.')
+    this.name = 'ThreadListBusyError'
+  }
+}
+
+/** Blocks for `ms`: the waits here are a few milliseconds, inside synchronous writes that cannot await. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
 
 /** Marks a thread exported back to JSON (`exportThreadToJson`); it is not imported again by itself. */
 const EXPORTED_MARKER = 'thread-db-exported.json'
@@ -625,11 +715,341 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private invalidateListCache(): void {
+    this.groupSignatures.clear()
     this.dirCache.clear()
     this.listCache = null
     this.listCacheProjectsKey = null
     this.standaloneListCache = null
     this.projectListCache.clear()
+  }
+
+  /**
+   * Adds a thread this store just created to the warm lists of its group, so the listing that follows a
+   * create (every client is sent the whole list) is rebuilt from memory instead of reading every thread's
+   * `meta.json` and lifecycle record again. A group that is not cached yet is read from disk as before.
+   */
+  private addToListCaches(thread: Thread): void {
+    this.listCache = null
+    if (!this.isLifecycleVisible(thread.id)) {
+      this.dropGroupCache(thread.projectId)
+      return
+    }
+    const withThread = (threads: Thread[]): Thread[] =>
+      this.sortThreads([...threads.filter((entry) => entry.id !== thread.id), { ...thread }])
+    // A project's list was kept in step, or dropped, inside its lock by the write that made the thread
+    // (`projectListWrite`); a group not cached is read from disk next time.
+    if (!thread.projectId) {
+      if (this.standaloneListCache) this.standaloneListCache = withThread(this.standaloneListCache)
+    } else {
+      const cached = this.projectListCache.get(thread.projectId)
+      if (cached) this.projectListCache.set(thread.projectId, withThread(cached))
+    }
+  }
+
+  /**
+   * What a group's files looked like when its list was read. Standalone threads: the index. A project: its thread
+   * folder (a thread folder added, moved away or deleted changes it) and the project's list revision, a token every
+   * change to the project's thread metadata replaces under the project's list lock (`projectListWrite`), in this
+   * process or another. A cached group is reused only while both are unchanged; correctness rests on the lock and the
+   * token, the folder is an extra check. A hand edit of one `meta.json` changes neither and shows when the list is
+   * next read from disk.
+   *
+   * A revision is written `pending:<id>` before the metadata write and `done:<id>` after it. A revision that is
+   * pending (a writer that stopped between the two) or cannot be read gives no signature, so no process reuses that
+   * project's list until a write finishes cleanly; a write that cannot mark its revision pending fails before it
+   * changes anything.
+   */
+  private readonly groupSignatures = new Map<string, string>()
+  /** Projects whose list lock this store holds (`projectListWrite`): a nested write is part of the outer one. */
+  private readonly heldProjectLocks = new Set<string>()
+
+  private listRevisionPath(projectId: string): string {
+    return join(this.homeDir, 'thread-list-revisions', `${basename(this.storageLayout.repositoryRoot(projectId))}.rev`)
+  }
+
+  private listLockPath(projectId: string): string {
+    return join(this.homeDir, 'thread-list-revisions', `${basename(this.storageLayout.repositoryRoot(projectId))}.lock`)
+  }
+
+  /** The project's revision as written: `'-'` when there is none yet, undefined when it cannot be read. */
+  private readRevisionToken(projectId: string): string | undefined {
+    try {
+      return readFileSync(this.listRevisionPath(projectId), 'utf8')
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? '-' : undefined
+    }
+  }
+
+  /** A file's or folder's `cacheSignature`; `'-'` when it does not exist, undefined when its stats can't be trusted. */
+  private stamp(path: string): string | undefined {
+    const stat = statSync(path, { bigint: true, throwIfNoEntry: false })
+    return stat ? cacheSignature(stat) : '-'
+  }
+
+  /** Undefined on a file system whose stats cannot be trusted to change (`cacheSignature`): the group is read every time. */
+  private groupSignature(projectId?: string): string | undefined {
+    if (!projectId) return this.stamp(join(this.homeDir, 'threads-index.json'))
+    const folder = this.stamp(this.storageLayout.repositoryRoot(projectId))
+    if (folder === undefined) return undefined
+    const revision = this.readRevisionToken(projectId)
+    if (revision === undefined || (revision !== '-' && !revision.startsWith('done:'))) return undefined
+    return `${folder}|${revision}`
+  }
+
+  /**
+   * Replaces a project's list revision with `<phase>:<id>` and returns it. Throws when it cannot, after a few tries
+   * for a reader holding the file open (a Windows sharing violation).
+   */
+  private publishListRevision(projectId: string, phase: 'pending' | 'done'): string {
+    const path = this.listRevisionPath(projectId)
+    let lastError: unknown
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        mkdirSync(join(this.homeDir, 'thread-list-revisions'), { recursive: true })
+        const content = `${phase}:${uuidv4()}`
+        writeFileSync(path, content)
+        return content
+      } catch (error) {
+        lastError = error
+        const code = (error as NodeJS.ErrnoException)?.code
+        if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'EACCES') break
+        sleepSync(20 * (attempt + 1))
+      }
+    }
+    throw new Error(`The thread list revision ${path} could not be written: ${lastError instanceof Error ? lastError.message : String(lastError)}`)
+  }
+
+  /**
+   * The project's list lock, across processes (`withFileLock`). It is the innermost lock: every lifecycle gate a
+   * write under it needs is taken before it (`withLifecycleGates`, `withPathGates`; those gates are re-entrant in a
+   * process, so the writes under it only re-enter them), and it is held only for synchronous file writes, never across
+   * an await. Nothing under it waits on, or fails for, another lock. Another process holding it is waited for, a few
+   * milliseconds at a time, for up to LIST_LOCK_WAIT_MS; then `ThreadListBusyError`, with nothing changed.
+   */
+  private withProjectListLock<T>(projectId: string, fn: () => T): T {
+    const path = this.listLockPath(projectId)
+    mkdirSync(join(this.homeDir, 'thread-list-revisions'), { recursive: true })
+    const deadline = Date.now() + LIST_LOCK_WAIT_MS
+    for (;;) {
+      let started = false
+      try {
+        return withFileLock(path, () => {
+          started = true
+          return fn()
+        })
+      } catch (error) {
+        if (started || !(error instanceof FileLockBusyError)) throw error
+        if (Date.now() >= deadline) throw new ThreadListBusyError()
+        sleepSync(5 + Math.floor(Math.random() * 10))
+      }
+    }
+  }
+
+  /** Takes these lifecycle gates by task id (re-entrant in a process), one after another, then runs `fn` under them. */
+  private withLifecycleGates<T>(taskIds: readonly string[], fn: () => T): T {
+    return this.lifecycleStore.withGates(taskIds, fn)
+  }
+
+  /** Takes the lifecycle admission of each path for a write (the gates its own write takes), in one loop, then runs `fn`. */
+  private withPathGates<T>(paths: readonly string[], fn: () => T): T {
+    return withThreadLifecyclePaths(paths, 'write', fn)
+  }
+
+  /** A task and its owners, the outermost owner first, as lifecycle records name them. */
+  private lifecycleChain(taskId: string | undefined): string[] {
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (let id = taskId; id && !seen.has(id); id = this.lifecycleStore.get(id)?.parentTaskId) {
+      seen.add(id)
+      ids.unshift(id)
+    }
+    return ids
+  }
+
+  /**
+   * One change to a project's thread metadata (a create, rename, pin, settle, reorder, trash or restore), under the
+   * project's list lock:
+   * 1. the revision is read; when it is not the one this store last saw for the project (or the store has no list of
+   *    it), the cached list is dropped and `write` is told so (`cacheTrusted` false);
+   * 2. the revision is marked pending, `write` runs, and the revision is marked done with a new id;
+   * 3. only then is this store's signature for the project moved to the new revision, if its list was trusted
+   *    throughout. Another store of this process writing inside the same lock (it is re-entrant per process) shows as a
+   *    revision that is no longer this write's pending one, and the list is dropped too. A write that adds or removes
+   *    no thread folder (`changesFolder` unset) must also find the project's folder as it was before it: a trash or
+   *    restore another process made meanwhile moved a folder outside this lock, and the list is dropped.
+   */
+  private projectListWrite<T>(
+    projectId: string,
+    write: (cacheTrusted: boolean) => T,
+    options: { repair?: boolean; changesFolder?: boolean } = {}
+  ): T {
+    if (this.heldProjectLocks.has(projectId)) return write(this.projectListCache.has(projectId))
+    return this.withProjectListLock(projectId, () => {
+      // Trusted only while nothing changed since this store's list was read: the same revision, and the same folder.
+      // Every change to the project's folder (a create's `mkdir`, a discard's removal) is made under this lock.
+      const current = this.groupSignature(projectId)
+      const recorded = this.groupSignatures.get(projectId)
+      let trusted = current !== undefined && recorded !== undefined && this.projectListCache.has(projectId) && current === recorded
+      if (!trusted) this.dropGroupCache(projectId)
+      let pending: string | undefined
+      try {
+        pending = this.publishListRevision(projectId, 'pending')
+      } catch (error) {
+        // A repair made while reading a list goes ahead without it; that read is not reused.
+        this.dropGroupCache(projectId)
+        if (!options.repair) throw error
+        trusted = false
+      }
+      this.heldProjectLocks.add(projectId)
+      let result: T
+      try {
+        result = write(trusted)
+      } finally {
+        this.heldProjectLocks.delete(projectId)
+      }
+      const folderAfterWrite = this.stamp(this.storageLayout.repositoryRoot(projectId))
+      if (pending === undefined || this.readRevisionToken(projectId) !== pending) trusted = false
+      if (!options.changesFolder && folderAfterWrite !== current?.split('|')[0]) trusted = false
+      let done: string
+      try {
+        done = this.publishListRevision(projectId, 'done')
+      } catch {
+        // The revision stays pending: no process reuses this project's list until a later write finishes.
+        this.dropGroupCache(projectId)
+        return result
+      }
+      // Recorded only if, after publishing, the revision is this write's and the folder is as this write left it.
+      const signature = trusted ? this.groupSignature(projectId) : undefined
+      if (signature !== undefined && signature === `${folderAfterWrite}|${done}`) this.groupSignatures.set(projectId, signature)
+      else this.dropGroupCache(projectId)
+      return result
+    })
+  }
+
+  /**
+   * Writes a thread's `meta.json` as `change` makes it from the thread as it is now. A project thread is written under
+   * its project's list lock: from `known` while this store's list of the project is trusted, else from its `meta.json`
+   * read again under the lock, so a change another process made since `known` was read (a mode, a rename) is kept and
+   * the settings revision moves on from the one on disk. A standalone thread is written from `known`, as before.
+   */
+  private writeThreadMeta<T extends Thread>(known: T, change: (base: T, cacheTrusted: boolean) => T): T {
+    const path = join(this.getThreadDir(known.id), 'meta.json')
+    const projectId = known.projectId
+    if (!projectId) {
+      const updated = change(this.metaOnDisk(path, known), false)
+      this.writeJsonAtomic(path, updated)
+      return updated
+    }
+    return this.withPathGates([path], () => this.projectListWrite(projectId, (cacheTrusted) => {
+      const updated = change(cacheTrusted ? known : this.metaOnDisk(path, known), cacheTrusted)
+      atomicWriteJsonSync(path, updated)
+      return updated
+    }))
+  }
+
+  /**
+   * Whether the project's folder holds a thread `listed` lacks: one with readable metadata that the lifecycle store
+   * shows (or has no record of yet). Read only: no registration, no repair, nothing that would take another lock.
+   */
+  private unlistedThreadInFolder(projectId: string, listed: ReadonlySet<string>): boolean {
+    let entries: string[] = []
+    try {
+      entries = readdirSync(this.storageLayout.repositoryRoot(projectId), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+    } catch {
+      return false
+    }
+    for (const name of entries) {
+      try {
+        const id = readThreadMeta<Thread>(join(this.storageLayout.repositoryRoot(projectId), name, 'meta.json')).id
+        if (!listed.has(id) && this.isLifecycleVisible(id)) return true
+      } catch {
+        // A folder without readable metadata is no thread of the list.
+      }
+    }
+    return false
+  }
+
+  /** A thread's `meta.json` as it is now, or `known` when it cannot be read as that thread. */
+  private metaOnDisk<T extends Thread>(path: string, known: T): T {
+    try {
+      const meta = readThreadMeta<T>(path)
+      return meta.id === known.id ? meta : known
+    } catch {
+      return known
+    }
+  }
+
+  /**
+   * The order for a new thread of a project, under its list lock: below every order of its trusted list, or, when the
+   * list is not trusted, below every order on disk (each thread folder's `meta.json`, read directly: no lifecycle
+   * lookups, which would take other locks under this one).
+   */
+  private projectOrderUnderLock(projectId: string, cacheTrusted: boolean): number {
+    const floor = this.remoteFloor?.(projectId)
+    let orders: number[]
+    if (cacheTrusted) {
+      orders = (this.projectListCache.get(projectId) ?? []).map((thread) => thread.order)
+    } else {
+      orders = []
+      const root = this.storageLayout.repositoryRoot(projectId)
+      let entries: string[] = []
+      try {
+        entries = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+      } catch {
+        // No thread folder yet.
+      }
+      for (const name of entries) {
+        try {
+          const order = readThreadMeta<Thread>(join(root, name, 'meta.json')).order
+          if (Number.isFinite(order)) orders.push(order)
+        } catch {
+          // A folder without readable metadata (being made, or damaged) has no order to stay below.
+        }
+      }
+    }
+    return orders.reduce((min, order) => Math.min(min, order), Math.min(0, floor ?? 0)) - 1
+  }
+
+  private dropGroupCache(projectId?: string): void {
+    this.listCache = null
+    this.groupSignatures.delete(projectId ?? '')
+    if (projectId) this.projectListCache.delete(projectId)
+    else this.standaloneListCache = null
+  }
+
+  /** Reads a cached group from disk again when its files changed since it was read (see `groupSignatures`). */
+  private refreshGroupIfChanged(projectId?: string): void {
+    if (this.groupStale(projectId)) this.dropGroupCache(projectId)
+  }
+
+  /** A cached group whose files changed since it was read, or whose list was never certified by a signature. */
+  private groupStale(projectId?: string): boolean {
+    const cached = projectId ? this.projectListCache.has(projectId) : this.standaloneListCache !== null
+    if (!cached) return false
+    const recorded = this.groupSignatures.get(projectId ?? '')
+    return recorded === undefined || recorded !== this.groupSignature(projectId)
+  }
+
+  /**
+   * Reads a group from disk with a signature that held for the whole read: taken before and after, and read again
+   * when something changed it meanwhile (another process writing mid-scan). After three tries the list is kept without
+   * a signature, so it is read again next time.
+   */
+  private readGroup(projectId: string | undefined, read: () => Thread[]): Thread[] {
+    let threads: Thread[] = []
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const before = this.groupSignature(projectId)
+      threads = read()
+      const after = this.groupSignature(projectId)
+      if (before !== undefined && before === after) {
+        this.groupSignatures.set(projectId ?? '', before)
+        return threads
+      }
+      this.groupSignatures.delete(projectId ?? '')
+      // Without a trusted signature at all (an untrusted file system, a pending revision) another read cannot help.
+      if (before === undefined || after === undefined) return threads
+    }
+    return threads
   }
 
   /** Replace one thread in the warm cache (avoids full rescan after meta updates). */
@@ -701,7 +1121,6 @@ export class ThreadDataStore extends EventEmitter {
   ): Thread {
     const id = opts?.id ?? uuidv4()
     if (opts?.id && this.getThread(opts.id)) throw new Error(`Thread ${opts.id} already exists`)
-    this.invalidateListCache()
     const now = new Date().toISOString()
     const meta: ThreadMeta = {
       id,
@@ -709,7 +1128,8 @@ export class ThreadDataStore extends EventEmitter {
       projectId,
       createdAt: now,
       updatedAt: now,
-      order: this.nextThreadOrder(projectId, projectPath)
+      // A project thread's order is taken under the project's list lock, with its first write (below).
+      order: projectId ? 0 : this.nextThreadOrder()
     }
     if (opts?.started === true) meta.startedAt = now
     if (opts?.firstSendPending === true) meta.firstSendPending = true
@@ -732,26 +1152,51 @@ export class ThreadDataStore extends EventEmitter {
       meta.worktreeBaseBranch = opts.worktreeStart.branch
     }
 
-    const threadDir = this.resolveThreadDir(meta, projectPath)
-    // An owner without a lifecycle record yet (an older thread) is registered first; the child's
-    // registration requires an active owner.
-    if (opts?.ownerThreadId) this.getThreadDir(opts.ownerThreadId)
-    this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true })
-    this.ensureThreadDir(threadDir)
+    try {
+      const threadDir = this.resolveThreadDir(meta, projectPath)
+      // An owner without a lifecycle record yet (an older thread) is registered first; the child's
+      // registration requires an active owner.
+      if (opts?.ownerThreadId) this.getThreadDir(opts.ownerThreadId)
+      const register = (): void => {
+        this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true })
+      }
 
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
-    if (this.sqliteStoreEnabled()) {
-      this.threadDb().client.callSync('create', threadDir)
-    } else {
-      this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
-      this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
-      this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
-    }
-    mkdirSync(join(threadDir, 'terminals'), { recursive: true })
+      if (projectId) {
+        // A project's cached list must still match the disk before this create changes its folder.
+        this.refreshGroupIfChanged(projectId)
+        // The gates the registration and the first writes take (the registry, the owners, the thread), then the
+        // project's list lock, and only then any change: a lock not had in time leaves nothing made.
+        this.withLifecycleGates(['_registry', ...this.lifecycleChain(opts?.ownerThreadId), id], () => {
+          this.projectListWrite(projectId, (cacheTrusted) => {
+            register()
+            this.ensureThreadDir(threadDir)
+            meta.order = this.projectOrderUnderLock(projectId, cacheTrusted)
+            atomicWriteJsonSync(join(threadDir, 'meta.json'), meta)
+          }, { changesFolder: true })
+        })
+      } else {
+        register()
+        this.ensureThreadDir(threadDir)
+        this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
+      }
+      if (this.sqliteStoreEnabled()) {
+        this.threadDb().client.callSync('create', threadDir)
+      } else {
+        this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
+        this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
+        this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
+      }
+      mkdirSync(join(threadDir, 'terminals'), { recursive: true })
 
-    if (!projectId) {
-      this.addToStandaloneIndex(meta)
+      if (!projectId) {
+        this.addToStandaloneIndex(meta)
+      }
+    } catch (error) {
+      // A half-made thread may be on disk: the next listing reads it from there.
+      this.invalidateListCache()
+      throw error
     }
+    this.addToListCaches(meta)
 
     // This is the authoritative creation notification for every producer:
     // GUI/CLI protocol calls, remote sends, and scheduled jobs.
@@ -779,9 +1224,22 @@ export class ThreadDataStore extends EventEmitter {
     // The registration goes first: it is the step that can refuse, and a crash after it leaves an
     // unowned empty thread that `discardOrphanedSubagents` removes at the next start, rather than a
     // registration of a missing directory that would stall its owner's trash.
-    this.lifecycleStore.forgetCreatedTask(id, owner ? { ownedBy: owner } : undefined)
-    if (!meta.projectId) this.removeFromStandaloneIndex(id)
-    rmSync(threadDir, { recursive: true, force: true })
+    const forget = (): void => { this.lifecycleStore.forgetCreatedTask(id, owner ? { ownedBy: owner } : undefined) }
+    const projectId = meta.projectId
+    if (projectId) {
+      // The gates forgetting takes, then the project's list lock, and only then any change: a lock not had in time
+      // leaves the thread as it was.
+      this.withLifecycleGates(['_registry', id], () => {
+        this.projectListWrite(projectId, () => {
+          forget()
+          rmSync(threadDir, { recursive: true, force: true })
+        }, { changesFolder: true })
+      })
+    } else {
+      forget()
+      this.removeFromStandaloneIndex(id)
+      rmSync(threadDir, { recursive: true, force: true })
+    }
     this.invalidateListCache()
     // `created` announced it; clients must hear it is gone.
     this.emit('discarded', { id })
@@ -861,7 +1319,7 @@ export class ThreadDataStore extends EventEmitter {
       throw new Error('Execution thread identity has unresolved legacy trash ownership')
     }
     const now = new Date().toISOString()
-    const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
+    const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId) }
     if (opts?.localOnly === true) initial.localOnly = true
     if (opts?.botOwned === true) initial.botOwned = true
     if (opts?.automationManager === true) initial.automationManager = true
@@ -907,8 +1365,7 @@ export class ThreadDataStore extends EventEmitter {
     for (const id of new Set(threadIds)) {
       const thread = this.getThread(id)
       if (!thread || thread.botOwned) continue
-      const updated: Thread = { ...thread, botOwned: true }
-      this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
+      const updated = this.writeThreadMeta(thread, (base) => ({ ...base, botOwned: true }))
       if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
       this.patchListCache(updated)
       this.emit('updated', updated)
@@ -923,17 +1380,19 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   listThreads(projectId?: string): Thread[] {
+    // A cached group is reused only while its files are as they were when it was read.
+    this.refreshGroupIfChanged(projectId)
     if (projectId) {
       const cached = this.projectListCache.get(projectId)
       if (cached) return cached
       const project = this.projectManager.getProject(projectId)
       if (!project) return []
-      const threads = this.scanProjectThreads(project.path)
+      const threads = this.readGroup(projectId, () => this.scanProjectThreads(project.path))
       this.projectListCache.set(projectId, threads)
       return threads
     }
     if (this.standaloneListCache) return this.standaloneListCache
-    const standalone = this.readStandaloneIndex()
+    const standalone = this.readGroup(undefined, () => this.readStandaloneIndex())
     this.standaloneListCache = standalone
     return standalone
   }
@@ -951,8 +1410,11 @@ export class ThreadDataStore extends EventEmitter {
   listAllThreads(): Thread[] {
     this.listSeq += 1
     const projectsKey = this.projectsCacheKey()
+    // Every group is checked, not only one a create touched: another process may have changed any of them.
     if (this.listCache && this.listCacheProjectsKey === projectsKey) {
-      return this.listCache
+      const stale = [undefined, ...this.projectManager.listProjects().map((project) => project.id)].filter((id) => this.groupStale(id))
+      if (!stale.length) return this.listCache
+      for (const id of stale) this.dropGroupCache(id)
     }
     // Project set/path changed — drop per-project caches so we do not reuse
     // threads scanned from a previous project path for the same id.
@@ -1054,7 +1516,7 @@ export class ThreadDataStore extends EventEmitter {
   updateThreadMeta(
     id: string,
     partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
-    opts: { touch?: boolean } = {}
+    opts: { touch?: boolean; ifRevision?: number } = {}
   ): Thread {
     const thread = this.getThread(id)
     if (!thread) {
@@ -1062,16 +1524,19 @@ export class ThreadDataStore extends EventEmitter {
     }
     if (partial.name !== undefined && partial.name !== thread.name) this.nameGuard?.(thread, partial.name)
 
-    const updated: Thread = {
-      ...thread,
-      ...partial,
-      // Every write of the model or the permission mode, by any route, moves the revision on (`ifRevision`).
-      ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (thread.settingsRevision ?? 0) + 1 } : {}),
-      updatedAt: opts.touch === false ? thread.updatedAt : new Date().toISOString()
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => {
+      // A conditional change (`ifRevision`) is compared with the thread as it is written from: on disk under the list
+      // lock when this store's list is not trusted, so a change another process made is never written over.
+      if (opts.ifRevision !== undefined) refuseChangedRevision(base, opts.ifRevision)
+      return {
+        ...base,
+        ...partial,
+        // Every write of the model or the permission mode, by any route, moves the revision on (`ifRevision`).
+        ...('modelOverride' in partial || 'permissionMode' in partial ? { settingsRevision: (base.settingsRevision ?? 0) + 1 } : {}),
+        updatedAt: opts.touch === false ? base.updatedAt : now
+      }
+    })
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
@@ -1080,6 +1545,20 @@ export class ThreadDataStore extends EventEmitter {
     this.patchListCache(updated)
     this.emit('updated', updated)
     return updated
+  }
+
+  /**
+   * The thread as its `meta.json` has it now, for a check that must not trust this store's cached row (another process
+   * may have changed the thread since): a bound send's settings, a conditional change's revision.
+   */
+  threadOnDisk(id: string): Thread | undefined {
+    const thread = this.getThread(id)
+    if (!thread) return undefined
+    try {
+      return this.metaOnDisk(join(this.getThreadDir(id), 'meta.json'), thread)
+    } catch {
+      return thread
+    }
   }
 
   setThreadWorktreeEnabled(id: string, enabled: boolean): Thread {
@@ -1094,14 +1573,8 @@ export class ThreadDataStore extends EventEmitter {
     if (this.messageCountAt(this.getThreadDir(id)) > 0) {
       throw threadErrors.create('thread_worktree_locked')
     }
-    const updated: Thread = {
-      ...thread,
-      worktreeEnabled: enabled,
-      updatedAt: new Date().toISOString()
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => ({ ...base, worktreeEnabled: enabled, updatedAt: now }))
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
@@ -1118,20 +1591,17 @@ export class ThreadDataStore extends EventEmitter {
       throw new Error(`Thread not found: ${id}`)
     }
 
-    const updated: Thread = {
-      ...thread,
-      updatedAt: new Date().toISOString()
-    }
-
-    if (settled) {
-      updated.settledAt = updated.updatedAt
-      delete updated.pinnedAt
-    } else {
-      delete updated.settledAt
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base, updatedAt: now }
+      if (settled) {
+        next.settledAt = now
+        delete next.pinnedAt
+      } else {
+        delete next.settledAt
+      }
+      return next
+    })
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
     this.emit('list-changed', { id })
@@ -1144,19 +1614,13 @@ export class ThreadDataStore extends EventEmitter {
       throw new Error(`Thread not found: ${id}`)
     }
 
-    const updated: Thread = {
-      ...thread,
-      updatedAt: new Date().toISOString()
-    }
-
-    if (pinned) {
-      updated.pinnedAt = updated.updatedAt
-    } else {
-      delete updated.pinnedAt
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    const now = new Date().toISOString()
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base, updatedAt: now }
+      if (pinned) next.pinnedAt = now
+      else delete next.pinnedAt
+      return next
+    })
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
@@ -1176,10 +1640,34 @@ export class ThreadDataStore extends EventEmitter {
     if (threadIds.some((id) => !byId.has(id))) {
       throw new Error('Threads may only be reordered within their current group')
     }
-    const reordered = threadIds.map((id, order) => ({ ...byId.get(id)!, order }))
-    for (const thread of reordered) {
-      this.writeJsonAtomic(join(this.resolveThreadDir(thread), 'meta.json'), thread)
+    // Only the rows whose order changes are written (moving one thread writes one row), so the list lock and their
+    // gates are held for those writes alone.
+    const listed = threadIds.map((id) => byId.get(id)!)
+    const orders = ordersKeeping(listed.map((thread) => thread.order))
+    const reordered = listed.map((thread, index) => (orders[index] === thread.order ? thread : { ...thread, order: orders[index]! }))
+    const changed = reordered.filter((thread, index) => thread !== listed[index])
+    const paths = changed.map((thread) => join(this.resolveThreadDir(thread), 'meta.json'))
+    // All or nothing: every changed row's gates are taken before the list lock and before any write, so a busy one
+    // changes nothing; a write that still fails puts the rows already written back as they were.
+    const writeChanged = (cacheTrusted: boolean): void => {
+      // Orders are kept relative to the rows around them, so they must be the ones on disk: a list another process
+      // changed since it was read is refused before anything is written, and the person tries again.
+      if (!cacheTrusted && listed.some((thread) => this.metaOnDisk(join(this.resolveThreadDir(thread), 'meta.json'), thread).order !== thread.order))
+        throw new ThreadListBusyError()
+      // So must the threads: one another process made since could share an order with a moved row.
+      if (!cacheTrusted && projectId && this.unlistedThreadInFolder(projectId, new Set(listed.map((thread) => thread.id))))
+        throw new ThreadListBusyError()
+      let written = 0
+      try {
+        for (; written < changed.length; written += 1) this.writeJsonAtomic(paths[written]!, changed[written])
+      } catch (error) {
+        for (let index = 0; index < written; index += 1) {
+          try { this.writeJsonAtomic(paths[index]!, byId.get(changed[index]!.id)) } catch { /* the original failure is reported */ }
+        }
+        throw error
+      }
     }
+    if (changed.length) this.withPathGates(paths, () => (projectId ? this.projectListWrite(projectId, writeChanged) : writeChanged(true)))
     if (!projectId) this.writeVisibleStandaloneProjection(reordered)
     this.invalidateListCache()
     this.emit('list-changed', {})
@@ -1215,6 +1703,15 @@ export class ThreadDataStore extends EventEmitter {
 
   /** Idempotent index projection; lifecycle location is the durable authority. */
   projectLifecycleIndex(record: TaskLifecycleRecord): void {
+    // A thread moved into or out of a project's folder (trash, restore): the project's revision moves under its lock.
+    // A purge needs nothing more; the thread had already left the project's folder when it was trashed.
+    let projectId: string | undefined
+    try {
+      projectId = readThreadMeta<ThreadMeta>(join(record.location, 'meta.json')).projectId
+    } catch {
+      // No metadata where it is now: nothing to tell about a project.
+    }
+    if (projectId) this.projectListWrite(projectId, () => undefined)
     this.removeFromStandaloneIndex(record.taskId)
     if (record.location === record.originalLocation) {
       const meta = readThreadMeta<ThreadMeta>(join(record.location, 'meta.json'))
@@ -1560,18 +2057,12 @@ export class ThreadDataStore extends EventEmitter {
     if (thread.startedAt) return { thread, newlyStarted: false }
 
     const now = new Date().toISOString()
-    const updated: ThreadMeta = {
-      ...thread,
-      startedAt: now,
-      updatedAt: now
-    }
-
-    const threadDir = this.getThreadDir(id)
-    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    // Started by another process meanwhile: kept as it is. Tried once more when the list is busy (a run start calls it).
+    const updated = retryOnceWhenListBusy(() => this.writeThreadMeta(thread, (base) => (base.startedAt ? base : { ...base, startedAt: now, updatedAt: now })))
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
     this.emit('list-changed', { id })
-    return { thread: updated, newlyStarted: true }
+    return { thread: updated, newlyStarted: updated.startedAt === now }
   }
 
   /**
@@ -1597,8 +2088,14 @@ export class ThreadDataStore extends EventEmitter {
       (min, entry) => Math.min(min, entry.order),
       Math.min(thread.order, floor ?? thread.order)
     )
-    const updated: Thread = { ...thread, order: minOrder - 1 }
-    this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
+    // A project thread's order is taken under the project's list lock, below every order on disk when its list is not
+    // trusted, as a new thread's is.
+    const projectId = thread.projectId
+    // Tried once more when the list is busy: a run start calls it.
+    const updated = retryOnceWhenListBusy(() => this.writeThreadMeta(thread, (base, cacheTrusted) => ({
+      ...base,
+      order: projectId ? this.projectOrderUnderLock(projectId, cacheTrusted) : minOrder - 1
+    })))
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.invalidateListCache()
     this.emit('updated', updated)
@@ -1796,7 +2293,7 @@ export class ThreadDataStore extends EventEmitter {
     const threads = this.scanThreadDirectory(dataDir, projectPath)
     return this.ensureThreadOrders(threads, (ordered) => {
       for (const thread of ordered) {
-        this.writeJsonAtomic(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), thread)
+        this.writeJsonAtomic(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), thread, { repair: true })
       }
     })
   }
@@ -1825,10 +2322,11 @@ export class ThreadDataStore extends EventEmitter {
     return threads.sort((a, b) => a.order - b.order)
   }
 
-  private nextThreadOrder(projectId?: string, projectPath?: string): number {
-    const threads = projectId
-      ? this.scanProjectThreads(projectPath ?? this.projectManager.getProject(projectId)?.path ?? '')
-      : this.readStandaloneIndex()
+  private nextThreadOrder(projectId?: string): number {
+    // The group's warm list, read from disk again when it is not cached or its files changed since, so a thread
+    // another process added is listed and the new order is below every order on disk.
+    this.refreshGroupIfChanged(projectId)
+    const threads = this.listThreads(projectId)
     // A group that also holds rows of other computers starts below their first.
     const floor = this.remoteFloor?.(projectId)
     return threads.reduce((min, thread) => Math.min(min, thread.order), Math.min(0, floor ?? 0)) - 1
@@ -1853,8 +2351,31 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /** Same-directory durable replacement with file and parent-directory fsync. */
-  private writeJsonAtomic(filePath: string, value: unknown): void {
+  private writeJsonAtomic(filePath: string, value: unknown, options: { repair?: boolean } = {}): void {
+    // A thread's meta.json or the standalone index: a write to a group's list, which moves its signature. When
+    // the cached list matched the disk before, it still does (every writer here patches or clears the cache).
+    const meta = basename(filePath) === 'meta.json' && value && typeof value === 'object' && typeof (value as Thread).id === 'string'
+    const group: { projectId?: string } | undefined = filePath === join(this.homeDir, 'threads-index.json')
+      ? {}
+      : meta ? { projectId: (value as Thread).projectId } : undefined
+    if (!group) {
+      atomicWriteJsonSync(filePath, value)
+      return
+    }
+    if (group.projectId) {
+      const projectId = group.projectId
+      // The write's lifecycle gates first, so the list lock is the innermost lock.
+      this.withPathGates([filePath], () => this.projectListWrite(projectId, () => atomicWriteJsonSync(filePath, value), options))
+      return
+    }
+    const recorded = this.groupSignatures.get('')
+    const inSync = recorded !== undefined && recorded === this.groupSignature()
     atomicWriteJsonSync(filePath, value)
+    if (inSync) {
+      const signature = this.groupSignature()
+      if (signature !== undefined) this.groupSignatures.set('', signature)
+      else this.groupSignatures.delete('')
+    }
   }
 
   /**
