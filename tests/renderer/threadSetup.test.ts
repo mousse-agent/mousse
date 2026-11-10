@@ -57,3 +57,38 @@ describe("the sidebar's New thread when the remembered model can no longer be us
     expect(useAppStore.getState().activeThreadId).toBe('empty')
   })
 })
+
+describe("the sidebar's New thread before the project's provider listing has loaded", () => {
+  const opus = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  async function setup(listing: () => Promise<unknown>) {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { useProviderSnapshotsStore } = await import('../../src/renderer/lib/providerSnapshots')
+    const { createAndSelectProjectThread } = await import('../../src/renderer/lib/threadActions')
+    const empty = { id: 'empty', name: 'New Chat', projectId: 'p', createdAt: '', updatedAt: '', order: 0, modelOverride: opus } as never
+    // Sonnet is remembered for the project; the empty thread is on Opus.
+    useAppStore.setState({ threads: [empty], activeThreadId: null, projects: [{ id: 'p', name: 'p', path: '/p', createdAt: '', order: 0, newThread: { model: { ...opus, model: 'sonnet' } } }] })
+    useProviderSnapshotsStore.setState({ scopes: {} })
+    const snapshots = vi.fn(listing)
+    const create = vi.fn(async () => ({ ...(empty as object), id: 'made', modelOverride: { ...opus, model: 'sonnet' } }))
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) }, providers: { snapshots } } })
+    return { useAppStore, createAndSelectProjectThread, create, snapshots }
+  }
+
+  it('loads the listing first, and makes a thread on the remembered model when the picker lists it', async () => {
+    const { model, snapshot } = await import('../providerSnapshotFixture')
+    const page = await setup(async () => [snapshot({ models: { entries: [model('opus'), model('sonnet')], source: 'live' } })])
+    await page.createAndSelectProjectThread('p')
+    expect(page.snapshots).toHaveBeenCalledTimes(1)
+    expect(page.create).toHaveBeenCalledWith(undefined, 'p', { rememberedChoices: true })
+    expect(page.useAppStore.getState().activeThreadId).toBe('made')
+  })
+
+  it('keeps the remembered model when the listing cannot be read, instead of reusing a thread on another model', async () => {
+    const page = await setup(async () => { throw new Error('The service did not answer') })
+    await page.createAndSelectProjectThread('p')
+    expect(page.create).toHaveBeenCalledTimes(1)
+    expect(page.useAppStore.getState().activeThreadId).toBe('made')
+  })
+})
