@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
+import type { SpawnedRoot } from '../../stopProcesses'
 
 /**
  * Claude threads run on a long-lived query (issue #142): the prompt is a queue-backed iterable that
@@ -60,24 +61,50 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   interruptTimeoutMs: 10_000
 }
 
-/** The pid each query's Claude Code was started with, as the SDK reported it at spawn (`noteClaudeQueryPid`). */
-const SPAWNED_PIDS = new WeakMap<object, () => number | undefined>()
+/** A query's Claude Code as the SDK reported it at spawn: its pid and when Mousse heard of it (`noteClaudeQuerySpawn`). */
+const SPAWNED = new WeakMap<object, () => { pid: number; spawnedAt: number } | undefined>()
 
-/** Records where the pid of `query`'s Claude Code is read from once it has started. */
-export function noteClaudeQueryPid(query: object, pid: () => number | undefined): void {
-  SPAWNED_PIDS.set(query, pid)
+/** Records where the spawn of `query`'s Claude Code is read from once it has started. */
+export function noteClaudeQuerySpawn(query: object, spawned: () => { pid: number; spawnedAt: number } | undefined): void {
+  SPAWNED.set(query, spawned)
 }
 
+/** A Claude Code process a query runs: its pid, and what Mousse knows of it for a delayed kill. */
+export interface ClaudeProcess {
+  pid: number
+  root: SpawnedRoot
+}
+
+/** The SDK's process of a query (a `ChildProcess`, or the SDK's wrapper of one, which has no pid). */
+type SdkProcess = { pid?: unknown; exitCode?: number | null; signalCode?: string | null; kill?: (signal?: NodeJS.Signals) => boolean }
+
+const validPid = (pid: unknown): number | undefined => (typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined)
+
 /**
- * The pid of the Claude Code process a query runs, or undefined. The Agent SDK does not publish it:
- * it is read from the query's process transport (`transport.process.pid`), or, in SDKs that wrap the
- * process without its pid, from what the SDK reported when it started it (`noteClaudeQueryPid`). Without
- * either, Stop has the SDK's own close only.
+ * The Claude Code process a query runs, or undefined. The Agent SDK does not publish it. The pid is read from the
+ * query's process transport (`transport.process.pid`), or, in SDKs that wrap the process without its pid, from what the
+ * SDK reported when it started it (`noteClaudeQuerySpawn`, which also anchors when it was started). Whether it exited,
+ * and its kill, come from that same process object (Mousse's handle). Without a pid, Stop has the SDK's own close only.
  */
+export function claudeQueryProcess(query: unknown): ClaudeProcess | undefined {
+  const handle = (query as { transport?: { process?: SdkProcess } } | undefined)?.transport?.process
+  const noted = query && typeof query === 'object' ? SPAWNED.get(query)?.() : undefined
+  const pid = validPid(handle?.pid) ?? validPid(noted?.pid)
+  if (pid === undefined) return undefined
+  const knowsExit = handle !== undefined && 'exitCode' in handle && 'signalCode' in handle
+  return {
+    pid,
+    root: {
+      ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt } : {}),
+      exited: () => (knowsExit ? handle!.exitCode !== null || handle!.signalCode !== null : undefined),
+      ...(typeof handle?.kill === 'function' ? { kill: () => { try { handle.kill!('SIGKILL') } catch { /* gone meanwhile */ } } } : {})
+    }
+  }
+}
+
+/** The pid of the Claude Code process a query runs, or undefined (`claudeQueryProcess`). */
 export function claudeQueryPid(query: unknown): number | undefined {
-  const pid = (query as { transport?: { process?: { pid?: unknown } } } | undefined)?.transport?.process?.pid
-    ?? (query && typeof query === 'object' ? SPAWNED_PIDS.get(query)?.() : undefined)
-  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined
+  return claudeQueryProcess(query)?.pid
 }
 
 /** The input stream of a live query. It ends only when closed. */
@@ -583,6 +610,11 @@ export class LiveSession<Turn = unknown> {
   /** The pid of the Claude Code process behind the query, while it is known (`claudeQueryPid`). */
   processId(): number | undefined {
     return this.query ? claudeQueryPid(this.query) : undefined
+  }
+
+  /** The Claude Code process behind the query, while it is known (`claudeQueryProcess`). */
+  process(): ClaudeProcess | undefined {
+    return this.query ? claudeQueryProcess(this.query) : undefined
   }
 
   /** A run is live: pushed and not yet ended (an abandoned one still owes its result). */

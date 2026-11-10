@@ -62,8 +62,8 @@ import { checkProxyKey, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
-import { CancelInProgress, claudeQueryPid, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQueryPid, type LiveRun, type LiveTimings } from './liveSession'
-import { reapProcessTree } from '../../stopProcesses'
+import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
+import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
@@ -270,7 +270,7 @@ type Dependencies = {
    * Ends a closed Claude Code process that has not exited by itself (`reapProcessTree`), with the
    * commands it started; tests substitute the grace or the kill.
    */
-  reap?: (pid: number) => Promise<'ended' | 'killed' | 'survived'>
+  reap?: (pid: number, root?: SpawnedRoot) => Promise<'ended' | 'killed' | 'survived'>
   query?: (input: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
   runAuth?: (
     binary: string,
@@ -1413,11 +1413,12 @@ export class ClaudeSubscriptionProviderService {
     options.abortController?.signal.throwIfAborted()
     if (this.stopped) throw new Error('Claude provider is stopped')
     // The SDK wraps the process without its pid; it reports the pid when it starts it, so Stop can end the process
-    // tree (`reapClosed`). The callback is the SDK's own, not in its published types.
-    let pid: number | undefined
+    // tree (`reapClosed`). When it was reported anchors the process's creation time, so a later kill never reaches
+    // another program given the pid since. The callback is the SDK's own, not in its published types.
+    let spawned: { pid: number; spawnedAt: number } | undefined
     const reported = (options as { onProcessSpawned?: (pid: number) => void }).onProcessSpawned
-    const created = sdk.query({ prompt, options: { ...options, onProcessSpawned: (spawned: number) => { pid = spawned; reported?.(spawned) } } as Options })
-    noteClaudeQueryPid(created, () => pid)
+    const created = sdk.query({ prompt, options: { ...options, onProcessSpawned: (pid: number) => { spawned = { pid, spawnedAt: Date.now() }; reported?.(pid) } } as Options })
+    noteClaudeQuerySpawn(created, () => spawned)
     return created
   }
   /**
@@ -1829,10 +1830,11 @@ export class ClaudeSubscriptionProviderService {
     const live = this.live.get(threadId)
     if (!live || live.dead) return 'not_active'
     this.questions.dismissAllForThread(threadId)
-    const pid = live.processId()
+    // Taken before the close: what the process is, and its handle, for the kill after the grace.
+    const target = live.process()
     live.close('closed')
     this.live.delete(threadId)
-    this.reapClosed(threadId, pid)
+    this.reapClosed(threadId, target)
     return 'stopped'
   }
   /**
@@ -1841,10 +1843,12 @@ export class ClaudeSubscriptionProviderService {
    * `CLAUDE_STOP_GRACE_MS` is killed with every process below it, so no command outlives the Stop; one
    * that cannot be killed is said in the thread, so it does not look stopped while it still runs.
    */
-  private reapClosed(threadId: string, pid: number | undefined): void {
-    if (pid === undefined) return
-    const reap = this.dependencies.reap ?? ((target: number) => reapProcessTree(target, { graceMs: CLAUDE_STOP_GRACE_MS }))
-    void reap(pid).then(
+  private reapClosed(threadId: string, target: ClaudeProcess | undefined): void {
+    if (target === undefined) return
+    const { pid, root } = target
+    // The process is known by its handle and the time it was started, so a pid given to another program meanwhile is never killed.
+    const reap = this.dependencies.reap ?? ((at: number, known?: SpawnedRoot) => reapProcessTree(at, { graceMs: CLAUDE_STOP_GRACE_MS, ...(known ? { root: known } : {}) }))
+    void reap(pid, root).then(
       (outcome) => {
         if (outcome === 'killed') console.warn('[claude-subscription] Claude Code did not exit after Stop; its processes were killed', { threadId, pid })
         if (outcome === 'survived')
@@ -2349,9 +2353,9 @@ export class ClaudeSubscriptionProviderService {
       if (live && liveRun) live.abandon(liveRun)
       else if (query) {
         // A one-shot query ends its process with the turn; one that does not exit is killed (`reapClosed`).
-        const pid = claudeQueryPid(query)
+        const target = claudeQueryProcess(query)
         query.close()
-        this.reapClosed(input.threadId, pid)
+        this.reapClosed(input.threadId, target)
       }
       this.questions.dismissAllForThread(input.threadId)
     }
