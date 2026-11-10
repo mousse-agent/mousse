@@ -12,6 +12,8 @@ import { ensureSnapshotWorkspaceAsync, threadStorePath } from '../src/mms/worksp
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { actionOptions } from './fixtures/gitFoundation'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
+import { canonicalJson } from '../src/mms/net/sync/codec'
+import { lifecycleForReply, type TaskLifecycleRecord } from '../src/shared/resourceLifecycle'
 
 /** Puts a file only this thread has in its scratch folder: unpublished work a purge may discard only with consent. */
 function soleCopy(services: MmsProfileServices, threadId: string): string {
@@ -47,6 +49,27 @@ function worktreeWithChanges(services: MmsProfileServices, home: string, root: s
   const refs = () => git(repo, ['for-each-ref', '--format=%(refname) %(objectname)'])
   return { repo, worktree, branch, retainedRef, refs, before: refs() }
 }
+
+describe('lifecycleForReply', () => {
+  const record = (ino: number): TaskLifecycleRecord => ({
+    taskId: 't', state: 'purged',
+    purge: { items: [{ id: 'a', kind: 'path', identity: '/x', ownerTaskId: 't', rootIdentity: { dev: 1, ino, birthtimeMs: 2 }, status: 'removed' }] }
+  } as unknown as TaskLifecycleRecord)
+
+  it('drops a file id above 2^53 that the strict network JSON refuses, and leaves the record it was given as it was', () => {
+    const stored = record(2 ** 60)
+    expect(() => canonicalJson(stored)).toThrow('Unsafe JSON number')
+    const sent = lifecycleForReply(stored)
+    expect(() => canonicalJson(sent)).not.toThrow()
+    expect(sent.purge!.items[0]).toEqual({ id: 'a', kind: 'path', identity: '/x', ownerTaskId: 't', status: 'removed' })
+    expect(stored.purge!.items[0].rootIdentity?.ino).toBe(2 ** 60)
+  })
+
+  it('returns a record without a purge as it is', () => {
+    const plain = { taskId: 't', state: 'active' } as unknown as TaskLifecycleRecord
+    expect(lifecycleForReply(plain)).toBe(plain)
+  })
+})
 
 /** Archive first, then delete: only an archived thread is deleted, for good, with its subagent threads. */
 describe('threads.delete', () => {
@@ -86,6 +109,23 @@ describe('threads.delete', () => {
       // Nothing waits in a trash: the inventory lists no thread that could be restored.
       const inventory = await f.rpc.request<{ lifecycles: Array<{ taskId: string; state: string }> }>('threads.inventory', {})
       expect(inventory.lifecycles.filter((record) => record.state === 'trashed')).toEqual([])
+    } finally { await f.close() }
+  })
+
+  it('replies without the folder file ids of its purge, which the network refuses above 2^53, and keeps them in the stored record', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const thread = f.services.threads.createThread('Archived with scratch files')
+      soleCopy(f.services, thread.id)
+      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      const reply = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.delete', { threadId: thread.id, discard: true })
+      expect(reply.lifecycle.state).toBe('purged')
+      const items = reply.lifecycle.purge!.items
+      expect(items.some((item) => item.kind === 'path')).toBe(true)
+      for (const item of items) expect(item).not.toHaveProperty('rootIdentity')
+      expect(() => canonicalJson(reply)).not.toThrow()
+      // The purge's own record still holds what it checks the disk against.
+      expect(f.services.threads.lifecycleStore.require(thread.id).purge!.items.some((item) => item.rootIdentity)).toBe(true)
     } finally { await f.close() }
   })
 
