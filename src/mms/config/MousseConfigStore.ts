@@ -12,6 +12,7 @@ import {
 } from 'fs'
 import { basename, dirname, join } from 'path'
 import { quarantineUnreadableFileSync } from '../data/AtomicFs'
+import { trackFileWatcher } from '../diagnostics/liveCounts'
 import { upgradeSelection } from '../../shared/modelSelection'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
@@ -665,9 +666,9 @@ export class MousseConfigStore {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true })
     }
-    this.watcher = watch(this.confPath, () => {
+    this.watcher = trackFileWatcher(watch(this.confPath, () => {
       this.reloadFromDisk()
-    })
+    }))
   }
 
   stopWatching(): void {

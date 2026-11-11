@@ -15,6 +15,7 @@ import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../../run/mcp/attachment'
 import type { ToolLedger } from '../../run/mcp/appTools/types'
 import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
+import { trackChildProcess } from '../../diagnostics/liveCounts'
 
 /**
  * How a bot's turn runs on Claude Code (PR 6 §3), on either kind of entry:
@@ -553,6 +554,7 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
       detached: platform !== 'win32',
       windowsHide: true
     })
+    trackChildProcess(child, 'claude')
     const pid = child.pid
     let exited = false
     let ended = false

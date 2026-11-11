@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { trackChildProcess } from '../../../diagnostics/liveCounts'
 import type { Readable, Writable } from 'node:stream'
 import {
   RPC_INTERNAL_ERROR,
@@ -320,12 +321,14 @@ export class CodexAppServerClient implements CodexConnection {
 
 /** Spawns `<binary> [entryArgs] app-server [args]` with piped stdio. */
 export function spawnCodexAppServer(launch: CodexLaunch): CodexProcess {
-  return spawn(launch.binary, [...(launch.entryArgs ?? []), 'app-server', ...launch.args], {
+  const child = spawn(launch.binary, [...(launch.entryArgs ?? []), 'app-server', ...launch.args], {
     env: launch.env,
     cwd: launch.cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true
   })
+  trackChildProcess(child, 'codex')
+  return child
 }
 
 /** TOML literal for a `-c key=value` override (strings, numbers, booleans, arrays and tables). */

@@ -68,6 +68,8 @@ export function requestTimeoutFor(method: string): number {
   if (method === 'mcp.beginAuth' || method === 'mcp.authenticate') return MMS_PROTOCOL_LOGIN_TIMEOUT_MS
   // Fetches the pull request's head from the network and builds a worktree.
   if (GIT_MUTATION_METHODS.has(method) || method === 'pullRequests.startThread') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  // A heap snapshot of a large service takes a while to write.
+  if (method === 'diagnostics.memory.heapSnapshot') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
 }
 

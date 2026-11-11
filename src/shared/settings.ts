@@ -124,6 +124,8 @@ export interface NotificationSettings {
   allRemoteThreads: boolean
   /** The channels chosen for each event. A channel not chosen yet is on. */
   events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
+  /** A notice when Mousse uses more memory than expected, at most once a day for each kind. Unset is on. */
+  memoryNotices?: boolean
 }
 
 /** The channels an event uses: what the person chose, and on for anything not chosen yet. */

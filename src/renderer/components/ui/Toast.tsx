@@ -114,6 +114,8 @@ interface ToastCardProps {
   className?: string
   /** A copy fading out after the toast closed: drawn, but not the live toast. */
   ghost?: boolean
+  /** Details shown as the text's tooltip. */
+  detail?: string
 }
 
 /** Read before the text by screen readers, since the tint alone says nothing to them. */
@@ -160,7 +162,7 @@ function useToastExpansion(text: HTMLElement | null, content: string, onPinnedCh
 }
 
 /** One toast, tinted by its tone: its line or two of text, up to two text actions and a close button. */
-function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, openLabel, onDismiss, time, className, ghost, onPinnedChange }: ToastCardProps & {
+function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, openLabel, onDismiss, time, className, ghost, detail, onPinnedChange }: ToastCardProps & {
   /** The toast was clicked open (true) or closed again (false). */
   onPinnedChange?: (pinned: boolean) => void
 }) {
@@ -197,11 +199,12 @@ function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, ope
     >
       <span className="ui-toast-body">
         {onOpen ? (
-          <button ref={setTextElement} type="button" className="ui-toast-text ui-toast-open" aria-label={openLabel} onClick={onOpen}>{text}</button>
+          <button ref={setTextElement} type="button" className="ui-toast-text ui-toast-open" aria-label={openLabel} title={detail} onClick={onOpen}>{text}</button>
         ) : (
           <span
             ref={setTextElement}
             className="ui-toast-text"
+            title={detail}
             role={expandable ? 'button' : undefined}
             tabIndex={expandable ? 0 : undefined}
             aria-expanded={expandable ? expanded : undefined}
@@ -315,6 +318,8 @@ export interface ToastInput {
   onOpen?: () => void
   /** The accessible name of the open button, e.g. "Open Fix tests". */
   openLabel?: string
+  /** Details shown as the text's tooltip. */
+  detail?: string
 }
 
 interface ToastEntry extends ToastInput { id: number; shownAt: number }
@@ -596,6 +601,7 @@ function StackedToast({
           message={toast.message}
           tone={toast.tone}
           openLabel={toast.openLabel}
+          detail={toast.detail}
           onOpen={open ? () => { dismissToast(toast.id); open() } : undefined}
           actions={action ? [{
             label: action.label,

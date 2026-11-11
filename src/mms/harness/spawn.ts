@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { withEnforced, type InstanceEnv } from './env'
 import { killProcessTree } from './processTree.mjs'
+import { childKindOf, trackChildProcess } from '../diagnostics/liveCounts'
 
 /**
  * The one way the gateway starts a harness process (probes, version checks, sign-in checks, model
@@ -60,6 +61,7 @@ export function spawnHarness(
     ...spawnOptions,
     env: processEnv
   })
+  trackChildProcess(child, childKindOf(command))
   if (onProcess && child.pid !== undefined) {
     try {
       onProcess(child.pid)

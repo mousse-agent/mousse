@@ -46,6 +46,11 @@ interface RuntimeListenerBundle {
 
 export class ThreadRuntimeManager extends EventEmitter {
   private readonly runtimes = new Map<string, ThreadRuntime>()
+
+  /** How many thread runtimes are held (the memory monitor's count). */
+  runtimeCount(): number {
+    return this.runtimes.size
+  }
   private readonly registryListeners = new Map<string, RuntimeListenerBundle>()
   /** Turn lifecycle state before thread-owned background agent work is folded in. */
   private readonly turnActivity = new Map<string, ThreadActivityState>()

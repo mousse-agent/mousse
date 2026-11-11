@@ -34,6 +34,7 @@ import { isSessionClosing } from './lib/errorText'
 import { useAppStore, withNewerTimes } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
 import { useViewSwap } from './lib/motion'
+import { useMemoryNotices } from './hooks/useMemoryNotices'
 import { normalizeRunSettings } from '../shared/settings'
 import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
@@ -80,6 +81,7 @@ export default function App() {
 
   useCommandShortcuts()
   useAppCommands()
+  useMemoryNotices()
   const setShortcuts = useAppStore((s) => s.setShortcuts)
   const usageOpen = useAppStore((s) => s.usageOpen)
   const setUsageOpen = useAppStore((s) => s.setUsageOpen)

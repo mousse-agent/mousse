@@ -7,6 +7,7 @@ import {
   type Session
 } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { markWebContentsRole } from '../diagnostics/webContentsRoles'
 import type { AppletAppearance } from '../../shared/appletAppearance'
 import { APPLET_EVENT_PREFIX, APPLET_APPLY_APPEARANCE, appletDocument, type AppletSource } from './document'
 
@@ -150,6 +151,7 @@ export class AppletRuntimeManager {
       }
     })
     guest.setBackgroundColor('#00000000')
+    markWebContentsRole(guest.webContents, 'applet')
     const container = new View()
     container.addChildView(guest)
     this.owner.contentView.addChildView(container)

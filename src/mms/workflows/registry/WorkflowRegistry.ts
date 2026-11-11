@@ -10,6 +10,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { trackFileWatcher } from '../../diagnostics/liveCounts'
 import { atomicWriteFileSync } from '../../data/AtomicFs'
 import { withFileLock } from '../../scheduled/fileLock'
 import {
@@ -423,9 +424,9 @@ export class WorkflowRegistry {
     }
     let watcher: FSWatcher
     try {
-      watcher = watch(this.workflowsRoot, { recursive: true }, fire)
+      watcher = trackFileWatcher(watch(this.workflowsRoot, { recursive: true }, fire))
     } catch {
-      watcher = watch(this.workflowsRoot, fire)
+      watcher = trackFileWatcher(watch(this.workflowsRoot, fire))
     }
     return {
       close: () => {

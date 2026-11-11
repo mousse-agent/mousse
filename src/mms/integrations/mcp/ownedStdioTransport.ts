@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { PassThrough } from 'node:stream'
+import { trackChildProcess } from '../../diagnostics/liveCounts'
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ReadBuffer, serializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
@@ -83,6 +84,7 @@ export class OwnedStdioClientTransport implements Transport {
         windowsHide: process.platform === 'win32',
         cwd: this.server.cwd
       })
+      trackChildProcess(child, 'mcp')
       this.child = child
 
       const onAbort = (): void => {

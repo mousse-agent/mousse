@@ -1,5 +1,6 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
+import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
@@ -1211,6 +1212,18 @@ const api = {
       return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
+  /** The service's memory monitor (Settings > General > About, and its notice). */
+  diagnostics: {
+    memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('diagnostics:memoryStatus'),
+    memoryNoticeShown: (kind: BreachKind): Promise<void> => ipcRenderer.invoke('diagnostics:memoryNoticeShown', kind),
+    /** Opens the prefilled GitHub issue in the browser; nothing is sent until the person submits it there. */
+    memoryReport: (): Promise<{ ok: boolean; url: string; copied: boolean; complete: boolean }> => ipcRenderer.invoke('diagnostics:memoryReport'),
+    onMemoryNotice: (cb: (notice: MemoryNotice) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, notice: MemoryNotice) => cb(notice)
+      ipcRenderer.on('diagnostics:memoryNotice', handler)
+      return () => ipcRenderer.removeListener('diagnostics:memoryNotice', handler)
+    }
+  },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
@@ -1361,5 +1374,32 @@ const api = {
 }
 
 contextBridge.exposeInMainWorld('mousse', api)
+
+// This window's renderer memory, once a minute, for the memory monitor: JS heap, private memory, decoded images and
+// canvases. A timer and one small message; nothing per frame, no GPU work.
+{
+  const sendMemory = async (): Promise<void> => {
+    try {
+      const heap = process.getHeapStatistics()
+      let privateKb: number | undefined
+      try { privateKb = (await process.getProcessMemoryInfo()).private } catch { /* not offered */ }
+      let imagesKb: number | undefined
+      try { imagesKb = Math.round(webFrame.getResourceUsage().images.size / 1024) } catch { /* not offered */ }
+      const webgl = Number(document.documentElement?.dataset.mousseWebglContexts ?? 0)
+      ipcRenderer.send('diagnostics:windowMemory', {
+        usedHeapKb: heap.usedHeapSize,
+        totalHeapKb: heap.totalHeapSize,
+        privateKb,
+        imagesKb,
+        canvases: document.querySelectorAll('canvas').length,
+        webglContexts: Number.isFinite(webgl) ? webgl : 0
+      })
+    } catch {
+      // Not offered in this renderer.
+    }
+  }
+  setTimeout(() => void sendMemory(), 10_000)
+  setInterval(() => void sendMemory(), 60_000)
+}
 
 export type MousseAPI = typeof api

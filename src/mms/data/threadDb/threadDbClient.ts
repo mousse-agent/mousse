@@ -62,6 +62,25 @@ export function threadDbWorkerScript(): string | undefined {
 
 const SYNC_TIMEOUT_MS = 120_000
 
+/**
+ * What one worker reports about itself for the memory monitor, in shared memory it writes and the daemon only reads:
+ * its open SQLite connections, its heap in KB, and whether it is running. Each worker has its own: a worker that was
+ * replaced or ended writes into memory nobody reads any more, and reading never sends it a request.
+ */
+export const WORKER_STAT_OPEN = 0
+export const WORKER_STAT_HEAP_KB = 1
+export const WORKER_STAT_ALIVE = 2
+
+export function newWorkerStats(): Int32Array {
+  return new Int32Array(new SharedArrayBuffer(3 * 4))
+}
+
+/** A worker's stats once it stopped: nothing open, not running. */
+function markEnded(stats: Int32Array): void {
+  Atomics.store(stats, WORKER_STAT_ALIVE, 0)
+  Atomics.store(stats, WORKER_STAT_OPEN, 0)
+}
+
 interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void }
 
 /** A worker answering requests by id. It keeps the process alive only while a request is in flight. */
@@ -69,9 +88,11 @@ class AsyncWorker {
   private readonly worker: Worker
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
+  /** What the worker reports about itself (`WORKER_STAT_*`). */
+  readonly stats = newWorkerStats()
 
   constructor(script: string, role: 'read' | 'index' | 'import') {
-    this.worker = new Worker(script, { workerData: { role }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
+    this.worker = new Worker(script, { workerData: { role, stats: this.stats }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
     this.worker.on('message', (message: { id: number; ok: boolean; value?: unknown; error?: WireError }) => {
       const entry = this.pending.get(message.id)
       if (!entry) return
@@ -86,7 +107,10 @@ class AsyncWorker {
       this.worker.unref()
     }
     this.worker.on('error', failAll)
-    this.worker.on('exit', (code) => failAll(new Error(`Thread database ${role} worker stopped (${code})`)))
+    this.worker.on('exit', (code) => {
+      markEnded(this.stats)
+      failAll(new Error(`Thread database ${role} worker stopped (${code})`))
+    })
     // After the listeners: adding a message listener refs a worker again.
     this.worker.unref()
   }
@@ -109,6 +133,8 @@ export class ThreadDbClient {
   private readonly inlineWrite?: ThreadDbEngine
   private readonly inlineRead?: ThreadDbEngine
   private writer?: Worker
+  /** The current write worker's stats; a replaced writer keeps writing only into its own, which is dropped. */
+  private writerStats?: Int32Array
   private reader?: AsyncWorker
   private indexer?: AsyncWorker
   private importer?: AsyncWorker
@@ -141,12 +167,15 @@ export class ThreadDbClient {
   /** A write worker with its own reply port and flag. A worker that timed out is replaced by a new one. */
   private startWriter(): void {
     const flag = new Int32Array(new SharedArrayBuffer(4))
+    const stats = newWorkerStats()
     const { port1, port2 } = new MessageChannel()
     this.writer = new Worker(this.writerScript!, {
-      workerData: { role: 'write', flag, port: port2 },
+      workerData: { role: 'write', flag, port: port2, stats },
       transferList: [port2],
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
     })
+    this.writer.once('exit', () => markEnded(stats))
+    this.writerStats = stats
     this.writer.unref()
     // The port is only read synchronously; it must not keep the process alive.
     port1.unref()
@@ -218,6 +247,30 @@ export class ThreadDbClient {
     if (this.closed) return
     this.callSync('quiesce', dir)
     if (this.inlineRead) this.inlineRead.quiesce(dir)
+  }
+
+  /**
+   * The memory monitor's counts: running worker threads, the SQLite connections they hold, and each one's heap in
+   * bytes, read only from the stats each worker writes itself. It sends no request, so it never keeps a worker
+   * alive, restarts one that ended, or waits on a busy one. A worker this client no longer holds is not counted.
+   */
+  async diagnostics(): Promise<{ workers: number; connections: number | null; workerHeaps: number[] }> {
+    if (this.closed) return { workers: 0, connections: 0, workerHeaps: [] }
+    if (this.inlineWrite) {
+      return { workers: 0, connections: this.inlineWrite.openCount() + (this.inlineRead?.openCount() ?? 0), workerHeaps: [] }
+    }
+    const held = [this.writerStats, this.reader?.stats, this.indexer?.stats, this.importer?.stats]
+    let workers = 0
+    let connections = 0
+    const workerHeaps: number[] = []
+    for (const stats of held) {
+      if (!stats || Atomics.load(stats, WORKER_STAT_ALIVE) !== 1) continue
+      workers += 1
+      connections += Atomics.load(stats, WORKER_STAT_OPEN)
+      const heapKb = Atomics.load(stats, WORKER_STAT_HEAP_KB)
+      if (heapKb > 0) workerHeaps.push(heapKb * 1024)
+    }
+    return { workers, connections, workerHeaps }
   }
 
   /** True when the client has workers to stop. */
