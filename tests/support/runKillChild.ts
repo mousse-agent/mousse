@@ -14,6 +14,8 @@
  *   queue drops the item;
  * - `steer-two-drains`: as `steer`, and `later` is queued too. `next` and then `later` are steered and drained
  *   separately; the provider takes both and accepts only `next`, by its drain token, then the process dies;
+ * - `steer-two-drains-ack`: as `steer-two-drains`, and the process dies inside the acceptance of `next`: after its text
+ *   and id are saved, before its queue row is dropped. What was saved then is written to `at-kill.json`;
  * - `approval`: the provider waits for a saved approval;
  * - `question`: the provider waits for an answer to a question.
  *
@@ -33,8 +35,9 @@ import { isOpenActivityRow } from '../../src/mms/run/restartNote'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon } from '../run/phase6Fixture'
 
-type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'steer-two-drains' | 'approval' | 'question'
+type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'steer-two-drains' | 'steer-two-drains-ack' | 'approval' | 'question'
 const [mode, home, scenario] = process.argv.slice(2) as ['first' | 'restart', string, Scenario | undefined]
+const twoDrains = scenario === 'steer-two-drains' || scenario === 'steer-two-drains-ack'
 process.env.MOUSSE_HOME = home
 process.env.MOUSSE_SQLITE_THREAD_STORE = '1'
 const MODEL = { llmProvider: 'claude-subscription', model: 'vendor-model' }
@@ -81,9 +84,9 @@ class KillAdapter implements ProviderAdapter {
         await waitFor(() => Boolean((entry = ctl.drainSteerEntry?.())), 'the steer drained', 20_000)
         sink.steerAccepted(entry!.text)
       }
-      if (scenario === 'steer-two-drains') {
+      if (twoDrains) {
         // Two drains outstanding: `next`, then `later`. Only `next` is accepted, by its token; `later` is taken and not
-        // accepted when the process dies.
+        // accepted when the process dies (in `steer-two-drains-ack`, inside that acceptance).
         await waitFor(() => existsSync(marker('take')), 'the steer to take', 20_000)
         let next: ReturnType<NonNullable<TurnControl['drainSteerEntry']>>
         await waitFor(() => Boolean((next = ctl.drainSteerEntry?.())), 'next drained', 20_000)
@@ -94,7 +97,7 @@ class KillAdapter implements ProviderAdapter {
         ctl.steerTaken?.(next!.token)
         ctl.steerTaken?.(later!.token)
         sink.steerAccepted(next!.text, next!.token)
-        die()
+        if (scenario === 'steer-two-drains') die()
       }
       return new Promise<TurnResult>(() => undefined)
     }
@@ -195,9 +198,23 @@ async function first(): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 20_000))
     throw new Error('the steer was not taken')
   }
-  if (scenario === 'steer-two-drains') {
+  if (twoDrains) {
     const later = await d.orch.send('later', false, { threadId: thread.id, clientRequestId: 'c-3' })
     if (!later.queued) throw new Error('later was not queued')
+    if (scenario === 'steer-two-drains-ack') {
+      // The acceptance of `next` has saved its text and id; the process dies before its queue row is dropped.
+      const orch = d.orch as unknown as { acknowledgeDrainedSteers: (session: unknown, ids: string[]) => void }
+      orch.acknowledgeDrainedSteers = (_session, ids) => {
+        writeFileSync(marker('at-kill.json'), JSON.stringify({
+          next: queued.queueItem!.id,
+          later: later.queueItem!.id,
+          acknowledging: ids,
+          accepted: d.store.loadThreadData(thread.id).llmContext?.acceptedSteerItemIds ?? [],
+          steering: readDurableQueue(d.store, thread.id).filter((item) => item.state === 'steering').map((item) => item.id)
+        }))
+        die()
+      }
+    }
     if (!d.orch.promoteQueueItem(thread.id, queued.queueItem!.id).ok) throw new Error('the steer was refused')
     writeFileSync(marker('take'), '')
     await waitFor(() => existsSync(marker('drained-next')), 'next drained')
