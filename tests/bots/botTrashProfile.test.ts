@@ -224,8 +224,9 @@ describe('round 3: a running bot holding its thread\'s execution lease', () => {
   it('a trash refused by other work leaves the bot running', async () => {
     const { services, bots, activation } = await withBot()
     const stop = vi.spyOn(services.orchestrator, 'stopThread')
-    // An ordinary turn elsewhere in the profile: the trash is refused at admission.
-    vi.spyOn(services.orchestrator, 'getOwnedActivity').mockReturnValue({ turn: 1 })
+    // Work of the whole profile (an automation's turn, tied to no thread): the trash is refused at admission. An
+    // ordinary turn in another thread no longer refuses it (`MmsProfileServices.deleteGuard`).
+    vi.spyOn(services.orchestrator, 'getOwnedWork').mockReturnValue([{ label: 'scheduled-turn', scope: null }])
     await expect(services.trashThread(activation.threadId!, 'refused-trash')).rejects.toMatchObject({ code: 'busy' })
     expect(stop).not.toHaveBeenCalled()
     expect(bots.getActivation(activation.id).status).toBe('running')

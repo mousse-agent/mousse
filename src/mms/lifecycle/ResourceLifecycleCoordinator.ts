@@ -14,7 +14,11 @@ import { renameFolder } from './renameFolder'
 export interface LifecycleRequest { taskId: string; operationId: string; expectedGeneration?: number; keepWork?: boolean }
 export interface ResourceLifecycleHooks {
   /** Atomic with installing the fence. Reject active work before affecting its writes. */
-  assertCanTrash?(record: TaskLifecycleRecord): void
+  /**
+   * `keepWork`: the trash or purge keeps the thread's worktrees, branches and Git refs (a person's delete). Without it
+   * the work may be removed (an expiry), so work in the same repository counts too.
+   */
+  assertCanTrash?(record: TaskLifecycleRecord, options?: { keepWork?: boolean }): void
   /** No stable/task/repository lock is held across this await. Never replay model/tool work. */
   drain(record: TaskLifecycleRecord): Promise<void>
   inventory?(record: TaskLifecycleRecord): Promise<ResourceInventorySnapshot> | ResourceInventorySnapshot
@@ -49,7 +53,7 @@ const MOVABLE_LOCKS = ['execution.lease', 'queue.mut.lock', 'thread-data.mut.loc
 export class ResourceLifecycleCoordinator {
   readonly cleanup: ResourcePurgeService
   constructor(readonly store: ResourceLifecycleStore, private readonly hooks: ResourceLifecycleHooks) {
-    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), beforeRemoval: (record) => hooks.beforePurgeRemoval?.(record), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk, expired: (record) => hooks.expired?.(record) === true })
+    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId, options) => hooks.assertCanTrash?.(store.require(taskId), options), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), beforeRemoval: (record) => hooks.beforePurgeRemoval?.(record), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk, expired: (record) => hooks.expired?.(record) === true })
   }
 
   trash(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('trash', request) }
@@ -97,7 +101,7 @@ export class ResourceLifecycleCoordinator {
         if (record.cleanupOwner && isOwnerLive(record.cleanupOwner)) throw new ResourceLifecycleError('busy', 'Task storage cleanup is running')
         if (request.expectedGeneration !== undefined && request.expectedGeneration !== record.generation) throw new ResourceLifecycleError('stale', 'Task lifecycle generation changed')
         if (record.state !== (kind === 'trash' ? 'active' : 'trashed')) throw new ResourceLifecycleError('unavailable', `Cannot ${kind} a ${record.state} task`)
-        if (kind === 'trash') this.hooks.assertCanTrash?.(record)
+        if (kind === 'trash') this.hooks.assertCanTrash?.(record, { keepWork: request.keepWork === true })
         const to = kind === 'trash'
           ? join(this.store.profileHome, 'trash', 'threads', `${record.taskId}-${createHash('sha256').update(request.operationId).digest('hex').slice(0, 20)}`)
           : record.originalLocation

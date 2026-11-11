@@ -2,9 +2,11 @@
  * Deleting a thread while its turn runs, through the real profile and protocol: the delete stops the turn (its queue
  * goes with the thread), leaves no provider turn running, and reports success. A delete that will be refused stops
  * nothing. A window's reads that arrive while the delete runs make it wait, not fail, and an unarchive meanwhile keeps
- * the thread.
+ * the thread. Other threads' work goes on through a delete, unless it touches the deleted thread's worktree or files,
+ * or (for an expiry, which takes the worktree) its repository.
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../src/mms/harness/adapter'
@@ -19,6 +21,9 @@ import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { waitFor } from './run/phase6Fixture'
 import { PI_TEST_CAPABILITIES } from './support/piStub'
 import { archived } from './support/archived'
+import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { requestWorkScope } from '../src/mms/execution/workScope'
+import type { ThreadWorkspaceMetadata } from '../src/shared/workspace'
 
 vi.setConfig({ testTimeout: 60_000 })
 
@@ -105,6 +110,33 @@ function soleCopy(f: Harness, threadId: string): void {
   mkdirSync(join(path, 'terminal-workspace'), { recursive: true })
   writeFileSync(join(path, 'terminal-workspace', 'sole-copy.txt'), 'retained output')
   writeFileSync(join(path, 'terminal-workspace.json'), JSON.stringify({ schemaVersion: 1, kind: 'task-terminal-scratch', threadId, workspaceRelativePath: 'terminal-workspace' }))
+}
+
+/** A Git repository opened as a project of the profile, for threads with worktrees. */
+function project(f: Harness): { repo: string; projectId: string } {
+  const repo = join(f.root, `repo-${Math.random().toString(36).slice(2, 8)}`)
+  mkdirSync(repo, { recursive: true })
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'owner@example.test')
+  git('config', 'user.name', 'Owner')
+  git('config', 'commit.gpgsign', 'false')
+  writeFileSync(join(repo, 'a.txt'), 'one\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'first')
+  return { repo, projectId: f.services.projects.openProject(repo).id }
+}
+
+/** A thread of the project with a worktree of its own. */
+async function worktreeThread(f: Harness, at: { repo: string; projectId: string }, name: string): Promise<{ thread: Thread; workspace: ThreadWorkspaceMetadata }> {
+  const thread = f.services.threads.createThread(name, at.projectId, at.repo, { worktreeEnabled: true, started: true })
+  const workspace = await new ThreadWorkspaceManager(f.services.threads.getThreadDir(thread.id)).provision(thread.id, 'main', at.repo, undefined, undefined, undefined, { nameFrom: name })
+  return { thread, workspace }
+}
+
+/** Records that `threadId` works in `workspace`'s folder (its own worktree, or another thread's): what a delete reads. */
+function worksIn(f: Harness, threadId: string, workspace: ThreadWorkspaceMetadata): void {
+  writeFileSync(join(f.services.threads.getThreadDir(threadId), 'workspace.json'), JSON.stringify({ ...workspace, threadId }))
 }
 
 /** Nothing of `threadId` was touched: listed, active, its turn running and its queue as it was. */
@@ -255,57 +287,6 @@ describe('deleting a thread while its turn runs', () => {
 })
 
 describe('a delete that will be refused stops nothing', () => {
-  it('while another thread is running: the turn keeps running and its queue stays', async () => {
-    const p = await profile()
-    try {
-      const target = await p.thread('to delete')
-      const other = await p.thread('still working')
-      await p.run(target.id)
-      await p.run(other.id, false)
-      archived(p.f.services.threads, target.id)
-      const stops = stopsFor(p.f.services)
-      await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(/profile execution is still active/)
-      expect(stops).not.toHaveBeenCalled()
-      untouched(p, target.id)
-      expect(p.adapter.live(other.id)).toBe(1)
-    } finally {
-      await p.close()
-    }
-  })
-
-  it('while another thread\'s send is still being set up (no turn yet): the turn keeps running and its queue stays', async () => {
-    const p = await profile()
-    let release = () => {}
-    try {
-      const target = await p.thread('to delete')
-      const other = await p.thread('starting')
-      await p.run(target.id)
-      // The other thread's send waits for its repository or a folder prompt: it is being handled, with no turn yet.
-      const orchestrator = p.f.services.orchestrator as unknown as { sendOwned: (...args: unknown[]) => Promise<unknown> }
-      const sendOwned = orchestrator.sendOwned.bind(p.f.services.orchestrator)
-      const hold = new Promise<void>((resolve) => { release = resolve })
-      vi.spyOn(orchestrator, 'sendOwned').mockImplementation(async (...args: unknown[]) => {
-        if ((args[2] as { threadId?: string } | undefined)?.threadId === other.id) await hold
-        return sendOwned(...args)
-      })
-      p.sends.push(p.f.rpc.request('orchestrator.send', { threadId: other.id, content: 'hello' }).catch(() => undefined))
-      // Two sends are handled: the target's, open for its turn, and the other thread's, held before any turn.
-      await waitFor(() => p.f.services.orchestrator.getOwnedActivity().send === 2, 'the other send to be handled')
-      expect(p.f.services.orchestrator.isTurnActive(other.id)).toBe(false)
-      archived(p.f.services.threads, target.id)
-      const stops = stopsFor(p.f.services)
-      const refused = await p.f.rpc.request('threads.delete', { threadId: target.id }).then(() => undefined, (error: unknown) => error)
-      // Nothing was stopped, and the reason is the trash's own.
-      expect(stops).not.toHaveBeenCalled()
-      untouched(p, target.id)
-      expect(String(refused)).toMatch(/profile execution is still active/)
-    } finally {
-      release()
-      vi.restoreAllMocks()
-      await p.close()
-    }
-  })
-
   it('a thread the deleted one launched, still running: neither turn is stopped', async () => {
     const p = await profile()
     try {
@@ -314,7 +295,7 @@ describe('a delete that will be refused stops nothing', () => {
       await p.run(creator.id)
       await p.run(launched.id, false)
       archived(p.f.services.threads, creator.id)
-      await expect(p.f.rpc.request('threads.delete', { threadId: creator.id })).rejects.toThrow(/profile execution is still active/)
+      await expect(p.f.rpc.request('threads.delete', { threadId: creator.id })).rejects.toThrow(/a thread it launched is still running/)
       untouched(p, creator.id)
       expect(p.adapter.live(launched.id)).toBe(1)
       expect(p.f.services.threads.getThread(launched.id)).toBeDefined()
@@ -336,6 +317,240 @@ describe('a delete that will be refused stops nothing', () => {
       expect(stops).not.toHaveBeenCalled()
       untouched(p, target.id)
     } finally {
+      await p.close()
+    }
+  })
+})
+
+describe('other threads keep working through a delete', () => {
+  it('deletes a running thread while another streams: the other keeps streaming, and its queue stays', async () => {
+    const p = await profile()
+    try {
+      const target = await p.thread('to delete')
+      const other = await p.thread('still working')
+      await p.run(target.id)
+      await p.run(other.id)
+      archived(p.f.services.threads, target.id)
+      const stops = stopsFor(p.f.services)
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: target.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(p.f.services.threads.getThread(target.id)).toBeUndefined()
+      expect(p.adapter.live(target.id)).toBe(0)
+      // Only the deleted thread was stopped.
+      expect(stops).toHaveBeenCalledTimes(1)
+      expect(stops.mock.calls[0]![0]).toEqual([target.id])
+      untouched(p, other.id)
+      expect(p.f.services.orchestrator.isTurnActive(other.id)).toBe(true)
+      // Its thread still reads and writes: a window's read answers, and another message joins the queue.
+      const read = await p.f.rpc.request<{ thread: Thread }>('threads.get', { threadId: other.id })
+      expect(read.thread.id).toBe(other.id)
+      p.sends.push(p.f.rpc.request('orchestrator.send', { threadId: other.id, content: 'one more' }).catch(() => undefined))
+      await waitFor(() => p.pending(other.id) === 2, 'the next message to be queued')
+      expect(p.adapter.live(other.id)).toBe(1)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('deletes an idle archived thread while another streams, without waiting for its open send', async () => {
+    const p = await profile()
+    try {
+      const target = await p.thread('idle')
+      const other = await p.thread('still working')
+      await p.run(other.id)
+      archived(p.f.services.threads, target.id)
+      // The other thread's send stays open for its whole turn.
+      expect(p.f.services.getOwnedActivity()['rpc:orchestrator.send']).toBeGreaterThanOrEqual(1)
+      // Before, the delete's admission waited 2 s for that send and was refused (`profile_busy`).
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: target.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      untouched(p, other.id)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('deletes it while another thread\'s send is still being set up (no turn yet), and that send goes on', async () => {
+    const p = await profile()
+    let release = () => {}
+    try {
+      const target = await p.thread('to delete')
+      const other = await p.thread('starting')
+      await p.run(target.id)
+      // The other thread's send waits for its repository or a folder prompt: it is being handled, with no turn yet.
+      const orchestrator = p.f.services.orchestrator as unknown as { sendOwned: (...args: unknown[]) => Promise<unknown> }
+      const sendOwned = orchestrator.sendOwned.bind(p.f.services.orchestrator)
+      const hold = new Promise<void>((resolve) => { release = resolve })
+      vi.spyOn(orchestrator, 'sendOwned').mockImplementation(async (...args: unknown[]) => {
+        if ((args[2] as { threadId?: string } | undefined)?.threadId === other.id) await hold
+        return sendOwned(...args)
+      })
+      p.sends.push(p.f.rpc.request('orchestrator.send', { threadId: other.id, content: 'hello' }).catch(() => undefined))
+      await waitFor(() => p.f.services.orchestrator.getOwnedActivity().send === 2, 'the other send to be handled')
+      archived(p.f.services.threads, target.id)
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: target.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(p.adapter.live(target.id)).toBe(0)
+      release()
+      await waitFor(() => p.adapter.live(other.id) === 1, 'the other thread\'s turn to start')
+    } finally {
+      release()
+      vi.restoreAllMocks()
+      await p.close()
+    }
+  })
+
+  it('deletes a thread and its running subagent while another thread and its subagent stream', async () => {
+    const p = await profile()
+    try {
+      const parent = await p.thread('to delete')
+      const child = p.f.services.threads.createThread('its subagent', undefined, undefined, { started: true, lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' } })
+      const other = await p.thread('still working')
+      const otherChild = p.f.services.threads.createThread('the other\'s subagent', undefined, undefined, { started: true, lineage: { parentThreadId: other.id, rootThreadId: other.id, relationship: 'subagent' } })
+      for (const id of [parent.id, child.id, other.id, otherChild.id]) await p.run(id, false)
+      archived(p.f.services.threads, parent.id)
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: parent.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(p.f.services.threads.getThread(child.id)).toBeUndefined()
+      expect(p.adapter.live(parent.id) + p.adapter.live(child.id)).toBe(0)
+      expect(p.adapter.live(other.id)).toBe(1)
+      expect(p.adapter.live(otherChild.id)).toBe(1)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('deletes a thread while another runs in a different worktree of the same repository, and keeps its worktree', async () => {
+    const p = await profile()
+    try {
+      const at = project(p.f)
+      const { thread: target, workspace } = await worktreeThread(p.f, at, 'to delete')
+      const { thread: other } = await worktreeThread(p.f, at, 'other worktree')
+      await p.run(target.id)
+      await p.run(other.id, false)
+      archived(p.f.services.threads, target.id)
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: target.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(p.adapter.live(other.id)).toBe(1)
+      // A person's delete keeps the worktree and its branch (#812/#817).
+      expect(existsSync(workspace.worktreePath)).toBe(true)
+      expect(execFileSync('git', ['rev-parse', '--verify', `refs/heads/${workspace.branch}`], { cwd: at.repo, encoding: 'utf8' }).trim()).toMatch(/^[0-9a-f]{40}$/)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('an expiry deletes a thread for good while other threads run elsewhere', async () => {
+    const p = await profile()
+    try {
+      const target = p.f.services.threads.createThread('expiring', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+      const other = await p.thread('still working')
+      const at = project(p.f)
+      const { thread: elsewhere } = await worktreeThread(p.f, at, 'another repository')
+      await p.run(other.id)
+      await p.run(elsewhere.id, false)
+      p.f.services.threads.updateThreadMeta(target.id, { expiresAt: new Date(Date.now() - 1_000).toISOString() })
+      // The expiry's own delete (`ThreadExpiryService.deleteForGood`).
+      await (p.f.services as unknown as { deleteExpiredThread: (id: string) => Promise<void> }).deleteExpiredThread(target.id)
+      expect(p.f.services.threads.getThread(target.id)).toBeUndefined()
+      expect(p.f.services.threads.lifecycleStore.get(target.id)?.state).toBe('purged')
+      untouched(p, other.id)
+      expect(p.adapter.live(elsewhere.id)).toBe(1)
+    } finally {
+      await p.close()
+    }
+  })
+})
+
+describe('a delete is refused, stopping nothing, while other work touches what it deletes', () => {
+  it('another thread works in its worktree', async () => {
+    const p = await profile()
+    try {
+      const at = project(p.f)
+      const { thread: target, workspace } = await worktreeThread(p.f, at, 'to delete')
+      const other = await p.thread('in its worktree')
+      await p.run(target.id)
+      await p.run(other.id, false)
+      worksIn(p.f, other.id, workspace)
+      archived(p.f.services.threads, target.id)
+      const stops = stopsFor(p.f.services)
+      await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(/another thread is working in its worktree/)
+      expect(stops).not.toHaveBeenCalled()
+      untouched(p, target.id)
+      expect(p.adapter.live(other.id)).toBe(1)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('an expiry, which takes the worktree, while another thread works in the same repository', async () => {
+    const p = await profile()
+    try {
+      const at = project(p.f)
+      const { thread: target, workspace } = await worktreeThread(p.f, at, 'expiring')
+      const { thread: other } = await worktreeThread(p.f, at, 'same repository')
+      await p.run(other.id, false)
+      p.f.services.threads.updateThreadMeta(target.id, { expiresAt: new Date(Date.now() - 1_000).toISOString() })
+      await expect(p.f.services.deleteThreadForGood(target.id, { human: false, discard: false, expiry: true }))
+        .rejects.toThrow(/another thread is working in the same repository, and this delete removes the thread's worktree and Git refs/)
+      expect(p.f.services.threads.getThread(target.id)).toBeDefined()
+      expect(p.f.services.threads.lifecycleStore.get(target.id)?.state ?? 'active').toBe('active')
+      expect(existsSync(workspace.worktreePath)).toBe(true)
+      expect(p.adapter.live(other.id)).toBe(1)
+    } finally {
+      await p.close()
+    }
+  })
+
+  for (const [kind, params] of [
+    ['a folder', (folder: string, other: string) => ({ threadId: other, path: join(folder, 'notes.md') })],
+    ['a project', (_folder: string, _other: string, projectId: string) => ({ projectId })]
+  ] as const) {
+    it(`a request that names ${kind} is in flight`, async () => {
+      const p = await profile()
+      let release = () => {}
+      try {
+        const at = project(p.f)
+        const { thread: target, workspace } = await worktreeThread(p.f, at, 'to delete')
+        const other = await p.thread('reads files')
+        await p.run(target.id)
+        archived(p.f.services.threads, target.id)
+        const hold = new Promise<void>((resolve) => { release = resolve })
+        // Named by folder or project, the request may touch the thread's files: it is not counted under a thread.
+        const scope = requestWorkScope(params(workspace.worktreePath, other.id, at.projectId))
+        expect(scope).toBeNull()
+        const request = p.f.services.runOwnedRequest('files.read', () => hold, scope)
+        const stops = stopsFor(p.f.services)
+        await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(/requests are still active \(rpc:files\.read=1\)/)
+        expect(stops).not.toHaveBeenCalled()
+        untouched(p, target.id)
+        release()
+        await request
+      } finally {
+        release()
+        await p.close()
+      }
+    })
+  }
+
+  it('profile-wide work (an automation run) is in flight', async () => {
+    const p = await profile()
+    let release = () => {}
+    try {
+      const target = await p.thread('to delete')
+      await p.run(target.id)
+      archived(p.f.services.threads, target.id)
+      const hold = new Promise<void>((resolve) => { release = resolve })
+      const scheduled = p.f.services.scheduled as unknown as { lifecycle: { run: (label: string, work: () => Promise<void>, scope: null) => Promise<void> } }
+      const run = scheduled.lifecycle.run('scheduled-run', () => hold, null)
+      const stops = stopsFor(p.f.services)
+      await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(/profile execution is still active/)
+      expect(stops).not.toHaveBeenCalled()
+      untouched(p, target.id)
+      release()
+      await run
+    } finally {
+      release()
       await p.close()
     }
   })

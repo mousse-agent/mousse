@@ -13,7 +13,8 @@ import type { AgentDefinitionRegistry } from '../agentDefinitions/AgentDefinitio
 import type { AgentResolver } from '../agentDefinitions/AgentResolver'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
-import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
+import { threadScope } from '../execution/workScope'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import { getExecutionLeasePath, heartbeatExecutionLease, isExecutionLeaseHeld, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { isOwnerLive } from '../queue/processLiveness'
@@ -119,6 +120,8 @@ export class AgentChatService {
     return () => { this.changeListeners.delete(listener) }
   }
   getActiveCount(): number { return this.lifecycle.count }
+  /** The work `getActiveCount` counts, each with the threads it belongs to. */
+  getActiveWork(): OwnedWorkEntry[] { return this.lifecycle.entries() }
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer)
@@ -287,7 +290,8 @@ export class AgentChatService {
       }])
       owned.heartbeat = setInterval(() => { heartbeatExecutionLease(lease) }, CHAT_LEASE_HEARTBEAT_MS)
       owned.heartbeat.unref()
-      owned.promise = this.lifecycle.run('chat-run', () => Promise.resolve().then(() => this.execute(input.chatId, owned, targets, user, workspaceRoot)))
+      // A chat's run is its conversation thread's work: a delete of another thread neither waits for it nor is refused by it.
+      owned.promise = this.lifecycle.run('chat-run', () => Promise.resolve().then(() => this.execute(input.chatId, owned, targets, user, workspaceRoot)), threadScope(record.conversation.threadId))
       void owned.promise.catch(() => { /* Execution persists its terminal failure; ownership releases only after settlement. */ })
       this.changed()
       return this.get(input.chatId)

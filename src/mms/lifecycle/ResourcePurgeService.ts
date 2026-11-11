@@ -187,7 +187,7 @@ export class ResourcePurgeService {
   private timer?: ReturnType<typeof setInterval>
   private sweepPromise?: Promise<TrashSweepOutcome[]>
   private stopping = false
-  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; /** Every pass, the first and each resumed one, before any item is removed; a failure stops the pass. */ beforeRemoval?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void>; /** The trashed thread's own expiry has passed (`Thread.expiresAt`): the authority an expiry purge needs. */ expired?(record: TaskLifecycleRecord): boolean }) { this.retirement = new WorktreeRetirementService(store) }
+  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { /** `keepWork`: the purge keeps the worktrees and Git refs (`ResourceLifecycleHooks.assertCanTrash`). */ assertIdle(taskId: string, options?: { keepWork?: boolean }): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; /** Every pass, the first and each resumed one, before any item is removed; a failure stops the pass. */ beforeRemoval?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void>; /** The trashed thread's own expiry has passed (`Thread.expiresAt`): the authority an expiry purge needs. */ expired?(record: TaskLifecycleRecord): boolean }) { this.retirement = new WorktreeRetirementService(store) }
 
   policy(): TrashRetentionPolicy {
     const path = join(this.store.root, 'trash-policy.json')
@@ -480,7 +480,7 @@ export class ResourcePurgeService {
     }
     if (record.state !== 'trashed') throw new Error('Only a trashed task can be permanently deleted')
     // A dry run does not hydrate runtimes; the caller asks the cheap idle lookup instead.
-    if (!readOnly) this.hooks.assertIdle(taskId)
+    if (!readOnly) this.hooks.assertIdle(taskId, { keepWork })
     const tasks = this.owned(taskId), ownedIds = new Set(tasks.map((task) => task.taskId))
     // The mode is signed with the rest: a preview that keeps the work authorizes only a purge that keeps it.
     const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0, ...(keepWork ? { keepWork: true as const } : {}) }
@@ -721,10 +721,10 @@ export class ResourcePurgeService {
       if (record.purge && record.purge.operationId !== input.operationId) throw new Error('Purge operation identity differs from its irreversible ledger')
       if (record.state === 'purged') return record
       if (record.state !== 'purge-started') {
-        this.hooks.assertIdle(input.taskId)
         const expiry = input.authorization === 'expiry'
         // An expiry takes the worktree; every other delete keeps it when asked.
         const keepWork = input.keepWork === true && !expiry
+        this.hooks.assertIdle(input.taskId, { keepWork })
         const preview = await this.previewOwned(input.taskId, false, keepWork)
         if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
         // A preview made in the other mode (keeping the work, or not) has another digest, and is refused here too.

@@ -1,4 +1,5 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
+import { requestWorkScope } from '../execution/workScope'
 import { expiryRefusal, isThreadExpired } from '../../shared/threadExpiry'
 import { assertWorktreeFolderConnected, chosenFolderHolding, WorktreeFolderRefused } from '../worktree/worktreeLayout'
 import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
@@ -1636,7 +1637,8 @@ async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unk
   // request barrier. Every actual personal service has this ownership method;
   // the fallback preserves legacy isolated handler test doubles.
   if (!isInstallationMethod(method) && ctx.mms.runOwnedRequest) {
-    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params))
+    // A request that names only threads is counted under them, so a delete of another thread does not wait for it.
+    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params))
   }
   return dispatchOwnedMethod(ctx, method, params)
 }

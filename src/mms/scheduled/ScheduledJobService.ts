@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
 import { isSilentOutput } from './computeNextRun'
 import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
-import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
 import {
   ScheduledJobStore,
   MISSED_GRACE_MS,
@@ -430,6 +430,8 @@ export class ScheduledJobService extends EventEmitter {
   }
 
   getActiveCount(): number { return this.lifecycle.count }
+  /** The work `getActiveCount` counts. A tick and a job's run are the profile's work (`scope: null`), whatever thread the run uses. */
+  getActiveWork(): OwnedWorkEntry[] { return this.lifecycle.entries() }
 
   shutdown({ timeoutMs = 30_000 }: { timeoutMs?: number } = {}): Promise<void> {
     this.beginShutdown()
@@ -679,7 +681,7 @@ export class ScheduledJobService extends EventEmitter {
 
   private async tick(): Promise<void> {
     if (this.stopped || this.lifecycle.stopping || this.tickInProgress) return
-    try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned()) }
+    try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned(), null) }
     catch (error) { this.lastTickError = error instanceof Error ? error.message : String(error) }
     await this.runTickHook()
   }
@@ -699,7 +701,7 @@ export class ScheduledJobService extends EventEmitter {
    */
   async tickNow(): Promise<void> {
     if (this.lifecycle.stopping || this.tickInProgress) return
-    try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned(true)) }
+    try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned(true), null) }
     catch (error) { this.lastTickError = error instanceof Error ? error.message : String(error) }
     await Promise.all([...this.inFlight.values()])
     await this.runTickHook()
@@ -794,7 +796,7 @@ export class ScheduledJobService extends EventEmitter {
     }
     let run: Promise<void>
     try {
-      run = this.lifecycle.run('scheduled-run', () => this.executeJob(job))
+      run = this.lifecycle.run('scheduled-run', () => this.executeJob(job), null)
     } catch (error) {
       // The profile started shutting down between the claim and its start.
       if (job.runClaim) this.interruptOwnedRun(job.id, job.runClaim.token, 'Interrupted by profile shutdown before execution')
