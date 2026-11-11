@@ -27,9 +27,28 @@ export interface ProfilerToolHost {
   settings: ProfilerSettings
   /** Null in a service without a profiler. */
   service: ProfilerService | null
-  /** Whether `threadId` (the caller's) has a turn running: the heap summary does not count the caller's own. */
+  /** The caller's profile, as its orchestrator: its threads are listed by id, every other profile's only as totals. */
+  owner: object
+  /**
+   * Whether `threadId` has a turn running. The heap summary does not count the caller's own turn, nor the turns of
+   * the threads that delegated to it, which wait on it.
+   */
   turnActive(threadId: string): boolean
 }
+
+/** The caller and the threads that delegated to it, nearest first. */
+function delegationChain(host: AppToolHost, threadId: string): string[] {
+  const chain: string[] = []
+  let current: string | undefined = threadId
+  while (current && !chain.includes(current) && chain.length < 32) {
+    chain.push(current)
+    current = host.threadMeta?.(current)?.lineage?.parentThreadId
+  }
+  return chain
+}
+
+/** A heap summary running in this service: one at a time, whatever profile or turn asked. */
+let heapSummaryRunning = false
 
 const NO_ARGS: JsonSchema = { type: 'object', properties: {}, additionalProperties: false }
 
@@ -37,7 +56,7 @@ const DESCRIPTIONS: Record<ProfilerToolName, string> = {
   profiler_overview:
     "Start here when Mousse is slow or uses too much memory. Every Mousse process by role (service, its workers and providers, main, each window, applet views, in-app browser, GPU, utilities) with private memory, working set, CPU and JS heap; the service against its start baseline; trends; limits broken now. Numbers only.",
   profiler_service_breakdown:
-    "When the background service is the big one: its V8 heap and heap spaces, worker heaps, counts (loaded and cached threads, runtimes, workers, SQLite connections, replay buffer, terminals, file watchers, child processes) against their bounds, cache sizes, and each thread in memory with its measured cache size. Titles only for this profile's threads.",
+    "When the background service is the big one: its V8 heap and heap spaces, worker heaps, counts (loaded and cached threads, runtimes, workers, SQLite connections, replay buffer, terminals, file watchers, child processes) against their bounds, cache sizes, and each of this profile's threads in memory, by id, with its measured cache size; other profiles as totals.",
   profiler_window_breakdown:
     "When a window's renderer is big or the UI is slow: per window, DOM nodes, mounted turns and rows, images with decoded size, canvases, WebGL contexts, in-app browser tabs, JS heap and code caches; applet and browser views with their sizes. Read on demand from the open app.",
   profiler_gpu_hints:
@@ -49,7 +68,7 @@ const DESCRIPTIONS: Record<ProfilerToolName, string> = {
   profiler_watch:
     "Samples every intervalSeconds (5 to 60) for minutes (at most 10, 120 points), so you can do something in parallel and see which numbers grow. Returns the series, the change and what grew most.",
   profiler_heap_summary:
-    "When the service heap grows and the breakdown does not say why: takes a service heap snapshot, analyses it in a worker and returns only totals: the constructors that retain most, counts and sizes by type, and the largest strings by size (content redacted). Pauses the service for a few seconds; refused while another turn runs."
+    "When the service heap grows and the breakdown does not say why: takes a service heap snapshot, analyses it in a worker and returns only totals: the constructors that retain most, counts and sizes by type, and the largest strings by size (content redacted). Pauses the service for a few seconds; refused while another turn or another summary runs."
 }
 
 const SCHEMAS: Partial<Record<ProfilerToolName, JsonSchema>> = {
@@ -86,8 +105,8 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 /**
  * The profiler's tools (Settings → Labs → Profiler): an agent reads what loads Mousse while the person keeps working.
  * Each is listed and offered only while the profiler, Agent access and the tool's own switch are on, and checked
- * again at the call. They return numbers and fixed names only; a thread is named by its id, and by its title only
- * when it belongs to the caller's profile, whose threads the person already shows that agent.
+ * again at the call. They return numbers and fixed names only; a thread is named by its id alone, and only when it
+ * belongs to the caller's profile. Other profiles belong to other people and count only in totals.
  */
 export function profilerTools(host: AppToolHost): MousseTool[] {
   const reach = (): ProfilerToolHost | undefined => host.profiler?.()
@@ -144,17 +163,11 @@ async function run(
     }
     case 'profiler_service_breakdown': {
       const sample = await monitor.measure({ children: true })
-      // A thread is this profile's when its own store knows it: only then is its title shown.
-      const ownTitle = (threadId: string): string | undefined => {
-        const meta = env.host.threadMeta?.(threadId)
-        return meta ? meta.name : undefined
-      }
       return json(serviceBreakdownReport({
         sample,
         detail: monitor.readDetailNow(),
         thresholds: monitor.thresholds,
-        threads: service.threads(),
-        ownTitle,
+        threads: service.threads(env.profiler.owner),
         cacheLimits: { threads: MAX_CACHED_THREADS, mb: MAX_CACHED_BYTES / 1048576 },
         replayLimitPerProfile: MMS_PROTOCOL_REPLAY_RING_SIZE
       }))
@@ -200,11 +213,20 @@ async function run(
       return json(watchReport(plan, points, stopped))
     }
     case 'profiler_heap_summary': {
-      const others = service.activeTurns() - (env.profiler.turnActive(ctx.caller.threadId) ? 1 : 0)
+      // Checked and claimed before any await, so two calls in the same moment cannot both pass.
+      if (heapSummaryRunning) return error('A heap summary is already running. Call again when it is done.')
+      // The caller's turn, and the turns of the threads that delegated to it (they wait on it), do not count.
+      const mine = delegationChain(env.host, ctx.caller.threadId).filter((id) => env.profiler.turnActive(id)).length
+      const others = service.activeTurns() - mine
       if (others > 0) return error(`Another turn is running (${others}). A heap snapshot pauses the service; call again when only this turn runs.`)
       const top = typeof args.top === 'number' && Number.isFinite(args.top) ? Math.min(30, Math.max(5, Math.round(args.top))) : 15
-      const summary = await service.heapSummary(top)
-      return json({ ...summary, note: 'Totals only. Names are constructor names from code or node types; string content is never read out. The snapshot file was deleted.' })
+      heapSummaryRunning = true
+      try {
+        const summary = await service.heapSummary(top)
+        return json({ ...summary, note: 'Totals only. Names are constructor names from code or node types; string content is never read out. The snapshot file was deleted.' })
+      } finally {
+        heapSummaryRunning = false
+      }
     }
   }
   return error(`Unknown tool: ${name}`)

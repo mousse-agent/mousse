@@ -426,7 +426,7 @@ html[data-theme='high-contrast'] .settings-group-icon {
 .settings-status-ok { color: var(--success); }
 .settings-status-warn { color: var(--warning); }
 
-/* Settings > General > About > Memory: trends beside Report, and every process in a table below. */
+/* Settings > Labs > Profiler > Memory: trends beside Report, and every process in a table below. */
 .memory-row-controls { display: inline-flex; align-items: center; gap: 12px; }
 .memory-trend { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); font-size: 11px; }
 .memory-sparkline { flex: none; }

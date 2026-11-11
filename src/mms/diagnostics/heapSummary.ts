@@ -4,9 +4,9 @@
  * A snapshot holds everything the service has in memory (thread text, prompts, paths, tokens), so nothing named by
  * data ever comes out: a constructor's name is kept only when it is a plain identifier, every other node is named by
  * its type alone, and a string is only its size. The file is written to `diagnostics/heap-snapshots/` (0600) and
- * deleted as soon as it is read.
+ * deleted as soon as it is read; one a crash left behind is deleted when the service starts and before each summary.
  */
-import { chmodSync, mkdirSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import v8 from 'node:v8'
 import { Worker } from 'node:worker_threads'
@@ -219,31 +219,96 @@ function workerSource(): string {
     'try {',
     "  parentPort.postMessage({ ok: true, value: summarize(JSON.parse(readFileSync(workerData.file, 'utf8')), workerData.top) })",
     '} catch (error) {',
-    "  parentPort.postMessage({ ok: false, error: String((error && error.message) || error) })",
+    // Only the error's class: a parse error's message quotes the file, which holds thread text.
+    "  const name = error && typeof error.name === 'string' && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'Error'",
+    '  parentPort.postMessage({ ok: false, error: name })',
     '}'
   ].join('\n')
 }
 
-/** Analyses a snapshot file in a worker thread, so the service's event loop stays free while it parses. */
-export function analyseHeapSnapshotFile(file: string, top: number, timeoutMs = 120_000): Promise<HeapSummary> {
+/**
+ * The largest snapshot file the summary reads. The worker reads the file as one string and parses it, which needs
+ * a few times the file's size, and a string cannot pass about 512 MB at all.
+ */
+export const HEAP_SUMMARY_MAX_FILE_MB = 256
+/** The worker's heap limit: room to parse a file at the cap, and no more taken from the service. */
+export const HEAP_SUMMARY_WORKER_HEAP_MB = 1536
+
+/**
+ * Analyses a snapshot file in a worker thread, so the service's event loop stays free while it parses. A file over
+ * `maxFileMb` is refused before anything reads it, and the worker runs under a heap limit of its own.
+ */
+export function analyseHeapSnapshotFile(
+  file: string,
+  top: number,
+  options: { timeoutMs?: number; maxFileMb?: number; workerHeapMb?: number } = {}
+): Promise<HeapSummary> {
+  const maxFileMb = options.maxFileMb ?? HEAP_SUMMARY_MAX_FILE_MB
+  let sizeMb: number
+  try {
+    sizeMb = statSync(file).size / 1048576
+  } catch {
+    return Promise.reject(new Error('The heap analysis failed: the snapshot could not be read.'))
+  }
+  if (sizeMb > maxFileMb) {
+    return Promise.reject(new Error(`The service heap snapshot is ${Math.round(sizeMb)} MB; the summary reads at most ${maxFileMb} MB. Use profiler_service_breakdown instead.`))
+  }
   return new Promise((resolve, reject) => {
-    const worker = new Worker(workerSource(), { eval: true, workerData: { file, top }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
-    const timer = setTimeout(() => {
+    const worker = new Worker(workerSource(), {
+      eval: true,
+      workerData: { file, top },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      resourceLimits: { maxOldGenerationSizeMb: options.workerHeapMb ?? HEAP_SUMMARY_WORKER_HEAP_MB, maxYoungGenerationSizeMb: 64 }
+    })
+    let settled = false
+    const settle = (action: () => void): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       void worker.terminate()
-      reject(new Error('The heap analysis took too long.'))
-    }, timeoutMs)
+      action()
+    }
+    const timer = setTimeout(() => settle(() => reject(new Error('The heap analysis took too long.'))), options.timeoutMs ?? 120_000)
     timer.unref?.()
     worker.once('message', (message: { ok: boolean; value?: HeapSummary; error?: string }) => {
-      clearTimeout(timer)
-      void worker.terminate()
-      if (message.ok && message.value) resolve(message.value)
-      else reject(new Error(`The heap analysis failed: ${message.error ?? 'unknown error'}`))
+      settle(() => {
+        if (message.ok && message.value) resolve(message.value)
+        else reject(new Error(`The heap analysis failed (${message.error ?? 'Error'}).`))
+      })
     })
-    worker.once('error', (error) => {
-      clearTimeout(timer)
-      reject(error)
+    worker.once('error', (error: Error & { code?: string }) => {
+      settle(() => reject(error.code === 'ERR_WORKER_OUT_OF_MEMORY'
+        ? new Error(`The heap analysis ran out of its ${options.workerHeapMb ?? HEAP_SUMMARY_WORKER_HEAP_MB} MB memory limit.`)
+        : new Error('The heap analysis failed in its worker.')))
     })
+    worker.once('exit', () => settle(() => reject(new Error('The heap analysis stopped before it finished.'))))
   })
+}
+
+/** Matches the files the heap summary writes; anything else in the folder is left alone. */
+const SUMMARY_FILE = /^agent-\d+\.heapsnapshot$/
+
+/**
+ * Deletes heap summary files a crash or a killed service left behind: they hold everything the service had in memory.
+ * Runs when the service starts and before each summary. Snapshots a person asked for (`heap-*`) are kept.
+ */
+export function removeLeftoverSummaryFiles(homeDir: string): number {
+  const dir = join(homeDir, HEAP_SNAPSHOT_RELATIVE_DIR)
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return 0
+  }
+  let removed = 0
+  for (const entry of entries) {
+    if (!SUMMARY_FILE.test(entry)) continue
+    try {
+      rmSync(join(dir, entry), { force: true })
+      removed += 1
+    } catch { /* tried again at the next start or summary */ }
+  }
+  return removed
 }
 
 /**
@@ -258,11 +323,17 @@ export async function takeHeapSummary(
   const dir = join(homeDir, HEAP_SNAPSHOT_RELATIVE_DIR)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   chmodSync(dir, 0o700)
+  removeLeftoverSummaryFiles(homeDir)
   const target = join(dir, `agent-${(deps.now ?? Date.now)()}.heapsnapshot`)
   let written: string | undefined
   try {
-    written = (deps.write ?? ((file: string) => v8.writeHeapSnapshot(file)))(target)
-    chmodSync(written, 0o600)
+    try {
+      written = (deps.write ?? ((file: string) => v8.writeHeapSnapshot(file)))(target)
+      chmodSync(written, 0o600)
+    } catch {
+      // The error would name the file's path.
+      throw new Error('The heap snapshot could not be written.')
+    }
     return await (deps.analyse ?? analyseHeapSnapshotFile)(written, top)
   } finally {
     rmSync(written ?? target, { force: true })

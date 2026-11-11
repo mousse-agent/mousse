@@ -3711,6 +3711,7 @@ export class OrchestratorService extends EventEmitter {
       profiler: () => ({
         settings: this.settingsStore.get().experimental.profiler,
         service: profilerService(),
+        owner: this,
         turnActive: (threadId) => this.isTurnActive(threadId)
       }),
       threadMeta: (threadId) => this.threadStore?.getThread(threadId),

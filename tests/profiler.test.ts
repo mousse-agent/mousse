@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
@@ -8,9 +8,9 @@ import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { MemoryMonitor } from '../src/mms/diagnostics/MemoryMonitor'
 import { MemoryLog } from '../src/mms/diagnostics/memoryLog'
 import { prepareMemoryMonitor, readThreadMemory } from '../src/mms/diagnostics/startMemoryMonitor'
-import { profilerService, setProfilerService, type ProfilerService, type ThreadMemoryEntry } from '../src/mms/diagnostics/profilerService'
+import { profilerService, setProfilerService, type ProfilerService, type ThreadMemory, type ThreadMemoryEntry } from '../src/mms/diagnostics/profilerService'
 import { PROFILER_COLLECT_EVENT, PROFILER_STATE_EVENT, validateAppReport } from '../src/mms/diagnostics/memoryDomain'
-import { analyseHeapSnapshotFile, summarizeHeapSnapshot, takeHeapSummary, type HeapSummary } from '../src/mms/diagnostics/heapSummary'
+import { analyseHeapSnapshotFile, removeLeftoverSummaryFiles, summarizeHeapSnapshot, takeHeapSummary, type HeapSummary } from '../src/mms/diagnostics/heapSummary'
 import { WATCH_LIMITS, watchPlan } from '../src/mms/diagnostics/profilerReports'
 import { memoryNoticesEnabled } from '../src/renderer/hooks/useMemoryNotices'
 import { HEAP_SNAPSHOT_RELATIVE_DIR } from '../src/mms/diagnostics/heapSnapshot'
@@ -197,11 +197,19 @@ describe('the profiler in the service', () => {
     expect(() => validateAppReport({ processes: [], requestId: '../../etc' })).toThrow(/requestId/)
   })
 
-  it('lists each thread in memory once: loaded, cached or both, with the measured cache size', () => {
-    const entries = readThreadMemory([{
-      orchestrator: { loadedThreadIds: () => ['t1', 't2'], isTurnActive: (id: string) => id === 't2' },
+  it('lists each thread of the caller\'s profile once, and other profiles only as totals', () => {
+    const ownOrchestrator = { loadedThreadIds: () => ['t1', 't2'], isTurnActive: (id: string) => id === 't2' }
+    const other = {
+      orchestrator: { loadedThreadIds: () => ['private-a', 'private-b'], isTurnActive: () => true },
+      threads: { threadDbCacheEntries: () => [{ threadId: 'private-a', bytes: 3 * 1048576, idleMs: 5_000 }, { bytes: 1048576, idleMs: 0 }] }
+    }
+    const { own: entries, others } = readThreadMemory([{
+      orchestrator: ownOrchestrator,
       threads: { threadDbCacheEntries: () => [{ threadId: 't1', bytes: 2 * 1048576, idleMs: 120_000 }, { threadId: 't3', bytes: 1048576, idleMs: 0 }, { bytes: 10, idleMs: 0 }] }
-    } as never], T0)
+    } as never, other as never], ownOrchestrator, T0)
+    // Another profile: totals, with no ids, turn states or idle times.
+    expect(others).toEqual({ profiles: 1, loadedThreads: 2, cachedThreads: 2, cachedBytes: 4 * 1048576 })
+    expect(JSON.stringify(entries)).not.toContain('private-')
     expect(entries).toEqual(expect.arrayContaining([
       { threadId: 't1', loaded: true, cached: true, turnRunning: false, cachedBytes: 2 * 1048576, idleSeconds: 120 },
       { threadId: 't2', loaded: true, cached: false, turnRunning: true, cachedBytes: null, idleSeconds: null },
@@ -216,10 +224,11 @@ describe('the profiler in the service', () => {
 function profilerFixture(dir: string, options: { activeTurns?: number; heap?: () => Promise<HeapSummary> } = {}) {
   const now = { t: Date.now() }
   const monitor = testMonitor(dir, now)
-  const threads: ThreadMemoryEntry[] = [
+  const own: ThreadMemoryEntry[] = [
     { threadId: 'own-1', loaded: true, cached: true, turnRunning: false, cachedBytes: 3 * 1048576, idleSeconds: 60 },
-    { threadId: 'other-1', loaded: true, cached: true, turnRunning: false, cachedBytes: 5 * 1048576, idleSeconds: 30 }
+    { threadId: 'own-2', loaded: true, cached: true, turnRunning: true, cachedBytes: 5 * 1048576, idleSeconds: 30 }
   ]
+  const threads = vi.fn((_owner: object): ThreadMemory => ({ own, others: { profiles: 1, loadedThreads: 2, cachedThreads: 1, cachedBytes: 2 * 1048576 } }))
   const collect = vi.fn(async (windows: boolean) => {
     monitor.acceptAppReport('gui', [
       { kind: 'main', role: 'main', rss: 200, private: 150, cpu: 1.5 },
@@ -232,26 +241,30 @@ function profilerFixture(dir: string, options: { activeTurns?: number; heap?: ()
   const service: ProfilerService = {
     monitor: () => monitor,
     collectApp: collect,
-    threads: () => threads,
+    threads,
     activeTurns: () => options.activeTurns ?? 1,
     heapSummary: options.heap ?? (async () => { throw new Error('not in this test') }),
     refresh: () => {}
   }
-  return { monitor, service, now, collect }
+  return { monitor, service, now, collect, threads }
 }
 
 const ON: ProfilerSettings = { ...normalizeProfilerSettings(), enabled: true, agentAccess: true }
+/** The caller's profile, as the orchestrator the tool host names. */
+const OWNER = { profile: 'own' }
 
-function toolsFor(settings: () => ProfilerSettings, service: ProfilerService | null, turnActive = (_: string) => true) {
-  const profiler: () => ProfilerToolHost = () => ({ settings: settings(), service, turnActive })
+/** This profile's threads: `own-1` (the caller) and any `extra` ones, such as the threads that delegated to it. */
+function toolsFor(settings: () => ProfilerSettings, service: ProfilerService | null, turnActive = (_: string) => true, extra: Record<string, { lineage?: { parentThreadId: string } }> = {}) {
+  const profiler: () => ProfilerToolHost = () => ({ settings: settings(), service, owner: OWNER, turnActive })
+  const metas: Record<string, object> = { 'own-1': { id: 'own-1', name: 'Speed up startup', ...extra['own-1'] } }
+  for (const [id, meta] of Object.entries(extra)) if (id !== 'own-1') metas[id] = { id, name: 'Fix the login page', ...meta }
   const host: AppToolHost = {
     delegation: () => undefined as never,
     askUser: async () => ({}),
     presentPlan: () => {},
     tasks: () => undefined,
     profiler,
-    // This profile's store knows only its own thread.
-    threadMeta: (threadId: string) => (threadId === 'own-1' ? { id: 'own-1', name: 'Speed up startup' } as never : undefined)
+    threadMeta: (threadId: string) => metas[threadId] as never
   } as unknown as AppToolHost
   return createAppToolRegistry({ host }).registry
 }
@@ -322,10 +335,11 @@ describe('the profiler tools', () => {
     expectNoPrivateData(outcome.text, dir)
   })
 
-  it('profiler_service_breakdown: heap, counts, caches and threads, titles for this profile only', async () => {
+  it('profiler_service_breakdown: heap, counts, caches, this profile\'s threads by id and other profiles as totals', async () => {
     const dir = home()
-    const { service } = profilerFixture(dir)
+    const { service, threads } = profilerFixture(dir)
     const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_service_breakdown')
+    expect(threads).toHaveBeenCalledWith(OWNER)
     expect(value).toMatchObject({
       heap: { usedMb: 60, limitMb: 4096 },
       heapSpacesMb: { old_space: 50, other: 1 },
@@ -333,11 +347,14 @@ describe('the profiler tools', () => {
       counts: { loadedThreads: 1, cachedThreads: 1, sqliteConnections: 2, childProcesses: 2 },
       caches: { threadDatabase: { threads: 1, mb: 0.5, maxThreads: 64, maxMb: 48 }, replayBuffer: { events: 12, mb: 2, maxEventsPerProfile: 512 } }
     })
+    // Ids and numbers only: no titles, not even this profile's (a private or expiring thread's title stays out too).
     expect(value.threads).toEqual([
-      { threadId: 'other-1', ownProfile: false, loaded: true, cached: true, turnRunning: false, cachedMb: 5, idleMinutes: 1 },
-      { threadId: 'own-1', ownProfile: true, title: 'Speed up startup', loaded: true, cached: true, turnRunning: false, cachedMb: 3, idleMinutes: 1 }
+      { threadId: 'own-2', loaded: true, cached: true, turnRunning: true, cachedMb: 5, idleMinutes: 1 },
+      { threadId: 'own-1', loaded: true, cached: true, turnRunning: false, cachedMb: 3, idleMinutes: 1 }
     ])
+    expect(value.otherProfiles).toEqual({ profiles: 1, loadedThreads: 2, cachedThreads: 1, cachedMb: 2 })
     expect(value.bytes).toMatch(/measured/)
+    expect(outcome.text).not.toContain('Speed up startup')
     expectNoPrivateData(outcome.text, dir)
   })
 
@@ -433,6 +450,44 @@ describe('the profiler tools', () => {
     expect(heap).toHaveBeenCalledWith(30)
     expect(Object.keys(value).sort()).toEqual(['biggestStrings', 'byType', 'nodes', 'note', 'topRetainers', 'totalMb'])
   })
+
+  it('profiler_heap_summary runs one at a time: a second call while one runs is refused', async () => {
+    const dir = home()
+    const summary: HeapSummary = { nodes: 1, totalMb: 0, byType: [], topRetainers: [], biggestStrings: [] }
+    let finish!: () => void
+    const heap = vi.fn(() => new Promise<HeapSummary>((resolve) => { finish = () => resolve(summary) }))
+    const settings = { ...ON, tools: { ...ON.tools, profiler_heap_summary: true } }
+    const registry = toolsFor(() => settings, profilerFixture(dir, { activeTurns: 1, heap }).service)
+    // Two calls from one turn, in the same moment.
+    const first = call(registry, 'profiler_heap_summary')
+    const second = call(registry, 'profiler_heap_summary')
+    expect((await second).outcome).toMatchObject({ isError: true, text: expect.stringContaining('already running') })
+    expect(heap).toHaveBeenCalledTimes(1)
+    finish()
+    expect((await first).outcome.isError).toBeFalsy()
+    // Once it is done, the next one runs.
+    const third = call(registry, 'profiler_heap_summary')
+    await vi.waitFor(() => expect(heap).toHaveBeenCalledTimes(2))
+    finish()
+    expect((await third).outcome.isError).toBeFalsy()
+  })
+
+  it('profiler_heap_summary from a delegated child does not count the turns waiting on it', async () => {
+    const dir = home()
+    const heap = vi.fn(async (): Promise<HeapSummary> => ({ nodes: 1, totalMb: 0, byType: [], topRetainers: [], biggestStrings: [] }))
+    const settings = { ...ON, tools: { ...ON.tools, profiler_heap_summary: true } }
+    // own-1 was delegated by parent-1, itself delegated by root-1: all three have a turn running.
+    const chain = { 'own-1': { lineage: { parentThreadId: 'parent-1' } }, 'parent-1': { lineage: { parentThreadId: 'root-1' } }, 'root-1': {} }
+    const running = new Set(['own-1', 'parent-1', 'root-1'])
+    const turnActive = (id: string) => running.has(id)
+    const allowed = await call(toolsFor(() => settings, profilerFixture(dir, { activeTurns: 3, heap }).service, turnActive, chain), 'profiler_heap_summary')
+    expect(allowed.outcome.isError).toBeFalsy()
+    expect(heap).toHaveBeenCalledTimes(1)
+    // A turn outside the chain still counts.
+    const refused = await call(toolsFor(() => settings, profilerFixture(dir, { activeTurns: 4, heap }).service, turnActive, chain), 'profiler_heap_summary')
+    expect(refused.outcome).toMatchObject({ isError: true, text: expect.stringContaining('Another turn is running (1)') })
+    expect(heap).toHaveBeenCalledTimes(1)
+  })
 })
 
 /** A small heap snapshot in V8's format, holding the private strings a real one would. */
@@ -497,7 +552,112 @@ describe('the heap summary', () => {
     const result = await takeHeapSummary(dir, 10, { write: (target) => { writeFileSync(target, JSON.stringify(syntheticSnapshot())); written.push(target); return target }, analyse: (target, top) => analyseHeapSnapshotFile(target, top) })
     expect(result.nodes).toBe(5)
     expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toEqual([])
-    await expect(takeHeapSummary(dir, 10, { write: (target) => { writeFileSync(target, 'not json'); return target } })).rejects.toThrow(/heap analysis failed/)
+    // A parse error comes back by its class alone: its message would quote the file.
+    const failed = takeHeapSummary(dir, 10, { write: (target) => { writeFileSync(target, 'not json Fix the login page'); return target } })
+    await expect(failed).rejects.toThrow(/heap analysis failed \(SyntaxError\)/)
+    await failed.catch((error: Error) => expect(error.message).not.toContain('Fix the login page'))
     expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toEqual([])
+  })
+
+  it('refuses a snapshot over the size cap before reading it, with numbers only', async () => {
+    const dir = home()
+    const file = join(dir, 'big.heapsnapshot')
+    writeFileSync(file, Buffer.alloc(3 * 1048576, 32))
+    const refused = analyseHeapSnapshotFile(file, 10, { maxFileMb: 2 })
+    await expect(refused).rejects.toThrow('The service heap snapshot is 3 MB; the summary reads at most 2 MB. Use profiler_service_breakdown instead.')
+    await refused.catch((error: Error) => expectNoPrivateData(error.message, dir))
+    // Through the summary too: refused, and the file deleted.
+    await expect(takeHeapSummary(dir, 10, {
+      write: (target) => { writeFileSync(target, Buffer.alloc(3 * 1048576, 32)); return target },
+      analyse: (target, top) => analyseHeapSnapshotFile(target, top, { maxFileMb: 2 })
+    })).rejects.toThrow(/at most 2 MB/)
+    expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toEqual([])
+  })
+
+  it('a worker over its heap limit fails with a fixed message', async () => {
+    const dir = home()
+    const file = join(dir, 'real-size.heapsnapshot')
+    // Valid JSON whose parse needs far more than the limit allows.
+    writeFileSync(file, `{"snapshot":{"meta":{}},"nodes":[${'1,'.repeat(4_000_000)}1],"edges":[],"strings":[]}`)
+    await expect(analyseHeapSnapshotFile(file, 10, { workerHeapMb: 8 })).rejects.toThrow(/memory limit|failed in its worker/)
+  })
+
+  it('deletes heap summary files a crash left behind, at service start and before each summary, and keeps asked-for snapshots', async () => {
+    const dir = home()
+    const folder = join(dir, HEAP_SNAPSHOT_RELATIVE_DIR)
+    const leave = () => {
+      mkdirSync(folder, { recursive: true })
+      writeFileSync(join(folder, 'agent-1700000000000.heapsnapshot'), '{"Fix the login page":1}')
+      writeFileSync(join(folder, 'heap-2026-11-11T08-00-00-000Z.heapsnapshot'), '{}')
+    }
+    leave()
+    expect(removeLeftoverSummaryFiles(dir)).toBe(1)
+    expect(readdirSync(folder)).toEqual(['heap-2026-11-11T08-00-00-000Z.heapsnapshot'])
+    expect(removeLeftoverSummaryFiles(home())).toBe(0)
+
+    // Before a summary: the leftover is gone before the new file is written.
+    leave()
+    let seen: string[] = []
+    await takeHeapSummary(dir, 10, { write: (target) => { seen = readdirSync(folder); writeFileSync(target, '{}'); return target }, analyse: async () => ({ nodes: 0, totalMb: 0, byType: [], topRetainers: [], biggestStrings: [] }) })
+    expect(seen).toEqual(['heap-2026-11-11T08-00-00-000Z.heapsnapshot'])
+
+    // At service start, even with the profiler off.
+    leave()
+    const { mms, protocolServer } = fakeService(dir)
+    const handle = prepareMemoryMonitor({ mms, protocolServer, homeDir: dir, version: '0.1.3', env: {}, createMonitor: () => testMonitor(dir, { t: T0 }) })!
+    expect(readdirSync(folder)).toEqual(['heap-2026-11-11T08-00-00-000Z.heapsnapshot'])
+    handle.stop()
+  })
+})
+
+describe('stopping the profiler', () => {
+  it('a sample still reading when the monitor stops writes no line and raises no notice', async () => {
+    const dir = home()
+    let release!: () => void
+    const onNotice = vi.fn()
+    const log = new MemoryLog(dir, { flushIntervalMs: 1 })
+    const monitor = new MemoryMonitor({
+      homeDir: dir,
+      version: '0.1.3',
+      // Any service size breaks this limit, so a finished sample would raise a notice.
+      thresholds: resolveMemoryThresholds('{"servicePrivateMb":1,"serviceSevereMb":2,"serviceSustainMinutes":0}'),
+      readCounts: async () => ({ counts: { sqliteConnections: 0, workerThreads: 0, loadedThreads: 0, threadRuntimes: 0, threadCacheThreads: 0, threadCacheMb: 0, replayEvents: 0, ptys: 0, fileWatchers: 0, profiles: 1, activeTurns: 0 }, workerHeaps: [] }),
+      sampleProcess: () => new Promise((resolve) => { release = () => resolve({ rss: 900, private: 900, heapUsed: 60, heapTotal: 80, external: 4, arrayBuffers: 1 }) }),
+      readDetail: () => ({ heapSpaces: {}, heap: { totalHeapSize: 80, usedHeapSize: 60, heapSizeLimit: 4096, mallocedMemory: 1, externalMemory: 4, nativeContexts: 1, detachedContexts: 0 } }),
+      readChildren: async () => [],
+      childCount: () => 0,
+      onNotice,
+      log
+    })
+    const pending = monitor.tick()
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    monitor.stop()
+    release()
+    await pending
+    log.flushSync()
+    expect(monitor.samples()).toHaveLength(0)
+    const file = join(dir, 'diagnostics', 'memory.jsonl')
+    const lines = existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line).type) : []
+    expect(lines).not.toContain('sample')
+    expect(onNotice).not.toHaveBeenCalled()
+    // A tick after stop does nothing at all.
+    await monitor.tick()
+    expect(monitor.samples()).toHaveLength(0)
+  })
+
+  it('stops the monitor when the last profile with the profiler on is archived or removed', async () => {
+    const dir = home()
+    const { settings, domains, mms, protocolServer } = fakeService(dir)
+    settings.set({ experimental: { profiler: { ...settings.get().experimental.profiler, enabled: true } } })
+    const profile = { ...(mms as unknown as Record<string, unknown>) }
+    let live: unknown[] = [profile]
+    const withHost = { ...(mms as unknown as Record<string, unknown>), getInstallationHost: () => ({ liveServices: () => live }) } as unknown as MousseMainService
+    const handle = prepareMemoryMonitor({ mms: withHost, protocolServer, homeDir: dir, version: '0.1.3', env: {}, createMonitor: () => testMonitor(dir, { t: T0 }) })!
+    handle.start()
+    expect(profilerService()!.monitor()).not.toBeNull()
+    live = []
+    domains.notifyProfileDisposed('profile-2')
+    expect(profilerService()!.monitor()).toBeNull()
+    handle.stop()
   })
 })

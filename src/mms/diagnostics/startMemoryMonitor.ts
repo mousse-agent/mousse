@@ -11,11 +11,11 @@ import { existingThreadDbClient } from '../data/threadDb/threadDbClient'
 import { onSettingsSaved } from '../settings/SettingsStore'
 import { DEFAULT_MEMORY_THRESHOLDS, MEMORY_THRESHOLDS_ENV, isPackagedRuntime, resolveMemoryThresholds, toMb, type MemoryThresholds } from '../../shared/diagnostics/memory'
 import { writeHeapSnapshotFile } from './heapSnapshot'
-import { takeHeapSummary } from './heapSummary'
+import { removeLeftoverSummaryFiles, takeHeapSummary } from './heapSummary'
 import { MemoryMonitor, type ServiceCountsReading } from './MemoryMonitor'
 import { liveFileWatchers } from './liveCounts'
 import { MEMORY_NOTICE_EVENT, PROFILER_COLLECT_EVENT, PROFILER_STATE_EVENT, registerMemoryDiagnosticsMethods, type MemoryMonitorHolder } from './memoryDomain'
-import { setProfilerService, type ProfilerService, type ThreadMemoryEntry } from './profilerService'
+import { setProfilerService, type OtherProfilesMemory, type ProfilerService, type ThreadMemory, type ThreadMemoryEntry } from './profilerService'
 
 /** Counts summed over `profiles`. Each read is a map size or a short list; nothing is loaded. */
 export async function readServiceCounts(profiles: MmsProfileServices[], replayEvents: () => number): Promise<ServiceCountsReading> {
@@ -56,10 +56,24 @@ export async function readServiceCounts(profiles: MmsProfileServices[], replayEv
 
 type ProfileLike = Pick<MmsProfileServices, 'orchestrator' | 'threads'>
 
-/** Every thread in memory across `profiles`: loaded sessions and thread database cache entries, by thread. */
-export function readThreadMemory(profiles: readonly ProfileLike[], now = Date.now()): ThreadMemoryEntry[] {
-  const out: ThreadMemoryEntry[] = []
+/**
+ * The threads in memory: loaded sessions and thread database cache entries. Only the profile whose orchestrator is
+ * `owner` (the caller's) is listed thread by thread; every other profile belongs to another person and counts only in
+ * totals, with no ids, turn states or idle times.
+ */
+export function readThreadMemory(profiles: readonly ProfileLike[], owner: object, now = Date.now()): ThreadMemory {
+  const own: ThreadMemoryEntry[] = []
+  const others: OtherProfilesMemory = { profiles: 0, loadedThreads: 0, cachedThreads: 0, cachedBytes: 0 }
   for (const services of profiles) {
+    if (services.orchestrator !== owner) {
+      others.profiles += 1
+      others.loadedThreads += services.orchestrator.loadedThreadIds().length
+      for (const entry of services.threads.threadDbCacheEntries(now)) {
+        others.cachedThreads += 1
+        others.cachedBytes += entry.bytes
+      }
+      continue
+    }
     const byId = new Map<string, ThreadMemoryEntry>()
     for (const threadId of services.orchestrator.loadedThreadIds()) {
       byId.set(threadId, { threadId, loaded: true, cached: false, turnRunning: services.orchestrator.isTurnActive(threadId), cachedBytes: null, idleSeconds: null })
@@ -68,11 +82,11 @@ export function readThreadMemory(profiles: readonly ProfileLike[], now = Date.no
       const known = entry.threadId ? byId.get(entry.threadId) : undefined
       const idleSeconds = Math.round(entry.idleMs / 1000)
       if (known) Object.assign(known, { cached: true, cachedBytes: entry.bytes, idleSeconds })
-      else out.push({ ...(entry.threadId ? { threadId: entry.threadId } : {}), loaded: false, cached: true, turnRunning: false, cachedBytes: entry.bytes, idleSeconds })
+      else own.push({ ...(entry.threadId ? { threadId: entry.threadId } : {}), loaded: false, cached: true, turnRunning: false, cachedBytes: entry.bytes, idleSeconds })
     }
-    out.push(...byId.values())
+    own.push(...byId.values())
   }
-  return out
+  return { own, others }
 }
 
 /** Whether any of `profiles` has the profiler on. */
@@ -98,6 +112,8 @@ export function prepareMemoryMonitor(opts: {
   createMonitor?: (thresholds: MemoryThresholds) => MemoryMonitor
 }): { start: () => void; stop: () => void; refresh: () => void } | null {
   const env = opts.env ?? process.env
+  // A heap summary file a crash left behind holds what the service had in memory: gone at every start.
+  removeLeftoverSummaryFiles(opts.homeDir)
   if (env[MEMORY_THRESHOLDS_ENV] === 'off' || !opts.mms.domains) return null
   const profiles = () => opts.mms.getInstallationHost()?.liveServices() ?? [opts.mms]
   const activeTurns = () => profiles().reduce((sum, services) => sum + services.orchestrator.activeTurnCount(), 0)
@@ -145,6 +161,8 @@ export function prepareMemoryMonitor(opts: {
     }
   }
   const offSettings = onSettingsSaved(() => refresh())
+  // A profile archived or removed is gone from the live list: if it was the last with the profiler on, it stops.
+  const offDisposed = opts.mms.domains.onProfileDisposed(() => refresh())
 
   const service: ProfilerService = {
     monitor: () => holder.monitor,
@@ -164,7 +182,7 @@ export function prepareMemoryMonitor(opts: {
         opts.protocolServer.emitInstallationEvent(PROFILER_COLLECT_EVENT, { requestId, windows })
       })
     },
-    threads: () => readThreadMemory(profiles()),
+    threads: (owner) => readThreadMemory(profiles(), owner),
     activeTurns,
     heapSummary: (top) => takeHeapSummary(opts.homeDir, top),
     refresh: () => refresh()
@@ -179,6 +197,7 @@ export function prepareMemoryMonitor(opts: {
     stop: () => {
       stopped = true
       offSettings()
+      offDisposed()
       offClosed()
       turnOff(false)
       for (const done of waiting.values()) done(false)

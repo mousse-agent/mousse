@@ -114,6 +114,8 @@ export class MemoryMonitor {
   private lastChildren: ChildMemory[] | undefined
   private lastReplayMb: number | undefined
   private started = false
+  /** Set by `stop()`: a sample that was reading then writes nothing and raises no notice. */
+  private stopped = false
   private readonly uptime: () => number
   private readonly runId: string
   private loggedHints: { json: string; at: number } | null = null
@@ -135,6 +137,7 @@ export class MemoryMonitor {
   /** Starts sampling: the first sample a few seconds after start, then every interval. The timer never holds the process. */
   start(firstDelayMs = 10_000): void {
     if (this.timer) return
+    this.stopped = false
     this.log.prune(this.now())
     const first = setTimeout(() => {
       void this.tick()
@@ -146,6 +149,8 @@ export class MemoryMonitor {
   }
 
   stop(): void {
+    // A sample already reading when this runs ends without a log line or a notice.
+    this.stopped = true
     if (this.timer) {
       clearTimeout(this.timer)
       clearInterval(this.timer)
@@ -178,12 +183,14 @@ export class MemoryMonitor {
 
   private async runTick(): Promise<void> {
     try {
+      if (this.stopped) return
       this.ticks += 1
       if (!this.started) {
         this.started = true
         this.log.append({ type: 'start', t: this.now(), version: this.options.version, pid: process.pid })
       }
       const sample = await this.takeSample((this.ticks - 1) % DETAIL_EVERY === 0)
+      if (this.stopped) return
       this.history.push(sample)
       const cutoff = sample.t - HISTORY_MS
       while (this.history.length && this.history[0].t < cutoff) this.history.shift()
@@ -309,6 +316,7 @@ export class MemoryMonitor {
     if (toLog.length) {
       // The full breakdown, with the children's memory read now.
       const children = await (this.options.readChildren ?? (() => readChildMemory(liveChildProcesses())))().catch(() => undefined)
+      if (this.stopped) return
       const full: MemorySample = { ...sample, ...(children?.length ? { children } : {}) }
       this.history[this.history.length - 1] = full
       this.log.append({ type: 'breach', t: sample.t, breaches: toLog, sample: full, detail: this.detail ?? readHeapDetail() })

@@ -1,7 +1,7 @@
 /**
  * What the profiler's agent tools return, built from the monitor's samples: numbers and fixed names only, as in the
- * memory log. A thread is named by its id, and by its title only when it is a thread of the caller's own profile
- * (`ownTitle` answers for it). Pure, so each shape is tested without a service.
+ * memory log. A thread is named by its id only, and only when it is a thread of the caller's own profile; other
+ * profiles count only in totals. Pure, so each shape is tested without a service.
  */
 import {
   appMb,
@@ -18,7 +18,7 @@ import {
 } from '../../shared/diagnostics/memory'
 import type { AppViewInfo, WindowCounters } from '../../shared/diagnostics/profiler'
 import type { AppWindowDetail } from './MemoryMonitor'
-import type { ThreadMemoryEntry } from './profilerService'
+import type { ThreadMemory } from './profilerService'
 
 const UNITS = 'MB is private memory where the OS reports it, else the working set. CPU is percent of one core since the previous sample.'
 
@@ -82,15 +82,14 @@ export function serviceBreakdownReport(input: {
   sample: MemorySample
   detail: MemoryDetail
   thresholds: MemoryThresholds
-  threads: readonly ThreadMemoryEntry[]
-  /** The title of a thread of the caller's own profile; undefined for any other. */
-  ownTitle: (threadId: string) => string | undefined
+  threads: ThreadMemory
   cacheLimits: { threads: number; mb: number }
   replayLimitPerProfile: number
 }) {
   const { sample, detail, thresholds } = input
   const c: ServiceCounts = sample.counts
-  const threads = [...input.threads].sort((a, b) => (b.cachedBytes ?? -1) - (a.cachedBytes ?? -1) || Number(b.loaded) - Number(a.loaded))
+  const others = input.threads.others
+  const threads = [...input.threads.own].sort((a, b) => (b.cachedBytes ?? -1) - (a.cachedBytes ?? -1) || Number(b.loaded) - Number(a.loaded))
   return {
     service: { mb: serviceMb(sample), workingSetMb: sample.service.rss, ...(sample.service.cpu !== undefined ? { cpuPercent: sample.service.cpu } : {}) },
     heap: {
@@ -122,20 +121,16 @@ export function serviceBreakdownReport(input: {
       threadDatabase: { threads: c.threadCacheThreads, mb: c.threadCacheMb, maxThreads: input.cacheLimits.threads, maxMb: input.cacheLimits.mb },
       replayBuffer: { events: c.replayEvents, mb: sample.replayMb ?? null, maxEventsPerProfile: input.replayLimitPerProfile }
     },
-    threads: threads.slice(0, MAX_THREADS).map((entry) => {
-      const title = entry.threadId ? input.ownTitle(entry.threadId) : undefined
-      return {
-        threadId: entry.threadId ?? null,
-        ownProfile: title !== undefined,
-        ...(title !== undefined ? { title } : {}),
-        loaded: entry.loaded,
-        cached: entry.cached,
-        turnRunning: entry.turnRunning,
-        cachedMb: entry.cachedBytes === null ? null : r1(entry.cachedBytes / 1048576),
-        idleMinutes: entry.idleSeconds === null ? null : Math.round(entry.idleSeconds / 60)
-      }
-    }),
+    threads: threads.slice(0, MAX_THREADS).map((entry) => ({
+      threadId: entry.threadId ?? null,
+      loaded: entry.loaded,
+      cached: entry.cached,
+      turnRunning: entry.turnRunning,
+      cachedMb: entry.cachedBytes === null ? null : r1(entry.cachedBytes / 1048576),
+      idleMinutes: entry.idleSeconds === null ? null : Math.round(entry.idleSeconds / 60)
+    })),
     threadsNotListed: Math.max(0, threads.length - MAX_THREADS),
+    otherProfiles: { profiles: others.profiles, loadedThreads: others.loadedThreads, cachedThreads: others.cachedThreads, cachedMb: r1(others.cachedBytes / 1048576) },
     bytes:
       'cachedMb is measured: the serialized size of the rows and state the thread database cache holds for the thread. Its objects on the heap take roughly 2 to 3 times that (an estimate). A loaded thread with no cache entry has no measured size.'
   }
