@@ -21,6 +21,10 @@ describe('GUI chat connection errors', () => {
     expect(guiSendFailureAnswer(new Error('Client closed')).answer).not.toHaveProperty('requestAcknowledged')
     expect(guiSendFailureAnswer(new MmsProtocolError('thread_busy', 'Busy')).answer.requestAcknowledged).toBe(false)
   })
+  it('answers a request the client never wrote (`Not connected`) as not taken, so the composer gives its text back', () => {
+    expect(guiChatRequestError(new Error('Not connected')).code).not.toBe('workspace_connection_lost')
+    expect(guiSendFailureAnswer(new Error('Not connected')).answer.requestAcknowledged).toBe(false)
+  })
   it('retains explicit protocol admission errors', () => {
     const error = guiChatRequestError(new MmsProtocolError('thread_not_found', 'Thread not found'))
     expect(error.code).toBe('thread_not_found')
