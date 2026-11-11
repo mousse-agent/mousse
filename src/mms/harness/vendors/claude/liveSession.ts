@@ -487,7 +487,8 @@ export class LiveRun {
    * Pushed ids still unread at the run's result that Claude Code could not drop from its queue (`cancelAsyncMessage`
    * said false), though nothing named them yet. False alone is not a read: Claude Code also answers it for a message
    * its queue gave up a moment before, whose turn then drops it unrun (`LiveSession.endAtResult`). A held run waits for
-   * a read signal; one that ends otherwise (a Stop during the ask) counts them as read (`unreadFate`).
+   * a read signal (`read`); with none, however the run ends (the wait runs out, a Stop, a closed or dead process), they
+   * are handed back (`LiveSession.endTaken`, `unreadFate`).
    */
   readonly taken = new Set<string>()
   /**
@@ -1138,13 +1139,14 @@ export class LiveSession<Turn = unknown> {
 
   /**
    * What became of `id`, a message `run` pushed that Claude Code had not read when the run ended:
-   * - `read`: Claude Code read it after all (a Stop's interrupt can race the read), or it is no longer queued, so a
-   *   turn took it;
+   * - `read`: Claude Code read it after all (a Stop's interrupt can race the read): a `started` or `completed`
+   *   lifecycle, or a frame or result that named it. Nothing else counts as a read;
    * - `dropped`: Claude Code removed it from its queue unread (a cancel's receipt, `cancelAsyncMessage` here, or a
-   *   `cancelled` lifecycle), so it never runs there; or a held run waited for a late steer `cancelAsyncMessage` could
-   *   not drop and nothing showed it read (`endTaken`), so it is handed back, at least once;
+   *   `cancelled` lifecycle), so it never runs there; or `cancelAsyncMessage` could not drop it (false, `taken`) and
+   *   nothing showed it read, however the run ended (the wait ran out, `endTaken`; a Stop; a fresh ask here), so it is
+   *   handed back, at least once (`handBackTaken`);
    * - `gone`: the process ended (Stop closes it). A Claude Code killed with a message still queued does not run it
-   *   when the session is resumed (spike S1);
+   *   when the session is resumed (spike S1), and neither does a turn that took it: that turn ends with the process;
    * - `cut`: the run was cancelled, and its interrupt sweeps Claude Code's queue (`abandon`), or closes the process when
    *   Claude Code does not confirm the sweep. Not waited for, so a Stop ends the turn at once;
    * - `unknown`: Claude Code could not say (no per-message cancel, or the cancel failed or was ignored on a process that
@@ -1154,15 +1156,18 @@ export class LiveSession<Turn = unknown> {
    * and leaves one a turn already took). Never throws.
    */
   async unreadFate(run: LiveRun, id: string): Promise<'read' | 'dropped' | 'gone' | 'cut' | 'unknown'> {
-    // A receipt that dropped it outranks `taken`, which only says no queue held it when Claude Code was asked.
-    const known = (): 'read' | 'dropped' | undefined =>
-      run.read.has(id) ? 'read' : run.dropped.has(id) ? 'dropped' : run.taken.has(id) ? 'read' : undefined
+    // Only a read signal is a read. `taken` (`cancelAsyncMessage` said false) only says no queue held it when Claude Code
+    // was asked: it may have dropped it, and says so only when its next turn commits.
+    const known = (): 'read' | 'dropped' | undefined => (run.read.has(id) ? 'read' : run.dropped.has(id) ? 'dropped' : undefined)
     if (known()) return known()!
-    // Claude Code is still answering whether it took the steer (a Stop came during the ask): its answer decides.
+    // Claude Code is still answering whether it could drop the steer (a Stop came during the ask): wait for its answer.
     if (run.lateAsk) await run.lateAsk
     if (known()) return known()!
     const query = this.query
+    // Before `taken`: a turn that took it ended with the process.
     if (this.dead || !query) return 'gone'
+    // Not dropped, and nothing showed it read: handed back, as at the end of the wait (`endTaken`).
+    if (run.taken.has(id)) return this.handBackTaken(run, id)
     // A cancel already known to have been ignored on a process that stays leaves it queued there (`mayRunTwice`).
     if (run.abandoned) return run.mayRunTwice.has(id) ? 'unknown' : 'cut'
     const cancel = (query as { cancelAsyncMessage?: (uuid: string) => Promise<boolean> }).cancelAsyncMessage
@@ -1185,8 +1190,34 @@ export class LiveSession<Turn = unknown> {
       this.cancelId(id)
       return 'dropped'
     }
-    // No longer in the queue: a turn took it.
-    return 'read'
+    // No longer in the queue, which is not a read: Claude Code may have dropped it. Handed back, as above.
+    run.taken.add(id)
+    return this.handBackTaken(run, id)
+  }
+
+  /**
+   * `id`, a steer `run` pushed, was not dropped by `cancelAsyncMessage` (false) and nothing showed it read, and the run
+   * ended some way other than the end of its wait (`endTaken`): a Stop or a failure, or a fresh ask (`unreadFate`). It is
+   * handed back to Mousse the same way, at least once, never lost. A turn Claude Code may still run for it is owned by a
+   * stand-in until its result (or the stand-in's cutoff), so it reaches no other run, and a read then means it may run
+   * twice (`readAfterHandBack`). A cancelled run gives the steer up to the stand-in, and ends if it owed nothing else.
+   * A warning says it was handed back (ids only).
+   */
+  private handBackTaken(run: LiveRun, id: string): 'dropped' {
+    run.taken.delete(id)
+    run.dropped.add(id)
+    console.warn('[claude-live] Claude Code did not drop a steer, and nothing showed it read it; it is handed back', {
+      threadId: this.threadId,
+      runId: run.id,
+      messageIds: [id]
+    })
+    if (this.dead || !run.owned.has(id)) return 'dropped'
+    run.owned.delete(id)
+    const index = this.runs.indexOf(run)
+    if (run.abandoned && !run.settled && run.owned.size === 0) this.finishCancelled(run)
+    // Right after the run while it stays among the runs, so a frame that names the steer finds the stand-in (`ownerOf`).
+    this.standIn(run, [id], index >= 0 && this.runs.includes(run) ? index + 1 : index)
+    return 'dropped'
   }
 
   /**
@@ -1772,14 +1803,22 @@ export class LiveSession<Turn = unknown> {
       messageIds: unread
     })
     if (!run.settled || this.dead) return
+    this.standIn(run, unread, index)
+  }
+
+  /**
+   * A cancelled stand-in that owns `ids`, steers `pusher` pushed and handed back with no read signal, until Claude Code's
+   * turn for them ends or `lateSteerStandInMs` passes with no sign of it (`armStandIn`). It goes where `pusher` was among
+   * the runs (oldest first), so a newer turn's frames pass it over and an older one's do not.
+   */
+  private standIn(pusher: LiveRun, ids: readonly string[], index: number): void {
     const standIn = new LiveRun('prompt')
     standIn.abandoned = true
-    standIn.handedBackBy = run
-    for (const id of unread) {
+    standIn.handedBackBy = pusher
+    for (const id of ids) {
       standIn.ids.add(id)
       standIn.owned.add(id)
     }
-    // Where the run was among the runs (oldest first), so a newer turn's frames pass it over and an older one's do not.
     this.runs.splice(index >= 0 ? Math.min(index, this.runs.length) : this.runs.length, 0, standIn)
     this.armStandIn(standIn)
   }

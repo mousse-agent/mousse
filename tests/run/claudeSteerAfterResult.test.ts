@@ -173,6 +173,39 @@ describe('a steer still unread when Claude Code\'s reply ends', () => {
     }
   }, 30_000)
 
+  it('Claude Code answers that it could not drop it, then never runs it, and Stop comes during the wait: it is handed back once and runs once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      // A wait far longer than the test: only the Stop ends it.
+      const t = await steeredReply({ lateSteerReadMs: 60_000 })
+      t.claude.cancelAsyncTakenThenDropped = 'silent'
+      t.claude.emit(resultFrame({ uuids: [t.prompt], text: 'The reply.', queued: 0 }))
+      await waitFor(() => t.claude.cancelAsyncCalls.length === 1, 'Claude Code to be asked to drop the steer')
+      await later(50)
+      await t.d.orch.abortRun(t.d.engine.getActiveRun(t.thread.id)!.runId, 'stop-1', t.thread.id)
+      await t.first.catch(() => undefined)
+      // Handed back once: it waits in the queue, held behind the Stop like any queued message, and was not accepted.
+      await waitFor(() => t.d.orch.listQueue(t.thread.id).length > 0 && t.d.engine.getActiveRun(t.thread.id) === null, 'the steer to come back')
+      expect(t.d.orch.listQueue(t.thread.id).map((item) => item.content)).toEqual(['STEER'])
+      expect(t.transcript().filter(([role, content]) => role === 'user' && content === 'STEER')).toHaveLength(0)
+
+      // The queue runs again: the steer runs once, as a turn of its own.
+      t.d.orch.resumeThreadQueue(t.thread.id)
+      await t.idle()
+      const transcript = t.transcript()
+      expect(transcript.filter(([role, content]) => role === 'user' && content === 'STEER')).toHaveLength(1)
+      expect(transcript.slice(-2)).toEqual([
+        ['user', 'STEER'],
+        ['assistant', 'Answer to the steer.']
+      ])
+      expect(t.context().filter(([role, content]) => role === 'user' && content === 'STEER')).toHaveLength(1)
+      expect(t.claude.cancelAsyncCalls).toEqual([t.steer])
+      expect(t.cli.processes.reduce((sum, process) => sum + t.sentAgain(process), 0)).toBe(1)
+    } finally {
+      warn.mockRestore()
+    }
+  }, 30_000)
+
   it('Claude Code answers that it could not drop it, then says it cancelled it: it is handed back at once, without the wait', async () => {
     // A wait far longer than the test: only the `cancelled` lifecycle can end it.
     const t = await steeredReply({ lateSteerReadMs: 60_000 })
