@@ -741,7 +741,7 @@ Small: the renderer reads an optional field. A wrong cause shows a wrong word an
 
 Spikes come first, then small PRs in order. Each run-engine PR is Tier 5 and goes through the council's code gate.
 
-1. **Spikes S1–S4.** No product code; a short note is added to this document with what each one showed.
+1. **Spikes S1–S4.** No product code; a short note is added to this document with what each one showed. Done: see "Spike results" after this section.
    - **S4: timing on `start` providers.** On the Codex app-server with a mock model, Cursor and one ACP agent (each only if it runs with no account), measure:
      - (a) **the gap as Mousse sees it:** from the moment a tool's result arrives at the adapter to the moment the next tool start of the same response arrives there. This is measured at arrival, never from provider-side timestamps, so it includes notification lag;
      - (b) how late a start notification can be after the command actually began (a command that writes a timestamp, compared with the notification's arrival). This is a check on (a), not a separate input;
@@ -765,6 +765,102 @@ Spikes come first, then small PRs in order. Each run-engine PR is Tier 5 and goe
 7. **Later, each gated on its spike:** Claude `'next'` during a hold (S1), and Codex native `turn/steer` (S2).
 
 If a release shows a provider whose tool events are unreliable, that adapter goes back to `steerBoundary: 'none'`, or to strict release, without touching the others.
+
+## Spike results
+
+Run on 2026-11-11 against `master` at `395e026b1`, on macOS (Apple silicon).
+
+**Setup, shared by all spikes.**
+- Every CLI ran in an empty temporary home (`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Pi's agent folder), with a fake key, against a local mock model on 127.0.0.1. No account was used and no sign-in ran.
+- All other traffic went to a local trap proxy that refused it. The trap recorded no attempt in any run.
+- The scripts were throwaway and are not in the repo: one streaming mock per API (Anthropic Messages, OpenAI Responses, Chat Completions) and one driver per CLI that timestamps each event when it is read.
+- Commands write their own start time (and, in S1, their end time), so a killed command shows up as a missing end.
+- The mocks answer at once, so timings measure the CLIs and the pipe, not a model.
+
+### S1: Claude Code
+
+Claude Code 2.1.322, driven through the Agent SDK 0.3.291 (`query` with streaming input and partial messages), as Mousse runs it.
+
+| Question | Observed |
+|---|---|
+| `'next'` pushed during a foreground Bash | The Bash ran to its end (3 s). The steer was in the very next request, right after the tool result, as a "The user sent a new message while you were working" reminder. Same turn, nothing cancelled. |
+| `'next'` pushed when the `tool_result` frame arrives | Too late: Claude Code had already sent the next request. The steer ran after the turn's result, as a new turn. |
+| `'next'` pushed while the model writes text | Read only after the turn ended, as a new turn. |
+| Read signal | Yes. `command_lifecycle` frames report `queued`, `started` (taken into a request) and `completed` for the pushed uuid, and later frames carry it in `user_message_uuids`. |
+| Unread `'next'`, then an interrupt (Stop) | The interrupt killed the Bash. Its receipt listed the steer as `still_queued`, and the steer then ran at once as a new turn. A Stop that gives it back has to cancel it first (`cancel_queued` or `cancel_async_message`; not tried). |
+| Unread `'next'`, then the CLI killed | Lost on Claude's side. The session file holds only a `queue-operation` line with the text and no uuid, and the resumed session never ran it. The command itself ran on to its end. |
+| `'next'`, then `stopTask(taskId)` | The Bash was killed (exit 137). The steer was read once, in the next request of the same turn. |
+| `'now'` during a foreground Bash | **Neither killed nor moved.** Claude Code waited for the command (runs of 4 s and 12 s), ended the turn (`aborted_tools`) and ran the steer next, with the full output in its history. |
+| `'now'` after the no-argument `backgroundTasks()` | Moved, not killed: the result reads "Command was manually backgrounded by user", the command finished in the background, and a wake turn followed. This matches what #874 saw. A Bash can be moved only once Claude Code reports it as a task (`task_started`, about 3 s after it starts). At 1 s nothing moved, although the call returned `true`, and `backgroundTasks(id)` returned `false`. |
+| `'now'` with two Bash calls running in parallel | Both ran to their end, then the steer went in. |
+| Two Bash calls from one response, `'now'` pushed at the first result | The second call was refused before it ran ("Command was aborted before completion", no start time), 5 of 5. |
+| Delayed announcement | A `tool_use`'s `content_block_start` reached the SDK reader 30.5–48.9 ms (median 36.6, n = 20) before the command started. `'now'` pushed at the previous result aborted the next request before any `tool_use` arrived, 20 of 20. `'now'` pushed 0–100 ms after an announcement, while the input still streamed, dropped the call before it ran, 8 of 8. |
+| A tool starting while `backgroundTasks(agentId)` is awaited | The await returned in 1–9 ms (3 runs, a subagent started with `run_in_background: false`). The main loop's next tool was announced 8–10 ms after that and started 16–20 ms later, so none started during the await. Subagents now start in the background unless the model asks otherwise. |
+| `'now'` during WebFetch or WebSearch | Both ended at once: WebFetch with a `canceled` error, WebSearch with an empty result. No `detachedToolCall`, and no result came later. |
+| `backgroundTasks` with background tasks disabled | `backgroundTasks(id)` and `backgroundTasks()` both throw "Background tasks are disabled in this session." at once. The Bash is unaffected. |
+
+Conclusion against §2.4:
+- On this version a `'now'` cut never ended a command that had started. It waits for a running Bash and refuses calls not yet started. The Claude row of §2.3.1 does not show up for Bash. Other tools (edits, MCP calls) and other versions were not checked.
+- The no-argument `backgroundTasks()` is what ended commands for the person. Removing it, as PR 2 plans, is required.
+- **Send now cannot rely on `'now'`**, because `'now'` waits for the Bash. It needs `interrupt()`, which kills the command while the queued steer survives and runs once, or `stopTask(taskId)`, which works only after `task_started`. §2.4's Send now changes from "push `now`" to "push, then interrupt or stop the task".
+- `'next'` during a hold: S1 shows the read signal (condition 1) and a single read after `stopTask` (condition 3). For condition 2 it shows that an interrupt runs the steer unless it is cancelled, and that a crash loses it, so Mousse gives it back from its own record. Cancelling on Stop was not tried, so `'next'` stays a later change.
+
+### S2: Codex native `turn/steer` (optional, one run each)
+
+`codex app-server` 0.167.0 with a Responses mock. Mousse's managed pin, 0.162.1, was not tested.
+- **`turn/steer` during a 3 s command.** It was answered at once, and the command finished. Codex then emitted `item/started` for a `userMessage` with the steer's text, and the next request carried the text after the command's output. That item is a read signal (condition 1 of §2.5).
+- **`turn/steer`, then `turn/interrupt` before the command ended.** The turn ended `interrupted`. The steer was gone: no `userMessage` item, absent from the next turn's request, and no event said so (condition 2, for an interrupt). A failed turn and a thread resumed after a kill were not tried.
+- **Conclusion.** Native steer stays a later change: Mousse would have to hand back an accepted, unread steer on every interrupt itself.
+
+### S3: Pi
+
+The real Pi 1.4.0 RPC child, started by Mousse's own launcher with Mousse's extension (test build) and bridge, against a Chat Completions mock. The stub child (`tests/harness/fixtures/pi-rpc-stub.mjs`) got the same command sequences. Event order is the order Mousse's RPC client delivers them.
+
+1. **Abort mid-message.** Pi emits `message_end` (stop reason `aborted`, with the partial text), `turn_end`, `agent_end`, `agent_settled` with `aborted: true`, then the abort's response. The session keeps the partial assistant message, but the next request leaves it out, so the model does not see its cut-off words.
+2. **`prompt` after `abort`.** Same session id, with the full history.
+3. **`clear_queue`** returned two queued steers in order and emptied the queue.
+4. **A `steer` and `clear_queue` written in the same tick.** `clear_queue` answered `[]` first. The steer was queued after it and reached the model at the next step. Step 2.1's wait for the steer's response is needed.
+5. **`clear_queue` sent the moment `tool_execution_end` arrived** (10 runs). Pi had always taken the steer already: its user `message_start` came before the `clear_queue` response (`[]`) every time.
+6. **`abort` and `clear_queue` written together.** `agent_settled` arrived before both responses, and `clear_queue` still returned the steer: an abort does not empty Pi's queue.
+7. **A continuation `prompt` with an abort right behind it.** The prompt was answered `started` and its user message entered the session. No model request went out, and the run settled with `aborted: true`. The steer's text is then in Pi's history, though the model never read it.
+8. **Abort while Mousse's gate held a tool call.** Pi sends `tool_execution_start` about 1 ms after `message_end`, before the gate. The abort waited for the gate, then the call ended "Operation aborted" without running. Pi wrote that result into the session, so the next `prompt` worked: its request had the call and its result.
+9. **Several queued steers.** Pi does not join them: three steers became three user messages, each with its own model request.
+10. **Steers sent during a running tool** waited for it. Pi started both calls of the message together, so no call was skipped.
+11. **A native steer sent the moment `turn_end` arrived** was in the next request 0 of 40 times. Pi sent that request 1.2–3.4 ms (median 1.6) after `turn_end` reached the client. A steer sent at `tool_execution_end` instead also made it 0 of 40 times.
+12. **Retries.** Two failed attempts, then a success: three `agent_end`, then one `agent_settled` after all of them, and nothing after it (3 of 3). An abort during a 4 s backoff gave `auto_retry_end` (`success: false`) and `agent_settled` (`aborted: true`) within 1 ms, and no further request.
+
+**Where the stub differs from Pi**, which PR 4's tests depend on:
+- It streams nothing: a prompt gives only `agent_start`, `agent_end` and `agent_settled`.
+- `steer` is answered with no disposition and is never queued or delivered, and `clear_queue` returns only its configured list.
+- `abort` answers even when idle.
+- It writes the abort's response before `agent_settled` (Pi writes `agent_settled` first), and its `agent_settled` has no `aborted` flag.
+- It has no retries.
+
+Conclusion against §3.2:
+- **The cut works as written.** An abort ends the reply and leaves the session usable, and the settlement barrier holds: one `agent_settled` per prompt, also through retries and an abort in the backoff.
+- **The `turn_end` release missed every time here**, so the release-condition cut runs for nearly every held steer, at the cost of one aborted request start each.
+- **Sending at the last `tool_execution_end` does not help** (0 of 40), so that later improvement is not worth doing.
+- **The stub needs the behaviour listed above** before the §3.4 lifecycle tests can catch the races they are written for.
+
+### S4: timing on `start` providers
+
+Every event was timestamped when read from the CLI's stdout: Codex's through Mousse's own `CodexAppServerClient`, Grok's ACP lines off the same pipe Mousse's ACP connection reads. Commands of 0, 0.05, 0.2, 0.5 and 1 s were mixed. A pair is a tool result followed by the next start of the same response.
+
+| | Codex app-server 0.167.0 | Grok 1.0.77 over ACP (Mousse's launch arguments) |
+|---|---|---|
+| Sample | 432 commands in 72 responses of 6; 216 pairs | 250 calls in 50 responses of 5; 200 consecutive pairs |
+| How a response's calls run | All at once (`parallel_tool_calls: true` for every model name tried) | All at once |
+| (a) gap from a result to the next start | Max **G = 65.7 ms** (median 47.5, p99 65.1). In 189 pairs no other command of the response was open. | No start arrived after a result: each later call's `tool_call` came 15–1055 ms before the earlier call's result. **G = 0.** |
+| (b) how late a start notification is | Always after the command began: 21–24 ms for commands that end at once (their start and result arrive together, 214 of 432), 73–135 ms for longer ones. Max **135 ms**. | Never late: `tool_call` arrives 14–43 ms before the command starts, `in_progress` 7–21 ms before. |
+| (c) later calls reported before the first finishes | No. Nothing arrives before a command runs, and its start comes late, so Codex stays `start`. | Yes: every call of a response is announced before any runs. |
+| `STEER_SETTLE_MS` = 2 × G + 100 ms | **232 ms** | **100 ms** |
+| Best effort may ship (1 s or less) | **Yes** | **Yes**, for Grok |
+
+- **Cursor:** not run. It needs an account, and its CLI is not installed here.
+- **Antigravity:** not run. It needs an account.
+- **Codex: (b) matters more than (a).** A command can run for up to about 135 ms before Mousse hears of it, at any point in a turn, not only after a result. After a result, the 232 ms window covers it. A steer released while the model writes can still meet such a command, which is case (b) of the Codex row in §2.3.1.
+- **Grok behaves like an `announce` provider.** Its `tool_call` comes before its permission request (answered at once in the spike, as Mousse does when no approval is asked). This holds for Grok only; other ACP agents were not measured.
+- **These are observed values on an idle machine,** not a maximum.
 
 ## 7. Open questions
 
