@@ -96,14 +96,13 @@ function botTurn(scripts: Script[]) {
   }
   const stop = new AbortController()
   const events: string[] = []
-  let drained = false
+  // Steers waiting to be drained, oldest first: one at the start, and a test may queue more while the turn runs.
+  const pending: { text: string; token: string }[] = [{ text: 'use the other file', token: 'drain-1' }]
   const steer = {
-    // One steer, drained once by the turn's first poll.
     drainSteerEntry: vi.fn(() => {
-      if (drained) return undefined
-      drained = true
-      events.push('drained')
-      return { text: 'use the other file', token: 'drain-1' }
+      const next = pending.shift()
+      if (next) events.push('drained')
+      return next
     }),
     steerTaken: vi.fn((token?: string) => { events.push(`taken ${token}`) }),
     onSteer: vi.fn((text: string, token?: string) => { events.push(`accepted ${text} ${token}`) }),
@@ -119,7 +118,7 @@ function botTurn(scripts: Script[]) {
     onText: vi.fn(),
     ...steer
   })
-  return { run, stop, steer, queries, prompts, events }
+  return { run, stop, steer, queries, prompts, events, pending }
 }
 
 /** The first query: it waits for the steer's interrupt, then ends as an interrupted query does. */
@@ -195,5 +194,63 @@ describe('a steer into a bot\'s Claude Code turn (#920)', () => {
     expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
     expect(turn.steer.returnSteer).not.toHaveBeenCalled()
     expect(turn.events).toEqual(['drained', 'taken drain-1', 'restarted', 'queued', 'accepted use the other file drain-1'])
+  })
+
+  it('a second steer before the first is read goes in after it, and each is accepted once', async () => {
+    const turn = botTurn([
+      interruptedByTheSteer,
+      async function* (prompt, query) {
+        await firstMessage(prompt)
+        yield init
+        // The restarted query has not read its prompt when the second steer comes in and interrupts it.
+        turn.pending.push({ text: 'and keep the tests', token: 'drain-2' })
+        yield* interruptedByTheSteer(prompt, query)
+      },
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield done
+      }
+    ])
+    expect(await turn.run()).toBe('done')
+    expect(turn.queries).toHaveLength(3)
+    expect(turn.prompts[2]!.message.content).toBe('use the other file\nand keep the tests')
+    expect(turn.steer.onSteer.mock.calls).toEqual([['use the other file', 'drain-1'], ['and keep the tests', 'drain-2']])
+    expect(turn.steer.returnSteer).not.toHaveBeenCalled()
+  })
+
+  it('model output with no lifecycle frame counts as reading the steer', async () => {
+    const turn = botTurn([
+      interruptedByTheSteer,
+      async function* () {
+        yield init
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+          parent_tool_use_id: null,
+          uuid: 'event-1',
+          session_id: SESSION
+        }
+        turn.stop.abort()
+        yield init
+      }
+    ])
+    await expect(turn.run()).rejects.toThrow()
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+    expect(turn.steer.returnSteer).not.toHaveBeenCalled()
+  })
+
+  it('a failed result from the restarted query is not a read, and the steer is handed back', async () => {
+    const turn = botTurn([
+      interruptedByTheSteer,
+      async function* () {
+        yield init
+        yield { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['failed'], session_id: SESSION }
+      }
+    ])
+    await expect(turn.run()).rejects.toThrow()
+    expect(turn.queries).toHaveLength(2)
+    expect(turn.steer.onSteer).not.toHaveBeenCalled()
+    expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 })

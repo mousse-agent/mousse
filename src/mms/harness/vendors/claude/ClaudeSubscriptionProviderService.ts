@@ -2844,7 +2844,9 @@ export class ClaudeSubscriptionProviderService {
           try {
             for await (const message of query) {
               // Read before the frame is shown, so the steer is in place above what the model says after it; and
-              // before a Stop is checked, so a steer Claude Code did read is not handed back as well.
+              // before a Stop is checked, so a read frame that arrived before the Stop accepts the steer instead of
+              // handing it back. A read whose frame had not reached Mousse when the Stop aborted is not seen: that
+              // steer is still handed back, the at-least-once window the design accepts.
               if (carried && oneShotPromptRead(message, carried.id)) carriedRead()
               if (controller.signal.aborted) metrics.observe(message)
               controller.signal.throwIfAborted()
@@ -3067,6 +3069,8 @@ type OneShotSteer = { text: string; token?: string; steered: () => void }
  * (or `completed`), a frame or result names its id, or the model answers at all. The prompt is that query's only
  * message, so anything the model writes, and a successful result, answers it. Starting the process (`system` frames)
  * is not a read, and nor is a failed result: an interrupt or a Stop that came first ends the query that way too.
+ * Only frames that arrived are checked: if Claude Code read the prompt but the frame showing it had not reached Mousse
+ * when a Stop aborted the query, the steer is handed back anyway (at least once, never lost).
  */
 function oneShotPromptRead(message: unknown, id: string): boolean {
   if (typeof message !== 'object' || message === null) return false
