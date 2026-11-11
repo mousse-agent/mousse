@@ -82,13 +82,14 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
     if (!words || sending) return
     setSending(true)
     const project = local.find((entry) => entry.id === chosenProject)
+    // The composer clears at once: the words move to the request's card in the Drafts pane, which shows the manager
+    // working, then its draft, or the error with Retry and Edit (Edit puts them back here).
+    setText('')
+    setOpen(false)
+    const sent = sendToManager({ text: words, ...(project ? { projectId: project.id, projectName: project.name } : {}), who })
+    openDrafts()
     try {
-      // Returns once the words are sent (or refused): the Drafts pane shows the manager working, then its draft, or the
-      // error with Retry and Edit. The words live on that card, so the composer is free for the next one.
-      await sendToManager({ text: words, ...(project ? { projectId: project.id, projectName: project.name } : {}), who })
-      setText('')
-      setOpen(false)
-      openDrafts()
+      await sent
       void refreshInbox()
     } finally {
       setSending(false)

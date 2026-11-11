@@ -42,9 +42,19 @@ export function threadToastInput(toast: ThreadToastPayload, open: (threadId: str
   }
 }
 
-/** Shows a thread event as a toast, unless the person already has that thread open. */
+/** Pages that show a thread's outcome themselves, and say so for the threads they cover (`quietThreadToasts`). */
+const quietTests = new Set<(threadId: string) => boolean>()
+
+/** A page that shows a thread's outcome itself keeps that thread's toasts quiet while `covers` says so. */
+export function quietThreadToasts(covers: (threadId: string) => boolean): () => void {
+  quietTests.add(covers)
+  return () => { quietTests.delete(covers) }
+}
+
+/** Shows a thread event as a toast, unless the person already has that thread open, or a page already shows it. */
 export function showThreadToast(toast: ThreadToastPayload): void {
   if (useAppStore.getState().activeThreadId === toast.threadId) return
+  for (const covers of quietTests) if (covers(toast.threadId)) return
   showToast(threadToastInput(toast))
 }
 

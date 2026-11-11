@@ -43,6 +43,11 @@ export function lastRunCell(item: AutomationItem, runs: AutomationInbox['runs'] 
   return { tone: 'done', text: runTime(last.at, now), ...(last.detail ? { title: last.detail } : {}) }
 }
 
+/** The next run, in full in its tooltip when the column cuts it short. */
+function NextRun({ text }: { text: string }) {
+  return <span className="inbox-cell" title={text === '—' ? 'Runs on its trigger' : text}>{text}</span>
+}
+
 export function ManageTable({ automations, inbox, expanded, toggling = {}, onToggle, onRunNow, onEdit, onDelete, now, viewerZone }: {
   automations: AutomationItem[]
   inbox: AutomationInbox | null
@@ -110,10 +115,10 @@ export function ManageTable({ automations, inbox, expanded, toggling = {}, onTog
                       {pending !== undefined ? <span className="inbox-cell is-pending" role="status">{pending ? 'Resuming…' : 'Pausing…'}</span>
                         : offline ? <span className="inbox-cell" title={`${item.computer.name} is offline: it runs when that computer is back`}>Offline</span>
                           : !on ? <span className="inbox-cell">Paused</span>
-                            : <span className="inbox-cell">{item.next ? ownedWhenText(item.next.at, now, item.computer, viewerZone) : '—'}</span>}
+                            : <NextRun text={item.next ? ownedWhenText(item.next.at, now, item.computer, viewerZone) : '—'} />}
                     </td>
                     <td data-testid="inbox-manage-last">
-                      <span className="inbox-cell" data-tone={last.tone} {...(last.title ? { title: last.title } : {})}>
+                      <span className="inbox-cell" data-tone={last.tone} title={last.title ?? last.text}>
                         {last.tone === 'running' ? <Loader2 size={12} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : last.tone === 'failed' ? <CircleX size={12} strokeWidth={2} aria-hidden="true" /> : null}
                         {last.text}
                       </span>

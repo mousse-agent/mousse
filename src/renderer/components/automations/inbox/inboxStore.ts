@@ -6,6 +6,8 @@ import type { AutomationInbox, InboxCounts, InboxRun, TuningNote } from '../../.
 import type { TurnPhase, TurnState } from '../../../../shared/types'
 import { createAutomationsClient, type AutomationsClient } from '../../../services/automationsClient'
 import { useAppStore } from '../../../stores/appStore'
+import { quietThreadToasts, threadToastKey } from '../../../lib/threadToasts'
+import { dismissToastByKey } from '../../ui/Toast'
 
 /** What narrows the Runs list: one automation, one project group, words. */
 export interface InboxFilter {
@@ -294,8 +296,21 @@ export function watchRequest(): void {
 
 /** Starts a request: shown at once, kept across a reload for the profile it was sent from, and watched until it ends. */
 export function startRequest(request: ManagerRequest): void {
+  // The last request's toast (its turn stopped or failed) goes: the new request is what the page shows now.
+  const previous = useInboxStore.getState().composing?.threadId
+  if (previous) dismissToastByKey(threadToastKey(previous))
   useInboxStore.setState({ composing: { ...request, profileId: request.profileId ?? useAppStore.getState().profileId } })
   watchRequest()
+}
+
+/**
+ * Adds what the send learned (the manager's thread, then its run) to the request sent at `at`, unless newer words
+ * replaced it; `watch` starts watching its turn. A toast left from the thread's last turn goes: this request is shown.
+ */
+export function attachRequest(at: number, patch: Pick<ManagerRequest, 'threadId' | 'runId' | 'queueItemId'>, watch = false): void {
+  if (patch.threadId) dismissToastByKey(threadToastKey(patch.threadId))
+  updateRequest(at, patch)
+  if (watch && useInboxStore.getState().composing?.at === at) watchRequest()
 }
 
 const requestKey = (profileId: string) => `mousse.automations.request.${profileId}`
@@ -330,6 +345,10 @@ export function restoreRequest(profileId: string): void {
   try { useInboxStore.setState({ composing: loadRequest(profileId) }) } finally { switchingProfile = false }
   watchRequest()
 }
+
+// The manager's turn ends in the Drafts pane (its draft, its error with Retry, or its reply): while the Automations page
+// is open, the thread's own "Stopped" or "Finished" toast would only repeat it, worse.
+quietThreadToasts((threadId) => useAppStore.getState().scheduledOpen && useInboxStore.getState().composing?.threadId === threadId)
 
 // A request is kept under the profile it was sent from, whatever profile is current when it changes or ends.
 useInboxStore.subscribe((state, previous) => {

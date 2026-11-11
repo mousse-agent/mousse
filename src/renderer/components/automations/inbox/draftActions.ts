@@ -5,7 +5,7 @@ import type { JobSchedule } from '../../../../shared/types'
 import { createAutomationsClient, type AutomationWhoPick } from '../../../services/automationsClient'
 import { createPersonalBotsClient } from '../../../services/personalBotsClient'
 import { useAppStore } from '../../../stores/appStore'
-import { errorText, openEdit, refreshInbox, startRequest, useInboxStore, type ManagerRequest } from './inboxStore'
+import { attachRequest, errorText, openEdit, refreshInbox, startRequest, updateRequest, useInboxStore, type ManagerRequest } from './inboxStore'
 
 const api = () => createAutomationsClient(window.mousse.platformRequest)
 
@@ -59,31 +59,31 @@ export async function sendToManager(input: { text: string; projectId?: string; p
     status: 'working',
     known
   }
+  // The request shows as working at once, before anything is asked of the service: the composer is already clear.
   // Anything that stops the words going out (a refusal, an unreachable service) shows on the request's own card, with
   // Retry and Edit: the one place a request's outcome shows.
-  let threadId: string | undefined
+  startRequest({ ...request, ...(input.botId ? { botId: input.botId } : {}) })
+  const at = request.at
   try {
     if (input.who !== undefined) await client.nextWho(input.botId, pickOf(input.who))
     if (input.botId) {
       await createPersonalBotsClient(window.mousse.platformRequest).send(input.botId, message, crypto.randomUUID())
-      startRequest({ ...request, botId: input.botId })
       return
     }
     // Asked on every send: it also tells the daemon which project the manager's turn works in.
-    threadId = await client.managerThread(input.projectId)
+    const threadId = await client.managerThread(input.projectId)
+    attachRequest(at, { threadId })
     // `ack`: the send answers once its run is committed; the turn's outcome comes from its events (`watchRequest`).
     const result = await window.mousse.orchestrator.sendToThread(threadId, { content: message, await: 'ack' })
     // A refused send ran nothing. An uncertain one (no answer) is watched as sent.
     if (result?.error && result.requestAcknowledged === false) throw new Error(errorText(result.error))
-    startRequest({
-      ...request,
-      threadId,
+    attachRequest(at, {
       ...(result?.runId ? { runId: result.runId } : {}),
       // Behind an earlier turn: Stop takes this message out of the queue.
       ...(result?.queued && result.queueItem?.id ? { queueItemId: result.queueItem.id } : {})
-    })
+    }, true)
   } catch (cause) {
-    startRequest({ ...request, ...(threadId ? { threadId } : {}), ...(input.botId ? { botId: input.botId } : {}), status: 'failed', error: errorText(cause) })
+    if (useInboxStore.getState().composing?.status === 'working') updateRequest(at, { status: 'failed', error: errorText(cause) })
   }
 }
 

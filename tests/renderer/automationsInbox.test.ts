@@ -377,6 +377,21 @@ describe('creating an automation', () => {
     expect(JSON.parse(localStorage.getItem('mousse.automations.request.default')!)).toMatchObject({ runId: RUN_ID, status: 'working' })
   })
 
+  it('clears the composer and shows the request working before the service has answered the send', async () => {
+    const { mousse, create } = await mountComposer()
+    let answer: (value: unknown) => void = () => undefined
+    mousse.orchestrator.sendToThread.mockImplementationOnce(() => new Promise((done) => { answer = done }))
+    const input = await create('Every weekday at 9, triage new issues')
+    // The send is still out: the words are on the card, not in the composer.
+    expect(input.value).toBe('')
+    expect(useInboxStore.getState().composing).toMatchObject({ status: 'working', text: 'Every weekday at 9, triage new issues', threadId: 'manager' })
+    expect(useInboxStore.getState().composing?.runId).toBeUndefined()
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
+    await act(async () => { answer({ message: '', actions: [], runId: RUN_ID, accepted: true }) })
+    await act(async () => {})
+    expect(useInboxStore.getState().composing?.runId).toBe(RUN_ID)
+  })
+
   it('learns the outcome from the turn\'s events: another turn is not its; done lights the draft it wrote', async () => {
     const { items, emit, create } = await mountComposer()
     await create('Every weekday at 9, triage new issues')
