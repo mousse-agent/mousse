@@ -402,19 +402,6 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     await expect(crashed).resolves.toMatchObject({ code: 'interrupted' })
   }, 40_000)
 
-  it('a steer sent while Pi had not accepted the prompt comes back once when Stop kills the process', async () => {
-    const { engine, project } = setup()
-    const t = turn(project('p', { onPrompt: 'slowAck', ackDelayMs: 5000 }))
-    const returned: string[] = []
-    t.ctl.returnSteer = (text) => void returned.push(text)
-    const pending = run(engine, t)
-    await vi.waitFor(() => expect(t.refs.some((ref) => ref.sessionId)).toBe(true), { timeout: 10_000 })
-    await expect(engine.steer(t.refs.at(-1)!, 'typed during compaction')).resolves.toBe('delivered')
-    t.controller.abort()
-    await expect(pending).resolves.toMatchObject({ aborted: true })
-    expect(returned).toEqual(['typed during compaction'])
-  }, 30_000)
-
   it('stop() and thread Stop wait for the cleanup after an explicit kill of a warm process', async () => {
     let release!: () => void
     const held = new Promise<void>((resolve) => { release = resolve })
@@ -485,7 +472,7 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     await expect(pending).resolves.toMatchObject({ aborted: true })
   }, 30_000)
 
-  it('a ref names its own turn from the first one: steer, Stop and kill during a cold start reach no other thread', async () => {
+  it('a ref names its own turn from the first one: Stop and kill during a cold start reach no other thread', async () => {
     const { engine, spawned, project } = setup()
     const busy = turn(project('b', { onPrompt: 'hang' }), { threadId: 'b' })
     const runningB = run(engine, busy)
@@ -495,8 +482,7 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     const refA = cold.refs[0]
     expect(refA.nativeTurnId).toBeTruthy()
     expect(refA.sessionId).toBeUndefined()
-    // During A's cold start: a steer for A goes nowhere, and kill/Stop of A leave B running.
-    await expect(engine.steer(refA, 'for A')).resolves.toBe('not_active')
+    // During A's cold start: kill/Stop of A leave B running.
     engine.terminate(refA)
     await expect(engine.interrupt(refA)).resolves.toBe('interrupted')
     await expect(startingA).resolves.toMatchObject({ aborted: true })

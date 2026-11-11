@@ -61,6 +61,15 @@ export function resultFrame(options: { uuids?: string[]; text?: string; origin?:
   }
 }
 
+/** Claude Code's word on a pushed message: `started` when a turn takes it (the model reads it). */
+export const lifecycle = (uuid: string, state: 'queued' | 'started' | 'completed' | 'cancelled'): Frame => ({
+  type: 'command_lifecycle',
+  command_uuid: uuid,
+  state,
+  uuid: `lifecycle-${uuid}-${state}`,
+  session_id: SESSION
+})
+
 export const roster = (...tasks: Array<{ id: string; type?: string; ambient?: boolean }>): Frame => ({
   type: 'system',
   subtype: 'background_tasks_changed',
@@ -86,6 +95,10 @@ export class FakeClaudeProcess {
   /** The options of each `interrupt()` call. */
   readonly interruptOptions: Array<{ cancelQueued?: boolean } | undefined> = []
   stoppedTasks: string[] = []
+  /** The ids `cancelAsyncMessage` was asked to drop, in order. */
+  readonly cancelAsyncCalls: string[] = []
+  /** Whether the process has `cancelAsyncMessage` (an older Claude Code has no per-message cancel). */
+  cancelAsync = true
   /** The roster's tasks that have not ended: `local_agent` or `local_bash` by id. */
   private readonly liveTasks = new Map<string, string>()
   /**
@@ -93,6 +106,26 @@ export class FakeClaudeProcess {
    * undefined, like an older one that cannot say what it cancelled.
    */
   receipts = true
+  /**
+   * A Claude Code that sends interrupt receipts but predates `interrupt_cancel_queued_v1`: it ignores `cancelQueued`,
+   * answers like a plain interrupt (`still_queued`, no `cancelled`), and then (spike S1) starts what is still queued at
+   * once as a new turn, unless its process was closed first. What it started that way is in `ranAfterInterrupt`.
+   */
+  ignoresCancelQueued = false
+  /** The ids an interrupt left queued that the process then ran as turns of their own (`ignoresCancelQueued`). */
+  readonly ranAfterInterrupt: string[] = []
+  /**
+   * Like the real Claude Code, the process keeps running for a while after its input closes (the SDK's close only ends
+   * its stdin and signals it seconds later): the turn it runs goes on, and when that turn's result is written it starts
+   * what is still queued as turns of their own (`ranAfterClose`). Only a signal (`signals`) ends it.
+   */
+  lingersAfterClose = false
+  /** The ids the process ran after its input closed (`lingersAfterClose`). */
+  readonly ranAfterClose: string[] = []
+  /** The pid its process transport shows, as the Agent SDK's does; without one the query has no transport. */
+  pid: number | undefined
+  /** The signals sent through the process transport's handle, in order. */
+  readonly signals: string[] = []
   /** While set, `setPermissionMode` and `backgroundTasks` wait for it. */
   permissionGate: Promise<unknown> | undefined
   /** While set, `interrupt()` waits for it before it answers (a slow receipt). */
@@ -131,7 +164,7 @@ export class FakeClaudeProcess {
     }
     this.inputEnded = true
     // Like the real process: with its input closed it finishes what it was asked and exits.
-    this.end()
+    if (!this.lingersAfterClose) this.end()
   }
 
   /** The text of the n-th message the process read. */
@@ -153,11 +186,15 @@ export class FakeClaudeProcess {
       this.trackTasks(frame)
       const stamped = frame.user_message_uuids
       if (Array.isArray(stamped)) for (const id of stamped) this.started.add(String(id))
+      if (frame.type === 'command_lifecycle' && frame.state === 'started') this.started.add(String(frame.command_uuid))
       if (this.waiting) {
         const resolve = this.waiting
         this.waiting = undefined
         resolve({ value: frame as unknown as SDKMessage, done: false })
       } else this.frames.push(frame)
+      // A turn ended while the process lingers with its input closed: it starts what is still queued.
+      if (frame.type === 'result' && this.lingersAfterClose && (this.closed || this.inputEnded))
+        setTimeout(() => this.runQueued(this.ranAfterClose), 0)
     }
   }
 
@@ -205,6 +242,16 @@ export class FakeClaudeProcess {
     this.emit(textDelta(text, uuids[uuids.length - 1], { user_message_uuids: uuids }), resultFrame({ uuids, text }))
   }
 
+  /** Each message still queued starts as a turn of its own and runs to its result, as after an interrupt (spike S1). */
+  private runQueued(ran: string[] = this.ranAfterInterrupt): void {
+    for (const id of this.queued) {
+      if (this.ended) return
+      ran.push(id)
+      this.emit(lifecycle(id, 'started'))
+      this.answer(id, 'ran after the interrupt')
+    }
+  }
+
   /** The process took this message into the turn it is running (folded in) without a frame naming it. */
   markStarted(uuid: string): void {
     this.started.add(uuid)
@@ -238,7 +285,19 @@ export class FakeClaudeProcess {
       },
       [Symbol.asyncDispose]: async () => undefined
     } as AsyncGenerator<SDKMessage>
-    return Object.assign(iterator, {
+    // The SDK's process handle: a signal ends the process at once.
+    const handle = {
+      pid: this.pid,
+      exitCode: null as number | null,
+      signalCode: null as string | null,
+      kill: (signal: string = 'SIGTERM') => {
+        this.signals.push(signal)
+        handle.signalCode = signal
+        this.end()
+        return true
+      }
+    }
+    return Object.assign(iterator, this.pid === undefined ? {} : { transport: { process: handle } }, {
       interrupt: async (options?: { cancelQueued?: boolean }) => {
         this.interrupts++
         this.interruptOptions.push(options)
@@ -249,6 +308,10 @@ export class FakeClaudeProcess {
         for (const [id, type] of [...this.liveTasks]) if (type === 'local_agent') this.emit(notification(id, 'stopped'))
         if (!this.receipts) return undefined
         const queued = this.queued
+        if (this.ignoresCancelQueued) {
+          setTimeout(() => this.runQueued(), 0)
+          return { still_queued: queued }
+        }
         if (!options?.cancelQueued) return { still_queued: queued }
         for (const id of queued) this.cancelled.add(id)
         return { still_queued: [], cancelled: queued }
@@ -256,9 +319,17 @@ export class FakeClaudeProcess {
       stopTask: async (taskId: string) => {
         this.stoppedTasks.push(taskId)
       },
+      // Like the real process: a message still in the queue is dropped (true); one a turn already took is not (false).
+      cancelAsyncMessage: async (uuid: string) => {
+        if (!this.cancelAsync) throw new Error('cancel_async_message is not supported')
+        this.cancelAsyncCalls.push(uuid)
+        if (!this.queued.includes(uuid)) return false
+        this.cancelled.add(uuid)
+        return true
+      },
       close: () => {
         this.closed = true
-        this.end()
+        if (!this.lingersAfterClose) this.end()
       },
       setPermissionMode: async (mode: string) => {
         await this.permissionGate
@@ -283,8 +354,15 @@ export class FakeClaudeCli {
     process.answer(String(message.uuid), `reply to ${process.inputs.length}`)
   }
 
+  /** Each new process lingers after its input closes (`FakeClaudeProcess.lingersAfterClose`). */
+  lingersAfterClose = false
+  /** The pid each new process's transport shows (`FakeClaudeProcess.pid`); none by default. */
+  pid: number | undefined
+
   readonly query = ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }): Query => {
     const process = new FakeClaudeProcess(prompt, options, () => this.reply)
+    process.lingersAfterClose = this.lingersAfterClose
+    process.pid = this.pid
     this.processes.push(process)
     return process.asQuery()
   }

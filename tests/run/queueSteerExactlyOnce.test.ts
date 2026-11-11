@@ -6,6 +6,7 @@
  * appears. Also when Steer is clicked twice, when the turn ends as Steer lands, after Stop, and while the queue
  * drains.
  */
+import { AsyncResource } from 'node:async_hooks'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -670,5 +671,417 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
 
     expect(w.adapter.prompts).toEqual(['first', 'A', 'B'])
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+  })
+})
+
+type Drain = { text: string; token: string }
+
+/**
+ * A provider whose held turn leaves every drain, take, hand-back and acceptance to the test, the way Claude, Codex and
+ * Pi take steers asynchronously and can have several drains outstanding. However its turn ends (a reply, a Stop, a
+ * failure or a crash of its process), it hands back each drain it has not taken, as their `returnSteer`, `handBack` and
+ * `died` paths do.
+ */
+class ManualSteerAdapter implements ProviderAdapter {
+  readonly driver = 'claude' as const
+  readonly capabilities = CLAUDE_SUBSCRIPTION_CAPABILITIES
+  readonly prompts: string[] = []
+  /** Every steer text the provider accepted, in order. */
+  readonly accepted: string[] = []
+  holdPrompts = new Set<string>()
+  /** The turn's end hands back drains it took and did not accept too, as Claude Code's does for a steer it never read. */
+  handBackTaken = false
+  turn: {
+    prompt: string; ctl: TurnControl; sink: TurnSink; drains: Drain[]; taken: Set<string>; end: (how: 'reply' | 'fail' | 'crash') => void
+    /** Runs `fn` in the turn's own async context, as the provider's callbacks run. */
+    run: <T>(fn: () => T) => T
+  } | undefined
+
+  configured(): boolean {
+    return true
+  }
+
+  drain(): Drain {
+    const turn = this.turn!
+    const entry = turn.run(() => turn.ctl.drainSteerEntry!())
+    if (!entry) throw new Error('nothing to drain')
+    turn.drains.push(entry)
+    return entry
+  }
+
+  take(entry: Drain): void {
+    const turn = this.turn!
+    turn.taken.add(entry.token)
+    turn.run(() => turn.ctl.steerTaken!(entry.token))
+  }
+
+  /** Hands `entry` back by its token. */
+  giveBack(entry: Drain): void {
+    const turn = this.turn!
+    turn.drains = turn.drains.filter((drain) => drain !== entry)
+    turn.run(() => turn.ctl.returnSteer!(entry.text, entry.token))
+  }
+
+  /** Reports `text` accepted under `token`, as an adapter does. */
+  report(text: string, token: string): void {
+    const turn = this.turn!
+    turn.run(() => turn.sink.steerAccepted(text, token))
+  }
+
+  /** The model read `entry`: taken, then accepted under `token` (its own unless the test passes another). */
+  accept(entry: Drain, token = entry.token): void {
+    const turn = this.turn!
+    if (!turn.taken.has(entry.token)) this.take(entry)
+    turn.drains = turn.drains.filter((drain) => drain !== entry)
+    this.accepted.push(entry.text)
+    this.report(entry.text, token)
+  }
+
+  async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+    this.prompts.push(input.prompt)
+    const providerRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
+    sink.providerRef(providerRef)
+    let how: 'reply' | 'fail' | 'crash' | 'stop' = 'reply'
+    if (this.holdPrompts.has(input.prompt)) {
+      const inTurn = AsyncResource.bind((fn: () => unknown) => fn())
+      const turn = {
+        prompt: input.prompt, ctl, sink, drains: [] as Drain[], taken: new Set<string>(), end: (_how: 'reply' | 'fail' | 'crash') => {},
+        run: <T>(fn: () => T): T => inTurn(fn) as T
+      }
+      how = await new Promise((resolve) => {
+        turn.end = resolve
+        if (input.signal.aborted) resolve('stop')
+        else input.signal.addEventListener('abort', () => resolve('stop'), { once: true })
+        this.turn = turn
+      })
+      if (this.turn === turn) this.turn = undefined
+      for (const entry of turn.drains.splice(0)) if (!turn.taken.has(entry.token) || this.handBackTaken) ctl.returnSteer!(entry.text, entry.token)
+      if (how === 'fail' || how === 'crash') throw new Error(`provider ${how}`)
+    }
+    const aborted = how === 'stop'
+    const text = aborted ? '' : `reply to ${input.prompt}`
+    if (!aborted) {
+      sink.text({ phase: 'complete', content: text, contentIndex: 0 })
+      host.context.nativeHistoryAfterTurn(text)
+    }
+    return {
+      text, aborted, modelName: 'Scripted', totalResponseTimeMs: 1,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'scripted', nativeMessages: [], providerRef
+    }
+  }
+
+  async interrupt(): Promise<'interrupted' | 'not_active'> {
+    return 'not_active'
+  }
+}
+
+/**
+ * Acceptance per token (docs/design/steer-and-interruptions.md §2.6): each drain is accepted by its own token, with its
+ * text, so accepting one drain never acknowledges another that is still outstanding.
+ */
+describe('A steer is accepted by its own drain token', () => {
+  let home: string | undefined
+  let previousHome: string | undefined
+  let daemon: Phase6Daemon | undefined
+
+  afterEach(async () => {
+    await daemon?.stop().catch(() => undefined)
+    daemon = undefined
+    if (previousHome === undefined) delete process.env.MOUSSE_HOME
+    else process.env.MOUSSE_HOME = previousHome
+    if (home) rmSync(home, { recursive: true, force: true })
+    home = undefined
+  })
+
+  const world = () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-steer-token-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    mkdirSync(join(home, 'project'))
+    const adapter = new ManualSteerAdapter()
+    const d = phase6Daemon(home, [adapter])
+    daemon = d
+    const project = d.projects.openProject(join(home, 'project'))
+    const thread = d.store.createThread('Steer', project.id)
+    d.orch.setThreadModelOverride(thread.id, MODEL)
+    let sends = 0
+    const send = (text: string) => d.orch.send(text, false, { threadId: thread.id, clientRequestId: `send-${++sends}` })
+    /** The durable queue as `[content, state]`. */
+    const queue = () => readDurableQueue(d.store, thread.id).map((item) => [item.content, item.state])
+    const shownUserMessages = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden).map((message) => message.content)
+    /** How many times `text` is a user message of the model's context. */
+    const inContext = (text: string) => d.orch.getNativeContext(thread.id).messages.filter((message) => message.role === 'user' && JSON.stringify(message).includes(JSON.stringify(text))).length
+    const acceptedIds = () => d.orch.getNativeContext(thread.id).acceptedSteerItemIds ?? []
+    const idle = async (label: string): Promise<void> => {
+      await waitFor(() => !d.orch.isActiveTurnRunning(thread.id) && readDurableQueue(d.store, thread.id).length === 0 && d.engine.getActiveRun(thread.id) === null, label)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    /** A held turn `prompt` with `texts` queued behind it. */
+    const heldTurn = async (prompt: string, texts: string[]) => {
+      adapter.holdPrompts.add(prompt)
+      const running = send(prompt)
+      await waitFor(() => adapter.turn?.prompt === prompt, `turn ${prompt}`)
+      const items: Record<string, string> = {}
+      for (const text of texts) {
+        const queued = await send(text)
+        expect(queued.queued).toBe(true)
+        items[text] = queued.queueItem!.id
+      }
+      return { running, items }
+    }
+    /** Steers `text` and drains it alone, under its own token. */
+    const steerAndDrain = (items: Record<string, string>, text: string): Drain => {
+      expect(d.orch.promoteQueueItem(thread.id, items[text])).toEqual({ ok: true })
+      const entry = adapter.drain()
+      expect(entry.text).toBe(text)
+      return entry
+    }
+    /** Two drains outstanding, then only A accepted. */
+    const twoDrainsOneAccepted = async () => {
+      const { running, items } = await heldTurn('first', ['A', 'B'])
+      const a = steerAndDrain(items, 'A')
+      const b = steerAndDrain(items, 'B')
+      expect(a.token).not.toBe(b.token)
+      adapter.accept(a)
+      return { running, items, a, b }
+    }
+    return { d, adapter, thread, send, queue, shownUserMessages, inContext, acceptedIds, idle, heldTurn, steerAndDrain, twoDrainsOneAccepted }
+  }
+
+  /** Right after A's acceptance: A is saved and gone from the queue; B is still the queue's `steering` item, unaccepted. */
+  const expectOnlyAAccepted = (w: ReturnType<typeof world>, items: Record<string, string>): void => {
+    expect(w.queue()).toEqual([['B', 'steering']])
+    expect(w.acceptedIds()).not.toContain(items.B)
+    expect(w.inContext('A')).toBe(1)
+    expect(w.inContext('B')).toBe(0)
+  }
+
+  it('A and B drained separately, A accepted, then Stop: B is back first in the queue, once, and A stays read', async () => {
+    const w = world()
+    const { running, items } = await w.twoDrainsOneAccepted()
+    expectOnlyAAccepted(w, items)
+
+    await w.d.orch.abortRun(w.d.engine.getActiveRun(w.thread.id)!.runId, 'stop-1', w.thread.id)
+    await running
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    expect(w.queue()).toEqual([['B', 'pending']])
+    expect(w.shownUserMessages()).toEqual(['first', 'A'])
+
+    // The person sends again: B runs once, as its own turn, and A never runs again.
+    expect(w.d.orch.promoteQueueItem(w.thread.id, items.B)).toEqual({ ok: true })
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
+  })
+
+  it('A and B drained separately, A accepted, then a failed continuation: B runs once after the turn', async () => {
+    const w = world()
+    const { running, items } = await w.twoDrainsOneAccepted()
+    expectOnlyAAccepted(w, items)
+
+    w.adapter.turn!.end('fail')
+    await running.catch(() => undefined)
+    await waitFor(() => w.adapter.prompts.includes('B'), 'B runs')
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
+    expect(w.shownUserMessages().filter((text) => text === 'B')).toHaveLength(1)
+  })
+
+  it('A and B drained separately, A accepted, then the provider crashes: B runs once after the turn', async () => {
+    const w = world()
+    const { running, items } = await w.twoDrainsOneAccepted()
+    expectOnlyAAccepted(w, items)
+
+    // The provider's process died; its `died` path hands B back, and the turn fails.
+    w.adapter.turn!.end('crash')
+    await running.catch(() => undefined)
+    await waitFor(() => w.adapter.prompts.includes('B'), 'B runs')
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
+    expect(w.shownUserMessages().filter((text) => text === 'B')).toHaveLength(1)
+  })
+
+  it('A and B drained separately, both accepted: each is saved and dropped by its own token, once', async () => {
+    const w = world()
+    const { running, items, b } = await w.twoDrainsOneAccepted()
+    expectOnlyAAccepted(w, items)
+    w.adapter.accept(b)
+    expect(w.queue()).toEqual([])
+    expect(w.acceptedIds()).toEqual([])
+    expect([w.inContext('A'), w.inContext('B')]).toEqual([1, 1])
+
+    w.adapter.turn!.end('reply')
+    await running
+    await w.idle('turn done')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.shownUserMessages()).toEqual(['first', 'A', 'B'])
+  })
+
+  it('several steers under one token are accepted together, once', async () => {
+    const w = world()
+    const { running, items } = await w.heldTurn('first', ['A', 'B', 'C'])
+    for (const text of ['A', 'B', 'C']) expect(w.d.orch.promoteQueueItem(w.thread.id, items[text])).toEqual({ ok: true })
+    const all = w.adapter.drain()
+    expect(all.text).toBe(['A', 'B', 'C'].join(NL))
+    w.adapter.accept(all)
+    expect(w.queue()).toEqual([])
+    expect(w.acceptedIds()).toEqual([])
+
+    w.adapter.turn!.end('reply')
+    await running
+    await w.idle('turn done')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.inContext(['A', 'B', 'C'].join(NL))).toBe(1)
+    expect(w.shownUserMessages()).toEqual(['first', 'A', 'B', 'C'])
+  })
+
+  it('a second promotion of an item whose drain is outstanding changes nothing, after another drain was accepted', async () => {
+    const w = world()
+    const { running, items, b } = await w.twoDrainsOneAccepted()
+    // B is drained and not accepted: Steer on it again is a no-op, and nothing new is pending.
+    expect(w.d.orch.promoteQueueItem(w.thread.id, items.B)).toEqual({ ok: true })
+    expect(w.d.orch.getOrCreateSession(w.thread.id).activeTurn?.pendingSteer ?? []).toEqual([])
+    expect(w.queue()).toEqual([['B', 'steering']])
+    w.adapter.accept(b)
+
+    w.adapter.turn!.end('reply')
+    await running
+    await w.idle('turn done')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.adapter.accepted).toEqual(['A', 'B'])
+    expect([w.inContext('A'), w.inContext('B')]).toEqual([1, 1])
+    expect(w.shownUserMessages()).toEqual(['first', 'A', 'B'])
+  })
+
+  it('an acceptance with a token already accepted, or another turn\'s token, changes nothing', async () => {
+    const w = world()
+    const { running, items, a } = await w.twoDrainsOneAccepted()
+    // A second acceptance of A: the text is not saved twice, and B is not acknowledged with it.
+    w.adapter.report(a.text, a.token)
+    expectOnlyAAccepted(w, items)
+    const firstTurnToken = a.token
+    w.adapter.turn!.end('reply')
+    await running
+    // The unread B runs as its own turn after the first; a new turn then gets C.
+    await waitFor(() => w.adapter.prompts.includes('B'), 'B runs')
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+
+    const second = await w.heldTurn('second', ['C'])
+    const c = w.steerAndDrain(second.items, 'C')
+    // The first turn's token names nothing in this turn: C stays unread.
+    w.adapter.accept(c, firstTurnToken)
+    expect(w.queue()).toEqual([['C', 'steering']])
+    expect(w.acceptedIds()).not.toContain(second.items.C)
+    expect(w.inContext('C')).toBe(0)
+    // Its own token accepts it.
+    w.adapter.report(c.text, c.token)
+    expect(w.queue()).toEqual([])
+    expect(w.inContext('C')).toBe(1)
+
+    w.adapter.turn!.end('reply')
+    await second.running
+    await w.idle('second done')
+    expect(w.adapter.prompts).toEqual(['first', 'B', 'second'])
+    expect(w.inContext('A')).toBe(1)
+  })
+
+  it('a drain handed back restores only its own items, and a later drain of them is accepted once', async () => {
+    const w = world()
+    const { running, b } = await w.twoDrainsOneAccepted()
+    // B could not be used: handed back by its token, it is pending in the turn again and drained anew.
+    w.adapter.giveBack(b)
+    const again = w.adapter.drain()
+    expect(again.text).toBe('B')
+    expect(again.token).not.toBe(b.token)
+    // The old token is spent.
+    w.adapter.report(b.text, b.token)
+    expect(w.queue()).toEqual([['B', 'steering']])
+    w.adapter.accept(again)
+    expect(w.queue()).toEqual([])
+
+    w.adapter.turn!.end('reply')
+    await running
+    await w.idle('turn done')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect([w.inContext('A'), w.inContext('B')]).toEqual([1, 1])
+  })
+
+  it('a drain the provider took, then accepted by its token, runs once and its row is dropped; a later hand-back is ignored', async () => {
+    const w = world()
+    const { running, items } = await w.heldTurn('first', ['A'])
+    const a = w.steerAndDrain(items, 'A')
+    // Taken first, as Pi, Claude Code and Codex report it, and only then read.
+    w.adapter.take(a)
+    expect(w.queue()).toEqual([['A', 'steering']])
+    expect(w.inContext('A')).toBe(0)
+    w.adapter.accept(a)
+    expect(w.queue()).toEqual([])
+    expect(w.acceptedIds()).toEqual([])
+    expect(w.inContext('A')).toBe(1)
+    // A provider bug: the accepted drain handed back. The model has it, so nothing comes back.
+    w.adapter.giveBack(a)
+    expect(w.d.orch.getOrCreateSession(w.thread.id).activeTurn?.pendingSteer ?? []).toEqual([])
+
+    w.adapter.turn!.end('reply')
+    await running
+    await w.idle('turn done')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
+    expect(w.shownUserMessages()).toEqual(['first', 'A'])
+  })
+
+  it('a drain the provider took and handed back, while another was accepted by its token, is restored whole and runs once', async () => {
+    const w = world()
+    const { running, items, b } = await w.twoDrainsOneAccepted()
+    w.adapter.take(b)
+    expectOnlyAAccepted(w, items)
+    // B was taken and never read: handed back by its token, it is restored whole (its row, its identity), never as
+    // text alone, which would run beside the row the step before the next claim finds still `steering`.
+    w.adapter.giveBack(b)
+    const pending = w.d.orch.getOrCreateSession(w.thread.id).activeTurn?.pendingSteer ?? []
+    expect(pending.map((steer) => [steer.text, steer.itemId])).toEqual([['B', items.B]])
+
+    w.adapter.turn!.end('reply')
+    await running
+    await waitFor(() => w.adapter.prompts.includes('B'), 'B runs')
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
+    // B shows once, as its own turn's prompt; its copy inside the first turn is hidden.
+    expect(w.shownUserMessages()).toEqual(['first', 'A', 'B'])
+  })
+
+  it('a drain the provider took and had not read when Stop came, handed back as the turn ends, waits queued once and runs once', async () => {
+    const w = world()
+    const { running, items, b } = await w.twoDrainsOneAccepted()
+    // B was pushed to the provider (taken) and the model has not read it, as Claude Code with a steer it has not started.
+    w.adapter.take(b)
+    w.adapter.handBackTaken = true
+    expectOnlyAAccepted(w, items)
+
+    await w.d.orch.abortRun(w.d.engine.getActiveRun(w.thread.id)!.runId, 'stop-1', w.thread.id)
+    await running
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    expect(w.queue()).toEqual([['B', 'pending']])
+    expect(w.acceptedIds()).not.toContain(items.B)
+    expect(w.inContext('B')).toBe(0)
+    expect(w.shownUserMessages()).toEqual(['first', 'A'])
+    // Nothing runs it until the person sends it.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(w.adapter.prompts).toEqual(['first'])
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, items.B)).toEqual({ ok: true })
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
   })
 })

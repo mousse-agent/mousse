@@ -277,7 +277,6 @@ describe('Codex', () => {
       standaloneWorkspace: vi.fn(() => '/standalone'),
       configured: () => true,
       interrupt: vi.fn(),
-      steer: vi.fn(),
       userSetup: vi.fn()
     } as unknown as CodexClient
     const adapter = new CodexAdapter(() => client)

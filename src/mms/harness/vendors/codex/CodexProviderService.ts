@@ -450,7 +450,8 @@ export type CodexChatInput = {
   steerTaken?: (token?: string) => void
   /** Hands back a drained steer no turn took (a Stop, a failed turn, a refused `turn/start`): it is not lost. */
   returnSteer?: (text: string, token?: string) => void
-  onSteer?: (text: string) => void
+  /** A drained steer is read by the turn; `token` names its drain (`drainSteerEntry`), when it had one. */
+  onSteer?: (text: string, token?: string) => void
   /** Liveness while the turn only waits for the native helpers it started. */
   onHeartbeat?: () => void
 }
@@ -2495,18 +2496,6 @@ export class CodexProviderService {
     })
   }
 
-  /** Adds `text` to the running turn on `codexThreadId` (`turn/steer`). */
-  async steer(codexThreadId: string | undefined, text: string): Promise<'delivered' | 'not_active'> {
-    const run = codexThreadId ? this.turns.get(codexThreadId) : undefined
-    const conn = this.app?.conn
-    if (!run?.turnId || !conn || run.signal.aborted) return 'not_active'
-    try {
-      await conn.request('turn/steer', { threadId: run.codexThreadId, expectedTurnId: run.turnId, input: [textInput(text)] })
-      return 'delivered'
-    } catch {
-      return 'not_active'
-    }
-  }
 
   /** Remembers the turn of a thread no run owns yet: a helper's first events can beat the item that names it. */
   private noteStray(notification: CodexNotification, threadId: string): void {
@@ -2971,7 +2960,9 @@ export class CodexProviderService {
         const steer = (entry ? entry.text : input.drainSteer?.())?.trim()
         if (!steer) return
         if (entry?.cut) return cut({ text: steer, ...(entry.token ? { token: entry.token } : {}) })
-        input.onSteer?.(steer)
+        // Accepted by its drain's token, when the drain has one (`TurnSink.steerAccepted`).
+        if (entry?.token) input.onSteer?.(steer, entry.token)
+        else input.onSteer?.(steer)
         deliver(steer)
       }
       if (input.drainSteer || input.drainSteerEntry) {
@@ -3035,7 +3026,8 @@ export class CodexProviderService {
         // The server took the turn that carries the cut messages: they are read now, and the reply goes on below them.
         for (const entry of cutStarting.splice(0)) {
           input.steerTaken?.(entry.token)
-          input.onSteer?.(entry.text)
+          if (entry.token) input.onSteer?.(entry.text, entry.token)
+          else input.onSteer?.(entry.text)
         }
         input.onSession?.({ codexThreadId, turnId: current.turnId })
         // A person's message drained before the turn existed cuts it at once; it goes next with everything held.

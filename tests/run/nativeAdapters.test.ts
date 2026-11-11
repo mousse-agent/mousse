@@ -348,7 +348,6 @@ describe('CodexAdapter', () => {
         standaloneWorkspace: vi.fn((threadId: string) => `/standalone/${threadId}`),
         configured: () => true,
         interrupt: vi.fn(),
-        steer: vi.fn(),
         userSetup: vi.fn()
       }) as unknown as CodexClient
     const stopped = () => {

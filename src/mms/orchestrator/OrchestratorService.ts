@@ -11403,6 +11403,24 @@ export class OrchestratorService extends EventEmitter {
         ...(planning.failed && !planning.nativeFork ? { handoffUnplanned: true } : {}),
         signal: turn.abort.signal
       }
+      // Every drain is remembered under its own token until the provider has accepted the text, so a drain
+      // the provider hands back restores exactly what that drain took, whatever was drained since, and an
+      // acceptance acknowledges exactly that drain's items. Tokens are unique to this turn: another turn's
+      // token is never mistaken for one of these.
+      const drained = new Map<string, { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
+      // Drains the provider took (`steerTaken`) and has not reported read: still restorable whole, and accepted by token.
+      const takenDrains = new Map<string, { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
+      // Drains the turn accepted (text saved, rows dropped): the model has them.
+      const acceptedDrains = new Set<string>()
+      // An acceptance with no token (`steerAccepted`, `nativeMessages`) saves every drained item: every taken drain is
+      // accepted with it.
+      const acceptTakenDrains = (): void => {
+        for (const token of takenDrains.keys()) acceptedDrains.add(token)
+        takenDrains.clear()
+      }
+      const drainScope = `${turnId}:${randomUUID().slice(0, 8)}`
+      let drains = 0
+      let returnedAhead = 0
       const turnSink: TurnSink = {
         text: (event) => this.handleStreamingTextEvent(event),
         thinking: (event) => this.handleStreamingThinkingEvent(event),
@@ -11471,14 +11489,46 @@ export class OrchestratorService extends EventEmitter {
           })
         },
         providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),
-        steerAccepted: (text) => {
+        steerAccepted: (text, token) => {
+          // With a token, only that drain is accepted: its text and its items' ids are saved together, then its
+          // rows leave the queue. A drain still outstanding stays unread, so a crash or a Stop brings it back.
+          // A token this turn does not know (another turn's, or one already accepted or handed back) changes nothing.
+          // The drain is found whether or not the provider reported it taken (`steerTaken` moves it to `takenDrains`).
+          const entry = token === undefined ? undefined : drained.get(token) ?? takenDrains.get(token)
+          if (token !== undefined && !entry) {
+            // A provider bug if it happens: worth seeing without debug logging. Ids and counts only, never the text.
+            logWarn('OrchestratorService', 'steer acceptance for an unknown or already settled drain ignored', undefined, {
+              threadId: session.threadId,
+              ...(engineRunId ? { runId: engineRunId } : {}),
+              // The drain token names a drain (`drain-<turn>-N`), not a credential; a key named `token` would be redacted.
+              drain: token,
+              outstandingDrains: drained.size + takenDrains.size,
+              alreadyAccepted: acceptedDrains.has(token),
+              drainsMade: drains
+            })
+            return
+          }
+          // Without a token, every drained item is accepted (correct only while one drain is outstanding).
+          const ids = entry
+            ? [...new Set(entry.entries.flatMap((steer) => (steer.itemId ? [steer.itemId] : [])))]
+            : [...session.drainedExternalSteerIds]
+          if (token !== undefined) {
+            // Settled now: a later hand-back of this drain is ignored, and its token is spent.
+            drained.delete(token)
+            takenDrains.delete(token)
+            acceptedDrains.add(token)
+          }
           this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text))
           this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
-            ...(this.nativeContext.acceptedSteerItemIds ?? []), ...session.drainedExternalSteerIds
+            ...(this.nativeContext.acceptedSteerItemIds ?? []), ...ids
           ]))
           this.persist(true)
-          this.acknowledgeDrainedSteers(session)
-          acceptTakenDrains()
+          if (token !== undefined) {
+            this.acknowledgeDrainedSteers(session, ids)
+          } else {
+            this.acknowledgeDrainedSteers(session)
+            acceptTakenDrains()
+          }
           // The model has the steered message and has not answered it yet.
           this.setTurnStep(session.threadId, { kind: 'waiting' })
         },
@@ -11488,11 +11538,6 @@ export class OrchestratorService extends EventEmitter {
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }
-      // Every drain is remembered under its own token until the provider has taken the text, so a drain
-      // the provider hands back restores exactly what that drain took, whatever was drained since.
-      const drained = new Map<string, { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
-      let drains = 0
-      let returnedAhead = 0
       const drainEntry = (): { text: string; token: string; cut: boolean } | undefined => {
         // A remote turn's steers, then the thread's own (and the durable queue's).
         const raw = opts?.externalDrainSteer?.()
@@ -11501,7 +11546,7 @@ export class OrchestratorService extends EventEmitter {
         const own = this.drainSteerForSession(session, turn)
         const entries = [...external, ...(own?.entries ?? [])].filter((steer) => steer.text.trim())
         if (entries.length === 0) return undefined
-        const token = `drain-${++drains}`
+        const token = `drain-${drainScope}-${++drains}`
         // Each entry is kept as it was drained, identity and all, so a return restores them whole, never by cutting text apart.
         drained.set(token, { entries, carried: own?.carried ?? [] })
         returnedAhead = 0
@@ -11510,19 +11555,11 @@ export class OrchestratorService extends EventEmitter {
         const cut = entries.some((steer) => !steer.origin && !steer.byAgent && !notices.has(steer.text.trim()))
         return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut }
       }
-      // Drains the provider took (`steerTaken`) and has not reported read: still restorable whole.
-      const takenDrains = new Map<string, { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
-      // Drains the turn accepted (text saved, rows dropped): the model has them.
-      const acceptedDrains = new Set<string>()
-      // An acceptance with no token (`steerAccepted`, `nativeMessages`) saves every drained item: every taken drain is
-      // accepted with it.
-      const acceptTakenDrains = (): void => {
-        for (const token of takenDrains.keys()) acceptedDrains.add(token)
-        takenDrains.clear()
-      }
       const turnControl: TurnControl = {
         drainSteer: () => drainEntry()?.text,
         drainSteerEntry: drainEntry,
+        // Only a note that the provider has the text: the drain is kept, whole, until `steerAccepted` saves it or
+        // `returnSteer` hands it back.
         steerTaken: (token) => {
           const entry = token ? drained.get(token) : undefined
           if (!token || !entry) return
@@ -12085,9 +12122,11 @@ export class OrchestratorService extends EventEmitter {
     return !isStricter(item.permissionMode, binding.policy.permissionMode ?? 'ask')
   }
 
-  /** Remove steer queue entries only after their content and IDs are durable. */
-  private acknowledgeDrainedSteers(session: ThreadSession): void {
-    const ids = [...session.drainedExternalSteerIds]
+  /**
+   * Remove steer queue entries only after their content and IDs are durable: the items `ids` names (one accepted
+   * drain), or every drained item.
+   */
+  private acknowledgeDrainedSteers(session: ThreadSession, ids: string[] = [...session.drainedExternalSteerIds]): void {
     if (ids.length === 0) return
     if (this.threadStore) {
       session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) =>
@@ -12096,7 +12135,7 @@ export class OrchestratorService extends EventEmitter {
     } else {
       session.queue = dropSteerItems(session.queue, ids)
     }
-    session.drainedExternalSteerIds.clear()
+    for (const id of ids) session.drainedExternalSteerIds.delete(id)
     this.emitQueueUpdated(session.threadId, session.queue)
     const accepted = new Set(this.nativeContext.acceptedSteerItemIds ?? [])
     for (const id of ids) accepted.delete(id)

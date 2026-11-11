@@ -369,7 +369,8 @@ class PiTurn {
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
   /** A bot's built-in calls with a `started` ledger row, by call id. */
   readonly ledgerRows = new Map<string, string>()
-  readonly steers: Array<{ text: string; token?: string }> = []
+  /** Steers sent to Pi and not yet read, each with its drain's token: it is accepted by that token alone. */
+  readonly steers: Array<{ text: string; token: string }> = []
   /** Native `steer` requests sent at `turn_end` and not answered yet; the turn's end and Stop wait for them before `clear_queue`. */
   readonly steerSends = new Set<Promise<void>>()
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
@@ -1626,22 +1627,6 @@ export class PiRpcEngine implements ProviderAdapter {
     return 'stopped'
   }
 
-  async steer(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'> {
-    const { entry, thread } = this.target(ref)
-    const turn = entry?.turn ?? thread?.turn
-    const owner = entry?.thread ?? thread
-    // After `agent_end` (or during a retry backoff, or before the process is up) a steer becomes the next prompt.
-    if (!turn || !owner || owner.turn !== turn || turn.phase !== 'running') return 'not_active'
-    try {
-      await this.send(owner, { type: 'steer', message: text })
-      turn.steers.push({ text })
-      turn.awaitingModel = true
-      return 'delivered'
-    } catch {
-      return 'not_active'
-    }
-  }
-
   /**
    * Native fork (SPEC §16.2): a new Pi session holding the source session up to the end of the turn
    * `ref` names (its key, `nativeTurnId`, not the ordinal: Mousse's run ordinals do not count Pi's
@@ -1961,7 +1946,7 @@ export class PiRpcEngine implements ProviderAdapter {
           if (index >= 0) {
             const [steer] = turn.steers.splice(index, 1)
             turn.ctl.steerTaken?.(steer.token)
-            sink.steerAccepted(steer.text)
+            sink.steerAccepted(steer.text, steer.token)
           }
         }
         return
