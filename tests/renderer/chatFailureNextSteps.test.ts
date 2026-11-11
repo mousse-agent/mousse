@@ -238,6 +238,14 @@ describe('a run a restart left uncertain (SPEC §16.4)', () => {
     expect(onContinue).not.toHaveBeenCalled()
   })
 
+  it('moves focus to Continue anyway when the confirm opens, and back to Continue… on Cancel', () => {
+    render(createElement(RunInterruptedNotice, { uncertain, onContinueUncertain: vi.fn() }))
+    act(() => byText('Continue…')!.click())
+    expect(document.activeElement).toBe(byText('Continue anyway'))
+    act(() => byText('Cancel')!.click())
+    expect(document.activeElement).toBe(byText('Continue…'))
+  })
+
   it('Cancel goes back without continuing', () => {
     const onContinueUncertain = vi.fn()
     render(createElement(RunInterruptedNotice, { uncertain, onContinueUncertain }))

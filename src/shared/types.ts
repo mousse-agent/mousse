@@ -848,6 +848,11 @@ export interface ChatMessage {
   timestamp: string
   /** Durable turn/action lineage. */
   turnId?: string
+  /**
+   * A message whose turn a restart cut off before it started, added when the thread had moved on (SPEC §12.5). No
+   * model ever had it: a handoff leaves it out, and a fork keeps it marked.
+   */
+  notSent?: boolean
   actionId?: string
   conversationBranchId?: string
   /** Inline images for user messages (shown as previews; also sent to vision models). */

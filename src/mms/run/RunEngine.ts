@@ -399,7 +399,6 @@ export class TitleTakenRejection extends CommandRejection {
   }
 }
 
-/** The outcome of a run whose binding names the retired bare pi route (PR 4). */
 /**
  * The thread id the transcript markers are recorded under, as the reconciler's own events are
  * (`RECONCILER_THREAD_ID`): the boot reads them through the events' thread index. The payload names the
@@ -411,6 +410,7 @@ const RESTART_TRANSCRIPT_PENDING = 'restart.transcript_pending'
 /** The thread's transcript says the restart cut the run off. */
 const RESTART_TRANSCRIPT_WRITTEN = 'restart.transcript_written'
 
+/** The outcome of a run whose binding names the retired bare pi route (PR 4). */
 const RETIRED_ROUTE_OUTCOME = Object.freeze({
   errorCode: 'binding_stale',
   error: 'This run started on a route Mousse no longer has, so it cannot continue. Send the message again.'

@@ -15,7 +15,7 @@ import type { ChatMessage } from '../../src/shared/types'
 import { formatRestartNote, RESTART_INTERRUPTED_TEXT, RESTART_UNSENT_TEXT } from '../../src/mms/run/restartNote'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
-import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { CLAUDE, PI, claudeAdapter, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 describe('continue after restart (SPEC §16.4)', () => {
   let home: string | undefined
@@ -799,6 +799,61 @@ describe('continue after restart (SPEC §16.4)', () => {
       expect(rows(third, thread.id)).toEqual([['user', 'Set it up'], ['system', RESTART_UNSENT_TEXT]])
       expect(third.orch.getTurnState(thread.id).phase).not.toBe('stopped')
       expect(third.engine.pendingRestartTranscripts()).toEqual([])
+    })
+
+    it('a message that was never sent is not handed to another model, and a fork keeps it marked not sent', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter((input) => `pi answered: ${input.prompt}`)], { pid: 1 })
+      // This daemon saves its transcripts, as the profile does, so the first exchange is on disk after the crash.
+      first.orch.setPersistCallback((id) => {
+        if (id && first.orch.hasSession(id)) first.store.mutateThreadData(id, () => ({ messages: first.orch.liveMessagesForSave(id) as ChatMessage[], llmContext: first.orch.getNativeContext(id) }))
+      })
+      const thread = first.store.createThread('Switch')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      await first.orch.send('First question', false, { threadId: thread.id, clientRequestId: 'q-1' })
+      // The next send's turn.start is claimed, and the daemon dies while the turn is set up.
+      await first.worker.stop()
+      const sent = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'q-2', source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      first.engine.outbox.enqueue({
+        threadId: thread.id,
+        runId: sent.runId,
+        kind: 'turn.start',
+        payload: { runId: sent.runId, threadId: thread.id, input: { content: 'Set it up', mode: 'agent' }, reuseLastUser: false, displayUserMessage: true, source: 'gui' }
+      })
+      expect(first.engine.outbox.claimNext(first.engine.leaseOwner, new Date().toISOString())?.runId).toBe(sent.runId)
+      const threadDir = first.store.getThreadDir(thread.id)
+      await first.crash()
+      // Another process holds the thread at the next boot, and a later turn runs there meanwhile.
+      const lease = getExecutionLeasePath(threadDir)
+      const stamp = new Date().toISOString()
+      writeFileSync(lease, JSON.stringify({ pid: process.ppid, token: 'peer-token', processInstanceId: 'peer-instance', acquiredAt: stamp, heartbeatAt: stamp, source: 'cli' }))
+      const second = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      const later = await second.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'q-3', source: 'gui' })
+      if (later.status !== 'accepted') throw new Error('send rejected')
+      second.engine.markStarting(later.runId)
+      second.engine.markRunning(later.runId)
+      second.engine.markTerminal(later.runId, 'completed')
+      await second.crash()
+      rmSync(lease, { force: true })
+
+      const pi = piAdapter((input) => `pi answered: ${input.prompt}`)
+      const claude = claudeAdapter(() => 'Claude here.')
+      const third = phase6Daemon(dir, [pi, claude], { pid: 3, orchestratorBoot: true })
+      daemons.push(third)
+      expect(rows(third, thread.id).slice(-2)).toEqual([['user', 'Set it up'], ['system', RESTART_UNSENT_TEXT]])
+      // The switch hands the new model the conversation, without the message no model ever had.
+      third.orch.setThreadModelOverride(thread.id, CLAUDE)
+      await third.orch.send('Next', false, { threadId: thread.id, clientRequestId: 'q-4' })
+      const handed = claude.turns[0]!.prompt
+      expect(handed).toContain('<handoff')
+      expect(handed).toContain('First question')
+      expect(handed).not.toContain('Set it up')
+      // A fork shows it as it is here: marked not sent, with the line that says so.
+      const fork = (third.orch as unknown as { forkInheritedMessages(threadId: string, runId: string): ChatMessage[] }).forkInheritedMessages(thread.id, later.runId)
+      expect(fork.find((message) => message.content === 'Set it up')).toMatchObject({ role: 'user', notSent: true })
+      expect(fork.some((message) => message.content === RESTART_UNSENT_TEXT)).toBe(true)
     })
 
     it('a run rule 5 starts again does not take in a message the transcript has for it', async () => {

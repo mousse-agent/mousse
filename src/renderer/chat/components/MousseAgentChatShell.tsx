@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
 import { useAppStore } from '../../stores/appStore'
@@ -62,6 +62,16 @@ export function RunInterruptedNotice({ onContinue, uncertain, onContinueUncertai
   onContinueUncertain?: (runId: string) => void
 }) {
   const [confirming, setConfirming] = useState(false)
+  // Focus follows the row: Continue anyway when it opens, Continue… again when it is cancelled.
+  const confirmRef = useRef<HTMLButtonElement>(null)
+  const askRef = useRef<HTMLButtonElement>(null)
+  const opened = useRef(false)
+  useEffect(() => {
+    if (confirming) {
+      opened.current = true
+      confirmRef.current?.focus()
+    } else if (opened.current) askRef.current?.focus()
+  }, [confirming])
   const tools = uncertain?.tools.length ? uncertain.tools.join(', ') : 'unknown tools'
   const detail = `May have run without a result: ${tools}. Check before continuing.`
   return <div className="chat-run-interrupted" role="status">
@@ -70,13 +80,13 @@ export function RunInterruptedNotice({ onContinue, uncertain, onContinueUncertai
       {uncertain && confirming
         ? <>
             <span title={detail}>May have run: {tools}</span>
-            {onContinueUncertain && <button type="button" className="chat-run-interrupted-action" onClick={() => { setConfirming(false); onContinueUncertain(uncertain.runId) }}>Continue anyway</button>}
+            {onContinueUncertain && <button ref={confirmRef} type="button" className="chat-run-interrupted-action" onClick={() => { opened.current = false; setConfirming(false); onContinueUncertain(uncertain.runId) }}>Continue anyway</button>}
             <button type="button" className="chat-run-interrupted-action" onClick={() => setConfirming(false)}>Cancel</button>
           </>
         : <>
             <span>Run interrupted</span>
             {uncertain
-              ? onContinueUncertain && <button type="button" className="chat-run-interrupted-action" title={detail} onClick={() => setConfirming(true)}>Continue…</button>
+              ? onContinueUncertain && <button ref={askRef} type="button" className="chat-run-interrupted-action" title={detail} onClick={() => setConfirming(true)}>Continue…</button>
               : onContinue && <button type="button" className="chat-run-interrupted-action" onClick={onContinue}>Continue</button>}
           </>}
     </span>

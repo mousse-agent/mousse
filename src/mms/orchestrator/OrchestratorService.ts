@@ -2647,7 +2647,9 @@ export class OrchestratorService extends EventEmitter {
             // Taken in by a build that did not tag it: the kill came between the transcript write and the run's start.
             const lastShown = [...messages].reverse().find((message) => !message.hidden)
             if (!movedOn && lastShown?.role === 'user' && !lastShown.turnId && lastShown.content === request.content) continue
-            messages.push({ id: uuidv4(), role: 'user', content: request.content, timestamp, mode: request.mode, turnId: run.runId })
+            // The thread moved on since: such an untagged copy is somewhere after the run was asked for.
+            if (movedOn && messages.some((message) => message.role === 'user' && !message.hidden && !message.turnId && message.content === request.content && message.timestamp >= run.requestedAt)) continue
+            messages.push({ id: uuidv4(), role: 'user', content: request.content, timestamp, mode: request.mode, turnId: run.runId, ...(movedOn ? { notSent: true } : {}) })
             if (movedOn) {
               // Out of order beats lost; the model is not given a message it never had in its turn.
               messages.push({ id: uuidv4(), role: 'system', content: RESTART_UNSENT_TEXT, timestamp, turnId: run.runId })
@@ -5697,7 +5699,8 @@ export class OrchestratorService extends EventEmitter {
    * Copies of the source's visible conversation up to the fork point, as the fork shows them above its own: the
    * messages of runs up to `sourceRunId` (and those before any run), after the last `/clear` among them, the same
    * cut the fork's transfer hands the model (`handoffTranscript`). Each copy gets its own id and keeps no turn or
-   * action of the source, so the fork's Undo, edit and fork never act on it.
+   * action of the source, so the fork's Undo, edit and fork never act on it. A message no model ever had keeps its
+   * `notSent` mark and the line after it, so the fork shows it as not sent and never hands it to a model either.
    */
   private forkInheritedMessages(sourceThreadId: string, sourceRunId: string): ChatMessage[] {
     const engine = this.runEngine
@@ -5724,7 +5727,8 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The thread's visible conversation as handoff items (SPEC §16.1), oldest first. Each item carries
    * the ordinal of the run it belongs to (from the message's `turnId`); messages before the first
-   * known run have none. Markers, notes and hidden inputs are not conversation.
+   * known run have none. Markers, notes and hidden inputs are not conversation, nor is a message no model
+   * ever had (`notSent`).
    */
   private handoffTranscript(threadId: string): HandoffItem[] {
     const engine = this.runEngine
@@ -5740,7 +5744,8 @@ export class OrchestratorService extends EventEmitter {
         items.length = 0
         continue
       }
-      if (message.hidden || message.kind || (message.role !== 'user' && message.role !== 'assistant')) continue
+      // A message a restart cut off before its turn started, after the thread had moved on: no model ever had it.
+      if (message.hidden || message.kind || message.notSent || (message.role !== 'user' && message.role !== 'assistant')) continue
       const text = message.content.trim()
       if (!text) continue
       items.push({
