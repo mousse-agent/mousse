@@ -183,7 +183,7 @@ Send now and Stop end tools by design; the guarantee is about steers only.
 - **What it costs.** A steer held during a command waits for the agent's whole turn to end, which can be many commands and a long answer. Send now is the escape.
 - **What it does not change.** Strict only keeps a steer that is already held held. A steer sent while the model writes, with no tool known and the window closed, still cuts at once, with the writing-case window stated above.
 - **Where it is set.** It is a per-instance setting, `runs.steerRelease[<instanceId>]: 'best_effort' | 'strict'`, read when the turn starts and passed to `steerDelivery` as `strict`. It is `best_effort` by default and has no UI in this design. On `announce` providers it changes nothing.
-- **Why both ship.** The two modes differ only in how `releaseOpen` ends, so either can become the default without a redesign. This is open question 1 for the user (§7).
+- **Why both ship.** The two modes differ only in how `releaseOpen` ends, so either can become the default without a redesign. Best effort is the chosen default (§7).
 
 ### 2.4 Claude Code
 
@@ -862,14 +862,13 @@ Every event was timestamped when read from the CLI's stdout: Codex's through Mou
 - **Grok behaves like an `announce` provider.** Its `tool_call` comes before its permission request (answered at once in the spike, as Mousse does when no approval is asked). This holds for Grok only; other ACP agents were not measured.
 - **These are observed values on an idle machine,** not a maximum.
 
-## 7. Open questions
+## 7. Decisions
 
-For the user:
-1. **Best effort or strict, as the default for Codex, ACP agents and Cursor?**
-   - **Best effort** (written as the default here): a held steer goes in about half a second after a command when the model shows nothing, or as soon as it writes. A command that starts inside that window, or whose start Mousse has not heard of yet, can still be cut.
+1. **Best effort is the default for Codex, ACP agents and Cursor** (decided 2026-11-11, after the spike results).
+   - **Best effort:** a held steer goes in shortly after a command (`STEER_SETTLE_MS`: 232 ms on Codex, 100 ms on Grok) when the model shows nothing, or as soon as it writes. A command that starts inside that window, or whose start Mousse has not heard of yet, can still be cut.
    - **Strict:** a held steer waits until the agent's whole turn ends, or Send now. It never cuts a command it held for, but it can wait a long time.
 
-   Both ship as a per-instance setting; this question only picks the default.
+   Both ship as a per-instance setting. A provider whose gaps were not measured (Cursor, until it can be run) still follows the §6 pass rule before best effort ships for it.
 
 Kept from earlier rounds: the progress line keeps "Running Bash…" and the wait shows on the Steer block; no Send now shortcut; agents cannot Send now another thread's command; the marks read "Stopped" and "Interrupted".
 
