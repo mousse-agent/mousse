@@ -1421,6 +1421,62 @@ describe('CodexAdapter', () => {
       expect(returned).toEqual([['Focus', 'drain-1']])
     })
 
+    it('is handed back, with the steer queued behind it, when Stop lands before Codex answers turn/steer', async () => {
+      const controller = new AbortController()
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          // A second steer, drained while the first waits for Codex's answer, queues behind it.
+          cue({ steer: 'And lint' }),
+          cue({ stop: true })
+        ],
+        async (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) return void steers.push(steer)
+          // Stop once the second steer is drained, before Codex answers the first.
+          while (steers.length) await new Promise((resolve) => setTimeout(resolve, 10))
+          controller.abort(new Error('stopped by the user'))
+        }
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input({ signal: controller.signal }), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(accepted(sink)).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([
+        ['Focus', 'drain-1'],
+        ['And lint', 'drain-2']
+      ])
+    })
+
+    it('is handed back when the process dies before Codex answers turn/steer', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          inn({ kind: 'exit', code: 1 })
+        ],
+        (frame) => void steers.push((frame as { steer: string }).steer)
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(accepted(sink)).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Focus', 'drain-1']])
+    })
+
     it('is handed back by its token when its save fails', async () => {
       const steers: string[] = []
       const replay = transport(
