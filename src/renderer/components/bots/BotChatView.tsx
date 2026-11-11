@@ -141,9 +141,9 @@ export function pinnedOf(messages: readonly BotChatMessage[], bot: Pick<BotSumma
   return pinned
 }
 
-function PinnedLine({ item }: { item: BotPinned }) {
+function PinnedLine({ botId, item }: { botId: string; item: BotPinned }) {
   const Icon = item.kind === 'ask' ? Shield : CircleAlert
-  return <button type="button" className="bot-pinned" data-kind={item.kind} disabled={!item.id} title={item.id ? 'Show message' : undefined} onClick={() => item.id && showMessage(item.id)}>
+  return <button type="button" className="bot-pinned" data-kind={item.kind} disabled={!item.id} title={item.id ? 'Show message' : undefined} onClick={() => { if (item.id) void showMessage(botId, item.id) }}>
     <Icon size={14} aria-hidden /><span>{item.text}</span>
   </button>
 }
@@ -352,7 +352,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       </div>
       <div className="chat-input-area bot-input-area">
         {unseen && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />New message</button>}
-        {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} item={item} />)}</div>}
+        {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />
