@@ -1009,4 +1009,51 @@ describe('A steer is accepted by its own drain token', () => {
     expect(w.adapter.prompts).toEqual(['first'])
     expect([w.inContext('A'), w.inContext('B')]).toEqual([1, 1])
   })
+
+  it('a drain the provider took, then accepted by its token, runs once and its row is dropped; a later hand-back is ignored', async () => {
+    const w = world()
+    const { running, items } = await w.heldTurn('first', ['A'])
+    const a = w.steerAndDrain(items, 'A')
+    // Taken first, as Pi, Claude Code and Codex report it, and only then read.
+    w.adapter.take(a)
+    expect(w.queue()).toEqual([['A', 'steering']])
+    expect(w.inContext('A')).toBe(0)
+    w.adapter.accept(a)
+    expect(w.queue()).toEqual([])
+    expect(w.acceptedIds()).toEqual([])
+    expect(w.inContext('A')).toBe(1)
+    // A provider bug: the accepted drain handed back. The model has it, so nothing comes back.
+    w.adapter.giveBack(a)
+    expect(w.d.orch.getOrCreateSession(w.thread.id).activeTurn?.pendingSteer ?? []).toEqual([])
+
+    w.adapter.turn!.end('reply')
+    await running
+    await w.idle('turn done')
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
+    expect(w.shownUserMessages()).toEqual(['first', 'A'])
+  })
+
+  it('a drain the provider took and handed back, while another was accepted by its token, is restored whole and runs once', async () => {
+    const w = world()
+    const { running, items, b } = await w.twoDrainsOneAccepted()
+    w.adapter.take(b)
+    expectOnlyAAccepted(w, items)
+    // B was taken and never read: handed back by its token, it is restored whole (its row, its identity), never as
+    // text alone, which would run beside the row the step before the next claim finds still `steering`.
+    w.adapter.giveBack(b)
+    const pending = w.d.orch.getOrCreateSession(w.thread.id).activeTurn?.pendingSteer ?? []
+    expect(pending.map((steer) => [steer.text, steer.itemId])).toEqual([['B', items.B]])
+
+    w.adapter.turn!.end('reply')
+    await running
+    await waitFor(() => w.adapter.prompts.includes('B'), 'B runs')
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
+    // B shows once, as its own turn's prompt; its copy inside the first turn is hidden.
+    expect(w.shownUserMessages()).toEqual(['first', 'A', 'B'])
+  })
 })

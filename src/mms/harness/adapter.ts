@@ -244,8 +244,9 @@ export interface TurnControl {
    */
   drainSteerEntry?(): { text: string; token: string; cut?: boolean } | undefined
   /**
-   * The provider took the drain `token` names; it will not be returned. Nothing is saved or
-   * acknowledged until `TurnSink.steerAccepted(text, token)`.
+   * The provider took the drain `token` names. Nothing is saved or acknowledged until
+   * `TurnSink.steerAccepted(text, token)`. Until then the drain can still be handed back with
+   * `returnSteer`, and it is restored whole; once accepted, a hand-back is ignored.
    */
   steerTaken?(token?: string): void
   /** Liveness touch; the orchestrator throttles the store write. */

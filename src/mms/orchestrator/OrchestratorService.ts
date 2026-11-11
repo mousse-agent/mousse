@@ -11500,9 +11500,10 @@ export class OrchestratorService extends EventEmitter {
             logWarn('OrchestratorService', 'steer acceptance for an unknown or already settled drain ignored', undefined, {
               threadId: session.threadId,
               ...(engineRunId ? { runId: engineRunId } : {}),
-              // The drain token is a counter (`drain-N`), not a credential; a key named `token` would be redacted.
+              // The drain token names a drain (`drain-<turn>-N`), not a credential; a key named `token` would be redacted.
               drain: token,
-              outstandingDrains: drained.size,
+              outstandingDrains: drained.size + takenDrains.size,
+              alreadyAccepted: acceptedDrains.has(token),
               drainsMade: drains
             })
             return
