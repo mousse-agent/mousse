@@ -197,6 +197,47 @@ describe('GuiMmsController lifecycle', () => {
     expect(server.endpoint).toBeTruthy()
   })
 
+  it('a reconnect that fires while the first start waits for the service joins it: one service, one connection', async () => {
+    // A request made before the first start (the memory monitor reads its state when IPC registers) schedules a
+    // reconnect; its timer fires while start() is still waiting for the service it spawned.
+    const cold = mkdtempSync(join(tmpdir(), 'mousse-gui-cold-'))
+    const gui = new GuiMmsController({ homeDir: cold, reconnectBaseMs: 1, requestTimeoutMs: 5_000 })
+    const internals = gui as unknown as {
+      spawnDaemon(): Promise<unknown>
+      waitForSpawnedDaemon(child: unknown): Promise<unknown>
+      connectOnce(): Promise<unknown>
+      scheduleReconnect(reason: string): void
+      reconnectTimer: unknown
+      client: unknown
+      lastHello: unknown
+      setState(state: string): void
+    }
+    let publish!: () => void
+    const published = new Promise<void>((done) => { publish = done })
+    const spawn = vi.spyOn(internals, 'spawnDaemon').mockImplementation(async () => ({}))
+    vi.spyOn(internals, 'waitForSpawnedDaemon').mockImplementation(async () => { await published; return { pid: process.pid } })
+    // Connects as the real one does: the client, its hello and the ready state.
+    const connect = vi.spyOn(internals, 'connectOnce').mockImplementation(async () => {
+      internals.client = { connected: true, close: async () => undefined }
+      internals.lastHello = { instanceId: 'cold' }
+      internals.setState('ready')
+      return internals.lastHello
+    })
+    try {
+      const first = gui.start()
+      internals.scheduleReconnect('request_while_disconnected')
+      await vi.waitFor(() => expect(internals.reconnectTimer).toBeNull())
+      publish()
+      await first
+      await new Promise((done) => setTimeout(done, 20))
+      expect(spawn).toHaveBeenCalledTimes(1)
+      expect(connect).toHaveBeenCalledTimes(1)
+    } finally {
+      await gui.stop()
+      rmSync(cold, { recursive: true, force: true })
+    }
+  })
+
   it('shares a cold base handshake across concurrent startup and window bootstrap requests', async () => {
     const gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
     const connect = vi.spyOn(gui as unknown as { connectOnce: () => Promise<unknown> }, 'connectOnce')

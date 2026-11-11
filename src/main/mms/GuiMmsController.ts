@@ -245,6 +245,12 @@ export class GuiMmsController extends EventEmitter {
     // Renderer bootstrap requests and main's eager start share one discovery,
     // daemon spawn and base handshake. Window sessions keep their own fences.
     const operation = (async () => {
+      // A reconnect in progress starts the service and connects itself; this start joins it rather than racing it.
+      if (this.reconnecting) {
+        await this.reconnecting.catch(() => false)
+        if (this.connected && this.lastHello) return this.lastHello
+      }
+      this.assertMayConnect()
       // Tests may inject endpoint+token without a full runtime publication.
       if (!(this.endpointOverride && this.ownerTokenOverride)) await this.ensureDaemonReady()
       this.assertMayConnect()
@@ -872,6 +878,12 @@ export class GuiMmsController extends EventEmitter {
 
   private async reconnect(reason: string): Promise<void> {
     if (this.quitting || this.installing || this.reconnecting) return
+    // A request made before the first start schedules a reconnect, whose timer can fire while start() still waits for
+    // the service it spawned. Run beside it, the reconnect would find no service yet and start a second one (which
+    // fails: the first owns the home), or close the client the start just opened. It waits for the start instead, and
+    // is not needed once the start connected.
+    if (this.startPromise) await this.startPromise.catch(() => undefined)
+    if (this.connected || this.quitting || this.installing || this.reconnecting || this.startPromise) return
     const attempt = this.attemptReconnect(reason)
     this.reconnecting = attempt
     let retry = false
