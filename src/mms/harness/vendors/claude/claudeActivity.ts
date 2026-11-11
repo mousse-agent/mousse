@@ -328,6 +328,14 @@ function fileChangeResult(context: ClaudeCallContext, result: Record<string, unk
 }
 
 function searchResultCount(result: Record<string, unknown> | undefined): number | undefined {
+  // Grep in content mode reports no files (`numFiles: 0`): its matches are lines. A Grep cut by its
+  // `head_limit` (`appliedLimit`) counts what it kept; the real totals are `totalLines` / `totalFiles`.
+  const capped = result?.appliedLimit !== undefined && result?.appliedLimit !== null
+  if (result?.mode === 'content' && num(result.numLines) !== undefined)
+    return (capped ? num(result.totalLines) : undefined) ?? num(result.numLines)
+  if (capped && result?.mode === 'files_with_matches' && num(result.totalFiles) !== undefined) return num(result.totalFiles)
+  // A Glob cut at its limit counts what it kept; the real total is `totalMatches`.
+  if (result?.truncated === true && num(result.totalMatches) !== undefined) return num(result.totalMatches)
   return num(result?.numFiles) ?? (Array.isArray(result?.filenames) ? result.filenames.length : undefined)
 }
 

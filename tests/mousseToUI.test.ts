@@ -6,8 +6,9 @@ import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
 import { TranscriptAssembler } from '../src/mms/run/transcript/TranscriptAssembler'
 import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
 import { codexToolEvent } from '../src/mms/harness/vendors/codex/codexActivity'
-import { cursorToolName, cursorToolTitle } from '../src/mms/harness/cursor/session'
-import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
+import { claudeActivityComplete, claudeActivityStart, claudeCallContext } from '../src/mms/harness/vendors/claude/claudeActivity'
+import { cursorToolActivity, cursorToolName, cursorToolTitle } from '../src/mms/harness/cursor/session'
+import { formatSearchRowLabels, getToolStatus, searchResultCount } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
 import { toolRegistry } from '../src/renderer/chat/components/agent-elements/tools/tool-registry'
 
@@ -881,8 +882,93 @@ describe('provider events through the assembler into the cards', () => {
     ])
     const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as unknown as Array<Record<string, any>>
     expect(parts.map((part) => part.type)).toEqual(['tool-mcp__custom__list_directory', 'tool-mcp__mousse__thread_list', 'tool-Grep'])
-    // Cursor sends no arguments: the search card has no pattern rather than the tool's own name as one.
-    expect(parts[2]!.input).toMatchObject({ pattern: '', query: '' })
+  })
+
+  // A Cursor call as its session reports it: the title, the tool name, and a search's typed fields.
+  const cursorCall = (phase: 'start' | 'complete', callId: string, toolCall: unknown) => {
+    const toolName = cursorToolName(toolCall)
+    const activity = cursorToolActivity(toolCall)
+    return runtimeToolEvent({ phase, callId, title: cursorToolTitle(toolCall), ...(toolName ? { toolName } : {}), ...(activity ? { activity } : {}) })
+  }
+  const cardLabels = (part: Record<string, any>) =>
+    formatSearchRowLabels(part.type.replace('tool-', ''), part.input.pattern, searchResultCount(part.output) ?? 0)
+
+  it('shows a Cursor grep with matches by its pattern and how many it found', () => {
+    const call = { type: 'grep', args: { pattern: 'TODO', path: 'src' } }
+    const content = { type: 'content', output: { matches: [{ file: 'src/a.ts', lineNumber: 3, line: '// TODO one' }, { file: 'src/b.ts', lineNumber: 9, line: '// TODO two' }], totalMatches: 2 } }
+    const done = { ...call, result: { status: 'success', value: { workspaceResults: { '/repo': content } } } }
+    const part = partOf(mousseToUIMessages(replay([cursorCall('start', 'g1', call), cursorCall('complete', 'g1', done)]))[0]!)
+    expect(part).toMatchObject({
+      type: 'tool-Grep',
+      state: 'output-available',
+      input: { pattern: 'TODO', path: 'src' },
+      output: { numFiles: 2, text: 'src/a.ts:3:// TODO one\nsrc/b.ts:9:// TODO two' },
+    })
+    expect(cardLabels(part)).toEqual({ completeLabel: 'Found 2 results', detail: 'Grep “TODO”' })
+  })
+
+  it('shows a Cursor glob by its pattern and how many files it found', () => {
+    const call = { type: 'glob', args: { globPattern: '**/*.test.ts' } }
+    const done = { ...call, result: { status: 'success', value: { files: ['tests/a.test.ts', 'tests/b.test.ts', 'tests/c.test.ts'], totalFiles: 3, clientTruncated: false, ripgrepTruncated: false } } }
+    const part = partOf(mousseToUIMessages(replay([cursorCall('start', 'f1', call), cursorCall('complete', 'f1', done)]))[0]!)
+    expect(part).toMatchObject({ type: 'tool-Glob', state: 'output-available', input: { pattern: '**/*.test.ts' }, output: { numFiles: 3 } })
+    expect(cardLabels(part)).toEqual({ completeLabel: 'Found 3 results', detail: 'Glob “**/*.test.ts”' })
+  })
+
+  it('shows no pattern for a Cursor search saved before its arguments were kept', () => {
+    // Such a row has only a title, which named the folder rather than the pattern when Cursor passed one.
+    const saved = runtimeToolEvent({ phase: 'start', callId: 's1', title: 'Grep src', toolName: 'Grep' })
+    const part = partOf(mousseToUIMessages(replay([saved]))[0]!)
+    expect(part).toMatchObject({ type: 'tool-Grep', input: { pattern: '', query: '' } })
+  })
+
+  it('keeps a Claude Grep card as it was', () => {
+    const input = { pattern: 'foo', path: 'src' }
+    const context = claudeCallContext('Grep', input, true)
+    const done = claudeActivityComplete(context, { mode: 'files_with_matches', filenames: ['src/a.ts', 'src/b.ts'], numFiles: 2 }, undefined, false)
+    const messages = replay([
+      event('start', 'toolu_g', 'Grep', { activity: claudeActivityStart('Grep', input, true) }),
+      event('complete', 'toolu_g', 'Grep', { ...(done.activity ? { activity: done.activity } : {}) }),
+    ])
+    expect(partOf(mousseToUIMessages(messages)[0]!)).toEqual({
+      type: 'tool-Grep',
+      toolCallId: messages[0]!.id,
+      state: 'output-available',
+      input: { pattern: 'foo', query: 'foo', path: 'src' },
+      output: { numFiles: 2, text: 'src/a.ts\nsrc/b.ts' },
+    })
+  })
+
+  it('counts a Claude Grep in content mode by its matching lines, and a cut Glob by its real total', () => {
+    const grepInput = { pattern: 'TODO', output_mode: 'content' }
+    const grepContext = claudeCallContext('Grep', grepInput, true)
+    const grepDone = claudeActivityComplete(grepContext, { mode: 'content', numFiles: 0, filenames: [], content: 'a.ts:1:TODO\nb.ts:4:TODO', numLines: 2 }, undefined, false)
+    const globInput = { pattern: '**/*.ts' }
+    const globContext = claudeCallContext('Glob', globInput, true)
+    const globDone = claudeActivityComplete(globContext, { filenames: ['a.ts'], numFiles: 100, truncated: true, totalMatches: 240 }, undefined, false)
+    const messages = replay([
+      event('start', 'toolu_c', 'Grep', { activity: claudeActivityStart('Grep', grepInput, true) }),
+      event('complete', 'toolu_c', 'Grep', { ...(grepDone.activity ? { activity: grepDone.activity } : {}) }),
+      event('start', 'toolu_d', 'Glob', { activity: claudeActivityStart('Glob', globInput, true) }),
+      event('complete', 'toolu_d', 'Glob', { ...(globDone.activity ? { activity: globDone.activity } : {}) }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as Array<{ output?: { numFiles?: number } }>
+    expect(parts.map((part) => part.output?.numFiles)).toEqual([2, 240])
+  })
+
+  it('counts a Claude Grep cut by its limit by the real total', () => {
+    const counted = (result: Record<string, unknown>) => {
+      const input = { pattern: 'x' }
+      const done = claudeActivityComplete(claudeCallContext('Grep', input, true), result, undefined, false)
+      const messages = replay([
+        event('start', 'toolu_h', 'Grep', { activity: claudeActivityStart('Grep', input, true) }),
+        event('complete', 'toolu_h', 'Grep', { ...(done.activity ? { activity: done.activity } : {}) }),
+      ])
+      return (partOf(mousseToUIMessages(messages)[0]!) as { output?: { numFiles?: number } }).output?.numFiles
+    }
+    expect(counted({ mode: 'content', numFiles: 0, filenames: [], content: 'a', numLines: 250, totalLines: 1200, appliedLimit: 250 })).toBe(1200)
+    expect(counted({ mode: 'files_with_matches', numFiles: 250, filenames: ['a'], totalFiles: 900, appliedLimit: 250 })).toBe(900)
+    expect(counted({ mode: 'content', numFiles: 0, filenames: [], content: 'a', numLines: 3, totalLines: 3 })).toBe(3)
   })
 })
 

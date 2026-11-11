@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   formatSearchRowLabels,
   latestThoughtHeading,
+  searchResultCount,
   thoughtHeading,
 } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
@@ -102,6 +103,14 @@ describe('formatSearchRowLabels', () => {
       completeLabel: 'Found 1 result',
       detail: 'Grep \u201Cx\u201D',
     })
+  })
+
+  it('reads how many a code or file search found from its output', () => {
+    expect(searchResultCount({ numFiles: 4, text: 'a' })).toBe(4)
+    expect(searchResultCount({ numFiles: 0 })).toBe(0)
+    expect(searchResultCount({ text: 'a' })).toBeUndefined()
+    expect(searchResultCount('raw text')).toBeUndefined()
+    expect(searchResultCount(undefined)).toBeUndefined()
   })
 
   it('falls back to a bare tool name without a query', () => {

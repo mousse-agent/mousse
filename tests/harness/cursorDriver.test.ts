@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
-import { CursorSessions, cursorToolName } from '../../src/mms/harness/cursor/session'
+import { CursorSessions, cursorToolActivity, cursorToolName } from '../../src/mms/harness/cursor/session'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
@@ -374,6 +374,43 @@ describe('The tool name a Cursor call shows as', () => {
     const tools: StreamingLlmToolEvent[] = []
     expect(await (await turn('thread', { tool: (event) => void tools.push(event) })).result).toMatchObject({ aborted: false })
     expect(tools.find((event) => event.phase === 'start')).toMatchObject({ title: 'Ls src', activity: { toolName: 'list_directory' } })
+  })
+
+  it('gives a grep its pattern when it starts and how many it found when it ends', async () => {
+    const call = { type: 'grep', args: { pattern: 'TODO', path: 'src' } }
+    const files = { type: 'files', output: { files: ['src/a.ts', 'src/b.ts'], count: 2 } }
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => {
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'tool-call-started', callId: 'g1', toolCall: call } })
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'tool-call-completed', callId: 'g1', toolCall: { ...call, result: { status: 'success', value: { workspaceResults: { '/repo': files } } } } } })
+          fake.emit({ event: 'run_end', runId: 'run-1', status: 'finished' })
+        }, 1)
+        return { runId: 'run-1' }
+      }
+    })
+    const { turn } = setup(host.connect)
+    const tools: StreamingLlmToolEvent[] = []
+    expect(await (await turn('thread', { tool: (event) => void tools.push(event) })).result).toMatchObject({ aborted: false })
+    expect(tools.find((event) => event.phase === 'start')).toMatchObject({
+      title: 'Grep TODO',
+      activity: { toolName: 'Grep', kind: 'search', scope: 'code', query: 'TODO', path: 'src' }
+    })
+    expect(tools.find((event) => event.phase === 'complete')).toMatchObject({
+      activity: { kind: 'search', query: 'TODO', resultCount: 2, output: 'src/a.ts\nsrc/b.ts' }
+    })
+  })
+
+  it('reads every grep output mode and a glob, and marks a failed search', () => {
+    const grep = (output: Record<string, unknown>) =>
+      cursorToolActivity({ type: 'grep', args: { pattern: 'x' }, result: { status: 'success', value: { workspaceResults: { '/a': output } } } })
+    expect(grep({ type: 'count', output: { counts: [{ file: 'a.ts', count: 4 }, { file: 'b.ts', count: 1 }], total: 5 } })).toMatchObject({ resultCount: 5, output: 'a.ts:4\nb.ts:1' })
+    expect(grep({ type: 'content', output: { matches: [], totalMatches: 0 } })).toMatchObject({ resultCount: 0, output: '' })
+    expect(cursorToolActivity({ type: 'glob', args: { globPattern: '*.md', targetDirectory: 'docs' } })).toEqual({ kind: 'search', scope: 'files', query: '*.md', path: 'docs' })
+    expect(cursorToolActivity({ type: 'grep', args: { pattern: 'x' }, result: { status: 'error', error: 'bad regex' } })).toMatchObject({ status: 'failed' })
+    expect(cursorToolActivity({ type: 'grep', args: {} })).toBeUndefined()
+    expect(cursorToolActivity({ type: 'shell', args: { command: 'ls' } })).toBeUndefined()
   })
 })
 
