@@ -15,6 +15,8 @@ import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStam
 import { skeletonOf } from './jsonSkeleton'
 import { formatCursor, parseCursor } from '../../../shared/pageCursor'
 import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
+import { estimateMessage, withoutMissingImages, type MessageEstimate } from '../../orchestrator/contextEstimate'
+import type { Message } from '../../../shared/transcript'
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
@@ -51,7 +53,7 @@ export type BuildResult =
 
 export interface ThreadDbSummary { seq: number; messages: number }
 /** See `ThreadDbEngine.gauge`. */
-export interface ThreadDbGauge { context?: string; active: string[]; latest?: string }
+export interface ThreadDbGauge { context?: string; estimates: MessageEstimate[]; latest?: string }
 /** How many of the newest transcript messages the gauge looks through for the newest token count. */
 export const GAUGE_TOKEN_LOOKBACK = 500
 
@@ -320,18 +322,20 @@ export class ThreadDbEngine {
   }
 
   /**
-   * What the context gauge measures, without the transcript: the model context's header (`context` state), its active
-   * messages (those from `activeStartIndex`), and the newest transcript message that reports the tokens its turn used,
-   * among the newest `GAUGE_TOKEN_LOOKBACK` messages.
-   * Long text is put back; image data is not (the gauge counts an image, not its bytes). `context` is absent when the
-   * thread has no model context, which the gauge then estimates from the whole transcript.
+   * What the context gauge measures, without the transcript: the model context's header (`context` state), the
+   * estimate of each active message (those from `activeStartIndex`, see `estimateMessage`), and the newest transcript
+   * message that reports the tokens its turn used, among the newest `GAUGE_TOKEN_LOOKBACK` messages. The messages are
+   * parsed and estimated here, so the daemon's loop only sums the estimates. Image data is not read (an image counts
+   * the same whatever its size); an image whose file is missing counts as the note the model is sent instead, as in
+   * a full read. `context` is absent when the thread has no model context, which the gauge then estimates from the
+   * whole transcript.
    */
   gauge(dir: string): ThreadDbGauge {
     const { db } = this.open(dir)
     db.exec('BEGIN')
     try {
       const header = db.prepare("SELECT payload FROM state WHERE key = 'context'").get() as { payload: string } | undefined
-      if (!header) return { active: [] }
+      if (!header) return { estimates: [] }
       const parsed = JSON.parse(header.payload) as { activeStartIndex?: unknown }
       const start = Number.isInteger(parsed.activeStartIndex) ? Math.max(0, parsed.activeStartIndex as number) : 0
       const rows = db.prepare("SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'c:a' ORDER BY ord, rid LIMIT -1 OFFSET ?").all(start) as unknown as Array<DbRow & { blob_paths: string | null }>
@@ -340,8 +344,7 @@ export class ThreadDbEngine {
       const latest = db.prepare(`SELECT rid, coll, ord, payload, blob_paths FROM (SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' ORDER BY ord DESC, rid DESC LIMIT ${GAUGE_TOKEN_LOOKBACK}) WHERE json_extract(payload, '$.responseMetadata.tokensUsed') IS NOT NULL ORDER BY ord DESC, rid DESC LIMIT 1`).get() as (DbRow & { blob_paths: string | null }) | undefined
       return {
         context: header.payload,
-        // An image is counted, not read; one whose file is missing shows its placeholder, as a full read does.
-        active: hydrateRows(dir, rows, { images: 'presence' }).map((row) => row.payload),
+        estimates: hydrateRows(dir, rows, { images: 'presence' }).map((row) => estimateMessage(withoutMissingImages([JSON.parse(row.payload) as Message])[0]!)),
         ...(latest ? { latest: hydrateRows(dir, [latest], { images: false })[0]!.payload } : {})
       }
     } finally {

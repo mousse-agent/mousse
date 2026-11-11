@@ -10,9 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { BLOBS_DIR } from '../src/mms/data/threadDb/threadBlobs'
-import { GAUGE_TOKEN_LOOKBACK } from '../src/mms/data/threadDb/threadDbEngine'
+import { GAUGE_TOKEN_LOOKBACK, ThreadDbEngine } from '../src/mms/data/threadDb/threadDbEngine'
+import { estimateMessage } from '../src/mms/orchestrator/contextEstimate'
+import { computeContextUsage } from '../src/mms/orchestrator/contextUsage'
+import { getActiveMessages } from '../src/mms/orchestrator/nativeContext'
 import type { Message } from '../src/shared/transcript'
-import type { ChatMessage } from '../src/shared/types'
+import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
 import { createOrchestrator } from './run/phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -117,6 +120,38 @@ describe('the context gauge of a thread with no session', () => {
       expect((await store.readGaugeData(recent))!.messages.map((message) => message.id)).toEqual(['late'])
     } finally {
       store.closeThreadStorage()
+    }
+  })
+
+  it('the read worker estimates each active message exactly as the daemon would from the whole thread', async () => {
+    const image = randomBytes(3_000).toString('base64')
+    const context = [...mixedContext(image), ...mixedContext(image)]
+    const id = seed([chat('u1', 'user', 'hello')], context, { activeStartIndex: 3 })
+    const store = new ThreadDataStore(new ProjectManager())
+    const dir = store.getThreadDir(id)
+    const engine = new ThreadDbEngine({ idleCloseMs: 0, checkpointOnClose: false })
+    try {
+      const expected = (): unknown => getActiveMessages(store.loadThreadData(id).llmContext as NativeLlmContext).map((message) => estimateMessage(message))
+      const gauge = engine.gauge(dir)
+      expect(gauge.estimates).toHaveLength(context.length - 3)
+      expect(gauge.estimates).toEqual(expected())
+      // With the images' files gone too.
+      store.forgetThreadData(id)
+      rmSync(join(dir, BLOBS_DIR), { recursive: true, force: true })
+      expect(engine.gauge(dir).estimates).toEqual(expected())
+    } finally {
+      engine.closeEverything()
+      store.closeThreadStorage()
+    }
+  })
+
+  it('figures from estimates equal figures from the messages, with and without a measurement', () => {
+    const messages = [...mixedContext(randomBytes(3_000).toString('base64')), ...mixedContext('')]
+    const base = { draftInput: 'draft', contextLimit: 200_000, modelName: 'm', lastMeasuredCacheRead: null, lastMeasuredCacheWrite: null, summaryText: 'summary' }
+    for (const measurement of [{ lastMeasuredInput: null }, { lastMeasuredInput: 5_000, lastMeasuredCacheRead: 1_000, measuredAtMessageLength: 4 }]) {
+      const fromMessages = computeContextUsage({ ...base, ...measurement, messages })
+      expect(fromMessages.used).toBeGreaterThan(0)
+      expect(computeContextUsage({ ...base, ...measurement, messageEstimates: messages.map((message) => estimateMessage(message)) })).toEqual(fromMessages)
     }
   })
 })

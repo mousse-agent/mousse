@@ -68,6 +68,7 @@ import {
   type FileStamp
 } from './legacyThreadData'
 import { sharedThreadDbClient, WORKER_BACKOFF_CODE } from './threadDb/threadDbClient'
+import type { MessageEstimate } from '../orchestrator/contextEstimate'
 import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
 import { publishStagedBlobs } from './threadDb/threadBlobs'
@@ -491,18 +492,19 @@ export class ThreadDataStore extends EventEmitter {
 
   /**
    * What the context gauge measures, read in the read worker without loading the thread or keeping it: the model
-   * context with only its active messages (`activeStartIndex` 0), and as `messages` only the newest message that
-   * reports the tokens its turn used. Undefined for a JSON thread or one with no model context, which the gauge
-   * estimates from the whole transcript instead.
+   * context's header with no messages, the estimate of each of its active messages (`estimates`, made in the worker
+   * so this loop only sums them), and as `messages` only the newest message that reports the tokens its turn used.
+   * Undefined for a JSON thread or one with no model context, which the gauge estimates from the whole transcript
+   * instead.
    */
-  async readGaugeData(id: string): Promise<{ messages: ChatMessage[]; llmContext: NonNullable<ThreadData['llmContext']> } | undefined> {
+  async readGaugeData(id: string): Promise<{ messages: ChatMessage[]; llmContext: NonNullable<ThreadData['llmContext']>; estimates: MessageEstimate[] } | undefined> {
     const threadDir = this.getThreadDir(id)
     if (!ThreadDbStore.usesDb(threadDir)) return undefined
     const gauge = await this.threadDb().client.call('gauge', threadDir)
     if (gauge.context === undefined) return undefined
     const { $retired: _retired, ...header } = JSON.parse(gauge.context) as Record<string, unknown>
-    const llmContext = { ...header, messages: gauge.active.map((payload) => JSON.parse(payload) as unknown), activeStartIndex: 0 } as unknown as NonNullable<ThreadData['llmContext']>
-    return { messages: gauge.latest === undefined ? [] : [JSON.parse(gauge.latest) as ChatMessage], llmContext }
+    const llmContext = { ...header, messages: [], activeStartIndex: 0 } as unknown as NonNullable<ThreadData['llmContext']>
+    return { messages: gauge.latest === undefined ? [] : [JSON.parse(gauge.latest) as ChatMessage], llmContext, estimates: gauge.estimates }
   }
 
   /** The thread database's change sequence and epoch, or undefined for a JSON thread. */
