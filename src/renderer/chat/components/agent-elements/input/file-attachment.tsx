@@ -180,7 +180,7 @@ export function FileAttachment({
             </div>
           )}
 
-          <div className="flex flex-col min-w-0">
+          <div className="flex flex-col flex-1 min-w-0">
             <span
               className="text-sm font-medium text-an-foreground truncate"
               title={filename}
@@ -196,6 +196,8 @@ export function FileAttachment({
         </>
       )}
 
+      {/* On a chip the × has its own slot after the name, so a long name ellipsizes before it;
+          a bare image thumbnail keeps it in the corner. */}
       {onRemove && (
         <button
           onMouseDown={(e) => {
@@ -206,7 +208,7 @@ export function FileAttachment({
             e.stopPropagation();
             onRemove();
           }}
-          className={`absolute top-1 right-1 size-5 rounded-full bg-an-background border border-an-border-color
+          className={`${isImageOnly ? "absolute top-1 right-1" : "shrink-0"} size-5 rounded-full bg-an-background border border-an-border-color
                      flex items-center justify-center transition-[opacity,transform] duration-150 ease-out active:scale-[0.97] z-10
                      text-an-foreground hover:bg-an-background-secondary opacity-100`}
           aria-label={`Remove ${filename}`}
