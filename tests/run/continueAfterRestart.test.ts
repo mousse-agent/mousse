@@ -615,6 +615,41 @@ describe('continue after restart (SPEC §16.4)', () => {
       expect(shown.at(-1)).toBe('assistant:reply to Then C')
     })
 
+    it('a cut-off turn with more same-words copies than unread steers hides none of them', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Steer twice')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const cut = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'steer-twice', source: 'gui' })
+      if (cut.status !== 'accepted') throw new Error('send rejected')
+      first.engine.markStarting(cut.runId)
+      first.engine.markRunning(cut.runId)
+      const at = new Date().toISOString()
+      first.store.mutateThreadData(thread.id, () => ({
+        messages: [
+          { id: 'u1', role: 'user', content: 'Build it', timestamp: at },
+          // Two copies an older build wrote, with no queue item named: one the turn read, one it never did.
+          { id: 'read-echo', role: 'user', content: 'Look at B', timestamp: at, steered: true },
+          { id: 'unread-echo', role: 'user', content: 'Look at B', timestamp: at, steered: true }
+        ] as ChatMessage[]
+      }))
+      first.store.saveMessageQueue(thread.id, [
+        { id: 'steer-1', threadId: thread.id, content: 'Look at B', enqueuedAt: at, order: 1, intent: 'steer', state: 'steering', steerRunId: cut.runId }
+      ] as never)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      second.orch.recoverAndDrainPendingQueues()
+      await waitFor(() => pi.turns.length === 1 && second.engine.getActiveRun(thread.id) === null && !second.orch.isActiveTurnRunning(thread.id), 'the steer run')
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Look at B'])
+      // Which copy is the unread one cannot be told, so both stay: shown twice beats hiding the one the turn read.
+      const messages = second.orch.getMessages(thread.id)
+      expect(messages.some((message) => message.id === 'read-echo')).toBe(true)
+      expect(messages.some((message) => message.id === 'unread-echo')).toBe(true)
+    })
+
     it('an older steer with the same words stays shown when the cut-off turn saved no copy', async () => {
       const dir = setupHome()
       const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
