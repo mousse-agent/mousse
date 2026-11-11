@@ -4,7 +4,7 @@ import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
 import { Markdown } from "../markdown";
 import { ThinkingIcon } from "../../../../lib/icons";
-import { latestThoughtHeading, thoughtHeading } from "../utils/format-tool";
+import { liveThoughtLine, liveThoughtText, thoughtHeading } from "../utils/format-tool";
 import {
   mapPartStateToInvocationState,
   mapToolInvocationToStep,
@@ -38,8 +38,12 @@ export function ThinkingCollapsed({
       icon={<ThinkingIcon size={18} active={isAnimating} />}
       shimmerLabel="Thinking"
       completeLabel={heading || "Thinking"}
-      // While it streams, the newest line of the thought follows the label.
-      detail={isAnimating ? latestThoughtHeading(step.thoughtContent) || undefined : undefined}
+      // While it streams, the thought as it is written follows the label, on one line: its newest words show.
+      detail={isAnimating ? liveThoughtLine(step.thoughtContent) || undefined : undefined}
+      liveDetail
+      detailTitle={isAnimating ? liveThoughtText(step.thoughtContent) || undefined : undefined}
+      // The icon turns; a shimmering label would paint every frame.
+      shimmer={false}
       isAnimating={isAnimating}
       expandable={!!step.thoughtContent}
       defaultOpen={defaultOpen}

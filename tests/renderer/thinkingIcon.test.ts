@@ -37,24 +37,26 @@ describe('Thinking icon', () => {
     expect(thinkingIcon(html)).not.toContain('is-thinking')
   })
 
-  it('sweeps with the label shimmer: same period, set once on the row', () => {
-    const html = renderToStaticMarkup(createElement(ThinkingCollapsed, { step, state: 'animating', onComplete: () => {} }))
-    expect(html).toContain('--an-shimmer-duration:1.2s')
-    expect(html).toMatch(/an-text-shimmer[^>]*animation-duration:1.2s/)
+  it('turns by a transform on its own box, in steps, at the Animation speed setting: the compositor draws it', () => {
     const css = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')
-    expect(css).toMatch(/\.thinking-icon\.is-thinking\s*\{[^}]*animation:\s*thinking-icon-sweep var\(--an-shimmer-duration/)
+    expect(css).toMatch(/\.thinking-icon\.is-thinking\s*\{[^}]*animation: thinking-icon-turn calc\(2s \* var\(--ui-motion-scale, 1\)\) steps\(24, end\) infinite/)
+    // Only a transform animates, and only on the icon itself (one inside the SVG lays it out every frame).
+    const keyframes = css.match(/@keyframes thinking-icon-turn\s*\{([^]*?)\n\}/)?.[1] ?? ''
+    expect([...keyframes.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1])).toEqual(['transform'])
+    expect(css).not.toMatch(/thinking-icon-orbit\s*\{[^}]*animation/)
+    // No colour animation, which would paint every frame.
+    expect(css).not.toMatch(/@keyframes[^{]*\{[^@]*color:/)
   })
 
-  it('neither sweeps nor turns with motion off or reduced', () => {
+  it('is still with motion off or reduced', () => {
     const css = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')
-    expect(css).toMatch(/\[data-motion='off'\] \.thinking-icon\.is-thinking,\s*\[data-motion='off'\] \.thinking-icon\.is-thinking \.thinking-icon-orbit\s*\{\s*animation: none !important;/)
-    expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{\s*\.thinking-icon\.is-thinking,\s*\.thinking-icon\.is-thinking \.thinking-icon-orbit\s*\{\s*animation: none !important;/)
+    expect(css).toMatch(/\[data-motion='off'\] \.thinking-icon\.is-thinking\s*\{\s*animation: none !important;/)
+    expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{\s*\.thinking-icon\.is-thinking\s*\{\s*animation: none !important;/)
   })
 })
 
 describe('Thinking shimmer in light themes', () => {
   const globalCss = readFileSync('src/renderer/styles/global.css', 'utf8')
-  const iconCss = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')
   const agentCss = readFileSync('src/renderer/chat/components/agent-elements/agent-ui.css', 'utf8')
 
   it('gives light (and system on a light OS) two different shimmer colours, from theme tokens', () => {
@@ -66,10 +68,8 @@ describe('Thinking shimmer in light themes', () => {
     }
   })
 
-  it('sweeps the label and the icon with the same pair', () => {
-    for (const css of [agentCss, iconCss]) {
-      expect(css).toContain('var(--an-shimmer-base, var(--an-foreground-subtle, #a3a3a3))')
-      expect(css).toContain('var(--an-shimmer-peak, var(--an-foreground-muted, #737373))')
-    }
+  it('sweeps the label with the pair', () => {
+    expect(agentCss).toContain('var(--an-shimmer-base, var(--an-foreground-subtle, #a3a3a3))')
+    expect(agentCss).toContain('var(--an-shimmer-peak, var(--an-foreground-muted, #737373))')
   })
 })

@@ -202,6 +202,22 @@
   background-repeat: no-repeat;
 }
 
+/* A thought being written (ToolRowBase `liveDetail`): its newest words show, whatever the row's width. Too long for
+   the row, it is cut at its start: the box runs right to left so it overflows (and takes the ellipsis) on the left,
+   and the text inside keeps its own direction. Short, it sits at the left like any detail. */
+.an-live-thought {
+  direction: rtl;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.an-live-thought > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
 .an-text-shimmer--active {
   animation: an-shimmer var(--an-shimmer-duration, 2s) linear infinite;
 }

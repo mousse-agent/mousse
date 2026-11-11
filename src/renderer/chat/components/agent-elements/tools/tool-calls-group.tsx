@@ -13,6 +13,12 @@ export type ToolCallsGroupProps = {
    */
   label?: string;
   /**
+   * The thought being written, while the group's newest item is one: its newest words follow the title (`line`;
+   * `text` whole in the tooltip). Shown on the header only while the group is closed: open, the thought's own row
+   * shows it.
+   */
+  liveThought?: { line: string; text: string };
+  /**
    * True while any tool inside the group is still running. Drives the group
    * header shimmer only — completed groups stay static even if the turn is
    * still streaming text. The group stays collapsed unless toggled.
@@ -38,6 +44,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,
   icon,
   label,
+  liveThought,
   autoOpen = false,
   failed = 0,
   live = false,
@@ -61,7 +68,11 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       icon={icon}
       completeLabel={title}
       shimmerLabel={title}
-      detail={title === "Tool calls" ? `${count}` : undefined}
+      detail={liveThought ? (expanded ? undefined : liveThought.line || undefined) : title === "Tool calls" ? `${count}` : undefined}
+      liveDetail={Boolean(liveThought)}
+      detailTitle={liveThought && !expanded ? liveThought.text || undefined : undefined}
+      // A group titled with a thought turns its thinking icon; only one of plain tool calls shimmers.
+      shimmer={title === "Tool calls"}
       badge={
         failed > 0 ? (
           <span className="text-[var(--danger)]">· {failed} failed</span>
@@ -75,7 +86,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       }}
       itemCount={count}
     >
-      <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 border-l border-an-border-color pl-3">
+      <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
         {children}
       </div>
     </ToolRowBase>

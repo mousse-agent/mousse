@@ -1,4 +1,4 @@
-import { latestThoughtHeading } from "./format-tool";
+import { latestThoughtHeading, liveThoughtLine, liveThoughtText } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
 
 export type ToolPartBase = {
@@ -262,6 +262,58 @@ function thoughtTextFromPart(part: ToolPartBase): string {
     : typeof output === "string"
       ? output
       : "";
+}
+
+/** The settled copy of each message that held a thought still marked as streaming, kept while it is the same object. */
+const settledThoughtCopies = new WeakMap<object, object>();
+
+/**
+ * The turn's messages with every thought but one at the very end marked done. A provider closes a thought only when
+ * the turn ends, so one followed by text or a tool call would read as still thinking while the turn writes. A message
+ * that changes nothing stays the same object, and a settled copy is reused, so memoised rows do not render again.
+ */
+export function settleEarlierThoughts<T extends { parts?: unknown[] }>(messages: T[]): T[] {
+  let changed = false;
+  const out = messages.map((message, index) => {
+    if (index === messages.length - 1) return message;
+    const settled = settleThoughtsOf(message);
+    if (settled !== message) changed = true;
+    return settled;
+  });
+  return changed ? out : messages;
+}
+
+function settleThoughtsOf<T extends { parts?: unknown[] }>(message: T): T {
+  const parts = message.parts ?? [];
+  if (!parts.some((part) => isLiveThought(part))) return message;
+  const cached = settledThoughtCopies.get(message as object);
+  if (cached) return cached as T;
+  const copy = {
+    ...message,
+    parts: parts.map((part) => {
+      if (!isLiveThought(part)) return part;
+      const text = thoughtTextFromPart(part as ToolPartBase);
+      return { ...(part as object), state: "output-available", output: text };
+    }),
+  };
+  settledThoughtCopies.set(message as object, copy);
+  return copy;
+}
+
+function isLiveThought(part: unknown): boolean {
+  return isRecord(part) && part.type === "tool-Thinking" && part.state === "input-available";
+}
+
+/**
+ * The live line of a group whose newest item is a thought still being written: that thought as it is written
+ * (`line`, for the row; `text`, whole, for its tooltip), both "" while it has no text yet. Undefined when the
+ * newest item is not a live thought.
+ */
+export function liveGroupThought(items: AssistantToolItem[]): { line: string; text: string } | undefined {
+  const last = items[items.length - 1]?.part;
+  if (!last || last.type !== "tool-Thinking" || last.state !== "input-available") return undefined;
+  const content = thoughtTextFromPart(last);
+  return { line: liveThoughtLine(content), text: liveThoughtText(content) };
 }
 
 /**

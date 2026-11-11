@@ -51,6 +51,8 @@ import { getToolStatus } from "./utils/format-tool";
 import {
   activityGroupLabel,
   analyzeAssistantMessage,
+  liveGroupThought,
+  settleEarlierThoughts,
   isErrorPart,
   isRecord,
   isTextPart,
@@ -2173,7 +2175,8 @@ const TurnRow = memo(function TurnRow({
                   // Subagent results whose subagents have a card in
                   // the thread show there, as the card's state: the
                   // results add no line of their own.
-                  const turnMsgs = turn.assistantMsgs.flatMap((msg) => {
+                  // A thought with anything after it in the turn is done (the provider closes it only later).
+                  const turnMsgs = settleEarlierThoughts(turn.assistantMsgs.flatMap((msg) => {
                     const background = readBackgroundNotice(msg);
                     if (background) {
                       const rest = background.filter((item) => !cardedSubagents.has(item.taskId));
@@ -2187,7 +2190,7 @@ const TurnRow = memo(function TurnRow({
                     );
                     if (rest.length === 0) return [];
                     return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
-                  });
+                  }));
                   const turnAnalyses = turnMsgs.map((msg) =>
                     analyzeAssistantMessage(
                       msg.parts ?? [],
@@ -2294,7 +2297,9 @@ const TurnRow = memo(function TurnRow({
                       (msgIndex) =>
                         analyses[msgIndex]!.toolItems,
                     );
-                    const groupLabel = activityGroupLabel(items);
+                    // A thought still being written ends the group: its header is the turn's live line.
+                    const liveThought = isLastTurn && isStreaming ? liveGroupThought(items) : undefined;
+                    const groupLabel = liveThought !== undefined ? "Thinking" : activityGroupLabel(items);
                     const firstId =
                       answerMsgs[
                         segment.msgIndices[0]!
@@ -2324,6 +2329,7 @@ const TurnRow = memo(function TurnRow({
                           )
                         }
                         label={groupLabel}
+                        liveThought={liveThought}
                         autoOpen={anyToolPending}
                         failed={
                           items.filter(

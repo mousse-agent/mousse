@@ -4,6 +4,7 @@ import type { TurnPhase, TurnStep } from "../../../../shared/types";
 import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { parseMcpToolType } from "./tools/tool-registry";
 import { isCompactionRow } from "./utils/assistant-blocks";
+import { ThinkingIcon } from "../../../lib/icons";
 import "./turn-progress.css";
 
 /**
@@ -135,6 +136,13 @@ export function stepSeenAt(state: TurnProgressState | null | undefined, now = Da
   return now;
 }
 
+/** The steps that read "Thinking…": they show the thinking icon. */
+const THINKING_KINDS: ReadonlySet<TurnProgressKind> = new Set(["thinking", "starting", "waiting", "finishing"]);
+
+/** The turn's start and the wait for the model's first output say nothing more than that it thinks: the tooltip says which. */
+const STARTING: TurnProgress = { kind: "starting", label: "Thinking…", title: "Starting the agent and its tools" };
+const WAITING: TurnProgress = { kind: "waiting", label: "Thinking…", title: "Waiting for the model's first output" };
+
 function hasContent(messages: readonly UIMessage[]): boolean {
   return messages.some((message) =>
     (message.parts ?? []).some((part) => {
@@ -148,7 +156,8 @@ function hasContent(messages: readonly UIMessage[]): boolean {
 /**
  * The line under a running turn's Working: what the turn does now, in a few words. Null where
  * something else in the turn already says it (an approval waiting, a compaction running, an answer
- * the agent waits for, which the header shows).
+ * the agent waits for, which the header shows, or a thought streaming, whose row is the live line).
+ * Starting, waiting for the model and finishing all read "Thinking…", with what it is in the tooltip.
  */
 export function describeTurnProgress({ state, messages, stepSince, awaitingSubagents, standalone, now }: TurnProgressInput): TurnProgress | null {
   const phase = state?.phase;
@@ -175,14 +184,15 @@ export function describeTurnProgress({ state, messages, stepSince, awaitingSubag
   const parts = (last?.parts ?? []) as Part[];
   const tail = parts[parts.length - 1];
   if (tail && isRunningTool(tail)) return toolProgress(tail);
-  if (tail?.type === "tool-Thinking" && tail.state === "input-available") return { kind: "thinking", label: "Thinking…" };
+  // A thought that streams: its row (or its group's header) says Thinking with the thought's latest line.
+  if (tail?.type === "tool-Thinking" && tail.state === "input-available") return null;
   for (let m = messages.length - 1; m >= 0; m -= 1) {
     const own = (messages[m]!.parts ?? []) as Part[];
     for (let p = own.length - 1; p >= 0; p -= 1) if (isRunningTool(own[p]!)) return toolProgress(own[p]!);
   }
 
-  if (step?.kind === "starting") return { kind: "starting", label: "Starting…", title: "Starting the agent and its tools" };
-  if (step?.kind === "waiting") return { kind: "waiting", label: "Waiting for the model…", title: "The request is sent; nothing came back yet" };
+  if (step?.kind === "starting") return STARTING;
+  if (step?.kind === "waiting") return WAITING;
   if (step?.kind === "reasoning") return { kind: "thinking", label: "Thinking…" };
 
   const content = hasContent(messages);
@@ -192,23 +202,24 @@ export function describeTurnProgress({ state, messages, stepSince, awaitingSubag
     case "tool_running":
       return { kind: "running-tool", label: "Running tools…" };
     case "finalizing":
-      return { kind: "finishing", label: "Finishing…" };
+      return { kind: "finishing", label: "Thinking…", title: "Finishing the turn" };
     case "thinking":
-      return content ? { kind: "thinking", label: "Thinking…" } : { kind: "waiting", label: "Waiting for the model…" };
+      return content ? { kind: "thinking", label: "Thinking…" } : WAITING;
     case "queued":
-      return { kind: "starting", label: "Starting…" };
+      return STARTING;
   }
   if (awaitingSubagents) return { kind: "subagents", label: "Waiting for subagents…" };
   // Sent, and the service has not started the turn yet (or this list has no thread behind it).
-  if (!content) return { kind: "starting", label: "Starting…" };
+  if (!content) return STARTING;
   return { kind: "thinking", label: "Thinking…" };
 }
 
 /**
- * The live line at the end of a running turn, under its Working: a short label for what the turn
- * does now, details in its tooltip. Its dots pulse by opacity only, so the line costs no layout or
- * paint while it animates. It reads the thread's turn from context, so a memoised turn row still
- * follows it.
+ * The live line at the end of a running turn, under its Working: a short label for what the turn does
+ * now, details in its tooltip. While the turn thinks it shows the thinking icon; for anything else
+ * (a tool, a retry, a stop), three small dots. Both move by transform or opacity only, so the line
+ * costs no layout or paint while it animates. It reads the thread's turn from context,
+ * so a memoised turn row still follows it.
  */
 export function TurnProgressRow({
   messages,
@@ -236,11 +247,18 @@ export function TurnProgressRow({
     <div
       className="turn-progress flex items-center gap-2 min-w-0 max-w-full select-none"
       role="status" data-find-ignore data-turn-progress={progress.kind} title={progress.title}>
-      <span className="turn-progress-dots" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </span>
+      {THINKING_KINDS.has(progress.kind) ? (
+        <span className="turn-progress-icon" aria-hidden="true">
+          <ThinkingIcon size={18} active />
+        </span>
+      ) : (
+        // Running a tool, retrying, stopping, writing, subagents: no thought, so no thinking icon.
+        <span className="turn-progress-dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      )}
       <span className="turn-progress-label">{progress.label}</span>
     </div>
   );
