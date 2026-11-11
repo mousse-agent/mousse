@@ -19,15 +19,17 @@
 .bot-menu button.is-danger { color: var(--error, #e79090); }
 .bot-menu hr { border: 0; border-top: 1px solid rgba(var(--accent-pale-rgb), .1); margin: 4px 2px; }
 
-/* The transcript and the composer share one centred column, about four fifths of the pane; the full width on a
-   narrow pane, and no wider than 1200px. Both gutters are kept so the column stays centred under the composer. */
-.bot-conversation { --bot-column: clamp(min(calc(100% - 32px), 640px), 78%, 1200px); }
+/* The transcript and the composer share one centred column: nearly the full pane on a narrow one (95% at 1000px),
+   easing to 78% on a wide one, and never wider than 1200px. Both gutters are kept so the column stays centred under
+   the composer. */
+.bot-conversation { --bot-column: min(calc(100% - 32px), 1200px, max(78%, calc(44% + 510px))); }
 .bot-conversation .chat-transcript { padding: 12px 0 20px; scrollbar-gutter: stable both-edges; }
 .bot-conversation .chat-transcript > * { width: var(--bot-column); margin-inline: auto; box-sizing: border-box; }
 
 /* Messages in groups (messageGroups.ts): one sender's messages close in time sit tight, the bot's face and name on the
-   first, one small time under the last on the sender's side. A quote inside a group opens a little space above it. */
-.bot-conversation .chat-participant-message { margin: 0; }
+   first, one small time under the last on the sender's side. A quote inside a group opens a little space above it.
+   Only the block margins: the inline ones centre the message in the column. */
+.bot-conversation .chat-participant-message { margin-block: 0; }
 .bot-conversation .chat-participant-message.is-group-start { margin-top: 22px; }
 .bot-conversation .chat-participant-message.from-agent:not(.is-group-start) { margin-top: 12px; }
 .bot-conversation .chat-participant-message.bot-you:not(.is-group-start) { margin-top: 3px; }
@@ -185,7 +187,8 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
   html[data-theme='system'] .bot-conversation .chat-input-area.bot-input-area .composer { --bot-glint: transparent; --bot-sheen: none; box-shadow: var(--ui-raised-shadow); }
 }
 .bot-conversation .chat-input-area.bot-input-area .composer-attachments { flex: 1 0 100%; border-radius: 22px 22px 0 0; }
-.bot-conversation .chat-input-area.bot-input-area .composer-input-wrap { flex: 1 1 0; min-width: 0; min-height: 44px; max-height: 176px; }
+/* A real basis keeps the field and its buttons on one line under a row of attachments. */
+.bot-conversation .chat-input-area.bot-input-area .composer-input-wrap { flex: 1 1 200px; min-width: 0; min-height: 44px; max-height: 176px; }
 .bot-conversation .chat-input-area.bot-input-area .composer-input,
 .bot-conversation .chat-input-area.bot-input-area .composer-input-backdrop { padding: 11px 6px 11px 18px; font-size: 14.5px; line-height: 22px; max-height: 176px; }
 .bot-conversation .chat-input-area.bot-input-area .composer-input { height: auto; field-sizing: content; min-height: 44px; border-radius: 0; }

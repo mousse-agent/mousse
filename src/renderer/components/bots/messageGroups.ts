@@ -29,10 +29,10 @@ export function botDayLabel(at: string, now = new Date()): string {
   return date.toLocaleDateString([], { day: 'numeric', month: 'short', ...(date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) })
 }
 
-/** A group's time under its last message: the hour and minute (the day line above says which day). */
-export function botGroupTime(at: string): string {
+/** A group's time under its last message: the hour as the locale writes it ("1:59 PM", not "01:59 PM") and the minute. */
+export function botGroupTime(at: string, locales?: Intl.LocalesArgument): string {
   const date = new Date(at)
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString(locales ?? [], { hour: 'numeric', minute: '2-digit' })
 }
 
 /** A message's full date and time, for its tooltip. */
