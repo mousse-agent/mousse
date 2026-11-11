@@ -450,10 +450,19 @@ export type CodexChatInput = {
   steerTaken?: (token?: string) => void
   /** Hands back a drained steer no turn took (a Stop, a failed turn, a refused `turn/start`): it is not lost. */
   returnSteer?: (text: string, token?: string) => void
-  /** A drained steer is read by the turn; `token` names its drain (`drainSteerEntry`), when it had one. */
+  /**
+   * A drained steer is read: Codex has it (`turn/steer` answered, or the `turn/start` that carries it accepted).
+   * `token` names its drain (`drainSteerEntry`), when it had one. If this throws, a drain with a token is handed back.
+   */
   onSteer?: (text: string, token?: string) => void
   /** Liveness while the turn only waits for the native helpers it started. */
   onHeartbeat?: () => void
+}
+
+/** A steer `chat` drained; `token` names its drain (`drainSteerEntry`), when it had one. */
+interface DrainedSteer {
+  text: string
+  token?: string
 }
 
 export interface CodexChatResult {
@@ -2841,7 +2850,7 @@ export class CodexProviderService {
     const scope = this.scope
     let run: TurnRun | undefined
     let steerTimer: ReturnType<typeof setInterval> | undefined
-    // Hands back cut messages no accepted turn took (set once the turn's steer handling exists).
+    // Hands back drained steers and cut messages Codex does not have (set once the turn's steer handling exists).
     let handBack: () => void = () => {}
     const onAbort = (): void => {
       this.questions.dismissAllForThread(input.threadId)
@@ -2894,28 +2903,62 @@ export class CodexProviderService {
         summary: 'auto' as const
       }
 
+      // A drained steer counts as read only once Codex has it: `turn/steer` answered, or the `turn/start` that
+      // carries it accepted. Then it is saved as read, by its drain's token when it has one
+      // (`TurnSink.steerAccepted`). If that call throws, the drain is handed back by its token as well. The sink
+      // decides what that means: the orchestrator's sink settles the token, and appends the text to the model
+      // context, before it saves, so when its own save fails it ignores the hand-back and the next save keeps the
+      // text. A sink that throws before settling the drain gets it back, and it runs as the next turn.
+      const accept = (entry: DrainedSteer): void => {
+        input.steerTaken?.(entry.token)
+        try {
+          if (entry.token) input.onSteer?.(entry.text, entry.token)
+          else input.onSteer?.(entry.text)
+        } catch (error) {
+          // Without a token the sink cannot tell a saved drain from one it lost: nothing is handed back.
+          if (entry.token) input.returnSteer?.(entry.text, entry.token)
+          throw error
+        }
+      }
       // Steers join the running turn (`turn/steer`); one that arrives after the turn ended
       // starts the next turn instead.
-      const undelivered: string[] = []
+      const undelivered: DrainedSteer[] = []
       let steering: Promise<void> = Promise.resolve()
+      // Steers and cut messages handed to the `steering` chain that it has not settled yet: one whose `turn/steer`
+      // Codex has not answered, and every one queued behind it. They join the chain when drained, so a Stop or a
+      // dead process that ends the chat mid-request still hands each back (`handBack`).
+      const inFlight: DrainedSteer[] = []
+      // Takes an entry off `inFlight` when its step settles it. False when `handBack` already returned it: a late
+      // answer then neither accepts nor holds it, so it runs once, from the queue.
+      const land = (entry: DrainedSteer): boolean => {
+        const at = inFlight.indexOf(entry)
+        if (at < 0) return false
+        inFlight.splice(at, 1)
+        return true
+      }
       // Wakes the wait for native helpers when a steer has to start a turn of its own.
       let steerWake: (() => void) | undefined
-      const hold = (text: string): void => {
-        undelivered.push(text)
+      const hold = (entry: DrainedSteer): void => {
+        if (!land(entry)) return
+        undelivered.push(entry)
         steerWake?.()
       }
-      const deliver = (text: string): void => {
+      const deliver = (entry: DrainedSteer): void => {
+        inFlight.push(entry)
         steering = steering.then(async () => {
           if (!current.turnOpen || !current.turnId || signal.aborted) {
-            hold(text)
+            hold(entry)
             return
           }
           try {
-            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(text)] }, { signal })
+            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(entry.text)] }, { signal })
           } catch (error) {
+            // A Stop or a dead process: the entry stays in flight, and the chat's end hands it back.
             if (!(error instanceof CodexRpcError)) throw error
-            hold(text)
+            hold(entry)
+            return
           }
+          if (land(entry)) accept(entry)
         })
         steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
       }
@@ -2925,10 +2968,13 @@ export class CodexProviderService {
       // results join later. Subagent results and an agent's steer still join natively.
       // A cut message is taken only once the `turn/start` that carries it is accepted. Until then it is held here,
       // and handed back on any failure (a Stop, a failed turn, a refused start), so it never goes missing.
-      const cutHeld: Array<{ text: string; token?: string }> = []
-      let cutStarting: Array<{ text: string; token?: string }> = []
+      const cutHeld: DrainedSteer[] = []
+      // What the next `turn/start` carries: held steers, then cut messages.
+      let nextSteers: DrainedSteer[] = []
+      // Oldest first: what the chain already settled comes before what is still on it.
       handBack = (): void => {
-        for (const entry of [...cutStarting.splice(0), ...cutHeld.splice(0)]) input.returnSteer?.(entry.text, entry.token)
+        for (const entry of [...nextSteers.splice(0), ...undelivered.splice(0), ...cutHeld.splice(0), ...inFlight.splice(0)])
+          input.returnSteer?.(entry.text, entry.token)
       }
       const cutTurns = new Set<string>()
       let cutWaiting = false
@@ -2941,9 +2987,11 @@ export class CodexProviderService {
           /* the turn ended meanwhile: the held text starts the next turn all the same */
         })
       }
-      const cut = (entry: { text: string; token?: string }): void => {
+      const cut = (entry: DrainedSteer): void => {
+        inFlight.push(entry)
         // In order behind native steers already on their way.
         steering = steering.then(() => {
+          if (!land(entry)) return
           cutHeld.push(entry)
           cutWaiting = true
           steerWake?.()
@@ -2959,11 +3007,9 @@ export class CodexProviderService {
         const entry = input.drainSteerEntry ? input.drainSteerEntry() : undefined
         const steer = (entry ? entry.text : input.drainSteer?.())?.trim()
         if (!steer) return
-        if (entry?.cut) return cut({ text: steer, ...(entry.token ? { token: entry.token } : {}) })
-        // Accepted by its drain's token, when the drain has one (`TurnSink.steerAccepted`).
-        if (entry?.token) input.onSteer?.(steer, entry.token)
-        else input.onSteer?.(steer)
-        deliver(steer)
+        const drainedSteer = { text: steer, ...(entry?.token ? { token: entry.token } : {}) }
+        if (entry?.cut) return cut(drainedSteer)
+        deliver(drainedSteer)
       }
       if (input.drainSteer || input.drainSteerEntry) {
         steerTimer = setInterval(() => {
@@ -3023,12 +3069,17 @@ export class CodexProviderService {
         starting.catch(() => undefined)
         await Promise.race([starting, aborted])
         current.turnOpen = true
-        // The server took the turn that carries the cut messages: they are read now, and the reply goes on below them.
-        for (const entry of cutStarting.splice(0)) {
-          input.steerTaken?.(entry.token)
-          if (entry.token) input.onSteer?.(entry.text, entry.token)
-          else input.onSteer?.(entry.text)
+        // The server took the turn that carries the held steers and cut messages: they are read now, and the reply
+        // goes on below them. Each is saved or handed back on its own, so one failed save loses none of the others.
+        let unsaved: { error: unknown } | undefined
+        for (const entry of nextSteers.splice(0)) {
+          try {
+            accept(entry)
+          } catch (error) {
+            unsaved ??= { error }
+          }
         }
+        if (unsaved) throw unsaved.error
         input.onSession?.({ codexThreadId, turnId: current.turnId })
         // A person's message drained before the turn existed cuts it at once; it goes next with everything held.
         // Otherwise steers drained before the turn existed go in now.
@@ -3070,8 +3121,8 @@ export class CodexProviderService {
           if (!undelivered.length && !cutHeld.length) break
         }
         if (abandoned) afterCap = true
-        cutStarting = cutHeld.splice(0)
-        nextInput = [textInput([...undelivered.splice(0), ...cutStarting.map((entry) => entry.text)].join('\n'))]
+        nextSteers = [...undelivered.splice(0), ...cutHeld.splice(0)]
+        nextInput = [textInput(nextSteers.map((entry) => entry.text).join('\n'))]
       }
       // A turn that ran after the cap (a held steer) does not wait for helpers; its own are interrupted
       // before the run ends.

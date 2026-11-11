@@ -191,8 +191,8 @@ export class CodexAdapter implements ProviderAdapter {
       ...(ctl.drainSteerEntry ? { drainSteerEntry: () => ctl.drainSteerEntry!() } : {}),
       steerTaken: (token) => ctl.steerTaken?.(token),
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
-      // Called once the turn that reads the text is running: for a cut, when the server accepted the turn that
-      // carries it, so the reply row splits where the interrupt landed.
+      // Called once Codex has the text: its `turn/steer` was answered, or, for a cut, the server accepted the turn
+      // that carries it, so the reply row splits where the interrupt landed.
       onSteer: (text, token) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.
