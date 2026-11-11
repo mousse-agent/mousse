@@ -139,7 +139,7 @@ describe('background workflow ingress', () => {
           text: 'plain-ok', aborted: false, modelName: 'fixture', totalResponseTimeMs: 1,
           usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'fixture', nativeMessages: [], providerRef
         })
-        return { result, steer: async () => 'not_active' as const, interrupt: async () => 'not_active' as const, providerRef: () => providerRef }
+        return { result, interrupt: async () => 'not_active' as const, providerRef: () => providerRef }
       })
       vi.spyOn(Harness.prototype, 'oneShot').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
       const alice = await f.services(f.alice.id)

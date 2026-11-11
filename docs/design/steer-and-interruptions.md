@@ -490,7 +490,7 @@ ACP agents and Cursor are checked by hand only if they can run with no account; 
 | A tool call is announced or runs | Held (§2). Send now: a cut (Pi's abort ends the tool, §3.5). |
 | Retrying (`auto_retry_start`) | Cut: the abort also cancels the backoff (`engine.ts:1565`). |
 | Compacting (`compaction_start`) | Held until `compaction_end`. A Send now request is still read during the compaction (§2.2) and forces the cut once it ends: a steer never stops a compaction. |
-| After `agent_end` | Unchanged: `steer()` refuses (`engine.ts:1625`) and the text becomes the next turn. |
+| After `agent_end` | Unchanged: no drain runs once the turn is no longer running (the drain is at `turn_end`), so the text becomes the next turn. |
 
 Agents' steers and subagent notices keep Pi's native next-step path; they never cut.
 

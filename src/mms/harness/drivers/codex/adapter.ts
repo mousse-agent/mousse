@@ -27,7 +27,7 @@ import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOv
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
   CodexProviderService,
-  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
+  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'userSetup'
 > & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread'>>
 
 /** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
@@ -328,11 +328,6 @@ export class CodexAdapter implements ProviderAdapter {
    */
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     return (await this.service()?.stopThread?.(threadId)) ?? 'not_active'
-  }
-
-  /** Adds `text` to the live Codex turn of `ref` without cancelling it (`turn/steer`). */
-  async steer(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'> {
-    return (await this.service()?.steer(ref.sessionId, text)) ?? 'not_active'
   }
 
   /**

@@ -555,8 +555,6 @@ export interface TurnAppContext {
 
 export interface TurnHandle {
   readonly result: Promise<TurnResult>
-  /** Never "unsupported": delivered live, by restart, or queued; `not_active` once the turn ended. */
-  steer(text: string): Promise<{ delivery: 'live' | 'restarted' | 'queued' } | 'not_active'>
   interrupt(): Promise<'interrupted' | 'not_active'>
   /** The provider session reference once known (`TurnSink.providerRef`). */
   providerRef(): ProviderRef | undefined
@@ -1506,12 +1504,7 @@ export class Harness implements HarnessGateway {
     return {
       result,
       providerRef: () => ref,
-      interrupt: async () => (ended || !ref ? 'not_active' : this.interruptOn(record, ref, spec.input.threadId)),
-      steer: async (text) => {
-        if (ended) return 'not_active'
-        if (ref && record.runtime.adapter.steer && (await record.runtime.adapter.steer(ref, text)) === 'delivered') return { delivery: 'live' }
-        return { delivery: 'queued' }
-      }
+      interrupt: async () => (ended || !ref ? 'not_active' : this.interruptOn(record, ref, spec.input.threadId))
     }
   }
 

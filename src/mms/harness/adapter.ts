@@ -457,7 +457,6 @@ export interface ProviderAdapter {
   stopThread?(threadId: string): Promise<'stopped' | 'not_active'>
   /** Whether the adapter keeps a process for `threadId` between turns now (Claude's live query). */
   hasLiveProcess?(threadId: string): boolean
-  steer?(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'>
   /**
    * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or
    * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only

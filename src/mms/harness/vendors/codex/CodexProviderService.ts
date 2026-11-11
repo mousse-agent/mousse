@@ -2496,18 +2496,6 @@ export class CodexProviderService {
     })
   }
 
-  /** Adds `text` to the running turn on `codexThreadId` (`turn/steer`). */
-  async steer(codexThreadId: string | undefined, text: string): Promise<'delivered' | 'not_active'> {
-    const run = codexThreadId ? this.turns.get(codexThreadId) : undefined
-    const conn = this.app?.conn
-    if (!run?.turnId || !conn || run.signal.aborted) return 'not_active'
-    try {
-      await conn.request('turn/steer', { threadId: run.codexThreadId, expectedTurnId: run.turnId, input: [textInput(text)] })
-      return 'delivered'
-    } catch {
-      return 'not_active'
-    }
-  }
 
   /** Remembers the turn of a thread no run owns yet: a helper's first events can beat the item that names it. */
   private noteStray(notification: CodexNotification, threadId: string): void {
