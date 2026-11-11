@@ -208,8 +208,8 @@ export type ClaudeSubscriptionChatInput = {
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
-  /** A drained steer was pushed to Claude. */
-  onSteer?: (text: string) => void
+  /** A drained steer was pushed to Claude; `token` names its drain (`drainSteerEntry`), when it had one. */
+  onSteer?: (text: string, token?: string) => void
   /** A drained steer could not be pushed because the turn's result had already arrived: it is the next turn. */
   returnSteer?: (text: string, token?: string) => void
   /** A drained steer was pushed to Claude: its token is spent. */
@@ -2443,6 +2443,11 @@ export class ClaudeSubscriptionProviderService {
       const drained = input.drainSteerEntry ? input.drainSteerEntry() : undefined
       const steer = (drained ? drained.text : input.drainSteer?.())?.trim()
       if (!steer) return
+      // Accepted by its drain's token, when the drain has one (`TurnSink.steerAccepted`).
+      const steered = (): void => {
+        if (drained) input.onSteer?.(steer, drained.token)
+        else input.onSteer?.(steer)
+      }
       if (live && liveRun) {
         // A live turn is steered without interrupting it: the text joins the stream as an immediate
         // message, and background helpers keep running.
@@ -2453,7 +2458,7 @@ export class ClaudeSubscriptionProviderService {
             // Claude Code finishes sending the message it was writing until its cut lands: the steer takes its place
             // in the reply where the next message starts, so the old message's last words stay above it.
             frames.atNextMessage(() => {
-              input.onSteer?.(steer)
+              steered()
               frames.breakParagraph()
             })
           } else input.returnSteer?.(steer, drained?.token)
@@ -2461,7 +2466,7 @@ export class ClaudeSubscriptionProviderService {
         return
       }
       steers.push(steer)
-      input.onSteer?.(steer)
+      steered()
       if (query && !interruptRequested) {
         interruptRequested = true
         this.questions.autoRejectPendingForThread(input.threadId)

@@ -117,4 +117,38 @@ describe('restart recovery of a turn cut off by a killed daemon', () => {
       expect(result.nonTerminal).toEqual([])
     }, 120_000)
   }
+
+  // Acceptance per token (docs/design/steer-and-interruptions.md §2.6): accepting `next` must not acknowledge `later`,
+  // which was drained separately and is still unread when the daemon dies.
+  it('killed with two steers drained and only the first accepted: the first stays read, the second runs once after the restart', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-restart-steer-two-drains-'))
+    homes.push(home)
+    expect(spawnSync('git', ['-C', home, 'rev-parse', '--git-dir'], { encoding: 'utf-8' }).status, `${home} is inside a git repository`).not.toBe(0)
+    const killed = runChild(['first', home, 'steer-two-drains'])
+    expect(existsSync(join(home, 'error.txt')) ? readFileSync(join(home, 'error.txt'), 'utf-8') : '', killed.stderr).toBe('')
+    expect(killed.status === 0).toBe(false)
+
+    const restarted = runChild(['restart', home])
+    expect(existsSync(join(home, 'error.txt')) ? readFileSync(join(home, 'error.txt'), 'utf-8') : '', restarted.stderr).toBe('')
+    expect(restarted.status).toBe(0)
+    const result = JSON.parse(readFileSync(join(home, 'result.json'), 'utf-8')) as Result
+    const prompts = readFileSync(join(home, 'prompts.log'), 'utf-8').trim().split('\n')
+    expect(result.timedOut).toBe(false)
+
+    // `next` was read and is not sent again; `later` was not, and runs once, as its own turn.
+    expect(prompts).toEqual(['first:earlier', 'first:cut', 'restart:later'])
+    for (const transcript of [result.transcript, result.live]) {
+      const at = transcript.indexOf('user:cut')
+      expect(transcript.filter((row) => row === 'user:next')).toHaveLength(1)
+      expect(transcript.indexOf('user:next')).toBeGreaterThan(at)
+      expect(transcript.filter((row) => row === INTERRUPTED)).toHaveLength(1)
+      expect(transcript.filter((row) => row === 'user:later')).toHaveLength(1)
+      expect(transcript.indexOf('user:later')).toBeGreaterThan(transcript.indexOf(INTERRUPTED))
+      expect(transcript.at(-1)).toBe('assistant:reply to later')
+    }
+    expect(result.open).toBe(0)
+    expect(result.queue).toBe(0)
+    expect(result.active).toBe(false)
+    expect(result.nonTerminal).toEqual([])
+  }, 120_000)
 })

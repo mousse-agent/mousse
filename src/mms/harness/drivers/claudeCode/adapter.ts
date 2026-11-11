@@ -215,12 +215,12 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       drainSteerEntry: ctl.drainSteerEntry ? () => ctl.drainSteerEntry!() : undefined,
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
       steerTaken: (token) => ctl.steerTaken?.(token),
-      onSteer: (text) => {
+      onSteer: (text, token) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.
         streams.thinking.break()
         streams.text.break()
-        sink.steerAccepted(text)
+        sink.steerAccepted(text, token)
       },
       onText: (text) => {
         progress()

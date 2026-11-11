@@ -193,12 +193,12 @@ export class CodexAdapter implements ProviderAdapter {
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
       // Called once the turn that reads the text is running: for a cut, when the server accepted the turn that
       // carries it, so the reply row splits where the interrupt landed.
-      onSteer: (text) => {
+      onSteer: (text, token) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.
         streams.thinking.break()
         streams.text.break()
-        sink.steerAccepted(text)
+        sink.steerAccepted(text, token)
       },
       onText: (text) => {
         progress()

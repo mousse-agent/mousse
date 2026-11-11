@@ -1961,7 +1961,7 @@ export class PiRpcEngine implements ProviderAdapter {
           if (index >= 0) {
             const [steer] = turn.steers.splice(index, 1)
             turn.ctl.steerTaken?.(steer.token)
-            sink.steerAccepted(steer.text)
+            sink.steerAccepted(steer.text, steer.token)
           }
         }
         return

@@ -12,6 +12,8 @@
  * - `steer`: as `streaming`, and `next` was steered into the running turn (#873), which has not read it yet;
  * - `steer-taken`: as `steer`, and the provider took `next`: its acceptance is saved, and the process dies before the
  *   queue drops the item;
+ * - `steer-two-drains`: as `steer`, and `later` is queued too. `next` and then `later` are steered and drained
+ *   separately; the provider takes both and accepts only `next`, by its drain token, then the process dies;
  * - `approval`: the provider waits for a saved approval;
  * - `question`: the provider waits for an answer to a question.
  *
@@ -31,7 +33,7 @@ import { isOpenActivityRow } from '../../src/mms/run/restartNote'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon } from '../run/phase6Fixture'
 
-type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'approval' | 'question'
+type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'steer-two-drains' | 'approval' | 'question'
 const [mode, home, scenario] = process.argv.slice(2) as ['first' | 'restart', string, Scenario | undefined]
 process.env.MOUSSE_HOME = home
 process.env.MOUSSE_SQLITE_THREAD_STORE = '1'
@@ -78,6 +80,21 @@ class KillAdapter implements ProviderAdapter {
         let entry: ReturnType<NonNullable<TurnControl['drainSteerEntry']>>
         await waitFor(() => Boolean((entry = ctl.drainSteerEntry?.())), 'the steer drained', 20_000)
         sink.steerAccepted(entry!.text)
+      }
+      if (scenario === 'steer-two-drains') {
+        // Two drains outstanding: `next`, then `later`. Only `next` is accepted, by its token; `later` is taken and not
+        // accepted when the process dies.
+        await waitFor(() => existsSync(marker('take')), 'the steer to take', 20_000)
+        let next: ReturnType<NonNullable<TurnControl['drainSteerEntry']>>
+        await waitFor(() => Boolean((next = ctl.drainSteerEntry?.())), 'next drained', 20_000)
+        writeFileSync(marker('drained-next'), '')
+        let later: ReturnType<NonNullable<TurnControl['drainSteerEntry']>>
+        await waitFor(() => Boolean((later = ctl.drainSteerEntry?.())), 'later drained', 20_000)
+        if (next!.text !== 'next' || later!.text !== 'later') throw new Error(`drained ${next!.text} and ${later!.text}`)
+        ctl.steerTaken?.(next!.token)
+        ctl.steerTaken?.(later!.token)
+        sink.steerAccepted(next!.text, next!.token)
+        die()
       }
       return new Promise<TurnResult>(() => undefined)
     }
@@ -177,6 +194,16 @@ async function first(): Promise<void> {
     writeFileSync(marker('take'), '')
     await new Promise<void>((resolve) => setTimeout(resolve, 20_000))
     throw new Error('the steer was not taken')
+  }
+  if (scenario === 'steer-two-drains') {
+    const later = await d.orch.send('later', false, { threadId: thread.id, clientRequestId: 'c-3' })
+    if (!later.queued) throw new Error('later was not queued')
+    if (!d.orch.promoteQueueItem(thread.id, queued.queueItem!.id).ok) throw new Error('the steer was refused')
+    writeFileSync(marker('take'), '')
+    await waitFor(() => existsSync(marker('drained-next')), 'next drained')
+    if (!d.orch.promoteQueueItem(thread.id, later.queueItem!.id).ok) throw new Error('the second steer was refused')
+    await new Promise<void>((resolve) => setTimeout(resolve, 20_000))
+    throw new Error('the steers were not taken')
   }
   // What the thread saved so far reaches disk before the kill, as it would during a long turn.
   d.save(thread.id)

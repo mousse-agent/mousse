@@ -191,8 +191,13 @@ export interface TurnSink {
    * A drained steer reached a runtime that keeps its own transcript. The orchestrator appends it
    * to the canonical transcript and acknowledges the drained queue items. (The pi loop reports
    * steers through `nativeMessages` instead.)
+   *
+   * `token` names the drain (`TurnControl.drainSteerEntry`): only that drain's queue items are
+   * acknowledged, after the text and their ids are saved, so another drain still outstanding stays
+   * unread. A token this turn does not know, or already accepted, changes nothing. Without a token,
+   * every drained item is acknowledged, which is right only while one drain is outstanding.
    */
-  steerAccepted(text: string): void
+  steerAccepted(text: string, token?: string): void
   /** Turn-level measurements from a runtime that reports them (may arrive on failure too). */
   providerMetrics(metrics: ProviderMetrics): void
   /** Lines the runtime edited in the workspace. */
@@ -238,7 +243,10 @@ export interface TurnControl {
    * waits for the current reply or command to end cuts the reply instead and continues with the text.
    */
   drainSteerEntry?(): { text: string; token: string; cut?: boolean } | undefined
-  /** The provider took the drain `token` names; it will not be returned. */
+  /**
+   * The provider took the drain `token` names; it will not be returned. Nothing is saved or
+   * acknowledged until `TurnSink.steerAccepted(text, token)`.
+   */
   steerTaken?(token?: string): void
   /** Liveness touch; the orchestrator throttles the store write. */
   heartbeat(): void
