@@ -1,6 +1,9 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ToolRowBase } from "./tool-row-base";
+import { useLiveThought, type LiveThoughtSource } from "../../../../stores/liveTextStore";
+import { liveThoughtLine, liveThoughtText } from "../utils/format-tool";
+import { countRender } from "../render-counts";
 
 export type ToolCallsGroupProps = {
   count: number;
@@ -17,7 +20,7 @@ export type ToolCallsGroupProps = {
    * `text` whole in the tooltip). Shown on the header only while the group is closed: open, the thought's own row
    * shows it.
    */
-  liveThought?: { line: string; text: string };
+  liveThought?: LiveThoughtSource;
   /**
    * True while any tool inside the group is still running. Drives the group
    * header shimmer only — completed groups stay static even if the turn is
@@ -50,8 +53,11 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
   live = false,
   children,
 }: ToolCallsGroupProps) {
+  countRender("ToolCallsGroup");
   const [expanded, setExpanded] = useState(false);
   const title = label?.trim() ? label : "Tool calls";
+  // The thought as it is written: a streamed delta renders this header, not the turn around it.
+  const thought = useLiveThought(liveThought);
   // Failures already seen; a live group starts from none so its first failure counts.
   const seenFailed = useRef(live ? 0 : failed);
   const openedForFailure = useRef(false);
@@ -68,9 +74,9 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       icon={icon}
       completeLabel={title}
       shimmerLabel={title}
-      detail={liveThought ? (expanded ? undefined : liveThought.line || undefined) : title === "Tool calls" ? `${count}` : undefined}
+      detail={liveThought ? (expanded ? undefined : liveThoughtLine(thought) || undefined) : title === "Tool calls" ? `${count}` : undefined}
       liveDetail={Boolean(liveThought)}
-      detailTitle={liveThought && !expanded ? liveThought.text || undefined : undefined}
+      detailTitle={liveThought && !expanded ? liveThoughtText(thought) || undefined : undefined}
       // A group titled with a thought turns its thinking icon; only one of plain tool calls shimmers.
       shimmer={title === "Tool calls"}
       badge={

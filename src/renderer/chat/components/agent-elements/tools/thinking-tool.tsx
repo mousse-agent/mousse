@@ -4,6 +4,9 @@ import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
 import { Markdown } from "../markdown";
 import { ThinkingIcon } from "../../../../lib/icons";
+import { useLiveThought } from "../../../../stores/liveTextStore";
+import { thoughtSourceOf } from "../utils/assistant-blocks";
+import { countRender } from "../render-counts";
 import { liveThoughtLine, liveThoughtText, thoughtHeading } from "../utils/format-tool";
 import {
   mapPartStateToInvocationState,
@@ -81,6 +84,10 @@ export const ThinkingTool = memo(function ThinkingTool({
   expanded,
   onToggleExpand,
 }: ThinkingToolProps) {
+  countRender("ThinkingTool");
+  // The thought as it is written (see liveTextStore): a streamed delta renders this row alone.
+  const source = part && !externalStep ? thoughtSourceOf(part) : undefined;
+  const thought = useLiveThought(source);
   let step: Extract<TimelineStep, { type: "tool-call" }>;
   let stepState: StepState;
   let onComplete: () => void;
@@ -90,9 +97,10 @@ export const ThinkingTool = memo(function ThinkingTool({
     stepState = externalState;
     onComplete = externalOnComplete;
   } else if (part) {
+    const args = part.input ?? part.args ?? {};
     step = mapToolInvocationToStep(part.toolCallId ?? part.id ?? "thinking", {
       toolName: "Thinking",
-      args: part.input ?? part.args ?? {},
+      args: source && thought !== source.thought ? { ...args, thought } : args,
       state: mapPartStateToInvocationState(part.state),
       result: part.output ?? part.result,
     });

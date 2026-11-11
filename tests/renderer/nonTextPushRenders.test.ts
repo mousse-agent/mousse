@@ -113,7 +113,7 @@ async function store() {
 const listed = (): Thread[] => [thread('live-thread', 'Streaming now'), thread('other-a', 'Finished one'), thread('other-b', 'Quiet one')]
 
 /** The sidebar's Threads tab (or `view`) with three threads (or `threads`) beside the chat of the one whose reply streams. */
-async function mount(options: { view?: 'threads' | 'projects'; threads?: Thread[]; activity?: ThreadActivitySnapshot } = {}): Promise<void> {
+async function mount(options: { view?: 'threads' | 'projects'; threads?: Thread[]; activity?: ThreadActivitySnapshot; messages?: ChatMessage[]; turn?: TurnState } = {}): Promise<void> {
   stubBridge()
   const useAppStore = await store()
   useAppStore.setState({
@@ -123,9 +123,9 @@ async function mount(options: { view?: 'threads' | 'projects'; threads?: Thread[
     newThreadWorktree: false,
     projects: [project],
     threads: options.threads ?? listed(),
-    messages: transcript(),
+    messages: options.messages ?? transcript(),
     threadActivity: {},
-    turnStates: turns(turn()),
+    turnStates: turns(options.turn ?? turn()),
     stopRequests: {}
   })
   useAppStore.getState().setThreadActivity(options.activity ?? activity())
@@ -281,6 +281,28 @@ describe('pushes other than text while a reply streams', () => {
     expect(working('live-thread')).toBe(true)
     await counted(() => useAppStore.getState().setThreadActivity(tree('completed', 'waiting')))
     expect(waiting('live-thread')).toBe(true)
+  })
+})
+
+describe('a thought being written', () => {
+  const thought = (content: string): ChatMessage =>
+    ({ id: 'th', role: 'system', kind: 'thinking', content: '', timestamp: at(21), thinking: { content, status: 'processing' } })
+
+  it('a streamed delta of the thought renders its row only: no sidebar row, the chat or the transcript', async () => {
+    const thinking = [...transcript().slice(0, -1), thought('**Reading the logs**\n\nThe first run')]
+    await mount({ messages: thinking, turn: turn({ phase: 'thinking', step: { kind: 'reasoning' } }) })
+    const useAppStore = await store()
+    const { applyStreamedUpdates } = await import('../../src/renderer/stores/liveTextStore')
+    const before = useAppStore.getState().messages
+    const delta = await counted(() => {
+      const state = useAppStore.getState()
+      applyStreamedUpdates([thought('**Reading the logs**\n\nThe first run failed on the cache step')], state.messages, state.updateMessages)
+    })
+    expectTranscriptAndRowsStill(delta)
+    expect(delta.counts.ThreadsSidebar ?? 0).toBe(0)
+    expect(delta.counts.ThinkingTool).toBe(1)
+    expect(useAppStore.getState().messages).toBe(before)
+    expect(host.textContent).toContain('failed on the cache step')
   })
 })
 
