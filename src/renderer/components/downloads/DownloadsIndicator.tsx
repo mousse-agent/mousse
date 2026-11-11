@@ -214,7 +214,7 @@ export function downloadDetail(entry: DownloadEntry, notApplied = false): string
     case 'queued': return 'Waiting'
     case 'verifying': return 'Verifying'
     case 'available': return notApplied ? 'Did not install last time' : 'Update available'
-    case 'ready': return entry.error ?? 'Ready to install'
+    case 'ready': return entry.error ?? (notApplied ? 'Did not install last time' : 'Ready to install')
     case 'installing': return 'Installing…'
     case 'done': return 'Downloaded'
     case 'failed': return entry.error ?? 'Download failed'

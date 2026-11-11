@@ -1,7 +1,7 @@
 import { attachLinuxWindowShape } from './linuxWindowShape'
 import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { configureElectronContext, configureWindowlessElectron, finishElectronCli } from '../cli/electronContext'
@@ -45,6 +45,9 @@ import {
 } from './windowResume'
 import { attachContextMenu } from './contextMenu'
 import { startDesktopUpdates } from './updates'
+import { freeInstallFolder, listInstallFolderProcesses } from './updates/installFolder'
+import { INSTALL_QUIT_DEADLINE_MS } from './updates/installGate'
+import { prepareUpdateInstall, recoverUpdateInstall } from './updates/installHandoff'
 import type { DesktopUpdater } from './updates/DesktopUpdater'
 import { setupApplicationMenu } from './applicationMenu'
 import { attachZoomShortcuts } from './zoomShortcuts'
@@ -369,15 +372,30 @@ function startGuiApp(): void {
       try {
         desktopUpdater ??= startDesktopUpdates({
           // The installer replaces Mousse.exe, which also hosts the background service.
-          prepareInstall: async () => {
-            await guiMms?.stop()
-            const stopped = await stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS })
-            if (stopped.kind !== 'stopped' && stopped.kind !== 'not-running') {
-              throw new Error('The background service did not stop, so the update was not installed.')
+          prepareInstall: () => prepareUpdateInstall({
+            controller: guiMms,
+            stopService: () => stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS }),
+            // Services of other clients or earlier sessions, `mousse-cli` commands and the voice engine run the same
+            // files; the installer cannot replace them while they run. A development build's executable is the
+            // shared Electron runtime, which other checkouts run too: only an installed build checks its folder.
+            freeInstallFolder: async () => {
+              if (!app.isPackaged) return
+              await freeInstallFolder({
+                selfPid: process.pid,
+                list: () => listInstallFolderProcesses(dirname(process.execPath)),
+                stopService: async (otherHome) => {
+                  await stopRunningDaemon(canonicalizeHome(otherHome), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS })
+                },
+                kill: (pid) => process.kill(pid)
+              })
             }
+          }),
+          // The installer is running: quit even when a window would hold the quit back.
+          onInstallStarted: () => {
+            setTimeout(() => app.exit(0), INSTALL_QUIT_DEADLINE_MS).unref()
           },
           recoverInstall: async () => {
-            await guiMms?.start()
+            await recoverUpdateInstall({ controller: guiMms })
             for (const window of BrowserWindow.getAllWindows()) {
               if (!window.isDestroyed()) window.webContents.reload()
             }

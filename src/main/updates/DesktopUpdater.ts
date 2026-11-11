@@ -18,6 +18,8 @@ export interface UpdaterBackend {
 }
 
 export const FIRST_CHECK_DELAY_MS = 15_000
+/** The first check after an update did not install. */
+export const RETRY_CHECK_DELAY_MS = 3_000
 export const CHECK_INTERVAL_MS = 30 * 60_000
 /** A window regaining focus checks again only when the last check is at least this old. */
 export const FOCUS_CHECK_MIN_GAP_MS = 10 * 60_000
@@ -45,6 +47,8 @@ export interface DesktopUpdaterOptions {
   prepareInstall: () => Promise<void>
   /** Undoes `prepareInstall` after the installer could not start. */
   recoverInstall: () => Promise<void>
+  /** The installer process is starting and Mousse is quitting for it. */
+  onInstallStarted?: () => void
   onState: (state: UpdateState) => void
   now?: () => number
   random?: () => number
@@ -115,7 +119,8 @@ export class DesktopUpdater {
   }
 
   start(): void {
-    if (this.state.phase !== 'disabled') this.schedule(FIRST_CHECK_DELAY_MS)
+    // After an update did not install, its retry is offered soon after the window opens.
+    if (this.state.phase !== 'disabled') this.schedule(this.state.notAppliedVersion ? RETRY_CHECK_DELAY_MS : FIRST_CHECK_DELAY_MS)
   }
 
   /** A window gained focus. Checks when the last check is old enough. */
@@ -173,6 +178,9 @@ export class DesktopUpdater {
         const matched = typeof info.releaseNotes !== 'string' || !info.releaseName || info.releaseName.includes(info.version)
         const notes = normalizeReleaseNotes(matched ? info.releaseNotes : null, info.version, this.options.repositoryUrl)
         this.update({ phase: 'available', availableVersion: info.version, lastCheckedAt: this.now(), ...notes }, ['error'])
+        // The update that did not install last time is fetched again (electron-updater keeps the file, so this only
+        // checks it), and Restart to update is offered straight away to try once more.
+        if (info.version === this.state.notAppliedVersion) void this.download()
       }
       this.schedule(CHECK_INTERVAL_MS)
     } catch (error) {
@@ -222,7 +230,10 @@ export class DesktopUpdater {
       this.installStep = 'starting'
       backend.quitAndInstall(true, true)
       // Still 'starting' unless the call itself reported a failure.
-      if (this.installStep === 'starting') this.installStep = 'started'
+      if (this.installStep === 'starting') {
+        this.installStep = 'started'
+        this.options.onInstallStarted?.()
+      }
     } catch (error) {
       await this.failInstall(error)
     }

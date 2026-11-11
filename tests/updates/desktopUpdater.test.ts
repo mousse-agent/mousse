@@ -7,6 +7,7 @@ import {
   DesktopUpdater,
   FIRST_CHECK_DELAY_MS,
   FOCUS_CHECK_MIN_GAP_MS,
+  RETRY_CHECK_DELAY_MS,
   type UpdaterBackend
 } from '../../src/main/updates/DesktopUpdater'
 import { updaterRecordFile, type UpdaterRecord, type UpdaterRecordStore } from '../../src/main/updates/updaterRecord'
@@ -273,6 +274,54 @@ describe('DesktopUpdater', () => {
     expect(updater.getState().notAppliedVersion).toBe(notApplied)
     expect(updater.getState().channel).toBe('stable')
     expect(store.record).toEqual({ channel: 'stable' })
+  })
+
+  it('after an update did not install, checks soon and offers Restart to update for it again', async () => {
+    const store = memoryStore({ install: { from: '0.1.2-nightly.20261021.2', to: '0.1.2-nightly.20261022.3', at: 1 } })
+    const { backend, updater } = setup({ store })
+    backend.offer('0.1.2-nightly.20261022.3')
+    updater.start()
+    await vi.advanceTimersByTimeAsync(RETRY_CHECK_DELAY_MS * 1.1)
+    expect(backend.checks).toBe(1)
+    expect(updater.getState()).toMatchObject({ phase: 'downloaded', availableVersion: '0.1.2-nightly.20261022.3', notAppliedVersion: '0.1.2-nightly.20261022.3' })
+    await updater.install()
+    expect(backend.installs).toEqual([[true, true]])
+    expect(updater.getState().notAppliedVersion).toBeUndefined()
+    updater.dispose()
+  })
+
+  it('a newer release than the one that did not install is offered, not downloaded', async () => {
+    const store = memoryStore({ install: { from: '0.1.2-nightly.20261021.2', to: '0.1.2-nightly.20261022.3', at: 1 } })
+    const { backend, updater } = setup({ store })
+    backend.offer('0.1.2-nightly.20261023.4')
+    await updater.check()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(updater.getState().phase).toBe('available')
+    updater.dispose()
+  })
+
+  it('tells main once the installer is starting, and not when it could not start', async () => {
+    for (const installError of [undefined, new Error('spawn EACCES')]) {
+      const started = vi.fn()
+      const backend = new FakeBackend()
+      if (installError) backend.installError = installError
+      const updater = new DesktopUpdater({
+        currentVersion: '0.1.2-nightly.20261021.2',
+        repositoryUrl: 'https://github.com/mousse-agent/mousse',
+        store: memoryStore(),
+        loadBackend: async () => backend,
+        prepareInstall: async () => undefined,
+        recoverInstall: async () => undefined,
+        onInstallStarted: started,
+        onState: () => undefined
+      })
+      backend.offer('0.1.2-nightly.20261022.3')
+      await updater.check()
+      await updater.download()
+      await updater.install()
+      expect(started).toHaveBeenCalledTimes(installError ? 0 : 1)
+      updater.dispose()
+    }
   })
 
   it('switching channel saves the choice and checks the new channel without downgrading', async () => {

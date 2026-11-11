@@ -114,6 +114,7 @@ function isChannel(value: unknown): value is UpdateChannel {
 export function startDesktopUpdates(hooks: {
   prepareInstall: () => Promise<void>
   recoverInstall: () => Promise<void>
+  onInstallStarted?: () => void
 }): DesktopUpdater {
   // Every start of an installed AppImage keeps its launcher and icon current, updates or not.
   if (process.platform === 'linux' && app.isPackaged && process.env.APPIMAGE) syncLauncher(process.env.APPIMAGE)
@@ -126,6 +127,7 @@ export function startDesktopUpdates(hooks: {
     loadBackend: loadElectronUpdater,
     prepareInstall: hooks.prepareInstall,
     recoverInstall: hooks.recoverInstall,
+    ...(hooks.onInstallStarted ? { onInstallStarted: hooks.onInstallStarted } : {}),
     onState: broadcast
   })
   const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
