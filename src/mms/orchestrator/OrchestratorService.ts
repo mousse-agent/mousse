@@ -12674,21 +12674,73 @@ export class OrchestratorService extends EventEmitter {
       if (left.length !== own.length) session.nativeContext = { ...session.nativeContext, acceptedSteerItemIds: left.length ? left : undefined }
     }
     // The copy of each returned steer inside the turn it was steered into, found by the queue item it is a copy of
-    // (`steerItemId`), never by its words: an earlier message with the same text stays. A steer with no copy here
-    // (another process promoted it, or an older build wrote the copy) hides nothing.
+    // (`steerItemId`), never by its words: an earlier message with the same text stays.
     const returnedIds = new Set(returned.map((item) => item.id))
+    const copied = new Set<string>()
     let hidden = false
     session.messages.forEach((message, index) => {
-      if (message.role !== 'user' || !message.steered || message.hidden || !message.steerItemId || !returnedIds.has(message.steerItemId)) return
+      if (message.role !== 'user' || !message.steered || !message.steerItemId || !returnedIds.has(message.steerItemId)) return
+      copied.add(message.steerItemId)
+      if (message.hidden) return
       session.messages[index] = { ...message, hidden: true }
       hidden = true
     })
+    // A copy written before copies named their queue item (a daemon that crashed, then was updated) has no
+    // `steerItemId`, and is hidden only where it can be nothing else (`olderBuildSteerCopies`). Only an item an older
+    // build promoted can have such a copy: one this build promoted (`promotedWithCopyId`) and left with no named copy
+    // has none at all (another process promoted it, or the turn ended first), and a steered message with no item
+    // named is another steer (typed into the turn, sent by an agent) that must stay.
+    const olderBuild = returned.filter((item) => !copied.has(item.id) && !item.promotedWithCopyId)
+    for (const index of this.olderBuildSteerCopies(session.messages, olderBuild)) {
+      session.messages[index] = { ...session.messages[index], hidden: true }
+      hidden = true
+    }
     if (hidden) {
       this.sessionAls.run(session, () => this.persist(true))
       // The app merges message updates by id and removes rows only on a full replacement.
       this.emitThreadMessages(session.threadId, session.messages, true)
     }
     this.emitQueueUpdated(session.threadId, session.queue)
+  }
+
+  /**
+   * The indexes of the shown copies an older build wrote (no `steerItemId`) for `returned` steers an older build
+   * promoted (no `promotedWithCopyId`) and whose own copy carries no id. A copy counts only inside the run the steer was bound to (`steerRunId`), written no earlier than
+   * that run started and the steer was queued, with the steer's words. Every steer of the run with those words is
+   * matched against every such copy at once, and the copies are hidden only when there are no more of them than
+   * steers: one more is a message this method cannot tell apart (an earlier turn's steer, or one steered by hand), and
+   * then nothing with those words is hidden. Shown twice beats hiding another message. A steer whose run is unknown
+   * hides nothing.
+   */
+  private olderBuildSteerCopies(messages: readonly ChatMessage[], returned: readonly QueuedMessage[]): number[] {
+    const groups = new Map<string, { text: string; since: string; until: string | null; steers: number }>()
+    for (const item of returned) {
+      const run = item.steerRunId ? this.runEngine?.getRun(item.steerRunId) : null
+      const runStart = run?.startedAt ?? run?.requestedAt
+      if (!item.steerRunId || !run || !runStart) continue
+      const text = item.content.trim()
+      const since = item.enqueuedAt > runStart ? item.enqueuedAt : runStart
+      const key = JSON.stringify([item.steerRunId, text])
+      const group = groups.get(key)
+      groups.set(key, {
+        text,
+        since: group && group.since < since ? group.since : since,
+        until: run.completedAt,
+        steers: (group?.steers ?? 0) + 1
+      })
+    }
+    const indexes: number[] = []
+    for (const group of groups.values()) {
+      const copies: number[] = []
+      messages.forEach((message, index) => {
+        if (message.role !== 'user' || !message.steered || message.hidden || message.steerItemId) return
+        if (message.timestamp < group.since || (group.until && message.timestamp > group.until)) return
+        if (message.content.trim() !== group.text) return
+        copies.push(index)
+      })
+      if (copies.length <= group.steers) indexes.push(...copies)
+    }
+    return indexes
   }
 
   /** Loads one thread's session and schedules its drain when it still has pending normal work. */

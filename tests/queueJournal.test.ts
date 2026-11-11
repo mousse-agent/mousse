@@ -255,7 +255,8 @@ describe('queue command journal', () => {
     activeRun = 'run-a'
     new QueueCommands(db).insertPending('queue_promote_to_steer:caller:1', { ...base, op: 'promote', itemId: file[0].id, steerRunId: 'run-a', permissionMode: 'ask' })
     recoverQueueJournal(store, THREAD, store.loadMessageQueue(THREAD))
-    expect(file[0]).toMatchObject({ intent: 'steer', state: 'steering', steerRunId: 'run-a', permissionMode: 'ask' })
+    // Marked as this build's promotion: a copy of it is always written with the item's id, or not at all.
+    expect(file[0]).toMatchObject({ intent: 'steer', state: 'steering', steerRunId: 'run-a', permissionMode: 'ask', promotedWithCopyId: true })
     expect(rowOf('queue_promote_to_steer:caller:1')).toMatchObject({ status: 'applied', result: { outcome: 'promoted' } })
   })
 

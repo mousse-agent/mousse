@@ -15,6 +15,7 @@ import type { ChatMessage } from '../../src/shared/types'
 import { formatRestartNote, RESTART_INTERRUPTED_TEXT, RESTART_UNSENT_TEXT } from '../../src/mms/run/restartNote'
 import { RESTART_TRANSCRIPTS_THREAD_ID, RunEngine } from '../../src/mms/run/RunEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
+import { enqueueMessage, promoteQueuedMessageToSteer } from '../../src/mms/queue/ThreadMessageQueue'
 import { CLAUDE, PI, claudeAdapter, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 describe('continue after restart (SPEC §16.4)', () => {
@@ -613,6 +614,152 @@ describe('continue after restart (SPEC §16.4)', () => {
       // The earlier turn's steer, and the steer's own turn.
       expect(shown.filter((row) => row === 'user:Look at B')).toHaveLength(2)
       expect(shown.at(-1)).toBe('assistant:reply to Then C')
+    })
+
+    it('a cut-off turn with more same-words copies than unread steers hides none of them', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Steer twice')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const cut = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'steer-twice', source: 'gui' })
+      if (cut.status !== 'accepted') throw new Error('send rejected')
+      first.engine.markStarting(cut.runId)
+      first.engine.markRunning(cut.runId)
+      const at = new Date().toISOString()
+      first.store.mutateThreadData(thread.id, () => ({
+        messages: [
+          { id: 'u1', role: 'user', content: 'Build it', timestamp: at },
+          // Two copies an older build wrote, with no queue item named: one the turn read, one it never did.
+          { id: 'read-echo', role: 'user', content: 'Look at B', timestamp: at, steered: true },
+          { id: 'unread-echo', role: 'user', content: 'Look at B', timestamp: at, steered: true }
+        ] as ChatMessage[]
+      }))
+      first.store.saveMessageQueue(thread.id, [
+        { id: 'steer-1', threadId: thread.id, content: 'Look at B', enqueuedAt: at, order: 1, intent: 'steer', state: 'steering', steerRunId: cut.runId }
+      ] as never)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      second.orch.recoverAndDrainPendingQueues()
+      await waitFor(() => pi.turns.length === 1 && second.engine.getActiveRun(thread.id) === null && !second.orch.isActiveTurnRunning(thread.id), 'the steer run')
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Look at B'])
+      // Which copy is the unread one cannot be told, so both stay: shown twice beats hiding the one the turn read.
+      const messages = second.orch.getMessages(thread.id)
+      expect(messages.some((message) => message.id === 'read-echo')).toBe(true)
+      expect(messages.some((message) => message.id === 'unread-echo')).toBe(true)
+    })
+
+    it('a steer another process promoted, with no copy, never hides a read steer with the same words', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Send now elsewhere')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const cut = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'send-now-elsewhere', source: 'gui' })
+      if (cut.status !== 'accepted') throw new Error('send rejected')
+      first.engine.markStarting(cut.runId)
+      first.engine.markRunning(cut.runId)
+      // "continue" was queued first.
+      const queued = enqueueMessage([], { threadId: thread.id, content: 'continue' })
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      const at = new Date().toISOString()
+      first.store.mutateThreadData(thread.id, () => ({
+        messages: [
+          { id: 'u1', role: 'user', content: 'Build it', timestamp: at },
+          // Then a device steered "continue" into the turn: the model read it, and its copy names no queue item.
+          { id: 'device-steer', role: 'user', content: 'continue', timestamp: at, steered: true },
+          { id: 'a1', role: 'assistant', content: 'Continuing', timestamp: at }
+        ] as ChatMessage[]
+      }))
+      // Another window pressed Send now on the queued "continue": its process promoted the item into the run and
+      // wrote no copy, and the turn was cut off before it drained the item.
+      first.store.saveMessageQueue(thread.id, promoteQueuedMessageToSteer(queued.items, queued.item.id, { steerRunId: cut.runId }).items)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      second.orch.recoverAndDrainPendingQueues()
+      await waitFor(() => pi.turns.length === 1 && second.engine.getActiveRun(thread.id) === null && !second.orch.isActiveTurnRunning(thread.id), 'the steer run')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['continue'])
+      expect(second.store.loadMessageQueue(thread.id)).toEqual([])
+      const messages = second.orch.getMessages(thread.id)
+      expect(messages.some((message) => message.id === 'device-steer')).toBe(true)
+      // The read steer, and the promoted steer's own turn.
+      expect(messages.filter((message) => !message.hidden && message.role === 'user' && message.content === 'continue')).toHaveLength(2)
+    })
+
+    it('an older build\'s steer whose copy predates it: only the copy written since it was queued is hidden', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Steer window')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const cut = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'steer-window', source: 'gui' })
+      if (cut.status !== 'accepted') throw new Error('send rejected')
+      first.engine.markStarting(cut.runId)
+      first.engine.markRunning(cut.runId)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      const readAt = new Date().toISOString()
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      const queuedAt = new Date().toISOString()
+      first.store.mutateThreadData(thread.id, () => ({
+        messages: [
+          { id: 'u1', role: 'user', content: 'Build it', timestamp: readAt },
+          // Both copies an older build wrote, with no queue item named: the turn read the first before the second was queued.
+          { id: 'read-echo', role: 'user', content: 'Look at B', timestamp: readAt, steered: true },
+          { id: 'unread-echo', role: 'user', content: 'Look at B', timestamp: queuedAt, steered: true }
+        ] as ChatMessage[]
+      }))
+      first.store.saveMessageQueue(thread.id, [
+        { id: 'steer-1', threadId: thread.id, content: 'Look at B', enqueuedAt: queuedAt, order: 1, intent: 'steer', state: 'steering', steerRunId: cut.runId }
+      ] as never)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      second.orch.recoverAndDrainPendingQueues()
+      await waitFor(() => pi.turns.length === 1 && second.engine.getActiveRun(thread.id) === null && !second.orch.isActiveTurnRunning(thread.id), 'the steer run')
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Look at B'])
+      const messages = second.orch.getMessages(thread.id)
+      expect(messages.some((message) => message.id === 'read-echo')).toBe(true)
+      expect(messages.some((message) => message.id === 'unread-echo')).toBe(false)
+    })
+
+    it('an older build\'s steer bound to a known run that saved no copy hides no earlier steer with the same words', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Known run, no copy')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const earlier = '2020-01-01T00:00:00.000Z'
+      const cut = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'known-no-copy', source: 'gui' })
+      if (cut.status !== 'accepted') throw new Error('send rejected')
+      first.engine.markStarting(cut.runId)
+      first.engine.markRunning(cut.runId)
+      const at = new Date().toISOString()
+      first.store.mutateThreadData(thread.id, () => ({
+        messages: [
+          { id: 'u0', role: 'user', content: 'Start', timestamp: earlier },
+          { id: 'old-echo', role: 'user', content: 'continue', timestamp: earlier, steered: true },
+          { id: 'a0', role: 'assistant', content: 'Started', timestamp: earlier },
+          // The cut-off turn: its copy of the steer was never saved.
+          { id: 'u1', role: 'user', content: 'Build it', timestamp: at }
+        ] as ChatMessage[]
+      }))
+      first.store.saveMessageQueue(thread.id, [
+        { id: 'steer-1', threadId: thread.id, content: 'continue', enqueuedAt: at, order: 1, intent: 'steer', state: 'steering', steerRunId: cut.runId }
+      ] as never)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      second.orch.recoverAndDrainPendingQueues()
+      await waitFor(() => pi.turns.length === 1 && second.engine.getActiveRun(thread.id) === null && !second.orch.isActiveTurnRunning(thread.id), 'the steer run')
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['continue'])
+      expect(second.orch.getMessages(thread.id).some((message) => message.id === 'old-echo')).toBe(true)
     })
 
     it('an older steer with the same words stays shown when the cut-off turn saved no copy', async () => {

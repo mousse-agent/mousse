@@ -232,6 +232,8 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(typeof item.sentFrom?.node === 'string' && item.sentFrom.node ? { sentFrom: { node: item.sentFrom.node } } : {}),
       // Only a steering item is bound to a run.
       ...(state === 'steering' && typeof item.steerRunId === 'string' && item.steerRunId ? { steerRunId: item.steerRunId } : {}),
+      // Absent (an older build's file) reads as promoted by an older build.
+      ...(state === 'steering' && item.promotedWithCopyId === true ? { promotedWithCopyId: true as const } : {}),
       ...(origin ? { origin } : {})
     })
   }
@@ -428,6 +430,8 @@ export function editQueuedMessage(
 /**
  * Promote a pending normal queue item to steer intent for the active turn. `steerRunId` binds the promotion
  * to the run it was checked against; `permissionMode` is the (narrowed) mode the item keeps from here on.
+ * A pending item promoted here is marked `promotedWithCopyId`, whether or not a copy is ever written for it; an
+ * item that is already steering keeps what it had, so one an older build promoted stays unmarked.
  */
 export function promoteQueuedMessageToSteer(
   items: QueuedMessage[],
@@ -451,6 +455,7 @@ export function promoteQueuedMessageToSteer(
     intent: 'steer',
     state: 'steering',
     claim: undefined,
+    ...(current.state === 'pending' ? { promotedWithCopyId: true as const } : {}),
     ...(bind?.steerRunId ? { steerRunId: bind.steerRunId } : {}),
     ...(bind?.permissionMode ? { permissionMode: bind.permissionMode } : {})
   }
@@ -654,7 +659,7 @@ export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]
   const demoted = sortQueue(
     items.map((item) => {
       if (item.intent !== 'steer' || item.state === 'claimed' || (only && !only.has(item.id))) return item
-      const { steerRunId: _steerRunId, ...rest } = item
+      const { steerRunId: _steerRunId, promotedWithCopyId: _promotedWithCopyId, ...rest } = item
       demotedIds.add(item.id)
       return { ...rest, intent: 'normal' as const, state: 'pending' as const, claim: undefined }
     })
