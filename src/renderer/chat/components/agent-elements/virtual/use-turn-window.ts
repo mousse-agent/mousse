@@ -30,6 +30,11 @@ export type TurnWindowOptions = {
   modeRef: { readonly current: FollowMode };
   /** Called before every programmatic `scrollTop` write. */
   onProgrammaticScroll: () => void;
+  /**
+   * Moves the view to the end while following it, after a layout change has been held. Without it
+   * the end is written at once.
+   */
+  followEnd?: () => void;
 };
 
 /** One in-flight landing. Beginning another one, or cancelling, invalidates it. */
@@ -348,8 +353,11 @@ function createEngine(
     // hold within the frame, so it is never skipped.
     if (anchor && (!navigation.active || options.modeRef.current === "following-end")) {
       const scrollTop = container.scrollTop;
+      // With a follower, what is on screen is held here and the follower takes the view to the
+      // end, gliding while a turn runs.
+      const follower = options.modeRef.current === "following-end" ? options.followEnd : undefined;
       const next = nextScrollTop({
-        mode: options.modeRef.current,
+        mode: follower ? "free" : options.modeRef.current,
         scrollTop,
         delta: shiftOf(anchor, container, containerTop, prevLayout),
         end: container.scrollHeight - container.clientHeight,
@@ -358,6 +366,7 @@ function createEngine(
         options.onProgrammaticScroll();
         container.scrollTop = next;
       }
+      follower?.();
     }
     anchor = pickReadingPoint(container, rows, containerTop);
   };

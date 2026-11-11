@@ -10,6 +10,7 @@ import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MessageList, groupMessagesIntoTurns, readSteerGroup } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { analyzeAssistantMessage, settleFinishedTurn } from '../../src/renderer/chat/components/agent-elements/utils/assistant-blocks'
+import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -21,8 +22,12 @@ const realResizeObserver = globalThis.ResizeObserver
 let observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = []
 
 beforeEach(() => {
+  // Reduced motion: following the end lands at once, so each step can be checked as it happens (the
+  // glide while a turn runs is in endFollow.test.ts). Live text shows as it arrives (pacing is in
+  // replyPacing.test.ts).
+  setReplyPacing(false)
   window.matchMedia = ((query: string) => ({
-    matches: false,
+    matches: query === '(prefers-reduced-motion: reduce)',
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {}
@@ -44,6 +49,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setReplyPacing(true)
   act(() => root.unmount())
   host.remove()
   window.matchMedia = realMatchMedia

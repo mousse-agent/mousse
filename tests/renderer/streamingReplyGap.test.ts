@@ -141,6 +141,14 @@ describe('following a streaming reply', () => {
   /** Every ResizeObserver the list made, so a test can deliver "the transcript grew". */
   let observers: Array<{ callback: ResizeObserverCallback; targets: Element[]; boxes: Map<Element, string> }> = []
   beforeEach(() => {
+    // Reduced motion: following lands on the end at once, one write per growth. The glide while a
+    // turn runs with motion on is in endFollow.test.ts.
+    window.matchMedia = ((query: string) => ({
+      matches: query === '(prefers-reduced-motion: reduce)',
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
     observers = []
     globalThis.ResizeObserver = class {
       private entry: { callback: ResizeObserverCallback; targets: Element[]; boxes: Map<Element, string> }

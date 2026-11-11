@@ -51,6 +51,8 @@ export interface AppearanceSettings {
   acrylicIntensity: number
   /** Show LaTeX in chat replies and Markdown previews as formatted equations. */
   renderMath: boolean
+  /** Show a streaming reply a finished paragraph (list item, heading, line of code) at a time, each fading in. */
+  replyPacing: boolean
   /** Font for interface text. */
   interfaceFont: FontChoice
   /** Font for monospace text: code, diffs, the file editor and terminals. */
@@ -800,6 +802,7 @@ export function getDefaultSettings(): MousseSettings {
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
       renderMath: true,
+      replyPacing: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: true,
@@ -929,6 +932,7 @@ export function normalizeAppearance(
       raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
     ),
     renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
+    replyPacing: typeof raw.replyPacing === 'boolean' ? raw.replyPacing : defaults.replyPacing,
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:

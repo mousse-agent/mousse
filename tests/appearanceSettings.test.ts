@@ -36,6 +36,14 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ renderMath: 'no' as never }).renderMath).toBe(true)
   })
 
+  it('shows replies a paragraph at a time by default and keeps an explicit choice', () => {
+    expect(getDefaultSettings().appearance.replyPacing).toBe(true)
+    // Settings saved before the option existed read as on.
+    expect(normalizeAppearance({}).replyPacing).toBe(true)
+    expect(normalizeAppearance({ replyPacing: false }).replyPacing).toBe(false)
+    expect(normalizeAppearance({ replyPacing: 'no' as never }).replyPacing).toBe(true)
+  })
+
   it('shows a summary line of changed files by default and keeps an explicit choice', () => {
     expect(getDefaultSettings().appearance.turnChangedFiles).toBe('summary')
     // Settings saved before the option existed read as the default; nothing is migrated.
@@ -58,6 +66,7 @@ describe('appearance settings', () => {
       acrylic: true,
       acrylicIntensity: 55,
       renderMath: true,
+      replyPacing: true,
       interfaceFont: { source: 'default' },
       codeFont: { source: 'default' },
       threadProjectColors: true,

@@ -19,7 +19,8 @@ import { modelLabel } from "../../../../shared/modelChoice";
 
 import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
-import { Markdown } from "./markdown";
+import { PacedMarkdown } from "./paced-markdown";
+import { holdReplyPacing } from "../../../lib/replyPacingSetting";
 import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
@@ -89,6 +90,7 @@ import {
   type RowItem,
 } from "./virtual/turn-window";
 import { useTurnWindow } from "./virtual/use-turn-window";
+import { createEndFollower, type EndFollower } from "./virtual/end-follower";
 import { TurnIdContext } from "./turn-context";
 import { countRender } from "./render-counts";
 import { FindInThreadBar } from "./find/FindInThreadBar";
@@ -1447,6 +1449,18 @@ export const MessageList = memo(function MessageList({
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollAtRef.current = performance.now();
   }, []);
+  // Holds a just-sent prompt near the top and glides after the reply (virtual/end-follower.ts).
+  const followerRef = useRef<EndFollower | null>(null);
+  followerRef.current ??= createEndFollower({
+    container: () => chatContainerRef.current,
+    rows: () => rowsRef.current,
+    mode: () => followModeRef.current,
+    onProgrammaticScroll: () => {
+      programmaticScrollAtRef.current = performance.now();
+    },
+  });
+  const follower = followerRef.current;
+  useEffect(() => () => followerRef.current?.dispose(), []);
 
   const isAtBottom = useCallback(() => {
     const container = chatContainerRef.current;
@@ -1506,7 +1520,9 @@ export const MessageList = memo(function MessageList({
     // Any user motion ends a landing in progress, whatever the follow mode.
     virtualizationRef.current?.cancelNavigation();
     cancelPromptScroll();
+    follower.cancel();
     dispatchFollow({ type: "intent", intent });
+    follower.settle();
   };
 
   const handleScroll = useCallback(() => {
@@ -1515,6 +1531,7 @@ export const MessageList = memo(function MessageList({
 
     const programmatic = isProgrammaticScroll();
     dispatchFollow({ type: "scroll", atBottom: isAtBottom(), programmatic });
+    followerRef.current?.settle();
     // Skip auto-scroll noise (streaming follow, mount pin, marker glide) —
     // only a human moving the scrollbar reveals the markers.
     if (!programmatic) flashScrollbarActive();
@@ -1555,24 +1572,19 @@ export const MessageList = memo(function MessageList({
     container.toggleAttribute("data-following-end", followModeRef.current === "following-end");
 
     // The one writer that follows the end: the transcript grew (a streamed
-    // delta, an image, a tool card opening, the reply gap) and the observer
-    // runs after layout and before paint, so no frame shows the growth
-    // without the follow. It writes only when the end moved; in a windowed
-    // list `useTurnWindow` may have written the same value already.
+    // delta, an image, a tool card opening, the reply gap) or the viewport
+    // changed, and the observer runs after layout and before paint. The
+    // follower resizes the space under a pinned prompt, then lands on the end,
+    // or glides to it while a turn runs (virtual/end-follower.ts).
     // When reading history (free) nothing is written: streamed text appends
     // below the viewport, and growth above it is held by native scroll
     // anchoring (or by `useTurnWindow` in a windowed list).
-    const resizeObserver = new ResizeObserver(() => {
-      if (followModeRef.current !== "following-end") return;
-      const end = container.scrollHeight - container.clientHeight;
-      if (Math.abs(container.scrollTop - end) < 1) return;
-      programmaticScrollAtRef.current = performance.now();
-      container.scrollTop = end;
-    });
+    const resizeObserver = new ResizeObserver(() => followerRef.current?.follow());
 
     // The border box: the content's end padding is the composer's height, and the composer
     // unfolding grows only the padding.
     resizeObserver.observe(contentWrapper, { box: "border-box" });
+    resizeObserver.observe(container);
     return () => {
       resizeObserver.disconnect();
     };
@@ -1640,6 +1652,8 @@ export const MessageList = memo(function MessageList({
   }, [replyActive, lastUserMessageId, normalizedMessages]);
 
   const lastUserMessageIdRef = useRef(lastUserMessageId);
+  // The last row's key, set in render below; read by the effect that pins a starting turn.
+  const lastTurnKeyRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (
       lastUserMessageId &&
@@ -1652,6 +1666,11 @@ export const MessageList = memo(function MessageList({
         turnKeyAliasRef.current.has(lastUserMessageId);
       if (sentHere || followModeRef.current === "following-end") {
         dispatchFollow({ type: "new-turn" });
+        // A turn that is starting (sent here, or the queue's next) is held near the top while its
+        // reply fills the space below. A turn that arrives already answered is not.
+        const turnKey = lastTurnKeyRef.current;
+        const starting = replyActive || !turns[turns.length - 1]?.assistantMsgs.length;
+        if (turnKey && starting) followerRef.current?.pin(turnKey);
         void virtualizationRef.current?.settleToEnd();
       }
       lastUserMessageIdRef.current = lastUserMessageId;
@@ -1683,6 +1702,18 @@ export const MessageList = memo(function MessageList({
   const showAwaitingReply = Boolean(
     trailingUser && !trailingHasAssistant && replyHoldRef.current,
   );
+  follower.setLive(replyActive);
+  const turnLive = replyActive || showAwaitingReply;
+  // The last turn whose reply was seen running. A queued turn waiting for its run keeps its pin
+  // until its reply has run and ended.
+  const liveTurnRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (turnLive) {
+      liveTurnRef.current = lastUserMessageId;
+      return;
+    }
+    if (liveTurnRef.current === lastUserMessageId || trailingHasAssistant) followerRef.current?.turnEnded();
+  }, [turnLive, lastUserMessageId, trailingHasAssistant]);
   if (trailingOptimistic && trailingUser) {
     liveOptimisticKeyRef.current = trailingUser.id;
     turnKeyAliasRef.current.set(trailingUser.id, trailingUser.id);
@@ -1702,6 +1733,7 @@ export const MessageList = memo(function MessageList({
   const turnKeys = turns.map((turn, index) =>
     resolveTurnKey(turn, index, turnKeyAliasRef.current),
   );
+  lastTurnKeyRef.current = turnKeys[turnKeys.length - 1] ?? null;
   // Long threads mount only the turns near the viewport; short ones (and any
   // render without a window) keep every row.
   const windowed =
@@ -1715,6 +1747,7 @@ export const MessageList = memo(function MessageList({
     enabled: windowed,
     modeRef: followModeRef,
     onProgrammaticScroll: markProgrammaticScroll,
+    followEnd: () => followerRef.current?.follow(),
   });
   virtualizationRef.current = virtualization;
   // Find reads the message data, so it covers the turns that are not mounted.
@@ -1738,6 +1771,8 @@ export const MessageList = memo(function MessageList({
     onNavigate: () => dispatchFollow({ type: "navigate" }),
     onProgrammaticScroll: markProgrammaticScroll,
   });
+  // Find searches the reply's whole text, so while its bar is open nothing is held back.
+  useEffect(() => (find.open ? holdReplyPacing() : undefined), [find.open]);
   const rowItems: RowItem[] = windowed
     ? windowRowItems(turns.length, virtualization.window)
     : turns.map((_, index) => ({ kind: "row", index }));
@@ -1923,6 +1958,8 @@ export const MessageList = memo(function MessageList({
           <div aria-hidden="true" data-reply-gap className={cn(REPLY_GAP_CLASS, "w-full")} />
         )}
       </div>
+      {/* The space a just-sent prompt's reply grows into; sized by the follower, 0 otherwise. */}
+      <div ref={follower.reserveRef} aria-hidden="true" data-pin-reserve />
     </div>
     <PromptMarkersOverlay
       turns={turns}
@@ -2584,10 +2621,12 @@ const AssistantParts = memo(function AssistantParts({
               data-message-id={msg.id}
               data-part-index={i}
             >
-              <Markdown
+              <PacedMarkdown
                 content={text}
                 className="leading-relaxed [&_p]:leading-relaxed"
                 streaming={isLast && isStreaming}
+                // Text followed by a tool call or more text is finished: it shows whole.
+                paced={isLast && isStreaming && !parts.slice(i + 1).some((later) => isTextPart(later) || isV5ToolPart(later))}
               />
             </div>,
           );

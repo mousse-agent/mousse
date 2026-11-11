@@ -30,6 +30,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Glass intensity', section: 'appearance', anchor: 'appearance-glass-intensity', keywords: ['acrylic', 'blur', 'opacity'] },
   { title: 'Frosted composer', section: 'appearance', anchor: 'appearance-frosted-composer', keywords: ['glass', 'blur', 'translucent', 'transparent', 'opacity', 'color boost'] },
   { title: 'Render math', section: 'appearance', anchor: 'appearance-render-math', keywords: ['latex', 'equations'] },
+  { title: 'Show replies a paragraph at a time', section: 'appearance', anchor: 'appearance-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade'] },
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },

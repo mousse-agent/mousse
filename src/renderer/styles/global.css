@@ -229,7 +229,8 @@ html[data-theme='light'] {
   overflow-anchor: auto;
 }
 .an-message-list[data-windowed="true"],
-.an-message-list [aria-hidden][data-spacer] {
+.an-message-list [aria-hidden][data-spacer],
+.an-message-list > [data-pin-reserve] {
   overflow-anchor: none;
 }
 /* While the list follows the end it writes scrollTop itself, once per frame
@@ -237,13 +238,16 @@ html[data-theme='light'] {
 .an-message-list[data-following-end] {
   overflow-anchor: none;
 }
-/* A block that appears in a reply while it streams fades in. Opacity only, so nothing around it
-   moves; only the live reply has data-streaming, so opening a finished thread replays nothing. */
-.an-markdown[data-streaming] > div > * {
-  transition: opacity calc(240ms * var(--ui-motion-scale, 1)) ease-out;
+/* A block that appears in a reply while it streams fades in, and so does a new item in a list.
+   Opacity only, so nothing around it moves and the compositor runs it; only the live reply has
+   data-streaming, so opening a finished thread replays nothing. */
+.an-markdown[data-streaming] > div > *,
+.an-markdown[data-streaming] li {
+  transition: opacity calc(320ms * var(--ui-motion-scale, 1)) ease-out;
 }
 @starting-style {
-  .an-markdown[data-streaming] > div > * {
+  .an-markdown[data-streaming] > div > *,
+  .an-markdown[data-streaming] li {
     opacity: 0;
   }
 }

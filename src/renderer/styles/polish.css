@@ -1149,7 +1149,7 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 }
 
 /* At the end of the transcript the last line sits just above the composer, clear of the fade below. */
-.chat:not(.chat--empty) .an-message-list > div {
+.chat:not(.chat--empty) .an-message-list > div:not([data-pin-reserve]) {
   padding-bottom: calc(var(--chat-composer-stack, 160px) + 16px);
 }
 
@@ -1232,7 +1232,7 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
  * translucent, blurred composer instead of fading out above it. The backdrop blur makes the GPU
  * keep a copy of the window, which is why it is opt-in. Vars are set in lib/frostedComposer.ts.
  */
-html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list > div {
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list > div:not([data-pin-reserve]) {
   padding-bottom: calc(var(--chat-composer-stack, 160px) + 12px);
 }
 

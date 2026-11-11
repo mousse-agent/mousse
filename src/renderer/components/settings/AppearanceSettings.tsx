@@ -290,6 +290,18 @@ export function AppearanceSettings({
           }
         />
         <SettingsRow
+          title="Show replies a paragraph at a time"
+          anchor="appearance-reply-pacing"
+          description={<span title="Each finished paragraph, list item or code line fades in; off shows text as it arrives.">Instead of word by word.</span>}
+          control={
+            <Switch
+              label="Show replies a paragraph at a time"
+              checked={appearance.replyPacing}
+              onChange={(replyPacing) => void onUpdate({ appearance: { ...appearance, replyPacing } })}
+            />
+          }
+        />
+        <SettingsRow
           title="Changed files after each turn"
           anchor="appearance-turn-changed-files"
           control={
