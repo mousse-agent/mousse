@@ -37,7 +37,7 @@ import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { coalescedRunner } from '../mms/coalescedRunner'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
-import { guiChatRequestError } from '../mms/requestErrors'
+import { guiChatRequestError, guiSendFailureAnswer } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -1267,14 +1267,13 @@ export function registerGuiIpc(
     } catch (err) {
       // A send to another computer that was not confirmed: the window reads the thread in view again.
       noteUncertainOutcome(err)
-      const error = guiChatRequestError(err)
-      const disconnected = error.code === 'workspace_connection_lost'
-      if (!disconnected) {
+      const { error, answer } = guiSendFailureAnswer(err)
+      if (answer.requestAcknowledged === false) {
         setThreadActivity(targetThreadId, 'idle')
         activityTrackerFor().setBusyThreadId(null)
       }
       console.error('GUI chat request failed', errorDiagnostic(error, 'orchestrator.send'))
-      return { message: '', actions: [], ...(disconnected ? {} : { requestAcknowledged: false }), error: serializeAppError(error) }
+      return answer
     }
   }
 
