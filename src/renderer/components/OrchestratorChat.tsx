@@ -1084,6 +1084,15 @@ export function OrchestratorChat() {
         if (resendBusy || !useAppStore.getState().workspaceReady) return
         void sendMessage(content, chatMode, images, activeThreadId)
       },
+      // SPEC §16.4: a run a restart left uncertain continues as itself, with the tools the person confirmed acknowledged.
+      continueRunOf: (runId) => {
+        if (resendBusy || !useAppStore.getState().workspaceReady) return
+        void window.mousse.orchestrator.sendToThread(activeThreadId, { content: 'Continue where you left off.', mode: chatMode, continuationOfRunId: runId, acknowledgeUncertain: true })
+          .then((result) => {
+            if (result.error) showToast({ tone: 'error', message: readableError(result.error, "The run couldn't be continued. Try again.") })
+          })
+          .catch((error: unknown) => showToast({ tone: 'error', message: readableError(error, "The run couldn't be continued. Try again.") }))
+      },
       // The fork opens once it is made; a turn that can't be forked says why.
       forkFrom: (turnId) => {
         void window.mousse.threads.fork(activeThreadId, { atRunId: turnId }).catch((error: unknown) => {

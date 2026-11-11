@@ -95,7 +95,7 @@ import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
-import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow, RESTART_INTERRUPTED_TEXT } from '../run/restartNote'
+import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow, RESTART_INTERRUPTED_TEXT, RESTART_UNSENT_TEXT } from '../run/restartNote'
 import { ThreadResidency } from './ThreadResidency'
 import { isDeepStrictEqual } from 'node:util'
 import type { ContinuationInfo, OneShotTask, ProviderTaskEnd } from '../harness/driver'
@@ -1770,7 +1770,7 @@ export class OrchestratorService extends EventEmitter {
   private queueHoldClock: () => number = () => Date.now()
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
-  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause' | 'step'>> & { blockedOnWait?: boolean }): void {
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause' | 'step' | 'uncertain'>> & { blockedOnWait?: boolean }): void {
     // A stopped turn that is still ending already shows stopped (`showStopped`): what its provider sent before it let go
     // (a last delta, a tool event, a question) does not make the thread look busy again.
     if (this.isStopping(threadId) && isTurnStoppable({ phase, turnId: 'any' })) return
@@ -1792,6 +1792,9 @@ export class OrchestratorService extends EventEmitter {
     // The pause is only part of the paused state; any other phase drops it.
     if (phase === 'paused' && patch?.pause) state.pause = patch.pause
     else delete state.pause
+    // The tools a restart may have cut off mid-call are only part of the stopped state they were given with.
+    if (phase === 'stopped' && patch?.uncertain) state.uncertain = patch.uncertain
+    else delete state.uncertain
     // A step is only part of the phase it was given with (`setTurnStep`).
     if (patch?.step && isTurnActivePhase(phase)) state.step = patch.step
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) state.startedAt = now
@@ -2596,13 +2599,17 @@ export class OrchestratorService extends EventEmitter {
    * interrupts does (`RESTART_INTERRUPTED_TEXT`), `uncertain` runs included (the restart note tells the model which
    * tools may have run). A reply left streaming is closed as incomplete. A send whose turn never started
    * (`RunEngine.reconcileOnBoot` step 4) never reached the transcript: its message is added first, from the send its
-   * `turn.start` stored, so it is not lost (images are not stored); one the transcript already ends with is not added
-   * again. The thread's turn phase becomes `stopped`, as after a Stop.
+   * `turn.start` stored, so it is not lost (images are not stored). The thread's turn phase becomes `stopped`, as
+   * after a Stop; for an `uncertain` run it names the tools that may have run (`TurnState.uncertain`), so Continue
+   * asks first.
    *
-   * The runs come from `RunEngine.pendingRestartTranscripts`, which keeps each one until it is marked written: a
-   * thread another live process holds, or a write that fails, is tried again at the next boot. A thread where a
-   * later turn has started since is marked written without a change (the line would land after that turn). Written
-   * to the saved thread under its write lock. Best-effort: a boot must not fail on it.
+   * Every row written carries the run's id (`turnId`), as the message a turn takes in does, and a retry adds only the
+   * rows the transcript does not have yet: a boot that wrote them and died before marking them written adds nothing
+   * the next time. The runs come from `RunEngine.pendingRestartTranscripts`, which keeps each one until it is marked
+   * written, so a thread another live process holds, or a write that fails, is tried again at the next boot. A thread
+   * where a later turn has started since gets only the message that was never sent, with a line that says so (the
+   * interrupted line would land after that turn). Written to the saved thread under its write lock. Best-effort: a
+   * boot must not fail on it.
    */
   private writeRestartTranscripts(): void {
     const engine = this.runEngine
@@ -2611,52 +2618,58 @@ export class OrchestratorService extends EventEmitter {
     const byThread = new Map<string, RunRecord[]>()
     for (const run of engine.pendingRestartTranscripts()) byThread.set(run.threadId, [...(byThread.get(run.threadId) ?? []), run])
     for (const [threadId, runs] of byThread) {
-      const written = (): void => {
-        for (const run of runs) engine.markRestartTranscriptWritten(run)
-      }
       try {
         if (!store.getThread(threadId)) {
-          written()
-          continue
-        }
-        const last = Math.max(...runs.map((run) => run.ordinal))
-        if (engine.listRuns(threadId).some((run) => run.ordinal > last && run.startedAt)) {
-          written()
+          for (const run of runs) engine.markRestartTranscriptWritten(run)
           continue
         }
         const threadDir = store.getThreadDir(threadId)
         if (isLeaseHeldByLivePeer(threadDir).held) continue
+        const lastRun = runs.reduce((latest, run) => (run.ordinal > latest.ordinal ? run : latest))
+        const movedOn = engine.listRuns(threadId).some((run) => run.ordinal > lastRun.ordinal && run.startedAt)
         const unsent = runs.filter((run) => !run.startedAt).flatMap((run) => {
           const payload = engine.outbox.listForRun(run.runId).filter((effect) => effect.kind === 'turn.start').at(-1)?.payload as Partial<TurnStartPayload> | undefined
           if (!payload?.input || payload.displayUserMessage === false) return []
           const request = normalizeSendRequest(payload.input)
-          return request.content.trim() ? [request] : []
+          return request.content.trim() ? [{ run, request }] : []
         })
         const saved = store.mutateThreadData(threadId, (current) => {
           if (isLeaseHeldByLivePeer(threadDir).held) throw new StaleActivitySkipped()
           const timestamp = new Date().toISOString()
-          const messages = current.messages.map((message) => (message.role === 'assistant' && message.streaming ? { ...message, streaming: false, incomplete: true } : message))
+          const messages = movedOn
+            ? [...current.messages]
+            : current.messages.map((message) => (message.role === 'assistant' && message.streaming ? { ...message, streaming: false, incomplete: true } : message))
           let llmContext = current.llmContext
-          for (const request of unsent) {
-            // Already taken in: the kill came between the transcript write and the run's start.
+          const has = (runId: string, role: ChatMessage['role'], content?: string): boolean =>
+            messages.some((message) => message.turnId === runId && message.role === role && (content === undefined || message.content === content))
+          for (const { run, request } of unsent) {
+            if (has(run.runId, 'user')) continue
+            // Taken in by a build that did not tag it: the kill came between the transcript write and the run's start.
             const lastShown = [...messages].reverse().find((message) => !message.hidden)
-            if (lastShown?.role === 'user' && lastShown.content === request.content) continue
-            messages.push({ id: uuidv4(), role: 'user', content: request.content, timestamp, mode: request.mode })
-            if (llmContext) llmContext = appendNativeMessage(llmContext, userMessage(request.content))
+            if (!movedOn && lastShown?.role === 'user' && !lastShown.turnId && lastShown.content === request.content) continue
+            messages.push({ id: uuidv4(), role: 'user', content: request.content, timestamp, mode: request.mode, turnId: run.runId })
+            if (movedOn) {
+              // Out of order beats lost; the model is not given a message it never had in its turn.
+              messages.push({ id: uuidv4(), role: 'system', content: RESTART_UNSENT_TEXT, timestamp, turnId: run.runId })
+            } else if (llmContext) llmContext = appendNativeMessage(llmContext, userMessage(request.content))
           }
-          if (messages.at(-1)?.content !== RESTART_INTERRUPTED_TEXT)
-            messages.push({ id: uuidv4(), role: 'system', content: RESTART_INTERRUPTED_TEXT, timestamp })
+          if (!movedOn && !has(lastRun.runId, 'system', RESTART_INTERRUPTED_TEXT))
+            messages.push({ id: uuidv4(), role: 'system', content: RESTART_INTERRUPTED_TEXT, timestamp, turnId: lastRun.runId })
           return { messages, ...(llmContext ? { llmContext } : {}) }
         })
-        written()
+        for (const run of runs) engine.markRestartTranscriptWritten(run)
         const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
         if (session && !session.isTurnRunning()) {
           session.messages = saved.messages
           if (saved.llmContext) session.nativeContext = normalizeNativeContext(saved.llmContext)
         }
+        if (movedOn) continue
         // As after a Stop: the thread shows its last turn stopped, with Continue, until another turn runs. Like every
         // turn phase it lives in memory; the transcript line is what a later restart keeps.
-        this.setTurnPhase(threadId, 'stopped', { turnId: runs.at(-1)!.runId })
+        const tools = lastRun.status === 'uncertain'
+          ? [...new Set(engine.tools.listForRun(lastRun.runId).filter((tool) => !tool.idempotent && (tool.status === 'started' || tool.status === 'outcome_unknown')).map((tool) => tool.tool))]
+          : []
+        this.setTurnPhase(threadId, 'stopped', { turnId: lastRun.runId, ...(lastRun.status === 'uncertain' ? { uncertain: { runId: lastRun.runId, tools } } : {}) })
       } catch (error) {
         if (error instanceof StaleActivitySkipped) continue
         console.warn('the transcript could not say that a restart cut its turn off', { threadId, error: error instanceof Error ? error.message : String(error) })
@@ -9171,7 +9184,9 @@ export class OrchestratorService extends EventEmitter {
     scheduled?: ScheduledTurnRef,
     approvalNote?: string,
     agent?: AgentOrigin,
-    backgroundNotice?: BackgroundTaskNoticeItem[]
+    backgroundNotice?: BackgroundTaskNoticeItem[],
+    /** The run this message opens: its `turnId` from the start, so a run started again after a restart finds it. */
+    runId?: string
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -9236,6 +9251,7 @@ export class OrchestratorService extends EventEmitter {
       // A message another thread's agent wrote is stored as that agent's, never as something a person typed.
       ...(agent ? { origin: agentOriginOf(agent) } : {}),
       hidden: displayUserMessage ? undefined : true,
+      ...(runId ? { turnId: runId } : {}),
       ...(displayUserMessage && mode !== undefined
         ? { mode: normalizeChatMode(mode) }
         : {}),
@@ -10985,6 +11001,11 @@ export class OrchestratorService extends EventEmitter {
     const turnStartCheck = checkpointEnabled && turnStartSha && checkpointCwd
       ? await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
       : undefined
+    // A run started again after a restart (reconciler rule 5) whose message the transcript already has, tagged with
+    // its run, does not take it in a second time: the turn runs on it.
+    if (!reuseLastUser && !queueItemId && opts?.runId && this.runEngine && session.messages.some((message) => message.role === 'user' && message.turnId === opts.runId)) {
+      reuseLastUser = true
+    }
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
     if (!reuseLastUser && displayUserMessage) {
       this.touchUserActivityAndNotify(session.threadId)
@@ -11017,7 +11038,8 @@ export class OrchestratorService extends EventEmitter {
             opts?.schedule,
             approvalNote,
             opts?.agent,
-            opts?.backgroundNotice
+            opts?.backgroundNotice,
+            this.runEngine ? opts?.runId : undefined
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
@@ -12483,8 +12505,8 @@ export class OrchestratorService extends EventEmitter {
    * order they were steered, as a Stop hands them back (`returnUnreadSteerItems`), and the startup drain runs them
    * once, as turns of their own, before what was queued behind them. That give-back is at-least-once: a steer handed
    * to the provider and not yet reported accepted is known only to the dead process's memory, so a provider whose own
-   * session resumes may already have it. The copy each left inside the cut-off turn is hidden, so the message shows
-   * once, as its own turn's prompt. Called only while no turn of the thread runs here or elsewhere.
+   * session resumes may already have it. The copy each left inside the run it was steered into is hidden, so the
+   * message shows once, as its own turn's prompt. Called only while no turn of the thread runs here or elsewhere.
    */
   private returnOrphanedSteers(session: ThreadSession): void {
     const steering = session.queue.filter((item) => item.state === 'steering')
@@ -12508,14 +12530,17 @@ export class OrchestratorService extends EventEmitter {
       session.nativeContext = { ...session.nativeContext, acceptedSteerItemIds: left.length ? left : undefined }
       changed = true
     }
-    // The copies are in the cut-off turn: after the last message a person sent that was not a steer.
-    let turnStart = session.messages.length - 1
-    while (turnStart >= 0 && !(session.messages[turnStart].role === 'user' && !session.messages[turnStart].steered && !session.messages[turnStart].hidden)) turnStart -= 1
+    // A copy is in the run the steer was bound to (`steerRunId`): looked for only among the messages since that run
+    // started, so a wake, bot or continuation turn never reaches an earlier turn's steer with the same words. Without
+    // a run to go by, nothing is hidden: shown twice beats hiding another message.
     for (const item of returned) {
+      const run = item.steerRunId ? this.runEngine?.getRun(item.steerRunId) : null
+      const since = run?.startedAt ?? run?.requestedAt
+      if (!since) continue
       const text = item.content.trim()
       let index = session.messages.length - 1
-      while (index > turnStart && !isSteerEcho(session.messages[index], text)) index -= 1
-      if (index <= turnStart) continue
+      while (index >= 0 && session.messages[index].timestamp >= since && !isSteerEcho(session.messages[index], text)) index -= 1
+      if (index < 0 || session.messages[index].timestamp < since) continue
       session.messages[index] = { ...session.messages[index], hidden: true }
       changed = true
     }

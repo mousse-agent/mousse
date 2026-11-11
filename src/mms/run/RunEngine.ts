@@ -400,6 +400,12 @@ export class TitleTakenRejection extends CommandRejection {
 }
 
 /** The outcome of a run whose binding names the retired bare pi route (PR 4). */
+/**
+ * The thread id the transcript markers are recorded under, as the reconciler's own events are
+ * (`RECONCILER_THREAD_ID`): the boot reads them through the events' thread index. The payload names the
+ * run's thread.
+ */
+export const RESTART_TRANSCRIPTS_THREAD_ID = '__restart_transcripts__'
 /** A run boot cut off; its thread's transcript still has to say so (`pendingRestartTranscripts`). */
 const RESTART_TRANSCRIPT_PENDING = 'restart.transcript_pending'
 /** The thread's transcript says the restart cut the run off. */
@@ -909,7 +915,7 @@ export class RunEngine extends EventEmitter {
         noteFor(run.threadId).runIds.push(run.runId)
       }
       for (const run of cutOff)
-        this.store.appendEvent({ threadId: run.threadId, runId: run.runId, type: RESTART_TRANSCRIPT_PENDING, payload: { epoch } })
+        this.store.appendEvent({ threadId: RESTART_TRANSCRIPTS_THREAD_ID, runId: run.runId, type: RESTART_TRANSCRIPT_PENDING, payload: { threadId: run.threadId, epoch } })
       const strandedQueued: string[] = []
       for (const { run } of strandedQueuedRuns(this.store, this.outbox)) {
         const note = noteFor(run.threadId)
@@ -938,16 +944,18 @@ export class RunEngine extends EventEmitter {
   /**
    * Runs a boot cut off whose thread's transcript does not say so yet: a `restart.transcript_pending`
    * event with no `restart.transcript_written` after it, oldest first. Kept across boots, so a write that
-   * a peer's lease or a failure held up is tried again at the next one.
+   * a peer's lease or a failure held up is tried again at the next one. The markers live under their own
+   * thread id (`RESTART_TRANSCRIPTS_THREAD_ID`), so this reads them through the events' thread index and
+   * never scans the event log.
    */
   pendingRestartTranscripts(): RunRecord[] {
     const rows = this.store.db
       .statement(
-        `SELECT p.run_id FROM thread_events p WHERE p.type = ? AND p.run_id IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM thread_events w WHERE w.run_id = p.run_id AND w.type = ?)
+        `SELECT p.run_id FROM thread_events p WHERE p.thread_id = ? AND p.type = ? AND p.run_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM thread_events w WHERE w.thread_id = p.thread_id AND w.type = ? AND w.run_id = p.run_id)
          ORDER BY p.seq`
       )
-      .all(RESTART_TRANSCRIPT_PENDING, RESTART_TRANSCRIPT_WRITTEN)
+      .all(RESTART_TRANSCRIPTS_THREAD_ID, RESTART_TRANSCRIPT_PENDING, RESTART_TRANSCRIPT_WRITTEN)
     return rows.flatMap((row) => {
       const run = this.store.getRun(String(row.run_id))
       return run ? [run] : []
@@ -956,7 +964,7 @@ export class RunEngine extends EventEmitter {
 
   /** The thread's transcript now says the restart cut `runId` off (or never will): `pendingRestartTranscripts` drops it. */
   markRestartTranscriptWritten(run: RunRecord): void {
-    this.store.appendEvent({ threadId: run.threadId, runId: run.runId, type: RESTART_TRANSCRIPT_WRITTEN, payload: {} })
+    this.store.appendEvent({ threadId: RESTART_TRANSCRIPTS_THREAD_ID, runId: run.runId, type: RESTART_TRANSCRIPT_WRITTEN, payload: { threadId: run.threadId } })
   }
 
   /**

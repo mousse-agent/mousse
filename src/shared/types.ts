@@ -515,6 +515,13 @@ export interface ChatImageAttachment {
 
 export interface OrchestratorSendRequest {
   content: string
+  /**
+   * SPEC §16.4: the run a restart cut off that this message continues. The send's `clientRequestId` is
+   * `continue:<runId>`, so a second click replays the first.
+   */
+  continuationOfRunId?: string
+  /** Required with `continuationOfRunId` when that run is `uncertain`: the person saw the tools that may have run. */
+  acknowledgeUncertain?: boolean
   mode?: ChatMode
   images?: ChatImageAttachment[]
   /** Caller-owned logical send identity, retained after an uncertain response. */
@@ -1511,6 +1518,11 @@ export interface TurnState {
   pause?: TurnPause
   /** What an active turn is doing that its phase does not say, for the live line under Working. Any phase change drops it. */
   step?: TurnStep
+  /**
+   * Set only while `phase` is `stopped` after a restart cut off an `uncertain` run (SPEC §12.5, §16.4): the tools
+   * that may have run without a recorded result. Continue then asks first, and continues the run acknowledged.
+   */
+  uncertain?: { runId: string; tools: string[] }
 }
 export type TurnStateSnapshot = Record<string, TurnState>
 

@@ -218,3 +218,39 @@ describe('a stopped run', () => {
     expect(continueButton()).toBeUndefined()
   })
 })
+
+describe('a run a restart left uncertain (SPEC §16.4)', () => {
+  const byText = (label: string) => [...host.querySelectorAll('button')].find((entry) => entry.textContent === label)
+  const uncertain = { runId: 'run:1', tools: ['bash', 'mcp__fs__write'] }
+
+  it('offers no plain Continue: Continue… names the tools first, and only the confirm continues the run', () => {
+    const onContinue = vi.fn()
+    const onContinueUncertain = vi.fn()
+    render(createElement(RunInterruptedNotice, { onContinue, uncertain, onContinueUncertain }))
+    expect(byText('Continue')).toBeUndefined()
+    const ask = byText('Continue…')!
+    expect(ask.title).toContain('bash, mcp__fs__write')
+    act(() => ask.click())
+    expect(onContinueUncertain).not.toHaveBeenCalled()
+    expect(text()).toContain('May have run: bash, mcp__fs__write')
+    act(() => byText('Continue anyway')!.click())
+    expect(onContinueUncertain).toHaveBeenCalledWith('run:1')
+    expect(onContinue).not.toHaveBeenCalled()
+  })
+
+  it('Cancel goes back without continuing', () => {
+    const onContinueUncertain = vi.fn()
+    render(createElement(RunInterruptedNotice, { uncertain, onContinueUncertain }))
+    act(() => byText('Continue…')!.click())
+    act(() => byText('Cancel')!.click())
+    expect(onContinueUncertain).not.toHaveBeenCalled()
+    expect(text()).toContain('Run interrupted')
+  })
+
+  it('the turn actions continue the run acknowledged, through the window\'s continuation', () => {
+    const continueRunOf = vi.fn()
+    const actions = createTurnActions({ prompt: () => undefined, send: vi.fn(), continueRunOf })
+    actions.continueUncertain!('run:1')
+    expect(continueRunOf).toHaveBeenCalledWith('run:1')
+  })
+})

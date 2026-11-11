@@ -63,6 +63,8 @@ describe('restart recovery of a turn cut off by a killed daemon', () => {
       // Outside any repository: the child's test project must never resolve to this checkout's git repository.
       const home = mkdtempSync(join(tmpdir(), `mousse-restart-${scenario}-`))
       homes.push(home)
+      // A home inside a repository would put the child's branches in it: refuse to run there (set TMP elsewhere).
+      expect(spawnSync('git', ['-C', home, 'rev-parse', '--git-dir'], { encoding: 'utf-8' }).status, `${home} is inside a git repository`).not.toBe(0)
       const killed = runChild(['first', home, scenario])
       expect(existsSync(join(home, 'error.txt')) ? readFileSync(join(home, 'error.txt'), 'utf-8') : '', killed.stderr).toBe('')
       expect(killed.status === 0).toBe(false)

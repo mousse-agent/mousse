@@ -358,12 +358,17 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   images?: unknown
   conversationBranchId?: string
   expect?: unknown
+  continuationOfRunId?: string
+  acknowledgeUncertain?: boolean
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
     requestId: request.requestId,
     ...(typeof request.conversationBranchId === 'string' ? { conversationBranchId: request.conversationBranchId } : {}),
+    ...(typeof request.continuationOfRunId === 'string' && request.continuationOfRunId
+      ? { continuationOfRunId: request.continuationOfRunId, ...(request.acknowledgeUncertain === true ? { acknowledgeUncertain: true } : {}) }
+      : {}),
     ...(request.expect && typeof request.expect === 'object' ? { expect: request.expect } : {}),
     mode: request.mode,
     images: request.images
@@ -1225,7 +1230,8 @@ export function registerGuiIpc(
     setThreadActivity(targetThreadId, 'processing')
     try {
       const body = normalizeSendContent(request)
-      const requestId = body.requestId ?? randomUUID()
+      // SPEC §16.4: a continuation of a run is `continue:<runId>`, so a second click replays the first.
+      const requestId = body.continuationOfRunId ? `continue:${body.continuationOfRunId}` : body.requestId ?? randomUUID()
       const result = await guiMms.request<{ queued?: boolean; heldByPause?: boolean; message?: string }>(
         'orchestrator.send',
         {
@@ -1239,6 +1245,7 @@ export function registerGuiIpc(
           images: body.images,
           source: 'gui',
           ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {}),
+          ...(body.continuationOfRunId ? { continuationOfRunId: body.continuationOfRunId, ...(body.acknowledgeUncertain ? { acknowledgeUncertain: true } : {}) } : {}),
           ...(body.expect ? { expect: body.expect } : {})
         }
       )

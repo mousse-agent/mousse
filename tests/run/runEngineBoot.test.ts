@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
-import { RunEngine } from '../../src/mms/run/RunEngine'
+import { RESTART_TRANSCRIPTS_THREAD_ID, RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { RunRecord, ThreadEvent } from '../../src/mms/run/types'
 
@@ -160,7 +160,8 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     ])
     expect(notes('t3')).toEqual([])
     // Boot events reach listeners for every thread it touched, effect-only threads included.
-    expect(new Set(second.events.map((event) => event.threadId))).toEqual(new Set(['t1', 't2', 't3']))
+    // And the markers of the transcripts still to write, under their own thread id.
+    expect(new Set(second.events.map((event) => event.threadId))).toEqual(new Set(['t1', 't2', 't3', RESTART_TRANSCRIPTS_THREAD_ID]))
   })
 
   it('lists a queued run whose turn.start died in the restart note (queuedRunIds)', async () => {
