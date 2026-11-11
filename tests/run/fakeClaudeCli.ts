@@ -130,6 +130,8 @@ export class FakeClaudeProcess {
   permissionGate: Promise<unknown> | undefined
   /** While set, `interrupt()` waits for it before it answers (a slow receipt). */
   interruptGate: Promise<unknown> | undefined
+  /** While set, `cancelAsyncMessage` waits for it before it answers (a slow answer). */
+  cancelAsyncGate: Promise<unknown> | undefined
   backgroundGate: Promise<unknown> | undefined
   private readonly started = new Set<string>()
   private readonly cancelled = new Set<string>()
@@ -323,6 +325,7 @@ export class FakeClaudeProcess {
       cancelAsyncMessage: async (uuid: string) => {
         if (!this.cancelAsync) throw new Error('cancel_async_message is not supported')
         this.cancelAsyncCalls.push(uuid)
+        await this.cancelAsyncGate
         if (!this.queued.includes(uuid)) return false
         this.cancelled.add(uuid)
         return true

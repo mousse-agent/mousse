@@ -817,6 +817,19 @@ describe('result routing and steering edge cases', () => {
     expect(await b).toBe('B text')
   })
 
+  it('a turn that answers a finished turn\'s message again keeps all its frames from the turn that is waiting, not only the first', async () => {
+    const f = fixture()
+    await f.turn({ prompt: 'A' })
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const b = f.chat({ prompt: 'B', history: '' })
+    await inputs(f.cli, 2)
+    // Only the turn's first frame names A's message; the rest name nothing, and its result names A again.
+    process.answer(process.uuid(0), 'A again, and more of A', ['A again', ', and more of A'])
+    process.answer(process.uuid(1), 'B text')
+    expect(await b).toBe('B text')
+  })
+
   it('a live turn reports a Mousse subagent call with its bounded record: marked at the start, named once the input is known, closed with the result', async () => {
     const f = fixture()
     const events: Array<Record<string, unknown>> = []
@@ -1484,6 +1497,70 @@ describe('result routing and steering edge cases', () => {
     expect(process.interrupts).toBe(0)
     process.emit(textDelta('answer', process.uuid(1)), resultFrame({ uuids: [process.uuid(1)], text: 'answer' }))
     await mine
+  })
+
+  it('a steered wake held at its result for a steer Claude Code took leaves another wake its own frames and result', async () => {
+    const f = fixture({ lateSteerReadMs: 60_000 })
+    await withHelperTurn(f)
+    const process = f.cli.last
+    process.emit(roster({ id: 'bash-1' }, { id: 'bash-2' }))
+    process.emit(notification('bash-1'), textDelta('wake one'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const first = f.service.chat({
+      threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, continuationId: f.host.continuationStarted.mock.calls[0][1].id, onText: () => undefined,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('steer for wake one').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    const steer = process.uuid(1)
+    // The wake's result comes before the steer was read, and a turn has taken the steer without saying so yet.
+    process.markStarted(steer)
+    process.emit(resultFrame({ text: 'wake one', origin: 'task-notification', queued: 0 }))
+    await vi.waitFor(() => expect(process.cancelAsyncCalls).toEqual([steer]))
+    // Meanwhile another task finishes, and Claude Code wakes for it: a frame and a result that name nothing.
+    process.emit(notification('bash-2'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
+    process.emit(textDelta('wake two'), resultFrame({ text: 'wake two', origin: 'task-notification' }))
+    await later(30)
+    // Then the steer's turn shows itself, and the held wake goes on to its answer.
+    process.emit(textDelta('steer answered', steer), resultFrame({ uuids: [steer], text: 'steer answered' }))
+    const firstText = await first
+    expect(firstText).toContain('wake one')
+    expect(firstText).toContain('steer answered')
+    expect(firstText).not.toContain('wake two')
+    // Asked once: the other wake's result did not end the held one again.
+    expect(process.cancelAsyncCalls).toEqual([steer])
+    // The other wake kept what it said, for the run that takes it.
+    const secondText = await f.service.chat({
+      threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, continuationId: f.host.continuationStarted.mock.calls[1][1].id, onText: () => undefined
+    })
+    expect(secondText).toContain('wake two')
+    expect(secondText).not.toContain('wake one')
+    expect(secondText).not.toContain('steer answered')
+  })
+
+  it('Stop while Claude Code answers whether it took a late steer: a steer it took is not handed back', async () => {
+    const f = fixture()
+    silent(f.cli)
+    const returned = vi.fn()
+    const stop = new AbortController()
+    const turn = f.chat({
+      prompt: 'go', signal: stop.signal, returnSteer: returned,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('late steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    const process = f.cli.last
+    const steer = process.uuid(1)
+    process.markStarted(steer)
+    let answer!: () => void
+    process.cancelAsyncGate = new Promise<void>((resolve) => { answer = resolve })
+    process.emit(textDelta('the reply', process.uuid(0)), resultFrame({ uuids: [process.uuid(0)], text: 'the reply', queued: 0 }))
+    await vi.waitFor(() => expect(process.cancelAsyncCalls).toEqual([steer]))
+    // Stop comes first; then Claude Code answers that a turn took the steer.
+    stop.abort()
+    await later(30)
+    answer()
+    await turn.catch(() => undefined)
+    expect(returned).not.toHaveBeenCalled()
   })
 
   it('a steered continuation ignores an abort result that echoes no id and ends at its own result', async () => {

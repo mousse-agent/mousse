@@ -34,7 +34,7 @@ describe('a steer still unread when Claude Code\'s reply ends', () => {
    * A thread whose first prompt streams "The reply." and waits, with a steer pushed into it. Any later prompt (the
    * steer handed back and sent again) is answered "Answer to the steer.".
    */
-  async function steeredReply() {
+  async function steeredReply(live?: { lateSteerReadMs: number }) {
     home = mkdtempSync(join(tmpdir(), 'mousse-steer-after-result-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -53,6 +53,7 @@ describe('a steer still unread when Claude Code\'s reply ends', () => {
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       launchConfig: () => ({ binaryPath: binary }),
       query: cli.query,
+      ...(live ? { live } : {}),
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })
     stops.push(async () => service.stop())
@@ -108,6 +109,56 @@ describe('a steer still unread when Claude Code\'s reply ends', () => {
     // Claude Code ran it once, as the turn it took; nothing was sent again.
     expect(t.claude.cancelAsyncCalls).toEqual([t.steer])
     expect(t.sentAgain(t.claude)).toBe(0)
+  }, 30_000)
+
+  it('Claude Code says a turn took it before that turn shows itself: the run waits, and goes on to the steer\'s answer', async () => {
+    const t = await steeredReply()
+    // Taken, with nothing said yet: Claude Code cannot drop it.
+    t.claude.markStarted(t.steer)
+    t.claude.emit(resultFrame({ uuids: [t.prompt], text: 'The reply.', queued: 0 }))
+    await waitFor(() => t.claude.cancelAsyncCalls.length === 1, 'Claude Code to be asked to drop the steer')
+    await later(50)
+    t.claude.emit(lifecycle(t.steer, 'started'))
+    t.claude.answer(t.steer, 'Answer to the steer.')
+    await t.first
+    await t.idle()
+
+    expect(t.transcript()).toEqual([
+      ['user', 'first'],
+      ['assistant', 'The reply.'],
+      ['user', 'STEER'],
+      ['assistant', 'Answer to the steer.']
+    ])
+    expect(t.claude.cancelAsyncCalls).toEqual([t.steer])
+    expect(t.sentAgain(t.claude)).toBe(0)
+  }, 30_000)
+
+  it('Claude Code took it but its turn did not show in time: the run ends, and that turn\'s answer never reaches the next prompt', async () => {
+    const t = await steeredReply({ lateSteerReadMs: 100 })
+    t.claude.markStarted(t.steer)
+    t.claude.emit(resultFrame({ uuids: [t.prompt], text: 'The reply.', queued: 0 }))
+    await t.first
+    await t.idle()
+    // The next prompt goes to the same process, which runs the steer's turn first. Only that turn's first frame names
+    // the steer.
+    t.claude.onInput = null
+    const second = t.d.orch.send('second', false, { threadId: t.thread.id, clientRequestId: 'turn-2' })
+    await waitFor(() => t.claude.inputs.length === 3, 'the next prompt to be read')
+    t.claude.answer(t.steer, 'STEERANSWER-1STEERANSWER-2', ['STEERANSWER-1', 'STEERANSWER-2'])
+    t.claude.answer(t.claude.uuid(2), 'Second answer.')
+    await second
+    await t.idle()
+
+    const transcript = t.transcript()
+    expect(transcript.filter(([, content]) => content.includes('STEERANSWER'))).toEqual([])
+    expect(transcript.slice(-2)).toEqual([
+      ['user', 'second'],
+      ['assistant', 'Second answer.']
+    ])
+    expect(transcript.filter(([role, content]) => role === 'user' && content === 'STEER')).toHaveLength(1)
+    // Taken, so it counts as read: neither waiting in the queue nor sent again.
+    expect(t.d.orch.listQueue(t.thread.id)).toHaveLength(0)
+    expect(t.cli.processes.reduce((sum, process) => sum + t.sentAgain(process), 0)).toBe(0)
   }, 30_000)
 
   it('Claude Code had not taken it: it is dropped there, handed back, and runs once as the next turn, with the reply kept once', async () => {
