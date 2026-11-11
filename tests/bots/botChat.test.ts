@@ -218,6 +218,9 @@ describe('bots.chat.send', () => {
     const one = await send('Hello', 'same')
     const two = await send('Hello', 'same')
     expect(two.id).toBe(one.id)
+    // The owner's message carries its request id, which the app matches to the bubble it showed while sending.
+    expect([one.clientRequestId, two.clientRequestId]).toEqual(['same', 'same'])
+    expect(chatOf(f, botId).find((message) => message.author === 'owner')?.clientRequestId).toBe('same')
     expect(chatOf(f, botId).filter((message) => message.author === 'owner')).toHaveLength(1)
     expect(f.store.listActivations(botId).filter((row) => row.idempotencyKey === 'chat:same')).toHaveLength(1)
   })

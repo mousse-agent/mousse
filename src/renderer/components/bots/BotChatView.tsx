@@ -33,10 +33,24 @@ export function BotErrorLine({ error, onAction }: { error: BotError; onAction(ac
   </div>
 }
 
-/** Scrolls to a message of the open chat and lights it briefly; nothing when it is not loaded. */
-function showMessage(id: string): void {
+const messageElement = (id: string) => {
   const element = document.querySelector(`.bot-conversation [data-message-id="${CSS.escape(id)}"]`)
-  if (!(element instanceof HTMLElement)) return
+  return element instanceof HTMLElement ? element : null
+}
+const nextFrame = () => new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()) })
+
+/**
+ * Scrolls to a message of the open chat and lights it briefly. A message not loaded yet is loaded first, page by
+ * page of older history; one the chat no longer has does nothing.
+ */
+async function showMessage(botId: string, id: string): Promise<void> {
+  let element = messageElement(id)
+  if (!element) {
+    if (!(await useBotsStore.getState().findMessage(botId, id))) return
+    // The loaded page renders on its own schedule: wait a few frames for the message to be drawn.
+    for (let frame = 0; frame < 10 && !(element = messageElement(id)); frame += 1) await nextFrame()
+    if (!element) return
+  }
   element.scrollIntoView({ block: 'center', behavior: 'smooth' })
   element.classList.remove('is-shown')
   void element.offsetWidth
@@ -62,8 +76,8 @@ function QuoteLine({ quote, botName }: { quote: BotChatQuote; botName: string })
 }
 
 /** The quote above a message that answers an earlier one, not the one right above it: who wrote it and its first line. */
-export function BotReplyQuote({ quote, botName }: { quote: BotChatQuote; botName: string }) {
-  return <button type="button" className="bot-quote bot-reply-quote" data-author={quote.author} disabled={quote.gone} onClick={() => showMessage(quote.id)} aria-label={`Replying to ${quoteOwner(quote, botName)}: ${quoteLine(quote)}`}>
+export function BotReplyQuote({ botId, quote, botName }: { botId: string; quote: BotChatQuote; botName: string }) {
+  return <button type="button" className="bot-quote bot-reply-quote" data-author={quote.author} disabled={quote.gone} onClick={() => void showMessage(botId, quote.id)} aria-label={`Replying to ${quoteOwner(quote, botName)}: ${quoteLine(quote)}`}>
     <QuoteLine quote={quote} botName={botName} />
   </button>
 }
@@ -139,14 +153,14 @@ function ReplyButton({ onReply }: { onReply(): void }) {
 }
 
 /** `starts`: the first message of its group, with the group's space above it (messageGroups.ts). */
-interface OwnerMessageProps { message: BotChatMessage; pending: boolean; botName: string; quote: boolean; starts: boolean; onReply?(message: BotChatMessage): void }
+interface OwnerMessageProps { botId: string; message: BotChatMessage; pending: boolean; botName: string; quote: boolean; starts: boolean; onReply?(message: BotChatMessage): void }
 
 // Messages render again only when they change: a poll, a live chip or the bot starting work leaves them alone.
 // The group's time is drawn beside them (GroupTime), so a message that stops being a group's last does not render again.
-const OwnerMessage = memo(function OwnerMessage({ message, pending, botName, quote, starts, onReply }: OwnerMessageProps) {
+const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botName, quote, starts, onReply }: OwnerMessageProps) {
   const quoted = quote && message.replyTo
   return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id} title={pending ? undefined : botFullTime(message.at)}>
-    {quoted && <BotReplyQuote quote={message.replyTo!} botName={botName} />}
+    {quoted && <BotReplyQuote botId={botId} quote={message.replyTo!} botName={botName} />}
     <div className="bot-you-line">
       {!pending && onReply && <ReplyButton onReply={() => onReply(message)} />}
       <div className="bot-you-content">
@@ -186,7 +200,7 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
       : <div className="bot-message-gutter"><ReplyButton onReply={() => onReply(message)} /></div>}
     <div className="chat-participant-message-body">
       {starts && <div className="chat-message-meta"><strong>{bot.name}</strong><ReplyButton onReply={() => onReply(message)} /></div>}
-      {quoted && <BotReplyQuote quote={message.replyTo!} botName={bot.name} />}
+      {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
       {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" />}
       <BotChips chips={message.chips} />
       {browser}
@@ -324,7 +338,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           return <Fragment key={message.id}>
             {place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>}
             {message.author === 'owner'
-              ? <OwnerMessage message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} onReply={sending ? undefined : reply} />
+              ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} onReply={sending ? undefined : reply} />
               : <BotMessage bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} />}
             {place.ends && <GroupTime message={message} pending={sending} />}
           </Fragment>
