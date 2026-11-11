@@ -25,6 +25,7 @@ import {
   LOCK_CORRUPT_STALE_MS,
   LOCK_PUBLICATION_GRACE_MS,
   mayReclaimUnreadableLock,
+  onExecutionLeaseReleased,
   releaseExecutionLease,
   releaseExecutionLeaseHandle,
   tryAcquireExecutionLease,
@@ -226,6 +227,37 @@ describe('ThreadExecutionLease', () => {
     expect(releaseExecutionLease(dir, 'mine')).toBe(false)
     expect(existsSync(lockPath)).toBe(true)
     expect(readFileSync(lockPath, 'utf-8').trim()).toBe('')
+  })
+
+  it('tells release listeners about a release, a stale reclaim, and a release that finds the lease gone', () => {
+    const heard: string[] = []
+    const stop = onExecutionLeaseReleased((threadDir) => heard.push(threadDir))
+    try {
+      const lockPath = getExecutionLeasePath(dir)
+      releaseExecutionLeaseHandle(tryAcquireExecutionLease(dir, { token: 'plain' })!)
+      expect(heard).toEqual([dir])
+
+      const dead: ThreadLeaseOwner = { pid: 2_147_000_002, token: 'dead', processInstanceId: 'dead-instance', acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() }
+      writeFileSync(lockPath, JSON.stringify(dead), 'utf-8')
+      expect(tryReclaimStaleLease(dir)).toBe(true)
+      expect(heard).toHaveLength(2)
+
+      writeFileSync(lockPath, '{not-json', 'utf-8')
+      const old = Date.now() - LOCK_CORRUPT_STALE_MS - 1_000
+      utimesSync(lockPath, new Date(old), new Date(old))
+      expect(tryReclaimStaleLease(dir)).toBe(true)
+      expect(heard).toHaveLength(3)
+
+      // The holder's lease file was removed under it: its release still lets a waiter look again.
+      tryAcquireExecutionLease(dir, { token: 'gone' })
+      rmSync(lockPath)
+      expect(releaseExecutionLease(dir, 'gone')).toBe(false)
+      expect(heard).toHaveLength(4)
+    } finally {
+      stop()
+    }
+    releaseExecutionLeaseHandle(tryAcquireExecutionLease(dir, { token: 'after-stop' })!)
+    expect(heard).toHaveLength(4)
   })
 
 })

@@ -125,4 +125,125 @@ describe('a send that lost the race for the thread lease', () => {
     expect(prompts()[0]).toContain('LEASE-X1')
     expect(adapter.turns).toHaveLength(2)
   })
+
+  type LeaseWait = { itemIds: Set<string>; poll: NodeJS.Timeout | null }
+  const leaseWaits = (): Map<string, LeaseWait> => (orch as unknown as { leaseWaits: Map<string, LeaseWait> }).leaseWaits
+  /** A live peer (this test's parent process) holds the thread's lease, as the app's other process would. */
+  const holdAsPeer = (threadId: string): string => {
+    const leasePath = getExecutionLeasePath(store.getThreadDir(threadId))
+    const now = new Date().toISOString()
+    writeFileSync(leasePath, JSON.stringify({ pid: process.ppid, token: 'peer-token', processInstanceId: 'peer-instance', acquiredAt: now, heartbeatAt: now, source: 'cli-turn' }))
+    return leasePath
+  }
+
+  it('keeps a message held when a Stop comes after it started waiting for another process', async () => {
+    const thread = store.createThread('Lease wait then Stop')
+    const leasePath = holdAsPeer(thread.id)
+    const result = await orch.send('LEASE-H behind the peer', false, { threadId: thread.id })
+    expect(result.queued).toBe(true)
+    expect(leaseWaits().has(thread.id)).toBe(true)
+
+    // The person stops the peer's turn: what waits in the queue, this message included, is held.
+    mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+    unlinkSync(leasePath)
+    await settle(1_200)
+
+    expect(adapter.turns).toHaveLength(0)
+    const pending = listPendingQueue(store.loadMessageQueue(thread.id))
+    expect(pending.map((item) => [item.content, item.heldAfterStop])).toEqual([['LEASE-H behind the peer', true]])
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  })
+
+  it('runs nothing a Stop held when the waiting message cannot be moved first', async () => {
+    const thread = store.createThread('Lease wait reorder fails')
+    orch.enqueueForThread(thread.id, 'HELD-OLD queued before the Stop')
+    mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+    const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'git-operation' })!
+    await orch.send('LEASE-F sent after the Stop', false, { threadId: thread.id })
+
+    const save = store.saveMessageQueue.bind(store)
+    let refused = 0
+    vi.spyOn(store, 'saveMessageQueue').mockImplementation((threadId, items) => {
+      if (threadId === thread.id && listPendingQueue(items)[0]?.content.includes('LEASE-F')) {
+        refused++
+        throw new Error('the disk is full')
+      }
+      return save(threadId, items)
+    })
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    releaseExecutionLeaseHandle(lease)
+    await settle(400)
+
+    expect(refused).toBe(1)
+    expect(adapter.turns).toHaveLength(0)
+    const pending = listPendingQueue(store.loadMessageQueue(thread.id))
+    expect(pending.map((item) => [item.content, item.state, item.heldAfterStop])).toEqual([
+      ['HELD-OLD queued before the Stop', 'pending', true],
+      ['LEASE-F sent after the Stop', 'pending', undefined]
+    ])
+  })
+
+  it('polls only for a holder in another process, without loading the waiting thread', async () => {
+    const local = store.createThread('Lease wait local holder')
+    const lease = tryAcquireExecutionLease(store.getThreadDir(local.id), { source: 'terminal' })!
+    await orch.send('LEASE-L local holder', false, { threadId: local.id })
+    expect(leaseWaits().get(local.id)?.poll).toBeNull()
+
+    const peer = store.createThread('Lease wait peer holder')
+    const leasePath = holdAsPeer(peer.id)
+    await orch.send('LEASE-P peer holder', false, { threadId: peer.id })
+    expect(leaseWaits().get(peer.id)?.poll).not.toBeNull()
+
+    const load = vi.spyOn(orch, 'getOrCreateSession')
+    await settle(1_200)
+    expect(load).not.toHaveBeenCalled()
+    expect(adapter.turns).toHaveLength(0)
+
+    unlinkSync(leasePath)
+    await waitFor(() => ran('LEASE-P') === 1, 'the peer-held message to run', 2_000)
+    releaseExecutionLeaseHandle(lease)
+    await waitFor(() => ran('LEASE-L') === 1, 'the locally held message to run', 2_000)
+  })
+
+  it('stops waiting when the message is removed while the lease is still held', async () => {
+    const thread = store.createThread('Lease wait removed')
+    const leasePath = holdAsPeer(thread.id)
+    const result = await orch.send('LEASE-R removed', false, { threadId: thread.id })
+    expect(orch.removeQueuedItem(thread.id, result.queueItem!.id)).not.toBeNull()
+    await waitFor(() => !leaseWaits().has(thread.id), 'the wait to end while the peer still holds the lease', 2_000)
+
+    unlinkSync(leasePath)
+    await settle(800)
+    expect(adapter.turns).toHaveLength(0)
+  })
+
+  it('stops waiting when the thread is deleted, and waits again once it is restored', async () => {
+    const thread = store.createThread('Lease wait deleted')
+    const leasePath = holdAsPeer(thread.id)
+    const result = await orch.send('LEASE-D deleted then restored', false, { threadId: thread.id })
+    const queued = store.loadMessageQueue(thread.id)
+
+    orch.markThreadDeleted(thread.id)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+    await settle(200)
+    // The trash keeps the thread's queue; a restore brings it back.
+    store.saveMessageQueue(thread.id, queued)
+    orch.markThreadRestored(thread.id)
+    expect(leaseWaits().get(thread.id)?.itemIds.has(result.queueItem!.id)).toBe(true)
+    expect(leaseWaits().get(thread.id)?.poll).not.toBeNull()
+
+    unlinkSync(leasePath)
+    await waitFor(() => ran('LEASE-D') === 1, 'the restored message to run after the peer released the lease', 2_000)
+    await settle(100)
+    expect(ran('LEASE-D')).toBe(1)
+  })
+
+  it('stops waiting on shutdown', async () => {
+    const thread = store.createThread('Lease wait shutdown')
+    holdAsPeer(thread.id)
+    await orch.send('LEASE-Q shutdown', false, { threadId: thread.id })
+    expect(leaseWaits().get(thread.id)?.poll).not.toBeNull()
+    await orch.shutdown(5_000)
+    expect(leaseWaits().size).toBe(0)
+  })
 })

@@ -240,6 +240,7 @@ export function tryReclaimStaleLease(threadDir: string, expectedToken?: string):
     if (!mayReclaimUnreadableLock(lockPath)) return false
     try {
       unlinkSync(lockPath)
+      notifyLeaseReleased(threadDir)
       return true
     } catch {
       return false
@@ -259,6 +260,7 @@ export function tryReclaimStaleLease(threadDir: string, expectedToken?: string):
     if (isOwnerLive(still) && still.pid !== process.pid) return false
     // Same process, live, different token not held: orphan from prior crash in-process.
     unlinkSync(lockPath)
+    notifyLeaseReleased(threadDir)
     return true
   } catch {
     return false
@@ -431,17 +433,32 @@ export function releaseExecutionLease(threadDir: string, token: string): boolean
   if (!owner) {
     // Missing/unreadable: do not unlink based on age — may be a new partial publication.
     untrackHeld(token)
+    notifyLeaseReleased(threadDir)
     return false
   }
-  if (owner.token !== token) return false
+  // Another owner took it (it was reclaimed from this one): whoever waits looks again at who holds it now.
+  if (owner.token !== token) {
+    notifyLeaseReleased(threadDir)
+    return false
+  }
   try {
     const still = readLeaseOwner(lockPath)
-    if (!still || still.token !== token) return false
+    if (!still || still.token !== token) {
+      notifyLeaseReleased(threadDir)
+      return false
+    }
     unlinkSync(lockPath)
     untrackHeld(token)
   } catch {
     return false
   }
+  notifyLeaseReleased(threadDir)
+  return true
+}
+
+const releaseListeners = new Set<(threadDir: string) => void>()
+
+function notifyLeaseReleased(threadDir: string): void {
   for (const listener of releaseListeners) {
     try {
       listener(threadDir)
@@ -449,14 +466,13 @@ export function releaseExecutionLease(threadDir: string, token: string): boolean
       // A listener never fails the release.
     }
   }
-  return true
 }
 
-const releaseListeners = new Set<(threadDir: string) => void>()
-
 /**
- * Hear each execution lease this process releases, by thread directory, right after the release. A listener runs
- * inside the releaser's call: it must be quick and leave real work for later.
+ * Hear each time this process lets go of an execution lease, by thread directory, right after: a release, a stale
+ * lease it reclaims, or a release that finds the lease already gone or taken by another owner. The lease may be held
+ * again by then; a listener looks for itself. It runs inside the releaser's call: it must be quick and leave real work
+ * for later.
  */
 export function onExecutionLeaseReleased(listener: (threadDir: string) => void): () => void {
   releaseListeners.add(listener)

@@ -1038,6 +1038,7 @@ export class OrchestratorService extends EventEmitter {
     this.lifecycle.beginShutdown()
     this.residency.stop()
     for (const threadId of [...this.leaseWaits.keys()]) this.endLeaseWait(threadId)
+    this.leaseWaitsOfDeleted.clear()
     this.stopLeaseReleaseWatch?.()
     this.stopLeaseReleaseWatch = null
     for (const retry of this.releaseRetries) clearTimeout(retry)
@@ -7273,10 +7274,13 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Messages queued because the thread's execution lease was held by something that drains nothing when it lets go
    * (a git operation, a workspace restore, a sweep, a terminal, or work in another process). The thread waits for
-   * the lease here: a release in this process wakes it at once, and a short poll sees a release in another one. The
-   * wait ends with one drain once the lease is free and no turn of the thread runs here.
+   * the lease here: a release in this process wakes it at once, and while another process holds it a short poll looks
+   * for its release. The wait ends with one drain once the lease is free and no turn of the thread runs here. Deleting
+   * the thread ends the wait; restoring it waits again for what is still queued.
    */
-  private readonly leaseWaits = new Map<string, { threadDir: string; itemIds: Set<string>; poll: NodeJS.Timeout; wakeQueued: boolean }>()
+  private readonly leaseWaits = new Map<string, { threadDir: string; itemIds: Set<string>; poll: NodeJS.Timeout | null; wakeQueued: boolean }>()
+  /** What a delete ended a lease wait for, by thread: a restore waits again for those that are still queued. */
+  private readonly leaseWaitsOfDeleted = new Map<string, Set<string>>()
   private stopLeaseReleaseWatch: (() => void) | null = null
 
   private waitForThreadLease(threadId: string, itemId: string): void {
@@ -7284,55 +7288,110 @@ export class OrchestratorService extends EventEmitter {
     const threadDir = this.resolveThreadDir(threadId)
     if (!threadDir) return
     let wait = this.leaseWaits.get(threadId)
+    const started = !wait
     if (!wait) {
-      const poll = setInterval(() => this.wakeLeaseWait(threadId), LEASE_WAIT_POLL_MS)
-      poll.unref?.()
-      wait = { threadDir: resolve(threadDir), itemIds: new Set(), poll, wakeQueued: false }
+      wait = { threadDir: resolve(threadDir), itemIds: new Set(), poll: null, wakeQueued: false }
       this.leaseWaits.set(threadId, wait)
     }
     wait.itemIds.add(itemId)
     this.stopLeaseReleaseWatch ??= onExecutionLeaseReleased((released) => {
       const dir = resolve(released)
       for (const [id, entry] of this.leaseWaits) {
-        if (entry.threadDir !== dir || entry.wakeQueued) continue
-        // The releaser is still in its own cleanup: the drain waits for it to finish.
-        entry.wakeQueued = true
-        setImmediate(() => {
-          entry.wakeQueued = false
-          this.wakeLeaseWait(id)
-        })
+        if (entry.threadDir === dir) this.queueLeaseWake(id, entry)
       }
+    })
+    this.pollWhileHeldElsewhere(threadId, wait)
+    // The lease may have been let go between the look that queued the message and now.
+    if (started) this.queueLeaseWake(threadId, wait)
+  }
+
+  /** Wake a lease wait on the next turn of the event loop: a releaser is still in its own cleanup. */
+  private queueLeaseWake(threadId: string, wait: { wakeQueued: boolean }): void {
+    if (wait.wakeQueued) return
+    wait.wakeQueued = true
+    setImmediate(() => {
+      wait.wakeQueued = false
+      this.wakeLeaseWait(threadId)
     })
   }
 
-  private endLeaseWait(threadId: string): void {
+  /**
+   * Another process holds the lease: its release fires nothing here, so the wait polls for it. A holder in this process
+   * fires the release hook, and needs no poll.
+   */
+  private pollWhileHeldElsewhere(threadId: string, wait: { threadDir: string; poll: NodeJS.Timeout | null }): void {
+    if (wait.poll || !isLeaseHeldByLivePeer(wait.threadDir).held) return
+    wait.poll = setInterval(() => this.wakeLeaseWait(threadId), LEASE_WAIT_POLL_MS)
+    wait.poll.unref?.()
+  }
+
+  private endLeaseWait(threadId: string, opts?: { deleted?: boolean }): void {
     const wait = this.leaseWaits.get(threadId)
     if (!wait) return
-    clearInterval(wait.poll)
+    if (wait.poll) clearInterval(wait.poll)
     this.leaseWaits.delete(threadId)
+    if (opts?.deleted && wait.itemIds.size > 0) this.leaseWaitsOfDeleted.set(threadId, new Set(wait.itemIds))
+  }
+
+  /** A restored thread waits again for the lease for the messages its delete stopped waiting, if they are still queued. */
+  private resumeLeaseWaitAfterRestore(threadId: string): void {
+    const ids = this.leaseWaitsOfDeleted.get(threadId)
+    this.leaseWaitsOfDeleted.delete(threadId)
+    if (!ids || this.lifecycle.stopping) return
+    for (const id of this.stillWaitingForLease(threadId, ids)) this.waitForThreadLease(threadId, id)
+  }
+
+  /** Of `ids`, those still waiting in the thread's queue, read without loading the thread. */
+  private stillWaitingForLease(threadId: string, ids: Set<string>): string[] {
+    let items: QueuedMessage[]
+    try {
+      items = this.threadStore
+        ? (this.threadStore.getThread(threadId) ? readDurableQueue(this.threadStore, threadId) : [])
+        : (this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId))?.queue ?? []
+    } catch {
+      return [...ids]
+    }
+    return listPendingQueue(items).filter((item) => item.state === 'pending' && !item.heldAfterStop && ids.has(item.id)).map((item) => item.id)
   }
 
   private wakeLeaseWait(threadId: string): void {
     const wait = this.leaseWaits.get(threadId)
     if (!wait) return
-    if (this.lifecycle.stopping || (this.threadStore && !this.threadStore.getThread(threadId))) {
+    if (this.lifecycle.stopping) {
       this.endLeaseWait(threadId)
       return
     }
-    const session = this.getOrCreateSession(threadId)
-    if (session.deleted) {
-      this.endLeaseWait(threadId)
+    if (this.threadStore && !this.threadStore.getThread(threadId)) {
+      this.endLeaseWait(threadId, { deleted: true })
       return
     }
-    // A turn of the thread runs or is set up here: it takes the lease, and its end drains the queue. Its release wakes
-    // this wait again all the same, for a turn that drains nothing after it.
+    // While the lease is held the thread is not loaded or touched, so a wait does not keep it resident. A message
+    // removed, sent with Send now, or held by a Stop meanwhile no longer waits.
+    if (isExecutionLeaseHeld(wait.threadDir)) {
+      const still = this.stillWaitingForLease(threadId, wait.itemIds)
+      if (still.length === 0) {
+        this.endLeaseWait(threadId)
+        return
+      }
+      wait.itemIds = new Set(still)
+      this.pollWhileHeldElsewhere(threadId, wait)
+      return
+    }
+    const loaded = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    if (loaded?.deleted) {
+      this.endLeaseWait(threadId, { deleted: true })
+      return
+    }
+    const session = loaded ?? this.getOrCreateSession(threadId)
+    // A turn of the thread is set up here: it takes the lease, and its end drains the queue. Its release wakes this
+    // wait again all the same, for a turn that drains nothing after it.
     if (session.isTurnRunning() || session.turnAdmitted) return
-    if (isExecutionLeaseHeld(wait.threadDir)) return
     this.refreshSessionQueueFromDisk(session)
     const pending = listPendingQueue(session.queue)
-    const waiting = pending.filter((item) => item.state === 'pending' && wait.itemIds.has(item.id)).map((item) => item.id)
+    // A Stop since the message was queued holds it with the rest: it waits for Send now, like everything the Stop held.
+    const waiting = pending.filter((item) => item.state === 'pending' && !item.heldAfterStop && wait.itemIds.has(item.id)).map((item) => item.id)
     this.endLeaseWait(threadId)
-    // Already run, removed, or claimed by another process.
+    // Already run, removed, held by a Stop, or claimed by another process.
     if (waiting.length === 0) return
     // A Stop holds what was queued before it. A message that only waited for the lease was never held: it goes first,
     // as it would have run had the lease been free, and the hold lifts once its turn starts.
@@ -7346,7 +7405,10 @@ export class OrchestratorService extends EventEmitter {
         session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, toFront) : toFront(session.queue)
         this.emitQueueUpdated(threadId, session.queue)
       } catch (error) {
-        logDebug('OrchestratorService', 'a message that waited for the thread lease could not go first', error, { threadId })
+        // A drain now would claim the oldest message the Stop held. The message waits for Send now, or for the next
+        // turn of the thread, which lifts the hold and drains the queue after it.
+        console.warn('a message that waited for the thread lease could not go before the messages a Stop held', { threadId, error: error instanceof Error ? error.message : String(error) })
+        return
       }
     }
     this.scheduleQueueDrain(session, {
@@ -7550,6 +7612,7 @@ export class OrchestratorService extends EventEmitter {
    */
   markThreadDeleted(threadId: string): void {
     this.residency.forget(threadId)
+    this.endLeaseWait(threadId, { deleted: true })
     this.revokeMcp(threadId)
     this.appToolTurns.forgetThread(threadId)
     this.dropContinuationsOf(threadId)
@@ -7614,6 +7677,7 @@ export class OrchestratorService extends EventEmitter {
     this.sessions.delete(threadId)
     if (this.boundSession.threadId === threadId) this.boundSession = new ThreadSession('__unbound__')
     this.turnStates.delete(threadId)
+    this.resumeLeaseWaitAfterRestore(threadId)
   }
 
   loadMessages(messages: ChatMessage[], nativeContext?: NativeLlmContext, queue?: QueuedMessage[]): void {
