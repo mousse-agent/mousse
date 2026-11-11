@@ -89,6 +89,13 @@
 .bot-you-files { display: flex; flex-wrap: wrap; gap: 6px; }
 .bot-file-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 8px; font-size: 11px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
 .bot-loading-older { text-align: center; }
+/* The chat's first load: a quiet line in the middle, or what failed with Retry. */
+.bot-conversation .chat-transcript > .bot-load-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 100%; font-size: 12px; color: var(--text-secondary); }
+.bot-load-state.is-failed button { padding: 5px 11px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
+.bot-load-state.is-failed button:hover { background: color-mix(in srgb, var(--text-secondary) 18%, transparent); }
+/* A reminder or a work report says so in a small label: beside the name, or above the text later in a group. */
+.bot-message-label { padding: 1px 7px; border-radius: 6px; font-size: 11px; line-height: 16px; font-weight: 500; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 10%, transparent); }
+.bot-message-label.is-own-line { display: inline-block; margin-bottom: 7px; }
 
 /* One-line activity chips: quiet, never a tool log. */
 .bot-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }

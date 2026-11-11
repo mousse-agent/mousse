@@ -60,6 +60,8 @@ interface BotsState {
   bots: BotSummary[]
   loaded: boolean
   chats: Record<string, BotChatCache>
+  /** A chat's first load while it runs, or after it failed (until Retry). Absent once the chat is held. */
+  chatLoad: Record<string, 'loading' | 'failed'>
   /** The current step of a working bot. */
   live: Record<string, { activationId: string; chip?: BotChip }>
   /** The live chip of each running activation (the chat's turn and each piece of work), by activation id. */
@@ -225,7 +227,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
   }
 
   return {
-    profileId: null, bots: [], loaded: false, chats: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
+    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
     error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
 
     activate(profileId) {
@@ -239,7 +241,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       created.clear()
       readSeq.clear()
       removed.clear()
-      set({ profileId, bots: [], loaded: false, chats: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
+      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
         error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
       subscribe()
     },
@@ -274,11 +276,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     async loadChat(botId) {
       const owner = epoch
+      // A chat with nothing held yet says it is loading, and that it failed with Retry; one already shown just updates.
+      const first = !get().chats[botId]
+      if (first) set((state) => ({ chatLoad: { ...state.chatLoad, [botId]: 'loading' } }))
       try {
         const page = await bots().messages(botId, { limit: BOT_CHAT_PAGE })
         if (owner !== epoch) return
         set((state) => {
           if (removed.has(botId)) return {}
+          const chatLoad = withoutKey(state.chatLoad, botId)
           // A full page that does not reach what is held leaves a gap (rows were missed): it starts the chat over.
           const first = Math.min(...page.messages.map((message) => message.seq))
           const gap = page.messages.length >= BOT_CHAT_PAGE && !(state.chats[botId]?.messages ?? []).some((message) => message.seq === first)
@@ -286,10 +292,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
           const { [botId]: _old, ...live } = state.live
           return {
             chats: { ...state.chats, [botId]: { messages: upsert(held, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } },
-            live: page.live ? { ...live, [botId]: page.live } : live
+            live: page.live ? { ...live, [botId]: page.live } : live,
+            chatLoad
           }
         })
-      } catch (cause) { fail(owner, cause, botId) }
+      } catch (cause) {
+        if (owner !== epoch) return
+        if (get().chats[botId]) fail(owner, cause, botId)
+        else set((state) => ({ chatLoad: { ...state.chatLoad, [botId]: 'failed' } }))
+      }
     },
 
     loadOlder(botId) {

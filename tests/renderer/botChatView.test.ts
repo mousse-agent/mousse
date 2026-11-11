@@ -668,3 +668,62 @@ describe('pinned above the composer, and New message', () => {
     expect(button('New message')).toBeUndefined()
   })
 })
+
+describe('loading and labels', () => {
+  const loadState = () => host.querySelector('.bot-load-state')
+
+  it('says Loading messages… while the chat first loads, then shows it', async () => {
+    fake.chats.inbox = [message(1, { text: 'Hello.' })]
+    let release!: () => void
+    const original = fake.client.messages
+    vi.mocked(fake.client.messages).mockImplementationOnce((...args) => new Promise((resolve) => { release = () => resolve(original(...args)) }))
+    fake.bots = [inbox]
+    await act(async () => useChatsStore.getState().activate('p1'))
+    await act(async () => root.render(createElement(ChatWorkspace)))
+    let opening!: Promise<void>
+    await act(async () => { opening = useChatsStore.getState().openBot('inbox') })
+    expect(loadState()?.textContent).toBe('Loading messages…')
+    expect(transcript().querySelectorAll('article')).toHaveLength(0)
+    await act(async () => { release(); await opening })
+    expect(loadState()).toBeNull()
+    expect(transcript().querySelectorAll('article')).toHaveLength(1)
+  })
+
+  it('says it couldn’t load with Retry, and Retry loads the chat', async () => {
+    fake.chats.inbox = [message(1, { text: 'Hello.' })]
+    vi.mocked(fake.client.messages).mockImplementationOnce(() => Promise.reject(new Error('offline')))
+    await open()
+    expect(loadState()?.textContent).toBe('Couldn’t load messages.Retry')
+    // Said once, in the transcript: not again above the composer.
+    expect(composerError()).toBeNull()
+    await click(button('Retry'))
+    await settle()
+    expect(loadState()).toBeNull()
+    expect(transcript().querySelector('[data-message-id="m1"]')).not.toBeNull()
+  })
+
+  it('a chat already shown keeps its messages when a later load fails, and says why above the composer', async () => {
+    fake.chats.inbox = [message(1, { text: 'Hello.' })]
+    await open()
+    vi.mocked(fake.client.messages).mockImplementationOnce(() => Promise.reject(Object.assign(new Error('The service is offline.'), { code: 'offline' })))
+    await act(async () => useBotsStore.getState().loadChat('inbox'))
+    expect(loadState()).toBeNull()
+    expect(transcript().querySelector('[data-message-id="m1"]')).not.toBeNull()
+    expect(composerError()).not.toBeNull()
+  })
+
+  it('labels reminders and work reports beside the name, or above the text later in a group', async () => {
+    fake.chats.inbox = [
+      message(1, { id: 'bm_rem_1', kind: 'run_report', text: 'Time to stretch.' }),
+      message(2, { id: 'm2', text: 'Plain reply.' }),
+      message(3, { id: 'bm_act_1', kind: 'run_report', activationId: 'act_1', text: 'The Q7 is the pick.' })
+    ]
+    await open()
+    const label = (id: string) => transcript().querySelector(`[data-message-id="${id}"] .bot-message-label`)
+    expect(label('bm_rem_1')?.textContent).toBe('Reminder')
+    expect(label('bm_rem_1')?.closest('.chat-message-meta')).not.toBeNull()
+    expect(label('m2')).toBeNull()
+    expect(label('bm_act_1')?.textContent).toBe('Work report')
+    expect(label('bm_act_1')?.classList.contains('is-own-line')).toBe(true)
+  })
+})

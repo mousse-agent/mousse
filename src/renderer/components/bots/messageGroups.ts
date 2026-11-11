@@ -41,7 +41,16 @@ export function botFullTime(at: string): string {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString([], { dateStyle: 'full', timeStyle: 'short' })
 }
 
-/** Where each message sits: whether it starts or ends its group, and the day line above it. */
+/**
+ * The small label on a bot message that is not a plain reply: "Reminder" for a reminder said at its time (its row is
+ * `bm_<reminder id>`, and reminder ids start `rem_`; BotEngine), "Work report" for what a run of work reported.
+ */
+export function botMessageLabel(message: { id: string; kind: string; author: string }): string | undefined {
+  if (message.author !== 'bot' || message.kind !== 'run_report') return undefined
+  return message.id.startsWith('bm_rem_') ? 'Reminder' : 'Work report'
+}
+
+/** Where each message sits:whether it starts or ends its group, and the day line above it. */
 export function placeMessages(messages: ReadonlyArray<{ author: string; at: string }>, now = new Date()): MessagePlace[] {
   const places: MessagePlace[] = []
   let previous: { author: string; time: number; day: string } | undefined

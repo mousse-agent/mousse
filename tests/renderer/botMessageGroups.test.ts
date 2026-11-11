@@ -1,6 +1,16 @@
 /** How a bot chat's messages group: one sender, ten minutes apart at most, the same day (messageGroups.ts). */
 import { describe, expect, it } from 'vitest'
-import { GROUP_GAP_MS, botDayLabel, botGroupTime, placeMessages } from '../../src/renderer/components/bots/messageGroups'
+import { GROUP_GAP_MS, botDayLabel, botGroupTime, botMessageLabel, placeMessages } from '../../src/renderer/components/bots/messageGroups'
+
+describe('labels', () => {
+  it('labels a reminder and a work report, and nothing else', () => {
+    expect(botMessageLabel({ id: 'bm_rem_1a2b', kind: 'run_report', author: 'bot' })).toBe('Reminder')
+    expect(botMessageLabel({ id: 'bm_act_9_report', kind: 'run_report', author: 'bot' })).toBe('Work report')
+    expect(botMessageLabel({ id: 'bm_rem_1a2b', kind: 'text', author: 'bot' })).toBeUndefined()
+    expect(botMessageLabel({ id: 'm1', kind: 'notice', author: 'bot' })).toBeUndefined()
+    expect(botMessageLabel({ id: 'm2', kind: 'run_report', author: 'owner' })).toBeUndefined()
+  })
+})
 
 const now = new Date(2026, 10, 11, 15, 0)
 const at = (day: number, hours: number, minutes: number, seconds = 0) => new Date(2026, 10, day, hours, minutes, seconds).toISOString()
