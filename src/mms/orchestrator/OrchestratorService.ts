@@ -8023,7 +8023,9 @@ export class OrchestratorService extends EventEmitter {
    * being set up): the message moves to the front of the queue and goes as the next turn when that turn ends.
    */
   private sendNowAfterTurn(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
-    this.moveQueueItemToFront(session, itemId, expectedRevision)
+    // After a Stop the queue drains once the stopped turn has ended, so nothing in it is held for the person any more,
+    // nor after a restart that comes first.
+    this.moveQueueItemToFront(session, itemId, expectedRevision, { releaseStopHold: session.stopping })
     session.drainAfterSettle = true
     return { ok: true }
   }
@@ -8131,8 +8133,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** Moves a person's pending message to the front of the thread's queue, under the queue lock. */
-  private moveQueueItemToFront(session: ThreadSession, itemId: string, expectedRevision?: string): void {
-    const toFront = (items: QueuedMessage[]): QueuedMessage[] => {
+  private moveQueueItemToFront(session: ThreadSession, itemId: string, expectedRevision?: string, opts?: { releaseStopHold?: boolean }): void {
+    const move = (items: QueuedMessage[]): QueuedMessage[] => {
       assertQueueRevision(items, expectedRevision)
       const pending = listPendingQueue(items).filter((entry) => !entry.internal)
       const item = pending.find((entry) => entry.id === itemId)
@@ -8142,6 +8144,7 @@ export class OrchestratorService extends EventEmitter {
       if (pending[0]?.id === itemId) return items
       return reorderQueuedMessages(items, [itemId, ...pending.map((entry) => entry.id).filter((id) => id !== itemId)])
     }
+    const toFront = (items: QueuedMessage[]): QueuedMessage[] => (opts?.releaseStopHold ? releaseStopHold(move(items)) : move(items))
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, toFront) : toFront(session.queue)
     this.emitQueueUpdated(session.threadId, session.queue)
   }
@@ -10723,6 +10726,8 @@ export class OrchestratorService extends EventEmitter {
     this.activeTurn = turn
     session.setupStop = null
     this.applyRequestedAbort(session, turn)
+    // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
+    if (!turn.abort.signal.aborted) this.releaseStopHold(session)
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
     let admitted: WorkflowChatRun | undefined

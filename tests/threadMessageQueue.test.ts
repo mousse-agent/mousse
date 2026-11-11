@@ -500,7 +500,8 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
       const loaded = normalizeQueuedMessages(JSON.parse(JSON.stringify(held)), 't1')
       expect(isQueueHeldByStop(loaded)).toBe(true)
       // A steer the Stop hands back stays held.
-      expect(isQueueHeldByStop(demoteSteerItems(loaded, [first.id], { toFront: true }))).toBe(true)
+      const demoted = demoteSteerItems(loaded, [first.id], { toFront: true }).find((item) => item.id === first.id)
+      expect(demoted).toMatchObject({ state: 'pending', heldAfterStop: true })
       const released = releaseStopHold(loaded)
       expect(isQueueHeldByStop(released)).toBe(false)
       expect(released.some((item) => 'heldAfterStop' in item)).toBe(false)

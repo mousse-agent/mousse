@@ -12,11 +12,15 @@ import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon, type ScriptedA
 
 vi.setConfig({ testTimeout: 60_000 })
 
-/** Replies at once, except to `holds`, whose turn runs until it is stopped or `releases` ends it. */
-const script = (holds: ReadonlySet<string>, releases = new Map<string, () => void>()) => (input: TurnInput): Promise<string> | string =>
+/**
+ * Replies at once, except to `holds`, whose turn runs until it is stopped or `releases` ends it. With `slowStop` a
+ * stopped turn still ends only when `releases` ends it, as a provider that is slow to let go.
+ */
+const script = (holds: ReadonlySet<string>, releases = new Map<string, () => void>(), slowStop = false) => (input: TurnInput): Promise<string> | string =>
   holds.has(input.prompt)
     ? new Promise<string>((resolve) => {
       releases.set(input.prompt, () => resolve(`reply to ${input.prompt}`))
+      if (slowStop) return
       if (input.signal.aborted) resolve('')
       else input.signal.addEventListener('abort', () => resolve(''), { once: true })
     })
@@ -35,12 +39,12 @@ describe('a queue held after a Stop stays held across a restart (#917)', () => {
     home = undefined
   })
 
-  const setup = (holds: string[] = ['first']) => {
+  const setup = (holds: string[] = ['first'], opts?: { slowStop?: boolean }) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-hold-stop-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     const releases = new Map<string, () => void>()
-    const adapter = piAdapter(script(new Set(holds), releases))
+    const adapter = piAdapter(script(new Set(holds), releases, opts?.slowStop))
     const d = phase6Daemon(home, [adapter], { pid: 1 })
     daemons.push(d)
     const thread = d.store.createThread('Held')
@@ -122,6 +126,22 @@ describe('a queue held after a Stop stays held across a restart (#917)', () => {
     expect(prompts(adapter)).toEqual(['B', 'A'])
   })
 
+  it('Send now while the stopped turn still ends lets the queue go on, and saves that for a restart in that window', async () => {
+    const w = setup(['first'], { slowStop: true })
+    const { first, b } = await queuedBehindTurn(w)
+    await w.d.orch.stopThread(w.thread.id, 'user')
+    // The provider has not let go: the stopped turn is still ending when the person sends B now.
+    expect(w.d.orch.isActiveTurnRunning(w.thread.id)).toBe(true)
+    expect(w.d.orch.promoteQueueItem(w.thread.id, b.id)).toEqual({ ok: true })
+    // The saved queue, which startup recovery reads, holds nothing for the person any more.
+    expect(w.d.store.loadMessageQueue(w.thread.id).map((item) => [item.content, item.heldAfterStop])).toEqual([['B', undefined], ['A', undefined]])
+
+    w.release('first')
+    await first.catch(() => undefined)
+    await idle(w.d, w.thread.id, 'the queue to drain')
+    expect(prompts(w.adapter)).toEqual(['first', 'B', 'A'])
+  })
+
   it('a new message after the Stop lets the queue go on, as in the running app, and a restart keeps that', async () => {
     const w = setup(['first', 'D'])
     const { first } = await queuedBehindTurn(w)
@@ -134,6 +154,31 @@ describe('a queue held after a Stop stays held across a restart (#917)', () => {
     const { d, adapter } = await restart(w.dir, w.d)
     await idle(d, w.thread.id, 'the queue to drain')
     expect(prompts(adapter)).toEqual(['A', 'B'])
+  })
+
+  it('a workflow command after the Stop lets the queue go on, as any turn does', async () => {
+    const w = setup()
+    const { first } = await queuedBehindTurn(w)
+    await stop(w, first)
+    const workflowRun = {
+      invocationId: 'invocation-1', profileId: 'profile', threadId: w.thread.id, definitionId: 'definition',
+      revisionId: 'revision', runId: 'workflow-run-1', title: 'Fixture', state: 'running' as const
+    }
+    // While the workflow's turn runs, the saved queue (what a restart in that window reads) holds nothing any more.
+    let heldDuringTurn: Array<true | undefined> | undefined
+    w.d.orch.setWorkflowChatExecutor({
+      prepare: async () => { throw new Error('not used') },
+      execute: async () => {
+        heldDuringTurn = w.d.store.loadMessageQueue(w.thread.id).map((item) => item.heldAfterStop)
+        return workflowRun
+      },
+      observe: async () => { throw new Error('not used') },
+      abandon: () => undefined
+    })
+    await w.d.orch.send({ content: '/fixture', workflowInvocationId: workflowRun.invocationId }, false, { threadId: w.thread.id, clientRequestId: 'workflow' })
+    expect(heldDuringTurn).toEqual([undefined, undefined])
+    await idle(w.d, w.thread.id, 'the queue to drain')
+    expect(prompts(w.adapter)).toEqual(['first', 'A', 'B'])
   })
 
   it('in the running app, a turn that ends on its own runs what was queued behind it', async () => {
