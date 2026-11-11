@@ -955,6 +955,21 @@ describe('provider events through the assembler into the cards', () => {
     const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as Array<{ output?: { numFiles?: number } }>
     expect(parts.map((part) => part.output?.numFiles)).toEqual([2, 240])
   })
+
+  it('counts a Claude Grep cut by its limit by the real total', () => {
+    const counted = (result: Record<string, unknown>) => {
+      const input = { pattern: 'x' }
+      const done = claudeActivityComplete(claudeCallContext('Grep', input, true), result, undefined, false)
+      const messages = replay([
+        event('start', 'toolu_h', 'Grep', { activity: claudeActivityStart('Grep', input, true) }),
+        event('complete', 'toolu_h', 'Grep', { ...(done.activity ? { activity: done.activity } : {}) }),
+      ])
+      return (partOf(mousseToUIMessages(messages)[0]!) as { output?: { numFiles?: number } }).output?.numFiles
+    }
+    expect(counted({ mode: 'content', numFiles: 0, filenames: [], content: 'a', numLines: 250, totalLines: 1200, appliedLimit: 250 })).toBe(1200)
+    expect(counted({ mode: 'files_with_matches', numFiles: 250, filenames: ['a'], totalFiles: 900, appliedLimit: 250 })).toBe(900)
+    expect(counted({ mode: 'content', numFiles: 0, filenames: [], content: 'a', numLines: 3, totalLines: 3 })).toBe(3)
+  })
 })
 
 describe('tool rows without a name of their own', () => {
