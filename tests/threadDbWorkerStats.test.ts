@@ -86,17 +86,47 @@ describe('thread database worker stats', () => {
       await client.callIndex('exists', dir)
       expect((await until(() => client.diagnostics(), (d) => d.workers === 3)).workers).toBe(3)
 
-      // The worker ends: its stats read 0 and it is not counted, and asking does not start a new one.
+      // The worker ends: its stats read 0 and it is not counted, and asking does not start a new one. The client
+      // forgets a worker that ended, so the next request (not a diagnostics read) starts a fresh one.
       const ended = internals.indexer!
       await ended.terminate()
       const after = await until(() => client.diagnostics(), (d) => d.workers === 2)
       expect(after.workers).toBe(2)
       expect(Atomics.load(ended.stats, WORKER_STAT_ALIVE)).toBe(0)
-      expect(internals.indexer).toBe(ended)
+      expect(internals.indexer).toBeUndefined()
+      await client.diagnostics()
+      expect(internals.indexer).toBeUndefined()
+    } finally {
+      await client.close()
+    }
+  }, 30_000)
 
-      // A worker the client forgot (as #884 does before retiring one) is absent from the count.
-      internals.indexer = undefined
-      expect((await client.diagnostics()).workers).toBe(2)
+  it('an index worker ended for being idle drops out of the count, and the next one starts from zero', async () => {
+    const client = new ThreadDbClient({ script, idleWorkerStopMs: 300 })
+    const internals = client as unknown as Internals
+    try {
+      await until(() => client.diagnostics(), (d) => d.workers === 2)
+      const dir = join(out, 'thread-d')
+      mkdirSync(dir)
+      client.callSync('create', dir)
+      await client.callIndex('exists', dir)
+      const first = internals.indexer!
+      expect((await until(() => client.diagnostics(), (d) => d.workers === 3)).workers).toBe(3)
+      // Sampling the stats is no request: it does not keep the worker past its idle time.
+      const idle = await until(() => client.diagnostics(), (d) => d.workers === 2, 5_000)
+      expect(idle.workers).toBe(2)
+      expect(internals.indexer).toBeUndefined()
+      expect(Atomics.load(first.stats, WORKER_STAT_ALIVE)).toBe(0)
+      expect(Atomics.load(first.stats, 0)).toBe(0)
+
+      // A request starts a new worker with stats of its own, which start at zero and then count it.
+      const next = client.callIndex('exists', dir)
+      const fresh = internals.indexer!
+      expect(fresh).not.toBe(first)
+      expect(fresh.stats).not.toBe(first.stats)
+      await next
+      expect((await until(() => client.diagnostics(), (d) => d.workers === 3)).workers).toBe(3)
+      expect(Atomics.load(fresh.stats, WORKER_STAT_ALIVE)).toBe(1)
     } finally {
       await client.close()
     }
