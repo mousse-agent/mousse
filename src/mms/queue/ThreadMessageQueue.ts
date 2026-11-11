@@ -30,6 +30,8 @@ export interface EnqueueMessageInput {
   images?: ChatImageAttachment[]
   intent?: QueuedMessageIntent
   source?: string
+  /** The sender's id for the send that queued it (`QueuedMessage.clientRequestId`). */
+  clientRequestId?: string
   internal?: boolean
   runId?: string
   inboxIds?: string[]
@@ -222,6 +224,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       state,
       claim,
       source: typeof item.source === 'string' ? item.source : undefined,
+      ...(typeof item.clientRequestId === 'string' && item.clientRequestId ? { clientRequestId: item.clientRequestId } : {}),
       internal: item.internal === true ? true : undefined,
       ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {}),
       ...(typeof item.continuationOfRunId === 'string' && item.continuationOfRunId ? { continuationOfRunId: item.continuationOfRunId } : {}),
@@ -296,6 +299,7 @@ export function enqueueMessage(
     intent: input.intent ?? 'normal',
     state: 'pending',
     source: input.source,
+    ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
     internal: input.internal === true ? true : undefined,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.continuationOfRunId ? { continuationOfRunId: input.continuationOfRunId } : {}),

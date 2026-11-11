@@ -48,6 +48,8 @@ export interface UseThreadQueueOptions {
    */
   lastPromptId?: string | null
   lastPromptQueueItemId?: string | null
+  /** Sends whose queued message is not shown (`QueuedMessage.clientRequestId`): steers on their way into the reply. */
+  hiddenRequestIds?: ReadonlySet<string>
 }
 
 /** An unsaved edit whose message left the queue, as the composer takes it. */
@@ -129,10 +131,18 @@ export function startingItem(previous: QueuedMessage[], next: QueuedMessage[], s
 }
 
 /**
+ * Whether a listed item is the message a copy shown while its send is on its way stands for: the same item, or the
+ * item that send queued (the same `clientRequestId`), whichever of the list and the send's answer arrives first.
+ */
+export function sameQueuedSend(item: QueuedMessage, optimistic: QueuedMessage): boolean {
+  return item.id === optimistic.id || Boolean(optimistic.clientRequestId && item.clientRequestId === optimistic.clientRequestId)
+}
+
+/**
  * Loads the thread's queue, keeps it in step with `queue:updated`, and wraps the queue's changes
  * (send now, remove, reorder, edit) with busy marks and error text.
  */
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null }: UseThreadQueueOptions): ThreadQueue {
+export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds }: UseThreadQueueOptions): ThreadQueue {
   const [items, setItems] = useState<QueuedMessage[]>([])
   // The first queued message, just taken by the daemon for its turn, kept in the list until that turn's prompt shows
   // (the transcript's last prompt is no longer `promptId`, or is this message's).
@@ -302,7 +312,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   useEffect(() => {
     if (!onOptimisticItemReconciled) return
     for (const optimistic of optimisticItems) {
-      if (items.some((item) => item.id === optimistic.id)) onOptimisticItemReconciled(optimistic.id)
+      if (items.some((item) => sameQueuedSend(item, optimistic))) onOptimisticItemReconciled(optimistic.id)
     }
   }, [items, optimisticItems, onOptimisticItemReconciled])
 
@@ -502,8 +512,10 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   const shown = useMemo(() => [
     ...(startingShown ? [startingShown] : []),
     ...items,
-    ...optimisticItems.filter((optimistic) => optimistic.threadId === threadId && !items.some((item) => item.id === optimistic.id))
-  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id] && item.id !== lastPromptQueueItemId), [startingShown, items, optimisticItems, threadId, sentNow, lastPromptQueueItemId])
+    ...optimisticItems.filter((optimistic) => optimistic.threadId === threadId && !items.some((item) => sameQueuedSend(item, optimistic)))
+  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id] && item.id !== lastPromptQueueItemId &&
+    !(item.clientRequestId && hiddenRequestIds?.has(item.clientRequestId))),
+  [startingShown, items, optimisticItems, threadId, sentNow, lastPromptQueueItemId, hiddenRequestIds])
   // The message on its way into its turn takes no change.
   const busy = useMemo(() => (startingShown ? { ...busyIds, [startingShown.id]: true } : busyIds), [busyIds, startingShown])
 

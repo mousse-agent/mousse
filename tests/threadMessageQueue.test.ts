@@ -39,6 +39,13 @@ describe('ThreadMessageQueue domain', () => {
     expect(a.item.order).toBeLessThan(b.item.order)
   })
 
+  it("keeps the sender's id for the send that queued a message, through a save", () => {
+    const { item, items } = enqueueMessage([], { threadId: 't1', content: 'sent while busy', clientRequestId: 'req-1' })
+    expect(item.clientRequestId).toBe('req-1')
+    expect(normalizeQueuedMessages(JSON.parse(JSON.stringify(items)), 't1')[0]?.clientRequestId).toBe('req-1')
+    expect(enqueueMessage([], { threadId: 't1', content: 'no id' }).item).not.toHaveProperty('clientRequestId')
+  })
+
   it('keeps internal work durable but outside user queue mutations', () => {
     let items = enqueueMessage([], {
       threadId: 't1',

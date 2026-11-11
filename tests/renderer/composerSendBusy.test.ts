@@ -121,6 +121,55 @@ describe('the composer follows what a send did', () => {
     expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(['m-1'])
   })
 
+  it('queues a message sent while the earlier prompt is on its way, before the thread reports its turn', async () => {
+    const now = new Date().toISOString()
+    // The first prompt's send answers when its turn ends; the second is queued behind it.
+    orchestrator.sendToThread = vi.fn()
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockImplementationOnce(async (_thread: string, request: { requestId: string }) => ({
+        message: '', actions: [], queued: true,
+        queueItem: { id: 'queue-1', threadId: 'thread-a', content: 'Second message', mode: 'build', enqueuedAt: now, order: 1, intent: 'normal', state: 'pending', source: 'gui', clientRequestId: request.requestId }
+      }))
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    await mount()
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    await send('First prompt')
+    // The thread does not report the turn yet: nothing marks it busy.
+    await act(async () => { useAppStore.setState({ loading: false }) })
+    const shown: string[][] = []
+    const off = useAppStore.subscribe((state) => { shown.push(state.messages.map((message) => message.content)) })
+    await send('Second message')
+    off()
+
+    expect(orchestrator.sendToThread).toHaveBeenCalledTimes(2)
+    // Never painted as a prompt of its own in the transcript: it went to the queue.
+    expect(shown.some((contents) => contents.includes('Second message'))).toBe(false)
+  })
+
+  it('queues a message sent between two queued turns, while messages still wait in the queue', async () => {
+    const now = new Date().toISOString()
+    orchestrator.sendToThread = vi.fn(async () => ({
+      message: '', actions: [], queued: true,
+      queueItem: { id: 'queue-2', threadId: 'thread-a', content: 'Third message', mode: 'build', enqueuedAt: now, order: 2, intent: 'normal', state: 'pending', source: 'gui' }
+    }))
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    await mount()
+    // The last turn ended and the next queued one has not started: nothing reports a turn, one message waits.
+    await act(async () => {
+      for (const listener of listeners['queue.onUpdated'] ?? []) {
+        listener({ threadId: 'thread-a', items: [{ id: 'queue-1', threadId: 'thread-a', content: 'Second message', enqueuedAt: now, order: 1, intent: 'normal', state: 'pending', source: 'gui' }] })
+      }
+    })
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const shown: string[][] = []
+    const off = useAppStore.subscribe((state) => { shown.push(state.messages.map((message) => message.content)) })
+    await send('Third message')
+    off()
+
+    expect(orchestrator.sendToThread).toHaveBeenCalledTimes(1)
+    expect(shown.some((contents) => contents.includes('Third message'))).toBe(false)
+  })
+
   it('stops showing busy and shows the service notice again when reconnecting fails', async () => {
     orchestrator.retryConnection = vi.fn(async () => { throw new Error('ipc closed') })
     orchestrator.isTurnActive = vi.fn(async () => false)

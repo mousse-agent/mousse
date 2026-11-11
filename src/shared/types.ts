@@ -1141,6 +1141,11 @@ export interface QueuedMessage {
   claim?: QueuedMessageClaim
   /** Optional caller tag (gui | cli | remote | …). */
   source?: string
+  /**
+   * The id the sender gave the send that queued this message (`OrchestratorSendRequest.requestId`), so the window
+   * that sent it can tell it from the copy it shows while the send is on its way.
+   */
+  clientRequestId?: string
   /** Internal orchestration input: durable and executable, but hidden from queue/transcript UI. */
   internal?: boolean
   /** Run Engine run this item executes when drained. */
