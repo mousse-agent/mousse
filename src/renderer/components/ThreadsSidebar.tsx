@@ -1,10 +1,10 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 
-import { expiresAtAfter, expiresInLabel } from '../../shared/threadExpiry'
+import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Clock, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pin, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
@@ -56,7 +56,7 @@ import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadS
 
 import { ProjectRunsDot } from './automations/inbox/ProjectRunsDot'
 import { countRender } from '../chat/components/agent-elements/render-counts'
-import { plainThreads, sameListedActivity, ThreadCardStatus, ThreadRowStatusIcon } from './ThreadRowStatus'
+import { plainThreads, sameListedActivity, ThreadCardStatus, ThreadExpiryIcon, ThreadRowStatusIcon } from './ThreadRowStatus'
 import '../styles/threads-sidebar.css'
 import '../styles/sidebar-view-motion.css'
 
@@ -315,7 +315,7 @@ function ThreadCardBody({
         ) : (
           <span className="threads-sidebar-card-title" onDoubleClick={onStartRename} onMouseEnter={tooltipIfTruncated(fullTitle)}>
             {thread.localOnly && <Lock size={11} strokeWidth={2} className="thread-private-icon" aria-label="Private" />}
-            {thread.expiresAt && <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(thread.expiresAt)}`}><Clock size={11} strokeWidth={2} aria-label="Deletes itself" /></span>}
+            {thread.expiresAt && <ThreadExpiryIcon expiresAt={thread.expiresAt} size={11} />}
             {thread.name}
           </span>
         )}
@@ -1299,11 +1299,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           </span>
         )}
 
-        {thread.expiresAt && (
-          <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(thread.expiresAt)}`}>
-            <Clock size={12} strokeWidth={2} aria-label="Deletes itself" />
-          </span>
-        )}
+        {thread.expiresAt && <ThreadExpiryIcon expiresAt={thread.expiresAt} size={12} />}
 
         {isRenaming ? (
 

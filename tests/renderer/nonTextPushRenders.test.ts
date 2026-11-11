@@ -110,23 +110,25 @@ async function store() {
   return (await import('../../src/renderer/stores/appStore')).useAppStore
 }
 
-/** The sidebar's Threads tab with three threads beside the chat of the one whose reply streams. */
-async function mount(): Promise<void> {
+const listed = (): Thread[] => [thread('live-thread', 'Streaming now'), thread('other-a', 'Finished one'), thread('other-b', 'Quiet one')]
+
+/** The sidebar's Threads tab (or `view`) with three threads (or `threads`) beside the chat of the one whose reply streams. */
+async function mount(options: { view?: 'threads' | 'projects'; threads?: Thread[]; activity?: ThreadActivitySnapshot } = {}): Promise<void> {
   stubBridge()
   const useAppStore = await store()
   useAppStore.setState({
     profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false,
     activeThreadId: 'live-thread',
-    threadsSidebarView: 'threads',
+    threadsSidebarView: options.view ?? 'threads',
     newThreadWorktree: false,
     projects: [project],
-    threads: [thread('live-thread', 'Streaming now'), thread('other-a', 'Finished one'), thread('other-b', 'Quiet one')],
+    threads: options.threads ?? listed(),
     messages: transcript(),
     threadActivity: {},
     turnStates: turns(turn()),
     stopRequests: {}
   })
-  useAppStore.getState().setThreadActivity(activity())
+  useAppStore.getState().setThreadActivity(options.activity ?? activity())
   const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
   const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
   await act(async () => root.render(createElement('div', null, createElement(ThreadsSidebar), createElement(OrchestratorChat))))
@@ -244,6 +246,66 @@ describe('pushes other than text while a reply streams', () => {
       useAppStore.getState().setTurnState(turn({ phase: 'completed', updatedAt: at(30) }))
     })
     expect(progressLine()).toBeNull()
+  })
+
+  it('in the Projects tree, a parent row shows its subagent swapping Working and Waiting, and only its status renders for it', async () => {
+    const subagent = { ...thread('sub', 'Subagent'), lineage: { parentThreadId: 'live-thread', rootThreadId: 'live-thread', relationship: 'subagent' } } as Thread
+    // The parent waits on its subagent, which works: the parent's row rolls that up as Working.
+    const tree = (sub: ThreadActivitySnapshot[string], parent: ThreadActivitySnapshot[string] = 'waiting'): ThreadActivitySnapshot =>
+      ({ ...activity(parent), sub })
+    await mount({ view: 'projects', threads: [...listed(), subagent], activity: tree('processing') })
+    const useAppStore = await store()
+    const status = (threadId: string) => host.querySelector(`.threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-status-spinner, .threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-status-icon`)
+    const working = (threadId: string) => status(threadId)?.classList.contains('threads-sidebar-status-spinner')
+    const waiting = (threadId: string) => status(threadId)?.getAttribute('aria-label') === 'Agent is waiting'
+    // Subagents sit under their parent, not beside it.
+    expect(host.querySelector('.threads-sidebar-thread[data-thread-id="sub"]')).toBeNull()
+    expect(working('live-thread')).toBe(true)
+
+    // The subagent waits on a tool: the parent's rolled-up activity is Waiting.
+    const toWaiting = await counted(() => useAppStore.getState().setThreadActivity(tree('waiting')))
+    expect(toWaiting.chat).toBe(0)
+    expect(toWaiting.counts.MessageList ?? 0).toBe(0)
+    expect(toWaiting.counts['SidebarStatus:live-thread']).toBeGreaterThan(0)
+    expect(toWaiting.counts['SidebarStatus:other-a'] ?? 0).toBe(0)
+    expect(waiting('live-thread')).toBe(true)
+
+    // It works again: the parent reads Working.
+    const toWorking = await counted(() => useAppStore.getState().setThreadActivity(tree('processing')))
+    expect(toWorking.counts['SidebarStatus:live-thread']).toBeGreaterThan(0)
+    expect(toWorking.counts['SidebarStatus:other-a'] ?? 0).toBe(0)
+    expect(working('live-thread')).toBe(true)
+
+    // The subagent finishes and the parent works on its own, then waits: its row follows its own activity.
+    await counted(() => useAppStore.getState().setThreadActivity(tree('completed', 'processing')))
+    expect(working('live-thread')).toBe(true)
+    await counted(() => useAppStore.getState().setThreadActivity(tree('completed', 'waiting')))
+    expect(waiting('live-thread')).toBe(true)
+  })
+})
+
+describe('the shared clock', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('turns 5m into 6m a minute later, and renders only what shows a time', async () => {
+    // Only the interval and the date are fake: React and `settle` keep their real timeouts.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+    // Five minutes after the threads' last update; one thread deletes itself in 30 minutes.
+    vi.setSystemTime(Date.parse(at(1)) + 5 * 60_000)
+    const expiring = { ...thread('other-a', 'Finished one'), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() } as Thread
+    await mount({ threads: [thread('live-thread', 'Streaming now'), expiring, thread('other-b', 'Quiet one')] })
+    const expiry = () => card('other-a')?.querySelector('.thread-expiry-icon')?.getAttribute('title')
+    expect(card('other-b')?.querySelector('.threads-sidebar-card-age')?.textContent).toBe('5m')
+    expect(expiry()).toBe('Deletes in 30 minutes')
+
+    const tick = await counted(() => { vi.advanceTimersByTime(60_000) })
+    expect(card('other-b')?.querySelector('.threads-sidebar-card-age')?.textContent).toBe('6m')
+    expect(expiry()).toBe('Deletes in 29 minutes')
+    // The clock renders the statuses and the expiry mark, not the rows, the list or the chat.
+    expect(tick.counts['SidebarStatus:other-b']).toBeGreaterThan(0)
+    expect(tick.rows).toEqual({})
+    expect(tick.counts.ThreadsSidebar ?? 0).toBe(0)
+    expect(tick.chat).toBe(0)
   })
 })
 

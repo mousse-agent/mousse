@@ -1,5 +1,6 @@
 import { memo, useSyncExternalStore } from 'react'
-import { CircleCheck, CircleDotDashed, Loader2, MessageQuestion, Pause, Shield } from '../lib/icons'
+import { CircleCheck, CircleDotDashed, Clock, Loader2, MessageQuestion, Pause, Shield } from '../lib/icons'
+import { expiresInLabel } from '../../shared/threadExpiry'
 import { isThreadActivityActive, type Thread, type ThreadActivitySnapshot, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { threadStatus } from '../../shared/threadAttention'
 import { isSubagentThread } from '../../shared/threadLineage'
@@ -41,6 +42,8 @@ export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId,
   countRender(`SidebarStatus:${threadId}`)
   const status = threadStatus(useRowActivity(threadId, activity, live), awaitsApproval)
   const pause = useOwnPause(threadId)
+  // When the limit resets moves with the clock; the other icons show no time.
+  useAgeClock(status === 'paused')
   switch (status) {
     case 'working':
       return <Loader2 size={14} strokeWidth={2} className="threads-sidebar-status-spinner icon-spin" aria-hidden="true" />
@@ -96,11 +99,30 @@ function subscribeClock(listener: () => void): () => void {
 }
 
 const readClock = (): number => clockMinute
+const noClock = (): (() => void) => () => {}
+
+/**
+ * Renders again each minute of the shared clock while `enabled`: for what shows a time (an age, when a limit resets,
+ * when a thread deletes itself). Rows that show none do not subscribe, so the clock renders nothing for them.
+ */
+export function useAgeClock(enabled: boolean): void {
+  useSyncExternalStore(enabled ? subscribeClock : noClock, readClock, readClock)
+}
+
+/** A row's "Deletes itself" mark; its tooltip says how long until then, kept current by the shared clock. */
+export const ThreadExpiryIcon = memo(function ThreadExpiryIcon({ expiresAt, size }: { expiresAt: string; size: number }) {
+  useAgeClock(true)
+  return (
+    <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(expiresAt)}`}>
+      <Clock size={size} strokeWidth={2} aria-label="Deletes itself" />
+    </span>
+  )
+})
 
 /** The status and age in a Threads tab card's top line: Working 5m, Waiting, Approval, Input, Paused, Done, or its age. */
 export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activity, live, awaitsApproval, updatedAt }: RowStatusProps & { updatedAt?: string }) {
   countRender(`SidebarStatus:${threadId}`)
-  useSyncExternalStore(subscribeClock, readClock, readClock)
+  useAgeClock(true)
   const shown = useRowActivity(threadId, activity, live)
   const startedAt = useAppStore((s) => s.turnStates[threadId]?.startedAt)
   const pause = useOwnPause(threadId)
