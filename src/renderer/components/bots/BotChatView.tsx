@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { CircleAlert, Loader2, Paperclip, Reply, X } from '../../lib/icons'
 import type { BotChatMessage, BotChatQuote, BotChip, BotError, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -14,6 +14,7 @@ import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
+import { botFullTime, botGroupTime, placeMessages } from './messageGroups'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
@@ -23,17 +24,6 @@ const NO_WORK: BotWorkItem[] = []
 /** The chat's turn waits for the internet (its work, if any, says so on its own line). */
 const OFFLINE_TEXT = 'Waiting for internet'
 const ignore = () => {}
-
-/** A message's time: the time today, "Yesterday", or the date. */
-export function botMessageTime(at: string, now = new Date()): string {
-  const date = new Date(at)
-  if (Number.isNaN(date.getTime())) return ''
-  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  const yesterday = new Date(now)
-  yesterday.setDate(now.getDate() - 1)
-  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday'
-  return date.toLocaleDateString([], { day: 'numeric', month: 'short' })
-}
 
 /** The one red line of a bot's error, with its one way out (bot-ui §4.9). */
 export function BotErrorLine({ error, onAction }: { error: BotError; onAction(action: NonNullable<BotError['action']>): void }) {
@@ -121,40 +111,55 @@ function ReplyButton({ onReply }: { onReply(): void }) {
   return <button type="button" className="bot-reply-button" aria-label="Reply" title="Reply" onClick={onReply}><Reply size={14} aria-hidden /></button>
 }
 
-interface OwnerMessageProps { message: BotChatMessage; pending: boolean; botName: string; quote: boolean; onReply?(message: BotChatMessage): void }
+/** `starts`: the first message of its group, with the group's space above it (messageGroups.ts). */
+interface OwnerMessageProps { message: BotChatMessage; pending: boolean; botName: string; quote: boolean; starts: boolean; onReply?(message: BotChatMessage): void }
 
 // Messages render again only when they change: a poll, a live chip or the bot starting work leaves them alone.
-const OwnerMessage = memo(function OwnerMessage({ message, pending, botName, quote, onReply }: OwnerMessageProps) {
-  return <article className={`chat-participant-message from-person bot-you${pending ? ' is-pending' : ''}`} data-message-id={message.id}>
-    {quote && message.replyTo && <BotReplyQuote quote={message.replyTo} botName={botName} />}
-    {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" />}
-    {!!message.attachments?.length && <div className="bot-you-files">{message.attachments.map((file, index) => <span key={`${index}:${file.name}`} className="bot-file-pill" title={file.path || undefined}><Paperclip size={12} aria-hidden />{file.name}</span>)}</div>}
-    <div className="bot-you-meta">
+// The group's time is drawn beside them (GroupTime), so a message that stops being a group's last does not render again.
+const OwnerMessage = memo(function OwnerMessage({ message, pending, botName, quote, starts, onReply }: OwnerMessageProps) {
+  const quoted = quote && message.replyTo
+  return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id} title={pending ? undefined : botFullTime(message.at)}>
+    {quoted && <BotReplyQuote quote={message.replyTo!} botName={botName} />}
+    <div className="bot-you-line">
       {!pending && onReply && <ReplyButton onReply={() => onReply(message)} />}
-      <time dateTime={message.at}>{pending ? 'Sending…' : botMessageTime(message.at)}</time>
+      <div className="bot-you-content">
+        {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" />}
+        {!!message.attachments?.length && <div className="bot-you-files">{message.attachments.map((file, index) => <span key={`${index}:${file.name}`} className="bot-file-pill" title={file.path || undefined}><Paperclip size={12} aria-hidden />{file.name}</span>)}</div>}
+      </div>
     </div>
   </article>
 })
 
+/** One small time under a group's last message, on its sender's side; "Sending…" while that message is on its way. */
+function GroupTime({ message, pending }: { message: BotChatMessage; pending: boolean }) {
+  return <div className="bot-group-time" data-author={message.author}>
+    {pending ? <span>Sending…</span> : <time dateTime={message.at} title={botFullTime(message.at)}>{botGroupTime(message.at)}</time>}
+  </div>
+}
+
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
 const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.onAction === b.onAction && a.browser === b.browser &&
-  a.quote === b.quote && a.onReply === b.onReply &&
+  a.quote === b.quote && a.starts === b.starts && a.onReply === b.onReply &&
   a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.bot.look.colour === b.bot.look.colour && a.bot.look.accessory === b.bot.look.accessory
 
 /**
  * `browser`: the live preview of the bot's browser, on the reply of the last run that used it. `quote`: show the
- * message this one answers (it is not the one right above).
+ * message this one answers (it is not the one right above). `starts`: the first of its group, with the face and name;
+ * the rest of the group leave the face's place empty, with Reply in it on hover.
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; onReply(message: BotChatMessage): void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void }
 
-const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, onReply }: BotMessageProps) {
+const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, starts, onReply }: BotMessageProps) {
   const store = useBotsStore.getState
-  return <article className="chat-participant-message from-agent" data-message-id={message.id}>
+  const quoted = quote && message.replyTo
+  return <article className={`chat-participant-message from-agent${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}`} data-message-id={message.id} title={botFullTime(message.at)}>
     {/* Transcript faces are still: one baked pose per look, shared by every message. */}
-    <BotFace look={bot.look} state="idle" size={40} view="head" className="bot-message-face" still />
+    {starts
+      ? <BotFace look={bot.look} state="idle" size={40} view="head" className="bot-message-face" still />
+      : <div className="bot-message-gutter"><ReplyButton onReply={() => onReply(message)} /></div>}
     <div className="chat-participant-message-body">
-      <div className="chat-message-meta"><strong>{bot.name}</strong><time dateTime={message.at}>{botMessageTime(message.at)}</time><ReplyButton onReply={() => onReply(message)} /></div>
-      {quote && message.replyTo && <BotReplyQuote quote={message.replyTo} botName={bot.name} />}
+      {starts && <div className="chat-message-meta"><strong>{bot.name}</strong><ReplyButton onReply={() => onReply(message)} /></div>}
+      {quoted && <BotReplyQuote quote={message.replyTo!} botName={bot.name} />}
       {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" />}
       <BotChips chips={message.chips} />
       {browser}
@@ -197,6 +202,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
+  // The sent messages and those on their way, in one run of groups: who starts and ends each, and the day lines.
+  const shown = useMemo(() => (pending.length ? [...messages, ...pending] : messages), [messages, pending])
+  const places = useMemo(() => placeMessages(shown), [shown])
   // The bot's own browser: its last run's reply shows a live preview, and Expand opens the split view.
   const browser = useBotBrowser(bot.id, true)
   const paneOpen = useBotBrowserStore((s) => s.paneBotId === bot.id)
@@ -254,14 +262,19 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         if (element.scrollTop < 60 && chat?.hasMore) void store().loadOlder(bot.id)
       }}>
         {chat?.loadingOlder && <p className="chat-empty-hint bot-loading-older">Loading earlier messages…</p>}
-        {messages.map((message, index) => {
+        {shown.map((message, index) => {
+          const place = places[index]!
+          const sending = index >= messages.length
           // A reply shows what it answers unless that is the message right above it.
-          const quote = Boolean(message.replyTo) && messages[index - 1]?.id !== message.replyTo!.id
-          return message.author === 'owner'
-            ? <OwnerMessage key={message.id} message={message} pending={false} botName={bot.name} quote={quote} onReply={reply} />
-            : <BotMessage key={message.id} bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} onReply={reply} />
+          const quote = Boolean(message.replyTo) && (sending || messages[index - 1]?.id !== message.replyTo!.id)
+          return <Fragment key={message.id}>
+            {place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>}
+            {message.author === 'owner'
+              ? <OwnerMessage message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} onReply={sending ? undefined : reply} />
+              : <BotMessage bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} />}
+            {place.ends && <GroupTime message={message} pending={sending} />}
+          </Fragment>
         })}
-        {pending.map((message) => <OwnerMessage key={message.id} message={message} pending botName={bot.name} quote={Boolean(message.replyTo)} />)}
         {offline
           ? <div className="chat-run-status bot-offline-status" role="status">{OFFLINE_TEXT}</div>
           : working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{chatChip && <BotChipView chip={{ ...chatChip, live: true }} />}</div>}
