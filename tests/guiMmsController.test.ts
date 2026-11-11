@@ -238,6 +238,43 @@ describe('GuiMmsController lifecycle', () => {
     }
   })
 
+  it('a start made while a reconnect waits for the service joins that reconnect: one service, one connection', async () => {
+    const cold = mkdtempSync(join(tmpdir(), 'mousse-gui-cold-'))
+    const gui = new GuiMmsController({ homeDir: cold, reconnectBaseMs: 1, requestTimeoutMs: 5_000 })
+    const internals = gui as unknown as {
+      spawnDaemon(): Promise<unknown>
+      waitForSpawnedDaemon(child: unknown): Promise<unknown>
+      connectOnce(): Promise<unknown>
+      scheduleReconnect(reason: string): void
+      reconnecting: Promise<boolean> | null
+      client: unknown
+      lastHello: unknown
+      setState(state: string): void
+    }
+    let publish!: () => void
+    const published = new Promise<void>((done) => { publish = done })
+    const spawn = vi.spyOn(internals, 'spawnDaemon').mockImplementation(async () => ({}))
+    vi.spyOn(internals, 'waitForSpawnedDaemon').mockImplementation(async () => { await published; return { pid: process.pid } })
+    const connect = vi.spyOn(internals, 'connectOnce').mockImplementation(async () => {
+      internals.client = { connected: true, close: async () => undefined }
+      internals.lastHello = { instanceId: 'cold' }
+      internals.setState('ready')
+      return internals.lastHello
+    })
+    try {
+      internals.scheduleReconnect('request_while_disconnected')
+      await vi.waitFor(() => expect(internals.reconnecting).not.toBeNull())
+      const started = gui.start()
+      publish()
+      expect(await started).toEqual({ instanceId: 'cold' })
+      expect(spawn).toHaveBeenCalledTimes(1)
+      expect(connect).toHaveBeenCalledTimes(1)
+    } finally {
+      await gui.stop()
+      rmSync(cold, { recursive: true, force: true })
+    }
+  })
+
   it('shares a cold base handshake across concurrent startup and window bootstrap requests', async () => {
     const gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
     const connect = vi.spyOn(gui as unknown as { connectOnce: () => Promise<unknown> }, 'connectOnce')
