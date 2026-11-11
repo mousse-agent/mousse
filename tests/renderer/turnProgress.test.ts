@@ -8,17 +8,13 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import * as messageListModule from '../../src/renderer/chat/components/agent-elements/message-list'
+import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import {
   TurnProgressContext,
   describeTurnProgress,
   stepSeenAt,
   type TurnProgressState
 } from '../../src/renderer/chat/components/agent-elements/turn-progress'
-
-const { MessageList } = messageListModule
-/** Steered messages show as a Steer block inside the running reply (#873); before it, as a turn of their own. */
-const steerBlocks = 'readSteerGroup' in messageListModule
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -466,13 +462,13 @@ describe('the line under Working', () => {
     expect(label([writing, block], { phase: 'streaming', step: { kind: 'waiting' } })).toBe('Thinking…')
   })
 
-  it.skipIf(!steerBlocks)('12. a steer during a running tool keeps Running <tool>… in the transcript (#873)', () => {
+  it('12. a steer during a running tool keeps Running <tool>… in the transcript (#873)', () => {
     const steered = ask('u2', 'Also check the lint', { steered: true })
     render([ask('u1'), reply('c1', tool('Bash', 'input-available', { command: 'npm test' })), steered], 'streaming', { phase: 'tool_running' })
     expectLive('Running Bash…')
   })
 
-  it.skipIf(!steerBlocks)('12. a steer while the reply is written keeps Writing… until the service says the model waits (#873)', () => {
+  it('12. a steer while the reply is written keeps Writing… until the service says the model waits (#873)', () => {
     const steered = ask('u2', 'Also check the lint', { steered: true })
     const messages = [ask('u1'), reply('a1', text('Looking at the')), steered]
     render(messages, 'streaming', { phase: 'streaming' })
