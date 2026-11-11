@@ -1,53 +1,21 @@
-/* The live line at the end of a running turn (turn-progress.tsx): what the turn does now. Laid out like a
-   tool row (18px icon box, 15/22 label), so the row that comes next takes its place.
-   The three dots pulse one after another by opacity and scale only, in steps of about 10 a second: the
-   compositor draws them, with no layout or paint per frame. Animation speed scales them; Off and reduced
-   motion leave them still (global.css). */
+/* The live line at the end of a running turn (turn-progress.tsx): what the turn does now. Laid out like the
+   reasoning row (18px icon box, 15/22 label), so the row that comes next takes its place. Its only motion is the
+   thinking icon's turn (thinking-icon.css), a transform the compositor draws. */
 
 .turn-progress {
   color: color-mix(in srgb, var(--text-secondary) 85%, transparent);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 450;
   line-height: 22px;
-  letter-spacing: -0.006em;
 }
 
-.turn-progress-dots {
+.turn-progress-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
   width: 18px;
   height: 18px;
   flex-shrink: 0;
-}
-
-.turn-progress-dots > span {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.5;
-  animation: turn-progress-dot calc(1.2s * var(--ui-motion-scale, 1)) steps(12, jump-none) infinite both;
-}
-
-.turn-progress-dots > span:nth-child(2) {
-  animation-delay: calc(0.2s * var(--ui-motion-scale, 1));
-}
-
-.turn-progress-dots > span:nth-child(3) {
-  animation-delay: calc(0.4s * var(--ui-motion-scale, 1));
-}
-
-@keyframes turn-progress-dot {
-  0%, 60%, 100% {
-    opacity: 0.3;
-    transform: scale(0.8);
-  }
-  30% {
-    opacity: 1;
-    transform: scale(1);
-  }
 }
 
 .turn-progress-label {

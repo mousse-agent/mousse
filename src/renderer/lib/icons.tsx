@@ -355,7 +355,7 @@ export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)
 export const PinOff = /* @__PURE__ */ createIcon('PinOff', PinOffIcon)
 
 export interface ThinkingIconProps extends IconProps {
-  /** While the model thinks: the orbits turn around the still centre (thinking-icon.css). */
+  /** While the model thinks: the icon turns around its centre (thinking-icon.css). */
   active?: boolean
 }
 

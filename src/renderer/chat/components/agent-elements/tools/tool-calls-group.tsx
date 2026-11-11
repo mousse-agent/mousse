@@ -12,6 +12,8 @@ export type ToolCallsGroupProps = {
    * Other tool calls do not change this title.
    */
   label?: string;
+  /** What follows the title: the thought being written, while the group's newest item is one. */
+  detail?: string;
   /**
    * True while any tool inside the group is still running. Drives the group
    * header shimmer only — completed groups stay static even if the turn is
@@ -38,6 +40,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,
   icon,
   label,
+  detail,
   autoOpen = false,
   failed = 0,
   live = false,
@@ -61,7 +64,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       icon={icon}
       completeLabel={title}
       shimmerLabel={title}
-      detail={title === "Tool calls" ? `${count}` : undefined}
+      detail={detail ?? (title === "Tool calls" ? `${count}` : undefined)}
       badge={
         failed > 0 ? (
           <span className="text-[var(--danger)]">· {failed} failed</span>
@@ -75,7 +78,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       }}
       itemCount={count}
     >
-      <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 border-l border-an-border-color pl-3">
+      <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
         {children}
       </div>
     </ToolRowBase>
