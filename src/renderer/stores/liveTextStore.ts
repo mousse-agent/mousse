@@ -27,9 +27,42 @@ const entries = new Map<string, LiveText>()
 const listeners = new Map<string, Set<() => void>>()
 /** Replies whose end never came here (their thread was left, a snapshot replaced them): the oldest go. */
 const MAX_ENTRIES = 16
+/** Changes whenever any live text does: what a reader of every reply (Find) follows. */
+let version = 0
+const versionListeners = new Set<() => void>()
 
 function notify(id: string): void {
+  version += 1
   for (const listener of listeners.get(id) ?? []) listener()
+  for (const listener of versionListeners) listener()
+}
+
+/** Whether the reply `id` has a live text: its transcript text may not be what is shown. */
+export function hasLiveText(id: string): boolean {
+  return entries.has(id)
+}
+
+function subscribeVersion(listener: () => void): () => void {
+  versionListeners.add(listener)
+  return () => {
+    versionListeners.delete(listener)
+  }
+}
+
+const noSubscription = (): (() => void) => () => {}
+const readVersion = (): number => version
+const readNoVersion = (): number => 0
+
+/**
+ * A number that changes whenever any reply's live text does, while `active`; 0 otherwise. Only an
+ * active reader subscribes, so a streamed delta renders nothing that does not ask for it.
+ */
+export function useLiveTextVersion(active: boolean): number {
+  return useSyncExternalStore(
+    active ? subscribeVersion : noSubscription,
+    active ? readVersion : readNoVersion,
+    active ? readVersion : readNoVersion
+  )
 }
 
 function setLiveText(id: string, entry: LiveText): void {

@@ -2,7 +2,7 @@ import type { UIMessage } from "ai";
 import { readSubagentNotice } from "../../../adapters/subagentNotice";
 import { isTextPart } from "../utils/assistant-blocks";
 import { markdownToSearchBlocks, plainTextToSearchBlocks } from "./search-text";
-import { liveTextOver } from "../../../../stores/liveTextStore";
+import { hasLiveText, liveTextOver } from "../../../../stores/liveTextStore";
 
 /** A turn as the list groups it, with the key its row is mounted under. */
 export type FindTurn = {
@@ -145,7 +145,8 @@ export class FindIndex {
   /** The message's entry when it is current, else null. */
   private current(message: UIMessage): Entry | null {
     const known = this.byMessage.get(message);
-    if (known) return known;
+    // A reply streaming into its live text keeps its message object while its text changes.
+    if (known && !(message.role === "assistant" && hasLiveText(message.id))) return known;
     const entry = this.byId.get(message.id);
     if (!entry || !sameSource(entry.source, sourceOf(message))) return null;
     this.byMessage.set(message, entry);

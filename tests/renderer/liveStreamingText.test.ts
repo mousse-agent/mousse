@@ -14,7 +14,8 @@ import { countRender, startRenderCounts, stopRenderCounts } from '../../src/rend
 import { mousseToUIMessages, reuseUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { applyStreamedUpdates, clearAllLiveText, isLiveTextUpdate, liveTextOver } from '../../src/renderer/stores/liveTextStore'
-import { searchableParts } from '../../src/renderer/chat/components/agent-elements/find/find-index'
+import { searchableParts, type FindTurn } from '../../src/renderer/chat/components/agent-elements/find/find-index'
+import { STREAMING_REINDEX_MS, useThreadFind, type ThreadFind } from '../../src/renderer/chat/components/agent-elements/find/use-thread-find'
 import { PACE_MS } from '../../src/renderer/chat/components/agent-elements/reply-pacing'
 import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 import type { ChatMessage } from '../../src/shared/types'
@@ -291,5 +292,47 @@ describe('find while a reply streams', () => {
     const reply = { id: 'reply', role: 'assistant', parts: [{ type: 'text', text: 'Alpha' }] } as unknown as UIMessage
     const text = searchableParts(reply).flatMap((part) => part.blocks).join(' ')
     expect(text).toContain('charlie')
+  })
+
+  /** The find hook over a thread whose turns stay the same object while the reply streams into its live text. */
+  function FindHarness({ turns, out }: { turns: FindTurn[]; out: { find: ThreadFind | null } }) {
+    countRender('FindHarness')
+    const containerRef = useRef<HTMLDivElement>(null)
+    const rowsRef = useRef<HTMLDivElement>(null)
+    out.find = useThreadFind({
+      enabled: true,
+      turns,
+      isStreaming: true,
+      containerRef,
+      rowsRef,
+      virtualization: { beginNavigation: () => ({}) as never, cancelNavigation: () => {}, scrollToKey: async () => {} } as never,
+      onNavigate: () => {},
+      onProgrammaticScroll: () => {},
+    })
+    return createElement('div', { ref: containerRef }, createElement('div', { ref: rowsRef }))
+  }
+
+  it('finds text that streams in after the search, within the reindex interval, and renders nothing while closed', async () => {
+    const messages = thread(1, 'Alpha')
+    useAppStore.setState({ messages, activeThreadId: 'thread-1' })
+    const reply = { id: 'reply', role: 'assistant', parts: [{ type: 'text', text: 'Alpha' }] } as unknown as UIMessage
+    const prompt = { id: 'live', role: 'user', parts: [{ type: 'text', text: 'And now?' }] } as unknown as UIMessage
+    const turns: FindTurn[] = [{ key: 'live', userMsg: prompt, assistantMsgs: [reply] }]
+    const out: { find: ThreadFind | null } = { find: null }
+    act(() => root.render(createElement(FindHarness, { turns, out })))
+
+    // Closed: a streamed delta does not render the find hook's owner.
+    const counts = startRenderCounts()
+    stream(assistant('reply', 3, 'Alpha bravo', { streaming: true }))
+    expect(counts.FindHarness ?? 0).toBe(0)
+
+    act(() => out.find!.openFind!())
+    act(() => out.find!.barProps!.onQueryChange('charlie'))
+    expect(out.find!.barProps!.hasMatches).toBe(false)
+
+    stream(assistant('reply', 3, 'Alpha bravo charlie', { streaming: true }))
+    await act(async () => void (await new Promise((resolve) => setTimeout(resolve, STREAMING_REINDEX_MS + 50))))
+    expect(out.find!.barProps!.hasMatches).toBe(true)
+    expect(out.find!.barProps!.countLabel).toMatch(/1/)
   })
 })
