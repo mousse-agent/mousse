@@ -400,6 +400,11 @@ export class TitleTakenRejection extends CommandRejection {
 }
 
 /** The outcome of a run whose binding names the retired bare pi route (PR 4). */
+/** A run boot cut off; its thread's transcript still has to say so (`pendingRestartTranscripts`). */
+const RESTART_TRANSCRIPT_PENDING = 'restart.transcript_pending'
+/** The thread's transcript says the restart cut the run off. */
+const RESTART_TRANSCRIPT_WRITTEN = 'restart.transcript_written'
+
 const RETIRED_ROUTE_OUTCOME = Object.freeze({
   errorCode: 'binding_stale',
   error: 'This run started on a route Mousse no longer has, so it cannot continue. Send the message again.'
@@ -807,7 +812,10 @@ export class RunEngine extends EventEmitter {
    *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`. So does
    *    a send the previous daemon had begun: its `turn.start` was claimed (`running`), but the run
    *    was still `queued` (the turn was being set up and never reached its provider). It is not
-   *    started again (`cutOffStart`);
+   *    started again (`cutOffStart`), unless the message queue holds it (`options.queued`: a send that
+   *    could not start went back to the queue with its run, which runs it in its turn). Every run cut
+   *    off here gets a `restart.transcript_pending` event, kept until the orchestrator has written the
+   *    thread's transcript line (`pendingRestartTranscripts`), so a write that fails is tried again;
    * 5. one `restart.note` event per affected thread. Nothing auto-resumes. A note also covers runs
    *    the previous daemon's clean shutdown interrupted (`interruptedBy: 'daemon_restart'`, completed
    *    since that epoch started, not noted yet, no later run started on the thread) and lists
@@ -818,7 +826,7 @@ export class RunEngine extends EventEmitter {
    *    uncertain child runs publish through the terminal write's publication gate.
    * Step 6 (heartbeat and reconciler) belongs to the profile that owns the worker (Phase 2b).
    */
-  reconcileOnBoot(): BootReport {
+  reconcileOnBoot(options: { queued?: (run: RunRecord) => boolean } = {}): BootReport {
     this.epochs.clear()
     const report = this.store.db.transaction((): BootReport => {
       const now = this.now()
@@ -836,6 +844,8 @@ export class RunEngine extends EventEmitter {
       const uncertain: string[] = []
       /** The tools a crash may have cut off mid-call, per run: a saved approval request records them. */
       const uncertainTools = new Map<string, string[]>()
+      /** Runs this boot cut off: their threads' transcripts still have to say so. */
+      const cutOff: RunRecord[] = []
       const notes = new Map<string, Omit<RestartNote, 'epoch'>>()
       const noteFor = (threadId: string): Omit<RestartNote, 'epoch'> => {
         const note = notes.get(threadId) ?? { runIds: [], uncertainRunIds: [], cutOffTools: [] }
@@ -863,6 +873,7 @@ export class RunEngine extends EventEmitter {
           this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart', ...(retired ? RETIRED_ROUTE_OUTCOME : {}) })
           interrupted.push(run.runId)
         }
+        cutOff.push(run)
         const note = noteFor(run.threadId)
         note.runIds.push(run.runId)
         if (unsafe.length) note.uncertainRunIds.push(run.runId)
@@ -890,10 +901,15 @@ export class RunEngine extends EventEmitter {
       for (const effect of claimedStarts) {
         const run = effect.runId ? this.store.getRun(effect.runId) : null
         if (!run || !cutOffStart(run, effect.payload)) continue
+        // A queued message owns it: the queue runs it in its turn (an unreadable queue counts as owning it).
+        if (options.queued?.(run)) continue
         this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
         interrupted.push(run.runId)
+        cutOff.push(run)
         noteFor(run.threadId).runIds.push(run.runId)
       }
+      for (const run of cutOff)
+        this.store.appendEvent({ threadId: run.threadId, runId: run.runId, type: RESTART_TRANSCRIPT_PENDING, payload: { epoch } })
       const strandedQueued: string[] = []
       for (const { run } of strandedQueuedRuns(this.store, this.outbox)) {
         const note = noteFor(run.threadId)
@@ -917,6 +933,30 @@ export class RunEngine extends EventEmitter {
     })
     this.daemonEpoch = report.epoch
     return report
+  }
+
+  /**
+   * Runs a boot cut off whose thread's transcript does not say so yet: a `restart.transcript_pending`
+   * event with no `restart.transcript_written` after it, oldest first. Kept across boots, so a write that
+   * a peer's lease or a failure held up is tried again at the next one.
+   */
+  pendingRestartTranscripts(): RunRecord[] {
+    const rows = this.store.db
+      .statement(
+        `SELECT p.run_id FROM thread_events p WHERE p.type = ? AND p.run_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM thread_events w WHERE w.run_id = p.run_id AND w.type = ?)
+         ORDER BY p.seq`
+      )
+      .all(RESTART_TRANSCRIPT_PENDING, RESTART_TRANSCRIPT_WRITTEN)
+    return rows.flatMap((row) => {
+      const run = this.store.getRun(String(row.run_id))
+      return run ? [run] : []
+    })
+  }
+
+  /** The thread's transcript now says the restart cut `runId` off (or never will): `pendingRestartTranscripts` drops it. */
+  markRestartTranscriptWritten(run: RunRecord): void {
+    this.store.appendEvent({ threadId: run.threadId, runId: run.runId, type: RESTART_TRANSCRIPT_WRITTEN, payload: {} })
   }
 
   /**

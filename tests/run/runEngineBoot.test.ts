@@ -22,7 +22,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
   })
 
   /** A daemon: a fresh connection and engine that has booted. */
-  const daemon = (pid: number) => {
+  const daemon = (pid: number, options?: Parameters<RunEngine['reconcileOnBoot']>[0]) => {
     profileHome ??= mkdtempSync(join(tmpdir(), 'mousse-boot-'))
     let tick = Date.UTC(2026, 9, 12) + pid * 1_000_000
     const db = new ProfileDatabase({ profileHome, clock: () => (tick += 1000) })
@@ -32,7 +32,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     const engine = new RunEngine({ store, pid, outbox: new EffectOutbox(store, { allowReservedKinds: true }) })
     const events: ThreadEvent[] = []
     engine.on('event', (event: ThreadEvent) => events.push(event))
-    const boot = engine.reconcileOnBoot()
+    const boot = engine.reconcileOnBoot(options)
     return { store, engine, events, boot }
   }
 
@@ -94,6 +94,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(second.events.map((event) => event.type)).toEqual([
       'run.status',
       'attempt.status',
+      'restart.transcript_pending',
       'restart.note'
     ])
   })
@@ -210,6 +211,21 @@ describe('RunEngine boot (SPEC §12.5)', () => {
       expect(second.boot.strandedQueued).toEqual([pending.runId])
       expect(second.store.getRun(pending.runId)!.status).toBe('queued')
       expect(second.store.getRun(item)!.status).toBe('queued')
+      // The thread's transcript still has to say so, until the orchestrator has written it.
+      expect(second.engine.pendingRestartTranscripts().map((run) => run.runId)).toEqual([runId])
+      second.engine.markRestartTranscriptWritten(second.store.getRun(runId)!)
+      expect(second.engine.pendingRestartTranscripts()).toEqual([])
+    })
+
+    it('is left queued when the message queue holds its run (a send that went back to the queue)', async () => {
+      const first = daemon(10)
+      const runId = await claimed(first, 't', 'req-1')
+      // Crash.
+
+      const second = daemon(20, { queued: (run) => run.runId === runId })
+      expect(second.boot.interrupted).toEqual([])
+      expect(second.store.getRun(runId)!.status).toBe('queued')
+      expect(second.engine.pendingRestartTranscripts()).toEqual([])
     })
   })
 

@@ -5,9 +5,13 @@
  * `first <home> <scenario>`: thread T sends `cut` and, once the turn is at the scenario's point, a second message
  * `next` is queued behind it. Then the process kills itself. Scenarios:
  * - `starting`: right after the effect worker claims the turn's `turn.start`, before the turn reaches its provider;
+ * - `accepted`: the turn has saved `cut` to the transcript and is about to mark its run starting;
  * - `streaming`: the provider has the prompt and has streamed part of a reply;
  * - `tool`: the provider is running a tool (an activity row is open and the tool ledger has it started);
+ * - `uncertain`: as `tool`, with a tool that is not idempotent (`bash`), so the crash leaves its outcome unknown;
  * - `steer`: as `streaming`, and `next` was steered into the running turn (#873), which has not read it yet;
+ * - `steer-taken`: as `steer`, and the provider took `next`: its acceptance is saved, and the process dies before the
+ *   queue drops the item;
  * - `approval`: the provider waits for a saved approval;
  * - `question`: the provider waits for an answer to a question.
  *
@@ -18,7 +22,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AdapterHost, ProviderAdapter, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
+import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
@@ -27,7 +31,7 @@ import { isOpenActivityRow } from '../../src/mms/run/restartNote'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon } from '../run/phase6Fixture'
 
-type Scenario = 'starting' | 'streaming' | 'tool' | 'steer' | 'approval' | 'question'
+type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'approval' | 'question'
 const [mode, home, scenario] = process.argv.slice(2) as ['first' | 'restart', string, Scenario | undefined]
 process.env.MOUSSE_HOME = home
 process.env.MOUSSE_SQLITE_THREAD_STORE = '1'
@@ -52,15 +56,15 @@ class KillAdapter implements ProviderAdapter {
     return true
   }
 
-  async startTurn(input: TurnInput, sink: TurnSink, _ctl: unknown, host: AdapterHost): Promise<TurnResult> {
+  async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
     appendFileSync(marker('prompts.log'), `${mode}:${input.prompt}\n`)
     sink.providerRef({ provider: input.llmProvider, model: input.model })
     if (mode === 'first' && input.prompt.startsWith('cut')) {
       sink.text({ phase: 'start', content: '', contentIndex: 0 })
       sink.text({ phase: 'delta', content: 'partial reply', contentIndex: 0 })
       sink.progress()
-      if (scenario === 'tool') {
-        host.tools.toolLedger?.start({ id: 'call-read', name: 'read_file', arguments: { path: 'a.txt' } } as never)
+      if (scenario === 'tool' || scenario === 'uncertain') {
+        host.tools.toolLedger?.start({ id: 'call-read', name: scenario === 'tool' ? 'read_file' : 'bash', arguments: { path: 'a.txt' } } as never)
         sink.tool({
           kind: 'mcp_tool_call', phase: 'start', callId: 'call-read', title: 'Read', summary: 'Read a.txt', details: [],
           activity: { kind: 'tool', toolName: 'Read' }
@@ -68,6 +72,13 @@ class KillAdapter implements ProviderAdapter {
       }
       if (scenario === 'approval' || scenario === 'question') this.ask?.(input.threadId, scenario === 'approval')
       writeFileSync(marker('at-point'), '')
+      if (scenario === 'steer-taken') {
+        // The provider takes the steer once it is there; the acceptance saves, and the acknowledgement kills.
+        await waitFor(() => existsSync(marker('take')), 'the steer to take', 20_000)
+        let entry: ReturnType<NonNullable<TurnControl['drainSteerEntry']>>
+        await waitFor(() => Boolean((entry = ctl.drainSteerEntry?.())), 'the steer drained', 20_000)
+        sink.steerAccepted(entry!.text)
+      }
       return new Promise<TurnResult>(() => undefined)
     }
     const text = `reply to ${input.prompt}`
@@ -102,14 +113,14 @@ const die = (): never => {
 
 async function first(): Promise<void> {
   const adapter = new KillAdapter()
-  if (scenario === 'starting') {
+  if (scenario === 'starting' || scenario === 'accepted') {
     // Once armed, the turn's `turn.start` waits unclaimed until `go`; the process is killed the moment the worker's
     // claim of it has committed, so the turn never starts.
     const claim = EffectOutbox.prototype.claimNext
     EffectOutbox.prototype.claimNext = function (this: EffectOutbox, ...args: Parameters<EffectOutbox['claimNext']>) {
       if (existsSync(marker('armed')) && !existsSync(marker('go'))) return null
       const effect = claim.apply(this, args)
-      if (effect?.kind === 'turn.start' && existsSync(marker('armed'))) die()
+      if (effect?.kind === 'turn.start' && existsSync(marker('armed')) && scenario === 'starting') die()
       return effect
     }
   }
@@ -132,7 +143,15 @@ async function first(): Promise<void> {
   await d.orch.send('earlier', false, { threadId: thread.id, clientRequestId: 'c-0' })
   await waitFor(() => !d.orch.isActiveTurnRunning(thread.id) && d.engine.getActiveRun(thread.id) === null, 'first turn done')
 
-  if (scenario === 'starting') {
+  if (scenario === 'accepted') {
+    // Killed as the turn marks its run starting: its message is saved in the transcript, the run is still queued.
+    const orch = d.orch as unknown as { markRunStarting: (runId: string | undefined) => void }
+    orch.markRunStarting = () => {
+      d.save(thread.id)
+      die()
+    }
+  }
+  if (scenario === 'starting' || scenario === 'accepted') {
     writeFileSync(marker('armed'), '')
     void d.orch.send('cut', false, { threadId: thread.id, clientRequestId: 'c-1' })
     await waitFor(() => d.engine.listRuns(thread.id).length === 2, 'the run of cut')
@@ -151,6 +170,14 @@ async function first(): Promise<void> {
   if (scenario === 'steer') {
     if (!d.orch.promoteQueueItem(thread.id, queued.queueItem!.id).ok) throw new Error('the steer was refused')
   }
+  if (scenario === 'steer-taken') {
+    if (!d.orch.promoteQueueItem(thread.id, queued.queueItem!.id).ok) throw new Error('the steer was refused')
+    const orch = d.orch as unknown as { acknowledgeDrainedSteers: () => void }
+    orch.acknowledgeDrainedSteers = () => die()
+    writeFileSync(marker('take'), '')
+    await new Promise<void>((resolve) => setTimeout(resolve, 20_000))
+    throw new Error('the steer was not taken')
+  }
   // What the thread saved so far reaches disk before the kill, as it would during a long turn.
   d.save(thread.id)
   writeFileSync(marker('killed'), '')
@@ -161,10 +188,11 @@ async function restart(): Promise<void> {
   const adapter = new KillAdapter()
   const d = daemon(2, adapter)
   const { id } = JSON.parse(readFileSync(marker('thread.json'), 'utf-8')) as { id: string }
-  // As the profile does after boot: questions of the dead process are gone, then the reconciler and the queue drain run.
+  // As the profile does after boot: questions of the dead process are gone, then the reconciler and the startup queue
+  // recovery (`scheduleStartupQueueRecovery`, which reads each thread in the read worker) run.
   d.questions.markInterruptedByDaemonRestart()
   const repairs = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: d.engine.tools }).runOnce()
-  d.orch.recoverAndDrainPendingQueues()
+  d.orch.scheduleStartupQueueRecovery()
   const idle = (): boolean =>
     readDurableQueue(d.store, id).length === 0 && d.engine.getActiveRun(id) === null && !d.orch.isActiveTurnRunning(id) &&
     !d.engine.store.listQueuedRuns(id).some((run) => d.engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start' && (effect.status === 'pending' || effect.status === 'running')))

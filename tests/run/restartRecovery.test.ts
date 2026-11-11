@@ -53,17 +53,20 @@ describe('restart recovery of a turn cut off by a killed daemon', () => {
   }
 
   const INTERRUPTED = 'system:Turn interrupted by a Mousse restart.'
-  const SCENARIOS = ['starting', 'streaming', 'tool', 'steer', 'approval', 'question'] as const
+  const SCENARIOS = ['starting', 'accepted', 'streaming', 'tool', 'uncertain', 'steer', 'steer-taken', 'approval', 'question'] as const
+  /** What the provider was sent in the first process: `cut` reached it unless the turn died before its start. */
+  const sentFirst = (scenario: string): string[] => (scenario === 'starting' || scenario === 'accepted' ? ['first:earlier'] : ['first:earlier', 'first:cut'])
 
   for (const scenario of SCENARIOS) {
-    it(`killed while ${scenario}: the turn ends interrupted, never runs again, and the queued message runs once after it`, () => {
+    const taken = scenario === 'steer-taken'
+    it(`killed while ${scenario}: the turn ends ${scenario === 'uncertain' ? 'uncertain' : 'interrupted'}, never runs again, and ${taken ? 'the steer the provider took does not run again' : 'the queued message runs once after it'}`, () => {
       // Outside any repository: the child's test project must never resolve to this checkout's git repository.
       const home = mkdtempSync(join(tmpdir(), `mousse-restart-${scenario}-`))
       homes.push(home)
       const killed = runChild(['first', home, scenario])
       expect(existsSync(join(home, 'error.txt')) ? readFileSync(join(home, 'error.txt'), 'utf-8') : '', killed.stderr).toBe('')
       expect(killed.status === 0).toBe(false)
-      if (scenario !== 'starting') expect(existsSync(join(home, 'killed'))).toBe(true)
+      if (!['starting', 'accepted', 'steer-taken'].includes(scenario)) expect(existsSync(join(home, 'killed'))).toBe(true)
 
       const restarted = runChild(['restart', home])
       expect(existsSync(join(home, 'error.txt')) ? readFileSync(join(home, 'error.txt'), 'utf-8') : '', restarted.stderr).toBe('')
@@ -72,15 +75,17 @@ describe('restart recovery of a turn cut off by a killed daemon', () => {
       const prompts = readFileSync(join(home, 'prompts.log'), 'utf-8').trim().split('\n')
       expect(result.timedOut).toBe(false)
 
-      // Nothing reaches the provider twice: the cut-off turn is not sent again, and the queued message runs once.
-      expect(prompts).toEqual(scenario === 'starting' ? ['first:earlier', 'restart:next'] : ['first:earlier', 'first:cut', 'restart:next'])
+      // Nothing reaches the provider twice: the cut-off turn is not sent again, and the queued message runs once
+      // (a steer the provider took runs no more).
+      expect(prompts).toEqual([...sentFirst(scenario), ...(taken ? [] : ['restart:next'])])
       expect(result.restarted).toEqual([])
-      // The cut-off run is interrupted by the restart, not left queued; the queued message's run completed.
+      // The cut-off run ends by the restart, not left queued; the queued message's run completed.
       // A steered message's own run ended when it joined the turn; back in the queue, it runs as a new one.
-      const queuedRun = scenario === 'steer' ? [['c-2', 'cancelled', 'user'], ['queue', 'completed', null]] : [['c-2', 'completed', null]]
+      const cutOff = scenario === 'uncertain' ? ['c-1', 'uncertain', null] : ['c-1', 'interrupted', 'daemon_restart']
+      const queuedRun = scenario === 'steer' ? [['c-2', 'cancelled', 'user'], ['queue', 'completed', null]] : taken ? [['c-2', 'cancelled', 'user']] : [['c-2', 'completed', null]]
       expect(result.runs.map(({ clientRequestId, status, interruptedBy }) => [clientRequestId?.startsWith('queue:') ? 'queue' : clientRequestId, status, interruptedBy]).sort()).toEqual([
         ['c-0', 'completed', null],
-        ['c-1', 'interrupted', 'daemon_restart'],
+        cutOff,
         ...queuedRun
       ])
       expect(result.note).toEqual([expect.objectContaining({ runIds: [expect.any(String)] })])
@@ -93,8 +98,14 @@ describe('restart recovery of a turn cut off by a killed daemon', () => {
         expect(transcript.indexOf(INTERRUPTED)).toBeGreaterThan(at)
         expect(transcript.filter((row) => row === INTERRUPTED)).toHaveLength(1)
         expect(transcript.filter((row) => row === 'user:next')).toHaveLength(1)
-        expect(transcript.indexOf('user:next')).toBeGreaterThan(transcript.indexOf(INTERRUPTED))
-        expect(transcript.at(-1)).toBe('assistant:reply to next')
+        if (taken) {
+          // The steer the model took stays where it entered the turn, and nothing runs after the cut.
+          expect(transcript.indexOf('user:next')).toBeGreaterThan(at)
+          expect(transcript.at(-1)).toBe(INTERRUPTED)
+        } else {
+          expect(transcript.indexOf('user:next')).toBeGreaterThan(transcript.indexOf(INTERRUPTED))
+          expect(transcript.at(-1)).toBe('assistant:reply to next')
+        }
       }
       // No reply is left streaming and no tool row running.
       expect(result.open).toBe(0)
