@@ -68,6 +68,8 @@ export class SteerHold {
   private responseSinceTool = false
   private outputSinceTool = false
   private atBoundary = false
+  /** The provider compacts its context: a steer waits for it, and never stops it (§3.1). */
+  private compactingNow = false
   /** Only ever rises within a run (§0). */
   private generation = 0
   private heldKeys: Set<string> | undefined
@@ -116,9 +118,9 @@ export class SteerHold {
     else if (phase === 'delta' && this.responseSinceTool) this.outputSinceTool = true
   }
 
-  /** The provider's own turn ended and nothing runs (`TurnSink.boundary`). */
-  boundary(): void {
-    this.atBoundary = true
+  /** The provider's own turn ended and nothing runs (`TurnSink.boundary`); `false`: its next request started. */
+  boundary(at = true): void {
+    this.atBoundary = at
   }
 
   /** The provider began another turn of its own (`TurnSink.providerTurn`): the boundary is over. */
@@ -132,8 +134,14 @@ export class SteerHold {
     else this.waitingOnPerson.delete(callId)
   }
 
+  /** A compaction of the turn's context starts (`true`) or ends: while it runs, a held steer waits for it. */
+  compacting(active: boolean): void {
+    this.compactingNow = active
+  }
+
   foregroundTools(): ForegroundTool[] {
-    return this.options.foreground(this.waitingOnPerson)
+    const tools = this.options.foreground(this.waitingOnPerson)
+    return this.compactingNow ? [{ callId: 'compaction', toolName: 'compaction' }, ...tools] : tools
   }
 
   /** The window after the last foreground tool's result is still open (`start` providers only). */

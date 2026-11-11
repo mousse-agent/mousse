@@ -2,7 +2,7 @@ import { expect } from 'vitest'
 import type { Scenario } from '../types'
 
 /** Adapters whose reply row ends where the steer is taken, so the reply goes on below the steered message. */
-const SPLITS_AT_STEER = new Set(['acp', 'antigravity', 'claude-subscription', 'codex', 'cursor'])
+const SPLITS_AT_STEER = new Set(['acp', 'antigravity', 'claude-subscription', 'codex', 'cursor', 'pi-rpc'])
 
 /**
  * The user steers while the reply streams. The provider takes the guidance inside the same run (Codex by
@@ -22,8 +22,8 @@ export const scenario: Scenario = {
     const replies = messages.filter((message) => message.role === 'assistant' && !message.kind)
     expect(replies.map((message) => message.content).join('\n\n')).toBe('Working\n\nDone with tests')
     for (const reply of replies) expect(reply).toMatchObject({ streaming: false })
-    // Which adapters end the row at the steer is part of the contract: Pi takes a steer at its next step and keeps
-    // one row; every other adapter splits it there.
+    // Which adapters end the row at the steer is part of the contract: every adapter cuts the reply there and
+    // splits it (Pi aborts and continues the same turn with the steer).
     expect(replies).toHaveLength(SPLITS_AT_STEER.has(adapterId) ? 2 : 1)
     if (SPLITS_AT_STEER.has(adapterId)) {
       const at = (id: string) => messages.findIndex((message) => message.id === id)
