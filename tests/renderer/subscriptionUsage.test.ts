@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -7,7 +8,7 @@ import { DelayedLoader, LOADER_DELAY_MS } from '../../src/renderer/components/ui
 import { ALL_COMPUTERS, THIS_COMPUTER, usageRows, usageSelection, type ComputerUsage } from '../../src/renderer/lib/subscriptionUsage'
 import { formatCountdown, nextResetGain, resetsLabel, resetsTooltip, resetTooltip, resetTypeLabel, summarizeAccounts, totalResets } from '../../src/renderer/lib/subscriptionUsage'
 import { activeAccountsLabel } from '../../src/renderer/components/UsageAccountsView'
-import { formatResetLine, orderUsageWindows, remainingNow, remainingPercent, shortUsageNote, usageReadAtLabel, usageReadingTime, usageRedMix } from '../../src/renderer/lib/subscriptionUsage'
+import { formatResetLine, orderUsageWindows, remainingNow, remainingPercent, shortUsageNote, usageLevel, usageReadAtLabel, usageReadingTime, usageRunningLow } from '../../src/renderer/lib/subscriptionUsage'
 
 const NOW = Date.parse('2026-11-05T12:00:00Z')
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, ' ').trim()
@@ -40,8 +41,18 @@ describe('a usage window', () => {
     expect(remainingPercent({ remainingPercent: 140 })).toBe(100)
   })
 
-  it('takes on red smoothly as it nears empty: none at 80% left, a trace at 30%, clearly red-tinted at 5%', () => {
-    expect([usageRedMix(100), usageRedMix(80), usageRedMix(35), usageRedMix(30), usageRedMix(5), usageRedMix(0)]).toEqual([0, 0, 0, 8, 47, 55])
+  it('sorts a share left into levels: plenty above half, getting low to a quarter, low under it, critical under a tenth', () => {
+    expect([100, 51, 50, 25, 24, 10, 9, 0].map(usageLevel)).toEqual(['plenty', 'plenty', 'getting-low', 'getting-low', 'low', 'low', 'critical', 'critical'])
+    expect([25, 24, 0].map(usageRunningLow)).toEqual([false, true, true])
+  })
+
+  it('gives each level its own fixed colour (sage green, soft yellow, amber, red), never the accent', () => {
+    const css = readFileSync(new URL('../../src/renderer/styles/usage.css', import.meta.url), 'utf8')
+    const hues = Object.fromEntries([...css.matchAll(/--usage-(plenty|getting-low|low|critical): oklch\([\d.]+ [\d.]+ (\d+)\)/g)].map((match) => [match[1], Number(match[2])]))
+    expect(hues).toEqual({ plenty: 155, 'getting-low': 95, low: 58, critical: 23 })
+    expect(css).toContain("[data-usage-level] {\n  --usage-level: var(--usage-plenty);")
+    for (const level of ['getting-low', 'low', 'critical']) expect(css).toContain(`[data-usage-level='${level}'] { --usage-level: var(--usage-${level}); }`)
+    expect(css.match(/\.usage-bar-fill \{[^}]*\}/)?.[0]).not.toContain('--accent')
   })
 
   it('counts down, not by weekday: 45m, 1h 12m; from a day on always with hours (1d 0h, 3d 0h, 6d 23h)', () => {
@@ -88,9 +99,9 @@ describe('the Usage page', () => {
     expect(page).toContain('Sonnet Unknown')
     expect(page).toContain('Resets in 2h 5m')
     expect([...html.matchAll(/role="meter"[^>]*aria-valuenow="(\d+)"/g)].map((match) => match[1])).toEqual(['62', '12'])
-    // The fill is what is left, and only the nearly empty one is tinted red.
-    expect([...html.matchAll(/data-red="(\d+)" style="width:(\d+)%/g)].map((match) => [match[2], match[1]])).toEqual([['62', '0'], ['12', '36']])
-    expect(html).toContain('--usage-red:36%')
+    // The fill is what is left, each bar and share at its level.
+    expect([...html.matchAll(/aria-valuenow="(\d+)" data-usage-level="([a-z-]+)"><span class="usage-bar-fill" style="width:(\d+)%/g)].map((match) => [match[3], match[2]])).toEqual([['62', 'plenty'], ['12', 'low']])
+    expect([...html.matchAll(/usage-window-used usage-level-text" data-usage-level="([a-z-]+)"/g)].map((match) => match[1])).toEqual(['plenty', 'low'])
     expect(html).not.toContain('usage-ring')
   })
 
@@ -98,7 +109,7 @@ describe('the Usage page', () => {
     const html = view({ usage: response([{ ...claude, windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 5, resetsAt: '2026-11-08T12:00:00Z' }] }]) })
     expect(windows(html)).toEqual(['5'])
     expect(text(html)).not.toContain('5-hour')
-    expect(html).toContain('data-red="47" style="width:5%')
+    expect(html).toContain('data-usage-level="critical"><span class="usage-bar-fill" style="width:5%')
   })
 
   it('shows each provider as one group, with its own usage page behind an icon', () => {
