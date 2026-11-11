@@ -23,24 +23,25 @@ function rules(css: string): [string, string][] {
   return out
 }
 
-const BLUR = /backdrop-filter:\s*(blur\(|var\(--glass-blur\))/
+const BLUR = /backdrop-filter:\s*(blur\(|var\()/
+const allRules = () => cssFiles(RENDERER).flatMap((file) => rules(readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).map(([selector, body]) => ({ file: relative(RENDERER, file).replace(/\\/g, '/'), selector, body })))
 
-describe('glass blur on surfaces that stay on screen', () => {
-  it('defaults the glass blur to none, as the window material does the blurring', () => {
-    expect(source('styles/global.css')).toMatch(/--glass-blur: none;/)
+describe('no blur where nothing shows through', () => {
+  it('has no glass blur token left: the native window material blurs once, so nothing reads or sets it', () => {
+    const users = cssFiles(RENDERER).filter((file) => readFileSync(file, 'utf8').includes('--glass-blur')).map((file) => relative(RENDERER, file))
+    expect(users).toEqual([])
+    expect(source('hooks/useTheme.ts')).not.toContain('--glass-blur')
   })
 
-  it('leaves no backdrop blur on the persistent chrome or on each prompt in the transcript', () => {
-    const all = cssFiles(RENDERER).flatMap((file) => rules(readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).map(([selector, body]) => ({ file: relative(RENDERER, file), selector, body })))
-    const chrome = ['.titlebar', '.sidebar', '.main-area .header', '.composer', '.threads-sidebar', '.message-user', '.panel-toolbar', '.browser-toolbar']
+  it('leaves no backdrop blur on the persistent chrome, the Automations page or each prompt, with acrylic on or off', () => {
+    const all = allRules()
+    const chrome = ['.titlebar', '.sidebar', '.main-area .header', '.composer', '.threads-sidebar', '.message-user', '.chat-user-bubble', '.panel-toolbar', '.browser-toolbar', '.automations-page', '.usage-rail-page']
     for (const name of chrome) {
       const blurring = all.filter(({ selector, body }) =>
         selector.split(',').some((part) => part.trim() === name || part.trim().endsWith(` ${name}`)) &&
         BLUR.test(body) &&
         // Kept: the frosted composer setting, a deliberate see-through card.
-        !selector.includes("data-frosted-composer='true'") &&
-        // Acrylic's own surfaces are left as they are.
-        !selector.includes("data-acrylic='true'")
+        !selector.includes("data-frosted-composer='true'")
       )
       expect(blurring.map(({ file, selector }) => `${file}: ${selector}`), name).toEqual([])
     }
@@ -52,23 +53,32 @@ describe('glass blur on surfaces that stay on screen', () => {
     expect(body).not.toMatch(/backdrop-filter/)
   })
 
-  it('uses the glass blur token only in the acrylic theme file and the Automations page', () => {
-    const users = cssFiles(RENDERER)
-      .filter((file) => /backdrop-filter:\s*var\(--glass-blur\)/.test(readFileSync(file, 'utf8')))
-      .map((file) => relative(RENDERER, file).replace(/\\/g, '/'))
-      .sort()
-    // The Automations page keeps its own styles; the token is `none` outside acrylic, so it draws no blur there.
-    expect(users).toEqual(['styles/automations-page.css', 'styles/themes/acrylic.css'])
+  it('keeps the Automations page on its own opaque fill, with no blur under it', () => {
+    const [, body] = rules(source('styles/automations-page.css')).find(([selector]) => selector.split(',')[0]!.trim() === '.automations-page')!
+    expect(body).toContain('background-color: var(--bg-primary, #15171b)')
+    expect(body).not.toMatch(/backdrop-filter/)
   })
+})
 
-  it('keeps the blur where something shows through: the frosted composer and toasts', () => {
+describe('blur that stays: something varied shows through it', () => {
+  it('keeps the frosted composer setting and toasts', () => {
     const frosted = rules(source('styles/polish.css')).find(([selector]) => selector.includes("html[data-frosted-composer='true'] .app .chat:not(.chat--empty) .chat-input-area .composer"))!
     expect(frosted[1]).toMatch(/backdrop-filter: blur\(var\(--frosted-composer-blur/)
     expect(source('styles/toast.css')).toMatch(/backdrop-filter: blur\(22px\)/)
   })
+
+  it('keeps the dialog blur over the content behind dialogs, Search and the integrations dialog', () => {
+    expect(source('styles/app.css')).toMatch(/--ui-dialog-blur: blur\(3px\);/)
+    const users = allRules().filter(({ body }) => /backdrop-filter:\s*var\(--ui-dialog-blur\)/.test(body)).map(({ selector }) => selector).sort()
+    expect(users).toEqual(['.integration-modal-backdrop', '.modal-overlay', '.thread-search-overlay'])
+  })
+
+  it('keeps the image viewer blur', () => {
+    expect(source('chat/components/agent-elements/image-lightbox.tsx')).toMatch(/image-preview-overlay[^"]*backdrop-blur-sm/)
+  })
 })
 
-describe('the glass blur token at runtime', () => {
+describe('the acrylic switch at runtime', () => {
   beforeEach(() => {
     vi.stubGlobal('mousse', { platform: 'win32' })
   })
@@ -77,8 +87,8 @@ describe('the glass blur token at runtime', () => {
     vi.unstubAllGlobals()
   })
 
-  it.each([true, false])('is none with acrylic %s: the native material blurs once for the whole window', (acrylic) => {
+  it.each([true, false])('sets no glass blur with acrylic %s', (acrylic) => {
     applyAcrylic(acrylic, 50, 'dark')
-    expect(document.documentElement.style.getPropertyValue('--glass-blur')).toBe('none')
+    expect(document.documentElement.style.getPropertyValue('--glass-blur')).toBe('')
   })
 })
