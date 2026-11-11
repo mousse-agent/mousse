@@ -48,9 +48,10 @@ function namesLocation(key: string): boolean {
 
 /**
  * The scope of a protocol request, from its parameters: the threads it names, when it names nothing that reaches
- * beyond them (no project, folder, repository, worktree or file). Anything else is `null`.
+ * beyond them (no project, folder, repository, worktree or file). Anything else is `null`, and so is a request that
+ * names an id `isThread` does not know as a thread here (`__unbound__`, a chat's task id, another computer's thread).
  */
-export function requestWorkScope(params: unknown): WorkScope | null {
+export function requestWorkScope(params: unknown, isThread: (id: string) => boolean): WorkScope | null {
   if (!params || typeof params !== 'object' || Array.isArray(params)) return null
   const threads = new Set<string>()
   let local = true
@@ -63,7 +64,7 @@ export function requestWorkScope(params: unknown): WorkScope | null {
       // A thread named anywhere in the request is one of its threads.
       if (THREAD_KEY.test(key)) {
         for (const id of Array.isArray(item) ? item : [item]) {
-          if (typeof id === 'string' && id) threads.add(id)
+          if (typeof id === 'string' && id && id !== '__unbound__' && isThread(id)) threads.add(id)
           else if (id !== undefined && id !== null) local = false
         }
         continue

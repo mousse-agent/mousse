@@ -1637,8 +1637,10 @@ async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unk
   // request barrier. Every actual personal service has this ownership method;
   // the fallback preserves legacy isolated handler test doubles.
   if (!isInstallationMethod(method) && ctx.mms.runOwnedRequest) {
-    // A request that names only threads is counted under them, so a delete of another thread does not wait for it.
-    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params))
+    // A request that names only threads of this computer is counted under them, so a delete of another thread does
+    // not wait for it. One that names anything else (a project terminal's `__unbound__`, a chat's task id) is the profile's.
+    const isThread = (id: string): boolean => Boolean(ctx.mms.threads?.getThread(id) || ctx.mms.threads?.lifecycleStore?.get(id))
+    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params, isThread))
   }
   return dispatchOwnedMethod(ctx, method, params)
 }

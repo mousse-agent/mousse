@@ -6,12 +6,16 @@ import { describe, expect, it } from 'vitest'
 import { OwnedWorkBarrier } from '../src/mms/execution/OwnedWorkBarrier'
 import { currentWorkScope, requestWorkScope, threadScope } from '../src/mms/execution/workScope'
 
+/** The threads this computer knows in these cases. */
+const known = new Set(['a', 'b'])
+const isThread = (id: string): boolean => known.has(id)
+
 describe('a request\'s scope', () => {
   it('is its threads when it names only threads', () => {
-    expect(requestWorkScope({ threadId: 'a', content: 'hello', conversationBranchId: 'b1', images: [{ data: 'x', mimeType: 'image/png' }] })).toEqual({ threadIds: ['a'] })
-    expect(requestWorkScope({ threadIds: ['a', 'b'], profileId: 'p' })).toEqual({ threadIds: ['a', 'b'] })
+    expect(requestWorkScope({ threadId: 'a', content: 'hello', conversationBranchId: 'b1', images: [{ data: 'x', mimeType: 'image/png' }] }, isThread)).toEqual({ threadIds: ['a'] })
+    expect(requestWorkScope({ threadIds: ['a', 'b'], profileId: 'p' }, isThread)).toEqual({ threadIds: ['a', 'b'] })
     // Every thread it names counts, at any depth.
-    expect(requestWorkScope({ threadId: 'a', target: { parentThreadId: 'b' } })).toEqual({ threadIds: ['a', 'b'] })
+    expect(requestWorkScope({ threadId: 'a', target: { parentThreadId: 'b' } }, isThread)).toEqual({ threadIds: ['a', 'b'] })
   })
 
   it('is the profile\'s when it names a project, a folder, a repository, a worktree or a file', () => {
@@ -23,15 +27,34 @@ describe('a request\'s scope', () => {
       { threadId: 'a', worktreePath: '/x' },
       { threadId: 'a', files: ['a.txt'] },
       { threadId: 'a', workTree: '/x' }
-    ]) expect(requestWorkScope(params)).toBeNull()
+    ]) expect(requestWorkScope(params, isThread)).toBeNull()
   })
 
   it('is the profile\'s when it names no thread, or one that is not a name', () => {
-    expect(requestWorkScope(undefined)).toBeNull()
-    expect(requestWorkScope({})).toBeNull()
-    expect(requestWorkScope({ name: 'x' })).toBeNull()
-    expect(requestWorkScope({ threadId: 42 })).toBeNull()
+    expect(requestWorkScope(undefined, isThread)).toBeNull()
+    expect(requestWorkScope({}, isThread)).toBeNull()
+    expect(requestWorkScope({ name: 'x' }, isThread)).toBeNull()
+    expect(requestWorkScope({ threadId: 42 }, isThread)).toBeNull()
     expect(threadScope('__unbound__')).toBeNull()
+  })
+
+  it('is the profile\'s when it names an id that is not a thread of this computer, never the scope of the threads it does know', () => {
+    const asked: string[] = []
+    const lookup = (id: string): boolean => { asked.push(id); return isThread(id) }
+    for (const params of [
+      // A project terminal's requests, sent before it has a thread.
+      { threadId: '__unbound__' },
+      { threadIds: ['a', '__unbound__'] },
+      // A chat's task id, and a thread of another computer.
+      { taskId: 'rpc_9f2c41' },
+      { threadId: 'thread-of-another-computer' },
+      // Named together with a thread of this computer, it still reaches beyond that thread.
+      { threadIds: ['a', 'rpc_9f2c41'] },
+      { threadId: 'a', target: { parentThreadId: 'thread-of-another-computer' } }
+    ]) expect(requestWorkScope(params, lookup)).toBeNull()
+    // `__unbound__` is never a thread, whatever the lookup says.
+    expect(asked).not.toContain('__unbound__')
+    expect(requestWorkScope({ threadId: '__unbound__' }, () => true)).toBeNull()
   })
 })
 

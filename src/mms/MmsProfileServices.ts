@@ -116,7 +116,7 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from './execution/OwnedWorkBarrier'
 import { threadScope, type WorkScope } from './execution/workScope'
-import { comparablePath } from './lifecycle/canonicalPath'
+import { pathsOverlap } from './lifecycle/canonicalPath'
 import { readThreadWorkspaceRecord } from './workspace/ThreadWorkspaceManager'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
@@ -128,8 +128,8 @@ import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
 import { threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
-import { existsSync } from 'node:fs'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
@@ -217,10 +217,26 @@ function requestsBusy(prefix: string, active: Array<{ label: string; why: Delete
   return `${prefix}: ${DELETE_BLOCK_REASONS[why]}; its requests are still active (${list})`
 }
 
-/** Whether `path` is `root` or inside it, compared as the volume compares names. */
-function isWithin(path: string, root: string): boolean {
-  const rel = relative(comparablePath(resolve(root)), comparablePath(resolve(path)))
-  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`))
+/** A thread's facts a delete compares (`MmsProfileServices.threadWorkspaceFacts`). */
+interface ThreadWorkspaceFacts { location?: string; worktree?: string; projectFolder: boolean; repositoryId?: string; projectId?: string }
+/** What a thread's `meta.json` says of where it works. */
+type ThreadFacts = Pick<Thread, 'projectId' | 'lineage' | 'workspaceBinding'>
+
+/** The facts of a thread from its `meta.json` in `location` (a thread in the trash is not listed); undefined when unreadable. */
+function readThreadFacts(location: string, threadId: string): ThreadFacts | undefined {
+  try {
+    const path = join(location, 'meta.json')
+    if (statSync(path).size > 1024 * 1024) return undefined
+    const meta = JSON.parse(readFileSync(path, 'utf8')) as Partial<Thread>
+    return meta && meta.id === threadId ? meta : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A real path (short names, junctions and links resolved) when it exists; else the path as given, made absolute. */
+function canonicalPathSync(path: string): string {
+  try { return realpathSync.native(path) } catch { return resolve(path) }
 }
 
 export class MmsProfileServices {
@@ -1407,24 +1423,35 @@ export class MmsProfileServices {
         if (family.has(id)) return 'thread'
         if (related.has(id)) return 'launched'
         const other = factsOf(id)
-        // A thread that is not here (one of another computer, or one already gone) works in nothing of this computer.
-        if (!other) continue
-        if (other.worktree && owned.some((folder) => isWithin(other.worktree!, folder))) return 'worktree'
+        // A thread not known here (another computer's, one already gone) is work of unknown reach.
+        if (!other) return 'profile'
+        if (other.worktree && owned.some((folder) => pathsOverlap(canonicalPathSync(other.worktree!), canonicalPathSync(folder)))) return 'worktree'
         if (options.removesWork && ((other.repositoryId && repositories.has(other.repositoryId)) || (other.projectId && projects.has(other.projectId)))) return 'repository'
       }
       return undefined
     }
   }
 
-  /** Where a thread keeps its data and works: its folder, its worktree (or project folder) and repository, its project. */
-  private threadWorkspaceFacts(threadId: string): { location?: string; worktree?: string; projectFolder: boolean; repositoryId?: string; projectId?: string } | undefined {
-    const listed = this.threads.getThread(threadId)
+  /**
+   * Where a thread keeps its data and works: its folder, its worktree (or project folder) and repository, its project.
+   * Read only, from what is on disk: no thread folder is resolved, registered or migrated. A thread in the trash is read
+   * from its lifecycle record and its `meta.json` there. A subagent with no workspace record of its own works in its
+   * parent's (a `shared` one in the parent's folder, `workspaceBinding.sharedPath`), so it has its parent's facts.
+   */
+  private threadWorkspaceFacts(threadId: string, seen = new Set<string>()): ThreadWorkspaceFacts | undefined {
     const record = this.threads.lifecycleStore.get(threadId)
-    if (!listed && !record) return undefined
-    let location = record?.location
-    if (!location) { try { location = this.threads.getThreadDir(threadId) } catch { /* not resolvable: no folder to compare */ } }
+    const meta: ThreadFacts | undefined = this.threads.getThread(threadId) ?? (record ? readThreadFacts(record.location, threadId) : undefined)
+    if (!meta && !record) return undefined
+    const location = record?.location
     const workspace = location ? readThreadWorkspaceRecord(location) : undefined
-    return { location, worktree: workspace?.worktreePath, projectFolder: workspace?.kind === 'project-folder', repositoryId: workspace?.repositoryId, projectId: listed?.projectId }
+    const facts: ThreadWorkspaceFacts = { location, worktree: workspace?.worktreePath, projectFolder: workspace?.kind === 'project-folder', repositoryId: workspace?.repositoryId, projectId: meta?.projectId }
+    const parent = meta?.lineage?.parentThreadId
+    if (workspace || !parent || parent === threadId || seen.has(parent)) return facts
+    seen.add(threadId)
+    const up = this.threadWorkspaceFacts(parent, seen)
+    if (!up) return facts
+    // The shared path is the parent's own folder: a project's own folder stays one.
+    return { ...facts, worktree: meta?.workspaceBinding?.sharedPath ?? up.worktree, projectFolder: up.projectFolder, repositoryId: up.repositoryId, projectId: facts.projectId ?? up.projectId }
   }
 
   /**
@@ -1886,8 +1913,9 @@ export class MmsProfileServices {
         // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
         // Requests of threads the delete does not touch (another thread's send, open
         // for its whole turn) are not waited for (`deleteGuard`), as at that idle check.
-        const target = scope?.threadIds[0]
-        const blocks = target ? this.deleteGuard([target], { removesWork: false }) : () => 'profile' as const
+        // Every thread the request names is the delete's; one that names none waits for every request.
+        const targets = scope?.threadIds ?? []
+        const blocks = targets.length ? this.deleteGuard(targets, { removesWork: false }) : () => 'profile' as const
         const include = (active: string, activeScope: WorkScope | null) =>
           !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, '')) && blocks(activeScope) !== undefined
         try {

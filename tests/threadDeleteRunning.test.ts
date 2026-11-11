@@ -21,9 +21,16 @@ import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { waitFor } from './run/phase6Fixture'
 import { PI_TEST_CAPABILITIES } from './support/piStub'
 import { archived } from './support/archived'
-import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { requestWorkScope } from '../src/mms/execution/workScope'
+import { readThreadWorkspaceRecord, ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { runInWorkScope, type WorkScope } from '../src/mms/execution/workScope'
 import type { ThreadWorkspaceMetadata } from '../src/shared/workspace'
+import { RelayHandler, type RelayHost } from '../src/mms/run/mcp/relay/handler'
+import type { RelayCatalog } from '../src/mms/run/mcp/relay/catalog'
+import type { RelayTool } from '../src/mms/run/mcp/relay/names'
+import type { McpCallRequest } from '../src/mms/run/mcp/appTools/registry'
+import type { AppToolTurn } from '../src/mms/run/mcp/appTools/types'
+import type { BotEngineHost } from '../src/mms/bots/activation/BotEngine'
+import { appTurn } from './run/appToolsFixture'
 
 vi.setConfig({ testTimeout: 60_000 })
 
@@ -137,6 +144,35 @@ async function worktreeThread(f: Harness, at: { repo: string; projectId: string 
 /** Records that `threadId` works in `workspace`'s folder (its own worktree, or another thread's): what a delete reads. */
 function worksIn(f: Harness, threadId: string, workspace: ThreadWorkspaceMetadata): void {
   writeFileSync(join(f.services.threads.getThreadDir(threadId), 'workspace.json'), JSON.stringify({ ...workspace, threadId }))
+}
+
+/**
+ * Holds every `method` request the protocol handler admits until `release`, inside the profile's own request barrier,
+ * counted as the handler counts it (`dispatchAdmitted` works out its scope from its parameters). `scopes` are the scopes
+ * those requests were given; `admitted` waits until one is in flight.
+ */
+function holdRequests(services: MmsProfileServices, method: string) {
+  const real = services.runOwnedRequest.bind(services)
+  let release = () => {}
+  const hold = new Promise<void>((resolve) => { release = resolve })
+  const scopes: Array<WorkScope | null> = []
+  vi.spyOn(services, 'runOwnedRequest').mockImplementation(((name: string, work: () => unknown, scope?: WorkScope | null) => {
+    if (name !== method) return real(name, work, scope)
+    scopes.push(scope ?? null)
+    return real(name, async () => { await hold; return work() }, scope)
+  }) as MmsProfileServices['runOwnedRequest'])
+  const admitted = () => waitFor(() => services.getOwnedActivity()[`rpc:${method}`] === 1, `the ${method} request to be in flight`)
+  return { release: () => release(), scopes, admitted }
+}
+
+/** A subagent of `parentId` that works in its parent's folder (`shared`): it has no workspace record of its own. */
+function sharedSubagent(f: Harness, parentId: string, sharedPath: string): Thread {
+  return f.services.threads.createThread('shared subagent', undefined, undefined, {
+    started: true,
+    lineage: { parentThreadId: parentId, rootThreadId: parentId, relationship: 'subagent' },
+    ownerThreadId: parentId,
+    workspaceBinding: { policy: 'shared', sharedPath }
+  })
 }
 
 /** Nothing of `threadId` was touched: listed, active, its turn running and its queue as it was. */
@@ -460,6 +496,96 @@ describe('other threads keep working through a delete', () => {
       await p.close()
     }
   })
+
+  it('an MCP tool call another thread\'s provider turn makes through the relay goes on, and the delete does not wait for it', async () => {
+    const p = await profile()
+    let release = () => {}
+    try {
+      const target = await p.thread('to delete')
+      const other = await p.thread('calls a tool')
+      await p.run(target.id)
+      await p.run(other.id, false)
+      archived(p.f.services.threads, target.id)
+      // The relay's call runs on the profile's MCP manager, as `McpManager.callTool` runs it (`runTimed`), and holds
+      // until released: a long tool call of the other thread's turn.
+      const manager = p.f.services.mcpManager as unknown as { runTimed: (label: string, timeoutMs: number, message: string, signal: AbortSignal | undefined, run: (signal: AbortSignal) => Promise<unknown>) => Promise<unknown> }
+      const hold = new Promise<void>((resolve) => { release = resolve })
+      const tool: RelayTool = { name: 'echo__say', description: 'Says it', inputSchema: { type: 'object' }, installationId: 'inst-echo', serverName: 'echo', toolName: 'say', providerName: 'mcp__echo__say__abcd1234', configRevision: 'rev1' }
+      const turn = { ...appTurn({ threadId: other.id, runId: 'run-other' }), turnToken: 'tt' } as AppToolTurn
+      const relay = new RelayHandler({
+        catalog: { listing: () => [tool], resolve: () => tool } as unknown as RelayCatalog,
+        manager: {
+          isToolCallAllowed: async () => ({ allowed: true }),
+          callTool: ((_name: string, _args: unknown, _projectPath: unknown, signal?: AbortSignal) =>
+            manager.runTimed('mcp-call', 60_000, 'Timed out calling MCP tool say', signal, async () => { await hold; return { content: [{ type: 'text', text: 'said' }], isError: false } })) as never
+        } as RelayHost['manager'],
+        registry: { admit: async (rawArgs: Record<string, unknown>) => ({ threadId: other.id, active: 'run-other', turn, args: rawArgs, caller: { threadId: other.id, runId: 'run-other', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage' as const }, boundToken: 'tt' }) } as never,
+        projectPathFor: () => undefined
+      })
+      const request: McpCallRequest = {
+        credential: { threadId: other.id, runId: 'run-other', provider: 'codex', modeCeiling: 'default', accessLevel: 'lineage', binding: 'per_call', relay: { approvals: 'runtime' }, current: () => true } as never,
+        toolCallId: 'mcp:c1',
+        signal: new AbortController().signal
+      }
+      // The relay's HTTP server serves it outside any turn (`MousseMcpServer.start` runs as the profile's work).
+      const call = runInWorkScope(null, () => relay.call(tool.name, { text: 'hi' }, request))
+      await waitFor(() => p.f.services.mcpManager.getActiveWork().some((entry) => entry.label === 'mcp-call'), 'the relayed call to be in flight')
+      // Counted under the caller's thread, not as the profile's.
+      expect(p.f.services.mcpManager.getActiveWork().find((entry) => entry.label === 'mcp-call')?.scope).toEqual({ threadIds: [other.id] })
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: target.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(p.adapter.live(target.id)).toBe(0)
+      release()
+      expect(await call).toEqual({ text: 'said' })
+      expect(p.adapter.live(other.id)).toBe(1)
+    } finally {
+      release()
+      await p.close()
+    }
+  })
+
+  it('a deleted bot\'s thread is deleted for good while another thread streams', async () => {
+    const p = await profile()
+    try {
+      const other = await p.thread('still working')
+      await p.run(other.id)
+      const home = p.f.services.threads.ensureExecutionThread('bot:helper', 'Helper', undefined, undefined, { botOwned: true })
+      // `BotEngine` trashes a deleted bot's threads through this seam (`MmsProfileServices`' `trashThread`).
+      const host = (p.f.services.personalBots as unknown as { host: BotEngineHost }).host
+      await host.trashThread!(home.id)
+      expect(p.f.services.threads.lifecycleStore.get(home.id)?.state).toBe('purged')
+      untouched(p, other.id)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('a request that names only another thread is not waited for', async () => {
+    const p = await profile()
+    let hold: ReturnType<typeof holdRequests> | undefined
+    let read: Promise<unknown> | undefined
+    try {
+      const target = await p.thread('to delete')
+      const other = await p.thread('read by a window')
+      await p.run(target.id)
+      archived(p.f.services.threads, target.id)
+      hold = holdRequests(p.f.services, 'threads.get')
+      read = p.f.rpc.request('threads.get', { threadId: other.id })
+      await hold.admitted()
+      expect(hold.scopes).toEqual([{ threadIds: [other.id] }])
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: target.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      // Still in flight through the whole delete.
+      expect(p.f.services.getOwnedActivity()['rpc:threads.get']).toBe(1)
+      hold.release()
+      expect((await read as { thread: Thread }).thread.id).toBe(other.id)
+    } finally {
+      hold?.release()
+      await read?.catch(() => undefined)
+      vi.restoreAllMocks()
+      await p.close()
+    }
+  })
 })
 
 describe('a delete is refused, stopping nothing, while other work touches what it deletes', () => {
@@ -502,36 +628,100 @@ describe('a delete is refused, stopping nothing, while other work touches what i
     }
   })
 
-  for (const [kind, params] of [
-    ['a folder', (folder: string, other: string) => ({ threadId: other, path: join(folder, 'notes.md') })],
-    ['a project', (_folder: string, _other: string, projectId: string) => ({ projectId })]
+  // Each request goes through the protocol handler, which works out its scope from its parameters.
+  for (const [kind, method, params] of [
+    // Named by folder or project, the request may touch the thread's files: it is not counted under a thread.
+    ['a folder', 'files.read', (folder: string, other: string) => ({ threadId: other, path: join(folder, 'notes.md') })],
+    ['a project', 'git.status', (_folder: string, _other: string, projectId: string) => ({ projectId })],
+    // A project terminal's requests before it has a thread, a chat's task id, another computer's thread: their reach is not known.
+    ['`__unbound__`', 'threads.get', () => ({ threadId: '__unbound__' })],
+    ['an id that is not a thread here', 'threads.get', () => ({ threadId: 'rpc_9f2c41d0' })],
+    ['a thread here and one of another computer', 'threads.get', (_folder: string, other: string) => ({ threadId: other, target: { parentThreadId: 'thread-of-another-computer' } })]
   ] as const) {
     it(`a request that names ${kind} is in flight`, async () => {
       const p = await profile()
-      let release = () => {}
+      let hold: ReturnType<typeof holdRequests> | undefined
+      let request: Promise<unknown> | undefined
       try {
         const at = project(p.f)
         const { thread: target, workspace } = await worktreeThread(p.f, at, 'to delete')
         const other = await p.thread('reads files')
         await p.run(target.id)
         archived(p.f.services.threads, target.id)
-        const hold = new Promise<void>((resolve) => { release = resolve })
-        // Named by folder or project, the request may touch the thread's files: it is not counted under a thread.
-        const scope = requestWorkScope(params(workspace.worktreePath, other.id, at.projectId))
-        expect(scope).toBeNull()
-        const request = p.f.services.runOwnedRequest('files.read', () => hold, scope)
+        hold = holdRequests(p.f.services, method)
+        request = p.f.rpc.request(method, params(workspace.worktreePath, other.id, at.projectId)).catch(() => undefined)
+        await hold.admitted()
+        // Counted as the profile's, never under the one thread it does name.
+        expect(hold.scopes).toEqual([null])
         const stops = stopsFor(p.f.services)
-        await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(/requests are still active \(rpc:files\.read=1\)/)
+        await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(new RegExp(`profile requests are still active \\(rpc:${method.replace('.', '\\.')}=1\\)`))
         expect(stops).not.toHaveBeenCalled()
         untouched(p, target.id)
-        release()
-        await request
       } finally {
-        release()
+        hold?.release()
+        await request
+        vi.restoreAllMocks()
         await p.close()
       }
     })
   }
+
+  it('a person\'s delete left in the trash, tried again while a shared subagent works in its worktree', async () => {
+    const p = await profile()
+    try {
+      const at = project(p.f)
+      const { thread: target, workspace } = await worktreeThread(p.f, at, 'to delete')
+      // Another thread was given the deleted thread's worktree, and its shared subagent works there.
+      const parent = await p.thread('in its worktree')
+      worksIn(p.f, parent.id, workspace)
+      const child = sharedSubagent(p.f, parent.id, workspace.worktreePath)
+      // Trashed by an earlier delete that stopped there (a crash, a refusal): no longer listed.
+      archived(p.f.services.threads, target.id)
+      await p.f.services.trashThread(target.id, undefined, undefined, true)
+      expect(p.f.services.threads.getThread(target.id)).toBeUndefined()
+      await p.run(child.id, false)
+      expect(readThreadWorkspaceRecord(p.f.services.threads.getThreadDir(child.id))).toBeUndefined()
+      await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(/another thread is working in its worktree/)
+      expect(p.f.services.threads.lifecycleStore.get(target.id)?.state).toBe('trashed')
+      expect(existsSync(workspace.worktreePath)).toBe(true)
+      expect(p.adapter.live(child.id)).toBe(1)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('an expiry left in the trash, tried again or purged while a shared subagent works in the same project', async () => {
+    const p = await profile()
+    try {
+      const at = project(p.f)
+      const { thread: target, workspace } = await worktreeThread(p.f, at, 'expiring')
+      // Another thread of the project, idle, and its shared subagent, which works in its worktree. The subagent's
+      // project and repository are its parent's.
+      const { thread: parent, workspace: theirs } = await worktreeThread(p.f, at, 'same project')
+      const child = sharedSubagent(p.f, parent.id, theirs.worktreePath)
+      p.f.services.threads.updateThreadMeta(target.id, { expiresAt: new Date(Date.now() - 1_000).toISOString() })
+      // An earlier delete trashed it while nothing ran, and stopped there; the thread has expired since, so the expiry
+      // finishes the delete, taking the worktree.
+      archived(p.f.services.threads, target.id)
+      await p.f.services.trashThread(target.id, undefined, undefined, true)
+      expect(p.f.services.threads.getThread(target.id)).toBeUndefined()
+      await p.run(child.id, false)
+      expect(readThreadWorkspaceRecord(p.f.services.threads.getThreadDir(child.id))).toBeUndefined()
+      const refusal = /another thread is working in the same repository, and this delete removes the thread's worktree and Git refs/
+      // The purge's own idle check, with the expiry's authority: it stays in the trash.
+      await expect(p.f.services.lifecycle.cleanup.purge({ taskId: target.id, operationId: 'expiry-purge', authorization: 'expiry' })).rejects.toThrow(refusal)
+      expect(p.f.services.threads.lifecycleStore.get(target.id)?.state).toBe('trashed')
+      // The expiry service's next try (`deleteForGood`): refused, it puts the thread back in Archived, as any refused
+      // delete of a thread an earlier one left in the trash does.
+      await expect((p.f.services as unknown as { deleteExpiredThread: (id: string) => Promise<void> }).deleteExpiredThread(target.id)).rejects.toThrow(refusal)
+      expect(p.f.services.threads.lifecycleStore.get(target.id)?.state).not.toMatch(/purge/)
+      expect(p.f.services.threads.getThread(target.id)?.settledAt).toBeTruthy()
+      expect(existsSync(workspace.worktreePath)).toBe(true)
+      expect(p.adapter.live(child.id)).toBe(1)
+    } finally {
+      await p.close()
+    }
+  })
 
   it('profile-wide work (an automation run) is in flight', async () => {
     const p = await profile()
