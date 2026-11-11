@@ -20,9 +20,11 @@ import {
   watchReport,
   windowBreakdownReport
 } from '../../../diagnostics/profilerReports'
+import type { AgentAccessLevel } from '../../../../shared/settings'
+import type { Thread } from '../../../../shared/types'
 import type { AppToolHost } from './host'
 import { agentThreadView, threadVisibleToAgent } from './thread'
-import { json, type JsonSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
+import { json, levelAtLeast, type JsonSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /** What the profiler tools read, at every call: the profile's switches (Settings → Labs) and the service's profiler. */
 export interface ProfilerToolHost {
@@ -54,13 +56,19 @@ function delegationChain(host: AppToolHost, threadId: string): string[] {
  * the caller's is), a bot's, or outside the allowed projects (unless the caller launched it) counts only in a total,
  * as does a cache entry no thread of the profile owns, which cannot be checked.
  */
-function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThreadId: string): ThreadMemory {
+function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThreadId: string, level: AgentAccessLevel): ThreadMemory {
   const view = agentThreadView(host, callerThreadId)
   const byId = new Map(view.all.map((thread) => [thread.id, thread]))
+  const chain = new Set(delegationChain(host, callerThreadId))
+  // Below `read`, `thread_list` refuses: only the caller, the threads that delegated to it and the threads it
+  // launched are named. Below `manage`, other threads' subagents stay folded, as `thread_list` folds them.
+  const related = (thread: Thread) => chain.has(thread.id) || thread.createdByThreadId === callerThreadId
+  const named = (thread: Thread) =>
+    related(thread) || (levelAtLeast(level, 'read') && (levelAtLeast(level, 'manage') || !thread.lineage?.parentThreadId))
   const hidden = { threads: 0, cachedBytes: 0 }
   const own = threads.own.filter((entry) => {
     const thread = entry.threadId ? byId.get(entry.threadId) : undefined
-    if (thread && threadVisibleToAgent(host, thread, view)) return true
+    if (thread && named(thread) && threadVisibleToAgent(host, thread, view)) return true
     hidden.threads += 1
     hidden.cachedBytes += entry.cachedBytes ?? 0
     return false
@@ -68,10 +76,13 @@ function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThr
   return { own, others: threads.others, hidden }
 }
 
-/** The error's class, when it is a plain name: nothing else of an unexpected error reaches the agent. */
+/** Error classes an unexpected error may be reported as; nothing else of it reaches the agent. */
+const KNOWN_ERROR_CLASSES = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'AbortError', 'HeapSummaryError'])
+
+/** The error's class, when it is one of the known ones; otherwise `Error`. */
 function errorClass(caught: unknown): string {
   const name = caught instanceof Error ? caught.name : undefined
-  return typeof name === 'string' && /^[A-Za-z]{1,40}$/.test(name) ? name : 'Error'
+  return typeof name === 'string' && KNOWN_ERROR_CLASSES.has(name) ? name : 'Error'
 }
 
 /** A heap summary running in this service: one at a time, whatever profile or turn asked. */
@@ -161,11 +172,11 @@ export function profilerTools(host: AppToolHost): MousseTool[] {
       const refusal = !profiler?.service ? 'This Mousse service has no profiler.' : profilerToolRefusal(profiler.settings, name)
       if (refusal) return error(refusal)
       const service = profiler!.service!
-      // A profile that opened after the service started, with the profiler on, starts it here.
-      if (!service.monitor()) service.refresh()
-      const monitor = service.monitor()
-      if (!monitor) return error('The profiler is starting. Call again in a few seconds.')
       try {
+        // A profile that opened after the service started, with the profiler on, starts it here.
+        if (!service.monitor()) service.refresh()
+        const monitor = service.monitor()
+        if (!monitor) return error('The profiler is starting. Call again in a few seconds.')
         return await run(name, args, ctx, { profiler: profiler!, service, monitor, host })
       } catch (caught) {
         // Only fixed text reaches the agent: a Node error's message can name a file under the home folder.
@@ -200,7 +211,7 @@ async function run(
         sample,
         detail: monitor.readDetailNow(),
         thresholds: monitor.thresholds,
-        threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx.caller.threadId),
+        threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx.caller.threadId, ctx.level ?? 'lineage'),
         cacheLimits: { threads: MAX_CACHED_THREADS, mb: MAX_CACHED_BYTES / 1048576 },
         replayLimitPerProfile: MMS_PROTOCOL_REPLAY_RING_SIZE
       }))

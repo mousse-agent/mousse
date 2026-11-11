@@ -228,7 +228,7 @@ function workerSource(): string {
     "  parentPort.postMessage({ ok: true, value: summarize(JSON.parse(readFileSync(workerData.file, 'utf8')), workerData.top) })",
     '} catch (error) {',
     // Only the error's class: a parse error's message quotes the file, which holds thread text.
-    "  const name = error && typeof error.name === 'string' && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'Error'",
+    "  const name = error && ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError'].includes(error.name) ? error.name : 'Error'",
     '  parentPort.postMessage({ ok: false, error: name })',
     '}'
   ].join('\n')

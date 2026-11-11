@@ -19,6 +19,7 @@ import { createAppToolRegistry, type AppToolHost, type ProfilerToolHost } from '
 import type { AppToolTurn, ToolCallContext } from '../src/mms/run/mcp/appTools/types'
 import { PROFILER_TOOL_NAMES, normalizeProfilerSettings, profilerToolAllowed, type ProfilerSettings, type ProfilerToolName } from '../src/shared/diagnostics/profiler'
 import { resolveMemoryThresholds } from '../src/shared/diagnostics/memory'
+import type { AgentAccessLevel } from '../src/shared/settings'
 import type { MousseMainService } from '../src/mms/MousseMainService'
 import type { MmsProtocolServer } from '../src/mms/protocol/server'
 import type { HandlerContext } from '../src/mms/protocol/handlers'
@@ -287,8 +288,8 @@ const turn = {
   threadId: 'own-1', runId: 'run-1', turnToken: 'tok', mode: 'agent', modeFacts: { readOnly: false, agent: true, build: false }, modeCeiling: 'default',
   subagent: false, discovery: false, actor: { kind: 'main' }, enabledSkills: [], loadedSkills: [], settingsEnabled: () => true
 } as unknown as AppToolTurn
-function ctx(signal = new AbortController().signal): ToolCallContext {
-  return { caller: { threadId: 'own-1', runId: 'run-1', provider: 'claude', modeCeiling: 'default', accessLevel: 'lineage' }, turn, toolCallId: 'call-1', signal, transport: 'mcp' }
+function ctx(signal = new AbortController().signal, level?: AgentAccessLevel): ToolCallContext {
+  return { caller: { threadId: 'own-1', runId: 'run-1', provider: 'claude', modeCeiling: 'default', accessLevel: level ?? 'lineage' }, turn, toolCallId: 'call-1', signal, transport: 'mcp', ...(level ? { level } : {}) }
 }
 
 async function call(registry: ReturnType<typeof toolsFor>, name: ProfilerToolName, args: Record<string, unknown> = {}, context = ctx()) {
@@ -352,7 +353,7 @@ describe('the profiler tools', () => {
   it('profiler_service_breakdown: heap, counts, caches, this profile\'s threads by id and other profiles as totals', async () => {
     const dir = home()
     const { service, threads } = profilerFixture(dir)
-    const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_service_breakdown')
+    const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_service_breakdown', {}, ctx(undefined, 'read'))
     expect(threads).toHaveBeenCalledWith(OWNER)
     expect(value).toMatchObject({
       heap: { usedMb: 60, limitMb: 4096 },
@@ -401,16 +402,66 @@ describe('the profiler tools', () => {
       'bot-1': { projectId: 'p1', botOwned: true },
       'elsewhere-1': { projectId: 'p2' }
     }
-    const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown')
-    expect(value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['launched-1', 'own-1'])
+    const ids = (value: { threads: Array<{ threadId: string }> }) => value.threads.map((row) => row.threadId).sort()
+    const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, 'read'))
+    expect(ids(value)).toEqual(['launched-1', 'own-1'])
     expect(value.hiddenThreads).toEqual({ threads: 6, cachedMb: 12 })
     for (const id of ['private-', 'bot-1', 'elsewhere-1', 'unknown-1']) expect(outcome.text).not.toContain(id)
     expectNoPrivateData(outcome.text, dir)
 
-    // An agent in a private thread sees the private threads, as thread_list shows them to it.
-    const fromPrivate = await call(toolsFor(() => ON, service, undefined, { ...extra, 'own-1': { projectId: 'p1', localOnly: true } }, ['p1']), 'profiler_service_breakdown')
-    expect(fromPrivate.value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['launched-1', 'own-1', 'private-1', 'private-child-1'])
-    expect(fromPrivate.value.hiddenThreads).toEqual({ threads: 4, cachedMb: 9 })
+    // An agent in a private thread sees the private threads, as thread_list shows them to it; another thread's
+    // subagent stays folded below `manage`.
+    const privateCaller = { ...extra, 'own-1': { projectId: 'p1', localOnly: true } }
+    const fromPrivate = await call(toolsFor(() => ON, service, undefined, privateCaller, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, 'read'))
+    expect(ids(fromPrivate.value)).toEqual(['launched-1', 'own-1', 'private-1'])
+    expect(fromPrivate.value.hiddenThreads).toEqual({ threads: 5, cachedMb: 10 })
+    const managing = await call(toolsFor(() => ON, service, undefined, privateCaller, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, 'manage'))
+    expect(ids(managing.value)).toEqual(['launched-1', 'own-1', 'private-1', 'private-child-1'])
+  })
+
+  it('profiler_service_breakdown below the read level names only the caller, its delegators and the threads it launched', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    const entry = (threadId: string): ThreadMemoryEntry => ({ threadId, loaded: true, cached: true, turnRunning: false, cachedBytes: 1048576, idleSeconds: 60 })
+    service.threads = () => ({
+      own: [entry('own-1'), entry('parent-1'), entry('launched-1'), entry('own-2')],
+      others: { profiles: 0, loadedThreads: 0, cachedThreads: 0, cachedBytes: 0 }
+    })
+    const extra = {
+      'own-1': { projectId: 'p1', lineage: { parentThreadId: 'parent-1', rootThreadId: 'parent-1', relationship: 'subagent' } },
+      'parent-1': { projectId: 'p1' },
+      'launched-1': { projectId: 'p1', createdByThreadId: 'own-1' },
+      'own-2': { projectId: 'p1' }
+    }
+    // An absent level counts as the narrowest.
+    for (const context of [ctx(undefined, 'lineage'), ctx()]) {
+      const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, context)
+      expect(value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['launched-1', 'own-1', 'parent-1'])
+      expect(value.hiddenThreads).toEqual({ threads: 1, cachedMb: 1 })
+      expect(outcome.text).not.toContain('own-2')
+    }
+  })
+
+  it('reports an unexpected error class only when it is a known one', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    const odd = new Error('x')
+    odd.name = 'Speedupstartup'
+    service.threads = () => { throw odd }
+    const { outcome } = await call(toolsFor(() => ON, service), 'profiler_service_breakdown')
+    expect(outcome.text).toBe('The profiler could not finish profiler_service_breakdown (Error). Call again in a few seconds.')
+    service.threads = () => { throw new RangeError('y') }
+    expect((await call(toolsFor(() => ON, service), 'profiler_service_breakdown')).outcome.text).toContain('(RangeError)')
+  })
+
+  it('a profiler that fails to start reaches the agent as fixed text', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    service.monitor = () => null
+    service.refresh = () => { throw new Error(`EACCES: permission denied, mkdir '${dir}/memory'`) }
+    const { outcome } = await call(toolsFor(() => ON, service), 'profiler_overview')
+    expect(outcome).toEqual({ isError: true, text: 'The profiler could not finish profiler_overview (Error). Call again in a few seconds.' })
+    expectNoPrivateData(outcome.text, dir)
   })
 
   it('an unexpected error reaches the agent as fixed text, never its message', async () => {
