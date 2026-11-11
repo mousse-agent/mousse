@@ -51,6 +51,12 @@ describe('a thread in view', () => {
     const thread = t.thread('Before')
     const id = t.qualified(thread.id)
     await t.dispatch('threads.focus', { threadId: id })
+    // Right after the previous test lets its stream go, the first attach can find the computer offline and the
+    // focus returns before a retry attaches. The rename is made once the stream is open, so it travels on it.
+    await vi.waitFor(
+      () => expect(t.router.attached.state().find((row) => row.threadId === thread.id)?.attached).toBe(true),
+      { timeout: 10_000 }
+    )
     const applied = vi.spyOn(t.caller.bridge.lists, 'applyMetadata')
     const from = t.events.length
     t.owner.threads.updateThreadMeta(thread.id, { name: 'After' })
