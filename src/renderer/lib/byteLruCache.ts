@@ -35,8 +35,12 @@ export class ByteLruCache<K, V> {
   }
 
   set(key: K, value: V, bytes: number): void {
-    this.remove(key)
-    if (!(bytes >= 0) || bytes > this.budgetBytes) return
+    const replaced = this.remove(key)
+    if (!(bytes >= 0) || bytes > this.budgetBytes) {
+      // The entry it replaced is gone all the same.
+      if (replaced) this.onChange?.(this.total)
+      return
+    }
     this.entries.set(key, { value, bytes })
     this.total += bytes
     for (const [oldest, entry] of this.entries) {

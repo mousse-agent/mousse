@@ -69,6 +69,16 @@ describe('ByteLruCache', () => {
     expect(sizes).toEqual([30, 50, 0])
   })
 
+  it('reports the size when an entry is replaced by one too large to keep', () => {
+    const sizes: number[] = []
+    const cache = new ByteLruCache<string, string>(100, (bytes) => sizes.push(bytes))
+    cache.set('a', 'A', 40)
+    cache.set('a', 'A2', 101)
+    expect(cache.has('a')).toBe(false)
+    expect(cache.bytes).toBe(0)
+    expect(sizes).toEqual([40, 0])
+  })
+
   it('has budgets of about 10 MB for Markdown and 50 MB for code', () => {
     expect(MARKDOWN_CACHE_BYTES).toBe(10 * 1024 * 1024)
     expect(HIGHLIGHT_CACHE_BYTES).toBe(50 * 1024 * 1024)
@@ -161,6 +171,17 @@ describe('parsed Markdown', () => {
     mountMarkdown(heavyReply, false)
     expect(streamedEntries).toBeLessThanOrEqual(markdownCache.size)
     expect(streamedBytes).toBeLessThanOrEqual(markdownCache.bytes)
+  })
+
+  it('drops the partial text a streaming block put there when it ends on text already held', () => {
+    mountMarkdown('Hello world, the end.')
+    unmountMarkdown()
+    const held = markdownCache.size
+    mountMarkdown('Hello world, the', true)
+    expect(markdownCache.size).toBe(held + 1)
+    // The same block reaches text the cache holds: the step on the way goes.
+    mountMarkdown('Hello world, the end.', true)
+    expect(markdownCache.size).toBe(held)
   })
 })
 

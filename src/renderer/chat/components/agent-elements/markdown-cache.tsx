@@ -108,11 +108,15 @@ function CachedBlockView(props: BlockProps) {
   if (!found) return drawn;
   const text = found.parse.props.children;
   const key = `block\0${setup}\0${text}`;
+  // The text this block put there before is a step on the way to `text`, whether `text` is new or held.
+  if (inserted.current !== null && inserted.current !== key) {
+    cache.delete(inserted.current);
+    inserted.current = null;
+  }
   let tree = cache.get(key) as ReactNode | undefined;
   if (tree === undefined) {
     countRender("blockParse");
     tree = found.parse.type(found.parse.props);
-    if (inserted.current !== null && inserted.current !== key) cache.delete(inserted.current);
     cache.set(key, tree, parsedTreeBytes(tree, key));
     inserted.current = key;
   }
@@ -120,4 +124,4 @@ function CachedBlockView(props: BlockProps) {
 }
 
 /** Streamdown's block with parsed Markdown kept across mounts; Streamdown's own if its shape is not the one read here. */
-export const CachedBlock = streamdownBlock ? memo(CachedBlockView, streamdownBlockCompare) : Block;
+export const CachedBlock = typeof streamdownBlock === "function" ? memo(CachedBlockView, streamdownBlockCompare) : Block;
