@@ -3,7 +3,7 @@ import { contextHandoff, previousTurnModel } from './contextHandoff'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
 import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
-import { logDebug } from '../log/diag'
+import { logDebug, logWarn } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { existsSync, mkdirSync } from 'node:fs'
 import { sha256Hex } from '../../shared/agents/hashes'
@@ -11539,7 +11539,12 @@ export class OrchestratorService extends EventEmitter {
         // A drain already accepted is never handed back: the model has it.
         returnSteer: (text, token) => {
           if (token && acceptedDrains.has(token)) {
-            console.warn('a steer the turn already accepted was handed back; it is not run again', { threadId: session.threadId, drain: token })
+            logWarn('OrchestratorService', 'a steer the turn already accepted was handed back; it is not run again', undefined, {
+              threadId: session.threadId,
+              runId: engineRunId,
+              drain: token,
+              acceptedDrains: acceptedDrains.size
+            })
             return
           }
           const entry = token ? drained.get(token) ?? takenDrains.get(token) : undefined
