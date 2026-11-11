@@ -1663,6 +1663,11 @@ export class OrchestratorService extends EventEmitter {
     holdReason: (threadId) => this.releaseHoldReason(threadId),
     releaseIfIdle: (threadId) => this.releaseIfIdle(threadId)
   })
+
+  /** How many threads have a session in memory (the memory monitor's count). */
+  loadedSessionCount(): number {
+    return this.sessions.size
+  }
   /**
    * The last thread the context gauge measured without a session (`measuredSession`), kept while the thread is
    * unchanged so typing in its composer does not read it again. Only one: nothing else releases what it holds.

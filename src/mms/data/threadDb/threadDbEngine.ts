@@ -198,6 +198,11 @@ export class ThreadDbEngine {
 
   constructor(private readonly options: { idleCloseMs: number; checkpointOnClose?: boolean }) {}
 
+  /** Open SQLite connections held by this engine (the memory monitor's count). */
+  openCount(): number {
+    return this.connections.size
+  }
+
   private path(dir: string): string {
     return join(dir, THREAD_DB_FILE)
   }

@@ -166,6 +166,11 @@ export class ProfileHost {
     return this.live.get(profileId)
   }
 
+  /** Every profile whose services are running, the default included. */
+  liveServices(): MmsProfileServices[] {
+    return [...this.live.values()]
+  }
+
   async startActiveProfiles(): Promise<void> {
     for (const record of this.manager.list()) {
       if (record.status !== 'active') continue

@@ -57,6 +57,11 @@ export function bridgeProtocolEvent(
       broadcast('lineEdits:updated', (event.data as { snapshot: unknown }).snapshot)
       return true
     }
+    // The service's memory monitor has a notice for the windows (`diagnostics.memory.notice`).
+    case 'diagnostics.memory.notice': {
+      broadcast('diagnostics:memoryNotice', event.data)
+      return true
+    }
     case 'projects.updated': {
       const projects =
         (event.data as { projects?: unknown } | null)?.projects ?? event.data

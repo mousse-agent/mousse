@@ -1,5 +1,6 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
@@ -1211,6 +1212,18 @@ const api = {
       return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
+  /** The service's memory monitor (Settings > General > About, and its notice). */
+  diagnostics: {
+    memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('diagnostics:memoryStatus'),
+    memoryNoticeShown: (kind: BreachKind): Promise<void> => ipcRenderer.invoke('diagnostics:memoryNoticeShown', kind),
+    /** Opens the prefilled GitHub issue in the browser; nothing is sent until the person submits it there. */
+    memoryReport: (): Promise<{ ok: boolean; url: string }> => ipcRenderer.invoke('diagnostics:memoryReport'),
+    onMemoryNotice: (cb: (notice: MemoryNotice) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, notice: MemoryNotice) => cb(notice)
+      ipcRenderer.on('diagnostics:memoryNotice', handler)
+      return () => ipcRenderer.removeListener('diagnostics:memoryNotice', handler)
+    }
+  },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
@@ -1361,5 +1374,19 @@ const api = {
 }
 
 contextBridge.exposeInMainWorld('mousse', api)
+
+// This window's JS heap, once a minute, for the memory monitor. A timer and one small message; nothing per frame.
+{
+  const sendHeap = (): void => {
+    try {
+      const heap = process.getHeapStatistics()
+      ipcRenderer.send('diagnostics:windowHeap', { usedHeapSize: heap.usedHeapSize, totalHeapSize: heap.totalHeapSize })
+    } catch {
+      // Not offered in this renderer.
+    }
+  }
+  setTimeout(sendHeap, 10_000)
+  setInterval(sendHeap, 60_000)
+}
 
 export type MousseAPI = typeof api

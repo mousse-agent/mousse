@@ -41,6 +41,19 @@ export class EventSequenceRing {
     return this.ring.length
   }
 
+  /** The retained events' size as JSON text, in UTF-16 code units (about bytes for ASCII). */
+  approximateBytes(): number {
+    let bytes = 0
+    for (const event of this.ring) {
+      try {
+        bytes += JSON.stringify(event.data)?.length ?? 0
+      } catch {
+        // An event that cannot be encoded is not counted.
+      }
+    }
+    return bytes
+  }
+
   /** Append an event; returns the assigned sequence. */
   push(type: string, data: unknown, threadId?: string, profileId?: string): ProtocolEvent {
     this.sequence += 1

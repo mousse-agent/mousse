@@ -42,6 +42,8 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Delete private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto delete', 'timer', 'incognito', 'chats'] },
   { title: 'All threads on my other computers', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote'] },
   { title: 'Version and updates', section: 'general', anchor: 'general-updates', keywords: ['check for updates', 'about', 'upgrade'] },
+  { title: 'Memory', section: 'general', anchor: 'general-memory', keywords: ['ram', 'diagnostics', 'report', 'leak'] },
+  { title: 'Memory notices', section: 'general', anchor: 'general-memory-notices', keywords: ['ram', 'diagnostics', 'notification'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
   { title: 'Phones', section: 'connections', anchor: 'account-phones', keywords: ['mobile', 'pair'], needs: { anchor: 'account-mousse-id', reason: 'Phones appear once you sign in to Mousse ID.' } },

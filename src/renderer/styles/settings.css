@@ -425,6 +425,10 @@ html[data-theme='high-contrast'] .settings-group-icon {
    the description stays muted. Text only, never a dot or a pill. */
 .settings-status-ok { color: var(--success); }
 .settings-status-warn { color: var(--warning); }
+
+/* Settings > General > About > Memory: the service's trend beside Report. */
+.memory-row-controls { display: inline-flex; align-items: center; gap: 10px; }
+.memory-sparkline { color: var(--text-secondary); flex: none; }
 .settings-status-bad { color: var(--danger); }
 
 .settings-group-desc {

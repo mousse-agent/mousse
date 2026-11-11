@@ -22,6 +22,7 @@ Usage:
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
   mousse-cli storage export-json             Write threads back as JSON before a downgrade
+  mousse-cli diagnostics memory [report]     The service's memory log, and a prefilled issue
   mousse-cli relay serve                    Run a self-hosted relay in the foreground
   mousse-cli net <subcommand>               Network identity, transports and recovery
   mousse-cli bridge <subcommand>            Link and control my devices
@@ -209,6 +210,16 @@ export const STORAGE_HELP = `Usage:
                                       beside the files.
 `
 
+export const DIAGNOSTICS_HELP = `Usage:
+  mousse-cli diagnostics memory       The latest memory numbers per process, the hourly
+                                      trend and any limit out of bounds, read from
+                                      <home>/diagnostics/memory.jsonl
+  mousse-cli diagnostics memory report
+                                      Print the issue text and a link that opens it
+                                      prefilled on GitHub. Numbers only; nothing is
+                                      sent until you submit it there.
+`
+
 export const SERVICE_HELP = `Usage:
   mousse-cli service run              Run MMS in the foreground (headless)
   mousse-cli service start            Spawn detached service run (pidfile)
@@ -251,6 +262,8 @@ export function commandHelp(command: string): string | null {
       return CONFIG_HELP
     case 'storage':
       return STORAGE_HELP
+    case 'diagnostics':
+      return DIAGNOSTICS_HELP
     case 'service':
       return SERVICE_HELP
     case 'relay':

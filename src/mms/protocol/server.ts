@@ -167,6 +167,25 @@ export class MmsProtocolServer {
     return this.ringFor(this.opts.mms.profileId).currentSequence
   }
 
+  /** The replay buffers' retained events, across profiles (the memory monitor's count). */
+  replayEventCount(): number {
+    let events = 0
+    for (const ring of this.audienceRings.values()) events += ring.size
+    return events
+  }
+
+  /** Sends an event every profile's clients receive, such as the memory monitor's notice. */
+  emitInstallationEvent(type: string, data: unknown): void {
+    this.emitToSubscribers(this.ring.push(type, data), null)
+  }
+
+  /** The replay buffers' approximate size in bytes, as JSON. Costs a pass over every retained event; call rarely. */
+  replayBytes(): number {
+    let bytes = 0
+    for (const ring of this.audienceRings.values()) bytes += ring.approximateBytes()
+    return bytes
+  }
+
   private ringFor(profileId: string): EventSequenceRing {
     let ring = this.audienceRings.get(profileId)
     if (!ring) {

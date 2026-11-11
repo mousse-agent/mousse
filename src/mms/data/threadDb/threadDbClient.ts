@@ -103,6 +103,30 @@ class AsyncWorker {
   terminate(): Promise<number> {
     return this.worker.terminate()
   }
+
+  /** Bytes of heap the worker uses, or null when it cannot say. */
+  heapUsed(): Promise<number | null> {
+    return workerHeapUsed(this.worker)
+  }
+}
+
+async function workerHeapUsed(worker: Worker): Promise<number | null> {
+  const read = (worker as { getHeapStatistics?: () => Promise<{ used_heap_size: number }> }).getHeapStatistics
+  if (typeof read !== 'function') return null
+  try {
+    return (await read.call(worker)).used_heap_size
+  } catch {
+    return null
+  }
+}
+
+/** A worker's answer, or null when it takes longer than `ms`. */
+function within<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined
+  return Promise.race([
+    promise.catch(() => null),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); timer.unref?.() })
+  ]).finally(() => clearTimeout(timer))
 }
 
 export class ThreadDbClient {
@@ -218,6 +242,36 @@ export class ThreadDbClient {
     if (this.closed) return
     this.callSync('quiesce', dir)
     if (this.inlineRead) this.inlineRead.quiesce(dir)
+  }
+
+  /**
+   * The memory monitor's counts: worker threads started, the SQLite connections their engines hold (null when one
+   * did not answer within a few seconds), and each worker's heap in bytes. Starts nothing.
+   */
+  async diagnostics(): Promise<{ workers: number; connections: number | null; workerHeaps: number[] }> {
+    if (this.closed) return { workers: 0, connections: 0, workerHeaps: [] }
+    if (this.inlineWrite) {
+      return { workers: 0, connections: this.inlineWrite.openCount() + (this.inlineRead?.openCount() ?? 0), workerHeaps: [] }
+    }
+    const asyncWorkers = [this.reader, this.indexer, this.importer].filter((worker): worker is AsyncWorker => Boolean(worker))
+    let connections: number | null = 0
+    try {
+      // The write worker answers between saves; a count takes microseconds.
+      connections += this.callSync('openCount')
+    } catch {
+      connections = null
+    }
+    const counts = await Promise.all(asyncWorkers.map((worker) => within(worker.call('openCount', []) as Promise<number>, 5_000)))
+    for (const count of counts) connections = connections === null || typeof count !== 'number' ? null : connections + count
+    const heaps = await Promise.all([
+      this.writer ? within(workerHeapUsed(this.writer), 5_000) : Promise.resolve(null),
+      ...asyncWorkers.map((worker) => within(worker.heapUsed(), 5_000))
+    ])
+    return {
+      workers: (this.writer ? 1 : 0) + asyncWorkers.length,
+      connections,
+      workerHeaps: heaps.filter((heap): heap is number => typeof heap === 'number')
+    }
   }
 
   /** True when the client has workers to stop. */

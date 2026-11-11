@@ -1,4 +1,5 @@
 import { registerAppletIpc } from '../applets/registerAppletIpc'
+import { registerMemoryDiagnosticsIpc } from '../diagnostics/memoryIpc'
 import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
@@ -394,6 +395,7 @@ export function registerGuiIpc(
   activeGuiMms = guiMms
   registerLinuxWindowResizeIpc(getWindow)
   registerAppletIpc(registerHandler, guiMms, () => [getWindow()])
+  registerMemoryDiagnosticsIpc(registerHandler, guiMms)
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')

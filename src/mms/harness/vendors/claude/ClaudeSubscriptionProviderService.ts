@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { trackChildProcess } from '../../../diagnostics/liveCounts'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -1423,7 +1424,7 @@ export class ClaudeSubscriptionProviderService {
     // another program given the pid since. The callback is the SDK's own, not in its published types.
     let spawned: { pid: number; spawnedAt: number } | undefined
     const reported = (options as { onProcessSpawned?: (pid: number) => void }).onProcessSpawned
-    const created = sdk.query({ prompt, options: { ...options, onProcessSpawned: (pid: number) => { spawned = { pid, spawnedAt: Date.now() }; reported?.(pid) } } as Options })
+    const created = sdk.query({ prompt, options: { ...options, onProcessSpawned: (pid: number) => { spawned = { pid, spawnedAt: Date.now() }; trackChildProcess(pid, 'claude'); reported?.(pid) } } as Options })
     noteClaudeQuerySpawn(created, () => spawned)
     return created
   }
