@@ -465,6 +465,14 @@ button.composer-idle-chip:hover,
   cursor: default;
 }
 
+/* A narrow composer has no room for it beside the run controls, so it gives way; Compact now stays in the
+   context ring's popover. */
+@container composer (max-width: 560px) {
+  .composer-idle-chip {
+    display: none;
+  }
+}
+
 /* Its menu: the permission menu's rows under one muted line saying how long the cache has been cold. */
 .composer-mode-menu.composer-idle-menu {
   width: min(280px, calc(100vw - 16px));
