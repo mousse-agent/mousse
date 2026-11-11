@@ -14,7 +14,7 @@ import { TurnProgressContext, type TurnProgressState } from '../../src/renderer/
 import { countRender, startRenderCounts, stopRenderCounts } from '../../src/renderer/chat/components/agent-elements/render-counts'
 import { mousseToUIMessages, reuseUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import { applyStreamedUpdates, clearAllLiveText, handOverLiveThoughts, hasLiveText, isLiveThoughtUpdate } from '../../src/renderer/stores/liveTextStore'
+import { applyStreamedUpdates, clearAllLiveText, hasLiveText, isLiveThoughtUpdate, landMessage } from '../../src/renderer/stores/liveTextStore'
 import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 import type { ChatMessage } from '../../src/shared/types'
 
@@ -100,12 +100,25 @@ function stream(...updates: ChatMessage[]) {
   act(() => applyStreamedUpdates(updates, useAppStore.getState().messages, write))
 }
 
-/** A new message lands, as App's message handler applies it. */
-function land(message: ChatMessage) {
-  act(() => {
-    handOverLiveThoughts(useAppStore.getState().messages, write)
-    useAppStore.getState().addMessage(message)
+/** A new message lands through App's message handler, after `pending` (the frame's held updates) are flushed. */
+function land(message: ChatMessage, ...pending: ChatMessage[]) {
+  act(() => landMessage(message, () => {
+    if (pending.length > 0) applyStreamedUpdates(pending, useAppStore.getState().messages, write)
+  }))
+}
+
+/** How many times the store's messages change while `run` runs. */
+function messageWrites(run: () => void): number {
+  let count = 0
+  const stop = useAppStore.subscribe((state, previous) => {
+    if (state.messages !== previous.messages) count += 1
   })
+  try {
+    run()
+  } finally {
+    stop()
+  }
+  return count
 }
 
 /** The turn's thought rows (outside any group), by their header button, and the live ones' line. */
@@ -242,12 +255,69 @@ describe('the end of a thought', () => {
     mount(thread(3, 'Weighing'))
     stream(thinking('th', 11, 'Weighing the two options'))
     expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toBe('Weighing')
-    writes = 0
-    land(assistant('reply', 12, 'Option two.', { streaming: true }))
-    expect(writes).toBe(1)
+    const changes = messageWrites(() => land(assistant('reply', 12, 'Option two.', { streaming: true })))
+    // The thought's text, then the reply.
+    expect(changes).toBe(2)
     expect(hasLiveText('th')).toBe(false)
     expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toBe('Weighing the two options')
     expect(answerText()).toContain('Option two.')
+  })
+
+  it('a message that lands takes the thought\'s held deltas first, then its live text, then itself', () => {
+    mount(thread(3, 'Weighing'))
+    stream(thinking('th', 11, 'Weighing the two'))
+    // The frame still holds a delta when the message lands: App flushes it, then hands the thought over.
+    land(assistant('reply', 12, 'Option two.', { streaming: true }), thinking('th', 11, 'Weighing the two options, carefully'))
+    expect(hasLiveText('th')).toBe(false)
+    const messages = useAppStore.getState().messages
+    expect(messages.find((m) => m.id === 'th')!.thinking!.content).toBe('Weighing the two options, carefully')
+    expect(messages.at(-1)!.id).toBe('reply')
+  })
+
+  it('a user message replaces its optimistic copy', () => {
+    mount([...thread(1, 'Done', []), user('optimistic:1', 10, 'Next')])
+    land(user('u-real', 10, 'Next'))
+    const ids = useAppStore.getState().messages.map((m) => m.id)
+    expect(ids).not.toContain('optimistic:1')
+    expect(ids.at(-1)).toBe('u-real')
+  })
+
+  it('a row that lands through the update channel gives the group title the thought\'s full text, in one write', () => {
+    mount(thread(5, '**Checking the build**\n\nIt fails', [tool('tool-1', 12)]))
+    stream(thinking('th', 15, '**Checking the build**\n\nIt fails.\n\n**Running the tests**\n\nNow'))
+    expect(hasLiveText('th')).toBe(true)
+    writes = 0
+    stream(tool('tool-2', 16))
+    expect(writes).toBe(1)
+    expect(hasLiveText('th')).toBe(false)
+    expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toContain('Running the tests')
+    expect(useAppStore.getState().messages.at(-1)!.id).toBe('tool-2')
+    // The group, now titled from the stored thought, shows its newest heading.
+    expect(answerText()).toContain('Running the tests')
+  })
+
+  it('a thought delta after a row landed in the same frame goes to the store', () => {
+    mount(thread(2, 'Alpha'))
+    stream(thinking('th', 9, 'Alpha beta'))
+    writes = 0
+    stream(tool('tool-2', 10), thinking('th', 9, 'Alpha beta gamma'))
+    expect(writes).toBe(1)
+    expect(hasLiveText('th')).toBe(false)
+    expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toBe('Alpha beta gamma')
+  })
+
+  it('a thread switch while the thought streams clears its live text, and the view brings the full text', () => {
+    mount(thread(3, 'Weighing'))
+    stream(thinking('th', 11, 'Weighing the two options'))
+    expect(hasLiveText('th')).toBe(true)
+    act(() => useAppStore.getState().switchToThread('thread-2'))
+    expect(hasLiveText('th')).toBe(false)
+    act(() => useAppStore.getState().switchToThread('thread-1'))
+    expect(hasLiveText('th')).toBe(false)
+    const view = { threadId: 'thread-1', messages: thread(3, 'Weighing the two options, and a third') }
+    act(() => useAppStore.getState().applyThreadView(view as unknown as Parameters<ReturnType<typeof useAppStore.getState>['applyThreadView']>[0]))
+    expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toBe('Weighing the two options, and a third')
+    expect(answerText()).toContain('and a third')
   })
 
   it('a lagging snapshot of the thought does not shorten what streamed', () => {

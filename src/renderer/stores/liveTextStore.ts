@@ -233,21 +233,40 @@ export function applyStreamedUpdates(
 ): void {
   const toStore: ChatMessage[] = []
   const handedOver: string[] = []
+  // Set once a message the transcript does not hold yet lands in this frame: nothing ends it any more.
+  let landed = false
   for (const update of updates) {
     const current = findFromEnd(held, update.id)
     if (current && isLiveTextUpdate(current, update)) {
       setLiveText(update.id, { text: assistantDisplayText(update.content), over: assistantDisplayText(current.content) })
       continue
     }
-    if (current && current === held[held.length - 1] && isLiveThoughtUpdate(current, update)) {
+    if (!landed && current && current === held[held.length - 1] && isLiveThoughtUpdate(current, update)) {
       setLiveText(update.id, { text: update.thinking!.content, over: current.thinking!.content })
       continue
     }
+    if (!current && !landed) {
+      // A message lands after the thought through this channel: the thought's live text goes first, in the same write.
+      landed = true
+      collectLiveThoughts(held, toStore, handedOver)
+    }
     toStore.push(update)
-    if (entries.has(update.id)) handedOver.push(update.id)
+    if (entries.has(update.id) && !handedOver.includes(update.id)) handedOver.push(update.id)
   }
   if (toStore.length > 0) write(toStore)
   for (const id of handedOver) clearLiveText(id)
+}
+
+/** Adds to `toStore` every live thought of `messages` with its live text, and its id to `handedOver`, skipping ones already there. */
+function collectLiveThoughts(messages: readonly ChatMessage[], toStore: ChatMessage[], handedOver: string[]): void {
+  for (const [id, entry] of entries) {
+    if (handedOver.includes(id)) continue
+    const message = findFromEnd(messages, id)
+    if (message?.kind !== 'thinking' || !message.thinking) continue
+    handedOver.push(id)
+    const text = pickText(entry, message.thinking.content)
+    if (text !== message.thinking.content) toStore.push({ ...message, thinking: { ...message.thinking, content: text } })
+  }
 }
 
 /**
@@ -258,15 +277,29 @@ export function applyStreamedUpdates(
 export function handOverLiveThoughts(messages: readonly ChatMessage[], write: (messages: ChatMessage[]) => void): void {
   const toStore: ChatMessage[] = []
   const handedOver: string[] = []
-  for (const [id, entry] of entries) {
-    const message = findFromEnd(messages, id)
-    if (message?.kind !== 'thinking' || !message.thinking) continue
-    handedOver.push(id)
-    const text = pickText(entry, message.thinking.content)
-    if (text !== message.thinking.content) toStore.push({ ...message, thinking: { ...message.thinking, content: text } })
-  }
+  collectLiveThoughts(messages, toStore, handedOver)
   if (toStore.length > 0) write(toStore)
   for (const id of handedOver) clearLiveText(id)
+}
+
+/**
+ * A new message of the selected thread lands (`onThreadMessage`): the streamed updates held for the
+ * frame are applied first (`flush`), then the live text of a thought it follows is handed to the
+ * transcript, then the message is added. A user message replaces its optimistic copy.
+ */
+export function landMessage(message: ChatMessage, flush: () => void): void {
+  flush()
+  const store = useAppStore.getState()
+  handOverLiveThoughts(store.messages, store.updateMessages)
+  const state = useAppStore.getState()
+  if (message.role === 'user') {
+    const isCopy = (m: ChatMessage) => m.id.startsWith('optimistic:') && m.content === message.content
+    if (state.messages.some(isCopy)) {
+      state.setMessages([...state.messages.filter((m) => !isCopy(m)), message])
+      return
+    }
+  }
+  state.addMessage(message)
 }
 
 /**
