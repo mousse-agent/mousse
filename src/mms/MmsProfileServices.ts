@@ -1219,7 +1219,7 @@ export class MmsProfileServices {
         clearCleanupMarker(this.threads.lifecycleStore, record.taskId)
         this.threads.projectPurgedIndex(record)
         this.threadRuntimes.disposeRuntime(record.taskId)
-        this.orchestrator.markThreadDeleted(record.taskId)
+        this.orchestrator.markThreadDeleted(record.taskId, { purged: true })
       },
       configurationChanged: () => {
         this.config.reloadFromDisk()
