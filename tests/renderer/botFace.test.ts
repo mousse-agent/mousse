@@ -8,11 +8,14 @@ import {
   createWebGlGpu,
   FaceRenderer,
   faceDrawSide,
+  faceRendererStats,
   IDLE_LIVE_SECONDS,
+  IDLE_RELEASE_MS,
   LOST_CONTEXT_TIMEOUT_MS,
   PENDING_POLL_MS,
   PENDING_TIMEOUT_MS,
   resetSharedFaceRenderer,
+  RESTART_POLL_MS,
   SAMPLE_BUDGET,
   sharedFaceRendererStatus,
   UNFOCUSED_LIVE_SECONDS,
@@ -353,6 +356,106 @@ describe('BotFace fallback', () => {
     vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(null)
     render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
     expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+  })
+})
+
+describe('releasing the WebGL context while no face shows', () => {
+  const face = () => createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' })
+
+  it('lets the context go once no face has shown for the idle time', () => {
+    const fake = fakeEnv()
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    fake.tick()
+    expect(fake.draws).toHaveLength(1)
+    render(null)
+    fake.tick(IDLE_RELEASE_MS - 1)
+    expect(fake.gpu.dispose).not.toHaveBeenCalled()
+    expect(faceRendererStats()).not.toBeNull()
+    fake.tick(1)
+    expect(fake.gpu.dispose).toHaveBeenCalledTimes(1)
+    expect(faceRendererStats()).toBeNull()
+    expect(fake.timers()).toBe(0)
+    expect(fake.pending()).toBe(0)
+  })
+
+  it('keeps the context while a face shows, and when one comes back within the idle time', () => {
+    const fake = fakeEnv()
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    fake.tick(IDLE_RELEASE_MS * 2)
+    render(null)
+    fake.tick(IDLE_RELEASE_MS - 1)
+    render(face())
+    fake.tick(IDLE_RELEASE_MS * 2)
+    expect(fake.gpu.dispose).not.toHaveBeenCalled()
+    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+  })
+
+  it('makes a new context for the next face, which draws still until the shader is ready and then live', () => {
+    let status: ReturnType<FaceGpu['status']> = 'ready'
+    const fake = fakeEnv({ status: () => status })
+    const createGpu = vi.spyOn(fake.env, 'createGpu')
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    fake.tick()
+    render(null)
+    fake.tick(IDLE_RELEASE_MS)
+    expect(fake.gpu.dispose).toHaveBeenCalledTimes(1)
+
+    // The new context compiles the shader again: the face is never empty meanwhile.
+    status = 'pending'
+    render(face())
+    expect(createGpu).toHaveBeenCalledTimes(2)
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+    expect(host.querySelector('canvas')).toBeNull()
+    fake.tick(RESTART_POLL_MS)
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+
+    status = 'ready'
+    fake.tick(PENDING_POLL_MS)
+    expect(sharedFaceRendererStatus()).toBe('ready')
+    expect(host.querySelector('svg.bot-face-still')).toBeNull()
+    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+    const drawn = fake.draws.length
+    fake.tick()
+    expect(fake.draws.length).toBeGreaterThan(drawn)
+    expect(fake.timers()).toBe(0)
+  })
+
+  it('switches a new context that is ready at once to the live face at its first check', () => {
+    const fake = fakeEnv()
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    fake.tick()
+    render(null)
+    fake.tick(IDLE_RELEASE_MS)
+    render(face())
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+    fake.tick(RESTART_POLL_MS)
+    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+  })
+
+  it('draws the still face when the new context fails to compile', () => {
+    let status: ReturnType<FaceGpu['status']> = 'ready'
+    const fake = fakeEnv({ status: () => status })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    fake.tick()
+    render(null)
+    fake.tick(IDLE_RELEASE_MS)
+    status = 'failed'
+    render(face())
+    fake.tick(RESTART_POLL_MS)
+    expect(sharedFaceRendererStatus()).toBe('failed')
+    expect(fake.timers()).toBe(0)
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+  })
+
+  it('has nothing to release without WebGL', () => {
+    render(face())
+    render(null)
+    expect(sharedFaceRendererStatus()).toBe('unavailable')
   })
 })
 

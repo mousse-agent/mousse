@@ -91,8 +91,6 @@
   height: var(--theme-titlebar-height, var(--titlebar-height));
   flex-shrink: 0;
   background: var(--vscode-titleBar-activeBackground, linear-gradient(90deg, rgba(var(--surface-strong-rgb), 0.72) 0%, rgba(var(--surface-soft-rgb), 0.65) 55%, rgba(var(--surface-elevated-rgb), 0.6) 100%));
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   user-select: none;
 }
 
@@ -370,8 +368,6 @@ html.platform-darwin .titlebar-left {
   flex-direction: column;
   min-width: 280px;
   background: var(--vscode-sideBar-background, var(--gradient-surface));
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .sidebar.sidebar-full {
@@ -456,8 +452,6 @@ html.platform-darwin .titlebar-left {
   min-width: 0;
   flex-shrink: 0;
   background: rgba(var(--surface-strong-rgb), 0.55);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .main-area > :not(.header) {
@@ -920,8 +914,6 @@ html.platform-darwin .titlebar-left {
   justify-content: center;
   min-height: 0;
   background: rgba(var(--surface-base-rgb), 0.7);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .placeholder-view-content {
@@ -1289,8 +1281,6 @@ html.platform-darwin .titlebar-left {
   border: 1px solid var(--border);
   border-radius: 15px;
   background: var(--bg-secondary);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.16);
 }
 
@@ -2747,8 +2737,6 @@ html.platform-darwin .titlebar-left {
   border: none;
   border-radius: 14px;
   background: var(--bg-secondary);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: 0 8px 24px rgba(var(--surface-base-rgb), 0.18);
 }
 
@@ -3196,8 +3184,6 @@ html.platform-darwin .titlebar-left {
 
 .terminal-container-empty {
   background: rgba(var(--surface-base-rgb), 0.7);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .terminal-empty {
@@ -3452,8 +3438,6 @@ html[data-theme='high-contrast'] {
   gap: 8px;
   padding: 8px 12px;
   background: rgba(var(--surface-strong-rgb), 0.5);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
   min-height: 36px;
 }
@@ -3607,8 +3591,6 @@ html[data-theme='high-contrast'] {
   position: relative;
   z-index: 3;
   background: rgba(var(--surface-strong-rgb), 0.5);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   user-select: none;
 }
 

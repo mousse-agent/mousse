@@ -19,9 +19,10 @@
  *
  * Cost: the masks rasterise once per size; the drift animates only transform and opacity on composited
  * layers, so nothing lays out or repaints. It moves in 90 small steps per keyframe (20 a second at normal
- * speed) rather than on every screen refresh, and holds still while the window is not focused
- * (data-ambient-rest, set by AmbientGlow). Animation speed scales the loop, and Off or reduced motion
- * leaves it still.
+ * speed) rather than on every screen refresh, and holds still while the window is hidden, minimised or
+ * not focused (data-ambient-rest, set by AmbientGlow). The waves ask for their own layers (will-change)
+ * only while they move, so a resting or motionless glow keeps no extra layers. Animation speed scales
+ * the loop, and Off or reduced motion leaves it still.
  */
 
 .app .chat--empty {
@@ -59,7 +60,6 @@
   background-color: rgba(var(--accent-rgb), calc(var(--ui-aura-strength) * 1.25));
   -webkit-mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
   mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
-  will-change: transform, opacity;
   animation: var(--ambient-glow-anim) var(--ambient-glow-loop) var(--ambient-glow-ease) infinite;
 }
 
@@ -214,7 +214,15 @@ html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer::a
   75% { opacity: 0.6; }
 }
 
-/* Held where it is while the window is not focused; the logo's swirl holds with it (empty-logo.css). */
+/* Its own layer only while it moves: at rest, with motion Off or reduced, the layer goes. */
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-motion='off']) .app .chat--empty:not([data-ambient-rest]) .ambient-glow-wave {
+    will-change: transform, opacity;
+  }
+}
+
+/* Held where it is while the window is hidden, minimised or not focused; the logo's swirl holds with it
+   (empty-logo.css). */
 .app .chat--empty[data-ambient-rest] .ambient-glow-wave,
 .app .chat--empty[data-ambient-rest] .chat-input-area .composer::before,
 .app .chat--empty[data-ambient-rest] .chat-input-area .composer::after {

@@ -139,6 +139,13 @@ export const LOST_CONTEXT_TIMEOUT_MS = 5_000
 export const PENDING_TIMEOUT_MS = 3_000
 /** How often a timed-out compile is checked again. */
 export const PENDING_POLL_MS = 1_000
+/**
+ * With no face on screen for this long, the shared renderer lets its WebGL context go, so the GPU
+ * process frees the context, its buffer and the compiled shader. The next face makes a new one.
+ */
+export const IDLE_RELEASE_MS = 30_000
+/** A renderer made again after a release first checks its compile this soon, then every `PENDING_POLL_MS`. */
+export const RESTART_POLL_MS = 100
 
 /** Seconds between frames, by state. */
 const FRAME_INTERVAL: Record<BotFaceState, number> = {
@@ -219,7 +226,12 @@ export class FaceRenderer {
   /** Wait for the GPU at the end of each tick, so the stats include the shader time. */
   measureGpu = false
 
-  constructor(env: FaceRendererEnv) {
+  /**
+   * `stillUntilReady`: the faces draw the still fallback until the shader is ready, instead of nothing
+   * for up to `PENDING_TIMEOUT_MS`. Used when the shared renderer is made again after a release, so a
+   * face that was live before never shows empty while the new context compiles.
+   */
+  constructor(env: FaceRendererEnv, options: { stillUntilReady?: boolean } = {}) {
     this.env = env
     this.random = env.random ?? Math.random
     this.gpu = env.createGpu()
@@ -233,7 +245,12 @@ export class FaceRenderer {
       if (this.gpu?.status() === 'pending') this.startPendingTimer()
       this.schedule()
     })
-    this.startPendingTimer()
+    if (options.stillUntilReady && this.gpu && env.setTimer) {
+      this.timedOut = true
+      this.cancelPendingTimer = env.setTimer(this.checkPending, RESTART_POLL_MS)
+    } else {
+      this.startPendingTimer()
+    }
     const Observer = env.IntersectionObserver
     this.observer = Observer && this.gpu
       ? new Observer((entries) => {
@@ -263,6 +280,11 @@ export class FaceRenderer {
   status(): FaceRendererStatus {
     if (this.failed || this.timedOut) return 'failed'
     return this.ready ? 'ready' : 'pending'
+  }
+
+  /** Failed for good (no context, a failed compile, a lost context that did not come back), not just still compiling. */
+  get broken(): boolean {
+    return this.failed
   }
 
   /** Called when the status changes. */
@@ -872,6 +894,11 @@ let shared: FaceRenderer | null | undefined
 let sharedEnv: () => FaceRendererEnv | null = browserEnv
 let unsubscribeShared: (() => void) | null = null
 const sharedListeners = new Set<() => void>()
+/** The timer for `IDLE_RELEASE_MS` is set on the environment the shared renderer was made from. */
+let sharedTimerEnv: FaceRendererEnv | null = null
+let cancelIdleRelease: (() => void) | null = null
+/** The shared renderer was let go while idle: the next one draws still faces until it is ready. */
+let released = false
 
 function notifyShared(): void {
   for (const listener of [...sharedListeners]) listener()
@@ -881,14 +908,18 @@ function notifyShared(): void {
 export function sharedFaceRenderer(): FaceRenderer | null {
   if (shared !== undefined) return shared
   const env = sharedEnv()
-  const renderer = env ? new FaceRenderer(env) : null
-  if (!renderer || renderer.status() === 'failed') {
+  const renderer = env ? new FaceRenderer(env, { stillUntilReady: released }) : null
+  if (!renderer || renderer.broken) {
     renderer?.dispose()
     shared = null
     return shared
   }
   shared = renderer
+  sharedTimerEnv = env
+  released = false
   unsubscribeShared = renderer.subscribe(notifyShared)
+  // Made by a face's render, which subscribes next; until then nothing shows it, so the idle wait starts.
+  if (sharedListeners.size === 0) scheduleIdleRelease()
   if (import.meta.env?.DEV) {
     ;(globalThis as { __mousseFaceStats?: (measureGpu?: boolean) => FaceRendererStats }).__mousseFaceStats = (measureGpu) => {
       if (measureGpu !== undefined && measureGpu !== renderer.measureGpu) {
@@ -907,9 +938,32 @@ export function sharedFaceRendererStatus(): FaceRendererStatus | 'unavailable' {
   return renderer ? renderer.status() : 'unavailable'
 }
 
+/** Each face on screen subscribes; with none for `IDLE_RELEASE_MS`, the shared renderer and its context go. */
 export function subscribeSharedFaceRenderer(listener: () => void): () => void {
   sharedListeners.add(listener)
-  return () => sharedListeners.delete(listener)
+  cancelIdleRelease?.()
+  cancelIdleRelease = null
+  return () => {
+    sharedListeners.delete(listener)
+    if (sharedListeners.size === 0) scheduleIdleRelease()
+  }
+}
+
+function scheduleIdleRelease(): void {
+  cancelIdleRelease?.()
+  cancelIdleRelease = shared && sharedTimerEnv?.setTimer ? sharedTimerEnv.setTimer(releaseIdleRenderer, IDLE_RELEASE_MS) : null
+}
+
+/** Frees the WebGL context while no face shows. A renderer that never got WebGL (`null`) stays, so it is not tried again. */
+function releaseIdleRenderer(): void {
+  cancelIdleRelease = null
+  if (sharedListeners.size > 0 || !shared) return
+  unsubscribeShared?.()
+  unsubscribeShared = null
+  shared.dispose()
+  shared = undefined
+  sharedTimerEnv = null
+  released = true
 }
 
 export function faceRendererStats(): FaceRendererStats | null {
@@ -918,10 +972,14 @@ export function faceRendererStats(): FaceRendererStats | null {
 
 /** Drops the shared renderer; the next face makes a new one from `env` (the browser by default). */
 export function resetSharedFaceRenderer(env?: () => FaceRendererEnv | null): void {
+  cancelIdleRelease?.()
+  cancelIdleRelease = null
   unsubscribeShared?.()
   unsubscribeShared = null
   shared?.dispose()
   shared = undefined
+  sharedTimerEnv = null
+  released = false
   sharedEnv = env ?? browserEnv
   notifyShared()
 }

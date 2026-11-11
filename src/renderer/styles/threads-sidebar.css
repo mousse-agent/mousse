@@ -16,8 +16,6 @@
   /* pill-tabs: the tab bar's width rules (components/ui/PillTabs.tsx) read this container. */
   container-name: threads-sidebar pill-tabs;
   background: var(--vscode-sideBar-background, rgba(var(--surface-strong-rgb), 0.72));
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   animation: threads-sidebar-slide-in var(--ui-dur-slow) ease-out;
 }
 
@@ -912,8 +910,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
   background: rgba(var(--surface-strong-rgb), 0.98);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
