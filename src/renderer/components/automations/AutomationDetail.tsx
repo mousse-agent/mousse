@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ChevronLeft, ChevronRight, MessageSquare, X } from '../../lib/icons'
+import { ChevronDown, ChevronLeft, ChevronRight, X } from '../../lib/icons'
 import { modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import { describePermissionMode, narrowPermissionMode, PERMISSION_MODES, isStricter, type PermissionMode } from '../../../shared/permissionMode'
@@ -86,7 +86,7 @@ export function eventLogText(entry: ScheduledEventLogEntry, when: (iso: string) 
   }
 }
 
-/** The When of the sentence: "Every weekday at 9:00", "Every 30 minutes", "When you run it". */
+/** The When row: "Every weekday at 9:00", "Every 30 minutes", "When you run it". */
 export function whenSentence(draft: JobDraft): string {
   const schedule = scheduleOf(draft)
   if (schedule.kind === 'manual') return 'When you run it'
@@ -115,32 +115,32 @@ const RUN_GLYPH: Record<AutomationRun['state'], string> = {
   done: '✓', nothing_new: '·', incomplete: '◐', failed: '✕', queued: '◌', running: '◌', waiting: '◷'
 }
 
-function MoreRow({ title, htmlFor, description, control, children, field, testId }: {
-  title: string
+/** One row of the form: a label on the left, its control on the right, and anything under the control (a builder, an error) below it. */
+function FormRow({ label, htmlFor, labelId, field, testId, wide, extra, children }: {
+  label: string
   htmlFor?: string
-  description?: ReactNode
-  control?: ReactNode
-  children?: ReactNode
+  labelId?: string
   field?: DraftField
   testId?: string
+  /** The control takes the whole column (the task, keys, the request setup). */
+  wide?: boolean
+  extra?: ReactNode
+  children: ReactNode
 }) {
   return (
-    <div className="scheduled-detail-row" data-field={field} data-testid={testId}>
-      <div className="scheduled-detail-text">
-        {htmlFor ? <label className="scheduled-detail-title" htmlFor={htmlFor}>{title}</label> : <span className="scheduled-detail-title">{title}</span>}
-        {description ? <div className="scheduled-detail-desc">{description}</div> : null}
-      </div>
-      {control ? <div className="scheduled-detail-control">{control}</div> : null}
-      {children ? <div className="scheduled-detail-extra">{children}</div> : null}
+    <div className={`automation-form-row${wide ? ' wide' : ''}`} data-field={field} data-testid={testId}>
+      {htmlFor ? <label className="automation-form-label" htmlFor={htmlFor} id={labelId}>{label}</label> : <span className="automation-form-label" id={labelId}>{label}</span>}
+      <div className="automation-form-control">{children}</div>
+      {extra ? <div className="automation-form-extra">{extra}</div> : null}
     </div>
   )
 }
 
 /**
- * An automation's detail: the sentence is the editor ("Every [weekday at 9:00], [Claude] does [this] in [mousse]."),
- * then the prompt, May and Tell me, the next run with its reasons, the runs, and More with everything technical.
- * Saving sends only what changed. Escape goes back. A bot's automation is the same record: its Who stays the bot,
- * its May is the bot's grant, and only When, Do, the name and Tell me change.
+ * An automation's detail: label-and-control rows (When, Who, Where, Task, May, Tell me, Next), More with the name,
+ * thread, mode, keys and the request setup, one Save, then the runs. Saving sends only what changed. Escape and Back
+ * go back. A bot's automation is the same record: its Who stays the bot, its May is the bot's grant, and only When,
+ * the task, the name and Tell me change.
  */
 export function AutomationDetail({
   job,
@@ -367,18 +367,69 @@ export function AutomationDetail({
           {bot ? null : <button type="button" className="settings-btn" onClick={onRunNow} disabled={Boolean(item?.active && item.active.state !== 'waiting')}>Run now</button>}
           {paused
             ? <button type="button" className="settings-btn" onClick={onResume} data-testid="automation-detail-resume">Resume</button>
-            : <button type="button" className="settings-btn" onClick={onPause} title="Pause…" aria-label="Pause…" data-testid="automation-detail-pause">⏸</button>}
+            : <button type="button" className="settings-btn" onClick={onPause} title="Pause…" data-testid="automation-detail-pause">Pause</button>}
           <RowMenu label={`More actions for ${job.name}`} items={menu} />
         </div>
       </div>
 
-      <p className="automation-sentence" data-testid="automation-sentence">
-        <span className="automation-sentence-glue">
+      <div className="automation-form" data-testid="automation-form">
+        <FormRow label="When" labelId={id('when-label')} extra={builderOpen && !wakesOn ? (
+          <div className="scheduled-builder automation-builder">
+            <div className="scheduled-segmented" role="radiogroup" aria-label="When" {...field('schedule')}>
+              {(bot ? BOT_BUILDER_KINDS : BUILDER_KINDS).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={builderKind === option.value}
+                  tabIndex={builderKind === option.value ? 0 : -1}
+                  className={`scheduled-segment${builderKind === option.value ? ' active' : ''}`}
+                  onClick={() => chooseBuilderKind(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {fieldError('schedule')}
+            {builderKind === 'interval' ? (
+              <div className="scheduled-inline">
+                <label className="scheduled-label" htmlFor={id('minutes')}>Minutes between runs</label>
+                <input id={id('minutes')} className="scheduled-input narrow" inputMode="numeric" value={draft.minutes} {...field('minutes')} onChange={(event) => patch({ minutes: event.target.value })} />
+              </div>
+            ) : null}
+            {fieldError('minutes')}
+            {builderKind === 'daily' || builderKind === 'weekly' ? (
+              <div className="scheduled-inline">
+                {builderKind === 'weekly' ? (
+                  <>
+                    <label className="scheduled-label" htmlFor={id('day')}>Day</label>
+                    <Select id={id('day')} className="scheduled-select narrow" value={parts.day} options={WEEKDAY_OPTIONS} onChange={(day) => patch({ expr: cronOfForm('weekly', parts.time, day) })} />
+                  </>
+                ) : null}
+                <label className="scheduled-label" htmlFor={id('time')}>Time</label>
+                <input id={id('time')} className="scheduled-input narrow" type="time" value={parts.time} onChange={(event) => patch({ expr: cronOfForm(builderKind, event.target.value, parts.day) })} />
+              </div>
+            ) : null}
+            {builderKind === 'cron' ? (
+              <div className="scheduled-inline">
+                <label className="scheduled-label" htmlFor={id('expr')}>Cron</label>
+                <input id={id('expr')} className="scheduled-input mono" placeholder="0 9 * * *" title="Minute, hour, day of month, month, day of week" {...field('expr')} value={draft.expr} onChange={(event) => patch({ expr: event.target.value })} />
+              </div>
+            ) : null}
+            {fieldError('expr')}
+            {builderKind === 'once' ? (
+              <div className="scheduled-inline">
+                <label className="scheduled-label" htmlFor={id('runAt')}>Run at</label>
+                <input id={id('runAt')} className="scheduled-input narrow" type="datetime-local" value={draft.runAt} {...field('runAt')} onChange={(event) => patch({ runAt: event.target.value })} />
+              </div>
+            ) : null}
+            {fieldError('runAt')}
+          </div>
+        ) : null}>
           {wakesOn ? (
             <Select
-              ariaLabel="When"
-              className="automation-chip-select"
-              size="small"
+              ariaLabelledBy={id('when-label')}
+              className="automation-field-select"
               value={threadEventChoice(wakesOn.events)}
               options={THREAD_EVENT_CHOICES.map((choice) => ({ value: choice.value, label: choice.label }))}
               disabled={!onEvents}
@@ -387,174 +438,126 @@ export function AutomationDetail({
               onChange={(choice) => { const picked = THREAD_EVENT_CHOICES.find((entry) => entry.value === choice); if (picked) onEvents?.(picked.events) }}
             />
           ) : (
-            <button type="button" className="automation-chip" aria-expanded={builderOpen} onClick={() => setBuilderOpen((open) => !open)} data-testid="automation-when">
-              {whenSentence(draft)}
+            <button
+              type="button"
+              className={`ui-select automation-field-select${builderOpen ? ' open' : ''}`}
+              aria-labelledby={`${id('when-label')} ${id('when-value')}`}
+              aria-expanded={builderOpen}
+              onClick={() => setBuilderOpen((open) => !open)}
+              data-testid="automation-when"
+            >
+              <span className="ui-select-value" id={id('when-value')}>{whenSentence(draft)}</span>
+              <ChevronDown size={14} strokeWidth={2} className="ui-select-chevron" aria-hidden="true" />
             </button>
           )}
-          ,
-        </span>
-        {' '}
-        {bot ? (
-          <span className="automation-chip readonly" data-testid="automation-who" title={`${bot.name} does it, in its own way and with its own permissions`}>
-            <span className="automation-bot-face" aria-hidden="true"><BotFaceStill look={bot.look} state="idle" size={16} view="head" /></span>
-            {bot.name}
-          </span>
-        ) : remoteNode && !workflow ? (
-          <span className="automation-chip readonly" data-testid="automation-who" title={`Who does it is picked on ${owner.name}`}>{item?.who.name ?? whoLabel}</span>
-        ) : workflow ? null : (
-          <Select
-            ariaLabel="Who"
-            className="automation-chip-select"
-            size="small"
-            value={whoKey(who)}
-            options={whoChoices}
-            title="Who does it"
-            renderValue={() => <span data-testid="automation-who">{whoLabel}</span>}
-            onChange={chooseWho}
-          />
+        </FormRow>
+
+        <FormRow label="Who" labelId={id('who-label')}>
+          {bot ? (
+            <span className="automation-form-value" data-testid="automation-who" title={`${bot.name} does it, in its own way and with its own permissions`}>
+              <span className="automation-bot-face" aria-hidden="true"><BotFaceStill look={bot.look} state="idle" size={16} view="head" /></span>
+              {bot.name}
+            </span>
+          ) : workflow ? (
+            <span className="automation-form-value" data-testid="automation-who" title="A workflow runs its own steps">{`${draft.prompt.trim().split(/\s+/)[0]} (workflow)`}</span>
+          ) : remoteNode ? (
+            <span className="automation-form-value" data-testid="automation-who" title={`Who does it is picked on ${owner.name}`}>{item?.who.name ?? whoLabel}</span>
+          ) : (
+            <Select
+              ariaLabelledBy={id('who-label')}
+              className="automation-field-select"
+              value={whoKey(who)}
+              options={whoChoices}
+              title="Who does it"
+              renderValue={() => <span data-testid="automation-who">{whoLabel}</span>}
+              onChange={chooseWho}
+            />
+          )}
+        </FormRow>
+
+        {bot ? null : (
+          <FormRow label="Where" htmlFor={id('project')}>
+            <Select
+              id={id('project')}
+              ariaLabel="Where"
+              className="automation-field-select"
+              value={draft.projectId}
+              options={projectOptions}
+              onChange={(projectId) => {
+                const keep = catalog.threads.some((thread) => thread.id === draft.threadId && (!projectId || thread.projectId === projectId))
+                patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
+              }}
+            />
+            {manyComputers ? <span className="automation-form-note" data-testid="automation-computer" title={`It is stored and run on ${owner.name}`}>{`on ${owner.name}`}</span> : null}
+          </FormRow>
         )}
-        {workflow ? null : ' does '}
-        {bot ? <span className="automation-sentence-glue">this.</span> : <span className="automation-sentence-glue" data-testid="automation-do">{workflow ? draft.prompt.trim().split(/\s+/)[0] : 'this'}</span>}
-        {workflow ? ' runs' : null}
-        {bot ? null : ' in '}
-        {bot ? null : <span className="automation-sentence-glue">
-          <Select
-            id={id('project')}
-            ariaLabel="Where"
-            className="automation-chip-select"
-            size="small"
-            value={draft.projectId}
-            options={projectOptions}
-            onChange={(projectId) => {
-              const keep = catalog.threads.some((thread) => thread.id === draft.threadId && (!projectId || thread.projectId === projectId))
-              patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
-            }}
+
+        <FormRow label="Task" htmlFor={id('prompt')} wide extra={
+          <>
+            {job.trigger?.webhook && !bot ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
+            {fieldError('prompt')}
+          </>
+        }>
+          <textarea
+            ref={promptRef}
+            id={id('prompt')}
+            className="scheduled-prompt"
+            placeholder={bot ? `What should ${bot.name} do?` : 'What should the agent do?'}
+            rows={3}
+            value={draft.prompt}
+            {...field('prompt')}
+            onChange={(event) => patch({ prompt: event.target.value })}
           />
-          {manyComputers ? null : '.'}
-        </span>}
-        {manyComputers && !bot ? (
-          <span className="automation-sentence-glue">
-            {' on '}
-            <span className="automation-chip readonly" data-testid="automation-computer" title={`It is stored and run on ${owner.name}`}>{owner.name}</span>
-            .
-          </span>
-        ) : null}
-      </p>
+        </FormRow>
 
-      {builderOpen && !wakesOn ? (
-        <div className="scheduled-builder automation-builder">
-          <div className="scheduled-segmented" role="radiogroup" aria-label="When" {...field('schedule')}>
-            {(bot ? BOT_BUILDER_KINDS : BUILDER_KINDS).map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                role="radio"
-                aria-checked={builderKind === option.value}
-                tabIndex={builderKind === option.value ? 0 : -1}
-                className={`scheduled-segment${builderKind === option.value ? ' active' : ''}`}
-                onClick={() => chooseBuilderKind(option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          {fieldError('schedule')}
-          {builderKind === 'interval' ? (
-            <div className="scheduled-inline">
-              <label className="scheduled-label" htmlFor={id('minutes')}>Minutes between runs</label>
-              <input id={id('minutes')} className="scheduled-input narrow" inputMode="numeric" value={draft.minutes} {...field('minutes')} onChange={(event) => patch({ minutes: event.target.value })} />
-            </div>
-          ) : null}
-          {fieldError('minutes')}
-          {builderKind === 'daily' || builderKind === 'weekly' ? (
-            <div className="scheduled-inline">
-              {builderKind === 'weekly' ? (
-                <>
-                  <label className="scheduled-label" htmlFor={id('day')}>Day</label>
-                  <Select id={id('day')} className="scheduled-select narrow" value={parts.day} options={WEEKDAY_OPTIONS} onChange={(day) => patch({ expr: cronOfForm('weekly', parts.time, day) })} />
-                </>
-              ) : null}
-              <label className="scheduled-label" htmlFor={id('time')}>Time</label>
-              <input id={id('time')} className="scheduled-input narrow" type="time" value={parts.time} onChange={(event) => patch({ expr: cronOfForm(builderKind, event.target.value, parts.day) })} />
-            </div>
-          ) : null}
-          {builderKind === 'cron' ? (
-            <div className="scheduled-inline">
-              <label className="scheduled-label" htmlFor={id('expr')}>Cron</label>
-              <input id={id('expr')} className="scheduled-input mono" placeholder="0 9 * * *" title="Minute, hour, day of month, month, day of week" {...field('expr')} value={draft.expr} onChange={(event) => patch({ expr: event.target.value })} />
-            </div>
-          ) : null}
-          {fieldError('expr')}
-          {builderKind === 'once' ? (
-            <div className="scheduled-inline">
-              <label className="scheduled-label" htmlFor={id('runAt')}>Run at</label>
-              <input id={id('runAt')} className="scheduled-input narrow" type="datetime-local" value={draft.runAt} {...field('runAt')} onChange={(event) => patch({ runAt: event.target.value })} />
-            </div>
-          ) : null}
-          {fieldError('runAt')}
-        </div>
-      ) : null}
+        <FormRow label="May" labelId={id('may-label')} field="permission" extra={
+          <>
+            {fieldError('permission')}
+            {lowered ? <p className="scheduled-note warn" data-testid="permission-lowered">Saving lowers May to {describePermissionMode(lowered)}, the most you hold for the thread you chose.</p> : null}
+          </>
+        }>
+          {bot ? (
+            <span className="automation-form-value" data-testid="automation-may-bot" title={`What ${bot.name} may do is set by asking it, in its chat`}>
+              {`${bot.name}'s grant `}
+              {onOpenBot ? <button type="button" className="scheduled-link-btn" onClick={() => onOpenBot(bot.id)}>View</button> : null}
+            </span>
+          ) : draft.agentId && !workflow ? (
+            <span className="automation-form-value" data-testid="automation-may-agent" title="A saved agent keeps to what it may use, set in the Library">{`What ${whoLabel} may use`}</span>
+          ) : (
+            <Select<PermissionMode>
+              id={id('may')}
+              ariaLabelledBy={id('may-label')}
+              className="automation-field-select"
+              value={effectiveMay}
+              options={mayOptions}
+              title={`The strictest of this automation's mode${job.permissionCeiling ? `, its limit (${describePermissionMode(job.permissionCeiling)})` : ''} and its thread's. Never more than ${describePermissionMode(held.mode)}.`}
+              onChange={(permissionMode) => patch({ permissionMode })}
+            />
+          )}
+        </FormRow>
 
-      <label className="scheduled-sr-only" htmlFor={id('prompt')}>What it does</label>
-      <textarea
-        ref={promptRef}
-        id={id('prompt')}
-        className="scheduled-prompt"
-        placeholder={bot ? `What should ${bot.name} do?` : 'What should the agent do?'}
-        rows={3}
-        value={draft.prompt}
-        {...field('prompt')}
-        onChange={(event) => patch({ prompt: event.target.value })}
-      />
-      {job.trigger?.webhook && !bot ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
-      {fieldError('prompt')}
-
-      <div className="automation-detail-pair">
-        <span className="automation-detail-label" id={id('may-label')}>May</span>
-        {bot ? (
-          <span className="automation-detail-value" data-testid="automation-may-bot" title={`What ${bot.name} may do is set by asking it, in its chat`}>
-            {`${bot.name}'s grant `}
-            {onOpenBot ? <button type="button" className="scheduled-link-btn" onClick={() => onOpenBot(bot.id)}>View</button> : null}
-          </span>
-        ) : draft.agentId && !workflow ? (
-          <span className="automation-detail-value" data-testid="automation-may-agent" title="A saved agent keeps to what it may use, set in the Library">{`What ${whoLabel} may use`}</span>
-        ) : (
-          <Select<PermissionMode>
-            id={id('may')}
-            ariaLabelledBy={id('may-label')}
-            className="automation-inline-select"
-            size="small"
-            value={effectiveMay}
-            options={mayOptions}
-            title={`The strictest of this automation's mode${job.permissionCeiling ? `, its limit (${describePermissionMode(job.permissionCeiling)})` : ''} and its thread's. Never more than ${describePermissionMode(held.mode)}.`}
-            onChange={(permissionMode) => patch({ permissionMode })}
+        <FormRow label="Tell me" labelId={id('tell-label')}>
+          <Select<TellMe>
+            id={id('tell')}
+            ariaLabelledBy={id('tell-label')}
+            className="automation-field-select"
+            value={draft.tellMe}
+            options={tellOptions}
+            title="When a run notifies you. Nothing new is when the agent finds nothing to report."
+            onChange={(tellMe) => patch({ tellMe })}
           />
-        )}
-        <span className="automation-detail-label" id={id('tell-label')}>Tell me</span>
-        <Select<TellMe>
-          id={id('tell')}
-          ariaLabelledBy={id('tell-label')}
-          className="automation-inline-select"
-          size="small"
-          value={draft.tellMe}
-          options={tellOptions}
-          title="When a run notifies you. Nothing new is when the agent finds nothing to report."
-          onChange={(tellMe) => patch({ tellMe })}
-        />
-      </div>
-      {fieldError('permission')}
-      {lowered ? <p className="scheduled-note warn" data-testid="permission-lowered">Saving lowers May to {describePermissionMode(lowered)}, the most you hold for the thread you chose.</p> : null}
+        </FormRow>
 
-      <div className="automation-detail-pair">
-        <span className="automation-detail-label">Next</span>
-        <span className="automation-detail-value" data-testid="automation-next">
-          {paused
-            ? job.resumeAt ? `Paused until ${ownedWhenText(job.resumeAt, now, owner, viewerZone)}` : item?.pausedBy === 'bot' ? `${item.pausedReason ?? 'Paused'} · the bot is paused` : 'Paused'
-            : wakesOn
-              ? events?.heldUntil ? `Held until ${ownedWhenText(events.heldUntil, now, owner, viewerZone)}` : events && !events.watching ? 'Not watching. Resume to watch again.' : `When ${threadEventText(wakesOn.number, wakesOn.events)}`
-            : scheduleChanged ? 'Shown after Save' : next ? ownedWhenText(next, now, owner, viewerZone) : savedSchedule.kind === 'manual' ? 'When you run it' : 'None'}
-        </span>
-        <button type="button" className="scheduled-link-btn" aria-expanded={whyOpen} onClick={() => setWhyOpen((open) => !open)} data-testid="automation-why">(why?)</button>
+        <FormRow label="Next">
+          <span className="automation-form-value" data-testid="automation-next">
+            {paused
+              ? job.resumeAt ? `Paused until ${ownedWhenText(job.resumeAt, now, owner, viewerZone)}` : item?.pausedBy === 'bot' ? `${item.pausedReason ?? 'Paused'} · the bot is paused` : 'Paused'
+              : wakesOn
+                ? events?.heldUntil ? `Held until ${ownedWhenText(events.heldUntil, now, owner, viewerZone)}` : events && !events.watching ? 'Not watching. Resume to watch again.' : `When ${threadEventText(wakesOn.number, wakesOn.events)}`
+              : scheduleChanged ? 'Shown after Save' : next ? ownedWhenText(next, now, owner, viewerZone) : savedSchedule.kind === 'manual' ? 'When you run it' : 'None'}
+          </span>
+          <button type="button" className="scheduled-link-btn automation-form-link" aria-expanded={whyOpen} onClick={() => setWhyOpen((open) => !open)} data-testid="automation-why">Why?</button>
+        </FormRow>
       </div>
       {whyOpen && wakesOn ? (
         <div className="automation-why" data-testid="automation-why-panel">
@@ -582,6 +585,92 @@ export function AutomationDetail({
         </div>
       ) : null}
 
+      <button type="button" className="scheduled-disclosure automation-form-more" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
+        <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
+        More
+        <span className="automation-more-hint">{bot ? 'name · added by' : 'name · thread · mode · keys · request URL'}</span>
+      </button>
+
+      {moreOpen ? (
+        <div className="automation-form" id={id('more')}>
+          <FormRow label="Name" htmlFor={id('name')} field="name" extra={fieldError('name')}>
+            <input id={id('name')} className="scheduled-input automation-field-select" placeholder={nameFromPrompt(draft.prompt) || 'Name'} value={draft.name} {...field('name')} onChange={(event) => patch({ name: event.target.value })} />
+          </FormRow>
+
+          {bot ? null : <>
+          <FormRow label="Thread" htmlFor={id('thread')}>
+            <Select id={id('thread')} className="automation-field-select" value={threadLocked ? '' : draft.threadId} options={threadOptions} disabled={threadLocked} onChange={(threadId) => patch({ threadId })} />
+          </FormRow>
+
+          {workspaceShown ? (
+            <FormRow label="Runs in" htmlFor={id('workspace')} field="workspace" extra={
+              <>
+                {fieldError('workspace')}
+                {draft.workspaceKind === 'worktree' ? (
+                  <div className="scheduled-inline">
+                    <label className="scheduled-label" htmlFor={id('worktreePath')}>Worktree path</label>
+                    <input id={id('worktreePath')} className="scheduled-input" placeholder="/path/to/worktree" value={draft.worktreePath} {...field('worktreePath')} onChange={(event) => patch({ worktreePath: event.target.value })} />
+                  </div>
+                ) : null}
+                {fieldError('worktreePath')}
+                {draft.workspaceKind === 'project' && draft.mode !== 'plan' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
+              </>
+            }>
+              <Select<WorkspaceKind>
+                id={id('workspace')}
+                className="automation-field-select"
+                value={draft.workspaceKind}
+                options={workspaceChoices(draft)}
+                onChange={(workspaceKind) => patch({ workspaceKind, ...(draft.workspaceKind === 'worktree' && workspaceKind !== 'worktree' ? { threadId: '' } : {}) })}
+              />
+            </FormRow>
+          ) : draft.threadId ? <FormRow label="Runs in"><span className="automation-form-value">The thread's own workspace</span></FormRow> : null}
+
+          <FormRow label="Mode" htmlFor={id('mode')}>
+            <Select<JobDraft['mode']> id={id('mode')} className="automation-field-select" value={draft.mode} options={modeChoices(draft)} onChange={(mode) => patch({ mode })} />
+          </FormRow>
+
+          {remoteNode ? null : (
+            <FormRow label="Keys" testId="keys-row" wide>
+              <div className="automation-fields">
+                {(item?.keys ?? (job.keys ?? []).map((name) => ({ name, stored: true }))).map((key) => (
+                  <span key={key.name} className={`automation-field-token${key.stored ? '' : ' missing'}`} data-testid="automation-key" data-stored={key.stored ? 'true' : 'false'} title={key.stored ? 'Stored' : 'Not stored: a run that needs it ends Incomplete'}>
+                    {key.stored ? key.name : `${key.name} · missing`}
+                    {!key.stored && onAddKey ? <button type="button" aria-label={`Add key ${key.name}`} title="Add it" onClick={() => onAddKey(key.name)}>+</button> : null}
+                    {onKeys ? <button type="button" aria-label={`Remove key ${key.name}`} title="Remove" onClick={() => onKeys((job.keys ?? []).filter((name) => name !== key.name))}><X size={11} /></button> : null}
+                  </span>
+                ))}
+                {onAddKey ? <button type="button" className="scheduled-link-btn automation-form-link" data-testid="automation-key-add" onClick={() => onAddKey()}>Add key</button> : null}
+                {job.keys?.length ? null : <span className="automation-form-note">{'Tools read them as ${secret:NAME}.'}</span>}
+              </div>
+            </FormRow>
+          )}
+
+          {/* A request URL is served by the computer that runs it, and set up there. */}
+          <FormRow label="Request URL" testId="request-row" wide>
+            {remoteNode ? <span className="automation-form-value">{`Set up on ${owner.name}`}</span> : <RequestSetup job={job} request={item?.request} prompt={draft.prompt} api={requestApi} />}
+          </FormRow>
+
+          {job.createdBy ? (
+            <FormRow label="Added by" testId="agent-row">
+              <span className="automation-form-value">
+                {creatorThread ?? 'An agent'}
+                {job.expiresAt ? <span data-meta="expires">{` · ${job.state === 'completed' && Date.parse(job.expiresAt) <= Date.now() ? 'Ended' : 'Ends'} ${ownedWhenText(job.expiresAt, now, owner, viewerZone)}`}</span> : null}
+              </span>
+              <button type="button" className="scheduled-link-btn automation-form-link" title="Open the thread that added it" onClick={() => onOpenThread(job.createdBy!.threadId)}>Open thread</button>
+              {job.expiresAt ? <button type="button" className="settings-btn" data-testid="automation-keep" onClick={onKeep} title="Remove its end. Its access, how often it runs and what the agent may add stay as they are.">Keep</button> : null}
+            </FormRow>
+          ) : null}
+          </>}
+          {bot ? <FormRow label="Added by" testId="bot-added-by"><span className="automation-form-value">{job.bot?.createdBy === 'bot' ? bot.name : 'You'}</span></FormRow> : null}
+        </div>
+      ) : null}
+
+      <div className="automation-form-save">
+        <button type="submit" className="settings-btn primary" disabled={busy || unchanged}>Save</button>
+        {failure ? <p className="scheduled-item-error" role="alert" data-testid="save-error">{failure}</p> : null}
+      </div>
+
       <section className="automation-runs" aria-label={`Runs of ${job.name}`}>
         <h3 className="automation-runs-head">Runs</h3>
         {shownRuns.length === 0 ? <p className="scheduled-note">No runs yet.</p> : (
@@ -606,96 +695,6 @@ export function AutomationDetail({
       </section>
 
       {item?.request ? <DeliveryLog deliveries={item.request.deliveries} when={(iso) => ownedWhenText(iso, now, owner, viewerZone)} onResend={onResend} /> : null}
-
-      <button type="button" className="scheduled-disclosure" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
-        <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
-        More
-        <span className="automation-more-hint">{bot ? 'name · added by' : 'thread · worktree · mode · keys · request URL + curl · added by'}</span>
-      </button>
-
-      {moreOpen ? (
-        <div className="scheduled-details" id={id('more')}>
-          <MoreRow title="Name" htmlFor={id('name')} field="name" control={
-            <input id={id('name')} className="scheduled-input" placeholder={nameFromPrompt(draft.prompt) || 'Name'} value={draft.name} {...field('name')} onChange={(event) => patch({ name: event.target.value })} />
-          }>{fieldError('name')}</MoreRow>
-
-          {bot ? null : <>
-          <MoreRow title="Thread" htmlFor={id('thread')} control={
-            <Select id={id('thread')} className="scheduled-select" value={threadLocked ? '' : draft.threadId} options={threadOptions} disabled={threadLocked} onChange={(threadId) => patch({ threadId })} />
-          } />
-
-          {workspaceShown ? (
-            <MoreRow title="Runs in" htmlFor={id('workspace')} field="workspace" control={
-              <Select<WorkspaceKind>
-                id={id('workspace')}
-                className="scheduled-select"
-                value={draft.workspaceKind}
-                options={workspaceChoices(draft)}
-                onChange={(workspaceKind) => patch({ workspaceKind, ...(draft.workspaceKind === 'worktree' && workspaceKind !== 'worktree' ? { threadId: '' } : {}) })}
-              />
-            }>
-              {fieldError('workspace')}
-              {draft.workspaceKind === 'worktree' ? (
-                <div className="scheduled-inline">
-                  <label className="scheduled-label" htmlFor={id('worktreePath')}>Worktree path</label>
-                  <input id={id('worktreePath')} className="scheduled-input" placeholder="/path/to/worktree" value={draft.worktreePath} {...field('worktreePath')} onChange={(event) => patch({ worktreePath: event.target.value })} />
-                </div>
-              ) : null}
-              {fieldError('worktreePath')}
-              {draft.workspaceKind === 'project' && draft.mode !== 'plan' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
-            </MoreRow>
-          ) : draft.threadId ? <MoreRow title="Runs in" description="The thread's own workspace" /> : null}
-
-
-          <MoreRow title="Mode" htmlFor={id('mode')} control={
-            <Select<JobDraft['mode']> id={id('mode')} className="scheduled-select" value={draft.mode} options={modeChoices(draft)} onChange={(mode) => patch({ mode })} />
-          } />
-
-          {remoteNode ? null : (
-            <MoreRow title="Keys" testId="keys-row" description={job.keys?.length ? undefined : 'Saved keys its runs need. Tools read them as ${secret:NAME}.'}>
-              <div className="automation-fields">
-                {(item?.keys ?? (job.keys ?? []).map((name) => ({ name, stored: true }))).map((key) => (
-                  <span key={key.name} className={`automation-field-token${key.stored ? '' : ' missing'}`} data-testid="automation-key" data-stored={key.stored ? 'true' : 'false'} title={key.stored ? 'Stored' : 'Not stored: a run that needs it ends Incomplete'}>
-                    {key.stored ? key.name : `${key.name} · missing`}
-                    {!key.stored && onAddKey ? <button type="button" aria-label={`Add key ${key.name}`} title="Add it" onClick={() => onAddKey(key.name)}>+</button> : null}
-                    {onKeys ? <button type="button" aria-label={`Remove key ${key.name}`} title="Remove" onClick={() => onKeys((job.keys ?? []).filter((name) => name !== key.name))}><X size={11} /></button> : null}
-                  </span>
-                ))}
-                {onAddKey ? <button type="button" className="scheduled-link-btn" data-testid="automation-key-add" onClick={() => onAddKey()}>+ Key</button> : null}
-              </div>
-            </MoreRow>
-          )}
-
-          {/* A request URL is served by the computer that runs it, and set up there. */}
-          <MoreRow title="Request URL" testId="request-row" description={remoteNode ? `Set up on ${owner.name}` : undefined}>
-            {remoteNode ? null : <RequestSetup job={job} request={item?.request} prompt={draft.prompt} api={requestApi} />}
-          </MoreRow>
-
-          {job.createdBy ? (
-            <MoreRow title="Added by" testId="agent-row" description={
-              <>
-                {creatorThread ?? 'An agent'}
-                {job.expiresAt ? <span data-meta="expires">{` · ${job.state === 'completed' && Date.parse(job.expiresAt) <= Date.now() ? 'Ended' : 'Ends'} ${ownedWhenText(job.expiresAt, now, owner, viewerZone)}`}</span> : null}
-              </>
-            } control={
-              <>
-                {job.expiresAt ? <button type="button" className="settings-btn" data-testid="automation-keep" onClick={onKeep} title="Remove its end. Its access, how often it runs and what the agent may add stay as they are.">Keep</button> : null}
-                <button type="button" className="settings-icon-btn" title="Open the thread that added it" aria-label="Open the thread that added it" onClick={() => onOpenThread(job.createdBy!.threadId)}>
-                  <MessageSquare size={14} />
-                </button>
-              </>
-            } />
-          ) : null}
-          </>}
-          {bot ? <MoreRow title="Added by" testId="bot-added-by" description={job.bot?.createdBy === 'bot' ? bot.name : 'You'} /> : null}
-        </div>
-      ) : null}
-
-      {failure ? <p className="scheduled-item-error" role="alert" data-testid="save-error">{failure}</p> : null}
-      <div className="scheduled-form-actions">
-        <button type="button" className="settings-btn" onClick={onBack}>{unchanged ? 'Done' : 'Cancel'}</button>
-        <button type="submit" className="settings-btn primary" disabled={busy || unchanged}>Save</button>
-      </div>
     </form>
   )
 }
