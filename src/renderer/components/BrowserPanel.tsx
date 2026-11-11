@@ -21,7 +21,7 @@ import type { InAppBrowserState } from '../../shared/browser/inApp'
 import type { BrowserAgentCursor } from '../../shared/browser/agentCursor'
 import { AgentCursor } from './browser/AgentCursor'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import { useAppStore } from '../stores/appStore'
+import { browserTabsOpenedThisSession, useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import {
@@ -354,6 +354,7 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
         src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
+        data-agent-controlled={agentControlled ? '' : undefined}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
       {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control to interact" />}
@@ -385,6 +386,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const setActiveTab = useAppStore((s) => s.setActiveBrowserTab)
   const addElementAttachment = useAppStore((s) => s.addBrowserElementAttachment)
   const webviews = useRef(new Map<string, HTMLWebViewElement>())
+  const loadedTabs = useRef(new Set<string>())
   const registrations = useRef(new Map<string, Promise<unknown>>())
   const editingAddress = useRef(false)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
@@ -424,7 +426,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       const revision = accessRevision.current
       try {
         const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
-        if (!disposed && revision === accessRevision.current) setAccess(state)
+        // The poll usually returns the same answer; keeping the old state skips a re-render of the whole panel.
+        if (!disposed && revision === accessRevision.current) setAccess((previous) => JSON.stringify(previous) === JSON.stringify(state) ? previous : state)
       } catch { /* Reconnect on the next poll. */ }
       if (!disposed) timer = setTimeout(() => void refresh(), 750)
     }
@@ -787,7 +790,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       )}
       {/* All guests stay mounted so switching threads does not reload pages or lose DOM state. */}
       <KeepMounted active={hasVisibleTabs} preserveLayout className="browser-content">
-        {tabs.map((tab) => (
+        {tabs.filter((tab) => {
+          // A restored tab loads the first time it is shown or an agent drives it, then stays mounted.
+          if (!loadedTabs.current.has(tab.id) && (browserTabsOpenedThisSession.has(tab.id)
+            || (active && tab.id === activeTab?.id) || controlByTab[tab.id]?.owner === 'agent')) loadedTabs.current.add(tab.id)
+          return loadedTabs.current.has(tab.id)
+        }).map((tab) => (
           <BrowserWebview
             key={`${profileId}:${tab.id}`}
             tab={tab}
