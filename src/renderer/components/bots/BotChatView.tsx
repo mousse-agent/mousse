@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { CircleAlert, Loader2, Paperclip, Reply, X } from '../../lib/icons'
+import { ArrowDown, CircleAlert, Loader2, Paperclip, Reply, Shield, X } from '../../lib/icons'
 import type { BotChatMessage, BotChatQuote, BotChip, BotError, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
@@ -105,6 +105,33 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
 export function quoteOf(message: BotChatMessage): BotChatQuote {
   const line = (message.text || message.error?.text || message.attachments?.map((file) => file.name).join(', ') || '').trim().split('\n').find((part) => part.trim())?.trim() ?? ''
   return { id: message.id, author: message.author, text: line.length > 160 ? `${line.slice(0, 159)}…` : line }
+}
+
+/** Something waiting on the owner, pinned above the composer: the message it is on (absent when not loaded) and its line. */
+export interface BotPinned { kind: 'ask' | 'error'; id?: string; text: string }
+
+/**
+ * What stays pinned above the composer while the owner scrolls: the newest open ask, and the bot's current error
+ * (its summary's, which Resume or a good run clears). Each points at its full message: the ask's own, and the newest
+ * message with that error (or any error).
+ */
+export function pinnedOf(messages: readonly BotChatMessage[], bot: Pick<BotSummary, 'name' | 'error'>): BotPinned[] {
+  const pinned: BotPinned[] = []
+  const ask = messages.filter((message) => message.ask?.status === 'open').at(-1)
+  if (ask) pinned.push({ kind: 'ask', id: ask.id, text: `${bot.name} wants to ${ask.ask!.title}` })
+  if (bot.error) {
+    const errors = messages.filter((message) => message.error)
+    const shown = errors.filter((message) => message.error!.text === bot.error!.text).at(-1) ?? errors.at(-1)
+    pinned.push({ kind: 'error', ...(shown ? { id: shown.id } : {}), text: bot.error.text })
+  }
+  return pinned
+}
+
+function PinnedLine({ item }: { item: BotPinned }) {
+  const Icon = item.kind === 'ask' ? Shield : CircleAlert
+  return <button type="button" className="bot-pinned" data-kind={item.kind} disabled={!item.id} title={item.id ? 'Show message' : undefined} onClick={() => item.id && showMessage(item.id)}>
+    <Icon size={14} aria-hidden /><span>{item.text}</span>
+  </button>
 }
 
 function ReplyButton({ onReply }: { onReply(): void }) {
@@ -220,16 +247,41 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   useEffect(() => { if (lastSeq !== undefined) store().markRead(bot.id) }, [bot.id, lastSeq, store])
 
   // New messages keep the end in view; a page loaded above keeps the reader where they were.
-  const anchor = useRef<{ firstId?: string; height: number; atEnd: boolean }>({ height: 0, atEnd: true })
+  // Scrolled up, a new message from the bot leaves the reader where they are and offers New message instead.
+  const anchor = useRef<{ firstId?: string; lastSeq?: number; height: number; atEnd: boolean }>({ height: 0, atEnd: true })
+  const [unseen, setUnseen] = useState(false)
   useLayoutEffect(() => {
     const element = transcript.current
     if (!element) return
     const held = anchor.current
     if (held.firstId && firstId !== held.firstId && !held.atEnd) element.scrollTop += element.scrollHeight - held.height
     else if (held.atEnd) element.scrollTop = element.scrollHeight
-    anchor.current = { firstId, height: element.scrollHeight, atEnd: held.atEnd }
-  }, [firstId, messages.length, pending.length, working, live?.chip?.text, replying?.id, work.length])
-  useEffect(() => { anchor.current = { height: 0, atEnd: true } }, [bot.id])
+    if (!held.atEnd && held.lastSeq !== undefined && lastSeq !== undefined && lastSeq > held.lastSeq && messages.at(-1)?.author === 'bot') setUnseen(true)
+    anchor.current = { firstId, lastSeq, height: element.scrollHeight, atEnd: held.atEnd }
+  }, [firstId, lastSeq, messages, pending.length, working, live?.chip?.text, replying?.id, work.length])
+  useEffect(() => { anchor.current = { lastSeq: anchor.current.lastSeq, height: 0, atEnd: true }; setUnseen(false) }, [bot.id])
+  const toEnd = () => {
+    const element = transcript.current
+    if (element?.scrollTo) element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+    else if (element) element.scrollTop = element.scrollHeight
+    anchor.current.atEnd = true
+    setUnseen(false)
+  }
+  // A pinned line hides while its full message is on screen, so it never shows twice.
+  const pinned = useMemo(() => pinnedOf(messages, bot), [messages, bot])
+  const [onScreen, setOnScreen] = useState('')
+  const measure = useCallback(() => {
+    const element = transcript.current
+    if (!element) return
+    const view = element.getBoundingClientRect()
+    const shown = pinned.filter((item) => {
+      const box = item.id ? element.querySelector(`[data-message-id="${CSS.escape(item.id)}"]`)?.getBoundingClientRect() : undefined
+      return box && box.bottom > view.top + 24 && box.top < view.bottom - 24
+    }).map((item) => item.kind).join(' ')
+    setOnScreen(shown)
+  }, [pinned])
+  useLayoutEffect(measure, [measure, messages.length, pending.length])
+  const pinnedOff = pinned.filter((item) => !onScreen.split(' ').includes(item.kind))
 
   const act = useCallback((action: NonNullable<BotError['action']>) => {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
@@ -259,6 +311,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         const element = event.currentTarget
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight
+        if (anchor.current.atEnd) setUnseen(false)
+        measure()
         if (element.scrollTop < 60 && chat?.hasMore) void store().loadOlder(bot.id)
       }}>
         {chat?.loadingOlder && <p className="chat-empty-hint bot-loading-older">Loading earlier messages…</p>}
@@ -283,6 +337,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
       <div className="chat-input-area bot-input-area">
+        {unseen && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />New message</button>}
+        {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} item={item} />)}</div>}
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />

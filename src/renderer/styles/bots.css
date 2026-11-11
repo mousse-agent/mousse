@@ -170,6 +170,22 @@
 .bot-work-line button { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-secondary); opacity: .7; }
 .bot-work-line button:hover { opacity: 1; background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
 
+/* What waits on the owner (an open ask, the bot's error), pinned above the composer as one line each; a click shows
+   the full message. */
+.bot-pins { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 4px 8px; }
+.bot-pinned { display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; padding: 5px 12px 5px 10px; border-radius: 10px; font-size: 12px; line-height: 18px; text-align: left; color: var(--text-primary); background: rgba(var(--accent-rgb), .1); }
+.bot-pinned > svg { flex: none; color: var(--accent); }
+.bot-pinned > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-pinned:not(:disabled):hover { background: rgba(var(--accent-rgb), .16); }
+.bot-pinned:disabled { cursor: default; }
+.bot-pinned[data-kind='error'] { color: var(--error, #e79090); background: color-mix(in srgb, var(--error, #e79090) 11%, transparent); }
+.bot-pinned[data-kind='error'] > svg { color: inherit; }
+.bot-pinned[data-kind='error']:not(:disabled):hover { background: color-mix(in srgb, var(--error, #e79090) 17%, transparent); }
+/* Scrolled up when a message arrives: one small pill floating above the composer. */
+.bot-jump { position: absolute; z-index: 2; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px 6px 11px; border-radius: 999px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: var(--bg-secondary, #201d23); border: 1px solid rgba(var(--accent-pale-rgb), .14); box-shadow: 0 6px 20px rgba(0, 0, 0, .28); }
+.bot-jump > svg { color: var(--accent); }
+.bot-jump:hover { background: color-mix(in srgb, var(--text-secondary) 14%, var(--bg-secondary, #201d23)); }
+
 /* The composer: one flat pill as wide as the column, with attach, mic and send inside. It is one line high and grows
    with the words up to seven lines. Its specular is dimmer than the thread composer's: here the chat has the focus. */
 .bot-conversation .chat-input-area.bot-input-area { width: var(--bot-column); padding: 0 0 18px; }
