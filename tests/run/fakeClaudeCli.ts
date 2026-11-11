@@ -132,6 +132,12 @@ export class FakeClaudeProcess {
   interruptGate: Promise<unknown> | undefined
   /** While set, `cancelAsyncMessage` waits for it before it answers (a slow answer). */
   cancelAsyncGate: Promise<unknown> | undefined
+  /**
+   * Like the real Claude Code when its queue gave a message up a moment before the cancel came: `cancelAsyncMessage`
+   * answers false for a message still queued, yet the message never runs (the turn that took it drops it as it starts).
+   * `'lifecycle'` then says so with a `cancelled` lifecycle; `'silent'` says nothing at all, ever (the worst case).
+   */
+  cancelAsyncTakenThenDropped: 'silent' | 'lifecycle' | undefined
   backgroundGate: Promise<unknown> | undefined
   private readonly started = new Set<string>()
   private readonly cancelled = new Set<string>()
@@ -326,6 +332,11 @@ export class FakeClaudeProcess {
         if (!this.cancelAsync) throw new Error('cancel_async_message is not supported')
         this.cancelAsyncCalls.push(uuid)
         await this.cancelAsyncGate
+        if (this.cancelAsyncTakenThenDropped && this.queued.includes(uuid)) {
+          this.cancelled.add(uuid)
+          if (this.cancelAsyncTakenThenDropped === 'lifecycle') setTimeout(() => this.emit(lifecycle(uuid, 'cancelled')), 0)
+          return false
+        }
         if (!this.queued.includes(uuid)) return false
         this.cancelled.add(uuid)
         return true

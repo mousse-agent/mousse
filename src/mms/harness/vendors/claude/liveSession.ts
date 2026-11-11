@@ -41,6 +41,11 @@ export const STEER_BACKGROUND_MOVE_MS = 5_000
  * waits for that turn to show itself before it ends with the result it had (`LiveSession.endAtResult`).
  */
 export const LATE_STEER_READ_MS = 2_000
+/**
+ * A late steer handed back after `LATE_STEER_READ_MS` with no read signal: how long a stand-in still owns its id, so a
+ * turn Claude Code may run for it after all is dropped, not given to another run (`LiveSession.endTaken`).
+ */
+export const LATE_STEER_STAND_IN_MS = 10 * 60_000
 
 export interface LiveTimings {
   idleCloseMs: number
@@ -55,6 +60,8 @@ export interface LiveTimings {
   noticeDelayMs: number
   /** See `LATE_STEER_READ_MS`. */
   lateSteerReadMs: number
+  /** See `LATE_STEER_STAND_IN_MS`. */
+  lateSteerStandInMs: number
 }
 
 export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
@@ -66,7 +73,8 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   backgroundMoveMs: STEER_BACKGROUND_MOVE_MS,
   noticeDelayMs: 1_000,
   interruptTimeoutMs: 10_000,
-  lateSteerReadMs: LATE_STEER_READ_MS
+  lateSteerReadMs: LATE_STEER_READ_MS,
+  lateSteerStandInMs: LATE_STEER_STAND_IN_MS
 }
 
 /** A query's Claude Code as the SDK reported it at spawn: its pid and when Mousse heard of it (`noteClaudeQuerySpawn`). */
@@ -477,9 +485,18 @@ export class LiveRun {
   readonly mayRunTwice = new Set<string>()
   /**
    * Pushed ids still unread at the run's result that Claude Code could not drop from its queue (`cancelAsyncMessage`
-   * said a turn took them), though nothing named them yet. They count as read (`unreadFate`).
+   * said false), though nothing named them yet. False alone is not a read: Claude Code also answers it for a message
+   * its queue gave up a moment before, whose turn then drops it unrun (`LiveSession.endAtResult`). A held run waits for
+   * a read signal; one that ends otherwise (a Stop during the ask) counts them as read (`unreadFate`).
    */
   readonly taken = new Set<string>()
+  /**
+   * For a stand-in (`LiveSession.endTaken`): the steers it owns were handed back to Mousse with no read signal, and
+   * `handedBackBy` is the run that pushed them. Claude Code reading one later means it may run twice.
+   */
+  handedBackBy: LiveRun | undefined
+  /** Ends a stand-in that never heard of its steers again (`LATE_STEER_STAND_IN_MS`). */
+  standInTimer: ReturnType<typeof setTimeout> | undefined
   /**
    * The run's result arrived while a steer it pushed was still unread (issue #919): Claude Code may take that steer
    * right after and answer it as a turn of its own. The run stays open meanwhile (`LiveSession.endAtResult`) and
@@ -489,7 +506,7 @@ export class LiveRun {
   atResult: SDKResultMessage | undefined
   /** The steers that were unread at `atResult`, while the run waits to learn whether Claude Code runs them. */
   readonly lateSteers = new Set<string>()
-  /** Ends a held run whose late steer Claude Code says it took but never showed (`LATE_STEER_READ_MS`). */
+  /** Ends a held run whose late steer Claude Code did not drop but never showed it read (`LATE_STEER_READ_MS`). */
   lateTimer: ReturnType<typeof setTimeout> | undefined
   /** Claude Code is being asked to drop the late steers (`LiveSession.askLateSteers`); `unreadFate` waits for its answer. */
   lateAsk: Promise<void> | undefined
@@ -1123,8 +1140,9 @@ export class LiveSession<Turn = unknown> {
    * What became of `id`, a message `run` pushed that Claude Code had not read when the run ended:
    * - `read`: Claude Code read it after all (a Stop's interrupt can race the read), or it is no longer queued, so a
    *   turn took it;
-   * - `dropped`: Claude Code removed it from its queue unread (a cancel's receipt, or `cancelAsyncMessage` here), so
-   *   it never runs there;
+   * - `dropped`: Claude Code removed it from its queue unread (a cancel's receipt, `cancelAsyncMessage` here, or a
+   *   `cancelled` lifecycle), so it never runs there; or a held run waited for a late steer `cancelAsyncMessage` could
+   *   not drop and nothing showed it read (`endTaken`), so it is handed back, at least once;
    * - `gone`: the process ended (Stop closes it). A Claude Code killed with a message still queued does not run it
    *   when the session is resumed (spike S1);
    * - `cut`: the run was cancelled, and its interrupt sweeps Claude Code's queue (`abandon`), or closes the process when
@@ -1171,12 +1189,44 @@ export class LiveSession<Turn = unknown> {
     return 'read'
   }
 
+  /**
+   * Claude Code's `command_lifecycle` said `cancelled` for `id`: it dropped the message unrun. Taken from the frame only
+   * for a late steer whose `cancelAsyncMessage` answered false (a held run's, or a stand-in's): Claude Code answers false
+   * when its queue gave the steer up a moment before the cancel came, and then drops it as the turn starts, with this
+   * frame. The steer is handed back, at once rather than after the wait. Other cancels are settled by their receipts.
+   */
+  private lateSteerCancelled(id: string): void {
+    const owner = this.ownerOf([id])
+    if (!owner || owner.read.has(id) || !owner.owned.has(id)) return
+    if (!owner.lateSteers.has(id) && !owner.taken.has(id) && !owner.handedBackBy) return
+    this.cancelId(id)
+  }
+
+  /**
+   * Claude Code read `id` after all, a steer handed back to Mousse with no read signal (`endTaken`), which Mousse runs
+   * again as a turn of its own: it may run twice. The read turn is not stopped: an interrupt could land on the turn after
+   * it, and Mousse may already have sent the steer again behind it. Its frames and result go to the stand-in, which drops
+   * them, so it is never shown and never reaches another run; Mousse's model context keeps the steer once, with the
+   * answer of the turn Mousse ran. It is marked (`mayRunTwice`) and a warning says so. Ids only.
+   */
+  private readAfterHandBack(standIn: LiveRun, id: string): void {
+    const pusher = standIn.handedBackBy
+    standIn.mayRunTwice.add(id)
+    pusher?.mayRunTwice.add(id)
+    console.warn('[claude-live] Claude Code read a steer after it was handed back with no read signal; it may run twice', {
+      threadId: this.threadId,
+      ...(pusher ? { runId: pusher.id } : {}),
+      messageIds: [id]
+    })
+  }
+
   /** Claude Code read `ids` of the runs that pushed them. */
   private markRead(ids: readonly string[]): void {
     for (const run of this.ownersOf(ids)) {
       for (const id of ids) {
         if (!run.ids.has(id) || run.read.has(id)) continue
         run.read.add(id)
+        if (run.handedBackBy) this.readAfterHandBack(run, id)
         try {
           run.onRead?.(id)
         } catch (error) {
@@ -1274,6 +1324,7 @@ export class LiveSession<Turn = unknown> {
     if (lifecycle) {
       // `started`: a turn took the message, so the model reads it. Only the read is taken from this frame.
       if (lifecycle.state === 'started' || lifecycle.state === 'completed') this.markRead([lifecycle.id])
+      else if (lifecycle.state === 'cancelled') this.lateSteerCancelled(lifecycle.id)
       return
     }
     if (message.type !== 'stream_event' && message.type !== 'assistant' && message.type !== 'user') return
@@ -1625,8 +1676,9 @@ export class LiveSession<Turn = unknown> {
    * held at the result, and Claude Code is asked to drop each such steer (`cancelAsyncMessage`):
    * - dropped: it never runs there, and the run ends with the result; the steer is handed back (`unreadFate`);
    * - read (a `started` frame, or a frame that names it): the run goes on to the steer's own result (`resume`);
-   * - taken by a turn that has not shown itself yet: the run waits up to `lateSteerReadMs` for it to begin, then ends
-   *   with the result, and the steer counts as read.
+   * - not dropped (false) with no read yet: the run waits up to `lateSteerReadMs` for a read signal. A `cancelled`
+   *   lifecycle ends the wait: Claude Code dropped it after all (`lateSteerCancelled`). With no signal the run ends with
+   *   the result, and the steer is handed back (`endTaken`).
    * A Claude Code that cannot say (no per-message cancel) is not waited for: the run ends, and the steer is handed back.
    * Stop cancels a held run like any other.
    */
@@ -1680,7 +1732,8 @@ export class LiveSession<Turn = unknown> {
     }
     if (!held()) return
     if (run.lateSteers.size === 0) return this.endHeld(run)
-    // A turn took the steer: it shows itself with a frame that names it (`resume`), or the run ends after the wait.
+    // Not dropped: a turn that takes the steer shows itself (`resume`), a `cancelled` lifecycle says it was dropped after
+    // all (`lateSteerCancelled`), or the run ends after the wait and the steer is handed back (`endTaken`).
     if (run.lateTimer) clearTimeout(run.lateTimer)
     run.lateTimer = setTimeout(() => {
       run.lateTimer = undefined
@@ -1690,25 +1743,60 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * A held run whose steer Claude Code took, but which did not show itself within `lateSteerReadMs`, ends with its
-   * result. The steer's turn may still come: until its result, a cancelled stand-in owns the steer, so the turn's frames
-   * reach no other run (the next prompt's run among them) and are dropped. Its first frame names the steer and the rest
-   * follow it (`frameTarget`); its result names the steer and ends the stand-in. They are not shown: by then the run
-   * that would show them has ended, and the next turn may already be running in its place.
+   * A held run whose steer `cancelAsyncMessage` could not drop (it answered false), and which no read signal followed
+   * within `lateSteerReadMs` (a `started` or `completed` lifecycle, or a frame or result that names it: each resumes the
+   * run at once), ends with its result, and the steer is handed back (`unreadFate` says `dropped`): it runs once, as the
+   * next turn. False alone is not a read. Claude Code answers it for a steer its queue gave up a moment before the cancel
+   * came, then drops that steer as the turn starts; it says so with a `cancelled` lifecycle (`lateSteerCancelled`), but
+   * a steer that ran is never silent for this long. At least once, never lost: a Claude Code that ran the steer and sent
+   * neither lifecycle nor frames would run it twice, so a warning says it was handed back (ids only).
+   *
+   * Its turn may still come: until its result, or `lateSteerStandInMs` with no sign of it, a cancelled stand-in owns the
+   * steer, so that turn's frames reach no other run (the next prompt's run among them) and are dropped. Its first frame
+   * names the steer and the rest follow it (`frameTarget`); its result names the steer and ends the stand-in. A read
+   * then means the steer may run twice (`readAfterHandBack`).
    */
   private endTaken(run: LiveRun): void {
-    const taken = [...run.lateSteers].filter((id) => run.taken.has(id) && run.owned.has(id) && !run.read.has(id))
+    const unread = [...run.lateSteers].filter((id) => run.taken.has(id) && run.owned.has(id) && !run.read.has(id))
     const index = this.runs.indexOf(run)
+    // Before the run settles: the turn's end asks `unreadFate`, which must find them handed back, not taken.
+    for (const id of unread) {
+      run.taken.delete(id)
+      run.dropped.add(id)
+    }
     this.endHeld(run)
-    if (!run.settled || taken.length === 0 || this.dead) return
+    if (unread.length === 0) return
+    console.warn('[claude-live] Claude Code did not drop a late steer, and nothing showed it read it; it is handed back', {
+      threadId: this.threadId,
+      runId: run.id,
+      messageIds: unread
+    })
+    if (!run.settled || this.dead) return
     const standIn = new LiveRun('prompt')
     standIn.abandoned = true
-    for (const id of taken) {
+    standIn.handedBackBy = run
+    for (const id of unread) {
       standIn.ids.add(id)
       standIn.owned.add(id)
     }
     // Where the run was among the runs (oldest first), so a newer turn's frames pass it over and an older one's do not.
     this.runs.splice(index >= 0 ? Math.min(index, this.runs.length) : this.runs.length, 0, standIn)
+    this.armStandIn(standIn)
+  }
+
+  /**
+   * A stand-in whose steer showed no sign of a turn within `lateSteerStandInMs` ends: Claude Code dropped it. One whose
+   * turn has begun (a read, or a frame that named it) waits for that turn's result instead, so the rest of the turn
+   * still has an owner.
+   */
+  private armStandIn(standIn: LiveRun): void {
+    standIn.standInTimer = setTimeout(() => {
+      standIn.standInTimer = undefined
+      if (standIn.settled || this.dead) return
+      if (standIn.read.size > 0 || standIn.seen.size > 0) return
+      this.finishCancelled(standIn)
+    }, this.timings.lateSteerStandInMs)
+    standIn.standInTimer.unref?.()
   }
 
   /** A held run's late steer runs: the run is live again until that steer's result. */
@@ -1771,6 +1859,8 @@ export class LiveSession<Turn = unknown> {
 
   /** The run no longer receives frames and no longer owns results. */
   private remove(run: LiveRun): void {
+    if (run.standInTimer) clearTimeout(run.standInTimer)
+    run.standInTimer = undefined
     const index = this.runs.indexOf(run)
     if (index >= 0) this.runs.splice(index, 1)
     if (run === this.continuation) {
