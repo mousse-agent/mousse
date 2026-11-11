@@ -26,6 +26,7 @@ import {
   LEGACY_AUTH_KEY,
   LEGACY_MOUSSE_CONF
 } from '../../../tests/fixtures/agent-platform/package-windows/plantLegacy.mjs'
+import { ensureConsoleCliExe } from '../../windows-console-exe.mjs'
 
 export {
   plantLegacyHome,
@@ -694,6 +695,8 @@ export async function runWindowsPackageQualification(input) {
   const workRoot = resolve(input.workRoot)
   if (!isAbsolute(workRoot)) throw new Error('workRoot must be absolute')
   assertNotDefaultUserHome(workRoot)
+  // A win-unpacked folder has no mousse-cli.exe; the installer makes it. Make the same copy.
+  ensureConsoleCliExe(packageDir)
   const startedAt = nowIso()
   const evidenceDir = join(workRoot, 'evidence')
   const logsDir = join(evidenceDir, 'logs')
