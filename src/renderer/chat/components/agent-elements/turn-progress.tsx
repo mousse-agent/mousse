@@ -103,6 +103,8 @@ function toolProgress(part: Part): TurnProgress {
   if (part.type === "tool-Subagent" || part.type === "tool-Task" || part.type === "tool-Agent" || part.subagentTool) {
     return { kind: "running-tool", label: "Running subagent…", title: detail };
   }
+  // A tool search loads tools for the model: the line says what its row says.
+  if (part.type === "tool-ToolSearch") return { kind: "running-tool", label: "Loading tools…", title: detail };
   const name = toolName(part.type!);
   // A call whose arguments are still streaming in: the model is writing it (a runtime that opens the row at the
   // call's start, before its arguments, shows it running with none).

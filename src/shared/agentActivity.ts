@@ -390,6 +390,19 @@ export function commandLabel(command: string): string {
 
 /** Normalize any provider casing ("read", "read_file", "TodoWrite") to 21st PascalCase. */
 export function normalizeToolName(rawName: string | undefined, kind?: string): string {
+  const known = knownToolName(rawName)
+  if (known) return known
+  if (!rawName) {
+    if (kind === 'mcp_tool_call' || kind === 'mcp_tool_result') return 'Mcp'
+    return 'Generic'
+  }
+  // Preserve already-PascalCase names (Bash, Grep, ...), capitalize first letter otherwise.
+  if (/^[A-Z][A-Za-z]*$/.test(rawName)) return rawName
+  return rawName.charAt(0).toUpperCase() + rawName.slice(1)
+}
+
+/** The card name a tool name maps to ("ls" is `Glob`, "read_file" is `Read`), or undefined for a name it does not know. */
+export function knownToolName(rawName: string | undefined): string | undefined {
   const lower = (rawName ?? '').toLowerCase().replace(/[^a-z]/g, '')
   switch (lower) {
     case 'read':
@@ -442,13 +455,7 @@ export function normalizeToolName(rawName: string | undefined, kind?: string): s
     case 'cloning':
       return 'cloning'
     default:
-      if (!rawName) {
-        if (kind === 'mcp_tool_call' || kind === 'mcp_tool_result') return 'Mcp'
-        return 'Generic'
-      }
-      // Preserve already-PascalCase names (Bash, Grep, ...), capitalize first letter otherwise.
-      if (/^[A-Z][A-Za-z]*$/.test(rawName)) return rawName
-      return rawName.charAt(0).toUpperCase() + rawName.slice(1)
+      return undefined
   }
 }
 

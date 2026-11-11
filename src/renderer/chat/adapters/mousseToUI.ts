@@ -7,7 +7,7 @@ import {
   guessMimeTypeFromFilename,
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
-import { commandLabel, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
+import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
@@ -208,15 +208,30 @@ function splitMcpName(rawName: string | undefined): { server: string; tool: stri
   return match ? { server: match[1]!, tool: match[2]! } : undefined
 }
 
-/** A tool identifier used as the title (`ToolSearch`, `mcp__mousse__thread_list`): the name itself, not a sentence. */
-const IDENTIFIER_TITLE = /^(?:mcp__\w+|[A-Z][A-Za-z]+)$/
+/**
+ * Built-in tools a runtime names in camel case, with their own handling in the list (`TaskOutput` rows are hidden,
+ * MCP resource tools get their own labels). On an MCP-kind row without a server they keep that name.
+ */
+const BUILTIN_TOOL_NAMES = new Set([
+  'TaskOutput', 'TaskStop',
+  'ListMcpResources', 'ListMcpResourcesTool', 'ReadMcpResource', 'ReadMcpResourceTool',
+])
+
+/**
+ * A title that is a tool's name rather than a sentence: a full MCP name (`mcp__mousse__thread_list`), a camel-case
+ * name (`ToolSearch`, `WebFetch`) or a name the cards know (`Read`, `Bash`). A single word such as "Terminal" or
+ * "Reading" is not one: it is guessed from below.
+ */
+function titleIsToolName(title: string): boolean {
+  return /^mcp__\w+$/.test(title) || /^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(title) || (/^\w+$/.test(title) && knownToolName(title) !== undefined)
+}
 
 function fallbackToolName(msg: ChatMessage): string | undefined {
   const detailTool = msg.toolCall?.details.find((d) => d.startsWith('Tool:'))
   const name = detailTool?.replace('Tool:', '').trim().split(/\s+/)[0]
   if (name) return name
   const title = (msg.toolCall?.title ?? '').trim()
-  if (IDENTIFIER_TITLE.test(title)) return title
+  if (titleIsToolName(title)) return title
   // Older rows named only by a sentence: a guess from its words. A search is not guessed (a web search, a tool
   // search and a code search all say "search"): it stays a generic row rather than a wrong one.
   const lower = title.toLowerCase()
@@ -297,6 +312,8 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
       // Pi/build tools arrive with rewritten mcp kinds but no Server
       // detail — render their rich cards (Bash terminal, Edit diff, ...).
       type = `tool-${toolName}`
+    } else if (rawName && BUILTIN_TOOL_NAMES.has(rawName)) {
+      type = `tool-${rawName}`
     } else {
       type = mcpCustomType(rawName)
     }
@@ -323,7 +340,9 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
         ?? (toolCall.summary.match(/[^\s]+\.[a-z]{1,4}/i)?.[0] ?? '')
       input = { file_path: file, ...(toolName === 'Edit' ? { old_string: '', new_string: '' } : {}) }
     } else if (toolName === 'Grep' || toolName === 'Glob' || toolName === 'WebSearch') {
-      input = { pattern: toolCall.summary, query: toolCall.summary }
+      // A runtime that sends no arguments puts the tool's own name in the summary: that is not what it searched for.
+      const query = toolCall.summary === rawName ? '' : toolCall.summary
+      input = { pattern: query, query }
     } else if (toolName === 'TodoWrite') {
       input = { todos: [], action: 'update' }
     } else {

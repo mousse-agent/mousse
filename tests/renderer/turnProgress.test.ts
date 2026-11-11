@@ -304,6 +304,13 @@ describe('the line under Working', () => {
     expectLive('Running Get Issue…')
   })
 
+  it('5. a tool search says what its row says: Loading tools…, the query in the tooltip', () => {
+    const label = (input: Record<string, unknown>) =>
+      describeTurnProgress({ state: { phase: 'tool_running' }, messages: [reply('c1', tool('ToolSearch', 'input-available', input))], now: NOW })
+    expect(label({ query: 'select:mcp__mousse__thread_list' })).toMatchObject({ kind: 'running-tool', label: 'Loading tools…', title: 'select:mcp__mousse__thread_list' })
+    expect(label({})?.label).toBe('Loading tools…')
+  })
+
   it('5. a tool result arrived, the model reads it: Thinking…', () => {
     render([ask(), reply('c1', tool('Bash', 'output-available', { command: 'ls' }))], 'streaming', { phase: 'thinking' })
     expectLive('Thinking…')
