@@ -30,6 +30,7 @@ import type { ProviderRef } from '../../run/types'
 import type { InstanceEnv } from '../env'
 import { killTree } from '../spawn'
 import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '../supervise'
+import { logWarn } from '../../log/diag'
 import { PiBridge, type PiBridgeRegistration } from './bridge'
 import { longerTtl, writtenCacheTtl } from '../promptCache'
 import { DescendantTracker, OwnedGroups } from './descendants'
@@ -369,7 +370,7 @@ class PiTurn {
   /** A bot's built-in calls with a `started` ledger row, by call id. */
   readonly ledgerRows = new Map<string, string>()
   readonly steers: Array<{ text: string; token?: string }> = []
-  /** Native `steer` requests sent at `turn_end` and not answered yet; the turn's end waits for them. */
+  /** Native `steer` requests sent at `turn_end` and not answered yet; the turn's end and Stop wait for them before `clear_queue`. */
   readonly steerSends = new Set<Promise<void>>()
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   /** When the turn's last request was answered, and the longest cache lifetime its requests wrote (`cacheWrite1h`). */
@@ -1556,13 +1557,19 @@ export class PiRpcEngine implements ProviderAdapter {
       turn.settled()
       return 'interrupted'
     }
+    // A native `steer` sent at `turn_end` and not answered yet would be queued after `clear_queue`, and the model
+    // would read it as well as its next turn: Stop waits for its answer first, within the command deadline.
+    await within(this.steerSendsAnswered(turn), this.options.commandDeadlineMs ?? COMMAND_DEADLINE_MS)
+    if (thread.killed || !thread.alive) {
+      // Its deadline killed Pi, and Pi's queue went with it: nothing goes to the dying process.
+      this.returnSteers(turn)
+      await within(this.kill(thread), CLEANUP_DEADLINE_MS)
+      turn.settled()
+      return 'interrupted'
+    }
     try {
       const cleared = await this.send<{ steering: string[]; followUp: string[] }>(thread, { type: 'clear_queue' })
-      for (const text of [...cleared.steering, ...cleared.followUp]) {
-        const index = turn.steers.findIndex((steer) => steer.text === text)
-        const steer = index >= 0 ? turn.steers.splice(index, 1)[0] : undefined
-        turn.ctl.returnSteer?.(text, steer?.token)
-      }
+      this.returnCleared(turn, cleared)
       // `abort` also cancels a pending retry backoff.
       await this.send(thread, { type: 'abort' }, INTERRUPT_DEADLINE_MS)
     } catch {
@@ -1932,7 +1939,12 @@ export class PiRpcEngine implements ProviderAdapter {
           const sending: Promise<void> = this.send(thread, { type: 'steer', message: entry.text }).then(() => undefined, () => {
             const index = turn.steers.indexOf(entry)
             if (index >= 0) turn.steers.splice(index, 1)
-            turn.ctl.returnSteer?.(entry.text, entry.token)
+            // A hand-back that fails leaves the steer's row `steering`: the step before the next claim runs it.
+            try {
+              turn.ctl.returnSteer?.(entry.text, entry.token)
+            } catch (error) {
+              this.handBackFailed(thread, error)
+            }
           }).finally(() => turn.steerSends.delete(sending))
           turn.steerSends.add(sending)
         }
@@ -2085,8 +2097,12 @@ export class PiRpcEngine implements ProviderAdapter {
         if (turn.phase === 'stopping') return turn.settled()
         // A steer sent at the last `turn_end` that Pi never read would stay in Pi's queue and reach the model at the
         // next prompt, while Mousse also runs it as a turn of its own: Pi's queue is emptied first (#368).
+        // The turn ends whatever the hand-back does: a steer not handed back keeps its row `steering`, and the step
+        // before the next claim (`returnOrphanedSteers`) runs it once.
         if (turn.steers.length || turn.steerSends.size) {
-          void this.returnUnreadAtEnd(thread, turn).then(() => this.endTurn(turn))
+          void this.returnUnreadAtEnd(thread, turn)
+            .catch((error: unknown) => this.handBackFailed(thread, error))
+            .finally(() => this.endTurn(turn))
           return
         }
         return this.endTurn(turn)
@@ -2112,21 +2128,40 @@ export class PiRpcEngine implements ProviderAdapter {
    * its queue with it: the steers are handed back all the same.
    */
   private async returnUnreadAtEnd(thread: PiThreadProcess, turn: PiTurn): Promise<void> {
-    while (turn.steerSends.size) await Promise.all([...turn.steerSends])
-    // A Stop meanwhile hands them back itself.
-    if (!turn.steers.length || turn.phase === 'stopping' || !thread.alive) return
+    await this.steerSendsAnswered(turn)
+    // A Stop meanwhile hands them back itself, once the same steer sends are answered.
+    if (!turn.steers.length || turn.phase === 'stopping') return
+    // A steer send past its deadline killed Pi, and its queue went with it: nothing goes to the dying process, the
+    // steers come back, and the reply Pi finished stands.
+    if (thread.killed || !thread.alive) return this.returnSteers(turn)
+    let cleared: { steering: string[]; followUp: string[] } | undefined
     try {
-      const cleared = await this.send<{ steering: string[]; followUp: string[] }>(thread, { type: 'clear_queue' })
-      for (const text of [...cleared.steering, ...cleared.followUp]) {
-        const index = turn.steers.findIndex((steer) => steer.text === text)
-        const steer = index >= 0 ? turn.steers.splice(index, 1)[0] : undefined
-        turn.ctl.returnSteer?.(text, steer?.token)
-      }
+      cleared = await this.send<{ steering: string[]; followUp: string[] }>(thread, { type: 'clear_queue' })
     } catch {
       // Handed back below.
     }
+    this.returnCleared(turn, cleared)
     // Pi neither showed nor returned them: it does not have them.
     this.returnSteers(turn)
+  }
+
+  /** Waits until every native `steer` the turn sent is answered or failed; each is bounded by the command deadline. */
+  private async steerSendsAnswered(turn: PiTurn): Promise<void> {
+    while (turn.steerSends.size) await Promise.allSettled([...turn.steerSends])
+  }
+
+  /** Hands back, once, each steer `clear_queue` took out of Pi's queue. */
+  private returnCleared(turn: PiTurn, cleared: { steering: string[]; followUp: string[] } | undefined): void {
+    for (const text of [...(cleared?.steering ?? []), ...(cleared?.followUp ?? [])]) {
+      const index = turn.steers.findIndex((steer) => steer.text === text)
+      const steer = index >= 0 ? turn.steers.splice(index, 1)[0] : undefined
+      turn.ctl.returnSteer?.(text, steer?.token)
+    }
+  }
+
+  /** A steer hand-back threw: its row stays `steering`, and the step before the next claim runs it once. */
+  private handBackFailed(thread: PiThreadProcess, error: unknown): void {
+    logWarn('PiRpcEngine', 'a steer could not be handed back; it runs before the next queued message', error, { instanceId: this.options.instanceId, threadId: thread.threadId })
   }
 
   private streamUpdate(turn: PiTurn, update: { type: string; contentIndex: number; delta?: string; content?: string } | undefined): void {

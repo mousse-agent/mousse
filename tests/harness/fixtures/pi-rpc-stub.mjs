@@ -37,10 +37,12 @@ setTimeout(() => {
 }, config.readyDelayMs ?? 0)
 if (config.helperAtStart) helper(true)
 
-/** Native steers Pi queued and has not read (`onPrompt: 'steerAtEnd'`): `clear_queue` returns them. */
+/** Native steers Pi queued and has not read (`onPrompt: 'steerAtEnd'`, `steerDelayMs`): `clear_queue` returns them. */
 const queuedSteers = []
 /** `onPrompt: 'steerAtEnd'`: the prompt's last step has ended and the prompt settles once a steer is queued. */
 let settleOnSteer = false
+/** `steer: 'hangSecond'`: the native steers received so far. */
+let steersSeen = 0
 
 let buffer = ''
 process.stdin.setEncoding('utf8')
@@ -65,6 +67,28 @@ function handle(command) {
       write({ type: 'agent_end', messages: [] })
       return write({ type: 'agent_settled' })
     case 'steer':
+      // `steer: 'hangSecond'` (with `onPrompt: 'steerAtEnd'`): Pi queues the first steer unread and runs one more step;
+      // the second is never answered (the engine's command deadline kills the process), and the prompt settles.
+      if (config.steer === 'hangSecond' && settleOnSteer) {
+        steersSeen += 1
+        if (steersSeen === 1) {
+          queuedSteers.push(command.message)
+          respond(command)
+          write({ type: 'turn_start' })
+          write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' } })
+          return write({ type: 'turn_end' })
+        }
+        settleOnSteer = false
+        write({ type: 'agent_end', messages: [] })
+        return write({ type: 'agent_settled' })
+      }
+      // `steerDelayMs`: Pi queues the steer and answers only after the delay.
+      if (config.steerDelayMs) {
+        return void setTimeout(() => {
+          queuedSteers.push(command.message)
+          respond(command)
+        }, config.steerDelayMs)
+      }
       respond(command)
       if (!settleOnSteer) return
       // Queued after Pi's last check of its queue: the prompt ends without reading it, and Pi keeps it for the next.
@@ -97,6 +121,12 @@ function handle(command) {
         settleOnSteer = true
         write({ type: 'turn_start' })
         write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' } })
+        return write({ type: 'turn_end' })
+      }
+      if (config.onPrompt === 'stepThenHang') {
+        // One step ends (the engine answers `turn_end` with a native steer), and the prompt runs on until `abort`.
+        write({ type: 'turn_start' })
+        write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'working' }], stopReason: 'toolUse' } })
         return write({ type: 'turn_end' })
       }
       if (config.onPrompt === 'turn') {
