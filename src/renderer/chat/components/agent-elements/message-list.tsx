@@ -1744,6 +1744,8 @@ export const MessageList = memo(function MessageList({
   }, [replyActive, lastUserMessageId, normalizedMessages]);
 
   const lastUserMessageIdRef = useRef(lastUserMessageId);
+  // The last turn ended with messages still queued: the next prompt to arrive is the queue's next turn.
+  const queuedTurnNextRef = useRef(false);
   // The last row's key, set in render below; read by the effect that pins a starting turn.
   const lastTurnKeyRef = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -1751,6 +1753,7 @@ export const MessageList = memo(function MessageList({
       lastUserMessageId &&
       lastUserMessageId !== lastUserMessageIdRef.current
     ) {
+      queuedTurnNextRef.current = false;
       // A prompt the person just sent here takes them to the end. A turn the queue started (a queued
       // message's turn) leaves a reader of earlier messages where they are; at the end, the end is followed.
       const sentHere =
@@ -1775,10 +1778,18 @@ export const MessageList = memo(function MessageList({
   const trailingOptimistic = Boolean(
     trailingUser?.id.startsWith("optimistic:"),
   );
+  // The queue's next turn: its prompt arrives a moment before its run's status does. It is starting
+  // already, so it waits for its reply from this render on, as a prompt sent here does: its header
+  // renders with the row, and the row is pinned with it (no hop of the queue a frame later).
+  const queuedTurnArrived =
+    queuedTurnNextRef.current &&
+    lastUserMessageId !== lastUserMessageIdRef.current &&
+    !trailingHasAssistant;
   if (!trailingUser || trailingHasAssistant) {
     replyHoldRef.current = null;
   } else if (
     trailingOptimistic ||
+    queuedTurnArrived ||
     isStreaming ||
     replyHoldRef.current
   ) {
@@ -1806,6 +1817,7 @@ export const MessageList = memo(function MessageList({
     }
     // With messages still queued the next turn starts from them: the end is held for it.
     const nextQueued = (afterTurnsRef.current?.childElementCount ?? 0) > 0;
+    queuedTurnNextRef.current = nextQueued;
     if (liveTurnRef.current === lastUserMessageId || trailingHasAssistant) followerRef.current?.turnEnded(nextQueued);
   }, [turnLive, lastUserMessageId, trailingHasAssistant]);
   if (trailingOptimistic && trailingUser) {

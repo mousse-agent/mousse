@@ -234,6 +234,8 @@ describe('the setting', () => {
   it('keeps the progress line up while nothing of the reply is shown yet', () => {
     render(thread('The first paragraph is still being writ'))
     expect(replyText()).toBe('')
+    // Not even an empty block: one would take a gap above the progress line and move it down.
+    expect(host.querySelector('[data-message-id="reply"]')?.matches(':empty')).toBe(true)
     expect(host.querySelector('[data-turn-progress]')).not.toBeNull()
   })
 
