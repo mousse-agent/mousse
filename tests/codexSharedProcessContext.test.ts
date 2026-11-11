@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, expect, it } from 'vitest'
+import { currentWorkScope, runInWorkScope, threadScope, type WorkScope } from '../src/mms/execution/workScope'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 import { CodexProviderService } from '../src/mms/harness/vendors/codex/CodexProviderService'
@@ -133,17 +134,19 @@ it('delivers each thread its own events in its own context, after a steer was cu
   const server = sharedServer()
   const service = create(server)
   const thread = new AsyncLocalStorage<string>()
-  /** Every callback a chat got: the chat it was given to, and the context it ran in. */
-  const seen: Array<{ chat: string; context: string | undefined; what: string }> = []
+  /** Every callback a chat got: the chat it was given to, and the context it ran in (its thread, its work scope). */
+  const seen: Array<{ chat: string; context: string | undefined; scope: WorkScope | null; what: string }> = []
   const callbacks = (chat: string) => ({
-    onText: (text: string) => seen.push({ chat, context: thread.getStore(), what: text }),
-    onTool: (event: { title?: string }) => seen.push({ chat, context: thread.getStore(), what: `tool ${event.title ?? ''}` }),
-    onSteer: (text: string) => seen.push({ chat, context: thread.getStore(), what: `steer ${text}` })
+    onText: (text: string) => seen.push({ chat, context: thread.getStore(), scope: currentWorkScope(), what: text }),
+    onTool: (event: { title?: string }) => seen.push({ chat, context: thread.getStore(), scope: currentWorkScope(), what: `tool ${event.title ?? ''}` }),
+    onSteer: (text: string) => seen.push({ chat, context: thread.getStore(), scope: currentWorkScope(), what: `steer ${text}` })
   })
+  /** A chat run as a turn runs: in its thread's context and work scope. */
+  const asThread = <T>(chat: string, work: () => T): T => thread.run(chat, () => runInWorkScope(threadScope(chat), work))
 
   // Thread A starts the process with a long command; a person's message is cut into its turn.
   let steered = false
-  const a = thread.run('A', () => service.chat({
+  const a = asThread('A', () => service.chat({
     threadId: 'A', cwd: home, model: 'gpt-x', prompt: 'LONG work in A',
     ...callbacks('A'),
     drainSteerEntry: () => {
@@ -157,8 +160,8 @@ it('delivers each thread its own events in its own context, after a steer was cu
   expect(resultA.text).toContain('STEER-A')
 
   // Thread B, then C, run on the same process.
-  const resultB = await thread.run('B', () => service.chat({ threadId: 'B', cwd: home, model: 'gpt-x', prompt: 'hello from B', ...callbacks('B') }))
-  const resultC = await thread.run('C', () => service.chat({ threadId: 'C', cwd: home, model: 'gpt-x', prompt: 'hello from C', ...callbacks('C') }))
+  const resultB = await asThread('B', () => service.chat({ threadId: 'B', cwd: home, model: 'gpt-x', prompt: 'hello from B', ...callbacks('B') }))
+  const resultC = await asThread('C', () => service.chat({ threadId: 'C', cwd: home, model: 'gpt-x', prompt: 'hello from C', ...callbacks('C') }))
   expect(server.launches).toHaveLength(1)
 
   expect(resultB.text).toContain('hello from B')
@@ -168,4 +171,7 @@ it('delivers each thread its own events in its own context, after a steer was cu
   for (const chat of ['A', 'B', 'C']) expect(seen.filter((entry) => entry.chat === chat).length).toBeGreaterThan(0)
   // Each callback ran in its own chat's context, never in the one that started the process.
   expect(seen.filter((entry) => entry.context !== entry.chat)).toEqual([])
+  // And in its own work scope: work a callback starts during B's turn is counted under B.
+  expect(seen.filter((entry) => entry.chat === 'B').map((entry) => entry.scope)).toContainEqual(threadScope('B'))
+  expect(seen.filter((entry) => JSON.stringify(entry.scope) !== JSON.stringify(threadScope(entry.chat)))).toEqual([])
 })

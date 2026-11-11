@@ -1870,16 +1870,35 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `target` with each of its functions run in `session`'s scope. A runtime calls a turn's sink, control and context
-   * from whatever async context delivers its events, and a process that serves several threads (Codex's one
-   * app-server) delivers them in the context of the turn that started it: another thread's. Without this, that
-   * thread's transcript would take this turn's rows.
+   * `target` with each of its functions run in the async context of the turn that built it: its thread's session, its
+   * work scope and every other store, as they were when the turn started. A runtime calls a turn's sink, control and
+   * context from whatever async context delivers its events, and a process that serves several threads (Codex's one
+   * app-server, Cursor's one host) delivers them in the context of the turn that started it: another thread's. Without
+   * this, that thread's transcript would take this turn's rows, and work this turn starts would count as that thread's.
+   *
+   * `dropLate`: a call made once another turn is the thread's active one changes nothing. It would land in that turn
+   * (its open assistant row, its queue). A call while this turn is still active, or after it ended with no other turn
+   * running, goes through as before. Must be called in the turn's own context, where it takes the snapshot.
    */
-  private inSession<T extends object>(session: ThreadSession, target: T): T {
+  private inTurn<T extends object>(session: ThreadSession, turn: NonNullable<ThreadSession['activeTurn']>, turnId: string, part: string, target: T, options: { dropLate: boolean }): T {
+    const inTurnContext = AsyncLocalStorage.snapshot()
     const bound = { ...target } as Record<string, unknown>
     for (const [key, value] of Object.entries(bound)) {
       if (typeof value !== 'function') continue
-      bound[key] = (...args: unknown[]): unknown => this.sessionAls.run(session, () => (value as (...params: unknown[]) => unknown).apply(target, args))
+      bound[key] = (...args: unknown[]): unknown => {
+        if (options.dropLate) {
+          const live = session.released ? this.sessions.get(session.threadId) : session
+          if (live?.activeTurn && live.activeTurn !== turn) {
+            logDebug('OrchestratorService', 'a call for a turn that has ended was dropped: another turn runs in its thread', undefined, {
+              threadId: session.threadId,
+              turnId,
+              call: `${part}.${key}`
+            })
+            return undefined
+          }
+        }
+        return inTurnContext(() => this.sessionAls.run(session, () => (value as (...params: unknown[]) => unknown).apply(target, args)))
+      }
     }
     return bound as T
   }
@@ -11492,8 +11511,9 @@ export class OrchestratorService extends EventEmitter {
       const drainScope = `${turnId}:${randomUUID().slice(0, 8)}`
       let drains = 0
       let returnedAhead = 0
-      // The turn's own thread, whichever async context the runtime calls from (`inSession`).
-      const turnSink = this.inSession<TurnSink>(session, {
+      // The turn's own thread and async context, whichever context the runtime calls from (`inTurn`). A late call,
+      // made while a newer turn runs in the thread, would land in that turn's rows: it is dropped.
+      const turnSink = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
         text: (event) => this.handleStreamingTextEvent(event),
         thinking: (event) => this.handleStreamingThinkingEvent(event),
         tool: (event) => {
@@ -11609,7 +11629,7 @@ export class OrchestratorService extends EventEmitter {
           if (metrics.usage || metrics.context) lastUsageAt = Date.now()
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
-      })
+      }, { dropLate: true })
       const drainEntry = (): { text: string; token: string; cut: boolean } | undefined => {
         // A remote turn's steers, then the thread's own (and the durable queue's).
         const raw = opts?.externalDrainSteer?.()
@@ -11627,7 +11647,8 @@ export class OrchestratorService extends EventEmitter {
         const cut = entries.some((steer) => !steer.origin && !steer.byAgent && !notices.has(steer.text.trim()))
         return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut }
       }
-      const turnControl = this.inSession<TurnControl>(session, {
+      // A late drain would take the newer turn's steers into this one: dropped, as a late sink call is.
+      const turnControl = this.inTurn<TurnControl>(session, turn, turnId, 'control', {
         drainSteer: () => drainEntry()?.text,
         drainSteerEntry: drainEntry,
         // Only a note that the provider has the text: the drain is kept, whole, until `steerAccepted` saves it or
@@ -11675,7 +11696,7 @@ export class OrchestratorService extends EventEmitter {
           turn.carriedSteers = [...entry.carried, ...(turn.carriedSteers ?? [])]
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
-      })
+      }, { dropLate: true })
       const onPublishApplet = this.appletStore ? (value: unknown) => {
         if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
         stagedApplets.push(validateAppletSubmission(value))
@@ -11697,7 +11718,8 @@ export class OrchestratorService extends EventEmitter {
           // The app tools act only while this run is the thread's active one.
           ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {})
         },
-        context: this.inSession<AdapterHost['context']>(session, {
+        // The runtime asks these from inside its turn and needs their answers: never dropped.
+        context: this.inTurn<AdapterHost['context']>(session, turn, turnId, 'context', {
           recoverOverflow: () => {
             if (conversationToolsUsed || providerProgress || !contextSettings.compactionEnabled) return null
             onCompaction('start')
@@ -11725,7 +11747,7 @@ export class OrchestratorService extends EventEmitter {
             return nativeAgentHistory(this.nativeContext)
           },
           nativeHistoryNow: () => nativeAgentHistory(this.nativeContext)
-        })
+        }, { dropLate: false })
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
