@@ -1239,6 +1239,8 @@ export const MessageList = memo(function MessageList({
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
+  // What is drawn after the turns (the queued messages): the next turn starts from it.
+  const afterTurnsRef = useRef<HTMLDivElement>(null);
   const chatContainerObserverRef = useRef<ResizeObserver | null>(null);
   // Follow the end of the thread, or leave it alone. Changed only by what the
   // user does (see `virtual/follow-mode.ts`), never by a scroll position.
@@ -1449,7 +1451,7 @@ export const MessageList = memo(function MessageList({
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollAtRef.current = performance.now();
   }, []);
-  // Holds a just-sent prompt near the top and glides after the reply (virtual/end-follower.ts).
+  // Holds a just-sent prompt near the top and lands on the end as the reply grows (virtual/end-follower.ts).
   const followerRef = useRef<EndFollower | null>(null);
   followerRef.current ??= createEndFollower({
     container: () => chatContainerRef.current,
@@ -1574,8 +1576,8 @@ export const MessageList = memo(function MessageList({
     // The one writer that follows the end: the transcript grew (a streamed
     // delta, an image, a tool card opening, the reply gap) or the viewport
     // changed, and the observer runs after layout and before paint. The
-    // follower resizes the space under a pinned prompt, then lands on the end,
-    // or glides to it while a turn runs (virtual/end-follower.ts).
+    // follower resizes the space under a pinned prompt, then lands on the end
+    // in the same frame (virtual/end-follower.ts).
     // When reading history (free) nothing is written: streamed text appends
     // below the viewport, and growth above it is held by native scroll
     // anchoring (or by `useTurnWindow` in a windowed list).
@@ -1712,7 +1714,9 @@ export const MessageList = memo(function MessageList({
       liveTurnRef.current = lastUserMessageId;
       return;
     }
-    if (liveTurnRef.current === lastUserMessageId || trailingHasAssistant) followerRef.current?.turnEnded();
+    // With messages still queued the next turn starts from them: the end is held for it.
+    const nextQueued = (afterTurnsRef.current?.childElementCount ?? 0) > 0;
+    if (liveTurnRef.current === lastUserMessageId || trailingHasAssistant) followerRef.current?.turnEnded(nextQueued);
   }, [turnLive, lastUserMessageId, trailingHasAssistant]);
   if (trailingOptimistic && trailingUser) {
     liveOptimisticKeyRef.current = trailingUser.id;
@@ -1950,7 +1954,7 @@ export const MessageList = memo(function MessageList({
         </div>
         {afterTurns != null && (
           // Clear of the last turn's toolbar, which reaches into the space below the rows.
-          <div data-after-turns className="[&:not(:empty)]:mt-5">
+          <div ref={afterTurnsRef} data-after-turns className="[&:not(:empty)]:mt-5">
             {afterTurns}
           </div>
         )}

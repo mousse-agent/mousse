@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The transcript's own hooks into the end follower, with the defaults on (the glide and paragraph
+ * The transcript's own hooks into the end follower, with the defaults on (motion and paragraph
  * pacing): a prompt sent here is held near the top and the space under it closes when the turn
- * ends; a steer never moves a reader who scrolled up (#873); a long, windowed thread glides too.
+ * ends; a steer never moves a reader who scrolled up (#873); a long, windowed thread follows too.
  * jsdom has no layout, so a small one is given by hand: rows of fixed height stacked from the top,
  * the space under the content, and a viewport of 800 px that clamps the scroll position.
  */
@@ -195,7 +195,7 @@ describe('a steer while the reader is up in the thread (#873), defaults on', () 
 })
 
 describe('a long, windowed thread, defaults on', () => {
-  it('glides to the end as the reply grows, and paces the reply', () => {
+  it('lands on the end in the same frame as the reply grows, and paces the reply', () => {
     const count = RENDER_ALL_THRESHOLD + 5
     const before = history(count)
     const live = (text: string) => [...before, ask('u-live', 'Go on'), answer('a-live', text)]
@@ -207,20 +207,14 @@ describe('a long, windowed thread, defaults on', () => {
     grew()
     frames(5)
     expect(host.querySelector('[data-message-id="a-live"]')?.textContent ?? '').not.toContain('Second half writ')
-    // A paragraph more: the end moves 300 px, and the view eases there over several frames.
+    // A paragraph more: the end moves 300 px, and the view is there before the frame paints.
+    const start = list().scrollTop
     layout.content += 300
     render(live('First paragraph.\n\nSecond half written.\n\nThird'), 'streaming')
     grew()
-    const start = list().scrollTop
-    const target = end()
-    expect(target - start).toBeGreaterThan(200)
-    const positions: number[] = []
-    for (let index = 0; index < 40 && list().scrollTop < target; index++) {
-      frames(1)
-      positions.push(list().scrollTop)
-    }
-    expect(list().scrollTop).toBe(target)
-    expect(positions.length).toBeGreaterThan(4)
-    for (let index = 1; index < positions.length; index++) expect(positions[index]!).toBeGreaterThanOrEqual(positions[index - 1]!)
+    expect(end() - start).toBeGreaterThan(200)
+    expect(list().scrollTop).toBe(end())
+    frames(5)
+    expect(list().scrollTop).toBe(end())
   })
 })

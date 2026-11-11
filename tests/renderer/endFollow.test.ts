@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   COLLAPSE_MS,
   PIN_TOP,
+  QUEUED_TURN_HOLD_MS,
   collapsedReserve,
-  glideStep,
   heldReserve,
+  heldTotalReserve,
   pinnedReserve
 } from '../../src/renderer/chat/components/agent-elements/virtual/end-follow'
 
@@ -65,36 +66,11 @@ describe('the space under a pinned prompt', () => {
   })
 })
 
-describe('gliding to the end', () => {
-  it('eases toward the target a share at a time and never overshoots', () => {
-    let position = 0
-    const target = 600
-    const steps: number[] = []
-    for (let frame = 0; frame < 60 && position !== target; frame++) {
-      const next = glideStep(position, target, 16.7, 1)
-      expect(next).toBeGreaterThan(position)
-      expect(next).toBeLessThanOrEqual(target)
-      steps.push(next - position)
-      position = next
-    }
-    expect(position).toBe(target)
-    // Eased: big steps first, small ones last; about a quarter of a second at 60 frames a second.
-    expect(steps[0]!).toBeGreaterThan(steps.at(-1)!)
-    expect(steps.length).toBeGreaterThan(8)
-    expect(steps.length).toBeLessThan(40)
-  })
-
-  it('aims again at a target that moved, from where it is', () => {
-    const first = glideStep(0, 600, 16.7, 1)
-    const second = glideStep(first, 900, 16.7, 1)
-    expect(second - first).toBeGreaterThan(first)
-  })
-
-  it('lands at once with motion off, and goes slower at Slow', () => {
-    expect(glideStep(0, 600, 16.7, 0)).toBe(600)
-    expect(glideStep(0, 600, 16.7, 1.6)).toBeLessThan(glideStep(0, 600, 16.7, 0.6))
-    // A long stall does not turn into a leap.
-    expect(glideStep(0, 600, 2000, 1)).toBeLessThan(600)
+describe('holding the end while something near it is replaced', () => {
+  it('fills what left until the content grows back, then nothing', () => {
+    expect(heldTotalReserve({ total: 3000, contentHeight: 2940 })).toBe(60)
+    expect(heldTotalReserve({ total: 3000, contentHeight: 3000 })).toBe(0)
+    expect(heldTotalReserve({ total: 3000, contentHeight: 3080 })).toBe(0)
   })
 })
 
@@ -174,25 +150,106 @@ describe('the transcript while a reply streams', () => {
     expect(t.follower.pinned()).toBe('turn')
   })
 
-  it('starts following, with a glide, once the reply outgrows the screen', () => {
+  it('follows the end in the same frame once the reply outgrows the screen, on every update', () => {
     const t = transcript({ content: 3000 })
-    const rowTop = send(t)
+    send(t)
     t.state.content += 1200
     t.follower.follow()
     expect(t.follower.pinned()).toBeNull()
     expect(t.reserve()).toBe(0)
-    // Not in the same frame: the glide moves one step a frame.
-    expect(t.container.scrollTop).toBe(rowTop - PIN_TOP)
-    const positions: number[] = []
-    for (let index = 0; index < 40 && t.container.scrollTop < t.end(); index++) {
-      const writes = t.state.writes
+    // Before paint: no frame shows the view short of the end.
+    expect(t.container.scrollTop).toBe(t.end())
+    for (let step = 0; step < 10; step++) {
+      t.state.content += 40 + step * 13
+      t.follower.follow()
+      expect(t.container.scrollTop).toBe(t.end())
+      const at = t.container.scrollTop
       frame()
-      expect(t.state.writes - writes).toBeLessThanOrEqual(1)
+      frame()
+      // Nothing moves between updates.
+      expect(t.container.scrollTop).toBe(at)
+    }
+  })
+
+  it('holds the end when something near it leaves mid-turn, so the view does not drop and come back', () => {
+    const t = transcript({ content: 3000 })
+    send(t)
+    t.state.content += 1200
+    t.follower.follow()
+    const at = t.container.scrollTop
+    // Send now: the queued message leaves the list (60 px) a commit before the reply shows it (70 px).
+    t.state.content -= 60
+    t.follower.follow()
+    expect(t.container.scrollTop).toBe(at)
+    expect(t.reserve()).toBe(60)
+    t.state.content += 70
+    t.follower.follow()
+    expect(t.reserve()).toBe(0)
+    expect(t.container.scrollTop).toBe(at + 10)
+    expect(t.follower.holding()).toBe(false)
+  })
+
+  it('closes a held space after the turn ends, if nothing grew into it', () => {
+    const t = transcript({ content: 3000 })
+    send(t)
+    t.state.content += 1200
+    t.follower.follow()
+    t.state.content -= 60
+    t.follower.follow()
+    expect(t.reserve()).toBe(60)
+    t.follower.turnEnded()
+    for (let index = 0; index < 30 && t.reserve() > 0; index++) frame()
+    expect(t.reserve()).toBe(0)
+    expect(t.container.scrollTop).toBe(t.end())
+  })
+
+  it('moves once, up to the pin, when the next queued turn starts after a turn', () => {
+    const t = transcript({ content: 3000 })
+    const first = send(t, 'first')
+    t.state.content += 300
+    t.follower.follow()
+    expect(t.container.scrollTop).toBe(first - PIN_TOP)
+    // The turn ends with a message still queued; it leaves the queue (80 px) before its turn shows.
+    t.follower.turnEnded(true)
+    const positions = [t.container.scrollTop]
+    t.state.content -= 80
+    t.follower.follow()
+    positions.push(t.container.scrollTop)
+    for (let index = 0; index < 20; index++) {
+      frame()
       positions.push(t.container.scrollTop)
     }
-    expect(t.container.scrollTop).toBe(t.end())
-    expect(positions.length).toBeGreaterThan(5)
-    for (let index = 1; index < positions.length; index++) expect(positions[index]!).toBeGreaterThan(positions[index - 1]!)
+    // Nothing slides while the next turn is on its way.
+    expect(new Set(positions).size).toBe(1)
+    // Its turn shows and is pinned: one move, up to it.
+    const next = send(t, 'next')
+    expect(t.container.scrollTop).toBe(next - PIN_TOP)
+    expect(t.container.scrollTop).toBeGreaterThan(positions[0]!)
+  })
+
+  it('closes the space as after any turn when the queued turn does not start', () => {
+    const t = transcript({ content: 3000 })
+    send(t)
+    t.state.content += 300
+    t.follower.follow()
+    t.follower.turnEnded(true)
+    expect(t.reserve()).toBeGreaterThan(0)
+    vi.advanceTimersByTime(QUEUED_TURN_HOLD_MS)
+    for (let index = 0; index < 30 && t.reserve() > 0; index++) frame()
+    expect(t.reserve()).toBe(0)
+    expect(t.container.scrollTop).toBe(t.state.content - t.clientHeight)
+  })
+
+  it('lets a reader scroll away from a held end', () => {
+    const t = transcript({ content: 3000 })
+    send(t)
+    t.state.content += 300
+    t.follower.follow()
+    t.follower.turnEnded(true)
+    t.state.mode = 'free'
+    t.container.scrollTop -= 200
+    t.follower.settle()
+    expect(t.follower.holding()).toBe(false)
   })
 
   it('never moves a reader who scrolled up', () => {
@@ -208,32 +265,6 @@ describe('the transcript while a reply streams', () => {
       expect(t.container.scrollTop).toBe(1200)
     }
     expect(t.state.writes).toBe(writes)
-  })
-
-  it('stops gliding the moment the person scrolls', () => {
-    const t = transcript({ content: 3000 })
-    send(t)
-    t.state.content += 1000
-    t.follower.follow()
-    frame()
-    frame()
-    const at = t.container.scrollTop
-    expect(at).toBeLessThan(t.end())
-    t.follower.cancel()
-    t.state.mode = 'free'
-    const writes = t.state.writes
-    for (let index = 0; index < 20; index++) frame()
-    expect(t.container.scrollTop).toBe(at)
-    expect(t.state.writes).toBe(writes)
-  })
-
-  it('lands at once on every update with motion off', () => {
-    motion.scale = 0
-    const t = transcript({ content: 3000 })
-    send(t)
-    t.state.content += 1500
-    t.follower.follow()
-    expect(t.container.scrollTop).toBe(t.end())
   })
 
   it('lands at once when no turn runs', () => {
@@ -284,14 +315,6 @@ describe('the transcript while a reply streams', () => {
     t.container.scrollTop = at - 300
     t.follower.settle()
     expect(t.reserve()).toBeLessThanOrEqual(Math.max(0, at - 300 + t.clientHeight - t.state.content))
-  })
-
-  it('lands at once when the end is more than a screen away', () => {
-    const t = transcript({ content: 3000 })
-    send(t)
-    t.state.content += 2500
-    t.follower.follow()
-    expect(t.container.scrollTop).toBe(t.end())
   })
 
   /** A short reply under a pinned prompt, the turn not ended yet: 476 px of space under it. */

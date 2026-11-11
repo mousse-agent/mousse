@@ -1,7 +1,7 @@
 /**
  * How the transcript keeps up with a reply in progress, as pure arithmetic: where a just-sent
- * prompt is held, how much empty space under the reply that takes, and how the view moves toward
- * the end once the reply outgrows the screen. The DOM side is `end-follower.ts`.
+ * prompt is held, how much empty space under the reply that takes, how that space holds the end
+ * while something near it is replaced, and how it closes. The DOM side is `end-follower.ts`.
  *
  * Positions are scroll-space pixels: 0 is the top of the transcript's content.
  */
@@ -41,27 +41,20 @@ export function heldReserve(input: {
 }
 
 /**
- * How quickly a glide closes on the end at normal Animation speed: the time constant of an
- * exponential ease, so about 95% of the way is covered in three of these (about 250 ms).
+ * The empty space under the content that keeps the transcript `total` px tall, so the end, and the
+ * view standing on it, do not move when something near the end leaves before what replaces it
+ * arrives (a queued message sent into the reply, the next queued turn starting). 0 once the content
+ * has grown back to `total`.
  */
-export const GLIDE_TAU_MS = 85;
-/** The longest frame a glide step accounts for: after a stall it resumes, it does not leap. */
-const GLIDE_MAX_FRAME_MS = 50;
+export function heldTotalReserve(input: { total: number; contentHeight: number }): number {
+  return Math.max(0, Math.ceil(input.total - input.contentHeight));
+}
 
 /**
- * One frame of a glide from `position` toward `target`: an eased step that covers a share of what
- * is left, so a target that moves (the reply grew again) is simply aimed at anew. `scale` is the
- * Animation speed multiplier; 0 (Off, or the system reducing motion) lands at once. Each step moves
- * at least a pixel and never past the target, so a glide always ends.
+ * How long the end is held after a turn ends with messages still queued, waiting for the next turn
+ * to start. Past this the space closes as after any turn.
  */
-export function glideStep(position: number, target: number, frameMs: number, scale: number): number {
-  const remaining = target - position;
-  if (scale <= 0 || Math.abs(remaining) <= 1) return target;
-  const dt = Math.min(Math.max(frameMs, 0), GLIDE_MAX_FRAME_MS);
-  const share = 1 - Math.exp(-dt / (GLIDE_TAU_MS * scale));
-  const step = Math.max(1, Math.abs(remaining) * share);
-  return Math.abs(remaining) <= step ? target : position + Math.sign(remaining) * step;
-}
+export const QUEUED_TURN_HOLD_MS = 1500;
 
 /** How long the space under a finished reply takes to close, at normal Animation speed. */
 export const COLLAPSE_MS = 260;
