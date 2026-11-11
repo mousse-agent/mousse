@@ -62,6 +62,10 @@ describe('the async helpers', () => {
   })
 
   it('report output past the limit as spawnSync does', async () => {
+    // Far more output than a pipe holds, so Git is still writing when either form stops it. With a few hundred bytes
+    // Git could finish and exit 0 before the stop landed, in one form and not the other.
+    writeFileSync(join(f.repo, 'large.txt'), 'a line of the large file\n'.repeat(100_000))
+    git(f.repo, 'add', 'large.txt'); git(f.repo, 'commit', '-qm', 'large')
     const sync = spawnSync('git', ['log', '-p'], { cwd: f.repo, encoding: 'utf8', maxBuffer: 10 })
     const async = await runGitProcess(['log', '-p'], { cwd: f.repo, env: process.env, maxBuffer: 10 })
     expect(async.error?.code).toBe((sync.error as NodeJS.ErrnoException).code)
