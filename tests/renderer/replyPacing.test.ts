@@ -5,11 +5,13 @@ import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   IDLE_FLUSH_MS,
+  MAX_HOLD_MS,
   PACE_MS,
   finishedBlocksEnd,
+  readableEnd,
   usePacedText
 } from '../../src/renderer/chat/components/agent-elements/reply-pacing'
-import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
+import { holdReplyPacing, setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { startRenderCounts, stopRenderCounts } from '../../src/renderer/chat/components/agent-elements/render-counts'
 
@@ -43,6 +45,26 @@ describe('where a streaming reply can be shown up to', () => {
 
   it('keeps a list number that is alone on its line with the text after it', () => {
     expect(shown('1.\n\nFirst item')).toBe('')
+  })
+
+  it('shows a table a finished row at a time, once its header and delimiter are in', () => {
+    expect(shown('Results:\n\n| a | b |\n| -')).toBe('Results:\n\n')
+    expect(shown('Results:\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 |')).toBe('Results:\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n')
+  })
+
+  it('shows a quote a finished line at a time', () => {
+    expect(shown('> First line of the quote\n> second li')).toBe('> First line of the quote\n')
+  })
+
+  it('after a long hold, may show up to the last finished sentence or line, never a word being written', () => {
+    const text = 'One long paragraph. It goes on and on, sentence after sentence! Still going and not done yet wit'
+    expect(finishedBlocksEnd(text)).toBe(0)
+    expect(text.slice(0, readableEnd(text))).toBe('One long paragraph. It goes on and on, sentence after sentence!')
+    const soft = 'Line one of a soft break\nline two is half'
+    expect(soft.slice(0, readableEnd(soft))).toBe('Line one of a soft break\n')
+    // Inside a code fence a stop is not an end: only whole lines are.
+    const code = '```ts\nconst a = 1\nfoo. bar. ba'
+    expect(code.slice(0, readableEnd(code))).toBe('```ts\nconst a = 1\n')
   })
 })
 
@@ -116,6 +138,24 @@ describe('a paced reply', () => {
     expect(seen.at(-1)).toBe('A sentence before a tool call')
   })
 
+  it('shows a long first paragraph up to a finished sentence within the longest hold, while text keeps coming', () => {
+    const words = 'This first paragraph is long. It keeps going with more words. '.repeat(12)
+    let at = 0
+    let firstShownAt = -1
+    // Five characters every 20 ms, with no blank line anywhere.
+    for (let end = 5; end <= words.length; end += 5) {
+      show(words.slice(0, end))
+      wait(20)
+      at += 20
+      if (firstShownAt < 0 && (seen.at(-1) ?? '') !== '') firstShownAt = at
+    }
+    expect(firstShownAt).toBeGreaterThan(MAX_HOLD_MS - 40)
+    expect(firstShownAt).toBeLessThanOrEqual(MAX_HOLD_MS + 40)
+    const first = seen.find((value) => value !== '')!
+    expect(first.endsWith('.')).toBe(true)
+    expect(words.startsWith(first)).toBe(true)
+  })
+
   it('shows the first finished block at once', () => {
     show('First paragraph.\n\nSec')
     expect(seen.at(-1)).toBe('First paragraph.\n\n')
@@ -164,6 +204,23 @@ describe('the setting', () => {
     render(thread('Done paragraph.\n\nHalf writ'))
     render(thread('Done paragraph.\n\nHalf written and done.'), 'ready')
     expect(replyText()).toContain('Half written and done.')
+  })
+
+  it('shows held text while find is open, and takes nothing back after', () => {
+    render(thread('Done paragraph.\n\nHalf writ'))
+    expect(replyText()).not.toContain('Half writ')
+    let release = () => {}
+    act(() => { release = holdReplyPacing() })
+    expect(replyText()).toContain('Half writ')
+    act(() => release())
+    render(thread('Done paragraph.\n\nHalf written'))
+    expect(replyText()).toContain('Half writ')
+  })
+
+  it('keeps the progress line up while nothing of the reply is shown yet', () => {
+    render(thread('The first paragraph is still being writ'))
+    expect(replyText()).toBe('')
+    expect(host.querySelector('[data-turn-progress]')).not.toBeNull()
   })
 
   it('a reveal re-renders the reply alone, not the transcript', () => {

@@ -15,14 +15,16 @@ import type { FollowMode } from "./follow-mode";
  * - **Pin:** when a turn starts here, its row is held near the top of the viewport and the reply
  *   grows into the space below it. The space shrinks as fast as the reply grows, so the end, and
  *   the view, do not move. When the reply reaches the bottom the space is gone and the end is
- *   followed from there.
+ *   followed from there. A reader who leaves the end (a scroll, a jump to a prompt) ends the pin.
  * - **Glide:** while a turn runs, the view eases toward the moving end, one step a frame, instead
  *   of jumping on every update. Any input from the user stops it at once. With Animation speed Off
- *   or the system reducing motion, and whenever no turn runs, it lands at once.
- * - **Collapse:** when the turn ends, the part of the space the view does not stand on is dropped
- *   (nothing on screen moves). If the reader is at the end, what is left closes over a quarter of a
- *   second, so the reply settles onto the composer instead of leaving a gap under it. A reader who
- *   scrolled up keeps their view; the space shrinks as they scroll away from it.
+ *   or the system reducing motion, when no turn runs, and when the end is more than a screen away,
+ *   it lands at once.
+ * - **Close:** a space that no longer holds a pinned prompt never stays. While the reader follows
+ *   the end (the turn ended, they came back down, they asked for the latest), the part they do not
+ *   see is dropped and the rest closes over a quarter of a second, so the reply settles onto the
+ *   composer. A reader up in the thread keeps their view: the space only shrinks as they scroll away
+ *   from it, and closes once they are back at the end.
  */
 export type EndFollower = ReturnType<typeof createEndFollower>;
 
@@ -79,7 +81,41 @@ export function createEndFollower(options: {
     collapseFrame = 0;
   };
 
-  /** Sizes the space under the content for what is pinned, or trims what no longer holds the view. */
+  const held = (container: HTMLElement) =>
+    heldReserve({
+      reserve,
+      scrollTop: container.scrollTop,
+      clientHeight: container.clientHeight,
+      contentHeight: contentHeight(container),
+    });
+
+  /** Closes the space: what is out of sight at once, the rest eased, the view riding the end down. */
+  const startCollapse = (container: HTMLElement) => {
+    if (collapseFrame) return;
+    stopGlide();
+    setReserve(held(container));
+    if (reserve === 0) return;
+    const duration = COLLAPSE_MS * motionScale();
+    if (duration <= 0) {
+      options.onProgrammaticScroll();
+      setReserve(0);
+      return;
+    }
+    const from = reserve;
+    const startedAt = performance.now();
+    const step = (now: number) => {
+      // The browser clamps the view to the shrinking end; marked as ours.
+      options.onProgrammaticScroll();
+      setReserve(collapsedReserve(from, now - startedAt, duration));
+      collapseFrame = reserve > 0 ? requestAnimationFrame(step) : 0;
+    };
+    collapseFrame = requestAnimationFrame(step);
+  };
+
+  /**
+   * Sizes the space for what is pinned; otherwise closes it while the end is followed, or trims what
+   * no longer holds the view of a reader up in the thread.
+   */
   const updateReserve = (container: HTMLElement) => {
     if (anchorKey) {
       const top = anchorTop(container);
@@ -92,16 +128,9 @@ export function createEndFollower(options: {
       }
       anchorKey = null;
     }
-    if (reserve > 0 && !collapseFrame) {
-      setReserve(
-        heldReserve({
-          reserve,
-          scrollTop: container.scrollTop,
-          clientHeight: container.clientHeight,
-          contentHeight: contentHeight(container),
-        }),
-      );
-    }
+    if (reserve === 0 || collapseFrame) return;
+    if (options.mode() === "following-end") startCollapse(container);
+    else setReserve(held(container));
   };
 
   const glide = (now: number) => {
@@ -111,8 +140,9 @@ export function createEndFollower(options: {
     const end = container.scrollHeight - container.clientHeight;
     const next = glideStep(container.scrollTop, end, now - glideAt, motionScale());
     glideAt = now;
-    if (Math.abs(next - container.scrollTop) >= 0.5) write(container, next);
-    if (Math.abs(end - container.scrollTop) >= 1) glideFrame = requestAnimationFrame(glide);
+    if (next !== container.scrollTop) write(container, next);
+    // The last step lands exactly on the end (glideStep returns it), whatever the pixel rounding.
+    if (next !== end) glideFrame = requestAnimationFrame(glide);
   };
 
   return {
@@ -136,7 +166,6 @@ export function createEndFollower(options: {
       stopCollapse();
       stopGlide();
       anchorKey = turnKey;
-      live = true;
       if (!container) return;
       updateReserve(container);
       if (options.mode() !== "following-end") return;
@@ -157,8 +186,10 @@ export function createEndFollower(options: {
         return;
       }
       const end = container.scrollHeight - container.clientHeight;
-      if (Math.abs(container.scrollTop - end) < 1) return;
-      if (!live || collapseFrame || motionScale() === 0) {
+      const distance = Math.abs(container.scrollTop - end);
+      if (distance < 1) return;
+      // More than a screen away, a glide would only stream text past the reader: land.
+      if (!live || collapseFrame || motionScale() === 0 || distance > container.clientHeight) {
         stopGlide();
         write(container, end);
         return;
@@ -174,44 +205,24 @@ export function createEndFollower(options: {
       live = false;
       anchorKey = null;
       const container = options.container();
-      if (!container || reserve === 0) return;
-      const content = contentHeight(container);
-      const held = heldReserve({ reserve, scrollTop: container.scrollTop, clientHeight: container.clientHeight, contentHeight: content });
-      setReserve(held);
-      if (held === 0 || options.mode() !== "following-end") return;
-      stopGlide();
-      const duration = COLLAPSE_MS * motionScale();
-      if (duration <= 0) {
-        options.onProgrammaticScroll();
-        setReserve(0);
-        return;
-      }
-      const from = held;
-      const startedAt = performance.now();
-      const step = (now: number) => {
-        // The view rides the shrinking end down (the browser clamps it); marked as ours.
-        options.onProgrammaticScroll();
-        setReserve(collapsedReserve(from, now - startedAt, duration));
-        collapseFrame = reserve > 0 ? requestAnimationFrame(step) : 0;
-      };
-      collapseFrame = requestAnimationFrame(step);
+      if (container && reserve > 0) updateReserve(container);
     },
 
-    /** The person scrolled: a space no longer pinned shrinks to what still holds their view. */
-    onScroll() {
-      if (anchorKey || reserve === 0 || collapseFrame) return;
+    /**
+     * After a scroll or any input from the person, once the follow mode has taken it in: leaving the
+     * end ends a pin; back at the end, a space left over closes.
+     */
+    settle() {
       const container = options.container();
-      if (container) updateReserve(container);
+      if (!container) return;
+      if (anchorKey && options.mode() !== "following-end") anchorKey = null;
+      if (!anchorKey && reserve > 0) updateReserve(container);
     },
 
-    /** Any input from the person: stop every motion of ours where it is. */
+    /** Any input from the person: stop every motion of ours where it is. `settle` follows it. */
     cancel() {
       stopGlide();
-      if (collapseFrame) {
-        stopCollapse();
-        const container = options.container();
-        if (container) updateReserve(container);
-      }
+      stopCollapse();
     },
 
     /** The size of the space under the content, for tests. */

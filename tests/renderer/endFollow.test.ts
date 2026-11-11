@@ -213,7 +213,7 @@ describe('the transcript while a reply streams', () => {
   it('stops gliding the moment the person scrolls', () => {
     const t = transcript({ content: 3000 })
     send(t)
-    t.state.content += 2000
+    t.state.content += 1000
     t.follower.follow()
     frame()
     frame()
@@ -282,8 +282,100 @@ describe('the transcript while a reply streams', () => {
     expect(t.container.scrollTop).toBe(at)
     // What they can reach below them shrinks as they scroll up; it never comes back.
     t.container.scrollTop = at - 300
-    t.follower.onScroll()
+    t.follower.settle()
     expect(t.reserve()).toBeLessThanOrEqual(Math.max(0, at - 300 + t.clientHeight - t.state.content))
+  })
+
+  it('lands at once when the end is more than a screen away', () => {
+    const t = transcript({ content: 3000 })
+    send(t)
+    t.state.content += 2500
+    t.follower.follow()
+    expect(t.container.scrollTop).toBe(t.end())
+  })
+
+  /** A short reply under a pinned prompt, the turn not ended yet: 476 px of space under it. */
+  function shortReply() {
+    const t = transcript({ content: 3000 })
+    const rowTop = send(t)
+    t.state.content += 200
+    t.follower.follow()
+    expect(t.reserve()).toBe(476)
+    return { t, rowTop }
+  }
+  const settleFrames = (t: ReturnType<typeof transcript>) => {
+    for (let index = 0; index < 40 && t.reserve() > 0; index++) frame()
+  }
+
+  it('closes the space once a reader who scrolled up comes back down after the turn', () => {
+    const { t } = shortReply()
+    t.state.mode = 'free'
+    t.container.scrollTop -= 100
+    t.follower.settle()
+    t.follower.turnEnded()
+    for (let index = 0; index < 20; index++) frame()
+    expect(t.reserve()).toBeGreaterThan(0)
+    // Back at the end: the browser reads it as following again, and the space closes.
+    t.container.scrollTop = t.end()
+    t.state.mode = 'following-end'
+    t.follower.settle()
+    settleFrames(t)
+    expect(t.reserve()).toBe(0)
+    expect(t.container.scrollTop).toBe(t.state.content - t.clientHeight)
+  })
+
+  it('finishes closing after an End key or a wheel down in the middle of it', () => {
+    const { t } = shortReply()
+    t.follower.turnEnded()
+    frame()
+    frame()
+    const partway = t.reserve()
+    expect(partway).toBeGreaterThan(0)
+    // End (or a wheel down): any input stops our motion; the mode stays at the end.
+    t.follower.cancel()
+    t.follower.settle()
+    settleFrames(t)
+    expect(t.reserve()).toBe(0)
+    expect(t.container.scrollTop).toBe(t.state.content - t.clientHeight)
+  })
+
+  it('keeps a wheel up in the middle of closing where it is, and closes once back at the end', () => {
+    const { t } = shortReply()
+    t.follower.turnEnded()
+    frame()
+    frame()
+    t.follower.cancel()
+    t.state.mode = 'free'
+    t.container.scrollTop -= 120
+    const at = t.container.scrollTop
+    t.follower.settle()
+    for (let index = 0; index < 20; index++) frame()
+    expect(t.container.scrollTop).toBe(at)
+    t.container.scrollTop = t.end()
+    t.state.mode = 'following-end'
+    t.follower.settle()
+    settleFrames(t)
+    expect(t.reserve()).toBe(0)
+  })
+
+  it('ends the pin when the reader jumps to the prompt mid-stream, so Go to latest lands on the reply', () => {
+    const { t, rowTop } = shortReply()
+    // A prompt-rail jump to the current prompt: the mode goes free and the view moves to it.
+    t.state.mode = 'free'
+    t.container.scrollTop = rowTop - 16
+    t.follower.settle()
+    expect(t.follower.pinned()).toBeNull()
+    // The reply goes on while they read, then they ask for the latest.
+    t.state.content += 150
+    t.follower.follow()
+    t.state.mode = 'following-end'
+    t.container.scrollTop = t.end()
+    t.follower.settle()
+    settleFrames(t)
+    t.follower.follow()
+    for (let index = 0; index < 40; index++) frame()
+    expect(t.reserve()).toBe(0)
+    expect(t.container.scrollTop).toBe(Math.max(0, t.state.content - t.clientHeight))
   })
 
   it('leaves no gap in a short thread that fits the screen', () => {

@@ -20,6 +20,7 @@ import { modelLabel } from "../../../../shared/modelChoice";
 import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { PacedMarkdown } from "./paced-markdown";
+import { holdReplyPacing } from "../../../lib/replyPacingSetting";
 import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
@@ -1521,6 +1522,7 @@ export const MessageList = memo(function MessageList({
     cancelPromptScroll();
     follower.cancel();
     dispatchFollow({ type: "intent", intent });
+    follower.settle();
   };
 
   const handleScroll = useCallback(() => {
@@ -1529,7 +1531,7 @@ export const MessageList = memo(function MessageList({
 
     const programmatic = isProgrammaticScroll();
     dispatchFollow({ type: "scroll", atBottom: isAtBottom(), programmatic });
-    followerRef.current?.onScroll();
+    followerRef.current?.settle();
     // Skip auto-scroll noise (streaming follow, mount pin, marker glide) —
     // only a human moving the scrollbar reveals the markers.
     if (!programmatic) flashScrollbarActive();
@@ -1664,9 +1666,11 @@ export const MessageList = memo(function MessageList({
         turnKeyAliasRef.current.has(lastUserMessageId);
       if (sentHere || followModeRef.current === "following-end") {
         dispatchFollow({ type: "new-turn" });
-        // A turn that is starting is held near the top while its reply fills the space below.
+        // A turn that is starting (sent here, or the queue's next) is held near the top while its
+        // reply fills the space below. A turn that arrives already answered is not.
         const turnKey = lastTurnKeyRef.current;
-        if (turnKey && (sentHere || replyActive)) followerRef.current?.pin(turnKey);
+        const starting = replyActive || !turns[turns.length - 1]?.assistantMsgs.length;
+        if (turnKey && starting) followerRef.current?.pin(turnKey);
         void virtualizationRef.current?.settleToEnd();
       }
       lastUserMessageIdRef.current = lastUserMessageId;
@@ -1700,9 +1704,16 @@ export const MessageList = memo(function MessageList({
   );
   follower.setLive(replyActive);
   const turnLive = replyActive || showAwaitingReply;
+  // The last turn whose reply was seen running. A queued turn waiting for its run keeps its pin
+  // until its reply has run and ended.
+  const liveTurnRef = useRef<string | null>(null);
   useLayoutEffect(() => {
-    if (!turnLive) followerRef.current?.turnEnded();
-  }, [turnLive]);
+    if (turnLive) {
+      liveTurnRef.current = lastUserMessageId;
+      return;
+    }
+    if (liveTurnRef.current === lastUserMessageId || trailingHasAssistant) followerRef.current?.turnEnded();
+  }, [turnLive, lastUserMessageId, trailingHasAssistant]);
   if (trailingOptimistic && trailingUser) {
     liveOptimisticKeyRef.current = trailingUser.id;
     turnKeyAliasRef.current.set(trailingUser.id, trailingUser.id);
@@ -1760,6 +1771,8 @@ export const MessageList = memo(function MessageList({
     onNavigate: () => dispatchFollow({ type: "navigate" }),
     onProgrammaticScroll: markProgrammaticScroll,
   });
+  // Find searches the reply's whole text, so while its bar is open nothing is held back.
+  useEffect(() => (find.open ? holdReplyPacing() : undefined), [find.open]);
   const rowItems: RowItem[] = windowed
     ? windowRowItems(turns.length, virtualization.window)
     : turns.map((_, index) => ({ kind: "row", index }));
