@@ -68,9 +68,10 @@ export function plainTokens(code: string): HighlightResult {
 const themeName = (theme: ThemeInput): string =>
   typeof theme === "string" ? theme : ((theme as { name?: string }).name ?? "custom");
 
-// One highlighter (and one WASM engine) for the whole renderer. The highlighter
-// itself loads with the first code block, not with the app; grammars load the
-// first time a language is used.
+// One highlighter (and one WASM engine) for the whole renderer. It is not part
+// of the app's first paint: it loads while the window is idle after startup
+// (`scheduleHighlighterWarmup`), or with the first code block if that comes
+// sooner. Other grammars load the first time their language is used.
 let highlighterPromise: Promise<HighlighterCore> | null = null;
 const languageLoads = new Map<string, Promise<void>>();
 
@@ -106,6 +107,86 @@ function loadLanguage(highlighter: HighlighterCore, language: string): Promise<v
     languageLoads.set(language, load);
   }
   return load;
+}
+
+/** Grammars most replies use, loaded by the warm-up so their first block is coloured as it streams. */
+export const WARM_LANGUAGES = ["typescript", "javascript", "tsx", "json", "shellscript", "python", "rust", "go"] as const;
+
+/** What the warm-up needs from the window; tests pass their own. */
+export type WarmupHost = {
+  requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => unknown;
+  setTimeout: (callback: () => void, ms: number) => unknown;
+  isHidden: () => boolean;
+  /** Calls `callback` once, the next time the window is shown. */
+  onceVisible: (callback: () => void) => void;
+};
+
+/** The longest an idle step waits for an idle period before it runs anyway. */
+const WARMUP_IDLE_TIMEOUT_MS = 3_000;
+/** Without `requestIdleCallback`, how long a step waits. */
+const WARMUP_FALLBACK_DELAY_MS = 200;
+
+const windowHost = (): WarmupHost => ({
+  requestIdleCallback:
+    typeof window.requestIdleCallback === "function" ? window.requestIdleCallback.bind(window) : undefined,
+  setTimeout: (callback, ms) => window.setTimeout(callback, ms),
+  isHidden: () => document.visibilityState === "hidden",
+  onceVisible: (callback) => {
+    const listener = () => {
+      if (document.visibilityState === "hidden") return;
+      document.removeEventListener("visibilitychange", listener);
+      callback();
+    };
+    document.addEventListener("visibilitychange", listener);
+  },
+});
+
+/** Resolves in an idle period of a visible window; a hidden window waits until it is shown. */
+function whenIdleAndVisible(host: WarmupHost): Promise<void> {
+  return new Promise((resolve) => {
+    const step = () => {
+      if (host.isHidden()) {
+        host.onceVisible(step);
+        return;
+      }
+      resolve();
+    };
+    const wait = () => {
+      if (host.isHidden()) {
+        host.onceVisible(wait);
+        return;
+      }
+      if (host.requestIdleCallback) host.requestIdleCallback(step, { timeout: WARMUP_IDLE_TIMEOUT_MS });
+      else host.setTimeout(step, WARMUP_FALLBACK_DELAY_MS);
+    };
+    wait();
+  });
+}
+
+let warmup: Promise<void> | null = null;
+
+/**
+ * Loads the highlighter (core, WASM engine, both themes) and then the common grammars, each in its
+ * own idle period of a visible window, so no step runs while the app is busy or competes with input.
+ * It shares the loads code blocks use: a block that arrives first is not loaded twice, and a later
+ * block finds everything ready. Runs once; a failed step is left for the first code block to retry.
+ */
+export function warmHighlighterWhenIdle(host: WarmupHost = windowHost()): Promise<void> {
+  warmup ??= (async () => {
+    await whenIdleAndVisible(host);
+    const highlighter = await getHighlighter();
+    for (const language of WARM_LANGUAGES) {
+      await whenIdleAndVisible(host);
+      await loadLanguage(highlighter, language);
+    }
+  })().catch(() => undefined);
+  return warmup;
+}
+
+/** Starts the warm-up once the window has painted. Tests skip it: their code blocks load on use. */
+export function scheduleHighlighterWarmup(): void {
+  if (import.meta.env?.MODE === "test") return;
+  void warmHighlighterWhenIdle();
 }
 
 /** The estimated bytes a highlighted block holds: its text (UTF-16) and each token and line. */

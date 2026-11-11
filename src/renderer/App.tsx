@@ -3,6 +3,7 @@ import { Suspense, useEffect, useRef, useCallback, useState, startTransition, ty
 import { useChatsStore } from './stores/chatsStore'
 import { followPushedList } from './lib/followPushedList'
 import { OrchestratorChat } from './components/OrchestratorChat'
+import { scheduleHighlighterWarmup } from './chat/components/agent-elements/code-highlighter'
 
 import { MainViewTabs } from './components/MainViewTabs'
 
@@ -113,6 +114,11 @@ export default function App() {
   useEffect(() => {
     if (workspaceReady) preloadSplitSurfaces()
   }, [workspaceReady])
+  // The code highlighter loads once the window is idle after startup, so the first code block of a session is
+  // coloured as it streams. It does not wait for a thread to load: a window that opens on a new thread has none.
+  useEffect(() => {
+    if (profileReady) scheduleHighlighterWarmup()
+  }, [profileReady])
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the old one
