@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { build } from 'esbuild'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { getThreadDbWorkerBuildOptions } from '../scripts/build-cli.mjs'
-import { ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
+import { ThreadDbClient, WORKER_BACKOFF_CODE } from '../src/mms/data/threadDb/threadDbClient'
 import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
 import type { ChatMessage } from '../src/shared/types'
 
@@ -162,6 +162,85 @@ describe('workers that are slow or die', () => {
       expect(client.workerRoles()).not.toContain('index')
       await wait(600)
       expect(client.workerRoles()).toEqual(['write', 'read'])
+    } finally {
+      await client.close()
+      rmSync(out, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('a worker that keeps crashing waits longer before each start, and one that answers ends the wait', async () => {
+    const out = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-crash-')))
+    const script = join(out, 'crashing.mjs')
+    const { writeFileSync } = await import('node:fs')
+    // A role whose `crash-<role>` file exists ends as soon as it starts, before it answers anything.
+    writeFileSync(script, `
+      import { existsSync } from 'node:fs'
+      import { parentPort, workerData, threadId } from 'node:worker_threads'
+      const { role, flag, port } = workerData
+      if (role !== 'write' && existsSync(${JSON.stringify(out)} + '/crash-' + role)) process.exit(5)
+      if (role === 'write') parentPort.on('message', (request) => {
+        port.postMessage({ id: request.id, ok: true, value: request.op })
+        Atomics.store(flag, 0, 1)
+        Atomics.notify(flag, 0)
+      })
+      else parentPort.on('message', (request) => {
+        if (request.op === 'die') process.exit(3)
+        parentPort.postMessage({ id: request.id, ok: true, value: request.op + ':' + threadId })
+      })
+    `)
+    const crash = (role: string) => writeFileSync(join(out, `crash-${role}`), '')
+    const heal = (role: string) => rmSync(join(out, `crash-${role}`))
+    const client = new ThreadDbClient({ script, idleWorkerStopMs: 60_000, crashBackoff: { firstMs: 200, maxMs: 800 } })
+    const runs = client.workerCrashRuns.bind(client)
+    try {
+      // Index: the first crash starts again at once, then each wait doubles up to the cap.
+      crash('index')
+      const delays: number[] = []
+      for (let i = 0; i < 5; i++) {
+        await wait(runs().index?.restartInMs ?? 0)
+        await expect(client.callIndex('info' as never)).rejects.toThrow(/stopped \(5\)/)
+        delays.push(runs().index!.delayMs)
+      }
+      expect(delays).toEqual([0, 200, 400, 800, 800])
+      // While it waits, an index request is skipped at once: nothing is started, nothing hangs.
+      const asked = performance.now()
+      await expect(client.callIndex('info' as never)).rejects.toMatchObject({ code: WORKER_BACKOFF_CODE })
+      expect(performance.now() - asked).toBeLessThan(100)
+      expect(client.workerRoles()).not.toContain('index')
+
+      // Read: while the read worker waits, reads run in-process (a real engine answers, not the fake worker).
+      crash('read')
+      await expect(client.call('die' as never)).rejects.toThrow(/stopped \(3\)/)
+      await expect(client.call('info' as never)).rejects.toThrow(/stopped \(5\)/)
+      expect(runs().read).toMatchObject({ crashes: 2, delayMs: 200 })
+      expect(await client.call('exists', out)).toBe(false)
+      expect(client.workerRoles()).not.toContain('read')
+
+      // Import: while its worker waits, an import waits too, then runs.
+      crash('import')
+      await expect(client.callImport('info' as never)).rejects.toThrow(/stopped \(5\)/)
+      await expect(client.callImport('info' as never)).rejects.toThrow(/stopped \(5\)/)
+      heal('import')
+      const queued = performance.now()
+      expect(await client.callImport('info' as never)).toMatch(/^info:/)
+      expect(performance.now() - queued).toBeGreaterThan(150)
+      expect(runs().import).toBeUndefined()
+
+      // The memory monitor's count: every unexpected stop since the client started.
+      expect((await client.diagnostics()).workerCrashes).toBe(9)
+
+      // A worker that answers again ends the run: the next crash starts again at once.
+      heal('index')
+      heal('read')
+      await wait(runs().index?.restartInMs ?? 0)
+      expect(await client.callIndex('info' as never)).toMatch(/^info:/)
+      expect(runs().index).toBeUndefined()
+      await wait(runs().read?.restartInMs ?? 0)
+      expect(await client.call('info' as never)).toMatch(/^info:/)
+      expect(runs()).toEqual({})
+      await expect(client.callIndex('die' as never)).rejects.toThrow(/stopped \(3\)/)
+      expect(runs().index).toMatchObject({ crashes: 1, delayMs: 0 })
+      expect(await client.callIndex('info' as never)).toMatch(/^info:/)
     } finally {
       await client.close()
       rmSync(out, { recursive: true, force: true })

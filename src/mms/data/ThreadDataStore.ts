@@ -67,7 +67,7 @@ import {
   validateArray,
   type FileStamp
 } from './legacyThreadData'
-import { sharedThreadDbClient } from './threadDb/threadDbClient'
+import { sharedThreadDbClient, WORKER_BACKOFF_CODE } from './threadDb/threadDbClient'
 import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
 import { publishStagedBlobs } from './threadDb/threadBlobs'
@@ -2674,6 +2674,8 @@ export class ThreadDataStore extends EventEmitter {
     const targets = [...this.indexDirty].map(([threadId, dir]) => ({ threadId, dir }))
     this.indexDirty.clear()
     this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).catch((error: unknown) => {
+      // Skipped while the index worker backs off after crashing; the client has logged that once.
+      if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
       console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
     })
   }
@@ -2703,6 +2705,7 @@ export class ThreadDataStore extends EventEmitter {
       const live = this.databaseThreads()
       if (!live.length && !this.threadDbStore) return
       this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
         console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
       })
     }

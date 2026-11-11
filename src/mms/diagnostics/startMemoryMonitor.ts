@@ -29,7 +29,7 @@ export async function readServiceCounts(profiles: MmsProfileServices[], replayEv
     threadCacheBytes += cache.bytes
     ptys += services.ptyManager.list().length
   }
-  const db = (await existingThreadDbClient()?.diagnostics()) ?? { workers: 0, connections: 0, workerHeaps: [] }
+  const db = (await existingThreadDbClient()?.diagnostics()) ?? { workers: 0, connections: 0, workerHeaps: [], workerCrashes: 0 }
   return {
     counts: {
       sqliteConnections: db.connections,
@@ -42,7 +42,8 @@ export async function readServiceCounts(profiles: MmsProfileServices[], replayEv
       ptys,
       fileWatchers: liveFileWatchers(),
       profiles: profiles.length,
-      activeTurns
+      activeTurns,
+      workerCrashes: db.workerCrashes
     },
     workerHeaps: db.workerHeaps
   }

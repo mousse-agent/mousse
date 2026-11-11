@@ -141,7 +141,7 @@ function formatMemorySummary(summary: MemoryLogSummary, path: string): string {
   out.push(...formatMemoryTable(sample))
   if (sample.hints) out.push(`  Windows: ${appHintsLine(sample.hints)}`)
   const c = sample.counts
-  out.push(`  Counts: SQLite connections ${c.sqliteConnections ?? '-'}, workers ${c.workerThreads}, loaded threads ${c.loadedThreads}, runtimes ${c.threadRuntimes}, thread cache ${c.threadCacheThreads} (${mb(c.threadCacheMb)} MB), replay ${c.replayEvents} events, terminals ${c.ptys}, file watchers ${c.fileWatchers}, provider processes ${c.providerProcesses}`)
+  out.push(`  Counts: SQLite connections ${c.sqliteConnections ?? '-'}, workers ${c.workerThreads}, loaded threads ${c.loadedThreads}, runtimes ${c.threadRuntimes}, thread cache ${c.threadCacheThreads} (${mb(c.threadCacheMb)} MB), replay ${c.replayEvents} events, terminals ${c.ptys}, file watchers ${c.fileWatchers}, provider processes ${c.providerProcesses}${c.workerCrashes ? `, worker crashes ${c.workerCrashes}` : ''}`)
   if (summary.hourly.length > 1) {
     const series = (pick: (point: (typeof summary.hourly)[number]) => number | null) => summary.hourly.map((point) => { const v = pick(point); return v === null ? '-' : String(Math.round(v)) }).join(' ')
     out.push(`Hourly over the last day, MB: service ${series((point) => point.service)}`)

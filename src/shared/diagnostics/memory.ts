@@ -76,9 +76,14 @@ export interface ServiceCounts {
   profiles: number
   /** Turns running now, across profiles: the service is idle at 0. */
   activeTurns: number
+  /**
+   * Thread database workers (read, index, import) that stopped unexpectedly since the service started. A total, not a
+   * live count, so it has no bound; absent in samples from before it was counted.
+   */
+  workerCrashes?: number
 }
 
-export type CountName = Exclude<keyof ServiceCounts, 'threadCacheMb' | 'profiles' | 'activeTurns'>
+export type CountName = Exclude<keyof ServiceCounts, 'threadCacheMb' | 'profiles' | 'activeTurns' | 'workerCrashes'>
 
 /** A provider or tool process the service started, by kind (`claude`, `codex`, `mcp`...), and its memory in MB. */
 export interface ChildMemory {
@@ -589,7 +594,7 @@ export function memoryIssueText(input: MemoryReportInput): { title: string; body
   if (sample.hints) lines.push('', `**What the windows draw:** ${appHintsLine(sample.hints)}`)
 
   const c = sample.counts
-  lines.push('', `**Service counts:** SQLite connections ${c.sqliteConnections ?? '-'}, worker threads ${c.workerThreads}, loaded threads ${c.loadedThreads}, thread runtimes ${c.threadRuntimes}, thread cache ${c.threadCacheThreads} (${mb(c.threadCacheMb)} MB), replay buffer ${c.replayEvents} events${sample.replayMb !== undefined ? ` (${mb(sample.replayMb)} MB)` : ''}, terminals ${c.ptys}, file watchers ${c.fileWatchers}, provider processes ${c.providerProcesses}, profiles ${c.profiles}`)
+  lines.push('', `**Service counts:** SQLite connections ${c.sqliteConnections ?? '-'}, worker threads ${c.workerThreads}, loaded threads ${c.loadedThreads}, thread runtimes ${c.threadRuntimes}, thread cache ${c.threadCacheThreads} (${mb(c.threadCacheMb)} MB), replay buffer ${c.replayEvents} events${sample.replayMb !== undefined ? ` (${mb(sample.replayMb)} MB)` : ''}, terminals ${c.ptys}, file watchers ${c.fileWatchers}, provider processes ${c.providerProcesses}, profiles ${c.profiles}${c.workerCrashes ? `, worker crashes ${c.workerCrashes}` : ''}`)
   if (detail) {
     const spaces = Object.entries(detail.heapSpaces).filter(([, size]) => size >= 0.1).map(([name, size]) => `${kindName(name)} ${mb(size)}`)
     lines.push(`**Service V8 heap (MB):** used ${mb(detail.heap.usedHeapSize)} of ${mb(detail.heap.totalHeapSize)}, limit ${mb(detail.heap.heapSizeLimit)}, malloced ${mb(detail.heap.mallocedMemory)}, external ${mb(detail.heap.externalMemory)}, contexts ${detail.heap.nativeContexts} (${detail.heap.detachedContexts} detached)`)
