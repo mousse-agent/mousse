@@ -1,12 +1,12 @@
 // The strip above a run's thread while the Automations inbox shows it: the run's level (or Resolved), its bot, its
-// pull request with Open PR and Merge (the PR panel and its own merge), its usage, calibration and Resolve.
+// pull request with Open PR and Merge (the PR panel and its own merge), calibration and Resolve.
 import { useMemo } from 'react'
 import type { AutomationItem } from '../../../../shared/automations'
 import { openForPerson, resolvedRun, type InboxRun, type TuningNote } from '../../../../shared/automationInbox'
 import { Bell, Check, ExternalLink, GitMerge, Undo2, VolumeHigh } from '../../../lib/icons'
 import { useAppStore } from '../../../stores/appStore'
 import { requestPanelMerge } from '../../pullRequestPanelRequests'
-import { automationsById, usageText } from './inboxModel'
+import { automationsById } from './inboxModel'
 import { AssigneeChip, botNameOf, LEVEL_VIEW, PrChip, RunIcon, usePrChecks } from './RunParts'
 import { calibrateRun, resolveRun, undoResolve, useInboxStore } from './inboxStore'
 
@@ -35,7 +35,6 @@ function Strip({ run, automation, tuning, undoRunId }: { run: InboxRun; automati
   const noisy = tuning.some((note) => note.runId === run.id && note.kind === 'noisy')
   const missed = tuning.some((note) => note.runId === run.id && note.kind === 'missed')
   const bot = botNameOf(run, automation)
-  const usage = usageText(run.usage)
   const name = automation?.name ?? run.jobName
   return (
     <div className="inbox-strip" data-testid="inbox-strip" data-run-id={run.id}>
@@ -67,7 +66,6 @@ function Strip({ run, automation, tuning, undoRunId }: { run: InboxRun; automati
           ) : null}
         </span>
       ) : null}
-      {usage ? <span className="inbox-strip-usage" data-testid="inbox-strip-usage" title="This run's tokens by model; the cost shows only when it is known (API keys)">{usage}</span> : null}
       <span className="inbox-strip-spacer" />
       {ended ? (
         <>

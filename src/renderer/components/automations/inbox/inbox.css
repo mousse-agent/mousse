@@ -32,25 +32,53 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 10px 8px 6px;
+  padding: 10px 8px 8px;
 }
 
+/* The composer: the sidebar's one field, with its send button inside. Focus lights it with the accent, never an edge. */
 .inbox-composer {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 32px;
+  height: 34px;
   margin-right: 4px;
-  padding: 0 10px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--text-primary) 5.5%, transparent);
+  padding: 0 5px 0 12px;
+  border-radius: 10px;
+  background: var(--ui-hover);
   color: var(--text-secondary);
   cursor: text;
+  transition: background 0.15s, box-shadow 0.15s;
 }
 
-.inbox-composer:focus-within { background: color-mix(in srgb, var(--text-primary) 8%, transparent); }
+.inbox-composer:focus-within {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.45);
+  color: var(--accent);
+}
+
+/* The field draws focus on its box (as the chat composer does), not on the bare input. */
+.inbox-composer input:focus,
+.inbox-search input:focus { background: transparent; box-shadow: none; }
+.inbox-composer-box[data-busy] .inbox-composer input { color: var(--text-secondary); }
+
+.inbox-composer-send {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--surface-strong, #18151c);
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.inbox .inbox-composer-send { color: var(--surface-strong, #18151c); }
+.inbox-composer-send:hover:not(:disabled) { background: var(--accent-hover); }
+.inbox .inbox-composer-send:disabled { background: transparent; color: var(--text-secondary); opacity: 0.55; cursor: default; }
+.inbox .inbox-composer-send[aria-busy='true'] { background: rgba(var(--accent-rgb), 0.22); color: var(--accent); opacity: 1; cursor: progress; }
 
 .inbox-composer input,
 .inbox-search input {
@@ -80,6 +108,13 @@
 }
 
 .inbox-icon-btn.small { width: 24px; height: 24px; }
+.inbox button:focus-visible,
+.inbox [role='option']:focus-visible,
+.inbox-draft button:focus-visible,
+.inbox-strip button:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.65);
+  outline-offset: 1px;
+}
 .inbox-icon-btn:hover:not(:disabled) { background: var(--ui-hover); color: var(--text-primary); }
 .inbox-icon-btn:disabled { opacity: 0.4; cursor: default; }
 .inbox-icon-btn[aria-pressed='true'] {
@@ -87,12 +122,12 @@
   color: var(--accent);
 }
 
-.inbox-keys-anchor { position: relative; }
-.inbox-keys-btn { font-size: 13.5px; font-weight: 600; }
+.inbox-head { position: relative; }
+.inbox-keys-anchor { position: absolute; top: 100%; right: 8px; }
 
 .inbox-keys {
   position: absolute;
-  top: calc(100% + 6px);
+  top: 2px;
   right: 0;
   z-index: 30;
   width: 220px;
@@ -140,22 +175,20 @@
 
 /* The list scoped to one automation or project. */
 .inbox-filter {
-  margin: 2px 8px 4px;
-  padding: 6px 4px 8px 10px;
+  margin: 2px 8px 6px;
+  padding: 8px 6px 9px 12px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
+  background: var(--ui-hover);
 }
 
 .inbox-filter-top,
 .inbox-filter-project {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
-.inbox-filter-project { padding: 4px 4px 4px 10px; }
-
-.inbox-filter-icon { display: inline-grid; place-items: center; color: var(--accent); }
+.inbox-filter-project { padding: 4px 4px 4px 12px; }
 
 .inbox-filter-name {
   flex: 1;
@@ -169,28 +202,16 @@
 }
 
 .inbox-filter-meta {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 5px 10px;
-  margin-top: 4px;
+  margin: 2px 0 0;
   padding-right: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--text-secondary);
 }
 
-.inbox-filter-meta > span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.inbox-filter-meta svg { flex-shrink: 0; opacity: 0.8; }
-.inbox-filter-meta small { margin-left: 2px; font-size: 10.5px; opacity: 0.7; }
-.inbox-filter-meta .inbox-filter-cost { grid-column: 1 / -1; }
+.inbox-filter-meta .is-paused { margin-right: 6px; color: var(--warning); }
 
 .inbox-scroll {
   flex: 1;
@@ -205,14 +226,15 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 8px 4px;
-  font-size: 11.5px;
+  padding: 14px 10px 5px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--text-secondary);
 }
 
 .inbox-group-count {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
@@ -228,35 +250,35 @@
 }
 
 .inbox-row {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  gap: 8px;
-  padding: 7px 8px 8px 6px;
-  border-radius: 8px;
+  display: block;
+  padding: 8px 8px 9px 10px;
+  border-radius: 10px;
   cursor: default;
   transition: background 0.12s;
 }
 
+/* Hover and selection as in the threads sidebar: a fill, the open run in the accent-tinted raised material. */
 .inbox-row:hover,
 .inbox-fold:hover,
-.inbox-quiet-row:hover { background: rgba(var(--accent-rgb), 0.08); }
+.inbox-quiet-row:hover,
+.inbox-row[data-cursor]:not([data-open]),
+.inbox-fold[data-cursor],
+.inbox-quiet-row[data-cursor]:not([data-open]) { background: var(--ui-hover); }
 
 .inbox-row[data-open],
 .inbox-quiet-row[data-open],
-.inbox-fold[data-cursor],
-.inbox-quiet-row[data-cursor] { background: color-mix(in srgb, var(--text-secondary) 13%, transparent); }
-
-.inbox-row[data-cursor]:not([data-open]) { background: color-mix(in srgb, var(--text-secondary) 7%, transparent); }
+.inbox-drafts-row[aria-pressed='true'] { background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised)); }
 
 .inbox-run-icon {
   display: inline-grid;
   place-items: center;
+  flex-shrink: 0;
   width: 20px;
   height: 20px;
   color: var(--text-secondary);
 }
 
-.inbox-row .inbox-run-icon { margin-top: 0; }
+.inbox-run-icon.inline { width: 14px; height: 14px; margin-right: -1px; }
 .inbox-run-icon[data-tone='running'] { color: var(--status-running); }
 .inbox-run-icon[data-tone='paused'] { color: var(--warning); }
 .inbox-run-icon[data-tone='failed'] { color: var(--danger); }
@@ -264,6 +286,7 @@
 .inbox-run-icon[data-tone='none'] { color: var(--warning); }
 .inbox-run-icon[data-tone='quiet'] { opacity: 0.6; }
 .inbox-row[data-group='needs_you'] .inbox-run-icon[data-tone='trigger'] { color: var(--status-input); }
+.inbox-row[data-group='needs_you'] .inbox-run-icon[data-tone='failed'] + .inbox-row-body .inbox-row-summary { color: color-mix(in srgb, var(--danger) 80%, var(--text-secondary)); }
 
 .inbox-spin { animation: inbox-spin 1.1s linear infinite; }
 @keyframes inbox-spin { to { transform: rotate(360deg); } }
@@ -288,8 +311,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 0;
-  font-size: 13.5px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
   color: var(--text-primary);
   text-align: left;
 }
@@ -302,7 +326,7 @@
 .inbox-row-time {
   margin-left: auto;
   flex-shrink: 0;
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
 }
@@ -313,7 +337,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -360,7 +384,7 @@
   align-items: center;
   gap: 8px;
   height: 26px;
-  padding: 0 8px 0 6px;
+  padding: 0 8px 0 10px;
   border-radius: 8px;
   font-size: 12.5px;
   color: var(--text-secondary);
@@ -395,9 +419,11 @@
   color: var(--text-primary);
 }
 
-.inbox-text-btn:hover { background: var(--ui-hover); }
+.inbox-text-btn:hover:not(:disabled) { background: var(--ui-hover); }
 .inbox .inbox-text-btn.muted,
 .inbox-text-btn.muted { color: var(--text-secondary); }
+.inbox-text-btn.muted:hover:not(:disabled) { color: var(--text-primary); }
+.inbox-text-btn:disabled { opacity: 0.45; cursor: default; }
 
 .inbox-primary-btn {
   display: inline-flex;
@@ -405,17 +431,23 @@
   gap: 6px;
   height: 28px;
   padding: 0 12px;
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--accent);
-  color: #15131a;
+  color: var(--surface-strong, #18151c);
   font-size: 12.5px;
   font-weight: 600;
+  white-space: nowrap;
+  transition: background 0.15s, opacity 0.15s;
 }
 
 .inbox .inbox-primary-btn,
-.inbox-draft .inbox-primary-btn { color: #15131a; }
-.inbox-primary-btn:disabled { opacity: 0.45; cursor: default; filter: none; }
-.inbox-primary-btn:hover { filter: brightness(1.08); }
+.inbox-draft .inbox-primary-btn { color: var(--surface-strong, #18151c); }
+.inbox-primary-btn:hover:not(:disabled) { background: var(--accent-hover); }
+/* Disabled: a muted fill, so it never reads as a dimmed enabled button. Working: the accent, softly, with a spinner. */
+.inbox .inbox-primary-btn:disabled,
+.inbox-draft .inbox-primary-btn:disabled { background: var(--ui-pressed); color: var(--text-secondary); cursor: default; }
+.inbox .inbox-primary-btn[aria-busy='true'],
+.inbox-draft .inbox-primary-btn[aria-busy='true'] { background: rgba(var(--accent-rgb), 0.24); color: var(--accent); cursor: progress; }
 
 /* ── Pane ── */
 .inbox-pane {
@@ -493,109 +525,120 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 24px 24px;
+  padding: 16px 24px 24px;
 }
 
+/* Every pane opens with the same head: a 15px title, one short line beside it, Close on the right. */
 .inbox-manage-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 28px;
-  margin-bottom: 6px;
+  gap: 10px;
+  height: 30px;
+  margin-bottom: 12px;
 }
 
-.inbox-manage-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.inbox-manage-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 
+/* A calm table: quiet word headers, hairlines, a hovered row lit by a fill. */
 .inbox-table {
   width: 100%;
+  max-width: 1040px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 13px;
 }
 
-.inbox-table .c-expand { width: 34px; }
-.inbox-table .c-when { width: 136px; }
-.inbox-table .c-who { width: 84px; }
-.inbox-table .c-next { width: 118px; }
-.inbox-table .c-cost { width: 64px; }
+.inbox-table .c-when { width: 20%; }
+.inbox-table .c-who { width: 10%; }
+/* "Tomorrow 9:00 AM" fits at 1280px; a longer one ends in an ellipsis, with the whole value in its tooltip. */
+.inbox-table .c-next { width: 17%; min-width: 128px; }
+.inbox-table .c-last { width: 13%; }
 .inbox-table .c-on { width: 52px; }
-.inbox-table .c-menu { width: 36px; }
+.inbox-table .c-menu { width: 40px; }
 
 .inbox-table th {
   height: 30px;
-  padding: 0 6px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--ui-line);
   color: var(--text-secondary);
+  font-size: 11.5px;
   font-weight: 500;
   text-align: left;
 }
 
-.inbox-table th svg { vertical-align: middle; }
-.inbox-table .num { text-align: right; }
+.inbox-table th.c-on-head { text-align: center; }
 
 .inbox-table td {
-  height: 40px;
-  padding: 0 6px;
-  border-bottom: 1px solid color-mix(in srgb, var(--ui-line) 70%, transparent);
+  height: 44px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ui-line);
   vertical-align: middle;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* The switch and the menu are controls, not text: they never clip or take an ellipsis. */
+.inbox-table td:nth-last-child(-n + 2) { overflow: visible; text-overflow: clip; }
+.inbox-table td:last-child { text-align: right; }
+
 .inbox-table-row { transition: background 0.12s; }
-.inbox-table-row:hover { background: rgba(var(--accent-rgb), 0.06); }
-.inbox-table-row[data-open] { background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+.inbox-table-row:hover,
+.inbox-table-row[data-open] { background: var(--ui-hover); }
 .inbox-table-row[data-open] td { border-bottom-color: transparent; }
-.inbox-table-row[data-off] td:not(:nth-last-child(-n + 2)) { opacity: 0.5; }
+/* Off: the row fades; its switch stays clear. */
+.inbox-table-row[data-off] td:not(:nth-last-child(-n + 2)) { opacity: 0.55; }
 
 .inbox-table-name {
-  padding: 0;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.inbox .inbox-table-name { color: var(--text-primary); }
-.inbox-table-name:hover { text-decoration: underline; text-underline-offset: 2px; }
-.inbox-table-project { margin-left: 8px; font-size: 11.5px; color: var(--text-secondary); }
-
-.inbox-cell {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.inbox .inbox-table-name { color: var(--text-primary); }
+.inbox-table-name:hover { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
+.inbox-table-project { margin-left: 8px; font-size: 12px; color: var(--text-secondary); vertical-align: middle; }
+
+.inbox-cell {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12.5px;
   color: var(--text-secondary);
 }
 
-.inbox-table .num .inbox-cell { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+/* An icon sits on the text's line (icons are display: block by default), with a small gap; the text still ellipsizes. */
+.inbox-cell > svg { display: inline-block; margin-right: 5px; vertical-align: middle; position: relative; top: -1px; }
+.inbox-cell.is-pending { color: var(--accent); }
+.inbox-cell[data-tone='failed'] { color: var(--danger); }
 
-.inbox-tuning-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  height: 22px;
-  padding: 0 4px;
-  border-radius: 5px;
-  color: var(--text-secondary);
-}
+/* The switch is the app's (settings.css); here it only sits centred in its cell. */
+.inbox-switch { display: flex; align-items: center; justify-content: center; }
+/* Pausing… or Resuming…: the switch shows the asked state, locked and dimmed until it lands. */
+.inbox-switch[data-pending] { cursor: progress; }
+.inbox-switch[data-pending] .toggle-switch:disabled { opacity: 0.55; cursor: progress; }
 
-.inbox-tuning-toggle:hover { background: var(--ui-hover); }
-.inbox-tuning-toggle svg { transition: transform 0.15s; }
-.inbox-tuning-toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
-.inbox-tuning-count { font-size: 10.5px; font-weight: 600; color: var(--accent); }
+/* The menu is always there, quietly; the row's hover or focus brings it up. */
+.inbox-manage-more { opacity: 0.45; transition: opacity 0.12s; }
+.inbox-table-row:hover .inbox-manage-more,
+.inbox-table-row:focus-within .inbox-manage-more,
+.inbox-manage-more[aria-expanded='true'] { opacity: 1; }
 
-.inbox-tuning-row { background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
-.inbox-tuning-row td { height: auto; padding-bottom: 10px; border-bottom: 1px solid var(--ui-line); }
+.inbox-tuning-row td { height: auto; padding: 0; border-bottom: 1px solid var(--ui-line); background: var(--ui-hover); }
 
-.inbox-tuning { display: flex; flex-direction: column; }
-
-.inbox-tuning-label {
-  margin-bottom: 2px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-secondary);
+.inbox-tuning {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 12px 10px;
 }
 
 .inbox-tuning-none { font-size: 12.5px; color: var(--text-secondary); }
@@ -605,44 +648,55 @@
   align-items: center;
   gap: 8px;
   height: 28px;
-  max-width: 560px;
   font-size: 12.5px;
 }
 
-.inbox-tuning-kind { display: inline-grid; place-items: center; color: var(--text-secondary); }
-.inbox-tuning-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
+.inbox-tuning-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
 .inbox-tuning-meta { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 
-/* ── Empty: one automation, no runs ── */
+/* ── Empty: nothing yet, or automations with no runs ── */
 .inbox-empty {
   flex: 1;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 24px 64px;
+  text-align: center;
 }
+
+.inbox-empty-title { margin: 0; font-size: 17px; font-weight: 500; color: var(--text-primary); }
+.inbox-empty-none { margin: 0 0 10px; font-size: 13px; color: var(--text-secondary); }
+.inbox-empty-cards { display: flex; flex-direction: column; width: min(520px, 100%); margin-top: 10px; text-align: left; }
 
 .inbox-empty-card {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-width: 360px;
-  padding: 14px 14px 14px 16px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
+  gap: 6px;
+  padding: 10px 8px 10px 14px;
+  border-radius: 10px;
 }
 
-.inbox-empty-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+.inbox-empty-card:hover { background: var(--ui-hover); }
+/* A hairline between rows, inset from the ends; a hovered row and the one after it lose theirs. */
+.inbox-empty-card + .inbox-empty-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 1px;
+  background: var(--ui-line);
 }
+.inbox-empty-card:hover::before,
+.inbox-empty-card:hover + .inbox-empty-card::before { content: none; }
+.inbox-empty-card[data-paused] .inbox-empty-text { opacity: 0.55; }
 
-.inbox-empty-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.inbox-empty-text strong { font-size: 14px; font-weight: 600; color: var(--text-primary); }
-.inbox-empty-text span { font-size: 12.5px; color: var(--text-secondary); }
+.inbox-empty-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.inbox-empty-text strong { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.inbox-empty-text span { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Chats sidebar: the project dot ── */
 .inbox-project-dot {
@@ -668,23 +722,26 @@
 .inbox-draft {
   max-width: 560px;
   margin: 8px 0 4px;
-  padding: 12px 14px 12px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
-  box-shadow: inset 0 0 0 1px var(--ui-line);
+  padding: 14px 16px;
+  border-radius: var(--ui-card-radius, 12px);
+  background: var(--ui-hover);
   font-size: 13px;
+  transition: background 0.3s;
 }
+
+/* The draft the person's words just made: an accent wash over the whole card, no edge mark. */
+.inbox-draft[data-fresh] { background: rgba(var(--accent-rgb), 0.15); }
 
 .inbox-draft-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--accent);
 }
 
 .inbox-draft-head strong { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
 
 .inbox-draft-tag {
+  flex-shrink: 0;
   padding: 1px 6px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -763,7 +820,6 @@
 .inbox-composer-box { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; margin-right: 4px; }
 .inbox-composer-box .inbox-composer { margin-right: 0; }
 .inbox-composer-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 2px 4px; }
-.inbox-composer-hint { font-size: 11px; color: var(--text-secondary); opacity: 0.8; }
 .inbox-head:has(.inbox-composer-box[data-open]) { align-items: flex-start; }
 
 .inbox-note {
@@ -776,13 +832,12 @@
 }
 
 .inbox-drafts-row { width: 100%; margin-bottom: 2px; }
-.inbox-drafts-row[aria-pressed='true'] { background: color-mix(in srgb, var(--text-secondary) 13%, transparent); }
 
 .inbox-ask-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 4px 6px 6px;
+  padding: 6px 4px 6px 10px;
   border-radius: 8px;
 }
 .inbox-ask-row .inbox-run-icon { color: var(--status-input); }
@@ -797,15 +852,6 @@
   font-weight: 600;
   color: var(--text-primary);
 }
-.inbox-strip-usage {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-secondary);
-}
 .inbox-strip button { color: inherit; }
 .inbox-strip .inbox-resolve-btn { color: var(--accent); }
 
@@ -816,32 +862,68 @@
   min-height: 0;
   overflow-y: auto;
 }
-.inbox-drafts { padding-bottom: 16px; }
-.inbox-drafts-list { display: flex; flex-direction: column; gap: 10px; padding: 0 16px; max-width: 720px; }
-.inbox-drafts-working {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 16px 10px;
-  font-size: 12.5px;
-  color: var(--text-secondary);
+.inbox-drafts { padding: 16px 24px 24px; }
+.inbox-drafts-list { display: flex; flex-direction: column; gap: 10px; max-width: 600px; }
+.inbox-drafts-list .inbox-draft { margin: 0; max-width: none; }
+.inbox-manage-none { margin: 4px 0; font-size: 12.5px; color: var(--text-secondary); }
+
+/* The person's words to the manager while it writes, or what came back instead of a draft. */
+.inbox-request {
+  max-width: 600px;
+  margin-bottom: 10px;
+  padding: 14px 16px;
+  border-radius: var(--ui-card-radius, 12px);
+  background: var(--ui-hover);
 }
-.inbox-manage-none { margin: 4px 16px; font-size: 12.5px; color: var(--text-secondary); }
+
+.inbox-request[data-state='working'] { background: rgba(var(--accent-rgb), 0.09); }
+.inbox-request[data-state='failed'] { background: color-mix(in srgb, var(--danger) 9%, transparent); }
+.inbox-request-head { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.inbox-request-icon { display: inline-grid; place-items: center; color: var(--text-secondary); }
+.inbox-request[data-state='working'] .inbox-request-icon { color: var(--accent); }
+.inbox-request[data-state='failed'] .inbox-request-icon { color: var(--danger); }
+.inbox-request-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.inbox-request-time { font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+
+.inbox-request-text {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.inbox-request-text::before { content: '“'; }
+.inbox-request-text::after { content: '”'; }
+.inbox-request-error { margin: 8px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--danger); overflow-wrap: anywhere; }
+.inbox-request-actions { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
+.inbox-request-actions:empty { display: none; }
+
+/* The list's Drafts row: says when the manager is writing, or when it failed. */
+.inbox-drafts-row-note { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: 11px; }
+.inbox-drafts-row[data-state='working'] { color: var(--accent); }
+.inbox-drafts-row[data-state='failed'] { color: var(--danger); }
 .inbox-edit .automations-column { padding-top: 8px; }
 
-.inbox-empty-none { font-size: 13px; color: var(--text-secondary); }
-.inbox-empty { flex-direction: column; gap: 10px; }
 
 .inbox-run-card {
   margin: 24px auto;
   width: min(560px, calc(100% - 48px));
   padding: 14px 16px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
+  border-radius: var(--ui-card-radius, 12px);
+  background: var(--ui-hover);
 }
+.inbox-run-card[data-state='failed'] { background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.inbox-run-card[data-state='running'] { background: rgba(var(--accent-rgb), 0.08); }
 .inbox-run-card-head { display: flex; align-items: center; gap: 8px; }
-.inbox-run-card-head strong { flex: 1; min-width: 0; font-size: 14px; color: var(--text-primary); }
-.inbox-run-card-line { margin: 8px 0 12px; font-size: 13px; color: var(--text-secondary); }
+.inbox-run-card-head strong { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.inbox-run-card-line { margin: 8px 0 0; font-size: 13px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+.inbox-run-card[data-state='failed'] .inbox-run-card-line { color: color-mix(in srgb, var(--danger) 85%, var(--text-primary)); }
+.inbox-run-card-actions { display: flex; align-items: center; gap: 6px; margin-top: 14px; }
+.inbox-run-card-actions:empty { display: none; }
 
 /* ── The draft card (the inbox's drafts, and inline in a chat) ── */
 .inbox-draft-fixed { font-size: 12.5px; color: var(--text-primary); }
@@ -856,6 +938,7 @@
   font-size: 12px;
 }
 .inbox-chip-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.inbox-chip-btn:disabled { opacity: 0.45; cursor: default; }
 .inbox-draft button { color: inherit; }
 .inbox-draft-writing,
 .inbox-draft-gone {

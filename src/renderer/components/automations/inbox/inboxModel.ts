@@ -8,8 +8,7 @@ import {
   resolvedRun,
   RUN_LEVEL_LABELS,
   type InboxCounts,
-  type InboxRun,
-  type RunModelUsage
+  type InboxRun
 } from '../../../../shared/automationInbox'
 import type { InboxFilter } from './inboxStore'
 
@@ -156,26 +155,3 @@ export function runLine(run: InboxRun, now: Date): string {
 
 /** A run with no report says so, never as quiet. */
 export const noReport = (run: InboxRun) => run.state === 'done' && !run.level
-
-/** Tokens in a short form: 950, 12.3k, 1.2M. */
-export function tokensText(tokens: number): string {
-  if (tokens < 1_000) return String(tokens)
-  if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(tokens < 10_000 ? 1 : 0).replace(/\.0$/, '')}k`
-  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
-}
-
-export function costText(usd: number): string {
-  return usd >= 0.995 || usd === 0 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(usd < 0.1 ? 3 : 2)}`
-}
-
-/**
- * A run's usage in one line: tokens per model, and the cost when it is known (API keys). A subscription's run shows
- * tokens only.
- */
-export function usageText(usage: readonly RunModelUsage[]): string | undefined {
-  if (!usage.length) return undefined
-  const parts = usage.map((line) => `${line.model} ${tokensText(line.input + line.output)}`)
-  const known = usage.filter((line) => line.costUsd !== undefined)
-  const cost = known.reduce((sum, line) => sum + (line.costUsd ?? 0), 0)
-  return known.length ? `${parts.join(' · ')} · ${costText(cost)}` : parts.join(' · ')
-}

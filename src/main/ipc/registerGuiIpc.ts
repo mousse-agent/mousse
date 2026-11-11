@@ -360,11 +360,13 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   expect?: unknown
   continuationOfRunId?: string
   acknowledgeUncertain?: boolean
+  await?: 'ack'
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
     requestId: request.requestId,
+    ...(request.await === 'ack' ? { await: 'ack' as const } : {}),
     ...(typeof request.conversationBranchId === 'string' ? { conversationBranchId: request.conversationBranchId } : {}),
     ...(typeof request.continuationOfRunId === 'string' && request.continuationOfRunId
       ? { continuationOfRunId: request.continuationOfRunId, ...(request.acknowledgeUncertain === true ? { acknowledgeUncertain: true } : {}) }
@@ -1248,7 +1250,9 @@ export function registerGuiIpc(
           source: 'gui',
           ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {}),
           ...(body.continuationOfRunId ? { continuationOfRunId: body.continuationOfRunId, ...(body.acknowledgeUncertain ? { acknowledgeUncertain: true } : {}) } : {}),
-          ...(body.expect ? { expect: body.expect } : {})
+          ...(body.expect ? { expect: body.expect } : {}),
+          // Opt-in: answer once the run is committed, so a caller that watches the turn is not held for all of it.
+          ...(body.await === 'ack' ? { await: 'ack' } : {})
         }
       )
       if (result.heldByPause) {

@@ -269,10 +269,6 @@
   cursor: pointer;
 }
 
-.agent-switch-row .toggle-switch {
-  flex-shrink: 0;
-}
-
 .agent-validation a {
   color: var(--ad-accent);
 }

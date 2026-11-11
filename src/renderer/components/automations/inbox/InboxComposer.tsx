@@ -1,8 +1,7 @@
 // The inbox's composer: describe an automation and the Automation manager writes a draft (shown in the pane). While
 // composing, Project and Who show under it; Who is the person's pick, never the manager's.
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import { isThreadActivityActive } from '../../../../shared/types'
-import { Folder, Sparkles, User } from '../../../lib/icons'
+import { ArrowUp, Loader2 } from '../../../lib/icons'
 import { useAppStore } from '../../../stores/appStore'
 import { takeAutomationCreate, useAutomationCreate } from '../../../stores/automationCreateStore'
 import { Select } from '../../ui/Select'
@@ -19,18 +18,21 @@ export interface InboxComposerHandle {
 const isMac = () => /mac/i.test(globalThis.navigator?.platform ?? '')
 export const newKey = () => (isMac() ? '⌘N' : 'Ctrl+N')
 
-/** Whether the manager is still on it: its turn is running, or the words went out a moment ago. */
+/** A bot gives no turn to watch: after this long with no draft, its request stops showing as pending. */
+const BOT_WAIT_MS = 90_000
+
+/** Whether the manager is still on the person's last words: its turn has not ended (a bot: no draft yet, for a while). */
 export function useManagerWorking(): boolean {
   const composing = useInboxStore((s) => s.composing)
-  const activity = useAppStore((s) => (composing?.threadId ? s.threadActivity[composing.threadId] : undefined))
+  const working = composing?.status === 'working'
   const [, setTick] = useState(0)
   useEffect(() => {
-    if (!composing) return
-    const timer = setInterval(() => setTick((count) => count + 1), 2_000)
-    return () => clearInterval(timer)
-  }, [composing])
-  if (!composing) return false
-  return composing.threadId ? isThreadActivityActive(activity) || Date.now() - composing.at < 4_000 : Date.now() - composing.at < 90_000
+    if (!working || !composing?.botId) return
+    const timer = setTimeout(() => setTick((count) => count + 1), Math.max(0, composing.at + BOT_WAIT_MS - Date.now()))
+    return () => clearTimeout(timer)
+  }, [working, composing])
+  if (!working) return false
+  return composing.botId ? Date.now() - composing.at < BOT_WAIT_MS : true
 }
 
 export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]; onBotMade: () => void }>(function InboxComposer({ bots, onBotMade }, ref) {
@@ -43,7 +45,6 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
   const [projectId, setProjectId] = useState('')
   const [who, setWho] = useState('default')
   const [newBot, setNewBot] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const boxRef = useRef<HTMLDivElement>(null)
@@ -80,32 +81,33 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
     const words = text.trim()
     if (!words || sending) return
     setSending(true)
-    setError(null)
     const project = local.find((entry) => entry.id === chosenProject)
+    // The composer clears at once: the words move to the request's card in the Drafts pane, which shows the manager
+    // working, then its draft, or the error with Retry and Edit (Edit puts them back here).
+    setText('')
+    setOpen(false)
+    const sent = sendToManager({ text: words, ...(project ? { projectId: project.id, projectName: project.name } : {}), who })
+    openDrafts()
     try {
-      await sendToManager({ text: words, ...(project ? { projectId: project.id, projectName: project.name } : {}), who })
-      setText('')
-      setOpen(false)
-      openDrafts()
+      await sent
       void refreshInbox()
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setSending(false)
     }
   }
+  const ready = Boolean(text.trim()) && !sending
 
   return (
-    <div className="inbox-composer-box" ref={boxRef} data-open={open || undefined}>
-      <label className="inbox-composer" title={`New automation · ${newKey()}`}>
-        <Sparkles size={14} strokeWidth={1.8} aria-hidden="true" />
+    <div className="inbox-composer-box" ref={boxRef} data-open={open || undefined} data-busy={sending || undefined}>
+      <div className="inbox-composer" onMouseDown={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); inputRef.current?.focus() } }}>
         <input
           ref={inputRef}
           data-testid="inbox-composer"
           placeholder="Describe an automation…"
           aria-label="Describe an automation"
+          title={`New automation · ${newKey()} · ? for shortcuts`}
           value={text}
-          disabled={sending}
+          readOnly={sending}
           onFocus={() => setOpen(true)}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
@@ -113,22 +115,29 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
             if (event.key === 'Escape') { setOpen(false); event.currentTarget.blur() }
           }}
         />
-      </label>
+        <button
+          type="button"
+          className="inbox-composer-send"
+          data-testid="inbox-composer-send"
+          aria-label={sending ? 'Sending' : 'Create automation'}
+          aria-busy={sending || undefined}
+          title={sending ? 'Sending…' : text.trim() ? 'Create · Enter' : 'Describe it first'}
+          disabled={!ready}
+          onClick={() => void send()}
+        >
+          {sending ? <Loader2 size={14} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : <ArrowUp size={14} strokeWidth={2.2} aria-hidden="true" />}
+        </button>
+      </div>
       {open ? (
         <div className="inbox-composer-chips" data-testid="inbox-composer-chips">
           <span className="inbox-draft-field" title="Project">
-            <Folder size={13} strokeWidth={1.8} aria-hidden="true" />
-            <Select ariaLabel="Project" size="small" value={chosenProject} placeholder="Pick a project" options={local.map((project) => ({ value: project.id, label: project.name }))} onChange={setProjectId} />
+            <Select ariaLabel="Project" size="small" value={chosenProject} placeholder="Pick a project" disabled={sending} options={local.map((project) => ({ value: project.id, label: project.name }))} onChange={setProjectId} />
           </span>
           <span className="inbox-draft-field" title="Who does it">
-            <User size={13} strokeWidth={1.8} aria-hidden="true" />
-            <Select ariaLabel="Who" size="small" value={who} options={whoChoices(bots)} onChange={(key) => { if (key === NEW_BOT_KEY) setNewBot(true); else setWho(key) }} />
+            <Select ariaLabel="Who" size="small" value={who} disabled={sending} options={whoChoices(bots)} onChange={(key) => { if (key === NEW_BOT_KEY) setNewBot(true); else setWho(key) }} />
           </span>
-          <span className="inbox-strip-spacer" />
-          <span className="inbox-composer-hint">Enter</span>
         </div>
       ) : null}
-      {error ? <p className="inbox-draft-problem" role="alert">{error}</p> : null}
       {newBot ? (
         <NewBotDialog
           initialDescription={text}

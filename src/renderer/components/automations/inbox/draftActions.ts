@@ -5,7 +5,7 @@ import type { JobSchedule } from '../../../../shared/types'
 import { createAutomationsClient, type AutomationWhoPick } from '../../../services/automationsClient'
 import { createPersonalBotsClient } from '../../../services/personalBotsClient'
 import { useAppStore } from '../../../stores/appStore'
-import { openEdit, refreshInbox, useInboxStore } from './inboxStore'
+import { attachRequest, errorText, openEdit, refreshInbox, startRequest, updateRequest, useInboxStore, type ManagerRequest } from './inboxStore'
 
 const api = () => createAutomationsClient(window.mousse.platformRequest)
 
@@ -37,6 +37,9 @@ export function editDetails(jobId: string): void {
 /**
  * The person's words to a manager (the Automation manager, or the bot that wrote the draft), with the project, the
  * draft or the automation they are about. The manager's next drafts take the Who the person picked.
+ *
+ * Returns once the words are sent, not when the manager's turn ends: that turn can take minutes, and the Drafts pane
+ * shows it (`composing`) until it ends with a draft, an error or a Stop.
  */
 export async function sendToManager(input: { text: string; projectId?: string; projectName?: string; who?: string; botId?: string; draftId?: string; automationId?: string }): Promise<void> {
   const message = managerMessage({
@@ -46,16 +49,53 @@ export async function sendToManager(input: { text: string; projectId?: string; p
     ...(input.automationId ? { automationId: input.automationId } : {})
   })
   const client = api()
-  if (input.who !== undefined) await client.nextWho(input.botId, pickOf(input.who))
-  if (input.botId) {
-    await createPersonalBotsClient(window.mousse.platformRequest).send(input.botId, message, crypto.randomUUID())
-    useInboxStore.setState({ composing: { at: Date.now() } })
-    return
+  const known = (useInboxStore.getState().index?.items ?? []).filter((item) => item.kind === 'job' && item.draft).map((item) => item.id)
+  const request: ManagerRequest = {
+    at: Date.now(),
+    text: input.text,
+    ...(input.projectId ? { projectId: input.projectId, projectName: input.projectName ?? input.projectId } : {}),
+    ...(input.who !== undefined ? { who: input.who } : {}),
+    ...(input.draftId ? { draftId: input.draftId } : {}),
+    status: 'working',
+    known
   }
-  // Asked on every send: it also tells the daemon which project the manager's turn works in.
-  const threadId = await client.managerThread(input.projectId)
-  await window.mousse.orchestrator.sendToThread(threadId, message)
-  useInboxStore.setState({ composing: { at: Date.now(), threadId } })
+  // The request shows as working at once, before anything is asked of the service: the composer is already clear.
+  // Anything that stops the words going out (a refusal, an unreachable service) shows on the request's own card, with
+  // Retry and Edit: the one place a request's outcome shows.
+  startRequest({ ...request, ...(input.botId ? { botId: input.botId } : {}) })
+  const at = request.at
+  try {
+    if (input.who !== undefined) await client.nextWho(input.botId, pickOf(input.who))
+    if (input.botId) {
+      await createPersonalBotsClient(window.mousse.platformRequest).send(input.botId, message, crypto.randomUUID())
+      return
+    }
+    // Asked on every send: it also tells the daemon which project the manager's turn works in.
+    const threadId = await client.managerThread(input.projectId)
+    attachRequest(at, { threadId })
+    // `ack`: the send answers once its run is committed; the turn's outcome comes from its events (`watchRequest`).
+    const result = await window.mousse.orchestrator.sendToThread(threadId, { content: message, await: 'ack' })
+    // A refused send ran nothing. An uncertain one (no answer) is watched as sent.
+    if (result?.error && result.requestAcknowledged === false) throw new Error(errorText(result.error))
+    attachRequest(at, {
+      ...(result?.runId ? { runId: result.runId } : {}),
+      // Behind an earlier turn: Stop takes this message out of the queue.
+      ...(result?.queued && result.queueItem?.id ? { queueItemId: result.queueItem.id } : {})
+    }, true)
+  } catch (cause) {
+    if (useInboxStore.getState().composing?.status === 'working') updateRequest(at, { status: 'failed', error: errorText(cause) })
+  }
+}
+
+/** Retry: the failed or stopped words go to the manager again, with the same project and Who. */
+export function retryRequest(request: ManagerRequest): Promise<void> {
+  return sendToManager({
+    text: request.text,
+    ...(request.projectId ? { projectId: request.projectId, projectName: request.projectName } : {}),
+    ...(request.who !== undefined ? { who: request.who } : {}),
+    ...(request.botId ? { botId: request.botId } : {}),
+    ...(request.draftId ? { draftId: request.draftId } : {})
+  })
 }
 
 /** A quick answer to the manager's question under a draft: the question closes, the answer goes to its manager. */

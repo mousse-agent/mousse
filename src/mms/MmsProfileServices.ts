@@ -137,7 +137,7 @@ import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAut
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
-import type { AutomationIndex } from '../shared/automations'
+import type { AutomationIndex, ManagerTurn } from '../shared/automations'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
@@ -1548,6 +1548,26 @@ export class MmsProfileServices {
   automationManagerThread(projectId?: string): { id: string } {
     this.automationManagerProjectId = projectId
     return this.threads.ensureExecutionThread(AUTOMATION_MANAGER_THREAD_KEY, AUTOMATION_MANAGER_NAME, undefined, undefined, { automationManager: true })
+  }
+
+  /**
+   * How a turn of the manager's thread stands, from its run: the composer's send answers once the run is committed, and
+   * the page reads the outcome here when no turn event told it (a turn that failed before it started, or a reload).
+   */
+  automationManagerTurn(runId: string): ManagerTurn {
+    const run = this.runEngine.getRun(runId)
+    if (!run || this.threads.getThread(run.threadId)?.automationManager !== true) return { status: 'unknown' }
+    const error = run.outcome?.error
+    switch (run.status) {
+      case 'completed': return { status: 'completed' }
+      case 'failed':
+      case 'uncertain': return { status: 'failed', ...(error ? { error } : {}) }
+      case 'interrupted':
+      case 'cancelled': return { status: 'stopped' }
+      case 'paused': return { status: 'paused' }
+      case 'queued': return { status: 'queued' }
+      default: return { status: 'working' }
+    }
   }
 
   /** The Automations inbox (`automations/automations.db`); absent when it could not be opened. */

@@ -1,4 +1,4 @@
-import type { AttentionAnswer, AutomationIndex } from '../../shared/automations'
+import type { AttentionAnswer, AutomationIndex, ManagerTurn } from '../../shared/automations'
 import type { AutomationInbox, InboxCounts, TuningNote } from '../../shared/automationInbox'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { ScheduledJob, QuestionAnswerOutcome } from '../../shared/types'
@@ -27,6 +27,8 @@ export interface AutomationsClient {
   /** The Automation manager's hidden thread, made the first time (`automations.manager.thread`). */
   /** The manager's thread; its next turns work in this project (else the manager's own folder). */
   managerThread(projectId?: string): Promise<string>
+  /** How one of the manager's turns stands, by its run id (`automations.manager.turn`). */
+  managerTurn(runId: string): Promise<ManagerTurn>
   /** The person changed Who on a draft (`automations.drafts.setWho`). */
   setWho(draftId: string, who: AutomationWhoPick): Promise<void>
   /** The person's Who for the next drafts this manager writes (`automations.drafts.nextWho`). */
@@ -61,6 +63,7 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
     discard: async (draftId) => { await transport.request('automations.drafts.discard', { draftId }) },
     createDraft: async (projectId) => (await transport.request<{ job: ScheduledJob }>('automations.drafts.create', projectId ? { projectId } : {})).job,
     answered: async (draftId) => { await transport.request('automations.drafts.answered', { draftId }) },
+    managerTurn: async (runId) => (await transport.request<{ turn: ManagerTurn }>('automations.manager.turn', { runId })).turn,
     managerThread: async (projectId) => (await transport.request<{ threadId: string }>('automations.manager.thread', projectId ? { projectId } : {})).threadId,
     setWho: async (draftId, who) => { await transport.request('automations.drafts.setWho', { draftId, who }) },
     nextWho: async (botId, who) => { await transport.request('automations.drafts.nextWho', { ...(botId ? { botId } : {}), who }) },

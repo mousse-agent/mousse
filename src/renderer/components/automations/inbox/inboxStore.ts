@@ -3,8 +3,11 @@
 import { create } from 'zustand'
 import type { AutomationIndex } from '../../../../shared/automations'
 import type { AutomationInbox, InboxCounts, InboxRun, TuningNote } from '../../../../shared/automationInbox'
+import type { TurnPhase, TurnState } from '../../../../shared/types'
 import { createAutomationsClient, type AutomationsClient } from '../../../services/automationsClient'
 import { useAppStore } from '../../../stores/appStore'
+import { quietThreadToasts, threadToastKey } from '../../../lib/threadToasts'
+import { dismissToastByKey } from '../../ui/Toast'
 
 /** What narrows the Runs list: one automation, one project group, words. */
 export interface InboxFilter {
@@ -33,8 +36,38 @@ interface InboxState {
   editJobId: string | null
   folds: { bots: boolean; quiet: boolean }
   actionError: string | null
-  /** The composer's words went to a manager: when, and the manager's hidden thread (absent for a bot). */
-  composing: { at: number; threadId?: string } | null
+  /** The person's last words to a manager, and how its answer is going (the Drafts pane shows it). */
+  composing: ManagerRequest | null
+}
+
+/**
+ * Words sent to a manager (the Automation manager, or a bot). The manager's turn can take minutes, so the send is
+ * watched here instead of awaited by the composer: `working` until the turn ends, then `done`, `failed` or `stopped`.
+ */
+export interface ManagerRequest {
+  at: number
+  /** The manager's hidden thread; absent for a bot. */
+  threadId?: string
+  /** The run the send committed (`await: 'ack'`): the turn whose outcome this request waits for. */
+  runId?: string
+  /** The queued message, when the send waits behind an earlier turn: Stop takes it out of the queue. */
+  queueItemId?: string
+  /** The profile it was sent from: it is kept, and brought back, under that profile only. */
+  profileId?: string
+  /** Held by a usage limit: its turn goes on when the limit resets. */
+  waiting?: boolean
+  botId?: string
+  /** What was sent, for Retry and Edit. */
+  text: string
+  projectId?: string
+  projectName?: string
+  who?: string
+  /** The draft the words were about (an answer to its question): no new draft is expected. */
+  draftId?: string
+  status: 'working' | 'done' | 'failed' | 'stopped'
+  error?: string
+  /** The drafts there were when the words went out; any other draft is the one this request made. */
+  known: string[]
 }
 
 export const useInboxStore = create<InboxState>(() => ({
@@ -64,7 +97,11 @@ export function setInboxClient(next: AutomationsClient | null): void {
   client = next
 }
 
-const errorText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+export const errorText = (cause: unknown): string => {
+  if (cause instanceof Error) return cause.message
+  if (cause && typeof cause === 'object' && typeof (cause as { message?: unknown }).message === 'string') return (cause as { message: string }).message
+  return String(cause)
+}
 
 let reading: Promise<void> | null = null
 
@@ -75,6 +112,9 @@ export function refreshInbox(): Promise<void> {
   reading = Promise.all([api.list(), api.inbox(), api.counts()])
     .then(([index, inbox, counts]) => {
       useInboxStore.setState({ index, inbox, counts, loadError: null, loadedAt: Date.now() })
+      // A bot answers in its own chat, with no turn to watch here: its request is done once its draft shows.
+      const request = useInboxStore.getState().composing
+      if (request?.status === 'working' && request.botId && newDrafts(request, index).length) updateRequest(request.at, { status: 'done' })
     })
     .catch((cause) => {
       useInboxStore.setState({ loadError: errorText(cause) })
@@ -108,6 +148,218 @@ async function act(work: (api: AutomationsClient) => Promise<unknown>): Promise<
   }
   await refreshInbox()
 }
+
+/** The drafts a request made: the drafts now that were not there when its words went out. */
+export function newDrafts(request: Pick<ManagerRequest, 'known'> | null, index: AutomationIndex | null): string[] {
+  if (!request || !index) return []
+  return index.items.filter((item) => item.kind === 'job' && item.draft && !request.known.includes(item.id)).map((item) => item.id)
+}
+
+/** Changes the request sent at `at`, unless newer words replaced it. */
+export function updateRequest(at: number, patch: Partial<ManagerRequest>): void {
+  useInboxStore.setState((state) => (state.composing?.at === at ? { composing: { ...state.composing, ...patch } } : {}))
+}
+
+/**
+ * The manager's turn ended: with an error, or done. The list is read first, so a draft it wrote (even one written
+ * before it failed) is there when the pending line goes. A Stop the person pressed stays a Stop.
+ */
+export async function settleRequest(at: number, error?: string): Promise<void> {
+  await refreshInbox()
+  const request = useInboxStore.getState().composing
+  if (request?.at !== at || request.status !== 'working') return
+  if (error) updateRequest(at, { status: 'failed', error })
+  else if (request.draftId) useInboxStore.setState({ composing: null })
+  else updateRequest(at, { status: 'done' })
+}
+
+/**
+ * Stop: only this request's run. A send still queued behind an earlier turn is taken out of the queue; one whose turn
+ * runs is aborted (a thread runs one turn at a time, so that turn is its). When neither can be confirmed, the request
+ * keeps showing as working rather than claiming a Stop that did not happen.
+ */
+export async function stopRequest(): Promise<void> {
+  const request = useInboxStore.getState().composing
+  if (!request || request.status !== 'working' || !request.threadId) return
+  const { at, threadId } = request
+  try {
+    if (request.queueItemId && await window.mousse.queue.remove(threadId, request.queueItemId)) return updateRequest(at, { status: 'stopped' })
+    const turn = request.runId ? await inboxClient().managerTurn(request.runId) : undefined
+    if (turn && turn.status !== 'working' && turn.status !== 'paused') return void await checkRequest(at)
+    if (turn || !request.runId) {
+      await window.mousse.orchestrator.abort(threadId)
+      updateRequest(at, { status: 'stopped' })
+    }
+  } catch {
+    // Not stopped: it still shows as working, and the watch reads how it ends.
+  }
+}
+
+export function dismissRequest(): void {
+  useInboxStore.setState({ composing: null })
+}
+
+// ── Watching the manager's turn ──────────────────────────────────────────────────────────────────────
+// The send answers once its run is committed (`await: 'ack'`), so the turn's outcome comes from the thread's turn
+// events. The run is also read when the watch starts (a turn that ended before it subscribed), every few seconds
+// as a safety net (a turn that failed before it showed a phase), and when the page opens again after a reload.
+
+/** How often a working request reads its run, in case no turn event says it ended. */
+export const REQUEST_POLL_MS = 5_000
+/** After this many failed reads of the run in a row, the watch asks only whether the thread still works. */
+export const REQUEST_READ_FAILURES = 3
+/** A request older than this is given up on (a hung run), and not brought back after a reload. */
+export const REQUEST_KEEP_MS = 2 * 60 * 60 * 1000
+const ENDED_PHASES = new Set<TurnPhase>(['completed', 'failed', 'stopped'])
+
+/** A turn's error as the person reads it: without the `[code]` the engine puts in front. */
+export function turnErrorText(error: string | undefined): string {
+  return error?.replace(/^\[[a-z0-9_.-]+\]\s*/i, '').trim() || 'The Automation manager stopped with an error.'
+}
+
+let offTurnState: (() => void) | null = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let watching: number | null = null
+let readFailures = 0
+
+function stopWatching(): void {
+  offTurnState?.()
+  offTurnState = null
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = null
+  watching = null
+  readFailures = 0
+}
+
+/** The turn of the request (its run), from one turn event: ended or not. Another turn of the thread is not its. */
+function onTurnState(state: TurnState): void {
+  const request = useInboxStore.getState().composing
+  if (!request || request.status !== 'working' || state.threadId !== request.threadId) return
+  if (request.runId && state.turnId !== request.runId) return
+  // A usage limit holds the turn: it goes on when the limit resets, so the request waits with it.
+  if (state.phase === 'paused') return updateRequest(request.at, { waiting: true })
+  if (!ENDED_PHASES.has(state.phase)) return void (request.waiting ? updateRequest(request.at, { waiting: false }) : undefined)
+  if (state.phase === 'stopped') updateRequest(request.at, { status: 'stopped' })
+  else void settleRequest(request.at, state.phase === 'failed' ? turnErrorText(state.error) : undefined)
+}
+
+/** Whether the thread still works, for a request with no run to read: done once it is idle. */
+async function checkThread(at: number, threadId: string): Promise<void> {
+  const active = await window.mousse.orchestrator.isTurnActive(threadId).catch(() => true)
+  if (!active) await settleRequest(at)
+}
+
+/**
+ * Reads the request's run once and settles it if it ended. A run that cannot be read (an older service, say) is read
+ * a few times, then the watch asks only whether the thread still works. A request that outlived its keep is given up.
+ */
+export async function checkRequest(at: number): Promise<void> {
+  const request = useInboxStore.getState().composing
+  if (!request || request.at !== at || request.status !== 'working' || !request.threadId) return
+  if (Date.now() - at > REQUEST_KEEP_MS) return void await settleRequest(at, 'No answer from the Automation manager. Open its chat to see where it stopped.')
+  if (!request.runId || readFailures >= REQUEST_READ_FAILURES) return checkThread(at, request.threadId)
+  let turn
+  try {
+    turn = await inboxClient().managerTurn(request.runId)
+    readFailures = 0
+  } catch {
+    readFailures += 1
+    return
+  }
+  if (turn.status === 'working' || turn.status === 'queued') return void (request.waiting ? updateRequest(at, { waiting: false }) : undefined)
+  if (turn.status === 'paused') return updateRequest(at, { waiting: true })
+  if (turn.status === 'completed') return void await settleRequest(at)
+  if (turn.status === 'failed') return void await settleRequest(at, turnErrorText(turn.error))
+  if (turn.status === 'stopped') return updateRequest(at, { status: 'stopped' })
+  // Unknown to the service (it restarted): done once the thread is idle.
+  await checkThread(at, request.threadId)
+}
+
+/** Watches the working request: its turn events, one read now, and a read every few seconds until it ends. */
+export function watchRequest(): void {
+  const request = useInboxStore.getState().composing
+  if (!request || request.status !== 'working' || !request.threadId) { stopWatching(); return }
+  if (watching === request.at) return
+  stopWatching()
+  watching = request.at
+  offTurnState = window.mousse.orchestrator.onTurnState?.(onTurnState) ?? null
+  const at = request.at
+  const poll = () => {
+    pollTimer = setTimeout(() => {
+      if (watching !== at) return
+      void checkRequest(at).finally(() => { if (watching === at && useInboxStore.getState().composing?.status === 'working') poll() })
+    }, REQUEST_POLL_MS)
+  }
+  void checkRequest(at)
+  poll()
+}
+
+/** Starts a request: shown at once, kept across a reload for the profile it was sent from, and watched until it ends. */
+export function startRequest(request: ManagerRequest): void {
+  // The last request's toast (its turn stopped or failed) goes: the new request is what the page shows now.
+  const previous = useInboxStore.getState().composing?.threadId
+  if (previous) dismissToastByKey(threadToastKey(previous))
+  useInboxStore.setState({ composing: { ...request, profileId: request.profileId ?? useAppStore.getState().profileId } })
+  watchRequest()
+}
+
+/**
+ * Adds what the send learned (the manager's thread, then its run) to the request sent at `at`, unless newer words
+ * replaced it; `watch` starts watching its turn. A toast left from the thread's last turn goes: this request is shown.
+ */
+export function attachRequest(at: number, patch: Pick<ManagerRequest, 'threadId' | 'runId' | 'queueItemId'>, watch = false): void {
+  if (patch.threadId) dismissToastByKey(threadToastKey(patch.threadId))
+  updateRequest(at, patch)
+  if (watch && useInboxStore.getState().composing?.at === at) watchRequest()
+}
+
+const requestKey = (profileId: string) => `mousse.automations.request.${profileId}`
+
+/** The request a reload left, for this profile: still working, or failed (its error is not lost). */
+export function loadRequest(profileId: string): ManagerRequest | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(requestKey(profileId))
+    const request = raw ? JSON.parse(raw) as ManagerRequest : null
+    if (!request || typeof request.at !== 'number' || Date.now() - request.at > REQUEST_KEEP_MS) return null
+    if (request.profileId && request.profileId !== profileId) return null
+    return request.status === 'working' || request.status === 'failed' ? request : null
+  } catch {
+    return null
+  }
+}
+
+function saveRequest(profileId: string, request: ManagerRequest | null): void {
+  try {
+    if (request && (request.status === 'working' || request.status === 'failed')) globalThis.localStorage?.setItem(requestKey(profileId), JSON.stringify(request))
+    else globalThis.localStorage?.removeItem(requestKey(profileId))
+  } catch {
+    // A request that cannot be kept is only lost on a reload.
+  }
+}
+
+/** The page opened for a profile: its request comes back from before a reload, and is watched again. */
+let switchingProfile = false
+export function restoreRequest(profileId: string): void {
+  // The other profile's request stays saved under its own key: only this page's view of it goes.
+  switchingProfile = true
+  try { useInboxStore.setState({ composing: loadRequest(profileId) }) } finally { switchingProfile = false }
+  watchRequest()
+}
+
+// The manager's turn ends in the Drafts pane (its draft, its error with Retry, or its reply): while the Automations page
+// is open, the thread's own "Stopped" or "Finished" toast would only repeat it, worse.
+quietThreadToasts((threadId) => useAppStore.getState().scheduledOpen && useInboxStore.getState().composing?.threadId === threadId)
+
+// A request is kept under the profile it was sent from, whatever profile is current when it changes or ends.
+useInboxStore.subscribe((state, previous) => {
+  if (state.composing === previous.composing) return
+  const next = state.composing
+  const last = previous.composing
+  if (last?.profileId && last.at !== next?.at && !switchingProfile) saveRequest(last.profileId, null)
+  const owner = next?.profileId ?? (switchingProfile ? undefined : last?.profileId)
+  if (owner) saveRequest(owner, next)
+  if (next?.status !== 'working') stopWatching()
+})
 
 export function setInboxFilter(filter: InboxFilter): void {
   useInboxStore.setState({ filter, pane: 'run', manageExpanded: null })

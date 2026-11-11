@@ -1,7 +1,10 @@
 import { useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { AutomationsInbox } from './automations/inbox/AutomationsInbox'
-import { inboxPageClosed, inboxPageOpened, useInboxShowsThread, useInboxStore } from './automations/inbox/inboxStore'
+import { inboxPageClosed, inboxPageOpened, restoreRequest, useInboxShowsThread, useInboxStore } from './automations/inbox/inboxStore'
+// Edit details uses Settings' buttons and fields (.settings-btn): their CSS loads with the page, not only once the
+// Settings chunk has.
+import '../styles/settings.css'
 import '../styles/automations-page.css'
 
 /**
@@ -23,9 +26,10 @@ export function AutomationsPage() {
     inboxPageOpened()
     return inboxPageClosed
   }, [open])
-  // Another profile: another inbox.
+  // Another profile: another inbox, and its words to the manager from before a reload, watched again.
   useEffect(() => {
-    useInboxStore.setState({ index: null, inbox: null, counts: null, loadedAt: 0, filter: {}, openRunId: null, pane: 'run', editJobId: null, manageExpanded: null, composing: null })
+    useInboxStore.setState({ index: null, inbox: null, counts: null, loadedAt: 0, filter: {}, openRunId: null, pane: 'run', editJobId: null, manageExpanded: null })
+    restoreRequest(profileId)
   }, [profileId])
   return (
     <div ref={pageRef} className="automations-page" hidden={!open} tabIndex={-1} data-automations-workspace="" data-view="inbox" data-thread={showsThread || undefined}>
