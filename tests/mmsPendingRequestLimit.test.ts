@@ -117,6 +117,20 @@ describe('request limit overload', () => {
     expect(client.waitingRequestCount).toBe(0)
   })
 
+  it('on close, fails a request still waiting for a slot as not sent, and the written ones as cut off', async () => {
+    answer = () => 'hold'
+    const written = client.request('orchestrator.send', { written: true }).catch((error: unknown) => error)
+    await expect.poll(() => received.length).toBe(1)
+    await holdAll(MMS_PROTOCOL_MAX_PENDING_REQUESTS - 1)
+    const waiting = client.request('orchestrator.send', { waiting: true }).catch((error: unknown) => error)
+    expect(client.waitingRequestCount).toBe(1)
+    await client.close()
+    await expect(waiting).resolves.toMatchObject({ message: 'Not connected' })
+    await expect(written).resolves.toMatchObject({ message: 'Client closed' })
+    expect(received.some((request) => (request.params as { waiting?: boolean } | undefined)?.waiting)).toBe(false)
+    expect(client.waitingRequestCount).toBe(0)
+  })
+
   it('answers identical reads in flight with one request, and gives each caller its own copy', async () => {
     answer = () => 'hold'
     const calls = [

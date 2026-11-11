@@ -827,12 +827,16 @@ export class LocalMmsClient implements MmsClient {
     }
   }
 
+  /**
+   * `err` goes to the requests already written, whose outcome is now unknown. Requests still waiting for a slot were
+   * never written, so they fail as not sent (`Not connected`), and a caller may give their input back.
+   */
   private rejectAllPending(err: Error): void {
     const waiters = this.slotWaiters
     this.slotWaiters = []
     for (const waiter of waiters) {
       clearTimeout(waiter.timer)
-      waiter.fail(err)
+      waiter.fail(new Error('Not connected'))
     }
     for (const [, p] of this.pending) {
       clearTimeout(p.timer)

@@ -358,6 +358,30 @@ describe('a call to another computer that was not confirmed', () => {
     expect(sent('orchestrator.send')[0].params).toMatchObject({ requestId: 'req-9', clientRequestId: 'req-9' })
   })
 
+  it('answers a send cut off by the app quitting as a lost connection, so the window does not give its prompt back', async () => {
+    presentation.setActiveThreadId('local-thread')
+    // Quitting closes this client while the send still waits for its turn; the service goes on running it.
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw new Error('Client closed')
+    })
+    const answer = (await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Write the report', requestId: 'req-q' })) as { requestAcknowledged?: boolean; error?: { code?: string } }
+    expect(answer).not.toHaveProperty('requestAcknowledged')
+    expect(answer.error).toMatchObject({ code: 'workspace_connection_lost' })
+  })
+
+  it('answers a send that was still waiting for a free slot when the app quit as not taken, so the window gives its prompt back', async () => {
+    presentation.setActiveThreadId('local-thread')
+    // The client fails requests it never wrote with `Not connected`.
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw new Error('Not connected')
+    })
+    const answer = (await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Write the report', requestId: 'req-w' })) as { requestAcknowledged?: boolean; error?: { code?: string } }
+    expect(answer.requestAcknowledged).toBe(false)
+    expect(answer.error?.code).not.toBe('workspace_connection_lost')
+  })
+
   it('sends the continuation of a run a restart left uncertain as continue:<runId>, acknowledged, with its own short request id', async () => {
     presentation.setActiveThreadId('local-thread')
     const runId = 'run:thread:3f9c1a7e-5b2d-4c8e-9a10-6d4e2b7f8c01:ordinal:12'
