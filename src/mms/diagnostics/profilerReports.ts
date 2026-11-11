@@ -156,7 +156,8 @@ export function windowBreakdownReport(detail: AppWindowDetail | null, sample: Me
     windows: detail.windows.map(windowEntry),
     windowProcessesMb: windowRows.map((p) => p.private ?? p.rss),
     views: viewSummary(detail.views),
-    estimates: 'imagesDecodedMbEstimated and canvasMbEstimated assume 4 bytes a pixel. imageCacheMb and the JS heap are measured.'
+    estimates:
+      "imagesDecodedMbEstimated and canvasMbEstimated assume 4 bytes a pixel. imageCacheMb and the JS heap are measured. A cache's kbEstimated is an estimate of the heap its entries hold; limitKb is its budget."
   }
 }
 

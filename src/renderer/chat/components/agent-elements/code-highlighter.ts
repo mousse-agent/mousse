@@ -1,9 +1,8 @@
-import { registerWindowCache } from "../../../lib/windowCounters";
+import { registerByteCache } from "../../../lib/windowCounters";
 import type { BundledLanguage, CodeHighlighterPlugin } from "streamdown";
 import type { HighlighterCore } from "shiki/core";
 import { bundledLanguages, bundledLanguagesInfo } from "shiki/langs";
 import { ByteLruCache } from "../../../lib/byteLruCache";
-import { noteRenderCacheBytes } from "../../../lib/renderCacheReport";
 import { countRender } from "./render-counts";
 
 type HighlightOptions = Parameters<CodeHighlighterPlugin["highlight"]>[0];
@@ -119,9 +118,9 @@ export function highlightResultBytes(result: HighlightResult): number {
   return bytes;
 }
 
-const resultCache = new ByteLruCache<string, HighlightResult>(HIGHLIGHT_CACHE_BYTES, (bytes) => noteRenderCacheBytes("code", bytes));
+const resultCache = new ByteLruCache<string, HighlightResult>(HIGHLIGHT_CACHE_BYTES);
 
-/** The highlighted-code cache, for the memory monitor and tests. */
+/** The highlighted-code cache, for the profiler and tests. */
 export const highlightCache: Pick<ByteLruCache<string, HighlightResult>, "bytes" | "size" | "hits" | "misses" | "budgetBytes" | "clear"> =
   resultCache;
 
@@ -131,7 +130,7 @@ export function highlightCacheKey(language: string, themes: readonly [string, st
 }
 
 // The profiler's window breakdown reads the highlight cache's size.
-registerWindowCache("codeHighlight", () => ({ entries: resultCache.size }));
+registerByteCache("codeHighlight", resultCache);
 
 function cacheResult(key: string, result: HighlightResult): void {
   // The key holds the code too.

@@ -4,6 +4,7 @@
  * set and CPU, plus the windows' own heap reports. Pure, so it is tested without Electron.
  */
 import type { AppHints, AppProcessKind, AppProcessMemory, AppProcessRole } from '../../shared/diagnostics/memory'
+import { NEWER_WINDOW_CACHE_FIELDS, type WindowCacheSize, type WindowCounters } from '../../shared/diagnostics/profiler'
 
 /** The fields of Electron's ProcessMetric this reads. Sizes in KB, as Electron gives them. */
 export interface MetricLike {
@@ -28,9 +29,6 @@ export interface WindowReport {
   imagesKb?: number
   canvases?: number
   webglContexts?: number
-  /** The chat's parsed-Markdown and highlighted-code caches. */
-  markdownCacheKb?: number
-  codeCacheKb?: number
   at: number
 }
 
@@ -47,22 +45,42 @@ const UTILITY_ROLES: Array<[RegExp, AppProcessRole]> = [
 /** When one renderer hosts several contents, the one that names it best. */
 const RENDERER_ORDER: ContentsLike['role'][] = ['window', 'applet', 'browser', 'devtools', 'renderer']
 
-/** Hint fields an older service does not know: it refuses a report that has any field it does not know. */
-const NEWER_HINT_FIELDS = ['markdownCacheMb', 'codeCacheMb'] as const
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined
+}
+
+/** A cache size a window's preload sent, numbers only; `undefined` without a count of entries. */
+export function windowCacheSizeOf(raw: unknown): WindowCacheSize | undefined {
+  const value = raw as Record<string, unknown> | null
+  const entries = count(value?.entries)
+  if (entries === undefined) return undefined
+  const limit = count(value?.limit)
+  const kbEstimated = count(value?.kbEstimated)
+  const limitKb = count(value?.limitKb)
+  return {
+    entries,
+    ...(limit !== undefined ? { limit } : {}),
+    ...(kbEstimated !== undefined ? { kbEstimated } : {}),
+    ...(limitKb !== undefined ? { limitKb } : {})
+  }
+}
 
 /**
- * Sends the app's memory report. A service older than these fields refuses the whole report as having a field
- * it does not know (`unknown_field`): the report goes again without them. Any other refusal is thrown.
+ * Sends the app's memory report. A service from before the window caches' sizes refuses the whole report as having
+ * a field it does not know (`unknown_field`): the report goes again without them. Any other refusal is thrown.
  */
-export async function sendAppReport<R extends { hints?: AppHints }>(request: (report: R) => Promise<unknown>, report: R): Promise<void> {
+export async function sendAppReport<R extends { windows?: WindowCounters[] }>(request: (report: R) => Promise<unknown>, report: R): Promise<void> {
   try {
     await request(report)
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code
-    if (code !== 'unknown_field' || !report.hints || !NEWER_HINT_FIELDS.some((field) => field in report.hints!)) throw error
-    const hints = { ...report.hints }
-    for (const field of NEWER_HINT_FIELDS) delete hints[field]
-    await request({ ...report, hints })
+    const sized = (cache: WindowCacheSize) => NEWER_WINDOW_CACHE_FIELDS.some((field) => cache[field] !== undefined)
+    if (code !== 'unknown_field' || !report.windows?.some((w) => Object.values(w.caches).some(sized))) throw error
+    const windows = report.windows.map((w) => ({
+      ...w,
+      caches: Object.fromEntries(Object.entries(w.caches).map(([name, cache]) => [name, { entries: cache.entries, ...(cache.limit !== undefined ? { limit: cache.limit } : {}) }]))
+    }))
+    await request({ ...report, windows })
   }
 }
 
@@ -140,15 +158,11 @@ export function appHints(input: {
   let webglContexts = 0
   let canvases = 0
   let imagesKb: number | undefined
-  let markdownCacheKb: number | undefined
-  let codeCacheKb: number | undefined
   for (const report of input.reports) {
     if (input.now - report.at >= input.freshMs) continue
     webglContexts += report.webglContexts ?? 0
     canvases += report.canvases ?? 0
     if (report.imagesKb !== undefined) imagesKb = (imagesKb ?? 0) + report.imagesKb
-    if (report.markdownCacheKb !== undefined) markdownCacheKb = (markdownCacheKb ?? 0) + report.markdownCacheKb
-    if (report.codeCacheKb !== undefined) codeCacheKb = (codeCacheKb ?? 0) + report.codeCacheKb
   }
   const count = (role: ContentsLike['role']) => input.contents.filter((entry) => entry.role === role).length
   return {
@@ -158,8 +172,6 @@ export function appHints(input: {
     views: { applet: count('applet'), browser: count('browser'), devtools: count('devtools') },
     webglContexts,
     canvases,
-    ...(imagesKb !== undefined ? { imagesMb: kb(imagesKb) } : {}),
-    ...(markdownCacheKb !== undefined ? { markdownCacheMb: kb(markdownCacheKb) } : {}),
-    ...(codeCacheKb !== undefined ? { codeCacheMb: kb(codeCacheKb) } : {})
+    ...(imagesKb !== undefined ? { imagesMb: kb(imagesKb) } : {})
   }
 }

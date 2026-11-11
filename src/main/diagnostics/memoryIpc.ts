@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, clipboard, ipcMain, screen, shell, webContents } from 'electron'
 import { toMb, type AppHints, type AppProcessMemory, type BreachKind, type MemoryIssue } from '../../shared/diagnostics/memory'
 import type { WindowCounters } from '../../shared/diagnostics/profiler'
-import { appHints, appProcessRows, type ContentsLike, type WindowGeometry, type WindowReport } from './appProcesses'
+import { appHints, appProcessRows, sendAppReport, windowCacheSizeOf, type ContentsLike, type WindowGeometry, type WindowReport } from './appProcesses'
 import { openMemoryIssue } from './memoryReport'
 import { markedViews, webContentsRole } from './webContentsRoles'
 
@@ -102,9 +102,8 @@ function windowCountersOf(raw: unknown): Omit<WindowCounters, 'w' | 'h' | 'scale
   const rawCaches = value.caches as Record<string, unknown> | undefined
   if (rawCaches && typeof rawCaches === 'object') {
     for (const [name, cache] of Object.entries(rawCaches).slice(0, 16)) {
-      const entries = finite((cache as { entries?: unknown } | null)?.entries)
-      const limit = finite((cache as { limit?: unknown } | null)?.limit)
-      if (/^[a-z][A-Za-z0-9]{0,39}$/.test(name) && entries !== undefined) caches[name] = { entries: Math.round(entries), ...(limit !== undefined ? { limit: Math.round(limit) } : {}) }
+      const size = windowCacheSizeOf(cache)
+      if (/^[a-z][A-Za-z0-9]{0,39}$/.test(name) && size) caches[name] = size
     }
   }
   const imageCacheMb = finite(value.imageCacheMb)
@@ -216,7 +215,7 @@ export function registerMemoryDiagnosticsIpc(registerHandler: RegisterHandler, g
     try {
       const windows = await collectWindows(request?.windows === true)
       const { processes, hints } = await readAppMemory(options.acrylic())
-      await guiMms.request('diagnostics.memory.appReport', {
+      await sendAppReport((params) => guiMms.request('diagnostics.memory.appReport', params), {
         processes,
         hints,
         ...(request?.requestId ? { requestId: request.requestId } : {}),

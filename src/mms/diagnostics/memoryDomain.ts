@@ -75,17 +75,8 @@ function count(value: unknown, name: string): number {
   return value
 }
 
-const HINT_FIELDS = ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb', 'markdownCacheMb', 'codeCacheMb']
-
-/**
- * The hints, with fields this service does not know dropped: a newer app may add optional hints. Dropped fields
- * are never kept or logged, so nothing unknown reaches a sample.
- */
 function validateHints(value: unknown): AppHints {
-  const known = value && typeof value === 'object' && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value).filter(([key]) => HINT_FIELDS.includes(key)))
-    : value
-  const raw = domainObject(known, HINT_FIELDS)
+  const raw = domainObject(value, ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb'])
   if (!Array.isArray(raw.windows) || raw.windows.length > MAX_WINDOWS) throw new DomainRpcError('invalid_params', 'windows must be a list of at most 32')
   const windows = raw.windows.map((entry) => {
     const w = domainObject(entry, ['w', 'h', 'scale', 'visible'])
@@ -96,8 +87,6 @@ function validateHints(value: unknown): AppHints {
   const views = domainObject(raw.views, ['applet', 'browser', 'devtools'])
   if (typeof raw.acrylic !== 'boolean') throw new DomainRpcError('invalid_params', 'acrylic must be a boolean')
   const imagesMb = mb(raw.imagesMb, false)
-  const markdownCacheMb = mb(raw.markdownCacheMb, false)
-  const codeCacheMb = mb(raw.codeCacheMb, false)
   return {
     windows,
     surfaceMb: mb(raw.surfaceMb, true)!,
@@ -105,9 +94,7 @@ function validateHints(value: unknown): AppHints {
     views: { applet: count(views.applet, 'applet'), browser: count(views.browser, 'browser'), devtools: count(views.devtools, 'devtools') },
     webglContexts: count(raw.webglContexts, 'webglContexts'),
     canvases: count(raw.canvases, 'canvases'),
-    ...(imagesMb !== undefined ? { imagesMb } : {}),
-    ...(markdownCacheMb !== undefined ? { markdownCacheMb } : {}),
-    ...(codeCacheMb !== undefined ? { codeCacheMb } : {})
+    ...(imagesMb !== undefined ? { imagesMb } : {})
   }
 }
 
@@ -140,8 +127,14 @@ function validateWindowCounters(value: unknown): WindowCounters {
     if (names.length > 16) throw new DomainRpcError('invalid_params', 'At most 16 caches')
     for (const name of names) {
       if (!CACHE_NAME.test(name)) throw new DomainRpcError('invalid_params', 'Unknown cache name')
-      const cache = domainObject((raw.caches as Record<string, unknown>)[name], ['entries', 'limit'])
-      out.caches[name] = { entries: bigCount(cache.entries, 'entries'), ...(cache.limit !== undefined ? { limit: bigCount(cache.limit, 'limit') } : {}) }
+      // Counts only: entries and their limit, and for a cache bounded by size, its estimated KB and budget.
+      const cache = domainObject((raw.caches as Record<string, unknown>)[name], ['entries', 'limit', 'kbEstimated', 'limitKb'])
+      out.caches[name] = {
+        entries: bigCount(cache.entries, 'entries'),
+        ...(cache.limit !== undefined ? { limit: bigCount(cache.limit, 'limit') } : {}),
+        ...(cache.kbEstimated !== undefined ? { kbEstimated: bigCount(cache.kbEstimated, 'kbEstimated') } : {}),
+        ...(cache.limitKb !== undefined ? { limitKb: bigCount(cache.limitKb, 'limitKb') } : {})
+      }
     }
   }
   return out

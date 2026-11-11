@@ -25,7 +25,7 @@ export const PROFILER_TOOLS_OFF_BY_DEFAULT: readonly ProfilerToolName[] = ['prof
 export const PROFILER_TOOL_LABELS: Record<ProfilerToolName, { label: string; detail: string }> = {
   profiler_overview: { label: 'Overview', detail: 'Memory and CPU of every process by role, against the start baseline, with trends and recent breaches.' },
   profiler_service_breakdown: { label: 'Service breakdown', detail: 'The service heap, counts, caches and the memory each loaded or cached thread holds.' },
-  profiler_window_breakdown: { label: 'Window breakdown', detail: 'Per window: DOM nodes, mounted turns and rows, images, canvases, applet views and caches.' },
+  profiler_window_breakdown: { label: 'Window breakdown', detail: 'Per window: DOM nodes, mounted turns and rows, images, canvases, applet views and caches with their sizes.' },
   profiler_gpu_hints: { label: 'GPU hints', detail: 'GPU process memory, window sizes and scale, acrylic, WebGL contexts and views.' },
   profiler_children: { label: 'Child processes', detail: 'Provider and tool processes the service started, with their memory.' },
   profiler_sample_now: { label: 'Sample now', detail: 'A fresh sample, with what changed since the last one.' },
@@ -106,8 +106,22 @@ export interface WindowCounters {
   jsHeapUsedMb: number
   jsHeapTotalMb: number
   /** Named caches of the window's code, by entries (and their limit when there is one). */
-  caches: Record<string, { entries: number; limit?: number }>
+  caches: Record<string, WindowCacheSize>
 }
+
+/**
+ * A window cache's size: its entries and their limit, and for a cache bounded by size, the KB its entries are
+ * estimated to hold and its budget.
+ */
+export interface WindowCacheSize {
+  entries: number
+  limit?: number
+  kbEstimated?: number
+  limitKb?: number
+}
+
+/** The window cache fields a service from before them refuses as unknown. */
+export const NEWER_WINDOW_CACHE_FIELDS = ['kbEstimated', 'limitKb'] as const
 
 /** An applet or in-app browser view the app's main process holds, by size in DIP. */
 export interface AppViewInfo {

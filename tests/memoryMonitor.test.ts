@@ -13,7 +13,7 @@ import { HEAP_SNAPSHOT_RELATIVE_DIR, writeHeapSnapshotFile } from '../src/mms/di
 import { DomainHandlerRegistry } from '../src/mms/protocol/domainRegistry'
 import { EventSequenceRing } from '../src/mms/protocol/eventRing'
 import { summarizeMemoryLog } from '../src/cli/commands/diagnostics'
-import { appHintsLine, resolveMemoryThresholds, type MemoryNotice } from '../src/shared/diagnostics/memory'
+import { resolveMemoryThresholds, type MemoryNotice } from '../src/shared/diagnostics/memory'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import type { HandlerContext } from '../src/mms/protocol/handlers'
 
@@ -347,15 +347,7 @@ describe('memory monitor', () => {
     expect(() => validateAppReport({ processes: [{ kind: 'main', rss: '1' }] })).toThrow()
     const hints = { windows: [{ w: 800, h: 600, scale: 1.25, visible: false }], surfaceMb: 0, acrylic: true, views: { applet: 0, browser: 1, devtools: 0 }, webglContexts: 0, canvases: 1 }
     expect(validateAppReport({ processes: [], hints }).hints).toEqual(hints)
-    // The chat's render caches, in MB.
-    const withCaches = { ...hints, markdownCacheMb: 1.5, codeCacheMb: 12.25 }
-    expect(validateAppReport({ processes: [], hints: withCaches }).hints).toEqual({ ...withCaches, codeCacheMb: 12.3 })
-    expect(() => validateAppReport({ processes: [], hints: { ...hints, codeCacheMb: -1 } })).toThrow()
-    expect(appHintsLine(withCaches)).toMatch(/, chat caches: Markdown 1\.5 MB, code 12\.3 MB$/)
-    expect(appHintsLine(hints)).not.toContain('chat caches')
-    // A hint this service does not know (a newer app's) is dropped, never kept; the rest of the report stays.
-    expect(validateAppReport({ processes: [], hints: { ...hints, title: 'x', futureMb: 3 } }).hints).toEqual(hints)
-    expect(validateAppReport({ processes: [], hints: JSON.parse(JSON.stringify({ ...hints }).replace('{', '{"__proto__":{"x":1},')) }).hints).toEqual(hints)
+    expect(() => validateAppReport({ processes: [], hints: { ...hints, title: 'x' } })).toThrow(/Unexpected field/)
     expect(() => validateAppReport({ processes: [], hints: { ...hints, windows: [{ w: 1, h: 1, scale: 1, visible: true, url: 'x' }] } })).toThrow(/Unexpected field/)
   })
 })

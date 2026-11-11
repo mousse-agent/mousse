@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { appHints, appProcessRows, sendAppReport, utilityRole, type MetricLike, type WindowReport } from '../src/main/diagnostics/appProcesses'
+import type { WindowCounters } from '../src/shared/diagnostics/profiler'
 import { appProcessLabels, memoryTable, type MemorySample } from '../src/shared/diagnostics/memory'
 import { liveWebGlContexts, noteWebGlContext } from '../src/renderer/lib/webglCount'
 
@@ -56,14 +57,14 @@ describe('app process rows', () => {
 })
 
 describe('GPU hints', () => {
-  it('adds up what the shown windows draw, the views, WebGL contexts, canvases, images and chat caches', () => {
+  it('adds up what the shown windows draw, the views, WebGL contexts, canvases and images', () => {
     const hints = appHints({
       windows: [{ w: 1600, h: 1000, scale: 1.5, visible: true }, { w: 800, h: 600, scale: 1, visible: false }],
       acrylic: true,
       contents: [{ pid: 1, role: 'window' }, { pid: 2, role: 'applet' }, { pid: 2, role: 'applet' }, { pid: 3, role: 'devtools' }],
       reports: [
-        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 2, canvases: 3, imagesKb: 2_048, markdownCacheKb: 1_536, codeCacheKb: 10_240, at: NOW },
-        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 5, canvases: 5, imagesKb: 9_000, markdownCacheKb: 9_000, at: NOW - 600_000 }
+        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 2, canvases: 3, imagesKb: 2_048, at: NOW },
+        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 5, canvases: 5, imagesKb: 9_000, at: NOW - 600_000 }
       ],
       now: NOW,
       freshMs: 180_000
@@ -76,9 +77,7 @@ describe('GPU hints', () => {
       views: { applet: 2, browser: 0, devtools: 1 },
       webglContexts: 2,
       canvases: 3,
-      imagesMb: 2,
-      markdownCacheMb: 1.5,
-      codeCacheMb: 10
+      imagesMb: 2
     })
   })
 
@@ -115,27 +114,27 @@ describe('per-process table', () => {
   })
 })
 
-describe('sending the report to an older service', () => {
-  const hints = { windows: [], surfaceMb: 0, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0, imagesMb: 1, markdownCacheMb: 2, codeCacheMb: 3 }
+describe('sending the report to a service from before the window caches had sizes', () => {
+  const counters = { domNodes: 1, mountedTurns: 1, mountedRows: 1, images: 0, imagesDecodedMbEstimated: 0, canvases: 0, canvasMbEstimated: 0, webglContexts: 0, browserTabs: 0, jsHeapUsedMb: 1, jsHeapTotalMb: 2 }
+  const sized: WindowCounters = { ...counters, caches: { codeHighlight: { entries: 3, kbEstimated: 2_048, limitKb: 51_200 }, other: { entries: 2, limit: 10 } } }
   const refusal = (code: string) => Object.assign(new Error('refused'), { code })
 
-  it('sends again without the chat cache sizes when the service refuses a field it does not know', async () => {
+  it('sends again without the cache sizes when the service refuses a field it does not know', async () => {
     const sent: unknown[] = []
     await sendAppReport(async (report) => {
       sent.push(report)
       if (sent.length === 1) throw refusal('unknown_field')
-    }, { processes: [], hints })
+    }, { processes: [], windows: [sized] })
     expect(sent).toHaveLength(2)
-    expect((sent[1] as { hints: Record<string, unknown> }).hints).toEqual({ windows: [], surfaceMb: 0, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0, imagesMb: 1 })
+    expect((sent[1] as { windows: WindowCounters[] }).windows).toEqual([{ ...counters, caches: { codeHighlight: { entries: 3 }, other: { entries: 2, limit: 10 } } }])
   })
 
   it('sends once when the service takes it, and passes any other refusal on', async () => {
     let calls = 0
-    await sendAppReport(async () => { calls += 1 }, { processes: [], hints })
+    await sendAppReport(async () => { calls += 1 }, { processes: [], windows: [sized] })
     expect(calls).toBe(1)
-    await expect(sendAppReport(async () => { throw refusal('unavailable') }, { processes: [], hints })).rejects.toMatchObject({ code: 'unavailable' })
-    // Without the new fields there is nothing to drop: the refusal stands.
-    const { markdownCacheMb: _m, codeCacheMb: _c, ...older } = hints
-    await expect(sendAppReport(async () => { throw refusal('unknown_field') }, { processes: [], hints: older })).rejects.toMatchObject({ code: 'unknown_field' })
+    await expect(sendAppReport(async () => { throw refusal('unavailable') }, { processes: [], windows: [sized] })).rejects.toMatchObject({ code: 'unavailable' })
+    // Without the sizes there is nothing to drop: the refusal stands.
+    await expect(sendAppReport(async () => { throw refusal('unknown_field') }, { processes: [], windows: [{ ...counters, caches: {} }] })).rejects.toMatchObject({ code: 'unknown_field' })
   })
 })

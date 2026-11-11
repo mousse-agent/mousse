@@ -3,7 +3,7 @@
 import { cloneElement, createContext, isValidElement, memo, useContext, useRef, type ReactElement, type ReactNode } from "react";
 import { Block, type BlockProps } from "streamdown";
 import { ByteLruCache } from "../../../lib/byteLruCache";
-import { noteRenderCacheBytes } from "../../../lib/renderCacheReport";
+import { registerByteCache } from "../../../lib/windowCounters";
 import { countRender } from "./render-counts";
 
 /**
@@ -47,10 +47,13 @@ export function parsedTreeBytes(tree: ReactNode, key: string): number {
   return BYTES_PER_BLOCK + shape.elements * BYTES_PER_ELEMENT + shape.texts * BYTES_PER_TEXT_NODE + shape.chars * 2 + key.length * 2;
 }
 
-const cache = new ByteLruCache<string, ReactNode | string[]>(MARKDOWN_CACHE_BYTES, (bytes) => noteRenderCacheBytes("markdown", bytes));
+const cache = new ByteLruCache<string, ReactNode | string[]>(MARKDOWN_CACHE_BYTES);
 
-/** The parsed-Markdown cache, for the memory monitor and tests. */
+/** The parsed-Markdown cache, for the profiler and tests. */
 export const markdownCache: Pick<ByteLruCache<string, unknown>, "bytes" | "size" | "hits" | "misses" | "budgetBytes" | "clear"> = cache;
+
+// The profiler's window breakdown reads the Markdown cache's size.
+registerByteCache("markdown", cache);
 
 /**
  * Which setup the blocks inside are parsed with. Markdown's components and plugins differ with math

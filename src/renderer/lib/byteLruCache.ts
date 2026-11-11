@@ -10,8 +10,7 @@ export class ByteLruCache<K, V> {
   private hitCount = 0
   private missCount = 0
 
-  /** `onChange` hears the total bytes after each change. */
-  constructor(readonly budgetBytes: number, private readonly onChange?: (bytes: number) => void) {}
+  constructor(readonly budgetBytes: number) {}
 
   get(key: K): V | undefined {
     const entry = this.entries.get(key)
@@ -35,12 +34,9 @@ export class ByteLruCache<K, V> {
   }
 
   set(key: K, value: V, bytes: number): void {
-    const replaced = this.remove(key)
-    if (!(bytes >= 0) || bytes > this.budgetBytes) {
-      // The entry it replaced is gone all the same.
-      if (replaced) this.onChange?.(this.total)
-      return
-    }
+    // The entry it replaces is gone even when the new one is not kept.
+    this.remove(key)
+    if (!(bytes >= 0) || bytes > this.budgetBytes) return
     this.entries.set(key, { value, bytes })
     this.total += bytes
     for (const [oldest, entry] of this.entries) {
@@ -48,13 +44,10 @@ export class ByteLruCache<K, V> {
       this.entries.delete(oldest)
       this.total -= entry.bytes
     }
-    this.onChange?.(this.total)
   }
 
   delete(key: K): boolean {
-    if (!this.remove(key)) return false
-    this.onChange?.(this.total)
-    return true
+    return this.remove(key)
   }
 
   private remove(key: K): boolean {
@@ -68,7 +61,6 @@ export class ByteLruCache<K, V> {
   clear(): void {
     this.entries.clear()
     this.total = 0
-    this.onChange?.(0)
   }
 
   get size(): number {

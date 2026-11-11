@@ -5,8 +5,9 @@
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ByteLruCache } from '../../src/renderer/lib/byteLruCache'
+import { readWindowCounters } from '../../src/renderer/lib/windowCounters'
 import { Markdown } from '../../src/renderer/chat/components/agent-elements/markdown'
 import { markdownCache, MARKDOWN_CACHE_BYTES, parsedTreeBytes, parsedTreeShape } from '../../src/renderer/chat/components/agent-elements/markdown-cache'
 import {
@@ -55,28 +56,25 @@ describe('ByteLruCache', () => {
     expect(cache.bytes).toBe(90)
   })
 
-  it('keeps nothing larger than the whole budget, counts a replaced entry once, and reports its size', () => {
-    const sizes: number[] = []
-    const cache = new ByteLruCache<string, string>(100, (bytes) => sizes.push(bytes))
+  it('keeps nothing larger than the whole budget and counts a replaced entry once', () => {
+    const cache = new ByteLruCache<string, string>(100)
     cache.set('huge', 'H', 101)
     expect(cache.size).toBe(0)
     cache.set('a', 'A', 30)
+    expect(cache.bytes).toBe(30)
     cache.set('a', 'A2', 50)
     expect(cache.bytes).toBe(50)
     expect(cache.peek('a')).toBe('A2')
     cache.delete('a')
     expect(cache.bytes).toBe(0)
-    expect(sizes).toEqual([30, 50, 0])
   })
 
-  it('reports the size when an entry is replaced by one too large to keep', () => {
-    const sizes: number[] = []
-    const cache = new ByteLruCache<string, string>(100, (bytes) => sizes.push(bytes))
+  it('drops an entry replaced by one too large to keep', () => {
+    const cache = new ByteLruCache<string, string>(100)
     cache.set('a', 'A', 40)
     cache.set('a', 'A2', 101)
     expect(cache.has('a')).toBe(false)
     expect(cache.bytes).toBe(0)
-    expect(sizes).toEqual([40, 0])
   })
 
   it('has budgets of about 10 MB for Markdown and 50 MB for code', () => {
@@ -171,6 +169,21 @@ describe('parsed Markdown', () => {
     mountMarkdown(heavyReply, false)
     expect(streamedEntries).toBeLessThanOrEqual(markdownCache.size)
     expect(streamedBytes).toBeLessThanOrEqual(markdownCache.bytes)
+  })
+
+  it("gives the profiler's window breakdown its entries and estimated size only when asked, with no timer", () => {
+    vi.useFakeTimers()
+    try {
+      mountMarkdown(heavyReply)
+      // Filling the cache starts nothing: sizes are read only when the profiler asks.
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+    const { caches } = readWindowCounters()
+    expect(caches.markdown).toEqual({ entries: markdownCache.size, kbEstimated: Math.round(markdownCache.bytes / 1024), limitKb: MARKDOWN_CACHE_BYTES / 1024 })
+    expect(caches.markdown.entries).toBeGreaterThan(0)
+    expect(caches.codeHighlight).toEqual({ entries: highlightCache.size, kbEstimated: Math.round(highlightCache.bytes / 1024), limitKb: HIGHLIGHT_CACHE_BYTES / 1024 })
   })
 
   it('drops the partial text a streaming block put there when it ends on text already held', () => {
