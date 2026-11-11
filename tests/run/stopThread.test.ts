@@ -598,6 +598,27 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     })
   })
 
+  describe('the line a Stop writes says why the turn was cut off (the transcript marks it Stopped)', () => {
+    const stopLine = (s: Scene) => s.d.orch.getMessages(s.parentId).filter((message) => message.role === 'system').at(-1)
+
+    it('a person\'s Stop writes cause user with the run\'s id', async () => {
+      const s = await scene()
+      await s.d.orch.stopThread(s.parentId, 'user')
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to stop')
+      expect(stopLine(s)).toMatchObject({ content: 'Turn stopped.', turnId: s.parentRunId, turnEnd: { cause: 'user' } })
+      // The run's user message carries the same id, so the mark finds its turn.
+      expect(s.d.orch.getMessages(s.parentId).find((message) => message.role === 'user')?.turnId).toBe(s.parentRunId)
+    })
+
+    it('an agent\'s thread_interrupt from another thread writes cause agent', async () => {
+      const s = await scene()
+      await s.d.orch.stopThread(s.parentId, 'user', { actor: { kind: 'agent', threadId: 'other-thread', runId: 'other-run', toolCallId: 'mcp:stop-1' } })
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to stop')
+      expect(s.run(s.parentRunId).outcome).toMatchObject({ interruptedBy: 'agent' })
+      expect(stopLine(s)).toMatchObject({ content: 'Turn stopped.', turnId: s.parentRunId, turnEnd: { cause: 'agent' } })
+    })
+  })
+
   it('the Stop fence: a run that is being stopped can start no subagent and continue none', async () => {
     const s = await scene()
     const threadsBefore = s.d.store.listAllThreads().length

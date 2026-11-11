@@ -172,6 +172,7 @@ import {
   type QueuedMessage,
   type Thread,
   type ThreadTitleSource,
+  type TurnEnd,
   type TurnPhase,
   type TurnStep,
   type TurnState,
@@ -181,6 +182,7 @@ import {
   type AnsweredQuestion,
   type ScheduledRunAgent,
   DEFAULT_CHAT_MODE,
+  TURN_STOPPED_TEXT,
   isTurnStoppable,
   isTurnActivePhase
 } from '../../shared/types'
@@ -2640,6 +2642,11 @@ export class OrchestratorService extends EventEmitter {
           const request = normalizeSendRequest(payload.input)
           return request.content.trim() ? [{ run, request }] : []
         })
+        const tools = lastRun.status === 'uncertain'
+          ? [...new Set(engine.tools.listForRun(lastRun.runId).filter((tool) => !tool.idempotent && (tool.status === 'started' || tool.status === 'outcome_unknown')).map((tool) => tool.tool))]
+          : []
+        // Why the turn reads Interrupted: the boot that cut it off recorded whether the daemon before it crashed.
+        const turnEnd: TurnEnd = { cause: engine.restartTranscriptCrashed(lastRun.runId) ? 'crash' : 'daemon_restart', ...(tools.length ? { tools } : {}) }
         const saved = store.mutateThreadData(threadId, (current) => {
           if (isLeaseHeldByLivePeer(threadDir).held) throw new StaleActivitySkipped()
           const timestamp = new Date().toISOString()
@@ -2663,7 +2670,7 @@ export class OrchestratorService extends EventEmitter {
             } else if (llmContext) llmContext = appendNativeMessage(llmContext, userMessage(request.content))
           }
           if (!movedOn && !has(lastRun.runId, 'system', RESTART_INTERRUPTED_TEXT))
-            messages.push({ id: uuidv4(), role: 'system', content: RESTART_INTERRUPTED_TEXT, timestamp, turnId: lastRun.runId })
+            messages.push({ id: uuidv4(), role: 'system', content: RESTART_INTERRUPTED_TEXT, timestamp, turnId: lastRun.runId, turnEnd })
           return { messages, ...(llmContext ? { llmContext } : {}) }
         })
         for (const run of runs) engine.markRestartTranscriptWritten(run)
@@ -2675,9 +2682,6 @@ export class OrchestratorService extends EventEmitter {
         if (movedOn) continue
         // As after a Stop: the thread shows its last turn stopped, with Continue, until another turn runs. Like every
         // turn phase it lives in memory; the transcript line is what a later restart keeps.
-        const tools = lastRun.status === 'uncertain'
-          ? [...new Set(engine.tools.listForRun(lastRun.runId).filter((tool) => !tool.idempotent && (tool.status === 'started' || tool.status === 'outcome_unknown')).map((tool) => tool.tool))]
-          : []
         this.setTurnPhase(threadId, 'stopped', { turnId: lastRun.runId, ...(lastRun.status === 'uncertain' ? { uncertain: { runId: lastRun.runId, tools } } : {}) })
       } catch (error) {
         if (error instanceof StaleActivitySkipped) continue
@@ -9053,12 +9057,14 @@ export class OrchestratorService extends EventEmitter {
     return session
   }
 
-  private addSystemMessage(content: string): void {
+  private addSystemMessage(content: string, end?: { turnId?: string; turnEnd: TurnEnd }): void {
     const msg: ChatMessage = {
       id: uuidv4(),
       role: 'system',
       content,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      ...(end?.turnId ? { turnId: end.turnId } : {}),
+      ...(end ? { turnEnd: end.turnEnd } : {})
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
@@ -11826,7 +11832,14 @@ export class OrchestratorService extends EventEmitter {
       const restart = this.isShutdownAbort(turn.abort.signal.reason)
       // A bot's dispatch that ended at a wall waits for its owner; it was not stopped by a person.
       const wall = !restart && Boolean(opts?.bot) && isBotWallAbort(turn.abort.signal.reason)
-      this.addSystemMessage(restart ? RESTART_INTERRUPTED_TEXT : wall ? 'Paused: waiting for the owner.' : 'Turn stopped.')
+      // The line says why the turn was cut off, for its mark in the transcript (a wall is no cut-off). An agent's Stop
+      // is on the run's stored outcome from the moment it was asked for, before this abort.
+      const stoppedByAgent = engineRunId !== undefined && this.runEngine?.getRun(engineRunId)?.outcome?.stopRequestedBy === 'agent'
+      const turnEnd: TurnEnd | undefined = restart ? { cause: 'daemon_restart' } : wall ? undefined : { cause: stoppedByAgent ? 'agent' : 'user' }
+      this.addSystemMessage(
+        restart ? RESTART_INTERRUPTED_TEXT : wall ? 'Paused: waiting for the owner.' : TURN_STOPPED_TEXT,
+        turnEnd ? { turnId: engineRunId, turnEnd } : undefined
+      )
       const response: OrchestratorResponse = { message: partial, actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)

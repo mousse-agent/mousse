@@ -844,6 +844,21 @@ export interface MessageModelSelection {
   name?: string
 }
 
+/**
+ * Why a turn was cut off before it finished. `user`: a person's Stop; `agent`: an agent in another thread stopped it;
+ * `daemon_restart`: Mousse shut down or restarted; `crash`: Mousse quit without shutting down. `tools`: what an
+ * `uncertain` run may have run without a recorded result.
+ */
+export interface TurnEnd {
+  cause: 'user' | 'agent' | 'daemon_restart' | 'crash'
+  tools?: string[]
+}
+
+/** The transcript line of a turn a person's or an agent's Stop cut off. Lines older than `turnEnd` are read by it. */
+export const TURN_STOPPED_TEXT = 'Turn stopped.'
+/** The transcript line of a turn a restart cut off: a clean shutdown writes it as the turn ends, boot after a crash. */
+export const RESTART_INTERRUPTED_TEXT = 'Turn interrupted by a Mousse restart.'
+
 export interface ChatMessage {
   /** Durable completed-response applets; generated code never executes in the shell. */
   presentationParts?: import('./applets').AppletPresentationPart[]
@@ -853,6 +868,11 @@ export interface ChatMessage {
   timestamp: string
   /** Durable turn/action lineage. */
   turnId?: string
+  /**
+   * On the line Mousse writes when a Stop, a restart or a crash cut a turn off: why it ended. The transcript marks
+   * that turn "Stopped" or "Interrupted". A steer's cut, a pause, a failure and a bot's wall write none.
+   */
+  turnEnd?: TurnEnd
   /**
    * A message whose turn a restart cut off before it started, added when the thread had moved on (SPEC §12.5). No
    * model ever had it: a handoff leaves it out, and a fork keeps it marked.

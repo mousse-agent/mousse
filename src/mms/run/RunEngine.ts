@@ -914,8 +914,10 @@ export class RunEngine extends EventEmitter {
         cutOff.push(run)
         noteFor(run.threadId).runIds.push(run.runId)
       }
+      // `crashed` says why the transcript line reads Interrupted (a crash, or a restart); a write retried at a later boot
+      // still has this boot's answer.
       for (const run of cutOff)
-        this.store.appendEvent({ threadId: RESTART_TRANSCRIPTS_THREAD_ID, runId: run.runId, type: RESTART_TRANSCRIPT_PENDING, payload: { threadId: run.threadId, epoch } })
+        this.store.appendEvent({ threadId: RESTART_TRANSCRIPTS_THREAD_ID, runId: run.runId, type: RESTART_TRANSCRIPT_PENDING, payload: { threadId: run.threadId, epoch, crashed: previousCrashed } })
       const strandedQueued: string[] = []
       for (const { run } of strandedQueuedRuns(this.store, this.outbox)) {
         const note = noteFor(run.threadId)
@@ -960,6 +962,22 @@ export class RunEngine extends EventEmitter {
       const run = this.store.getRun(String(row.run_id))
       return run ? [run] : []
     })
+  }
+
+  /**
+   * Whether the boot that cut `runId` off found that the previous daemon had crashed, from the latest
+   * `restart.transcript_pending` event of the run. A marker an older build wrote has no answer: false (a restart).
+   */
+  restartTranscriptCrashed(runId: string): boolean {
+    const row = this.store.db
+      .statement(`SELECT payload FROM thread_events WHERE thread_id = ? AND type = ? AND run_id = ? ORDER BY seq DESC LIMIT 1`)
+      .get(RESTART_TRANSCRIPTS_THREAD_ID, RESTART_TRANSCRIPT_PENDING, runId) as { payload?: unknown } | undefined
+    if (!row || typeof row.payload !== 'string') return false
+    try {
+      return (JSON.parse(row.payload) as { crashed?: unknown }).crashed === true
+    } catch {
+      return false
+    }
   }
 
   /** The thread's transcript now says the restart cut `runId` off (or never will): `pendingRestartTranscripts` drops it. */

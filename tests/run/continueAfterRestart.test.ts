@@ -13,7 +13,7 @@ import { Reconciler } from '../../src/mms/run/Reconciler'
 import type { AgentActivityItem } from '../../src/shared/agentActivity'
 import type { ChatMessage } from '../../src/shared/types'
 import { formatRestartNote, RESTART_INTERRUPTED_TEXT, RESTART_UNSENT_TEXT } from '../../src/mms/run/restartNote'
-import { RunEngine } from '../../src/mms/run/RunEngine'
+import { RESTART_TRANSCRIPTS_THREAD_ID, RunEngine } from '../../src/mms/run/RunEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { CLAUDE, PI, claudeAdapter, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -116,6 +116,8 @@ describe('continue after restart (SPEC §16.4)', () => {
     const systemOf = (d: Phase6Daemon) => d.orch.getMessages(thread.id).filter((message) => message.role === 'system').map((message) => message.content)
     expect(systemOf(first)).toContain('Turn interrupted by a Mousse restart.')
     expect(systemOf(first)).not.toContain('Turn stopped.')
+    // The line says why for the transcript's mark (Interrupted), on the run's turn.
+    expect(first.orch.getMessages(thread.id).find((message) => message.content === RESTART_INTERRUPTED_TEXT)).toMatchObject({ turnId: sent.runId, turnEnd: { cause: 'daemon_restart' } })
     const notes = second.engine.listEvents(thread.id).filter((event) => event.type === 'restart.note')
     expect(notes.map((event) => event.payload)).toEqual([{ epoch: 2, runIds: [sent.runId], uncertainRunIds: [], cutOffTools: [] }])
     // The next turn opens with the note, once.
@@ -908,6 +910,7 @@ describe('continue after restart (SPEC §16.4)', () => {
       expect(second.boot.uncertain).toEqual([sent.runId])
       expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'stopped', uncertain: { runId: sent.runId, tools: ['bash'] } })
       expect(rows(second, thread.id).at(-1)).toEqual(['system', RESTART_INTERRUPTED_TEXT])
+      expect(second.store.loadThreadData(thread.id).messages.at(-1)).toMatchObject({ turnId: sent.runId, turnEnd: { cause: 'crash', tools: ['bash'] } })
       const send = (acknowledgeUncertain: boolean) => second.orch.send('Continue where you left off.', false, {
         threadId: thread.id, clientRequestId: `continue:${sent.runId}`, continuationOfRunId: sent.runId, acknowledgeUncertain
       })
@@ -950,6 +953,83 @@ describe('continue after restart (SPEC §16.4)', () => {
       const fourth = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 4, orchestratorBoot: true })
       daemons.push(fourth)
       expect(rows(fourth, thread.id)).toEqual([['user', 'Build it'], ['system', RESTART_INTERRUPTED_TEXT]])
+    })
+
+    describe('the line says why the turn was cut off (the transcript marks it Interrupted)', () => {
+      const lines = (d: Phase6Daemon, threadId: string) => d.store.loadThreadData(threadId).messages.filter((message) => message.role === 'system')
+      /** A running turn of a new thread, then the daemon ends: `crash` leaves its epoch open, `stop` closes it. */
+      const cutOff = async (dir: string, end: 'crash' | 'stop') => {
+        const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+        const thread = first.store.createThread('Why')
+        first.orch.setThreadModelOverride(thread.id, PI)
+        const sent = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: `why-${end}`, source: 'gui' })
+        if (sent.status !== 'accepted') throw new Error('send rejected')
+        first.engine.markStarting(sent.runId)
+        first.engine.markRunning(sent.runId)
+        const at = new Date().toISOString()
+        first.store.mutateThreadData(thread.id, () => ({ messages: [{ id: 'u1', role: 'user', content: 'Build it', timestamp: at, turnId: sent.runId }] as ChatMessage[] }))
+        const lease = getExecutionLeasePath(first.store.getThreadDir(thread.id))
+        await first[end]()
+        return { thread, runId: sent.runId, lease }
+      }
+      /** A live foreign process (this test's parent) holds the thread, so a boot cannot write its line yet. */
+      const holdLease = (path: string) => {
+        const stamp = new Date().toISOString()
+        writeFileSync(path, JSON.stringify({ pid: process.ppid, token: 'peer-token', processInstanceId: 'peer-instance', acquiredAt: stamp, heartbeatAt: stamp, source: 'cli' }))
+      }
+
+      it('after a crash: cause crash, with the run\'s id; a later boot adds no second line', async () => {
+        const dir = setupHome()
+        const { thread, runId } = await cutOff(dir, 'crash')
+        const second = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 2, orchestratorBoot: true })
+        daemons.push(second)
+        expect(lines(second, thread.id)).toEqual([expect.objectContaining({ content: RESTART_INTERRUPTED_TEXT, turnId: runId, turnEnd: { cause: 'crash' } })])
+        await second.crash()
+        const third = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 3, orchestratorBoot: true })
+        daemons.push(third)
+        expect(lines(third, thread.id)).toHaveLength(1)
+      })
+
+      it('after a clean shutdown that left the run active: cause daemon_restart', async () => {
+        const dir = setupHome()
+        const { thread, runId } = await cutOff(dir, 'stop')
+        const second = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 2, orchestratorBoot: true })
+        daemons.push(second)
+        expect(second.boot.interrupted).toEqual([runId])
+        expect(lines(second, thread.id)).toEqual([expect.objectContaining({ content: RESTART_INTERRUPTED_TEXT, turnId: runId, turnEnd: { cause: 'daemon_restart' } })])
+      })
+
+      it('a line written at a later boot keeps the answer of the boot that cut the turn off', async () => {
+        const dir = setupHome()
+        const { thread, runId, lease } = await cutOff(dir, 'crash')
+        // Another process holds the thread at the boot after the crash; that boot then shuts down cleanly.
+        holdLease(lease)
+        const second = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 2, orchestratorBoot: true })
+        daemons.push(second)
+        expect(lines(second, thread.id)).toEqual([])
+        await second.stop()
+        rmSync(lease, { force: true })
+        const third = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 3, orchestratorBoot: true })
+        daemons.push(third)
+        expect(lines(third, thread.id)).toEqual([expect.objectContaining({ turnId: runId, turnEnd: { cause: 'crash' } })])
+      })
+
+      it('a marker an older build wrote (no crashed field) reads as a restart', async () => {
+        const dir = setupHome()
+        const { thread, runId, lease } = await cutOff(dir, 'crash')
+        holdLease(lease)
+        const second = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 2, orchestratorBoot: true })
+        daemons.push(second)
+        expect(second.engine.restartTranscriptCrashed(runId)).toBe(true)
+        // As an older build wrote it: the same marker without the field.
+        second.engine.store.appendEvent({ threadId: RESTART_TRANSCRIPTS_THREAD_ID, runId, type: 'restart.transcript_pending', payload: { threadId: thread.id, epoch: 2 } })
+        expect(second.engine.restartTranscriptCrashed(runId)).toBe(false)
+        await second.crash()
+        rmSync(lease, { force: true })
+        const third = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 3, orchestratorBoot: true })
+        daemons.push(third)
+        expect(lines(third, thread.id)).toEqual([expect.objectContaining({ turnId: runId, turnEnd: { cause: 'daemon_restart' } })])
+      })
     })
   })
 })

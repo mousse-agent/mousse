@@ -1,7 +1,7 @@
 import { streamingAppletPresentation } from '../../components/applets/streamPresentation'
-import type { ChatMessage } from '../../../shared/types'
+import type { ChatMessage, TurnEnd } from '../../../shared/types'
 import type { UIMessage } from 'ai'
-import { isToolTimelineMessage } from '../../../shared/types'
+import { isToolTimelineMessage, RESTART_INTERRUPTED_TEXT, TURN_STOPPED_TEXT } from '../../../shared/types'
 import {
   filterImageAttachmentNames,
   guessMimeTypeFromFilename,
@@ -383,6 +383,17 @@ export function assistantDisplayText(content: string): string {
   return content.replace(/(?:[ \t]*\r?\n)*[ \t]*\(Stopped\)\s*$/u, '')
 }
 
+/**
+ * Why a Mousse line says its turn was cut off, or undefined when it says nothing of the kind. Lines written before
+ * `turnEnd` existed are read by their exact text: a Stop's (taken as a person's) and a restart's.
+ */
+function turnEndOf(msg: ChatMessage): TurnEnd | undefined {
+  if (msg.turnEnd) return msg.turnEnd
+  if (msg.content === TURN_STOPPED_TEXT) return { cause: 'user' }
+  if (msg.content === RESTART_INTERRUPTED_TEXT) return { cause: 'daemon_restart' }
+  return undefined
+}
+
 export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSenders): UIMessage[] {
   const out: UIMessage[] = []
   // Typed items: each item's parent, and the message a subagent's nested work belongs to.
@@ -417,6 +428,17 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     if (msg.role === 'system' && msg.error) {
       base.role = 'assistant'
       base.parts = [{ type: 'error', title: 'Request failed', message: msg.error.message || msg.content } as unknown as UIMessage['parts'][number]]
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
+    // The line a Stop, a restart or a crash wrote as it cut the turn off: a hidden marker that the turn's header reads
+    // ("Stopped", "Interrupted"). It shows nothing itself, as Mousse's other lines do not.
+    const turnEnd = msg.role === 'system' ? turnEndOf(msg) : undefined
+    if (turnEnd) {
+      base.parts = []
+      base.metadata = { ...(base.metadata as object | undefined), turnEnd }
       out.push(base)
       lastAssistantText = null
       continue
