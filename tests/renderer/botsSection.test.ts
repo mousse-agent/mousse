@@ -134,6 +134,26 @@ describe('the Bots section', () => {
     expect(host.querySelector('.chat-recent-section .chat-list-row.active')).not.toBeNull()
   })
 
+  it('marks the open bot in the Bots row, and a bot with unread messages with a dot that opening its chat clears', async () => {
+    fake.chats.a = [message(1, { text: 'Good morning.' })]
+    fake.chats.b = [message(1, { text: 'Two emails need a reply.' })]
+    await show([summary('a', { name: 'Inbox helper' }), summary('b', { name: 'Garden', unread: 2 })])
+    const face = (label: string) => button(`Message ${label}`)!
+    expect(face('Inbox helper').querySelector('.bot-roster-unread')).toBeNull()
+    expect(face('Garden').querySelector('.bot-roster-unread')?.getAttribute('aria-label')).toBe('2 unread')
+    expect(host.querySelector('.bot-roster button.bot-roster-active')).toBeNull()
+    await click(face('Inbox helper'))
+    expect(face('Inbox helper').classList.contains('bot-roster-active')).toBe(true)
+    expect(face('Garden').querySelector('.bot-roster-unread')).not.toBeNull()
+    await click(face('Garden'))
+    await act(async () => {})
+    expect(face('Garden').classList.contains('bot-roster-active')).toBe(true)
+    expect(face('Inbox helper').classList.contains('bot-roster-active')).toBe(false)
+    expect(face('Garden').querySelector('.bot-roster-unread')).toBeNull()
+    expect(useBotsStore.getState().bots.find((bot) => bot.id === 'b')?.unread).toBe(0)
+    expect(fake.calls).toContainEqual(['markRead', 'b', 1])
+  })
+
   it('finds bots with the chat search', async () => {
     await show([summary('a', { name: 'Inbox helper' }), summary('b', { name: 'Garden' })])
     await act(async () => useChatsStore.setState({ searchOpen: true, search: 'gar' }))

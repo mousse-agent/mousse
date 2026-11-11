@@ -3,6 +3,11 @@
 /* The Bots row and Recent. The face stands on its own: no tile behind it. */
 .chats-sidebar-content .bot-roster { padding-top: 6px; }
 .chat-roster button.bot-roster-active > span:last-child { color: var(--text-primary); }
+/* The open bot: a subtle tint, no edge marks. A bot with unread messages: a small dot by its face. */
+.chat-roster button.bot-roster-active, .app .chat-roster button.bot-roster-active { background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised, transparent)); }
+.app .chat-roster button.bot-roster-active:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, var(--ui-raised, transparent)); }
+.bot-roster button { position: relative; }
+.bot-roster .bot-roster-unread { position: absolute; top: 4px; right: 3px; z-index: 1; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
 .chat-list-row .bot-unread { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: grid; place-items: center; font-size: 10px; font-weight: 600; background: var(--accent); color: var(--surface-strong, #18151c); }
 
 /* Header: the face, the name and what it does; one menu. */

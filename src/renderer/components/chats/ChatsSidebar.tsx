@@ -53,7 +53,9 @@ export function ChatsSidebar() {
     <section aria-label="Bots"><div className="chat-section-heading"><h2>Bots</h2><button aria-label="New bot" title="New bot" onClick={newBot}><Plus size={15} /></button></div>
       {bots.length
         ? <div className="chat-roster bot-roster">{shownBots.map((bot) => <button key={bot.id} type="button" className={bot.id === activeBotId ? 'bot-roster-active' : ''} title={bot.stateText && bot.state !== 'idle' ? `${bot.name}: ${bot.stateText}` : bot.name} aria-label={`Message ${bot.name}`} onClick={() => void openBot(bot.id)}>
-          <BotFace look={bot.look} state={botFaceState(bot, happy[bot.id])} size={48} view="head" /><span>{bot.name}</span>
+          <BotFace look={bot.look} state={botFaceState(bot, happy[bot.id])} size={48} view="head" />
+          {bot.unread > 0 && bot.id !== activeBotId && <span className="bot-roster-unread" role="img" aria-label={`${bot.unread} unread`} />}
+          <span>{bot.name}</span>
         </button>)}</div>
         : <p className="chat-empty-hint">No bots yet. Press + to make one.</p>}
     </section>
