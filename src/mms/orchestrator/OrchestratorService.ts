@@ -1869,6 +1869,21 @@ export class OrchestratorService extends EventEmitter {
     return scoped ?? this.boundSession
   }
 
+  /**
+   * `target` with each of its functions run in `session`'s scope. A runtime calls a turn's sink, control and context
+   * from whatever async context delivers its events, and a process that serves several threads (Codex's one
+   * app-server) delivers them in the context of the turn that started it: another thread's. Without this, that
+   * thread's transcript would take this turn's rows.
+   */
+  private inSession<T extends object>(session: ThreadSession, target: T): T {
+    const bound = { ...target } as Record<string, unknown>
+    for (const [key, value] of Object.entries(bound)) {
+      if (typeof value !== 'function') continue
+      bound[key] = (...args: unknown[]): unknown => this.sessionAls.run(session, () => (value as (...params: unknown[]) => unknown).apply(target, args))
+    }
+    return bound as T
+  }
+
   private get messages(): ChatMessage[] {
     return this.session.messages
   }
@@ -11477,7 +11492,8 @@ export class OrchestratorService extends EventEmitter {
       const drainScope = `${turnId}:${randomUUID().slice(0, 8)}`
       let drains = 0
       let returnedAhead = 0
-      const turnSink: TurnSink = {
+      // The turn's own thread, whichever async context the runtime calls from (`inSession`).
+      const turnSink = this.inSession<TurnSink>(session, {
         text: (event) => this.handleStreamingTextEvent(event),
         thinking: (event) => this.handleStreamingThinkingEvent(event),
         tool: (event) => {
@@ -11593,7 +11609,7 @@ export class OrchestratorService extends EventEmitter {
           if (metrics.usage || metrics.context) lastUsageAt = Date.now()
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
-      }
+      })
       const drainEntry = (): { text: string; token: string; cut: boolean } | undefined => {
         // A remote turn's steers, then the thread's own (and the durable queue's).
         const raw = opts?.externalDrainSteer?.()
@@ -11611,7 +11627,7 @@ export class OrchestratorService extends EventEmitter {
         const cut = entries.some((steer) => !steer.origin && !steer.byAgent && !notices.has(steer.text.trim()))
         return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut }
       }
-      const turnControl: TurnControl = {
+      const turnControl = this.inSession<TurnControl>(session, {
         drainSteer: () => drainEntry()?.text,
         drainSteerEntry: drainEntry,
         // Only a note that the provider has the text: the drain is kept, whole, until `steerAccepted` saves it or
@@ -11659,7 +11675,7 @@ export class OrchestratorService extends EventEmitter {
           turn.carriedSteers = [...entry.carried, ...(turn.carriedSteers ?? [])]
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
-      }
+      })
       const onPublishApplet = this.appletStore ? (value: unknown) => {
         if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
         stagedApplets.push(validateAppletSubmission(value))
@@ -11681,7 +11697,7 @@ export class OrchestratorService extends EventEmitter {
           // The app tools act only while this run is the thread's active one.
           ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {})
         },
-        context: {
+        context: this.inSession<AdapterHost['context']>(session, {
           recoverOverflow: () => {
             if (conversationToolsUsed || providerProgress || !contextSettings.compactionEnabled) return null
             onCompaction('start')
@@ -11709,7 +11725,7 @@ export class OrchestratorService extends EventEmitter {
             return nativeAgentHistory(this.nativeContext)
           },
           nativeHistoryNow: () => nativeAgentHistory(this.nativeContext)
-        }
+        })
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
