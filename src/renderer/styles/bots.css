@@ -145,6 +145,7 @@
 .bot-about-row > svg { color: var(--text-secondary); flex-shrink: 0; }
 .bot-about-row span { flex: 1; min-width: 0; }
 .bot-about-next { display: block; font-size: 11px; color: var(--text-secondary); }
+.bot-about-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .bot-about-row button { font-size: 11px; color: var(--text-secondary); }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }

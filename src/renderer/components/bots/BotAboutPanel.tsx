@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Clock, Shield, X } from '../../lib/icons'
+import { Bell, Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import type { BotComputerChoice, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
@@ -14,6 +14,14 @@ export function nextRunText(at: string, now = new Date()): string {
   if (Number.isNaN(date.getTime())) return ''
   const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   return date.toDateString() === now.toDateString() ? time : `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`
+}
+
+/** When a reminder fires: like a run's next time within the week, else "14 Nov 09:00". */
+export function reminderWhenText(at: string, now = new Date()): string {
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return ''
+  if (date.getTime() - now.getTime() < 6 * 24 * 60 * 60_000) return nextRunText(at, now)
+  return `${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
 }
 
 /**
@@ -100,7 +108,14 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
         <Clock size={14} aria-hidden /><span>{run.label.charAt(0).toUpperCase() + run.label.slice(1)}{run.nextAt && <small className="bot-about-next">Next: {nextRunText(run.nextAt)}</small>}</span>
         <button type="button" aria-label={`Remove ${run.label}`} onClick={() => void store().removeSchedule(bot.id, run.id)}>Remove</button>
       </div>)
-      : detail && <p className="bot-about-empty">Only when you message it. Ask it to run on a schedule.</p>}
+      : null}
+    {detail?.reminders?.map((reminder) => <div className="bot-about-row" key={reminder.id} data-testid="bot-about-reminder">
+      <Bell size={14} aria-hidden /><span title={reminder.text}><span className="bot-about-clamp">{reminder.text}</span><small className="bot-about-next">{reminder.work ? 'Starts' : 'Reminds'}: {reminderWhenText(reminder.dueAt)}</small></span>
+      <button type="button" aria-label={`Cancel reminder: ${reminder.text}`} onClick={() => void store().cancelReminder(bot.id, reminder.id)}>Cancel</button>
+    </div>)}
+    {detail && !detail.runs.length && !detail.reminders?.length
+      ? <p className="bot-about-empty">Only when you message it. Ask it to run on a schedule.</p>
+      : null}
     {detail?.runs.length
       ? <button type="button" className="bot-ghost-button bot-about-automations" data-testid="bot-about-automations" title="Open them in Automations" onClick={() => useAppStore.getState().setScheduledOpen(true)}>
         {`Runs ${detail.runs.length} ${detail.runs.length === 1 ? 'automation' : 'automations'}`}

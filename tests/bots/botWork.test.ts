@@ -247,6 +247,27 @@ describe('reminders', () => {
     expect(f.store.all('SELECT text FROM bot_messages WHERE text IN (?, ?)', 'One.', 'Two.')).toEqual([])
   })
 
+  it('About lists waiting reminders; one the owner cancels there is never said', async () => {
+    const turn = await chat('Remind me twice', 'm1')
+    const one = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'One.' })
+    const two = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 120_000).toISOString(), text: 'Two.', work: { title: 'Two', brief: 'Do two.' } })
+    await finish(f, turn.payload, 'completed', { text: 'Set.' })
+    expect(f.bots.service.get(botId).reminders).toEqual([
+      { id: one.reminderId, dueAt: one.dueAt, text: 'One.' },
+      { id: two.reminderId, dueAt: two.dueAt, text: 'Two.', work: true }
+    ])
+    const detail = f.bots.service.reminderCancel(botId, one.reminderId)
+    expect(detail.reminders!.map((reminder) => reminder.id)).toEqual([two.reminderId])
+    // A second cancel, or one said meanwhile, leaves things as they are; another bot's or an unknown id is refused.
+    expect(f.bots.service.reminderCancel(botId, one.reminderId).reminders).toHaveLength(1)
+    expect(() => f.bots.service.reminderCancel(botId, 'rem_00000000-0000-0000-0000-000000000000')).toThrow(/no such reminder/)
+    f.clock.now += 60_000
+    await fireDue()
+    await f.bots.deliverDueReminders()
+    expect(f.store.all('SELECT text FROM bot_messages WHERE text = ?', 'One.')).toEqual([])
+    expect(f.store.reminder(one.reminderId)).toMatchObject({ status: 'cancelled' })
+  })
+
   it('refuses a time that has passed or is too far, and a reminder with no text', async () => {
     const turn = await chat('Remind me', 'm1')
     const add = (dueAt: number, text = 'x') => () => f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(dueAt).toISOString(), text })

@@ -30,6 +30,8 @@ export interface PersonalBotsClient {
   model(botId: string): Promise<BotsPersonalV2Result<'bots.model.get'>>
   setModel(botId: string, model: string | null): Promise<BotSummary>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
+  /** Cancels a waiting reminder; it never fires. */
+  cancelReminder(botId: string, reminderId: string): Promise<BotDetail>
   exportMemory(botId: string, dir: string): Promise<{ files: string[] }>
 }
 
@@ -57,6 +59,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     model: (botId) => call('bots.model.get', { botId }),
     setModel: async (botId, model) => (await call('bots.model.set', { botId, model })).bot,
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
+    cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
     exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir })
   }
 }

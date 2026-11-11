@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import type { BotAskCard, BotAskStatus, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotAskCard, BotAskStatus, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
 import { type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
@@ -256,16 +256,20 @@ export class BotChatProjection {
     }
   }
 
-  /** About this bot: what it can use beyond the starter grant, and its runs. */
+  /** About this bot: what it can use beyond the starter grant, its runs, and its waiting reminders. */
   detail(definition: BotDefinition, now: number): BotDetail {
     const grant = this.store.activeGrant(definition.id)
     const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
       { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const }
     ))
+    const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).map((reminder) => (
+      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: true as const } : {}) }
+    ))
     return {
       summary: this.summary(definition, now),
       permissions: grant ? this.permissionItems(definition.id, grant.manifest, grant.approvedAt) : [],
-      runs
+      runs,
+      reminders
     }
   }
 

@@ -119,9 +119,20 @@ export interface BotRunItem {
   kind: 'schedule'
 }
 
+/** One of a bot's waiting reminders (one-off, not yet said), in About → Runs. */
+export interface BotReminderItem {
+  id: string
+  dueAt: string
+  text: string
+  /** It starts work at its time rather than only saying `text`. */
+  work?: true
+}
+
 /** About this bot. */
 export interface BotDetail {
   summary: BotSummary
   permissions: BotPermissionItem[]
   runs: BotRunItem[]
+  /** Waiting reminders, soonest first; absent from older services. */
+  reminders?: BotReminderItem[]
 }
