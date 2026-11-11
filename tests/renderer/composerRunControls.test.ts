@@ -614,8 +614,8 @@ describe('composer send slot', () => {
       act(() => root.unmount())
       root = createRoot(host)
     }
-    // The focus ring is a shadow on the same box, so it follows the circle.
-    expect(css).toContain(`.app .chat-input-area :is(${match![1]}):focus-visible {\n  outline: none;\n  box-shadow: var(--ui-focus-ring);\n}`)
+    // Keyboard focus is the shared fill over the circle, never a ring.
+    expect(css).toContain(`.app .chat-input-area :is(${match![1]}):focus-visible {\n  outline: none;\n  background-image: var(--ui-focus-layer);\n}`)
   })
 })
 

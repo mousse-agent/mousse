@@ -242,11 +242,13 @@
 
 .model-picker-speed-option:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .model-picker-speed-option.selected:focus-visible {
-  box-shadow: var(--ui-specular), var(--ui-focus-ring);
+  outline: none;
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
 }
 
 /* Permission chip: the thread's mode as an icon left of the model button, the same dim neutral for every mode,
@@ -258,7 +260,7 @@
 
 .composer-permission-chip:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 /* Its menu: one row per mode, icon left, name over a one-line description, a check on the chosen one,
@@ -297,11 +299,13 @@
 
 .composer-permission-mode:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-permission-mode.selected:focus-visible {
-  box-shadow: var(--ui-specular), var(--ui-focus-ring);
+  outline: none;
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-permission-mode.is-disabled {
@@ -354,7 +358,7 @@
 }
 
 /* Every section marks its selection the same way: the neutral fill with the shared top light, no
-   check mark. Keyboard focus adds the focus ring, so it stays distinct from the selection. */
+   check mark. Keyboard focus lays the focus fill over it, a step firmer than the selection. */
 :is(.composer-run-menu, .model-picker-run) .composer-mode-menu-item {
   padding-left: var(--ui-menu-row-x);
 }
@@ -369,12 +373,14 @@
 :is(.composer-run-menu, .model-picker-run) .composer-mode-menu-item:focus-visible,
 .composer-run-menu-segment:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected:focus-visible,
 .composer-run-menu-segment.selected:focus-visible {
-  box-shadow: var(--ui-specular), var(--ui-focus-ring);
+  outline: none;
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
 }
 
 /* A level the model does not offer (saved, or carried from the model before): one muted line under the levels. */
@@ -456,7 +462,8 @@ button.composer-idle-chip:hover,
 
 .composer-idle-chip:focus-visible {
   outline: none;
-  box-shadow: var(--ui-specular), var(--ui-focus-ring);
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-idle-chip.is-compacting {

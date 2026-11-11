@@ -108,11 +108,11 @@ html[data-acrylic='true'] .an-markdown .an-md-code {
   background-color: color-mix(in srgb, var(--text-primary) 8%, transparent);
 }
 
-/* Selected rows use the same material, with the profile card's hairline so
-   the selection still reads without a fill of its own. */
+/* Selected rows use the same material: a fill a step firmer than hover and
+   the shared top light, never a hairline. */
 html[data-acrylic='true'] .app .threads-sidebar-thread.active,
 html[data-acrylic='true'] .app .threads-sidebar-thread.has-open-subagent,
 html[data-acrylic='true'] .app .chat-list-row.active {
-  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
-  box-shadow: var(--ui-specular), inset 0 0 0 1px var(--ui-line);
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
 }

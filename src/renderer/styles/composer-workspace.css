@@ -44,7 +44,7 @@ button.new-thread-chip:hover:not(:disabled),
 .new-thread-chip.active:hover:not(:disabled) { background: color-mix(in srgb, var(--private-tint, var(--accent)) 24%, transparent); color: var(--private-tint, var(--accent)); }
 .new-thread-chip:disabled { opacity: 0.5; cursor: default; }
 .new-thread-chip:focus-visible,
-.composer-workspace-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.composer-workspace-menu-item:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .new-thread-expiry-label { font-size: 11px; font-variant-numeric: tabular-nums; }
 
 @keyframes new-thread-row-in {

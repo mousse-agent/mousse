@@ -144,8 +144,8 @@
 .threads-sidebar-thread:focus-visible,
 .threads-sidebar-project-toggle:focus-visible,
 .threads-sidebar-inline-action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 @keyframes threads-sidebar-slide-in {
@@ -997,8 +997,9 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-rename-input:focus {
+  outline: none;
   border-color: rgba(var(--accent-rgb), 0.6);
-  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15);
+  background-image: var(--ui-focus-layer);
 }
 
 .threads-sidebar-project-rename {

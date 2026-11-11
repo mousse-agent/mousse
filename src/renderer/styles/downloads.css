@@ -114,8 +114,8 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
 }
 
 .downloads-nav:focus-visible {
-  outline: 1px solid var(--ui-line-strong);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .downloads-nav-icon {
@@ -236,8 +236,8 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
 
 .downloads-icon-btn:focus-visible,
 .downloads-btn:focus-visible {
-  outline: 1px solid var(--ui-line-strong);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .downloads-btn {

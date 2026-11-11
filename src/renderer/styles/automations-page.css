@@ -137,8 +137,8 @@ html[data-theme='high-contrast'] .automations-page {
 .scheduled-segment:focus-visible,
 .scheduled-link-btn:focus-visible,
 .scheduled-disclosure:focus-visible {
-  outline: 1px solid var(--ui-line-strong);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .scheduled-select {
@@ -188,7 +188,9 @@ html[data-theme='high-contrast'] .automations-page {
 }
 
 .scheduled-prompt:focus {
-  box-shadow: var(--ui-specular), 0 0 0 1px var(--ui-line-strong);
+  outline: none;
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
 }
 
 .scheduled-prompt[aria-invalid='true'] {

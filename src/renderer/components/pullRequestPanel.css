@@ -111,8 +111,8 @@
 .pr-panel-line:focus-visible,
 .pr-panel-file-head:focus-visible,
 .pr-panel-check-state:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .pr-panel-link {
@@ -449,8 +449,8 @@ button.pr-panel-line:hover {
 }
 
 .pr-panel-details summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .pr-panel-details pre {

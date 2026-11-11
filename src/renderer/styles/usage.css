@@ -272,8 +272,8 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 }
 
 .usage-settings-btn:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* A small text action inside a card or the settings popover. */
@@ -919,7 +919,7 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 
 .usage-reset-now:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 /* A window with nothing left reads as empty, not missing: a faint red track and its share in red. */

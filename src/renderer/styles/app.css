@@ -44,7 +44,7 @@
 .chat-prompt-tick[aria-current] span { opacity: 0.75; }
 .chat-prompt-rail:is(:hover, :focus-within, .is-active) .chat-prompt-tick span { transform: scaleX(1); }
 .chat-prompt-tick:is(:hover, :focus-visible) span { opacity: 1; }
-.chat-prompt-tick:focus-visible { outline: 1px solid currentColor; outline-offset: -1px; }
+.chat-prompt-tick:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .chat-prompt-preview {
   position: absolute;
   left: calc(100% + 12px);
@@ -408,7 +408,6 @@ html.platform-darwin .titlebar-left {
 .app .resizer:focus-visible {
   outline: none;
   background: var(--accent);
-  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.5);
 }
 
 /* Its width comes from App (mainAreaStyle): the saved width; it shrinks when the window is narrower. */
@@ -714,7 +713,6 @@ html.platform-darwin .titlebar-left {
 .surface-menu-row:focus-visible {
   outline: none;
   background: rgba(var(--accent-rgb), 0.1);
-  box-shadow: var(--ui-focus-ring);
 }
 
 .surface-menu-state {
@@ -881,7 +879,7 @@ html.platform-darwin .titlebar-left {
 .turn-edits-review:focus-visible,
 .turn-edits-toggle:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .turn-edits-file-icon {
@@ -1261,7 +1259,7 @@ html.platform-darwin .titlebar-left {
 .composer-notice-btn:focus-visible,
 .composer-notice-icon-btn:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-notice-btn:disabled,
@@ -2688,7 +2686,7 @@ html.platform-darwin .titlebar-left {
 
 .context-usage-compaction-change:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .context-usage-notes {
@@ -2792,8 +2790,8 @@ html.platform-darwin .titlebar-left {
 }
 
 .message-user .message-user-sticky-toggle:focus-visible {
-  outline: 2px solid rgba(var(--accent-rgb), 0.55);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .message-user-sticky-collapsed {
@@ -3297,7 +3295,7 @@ html[data-theme='high-contrast'] {
 /* Self-contained so it works outside Settings, where the settings tokens are unset. */
 :is(.modal, .integration-modal) .modal-close { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; margin-left: auto; border-radius: var(--ui-control-radius); color: var(--text-secondary); transition: background-color 0.15s, color 0.15s; }
 :is(.modal, .integration-modal) .modal-close:hover:not(:disabled) { background: var(--ui-hover); color: var(--text-primary); }
-:is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
+:is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .modal-body > p { margin: 0 0 12px; line-height: 1.6; }
 .modal-body > p:last-child { margin-bottom: 0; }
 /* The footer is its own row under the scrolling body: the dialog inset on the
@@ -3346,7 +3344,7 @@ html[data-theme='high-contrast'] {
   animation-range: 0px var(--modal-fade, 18px), calc(100% - var(--modal-fade, 18px)) 100%;
 }
 
-/* Above a footer the body keeps only room for a focus ring: the footer's own
+/* Above a footer the body keeps only a little room: the footer's own
    gap is the space. */
 .modal-body:has(+ .modal-footer) {
   padding-bottom: 4px;
@@ -3615,8 +3613,8 @@ html[data-theme='high-contrast'] {
 }
 
 .browser-toolbar-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .browser-toolbar-btn:disabled {
@@ -4234,7 +4232,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .git-section-divider:focus-visible {
   outline: none;
   background: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .git-section-header {
@@ -4330,8 +4327,8 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .git-row-action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The question before a discard: what goes, then which files and how long a copy is kept. */
@@ -5088,7 +5085,7 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 
 .composer-question-dot:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-question-modal-body {
@@ -5153,7 +5150,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .composer-question-option:focus-visible {
   outline: none;
   background: var(--ui-hover);
-  box-shadow: inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
 }
 
 .composer-question-option.selected {
@@ -5162,7 +5158,9 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .composer-question-option.selected:focus-visible {
-  box-shadow: var(--ui-specular), inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
+  outline: none;
+  box-shadow: var(--ui-specular);
+  background-image: var(--ui-focus-layer);
 }
 
 html[data-theme='high-contrast'] .composer-question-option.selected {
@@ -5275,7 +5273,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 
 .composer-question-btn:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .composer-question-btn:disabled {
@@ -5554,16 +5552,16 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 
 .assistant-message-action:focus-visible,
 .assistant-response-metadata button:focus-visible {
-  outline: 2px solid var(--accent-hover);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
-/* Copy, Details, Undo and Read aloud under a message: a keyboard ring, full strength while focused. */
+/* Copy, Details, Undo and Read aloud under a message: the focus fill, full strength while focused. */
 .chat-message-toolbar button:focus-visible,
 .chat-user-image:focus-visible {
+  outline: none;
   opacity: 1;
-  outline: 2px solid var(--accent-hover);
-  outline-offset: 1px;
+  background-image: var(--ui-focus-layer);
 }
 
 /* An attached image is a button; the global button reset would drop its tile fill. */
@@ -6087,7 +6085,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 .quick-actions-field input:focus,
 .quick-actions-field textarea:focus {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .quick-actions-field textarea {
@@ -6152,6 +6150,6 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 
 .an-compaction-stop:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
   opacity: 1;
+  background-image: var(--ui-focus-layer);
 }

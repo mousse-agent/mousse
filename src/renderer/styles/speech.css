@@ -247,7 +247,7 @@
 
 .speech-models-more:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .speech-models-group + .speech-models-group {

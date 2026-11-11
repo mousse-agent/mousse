@@ -130,8 +130,8 @@
 .side-card-git-option-action:focus-visible,
 .side-card-git-new-branch:focus-visible,
 .side-card-git-submit:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The thread's pull requests: icon, bold title over at most two lines, then the number and checks. */
@@ -273,8 +273,8 @@
 
 .side-card-git-pr-close:focus-visible,
 .side-card-git-pr-merge:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-git-pr-more {
@@ -297,8 +297,8 @@
 }
 
 .side-card-git-pr-more:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The branch of a thread with its own worktree: its full name and why it stays fixed. */
@@ -339,8 +339,8 @@
 }
 
 .side-card-git-pr-external:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-git-pr-check {
@@ -521,7 +521,7 @@
   outline: none;
 }
 
-/* The popover already shows where focus is; the global input:focus ring would double it. */
+/* The popover already shows where focus is; the global input:focus fill would double it. */
 .side-card-git-search input:focus {
   border: 0;
   background: transparent;
@@ -1051,8 +1051,8 @@
 .side-card-git-next-split:focus-visible,
 .side-card-git-next-side:focus-visible,
 .side-card-git-commit-open:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-git-next-spin {
