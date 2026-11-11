@@ -226,9 +226,14 @@ function ThreadNotice({ text }: { text: string }) {
   </div>;
 }
 
+/**
+ * A finished turn's time, from saved timestamps: its prompt to the last of its messages. A message's timestamp is when
+ * it started, so a turn a Stop cut off runs to its Stop line instead (`end.endedAt`), written as the turn stopped.
+ */
 function turnDurationMs(
   user: UIMessage | undefined,
   assistants: UIMessage[],
+  turnEnd?: TurnEndMark,
 ): number | null {
   const start = readCreatedAt(user);
   if (start == null) return null;
@@ -239,6 +244,7 @@ function turnDurationMs(
     const at = readCreatedAt(message);
     if (at != null && at > end) end = at;
   }
+  if (turnEnd?.endedAt != null && turnEnd.endedAt > end) end = turnEnd.endedAt;
   return Math.max(0, end - start);
 }
 
@@ -743,7 +749,16 @@ function MessageToolbar({
 export type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[]; end?: TurnEndMark };
 
 /** Why a turn was cut off before it finished (a Stop, a restart, a crash), read from Mousse's line for it. */
-export type TurnEndMark = { messageId: string; cause: TurnEnd["cause"]; tools?: string[] };
+export type TurnEndMark = {
+  messageId: string;
+  cause: TurnEnd["cause"];
+  tools?: string[];
+  /**
+   * When a Stop ended the turn: its line is written as the turn stops. A restart's or a crash's line can be written at
+   * the next boot, long after the turn, so it gives no end time.
+   */
+  endedAt?: number;
+};
 
 function readTurnEnd(message: UIMessage): TurnEnd | undefined {
   if ((message.role as string) !== "system") return undefined;
@@ -757,7 +772,13 @@ const turnEndMarks = new WeakMap<UIMessage, TurnEndMark>();
 function turnEndMark(marker: UIMessage, end: TurnEnd): TurnEndMark {
   let mark = turnEndMarks.get(marker);
   if (!mark) {
-    mark = { messageId: marker.id, cause: end.cause, ...(end.tools?.length ? { tools: end.tools } : {}) };
+    const stoppedAt = end.cause === "user" || end.cause === "agent" ? readCreatedAt(marker) : null;
+    mark = {
+      messageId: marker.id,
+      cause: end.cause,
+      ...(end.tools?.length ? { tools: end.tools } : {}),
+      ...(stoppedAt != null ? { endedAt: stoppedAt } : {}),
+    };
     turnEndMarks.set(marker, mark);
   }
   return mark;
@@ -2293,7 +2314,7 @@ const TurnRow = memo(function TurnRow({
 
           const workedMs = isTurnStreaming
             ? null
-            : settledMs ?? turnDurationMs(turn.userMsg, turn.assistantMsgs);
+            : settledMs ?? turnDurationMs(turn.userMsg, turn.assistantMsgs, turn.end);
           const liveStart = liveStartedAt ?? readCreatedAt(turn.userMsg);
 
           return (
