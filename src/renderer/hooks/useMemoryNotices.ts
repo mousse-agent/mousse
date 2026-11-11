@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import type { MemoryNotice } from '../../shared/diagnostics/memory'
 import type { MousseSettings } from '../../shared/settings'
 import { showToast, type ToastInput } from '../components/ui/Toast'
+import { useAppStore } from '../stores/appStore'
 
 export const MEMORY_NOTICE_TEXT = 'High memory use'
 
@@ -58,11 +59,16 @@ export function memoryNoticesEnabled(settings: { experimental?: Partial<Pick<Mou
   return settings?.experimental?.profiler?.enabled === true && settings.notifications?.memoryNotices !== false
 }
 
-/** Listens for the memory notice, and asks once at start for one that came while no window was open. */
+/**
+ * Listens for the memory notice, and asks once at start for one that came while no window was open. Settings belong to
+ * a profile, so nothing is read until the window is bound to one, and they are read again when it switches profile.
+ */
 export function useMemoryNotices(): void {
+  const profileReady = useAppStore((s) => s.profileReady)
+  const profileId = useAppStore((s) => s.profileId)
   useEffect(() => {
     const api = window.mousse?.diagnostics
-    if (!api) return
+    if (!api || !profileReady) return
     let enabled = false
     let cancelled = false
     const seen = new Set<string>()
@@ -89,5 +95,5 @@ export function useMemoryNotices(): void {
       offSettings()
       offNotice()
     }
-  }, [])
+  }, [profileReady, profileId])
 }
