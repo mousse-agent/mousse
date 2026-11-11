@@ -618,42 +618,8 @@
 .inbox-cell.is-pending { color: var(--accent); }
 .inbox-cell[data-tone='failed'] { color: var(--danger); }
 
-/* The switch, Fluent 2 outline: off is an outline with a small dot; on is an accent tint, an accent outline and a
-   light accent knob, never a full accent fill. Colours come from the text and accent tokens, so every theme and
-   accent works. Only the knob moves, briefly. */
+/* The switch is the app's (settings.css); here it only sits centred in its cell. */
 .inbox-switch { display: flex; align-items: center; justify-content: center; }
-.inbox-table .toggle-switch {
-  --switch-w: 28px;
-  --switch-h: 16px;
-  --switch-pad: 3px;
-  background: transparent;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 34%, transparent);
-  transition: none;
-}
-
-.inbox-table .toggle-switch::after {
-  background: color-mix(in srgb, var(--text-primary) 60%, transparent);
-  box-shadow: none;
-  transition: transform 120ms ease-out;
-}
-
-.inbox-table .toggle-switch:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 48%, transparent);
-}
-
-.inbox-table .toggle-switch.on,
-.inbox-table .toggle-switch.on:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
-}
-
-.inbox-table .toggle-switch.on::after { background: color-mix(in srgb, var(--accent) 70%, #ffffff); }
-/* No press stretch: the knob only slides. */
-.inbox-table .toggle-switch:active:not(:disabled)::after { width: var(--switch-knob); }
-.inbox-table .toggle-switch.on:active:not(:disabled)::after { transform: translateX(var(--switch-travel)); }
-.inbox-table .toggle-switch:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.65); outline-offset: 2px; }
-
 /* Pausing… or Resuming…: the switch shows the asked state, locked and dimmed until it lands. */
 .inbox-switch[data-pending] { cursor: progress; }
 .inbox-switch[data-pending] .toggle-switch:disabled { opacity: 0.55; cursor: progress; }

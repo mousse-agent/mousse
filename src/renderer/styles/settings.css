@@ -1183,13 +1183,13 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   background-image: var(--ui-focus-layer);
 }
 
-/* Switch: a light 28x16 track (Fluent 2 small, macOS mini scale). Off is a
-   neutral fill, on is a slightly muted accent; the white knob carries a soft
-   top light. No border, bevel or glow. */
+/* Switch, Fluent 2 outline (28x16): off is an outline with a small dot; on is an accent tint, an accent outline
+   and a light accent knob, never a full accent fill. Colours come from the text and accent tokens, so every theme
+   and accent works. Only the knob moves, briefly; no shadow, bevel or glow. */
 .toggle-switch {
   --switch-w: 28px;
   --switch-h: 16px;
-  --switch-pad: 2px;
+  --switch-pad: 3px;
   --switch-knob: calc(var(--switch-h) - 2 * var(--switch-pad));
   --switch-travel: calc(var(--switch-w) - var(--switch-knob) - 2 * var(--switch-pad));
   position: relative;
@@ -1199,9 +1199,9 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   padding: 0;
   border: 0;
   border-radius: 999px;
-  background: var(--ui-line-strong);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 34%, transparent);
   cursor: pointer;
-  transition: background-color 140ms ease-out;
 }
 
 /* Larger hit area without a larger switch. */
@@ -1219,35 +1219,31 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   width: var(--switch-knob);
   height: var(--switch-knob);
   border-radius: 999px;
-  background: #ffffff;
-  box-shadow: inset 0 -1px 0 rgba(20, 16, 30, 0.08), 0 1px 2px rgba(0, 0, 0, 0.28);
-  transition: transform var(--ui-dur-fast) ease-out, width var(--ui-dur-fast) ease-out;
+  background: color-mix(in srgb, var(--text-primary) 60%, transparent);
+  transition: transform 120ms ease-out;
 }
 
 .toggle-switch:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text-primary) 22%, transparent);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 48%, transparent);
 }
 
-.toggle-switch.on {
-  background: color-mix(in srgb, var(--accent) 86%, #6b6b78);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
-}
-
+.toggle-switch.on,
 .toggle-switch.on:hover:not(:disabled) {
-  background: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .toggle-switch.on::after {
+  background: color-mix(in srgb, var(--accent) 70%, #ffffff);
   transform: translateX(var(--switch-travel));
 }
 
-/* Pressing stretches the knob toward its travel, like the platform switches. */
-.toggle-switch:active:not(:disabled)::after {
-  width: calc(var(--switch-knob) + 3px);
-}
+/* On a light surface the light knob would fade into its tint: there it is the accent itself. */
+html[data-theme='light'] .toggle-switch.on::after { background: var(--accent); }
 
-.toggle-switch.on:active:not(:disabled)::after {
-  transform: translateX(calc(var(--switch-travel) - 3px));
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .toggle-switch.on::after { background: var(--accent); }
 }
 
 .toggle-switch:focus-visible {
