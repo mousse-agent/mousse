@@ -204,6 +204,11 @@ export class ThreadDbStore {
     return { threads: this.entries.size, bytes: this.cachedBytes }
   }
 
+  /** Each cached thread's folder, its rows' and state's size in bytes, and when it was last used. */
+  cacheEntries(): Array<{ dir: string; bytes: number; usedAt: number }> {
+    return [...this.entries].map(([dir, entry]) => ({ dir, bytes: entry.bytes, usedAt: entry.usedAt }))
+  }
+
   private applyChanges(entry: Entry, changes: DbChanges): void {
     for (const removed of changes.removed) {
       const rows = entry.collections.get(removed.coll)

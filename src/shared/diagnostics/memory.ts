@@ -12,6 +12,8 @@ export const MEMORY_ISSUE_REPO = 'mousse-agent/mousse'
 /** One process's memory, in MB with one decimal. `private` is the OS's private bytes when the OS reports them. */
 export interface ProcessMemory {
   rss: number
+  /** CPU use since the last sample, percent of one core. */
+  cpu?: number
   private?: number
   heapUsed?: number
   heapTotal?: number
@@ -41,8 +43,6 @@ export type AppProcessRole = (typeof APP_PROCESS_ROLES)[number]
 export interface AppProcessMemory extends ProcessMemory {
   kind: AppProcessKind
   role?: AppProcessRole
-  /** CPU use since the last report, percent of one core. */
-  cpu?: number
 }
 
 /** Cheap hints at what the GPU process holds. Reading them does no GPU work. */
@@ -545,7 +545,7 @@ export interface MemoryTableRow {
 
 /** Every process with its role, like Task Manager: the service, its workers and providers, then the app's processes. */
 export function memoryTable(sample: MemorySample): MemoryTableRow[] {
-  const rows: MemoryTableRow[] = [{ label: 'Service', group: 'service', ...pick(sample.service) }]
+  const rows: MemoryTableRow[] = [{ label: 'Service', group: 'service', ...pick(sample.service), ...(sample.service.cpu !== undefined ? { cpu: sample.service.cpu } : {}) }]
   if (sample.workers?.length) {
     rows.push({ label: `Service workers (${sample.workers.length})`, group: 'service', heapUsed: round1(sample.workers.reduce((sum, heap) => sum + heap, 0)) })
   }

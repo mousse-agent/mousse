@@ -320,6 +320,8 @@ export interface AppToolHost extends DelegationToolsHost {
   schedules?: AgentScheduleHost
   /** Automation drafts (`automation_*`), read at every call: the Automation manager's and granted bots' tools. */
   automations?(): import('./automations').AutomationToolHost | undefined
+  /** The profiler's tools (Settings → Labs), read at every call; absent: they are never listed. */
+  profiler?(): import('./profiler').ProfilerToolHost | undefined
   /** The request `requestId` in any state, or undefined when nobody asked it. */
   approvalRequest?(requestId: string): ApprovalRequestInfo | undefined
   /**

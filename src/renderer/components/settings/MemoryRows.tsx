@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { appHintsLine, appMb, memoryTable, serviceMb, type MemoryStatus, type MemoryTrendPoint } from '../../../shared/diagnostics/memory'
-import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
 import { ExternalLink } from '../../lib/icons'
-import { memoryNoticesEnabled, openMemoryReport } from '../../hooks/useMemoryNotices'
-import { SettingsRow, Switch } from './SettingsRow'
+import { openMemoryReport } from '../../hooks/useMemoryNotices'
+import { SettingsRow } from './SettingsRow'
 
 const REFRESH_MS = 60_000
+/** Before the first sample (just after the profiler is turned on), read again soon. */
+const FIRST_SAMPLE_MS = 3_000
 
 function mb(n: number | undefined): string {
   return n === undefined ? '-' : `${Math.round(n)} MB`
@@ -48,32 +49,50 @@ function series(trend: MemoryTrendPoint[], pick: (point: MemoryTrendPoint) => nu
   return trend.map(pick).filter((value): value is number => value !== null)
 }
 
-/** Settings > General > About: every process's memory like Task Manager, the trend, Report, and the notice switch. */
-export function MemoryRows({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
+/** Settings → Labs → Profiler, while it is on: every process's memory like Task Manager, the trend and Report. */
+export function MemoryRows() {
   const [status, setStatus] = useState<MemoryStatus | null>(null)
   const [unavailable, setUnavailable] = useState(false)
   useEffect(() => {
     const api = window.mousse?.diagnostics
     if (!api) return
     let live = true
-    const read = () => api.memoryStatus().then((next) => { if (live) { setStatus(next); setUnavailable(false) } }, () => { if (live) setUnavailable(true) })
-    void read()
-    const timer = setInterval(() => void read(), REFRESH_MS)
-    return () => { live = false; clearInterval(timer) }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let failures = 0
+    const read = (): void => {
+      void api.memoryStatus().then(
+        (next) => {
+          if (!live) return
+          setStatus(next)
+          setUnavailable(false)
+          failures = 0
+          timer = setTimeout(read, next?.sample ? REFRESH_MS : FIRST_SAMPLE_MS)
+        },
+        () => {
+          if (!live) return
+          setUnavailable(true)
+          // The service starts the monitor a moment after the switch is saved; past that, ask once a minute.
+          failures += 1
+          timer = setTimeout(read, failures <= 5 ? FIRST_SAMPLE_MS : REFRESH_MS)
+        }
+      )
+    }
+    read()
+    return () => { live = false; clearTimeout(timer) }
   }, [])
 
   const sample = status?.sample
   const app = sample ? appMb(sample) : null
   const summary = sample
     ? `Service ${mb(serviceMb(sample))}${app !== null ? `, app ${mb(app)}` : ''}${status!.breaches.length ? ', above expected' : ''}`
-    : unavailable ? 'Not measured by this service' : 'Measuring...'
-  const enabled = memoryNoticesEnabled(settings)
+    : unavailable ? 'Starting…' : 'Measuring…'
   const trend = status?.trend ?? []
   return (
     <>
       <SettingsRow
         title="Memory"
-        anchor="general-memory"
+        anchor="labs-profiler-memory"
+        indent
         description={<span title={status ? memoryBreakdown(status) : undefined} className={status?.breaches.length ? 'settings-status-warn' : undefined}>{summary}</span>}
         control={
           <span className="memory-row-controls">
@@ -112,18 +131,6 @@ export function MemoryRows({ settings, onUpdate }: { settings: MousseSettings; o
         )}
         {sample?.hints && <p className="memory-hints">{appHintsLine(sample.hints)}</p>}
       </SettingsRow>
-      <SettingsRow
-        title="Memory notices"
-        anchor="general-memory-notices"
-        description={<span title="At most once a day. The numbers are logged either way.">When memory goes out of bounds.</span>}
-        control={
-          <Switch
-            label="Show a notice when memory goes out of bounds"
-            checked={enabled}
-            onChange={(memoryNotices) => void onUpdate({ notifications: { ...settings.notifications, memoryNotices } })}
-          />
-        }
-      />
     </>
   )
 }

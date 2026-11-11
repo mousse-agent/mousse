@@ -1673,3 +1673,9 @@ html[data-theme='high-contrast'] .notification-channel.on {
   font-size: 12px;
   color: var(--danger);
 }
+
+/* Settings → Labs: a profiler tool's switch sits one step under Agent access. Padding only, no bars. */
+.settings-group-rows > .settings-item.indent.indent-2 {
+  padding-left: calc(var(--settings-surface-x) + 2 * var(--space-24));
+}
+.settings-tool-name { font-size: 11px; color: var(--text-secondary); }

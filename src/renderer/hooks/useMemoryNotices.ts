@@ -29,8 +29,8 @@ export interface MemoryNoticeDeps {
 }
 
 /**
- * Shows the service's memory notice as one toast with Report, unless the person turned the notices off
- * (Settings > General > About). Returns whether it showed. The service allows one a day; `seen` keeps one window
+ * Shows the service's memory notice as one toast with Report, only while the profiler and its Memory notices are on
+ * (Settings → Labs). Returns whether it showed. The service allows one a day; `seen` keeps one window
  * from showing the same notice twice.
  */
 export function presentMemoryNotice(notice: MemoryNotice, enabled: boolean, seen: Set<string>, deps: MemoryNoticeDeps): boolean {
@@ -50,8 +50,12 @@ export function presentMemoryNotice(notice: MemoryNotice, enabled: boolean, seen
   return true
 }
 
-export function memoryNoticesEnabled(settings: Pick<MousseSettings, 'notifications'> | null | undefined): boolean {
-  return settings?.notifications?.memoryNotices !== false
+/**
+ * The profiler and its Memory notices are both on (Settings → Labs). Settings from a service without a profiler: off.
+ * The notices switch is `notifications.memoryNotices`, as before, so a person who turned it off keeps it off.
+ */
+export function memoryNoticesEnabled(settings: { experimental?: Partial<Pick<MousseSettings['experimental'], 'profiler'>>; notifications?: Partial<Pick<MousseSettings['notifications'], 'memoryNotices'>> } | null | undefined): boolean {
+  return settings?.experimental?.profiler?.enabled === true && settings.notifications?.memoryNotices !== false
 }
 
 /** Listens for the memory notice, and asks once at start for one that came while no window was open. */
@@ -59,7 +63,7 @@ export function useMemoryNotices(): void {
   useEffect(() => {
     const api = window.mousse?.diagnostics
     if (!api) return
-    let enabled = true
+    let enabled = false
     let cancelled = false
     const seen = new Set<string>()
     const deps: MemoryNoticeDeps = {
@@ -75,7 +79,8 @@ export function useMemoryNotices(): void {
     void window.mousse.settings.get()
       .then((settings) => { enabled = memoryNoticesEnabled(settings) })
       .catch(() => undefined)
-      .then(() => api.memoryStatus())
+      // Off, the service has no monitor to ask.
+      .then(() => (enabled ? api.memoryStatus() : null))
       .then((status) => present(status?.notice))
       // An older service has no monitor.
       .catch(() => undefined)

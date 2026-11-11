@@ -1,3 +1,4 @@
+import { registerWindowCache } from "../../../lib/windowCounters";
 import type { BundledLanguage, CodeHighlighterPlugin } from "streamdown";
 import type { HighlighterCore } from "shiki/core";
 import { bundledLanguages, bundledLanguagesInfo } from "shiki/langs";
@@ -100,6 +101,9 @@ function loadLanguage(highlighter: HighlighterCore, language: string): Promise<v
 }
 
 const resultCache = new Map<string, HighlightResult>();
+
+// The profiler's window breakdown reads the highlight cache's size.
+registerWindowCache("codeHighlight", () => ({ entries: resultCache.size, limit: RESULT_CACHE_LIMIT }));
 
 function cacheResult(key: string, result: HighlightResult): void {
   resultCache.delete(key);

@@ -48,7 +48,7 @@ export async function runDiagnostics(args: ParsedArgs): Promise<void> {
   const lines = readMemoryLog(path)
   const summary = summarizeMemoryLog(lines, Date.now())
   if (!summary.sample) {
-    writeOutput(globals.mode, { log: path, samples: 0 }, () => `No memory samples yet in ${path}. The service writes one a minute while it runs.`)
+    writeOutput(globals.mode, { log: path, samples: 0 }, () => `No memory samples yet in ${path}. The service writes one a minute while the profiler is on (Settings → Labs).`)
     return
   }
   if (action === 'report') {

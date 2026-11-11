@@ -11,7 +11,6 @@ import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
 import { NotificationSettingsGroup } from './NotificationSettingsGroup'
-import { MemoryRows } from './MemoryRows'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -48,7 +47,6 @@ export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
 
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />
-        <MemoryRows settings={settings} onUpdate={onUpdate} />
       </SettingsGroup>
     </section>
   )

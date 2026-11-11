@@ -210,7 +210,9 @@ export const STORAGE_HELP = `Usage:
                                       beside the files.
 `
 
-export const DIAGNOSTICS_HELP = `Usage:
+export const DIAGNOSTICS_HELP = `The service samples memory only while the profiler is on (Settings > Labs).
+
+Usage:
   mousse-cli diagnostics memory       The latest memory numbers per process, the hourly
                                       trend and any limit out of bounds, read from
                                       <home>/diagnostics/memory.jsonl
@@ -222,7 +224,7 @@ export const DIAGNOSTICS_HELP = `Usage:
                                       Write a V8 heap snapshot of the running service
                                       to <home>/diagnostics/heap-snapshots/. It holds
                                       thread text, paths and tokens: keep it local.
-                                      Refused while a turn runs.
+                                      Refused while a turn runs, or with the profiler off.
 `
 
 export const SERVICE_HELP = `Usage:

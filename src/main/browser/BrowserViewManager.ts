@@ -91,7 +91,8 @@ export class BrowserViewManager {
       })
 
       const wc = this.view.webContents
-      markWebContentsRole(wc, 'browser')
+      const view = this.view
+      markWebContentsRole(wc, 'browser', () => view.getBounds(), () => view.getVisible())
       wc.setWindowOpenHandler(({ url }) => {
         if (!isAllowedBrowserPopupUrl(url)) return { action: 'deny' }
         return {

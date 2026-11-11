@@ -441,6 +441,19 @@ export class ThreadDataStore extends EventEmitter {
     return dropped.length
   }
 
+  /**
+   * Each thread the thread database cache holds: its id when this store loaded it, the serialized size of its rows and
+   * state (measured), and how long ago it was last used. For the profiler's per-thread breakdown.
+   */
+  threadDbCacheEntries(now = Date.now()): Array<{ threadId?: string; bytes: number; idleMs: number }> {
+    const store = this.threadDbStore
+    if (!store) return []
+    return store.cacheEntries().map((entry) => {
+      const threadId = this.loadedDirs.get(entry.dir)
+      return { ...(threadId ? { threadId } : {}), bytes: entry.bytes, idleMs: Math.max(0, now - entry.usedAt) }
+    })
+  }
+
   /** Thread database cache size, for diagnostics and tests. */
   threadDbCacheStats(): { threads: number; bytes: number; coldLoads: number; stateReads: number } {
     const store = this.threadDbStore

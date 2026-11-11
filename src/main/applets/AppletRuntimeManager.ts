@@ -151,7 +151,7 @@ export class AppletRuntimeManager {
       }
     })
     guest.setBackgroundColor('#00000000')
-    markWebContentsRole(guest.webContents, 'applet')
+    markWebContentsRole(guest.webContents, 'applet', () => guest.getBounds(), () => guest.getVisible())
     const container = new View()
     container.addChildView(guest)
     this.owner.contentView.addChildView(container)

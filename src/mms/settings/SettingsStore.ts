@@ -116,6 +116,14 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
   }
 }
 
+const savedListeners = new Set<() => void>()
+
+/** Calls `listener` after any profile's settings are saved through a SettingsStore. Returns a function that stops it. */
+export function onSettingsSaved(listener: () => void): () => void {
+  savedListeners.add(listener)
+  return () => { savedListeners.delete(listener) }
+}
+
 export class SettingsStore {
   private shouldPersistUsername = false
 
@@ -197,6 +205,9 @@ export class SettingsStore {
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
     this.config.applySettingsPatch(normalized)
+    for (const listener of savedListeners) {
+      try { listener() } catch (error) { console.warn('[SettingsStore] a settings listener failed', error) }
+    }
     return this.get()
   }
 }

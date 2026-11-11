@@ -186,6 +186,9 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
   throw { code: 'storage_invalid_response', message: 'Storage bridge returned an invalid response', errorInfo: { category: 'internal', retryable: false } }
 }
 
+/** The window's own counters for the profiler (`diagnostics.provideCounters`), read only when main asks. */
+let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, { entries: number; limit?: number }> }) | null = null
+
 const api = {
   platform: process.platform,
   startupAppearance: readStartupAppearanceArgument(process.argv),
@@ -1214,7 +1217,7 @@ const api = {
       return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
-  /** The service's memory monitor (Settings > General > About, and its notice). */
+  /** The profiler's memory monitor (Settings → Labs, and its notice). */
   diagnostics: {
     memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('diagnostics:memoryStatus'),
     memoryNoticeShown: (kind: BreachKind): Promise<void> => ipcRenderer.invoke('diagnostics:memoryNoticeShown', kind),
@@ -1224,6 +1227,16 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, notice: MemoryNotice) => cb(notice)
       ipcRenderer.on('diagnostics:memoryNotice', handler)
       return () => ipcRenderer.removeListener('diagnostics:memoryNotice', handler)
+    },
+    /** Writes a service heap snapshot to `diagnostics/heap-snapshots/`, after the person confirmed the warning. */
+    heapSnapshot: (): Promise<{ file: string; mb: number }> => ipcRenderer.invoke('diagnostics:heapSnapshot'),
+    /**
+     * The window's own counters (mounted turns and rows, its caches), read only when the profiler asks for this
+     * window's detail. Returns a function that removes the provider.
+     */
+    provideCounters: (provider: () => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, { entries: number; limit?: number }> }): (() => void) => {
+      windowCountersProvider = provider
+      return () => { if (windowCountersProvider === provider) windowCountersProvider = null }
     }
   },
   app: {
@@ -1377,31 +1390,61 @@ const api = {
 
 contextBridge.exposeInMainWorld('mousse', api)
 
-// This window's renderer memory, once a minute, for the memory monitor: JS heap, private memory, decoded images and
-// canvases. A timer and one small message; nothing per frame, no GPU work.
+// This window's renderer memory, for the profiler, read only when main asks (the profiler is on, or a profiler tool
+// asked): JS heap, private memory, decoded images and canvases, and with `detail` the window's DOM and counters. No
+// timer runs here, nothing is read per frame, and no GPU work is done.
 {
-  const sendMemory = async (): Promise<void> => {
-    try {
-      const heap = process.getHeapStatistics()
-      let privateKb: number | undefined
-      try { privateKb = (await process.getProcessMemoryInfo()).private } catch { /* not offered */ }
-      let imagesKb: number | undefined
-      try { imagesKb = Math.round(webFrame.getResourceUsage().images.size / 1024) } catch { /* not offered */ }
-      const webgl = Number(document.documentElement?.dataset.mousseWebglContexts ?? 0)
-      ipcRenderer.send('diagnostics:windowMemory', {
-        usedHeapKb: heap.usedHeapSize,
-        totalHeapKb: heap.totalHeapSize,
-        privateKb,
-        imagesKb,
-        canvases: document.querySelectorAll('canvas').length,
-        webglContexts: Number.isFinite(webgl) ? webgl : 0
-      })
-    } catch {
-      // Not offered in this renderer.
+  const mb = (bytes: number): number => Math.round((bytes / 1048576) * 10) / 10
+  const detailCounters = (heap: { usedHeapSize: number; totalHeapSize: number }, imagesKb: number | undefined, webgl: number) => {
+    let decoded = 0
+    const images = document.images
+    for (const image of Array.from(images)) if (image.complete) decoded += image.naturalWidth * image.naturalHeight * 4
+    const canvases = Array.from(document.querySelectorAll('canvas'))
+    let canvasBytes = 0
+    for (const canvas of canvases) canvasBytes += canvas.width * canvas.height * 4
+    let own: ReturnType<NonNullable<typeof windowCountersProvider>> = {}
+    try { own = windowCountersProvider?.() ?? {} } catch { /* the window's code failed: its counters are left out */ }
+    return {
+      domNodes: document.getElementsByTagName('*').length,
+      mountedTurns: own.mountedTurns ?? 0,
+      mountedRows: own.mountedRows ?? 0,
+      images: images.length,
+      imagesDecodedMbEstimated: mb(decoded),
+      ...(imagesKb !== undefined ? { imageCacheMb: Math.round((imagesKb / 1024) * 10) / 10 } : {}),
+      canvases: canvases.length,
+      canvasMbEstimated: mb(canvasBytes),
+      webglContexts: webgl,
+      browserTabs: document.querySelectorAll('webview').length,
+      jsHeapUsedMb: Math.round((heap.usedHeapSize / 1024) * 10) / 10,
+      jsHeapTotalMb: Math.round((heap.totalHeapSize / 1024) * 10) / 10,
+      caches: own.caches ?? {}
     }
   }
-  setTimeout(() => void sendMemory(), 10_000)
-  setInterval(() => void sendMemory(), 60_000)
+  ipcRenderer.on('diagnostics:collectMemory', (_event, request: { requestId?: unknown; detail?: unknown } | null) => {
+    void (async () => {
+      try {
+        const heap = process.getHeapStatistics()
+        let privateKb: number | undefined
+        try { privateKb = (await process.getProcessMemoryInfo()).private } catch { /* not offered */ }
+        let imagesKb: number | undefined
+        try { imagesKb = Math.round(webFrame.getResourceUsage().images.size / 1024) } catch { /* not offered */ }
+        const webglRaw = Number(document.documentElement?.dataset.mousseWebglContexts ?? 0)
+        const webgl = Number.isFinite(webglRaw) ? webglRaw : 0
+        ipcRenderer.send('diagnostics:windowMemory', {
+          requestId: typeof request?.requestId === 'string' ? request.requestId : undefined,
+          usedHeapKb: heap.usedHeapSize,
+          totalHeapKb: heap.totalHeapSize,
+          privateKb,
+          imagesKb,
+          canvases: document.querySelectorAll('canvas').length,
+          webglContexts: webgl,
+          ...(request?.detail === true ? { counters: detailCounters(heap, imagesKb, webgl) } : {})
+        })
+      } catch {
+        // Not offered in this renderer.
+      }
+    })()
+  })
 }
 
 export type MousseAPI = typeof api
