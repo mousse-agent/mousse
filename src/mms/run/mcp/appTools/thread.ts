@@ -307,6 +307,34 @@ function isBotThread(host: AppToolHost, threadId: string, meta: Pick<Thread, 'bo
   }
 }
 
+/** What an agent in `callerThreadId` lists threads against: every thread, the allowed projects, and whether its own thread is private. */
+export interface AgentThreadView {
+  all: Thread[]
+  callerThreadId: string
+  projectIds: string[]
+  callerPrivate: boolean
+}
+
+export function agentThreadView(host: AppToolHost, callerThreadId: string): AgentThreadView {
+  return {
+    all: host.listThreads?.() ?? [],
+    callerThreadId,
+    projectIds: host.agentAccess?.().projectIds ?? [],
+    callerPrivate: host.threadMeta?.(callerThreadId)?.localOnly === true
+  }
+}
+
+/**
+ * Whether an agent may see `thread` named in a list (`thread_list`, the profiler's threads): a private thread only
+ * from a private thread, a thread outside the allowed projects only when the caller launched it, and never a bot's.
+ */
+export function threadVisibleToAgent(host: AppToolHost, thread: Thread, view: AgentThreadView): boolean {
+  if (!view.callerPrivate && isLocalOnlyThread(thread, view.all)) return false
+  if (thread.createdByThreadId !== view.callerThreadId && !inProjects(view.projectIds, thread.projectId)) return false
+  // A bot's threads are its chat: no other thread's agent lists them.
+  return !isBotThread(host, thread.id, thread)
+}
+
 function assertNotBotThread(host: AppToolHost, threadId: string, tool: string): void {
   if (isBotThread(host, threadId)) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} belongs to a bot; ${tool} cannot reach it. Its owner continues it from the Bots tab.`)
 }
@@ -528,19 +556,15 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const manage = ctx.scope === 'manage'
         if (args.includeSubagents === true && !manage)
           throw new McpToolError('mousse_scope_denied', 'includeSubagents needs the "manage" agent access level.')
-        const all = host.listThreads()
-        const projectIds = allowedProjectIds()
-        // Private threads are listed only to an agent in a private thread.
-        const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
+        const view = agentThreadView(host, ctx.caller.threadId)
+        const { all, projectIds } = view
         const candidates = (args.includeSubagents === true ? all : visibleThreads(all)).filter((thread) => {
-          if (!callerPrivate && isLocalOnlyThread(thread, all)) return false
+          // Private, out-of-project (unless launched) and bot threads are not listed.
+          if (!threadVisibleToAgent(host, thread, view)) return false
           const launched = thread.createdByThreadId === ctx.caller.threadId
-          if (!launched && !inProjects(projectIds, thread.projectId)) return false
           if (args.projectId !== undefined && thread.projectId !== args.projectId) return false
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
-          if (!launched && args.includeSettled !== true && thread.settledAt) return false
-          // A bot's threads are its chat: no other thread's agent lists them.
-          return !isBotThread(host, thread.id, thread)
+          return launched || args.includeSettled === true || !thread.settledAt
         }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         const projectNames = new Map(host.listProjects().map((project) => [project.id, project.name]))
         const rows = []

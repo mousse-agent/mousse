@@ -130,6 +130,8 @@ export function serviceBreakdownReport(input: {
       idleMinutes: entry.idleSeconds === null ? null : Math.round(entry.idleSeconds / 60)
     })),
     threadsNotListed: Math.max(0, threads.length - MAX_THREADS),
+    // This profile's threads the agent may not see named (private, a bot's, outside its projects): totals only.
+    hiddenThreads: { threads: input.threads.hidden?.threads ?? 0, cachedMb: r1((input.threads.hidden?.cachedBytes ?? 0) / 1048576) },
     otherProfiles: { profiles: others.profiles, loadedThreads: others.loadedThreads, cachedThreads: others.cachedThreads, cachedMb: r1(others.cachedBytes / 1048576) },
     bytes:
       'cachedMb is measured: the serialized size of the rows and state the thread database cache holds for the thread. Its objects on the heap take roughly 2 to 3 times that (an estimate). A loaded thread with no cache entry has no measured size.'

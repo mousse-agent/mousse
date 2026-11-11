@@ -10,7 +10,7 @@ import { MemoryLog } from '../src/mms/diagnostics/memoryLog'
 import { prepareMemoryMonitor, readThreadMemory } from '../src/mms/diagnostics/startMemoryMonitor'
 import { profilerService, setProfilerService, type ProfilerService, type ThreadMemory, type ThreadMemoryEntry } from '../src/mms/diagnostics/profilerService'
 import { PROFILER_COLLECT_EVENT, PROFILER_STATE_EVENT, validateAppReport } from '../src/mms/diagnostics/memoryDomain'
-import { analyseHeapSnapshotFile, removeLeftoverSummaryFiles, summarizeHeapSnapshot, takeHeapSummary, type HeapSummary } from '../src/mms/diagnostics/heapSummary'
+import { HeapSummaryError, analyseHeapSnapshotFile, removeLeftoverSummaryFiles, summarizeHeapSnapshot, takeHeapSummary, type HeapSummary } from '../src/mms/diagnostics/heapSummary'
 import { WATCH_LIMITS, watchPlan } from '../src/mms/diagnostics/profilerReports'
 import { memoryNoticesEnabled } from '../src/renderer/hooks/useMemoryNotices'
 import { HEAP_SNAPSHOT_RELATIVE_DIR } from '../src/mms/diagnostics/heapSnapshot'
@@ -253,18 +253,32 @@ const ON: ProfilerSettings = { ...normalizeProfilerSettings(), enabled: true, ag
 /** The caller's profile, as the orchestrator the tool host names. */
 const OWNER = { profile: 'own' }
 
-/** This profile's threads: `own-1` (the caller) and any `extra` ones, such as the threads that delegated to it. */
-function toolsFor(settings: () => ProfilerSettings, service: ProfilerService | null, turnActive = (_: string) => true, extra: Record<string, { lineage?: { parentThreadId: string } }> = {}) {
+/**
+ * This profile's threads: `own-1` (the caller), `own-2`, and any `extra` ones, such as the threads that delegated to
+ * it or private, bot and out-of-project ones; `projectIds` is the agent's allowed project list.
+ */
+function toolsFor(
+  settings: () => ProfilerSettings,
+  service: ProfilerService | null,
+  turnActive = (_: string) => true,
+  extra: Record<string, Record<string, unknown>> = {},
+  projectIds: string[] = []
+) {
   const profiler: () => ProfilerToolHost = () => ({ settings: settings(), service, owner: OWNER, turnActive })
-  const metas: Record<string, object> = { 'own-1': { id: 'own-1', name: 'Speed up startup', ...extra['own-1'] } }
-  for (const [id, meta] of Object.entries(extra)) if (id !== 'own-1') metas[id] = { id, name: 'Fix the login page', ...meta }
+  const metas: Record<string, object> = {
+    'own-1': { id: 'own-1', name: 'Speed up startup', ...extra['own-1'] },
+    'own-2': { id: 'own-2', name: 'Fix the login page', ...extra['own-2'] }
+  }
+  for (const [id, meta] of Object.entries(extra)) if (!metas[id]) metas[id] = { id, name: 'Fix the login page', ...meta }
   const host: AppToolHost = {
     delegation: () => undefined as never,
     askUser: async () => ({}),
     presentPlan: () => {},
     tasks: () => undefined,
     profiler,
-    threadMeta: (threadId: string) => metas[threadId] as never
+    threadMeta: (threadId: string) => metas[threadId] as never,
+    listThreads: () => Object.values(metas) as never,
+    agentAccess: () => ({ projectIds }) as never
   } as unknown as AppToolHost
   return createAppToolRegistry({ host }).registry
 }
@@ -353,9 +367,78 @@ describe('the profiler tools', () => {
       { threadId: 'own-1', loaded: true, cached: true, turnRunning: false, cachedMb: 3, idleMinutes: 1 }
     ])
     expect(value.otherProfiles).toEqual({ profiles: 1, loadedThreads: 2, cachedThreads: 1, cachedMb: 2 })
+    expect(value.hiddenThreads).toEqual({ threads: 0, cachedMb: 0 })
     expect(value.bytes).toMatch(/measured/)
     expect(outcome.text).not.toContain('Speed up startup')
     expectNoPrivateData(outcome.text, dir)
+  })
+
+  it('profiler_service_breakdown names only the threads thread_list would show; private, bot and out-of-project ones count in a total', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    const entry = (threadId: string | undefined, cachedBytes: number): ThreadMemoryEntry =>
+      ({ ...(threadId ? { threadId } : {}), loaded: true, cached: true, turnRunning: true, cachedBytes, idleSeconds: 600 })
+    service.threads = () => ({
+      own: [
+        entry('own-1', 1048576),
+        entry('launched-1', 1048576),
+        entry('private-1', 2 * 1048576),
+        entry('private-child-1', 1048576),
+        entry('bot-1', 3 * 1048576),
+        entry('elsewhere-1', 4 * 1048576),
+        entry('unknown-1', 1048576),
+        entry(undefined, 1048576)
+      ],
+      others: { profiles: 0, loadedThreads: 0, cachedThreads: 0, cachedBytes: 0 }
+    })
+    const extra = {
+      'own-1': { projectId: 'p1' },
+      // Outside the allowed projects, but the caller launched it: thread_list shows it too.
+      'launched-1': { projectId: 'p2', createdByThreadId: 'own-1' },
+      'private-1': { projectId: 'p1', localOnly: true },
+      // A subagent of a private thread is private too.
+      'private-child-1': { projectId: 'p1', lineage: { parentThreadId: 'private-1', rootThreadId: 'private-1', relationship: 'subagent' } },
+      'bot-1': { projectId: 'p1', botOwned: true },
+      'elsewhere-1': { projectId: 'p2' }
+    }
+    const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown')
+    expect(value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['launched-1', 'own-1'])
+    expect(value.hiddenThreads).toEqual({ threads: 6, cachedMb: 12 })
+    for (const id of ['private-', 'bot-1', 'elsewhere-1', 'unknown-1']) expect(outcome.text).not.toContain(id)
+    expectNoPrivateData(outcome.text, dir)
+
+    // An agent in a private thread sees the private threads, as thread_list shows them to it.
+    const fromPrivate = await call(toolsFor(() => ON, service, undefined, { ...extra, 'own-1': { projectId: 'p1', localOnly: true } }, ['p1']), 'profiler_service_breakdown')
+    expect(fromPrivate.value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['launched-1', 'own-1', 'private-1', 'private-child-1'])
+    expect(fromPrivate.value.hiddenThreads).toEqual({ threads: 4, cachedMb: 9 })
+  })
+
+  it('an unexpected error reaches the agent as fixed text, never its message', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    service.threads = () => { throw new Error(`EACCES: permission denied, open '${join(dir, 'threads.db')}'`) }
+    const { outcome } = await call(toolsFor(() => ON, service), 'profiler_service_breakdown')
+    expect(outcome).toEqual({ isError: true, text: 'The profiler could not finish profiler_service_breakdown (Error). Call again in a few seconds.' })
+    expectNoPrivateData(outcome.text, dir)
+    // A heap summary that fails the same way.
+    const settings = { ...ON, tools: { ...ON.tools, profiler_heap_summary: true } }
+    const failing = profilerFixture(dir, { heap: async () => { throw new Error(`EPERM: operation not permitted, unlink '${dir}/x'`) } })
+    const heap = await call(toolsFor(() => settings, failing.service), 'profiler_heap_summary')
+    expect(heap.outcome).toMatchObject({ isError: true, text: expect.stringContaining('could not finish profiler_heap_summary') })
+    expectNoPrivateData(heap.outcome.text, dir)
+  })
+
+  it('profiler_heap_summary releases its one-at-a-time hold after a summary fails', async () => {
+    const dir = home()
+    const settings = { ...ON, tools: { ...ON.tools, profiler_heap_summary: true } }
+    const heap = vi.fn(async (): Promise<HeapSummary> => ({ nodes: 1, totalMb: 0, byType: [], topRetainers: [], biggestStrings: [] }))
+    heap.mockImplementationOnce(async () => { throw new HeapSummaryError('The heap analysis took too long.') })
+    const registry = toolsFor(() => settings, profilerFixture(dir, { activeTurns: 1, heap }).service)
+    // A fixed summary error reaches the agent as it is.
+    expect((await call(registry, 'profiler_heap_summary')).outcome).toEqual({ isError: true, text: 'The heap analysis took too long.' })
+    const next = await call(registry, 'profiler_heap_summary')
+    expect(next.outcome.isError).toBeFalsy()
+    expect(heap).toHaveBeenCalledTimes(2)
   })
 
   it('profiler_window_breakdown: counters per window, read from the app on demand', async () => {
@@ -572,6 +655,36 @@ describe('the heap summary', () => {
       analyse: (target, top) => analyseHeapSnapshotFile(target, top, { maxFileMb: 2 })
     })).rejects.toThrow(/at most 2 MB/)
     expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toEqual([])
+  })
+
+  it('refuses a heap clearly too big for the cap before writing a snapshot, with numbers only', async () => {
+    const dir = home()
+    const write = vi.fn((target: string) => { writeFileSync(target, '{}'); return target })
+    const analyse = async (): Promise<HeapSummary> => ({ nodes: 0, totalMb: 0, byType: [], topRetainers: [], biggestStrings: [] })
+    // Over twice the cap: refused, and nothing written, not even the folder.
+    const refused = takeHeapSummary(dir, 10, { write, analyse, maxFileMb: 2, heapUsedBytes: () => 5 * 1048576 })
+    await expect(refused).rejects.toThrow(new HeapSummaryError('The service heap uses 5 MB; its snapshot would pass the 2 MB the summary reads. Use profiler_service_breakdown instead.'))
+    await refused.catch((caught: Error) => expectNoPrivateData(caught.message, dir))
+    expect(write).not.toHaveBeenCalled()
+    expect(existsSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toBe(false)
+    // Under twice the cap, the snapshot is written and the cap on the file decides.
+    await expect(takeHeapSummary(dir, 10, { write, analyse, maxFileMb: 2, heapUsedBytes: () => 3 * 1048576 })).resolves.toMatchObject({ nodes: 0 })
+    expect(write).toHaveBeenCalledTimes(1)
+  })
+
+  it('a folder it cannot create or a file it cannot delete never puts the home path in an error', async () => {
+    const dir = home()
+    const analyse = async (): Promise<HeapSummary> => ({ nodes: 7, totalMb: 0, byType: [], topRetainers: [], biggestStrings: [] })
+    // `diagnostics` is a file: creating the snapshot folder fails with an error naming the path.
+    writeFileSync(join(dir, 'diagnostics'), 'not a folder')
+    const failed = takeHeapSummary(dir, 10, { write: (target) => target, analyse })
+    await expect(failed).rejects.toThrow(new HeapSummaryError('The heap snapshot could not be written.'))
+    await failed.catch((caught: Error) => expectNoPrivateData(caught.message, dir))
+
+    // A summary whose file cannot be deleted (here a folder, so the delete throws) still returns its summary.
+    const other = home()
+    const summary = await takeHeapSummary(other, 10, { write: (target) => { mkdirSync(target); return target }, analyse })
+    expect(summary.nodes).toBe(7)
   })
 
   it('a worker over its heap limit fails with a fixed message', async () => {

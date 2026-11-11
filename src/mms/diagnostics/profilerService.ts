@@ -28,10 +28,21 @@ export interface OtherProfilesMemory {
   cachedBytes: number
 }
 
+/**
+ * The caller's profile's threads in memory that its agent may not see named (private, a bot's, outside the allowed
+ * projects, or not known to the profile), as totals: no ids, turn states or idle times.
+ */
+export interface HiddenThreadsMemory {
+  threads: number
+  cachedBytes: number
+}
+
 /** The threads in memory as the caller may see them: its own profile's one by one, the rest as totals. */
 export interface ThreadMemory {
   own: ThreadMemoryEntry[]
   others: OtherProfilesMemory
+  /** Set by the tool once it has held `own` to what the calling agent may see. */
+  hidden?: HiddenThreadsMemory
 }
 
 export interface ProfilerService {

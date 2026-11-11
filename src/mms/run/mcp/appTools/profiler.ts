@@ -7,7 +7,8 @@ import {
 } from '../../../../shared/diagnostics/profiler'
 import { MMS_PROTOCOL_REPLAY_RING_SIZE } from '../../../protocol/types'
 import { MAX_CACHED_BYTES, MAX_CACHED_THREADS } from '../../../data/threadDb/threadDbStore'
-import type { ProfilerService } from '../../../diagnostics/profilerService'
+import { HeapSummaryError } from '../../../diagnostics/heapSummary'
+import type { ProfilerService, ThreadMemory } from '../../../diagnostics/profilerService'
 import {
   childrenReport,
   gpuHintsReport,
@@ -20,6 +21,7 @@ import {
   windowBreakdownReport
 } from '../../../diagnostics/profilerReports'
 import type { AppToolHost } from './host'
+import { agentThreadView, threadVisibleToAgent } from './thread'
 import { json, type JsonSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /** What the profiler tools read, at every call: the profile's switches (Settings → Labs) and the service's profiler. */
@@ -47,6 +49,31 @@ function delegationChain(host: AppToolHost, threadId: string): string[] {
   return chain
 }
 
+/**
+ * The caller's profile's threads held to what `thread_list` shows the calling agent: a thread that is private (unless
+ * the caller's is), a bot's, or outside the allowed projects (unless the caller launched it) counts only in a total,
+ * as does a cache entry no thread of the profile owns, which cannot be checked.
+ */
+function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThreadId: string): ThreadMemory {
+  const view = agentThreadView(host, callerThreadId)
+  const byId = new Map(view.all.map((thread) => [thread.id, thread]))
+  const hidden = { threads: 0, cachedBytes: 0 }
+  const own = threads.own.filter((entry) => {
+    const thread = entry.threadId ? byId.get(entry.threadId) : undefined
+    if (thread && threadVisibleToAgent(host, thread, view)) return true
+    hidden.threads += 1
+    hidden.cachedBytes += entry.cachedBytes ?? 0
+    return false
+  })
+  return { own, others: threads.others, hidden }
+}
+
+/** The error's class, when it is a plain name: nothing else of an unexpected error reaches the agent. */
+function errorClass(caught: unknown): string {
+  const name = caught instanceof Error ? caught.name : undefined
+  return typeof name === 'string' && /^[A-Za-z]{1,40}$/.test(name) ? name : 'Error'
+}
+
 /** A heap summary running in this service: one at a time, whatever profile or turn asked. */
 let heapSummaryRunning = false
 
@@ -56,7 +83,7 @@ const DESCRIPTIONS: Record<ProfilerToolName, string> = {
   profiler_overview:
     "Start here when Mousse is slow or uses too much memory. Every Mousse process by role (service, its workers and providers, main, each window, applet views, in-app browser, GPU, utilities) with private memory, working set, CPU and JS heap; the service against its start baseline; trends; limits broken now. Numbers only.",
   profiler_service_breakdown:
-    "When the background service is the big one: its V8 heap and heap spaces, worker heaps, counts (loaded and cached threads, runtimes, workers, SQLite connections, replay buffer, terminals, file watchers, child processes) against their bounds, cache sizes, and each of this profile's threads in memory, by id, with its measured cache size; other profiles as totals.",
+    "When the background service is the big one: its V8 heap and heap spaces, worker heaps, counts (loaded and cached threads, runtimes, workers, SQLite connections, replay buffer, terminals, file watchers, child processes) against their bounds, cache sizes, and each of this profile's threads in memory you may list, by id, with its measured cache size; private, bot and out-of-scope threads and other profiles as totals.",
   profiler_window_breakdown:
     "When a window's renderer is big or the UI is slow: per window, DOM nodes, mounted turns and rows, images with decoded size, canvases, WebGL contexts, in-app browser tabs, JS heap and code caches; applet and browser views with their sizes. Read on demand from the open app.",
   profiler_gpu_hints:
@@ -138,7 +165,13 @@ export function profilerTools(host: AppToolHost): MousseTool[] {
       if (!service.monitor()) service.refresh()
       const monitor = service.monitor()
       if (!monitor) return error('The profiler is starting. Call again in a few seconds.')
-      return run(name, args, ctx, { profiler: profiler!, service, monitor, host })
+      try {
+        return await run(name, args, ctx, { profiler: profiler!, service, monitor, host })
+      } catch (caught) {
+        // Only fixed text reaches the agent: a Node error's message can name a file under the home folder.
+        if (caught instanceof HeapSummaryError) return error(caught.message)
+        return error(`The profiler could not finish ${name} (${errorClass(caught)}). Call again in a few seconds.`)
+      }
     }
   }))
 }
@@ -167,7 +200,7 @@ async function run(
         sample,
         detail: monitor.readDetailNow(),
         thresholds: monitor.thresholds,
-        threads: service.threads(env.profiler.owner),
+        threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx.caller.threadId),
         cacheLimits: { threads: MAX_CACHED_THREADS, mb: MAX_CACHED_BYTES / 1048576 },
         replayLimitPerProfile: MMS_PROTOCOL_REPLAY_RING_SIZE
       }))
