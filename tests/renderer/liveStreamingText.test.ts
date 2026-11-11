@@ -2,6 +2,7 @@
 /**
  * Streamed text of a reply lives in its own slice (liveTextStore): an update renders only that reply's
  * text, the transcript and the store stay as they are, and the reply's final text takes over once.
+ * Reply pacing is off unless a test turns it on, so the live text shows word by word.
  */
 import { act, createElement, useMemo, useRef } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -14,6 +15,8 @@ import { mousseToUIMessages, reuseUIMessages } from '../../src/renderer/chat/ada
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { applyStreamedUpdates, clearAllLiveText, isLiveTextUpdate, liveTextOver } from '../../src/renderer/stores/liveTextStore'
 import { searchableParts } from '../../src/renderer/chat/components/agent-elements/find/find-index'
+import { PACE_MS } from '../../src/renderer/chat/components/agent-elements/reply-pacing'
+import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 import type { ChatMessage } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -29,6 +32,7 @@ beforeEach(() => {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
+  setReplyPacing(false)
 })
 
 afterEach(() => {
@@ -39,6 +43,7 @@ afterEach(() => {
   stopRenderCounts()
   clearAllLiveText()
   useAppStore.setState({ messages: [], activeThreadId: null, profileId: 'default' })
+  setReplyPacing(true)
   vi.useRealTimers()
 })
 
@@ -61,7 +66,7 @@ function thread(turns: number, live: string): ChatMessage[] {
 }
 
 /** What the chat view does with the store's messages, counted. */
-function Transcript({ progress }: { progress: TurnProgressState }) {
+function Transcript({ progress, status = 'streaming' }: { progress: TurnProgressState; status?: 'streaming' | 'ready' }) {
   countRender('Transcript')
   const messages = useAppStore((s) => s.messages)
   const shown = useRef<UIMessage[]>([])
@@ -70,7 +75,7 @@ function Transcript({ progress }: { progress: TurnProgressState }) {
     shown.current = next
     return next
   }, [messages])
-  return createElement(TurnProgressContext.Provider, { value: progress }, createElement(MessageList, { messages: ui, status: 'streaming' }))
+  return createElement(TurnProgressContext.Provider, { value: progress }, createElement(MessageList, { messages: ui, status }))
 }
 
 let writes = 0
@@ -172,6 +177,49 @@ describe('the end of a reply', () => {
     stream(assistant('reply', 5, 'Writing a long\n\n(Stopped)', { streaming: false, incomplete: true }))
     expect(replyText()).toContain('Writing a long')
     expect(replyText()).not.toContain('(Stopped)')
+  })
+})
+
+describe('a streamed reply with reply pacing on', () => {
+  it('shows finished blocks of the live text only, rendering the reply alone, then the whole text once when the turn ends', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame', 'performance', 'Date'] })
+    setReplyPacing(true)
+    mount(thread(5, 'First paragraph.\n\nSec'))
+    expect(replyText()).toContain('First paragraph.')
+    expect(replyText()).not.toContain('Sec')
+    const counts = startRenderCounts()
+
+    // A delta that finishes no block renders the reply, and neither its Markdown nor the transcript.
+    stream(assistant('reply', 11, 'First paragraph.\n\nSecond para', { streaming: true }))
+    expect(counts.LiveMarkdown).toBe(1)
+    expect(counts.Markdown ?? 0).toBe(0)
+    expect(replyText()).not.toContain('Second para')
+
+    // A delta that finishes a block shows it whole, never the word being written after it.
+    stream(assistant('reply', 11, 'First paragraph.\n\nSecond paragraph done.\n\nThi', { streaming: true }))
+    expect(replyText()).toContain('Second paragraph done.')
+    expect(replyText()).not.toContain('Thi')
+
+    // The next block finishes within PACE_MS: it waits for the pacing timer, which renders the reply alone.
+    stream(assistant('reply', 11, 'First paragraph.\n\nSecond paragraph done.\n\nThird paragraph done.\n\nThe end, still', { streaming: true }))
+    expect(replyText()).not.toContain('Third paragraph done.')
+    act(() => { vi.advanceTimersByTime(PACE_MS) })
+    expect(replyText()).toContain('Third paragraph done.')
+    expect(replyText()).not.toContain('The end')
+    expect(counts.Transcript ?? 0).toBe(0)
+    expect(counts.TurnRow ?? 0).toBe(0)
+    expect(counts.AssistantParts ?? 0).toBe(0)
+
+    // The final text reaches the store: nothing shown goes away while the turn is still marked streaming.
+    const final = 'First paragraph.\n\nSecond paragraph done.\n\nThird paragraph done.\n\nThe end, still going and done.'
+    stream(assistant('reply', 11, final, { streaming: false }))
+    expect(replyText()).toContain('Third paragraph done.')
+    // The turn ends: the whole text shows at once, each part of it once.
+    act(() => root.render(createElement(Transcript, { progress: { phase: 'streaming' }, status: 'ready' })))
+    expect(host.querySelectorAll('[data-message-id="reply"]')).toHaveLength(1)
+    expect(replyText().split('The end, still going and done.').length - 1).toBe(1)
+    expect(replyText().split('Second paragraph done.').length - 1).toBe(1)
+    expect(liveTextOver('reply', final)).toBe(final)
   })
 })
 
