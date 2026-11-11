@@ -194,6 +194,11 @@ export function usePacedText(text: string, paced: boolean): string {
       window.clearTimeout(s.timer);
       window.clearTimeout(s.idle);
       window.clearTimeout(s.hold);
+      // A cleared timer must not look pending: StrictMode (dev) runs this once on mount and the
+      // effect above re-arms only timers whose id is 0.
+      s.timer = 0;
+      s.idle = 0;
+      s.hold = 0;
     },
     [s],
   );

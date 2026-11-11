@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react'
+import { StrictMode, act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -154,6 +154,17 @@ describe('a paced reply', () => {
     const first = seen.find((value) => value !== '')!
     expect(first.endsWith('.')).toBe(true)
     expect(words.startsWith(first)).toBe(true)
+  })
+
+  it('still shows a long first paragraph within the longest hold under StrictMode', () => {
+    // StrictMode runs effect cleanups once on mount; a cleared timer must not look pending afterwards.
+    const strictShow = (text: string) => act(() => root.render(createElement(StrictMode, null, createElement(Probe, { text, paced: true }))))
+    const words = 'This first paragraph is long. It keeps going with more words. '.repeat(12)
+    for (let end = 5; end <= words.length && (seen.at(-1) ?? '') === ''; end += 5) {
+      strictShow(words.slice(0, end))
+      wait(20)
+    }
+    expect(seen.find((value) => value !== '')?.endsWith('.')).toBe(true)
   })
 
   it('shows the first finished block at once', () => {
