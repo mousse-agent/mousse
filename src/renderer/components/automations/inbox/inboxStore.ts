@@ -188,6 +188,11 @@ export const REQUEST_POLL_MS = 5_000
 const REQUEST_KEEP_MS = 2 * 60 * 60 * 1000
 const ENDED_PHASES = new Set<TurnPhase>(['completed', 'failed', 'stopped'])
 
+/** A turn's error as the person reads it: without the `[code]` the engine puts in front. */
+export function turnErrorText(error: string | undefined): string {
+  return error?.replace(/^\[[a-z0-9_.-]+\]\s*/i, '').trim() || 'The Automation manager stopped with an error.'
+}
+
 let offTurnState: (() => void) | null = null
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let watching: number | null = null
@@ -208,7 +213,7 @@ function onTurnState(state: TurnState): void {
   if (state.phase === 'paused') { void checkRequest(request.at); return }
   if (!ENDED_PHASES.has(state.phase)) return
   if (state.phase === 'stopped') updateRequest(request.at, { status: 'stopped' })
-  else void settleRequest(request.at, state.phase === 'failed' ? state.error ?? 'The Automation manager stopped with an error.' : undefined)
+  else void settleRequest(request.at, state.phase === 'failed' ? turnErrorText(state.error) : undefined)
 }
 
 /** Reads the request's run once and settles it if it ended; without a run id, whether the thread still works. */
@@ -219,7 +224,7 @@ export async function checkRequest(at: number): Promise<void> {
     const turn = request.runId ? await inboxClient().managerTurn(request.runId) : undefined
     if (turn?.status === 'working') return
     if (turn?.status === 'completed') return void await settleRequest(at)
-    if (turn?.status === 'failed') return void await settleRequest(at, turn.error ?? 'The Automation manager stopped with an error.')
+    if (turn?.status === 'failed') return void await settleRequest(at, turnErrorText(turn.error))
     if (turn?.status === 'stopped') return updateRequest(at, { status: 'stopped' })
     if (turn?.status === 'paused') return void await settleRequest(at, 'Paused by a usage limit. It goes on when the limit resets.')
     // No run to read (an uncertain send, or a service that restarted): done once the thread is idle.

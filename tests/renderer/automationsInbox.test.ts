@@ -388,7 +388,8 @@ describe('creating an automation', () => {
   it('shows the error a failed turn event carries, and Retry sends the same words again', async () => {
     const { mousse, emit, create } = await mountComposer()
     await create('Rotate the staging keys every Monday')
-    await emit({ turnId: RUN_ID, phase: 'failed', error: 'No model is set up.' })
+    // The engine's `[code]` in front of the message is not shown.
+    await emit({ turnId: RUN_ID, phase: 'failed', error: '[no_model_selected] No model is set up.' })
     expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('failed')
     expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('No model is set up.')
     expect($('[data-testid="inbox-drafts-row"]')?.dataset.state).toBe('failed')
