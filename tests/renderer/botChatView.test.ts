@@ -89,7 +89,7 @@ afterEach(() => {
 })
 
 describe('the transcript', () => {
-  it('shows the owner’s messages as bubbles and the bot’s with its face, name, time, chips, ask and error', async () => {
+  it('shows the owner’s messages as bubbles and the bot’s with its face, name, chips, ask and error', async () => {
     fake.chats.inbox = [
       message(1, { author: 'owner', text: 'Send the one to the Lisbon host.' }),
       message(2, { text: 'Sent.', chips: [{ icon: 'web', text: 'read 2 pages', highlight: 'example.com' }, { icon: 'memory', text: 'remembered', highlight: 'vegetarian' }] }),
@@ -104,13 +104,59 @@ describe('the transcript', () => {
     expect(chips!.classList.contains('from-agent')).toBe(true)
     expect(chips!.querySelector('.bot-face')).not.toBeNull()
     expect(chips!.querySelector('.chat-message-meta strong')?.textContent).toBe('Inbox helper')
-    expect(chips!.querySelector('time')?.getAttribute('dateTime')).toBe('2026-11-07T09:00:00.000Z')
+    // Nothing beside the name: the group's one time is under its last message.
+    expect(chips!.querySelector('.chat-message-meta time')).toBeNull()
     expect([...chips!.querySelectorAll('.bot-chip')].map((chip) => chip.textContent)).toEqual(['read 2 pages example.com', 'remembered vegetarian'])
     expect(chips!.querySelector('.bot-chip b')?.textContent).toBe('example.com')
+    // The ask and the error are in the bot's group: no face or name again, and each still draws its card.
+    expect(ask!.querySelector('.bot-face, .chat-message-meta')).toBeNull()
+    expect(error!.querySelector('.bot-face, .chat-message-meta')).toBeNull()
     expect(ask!.querySelector('.ask-card-title')?.textContent).toBe('Inbox helper wants to use files on this computer')
     expect(error!.querySelector('.bot-error span')?.textContent).toBe('Set up a provider so I can work.')
     await click(button('Set up', error!))
     expect(useAppStore.getState().settingsOpen).toBe(true)
+  })
+
+  it('groups one sender’s messages within ten minutes, with one time under the last on its side and a day line per day', async () => {
+    const today = new Date()
+    today.setHours(11, 27, 0, 0)
+    const at = (minutes: number, days = 0) => new Date(today.getTime() + minutes * 60_000 - days * 86_400_000).toISOString()
+    fake.chats.inbox = [
+      message(1, { id: 'y1', at: at(0, 1), text: 'Yesterday’s note.' }),
+      message(2, { id: 'o1', author: 'owner', at: at(0), text: 'what functions do u hav e' }),
+      message(3, { id: 'o2', author: 'owner', at: at(0), text: 'tool calls' }),
+      message(4, { id: 'b1', at: at(0), text: 'I use memory and search.', replyTo: { id: 'o1', author: 'owner', text: 'what functions do u hav e' } }),
+      message(5, { id: 'b2', at: at(1), text: 'No topic yet.', replyTo: { id: 'o2', author: 'owner', text: 'tool calls' } }),
+      message(6, { id: 'o3', author: 'owner', at: at(20), text: 'Spanish verbs' })
+    ]
+    await open()
+    const log = transcript()
+    const article = (id: string) => log.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    // Two days, each with its line before its first message.
+    expect([...log.querySelectorAll('.bot-day')].map((line) => [line.textContent, line.nextElementSibling?.getAttribute('data-message-id')])).toEqual([['Yesterday', 'y1'], ['Today', 'o1']])
+    // Owner o1+o2, bot b1+b2 (a quote does not break a group), then o3 twenty minutes later.
+    expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => article(id).classList.contains('is-group-start'))).toEqual([true, true, false, true, false, true])
+    expect(article('b2').querySelector('.bot-face, .chat-message-meta')).toBeNull()
+    expect(article('b2').querySelector('.bot-reply-quote')?.textContent).toBe('tool calls')
+    // One time per group, right after its last message, on the sender's side; the full date and time in each tooltip.
+    const times = [...log.querySelectorAll<HTMLElement>('.bot-group-time')]
+    expect(times.map((time) => [time.previousElementSibling?.getAttribute('data-message-id'), time.dataset.author])).toEqual([['y1', 'bot'], ['o2', 'owner'], ['b2', 'bot'], ['o3', 'owner']])
+    expect(times[1]!.querySelector('time')?.getAttribute('dateTime')).toBe(at(0))
+    expect(article('o1').title).toBe(article('o2').title)
+    expect(article('o1').title).not.toBe('')
+    expect(article('y1').title).not.toBe(article('o1').title)
+  })
+
+  it('a message on its way joins its group, and the group says Sending… under it', async () => {
+    fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', at: new Date().toISOString(), text: 'First' })]
+    await open()
+    vi.mocked(fake.client.send).mockImplementationOnce(() => new Promise(() => {}))
+    await type(box(), 'Second')
+    await press('Enter')
+    const sending = transcript().querySelector<HTMLElement>('.bot-you.is-pending')!
+    expect(sending.classList.contains('is-group-start')).toBe(false)
+    const times = [...transcript().querySelectorAll('.bot-group-time')]
+    expect(times.map((time) => time.textContent)).toEqual(['Sending…'])
   })
 
   it('Sign in opens Settings, Providers on the entry to sign in to (the bot runner\'s card)', async () => {
