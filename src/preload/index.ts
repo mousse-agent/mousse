@@ -906,6 +906,8 @@ const api = {
       ipcRenderer.invoke('threads:pin', threadId, pinned),
     /** One thread as the computer that runs it has it now, its settings revision included; null when it is not there. */
     get: (threadId: string): Promise<Thread | null> => ipcRenderer.invoke('threads:get', threadId),
+    /** The new chat a window goes to after its thread was deleted; windows asking at once share one. */
+    newChatAfterDelete: (): Promise<Thread> => ipcRenderer.invoke('threads:newChatAfterDelete'),
     /** `picked`: the person chose this checkout, so it is remembered for the project's next new threads. */
     setWorktreeEnabled: (threadId: string, enabled: boolean, picked?: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled, picked),

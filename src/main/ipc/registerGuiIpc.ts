@@ -182,7 +182,6 @@ import type {
   StartPullRequestThreadInput,
   StartPullRequestThreadResult
 } from '../../shared/pullRequests'
-import { visibleThreads } from '../../shared/threadLineage'
 import type {
   GitHubCloneRepositoryInput,
   GitHubCreateRepositoryInput
@@ -1831,24 +1830,27 @@ export function registerGuiIpc(
   }
 
   // Deletes an archived thread for good; its worktrees, branches and Git refs stay. The window asked first, so scratch
-  // files only the thread had go with it.
+  // files only the thread had go with it. A window showing the thread leaves it when the list without it arrives
+  // (`watchDeletedShownThread`), as for a delete from anywhere else. Another computer's thread is never deleted from here.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId, discard: true }
     )
     broadcastIfRouted([threadId], res)
-    if (currentPresentation().getActiveThreadId() === threadId) {
-      // Never fall back to a subagent: it sits under its parent in the sidebar.
-      const next = visibleThreads(res.threads).find((t) => !t.settledAt)
-      if (next) await selectThread(next.id)
-      else {
-        const created = await guiMms.request<{ thread: { id: string } }>('threads.create', {
-          name: 'New Chat'
-        })
-        await selectThread(created.thread.id)
-      }
-    }
+  })
+
+  // The new chat a window goes to after the thread it showed was deleted. Every window of a profile that showed it asks
+  // at once; they share one chat instead of making one each.
+  let chatAfterDelete: { profile: string; at: number; thread: Promise<Thread> } | undefined
+  registerHandler('threads:newChatAfterDelete', async () => {
+    const profile = currentProfileKey()
+    if (chatAfterDelete && chatAfterDelete.profile === profile && Date.now() - chatAfterDelete.at < 10_000) return chatAfterDelete.thread
+    const thread = guiMms.request<{ thread: Thread }>('threads.create', { name: 'New Chat' }).then((res) => res.thread)
+    const made = { profile, at: Date.now(), thread }
+    chatAfterDelete = made
+    thread.catch(() => { if (chatAfterDelete === made) chatAfterDelete = undefined })
+    return thread
   })
 
   registerHandler('threads:rename', async (_e, threadId: string, name: string) => {
@@ -1933,9 +1935,17 @@ export function registerGuiIpc(
     return res.thread
   })
   // One thread as the computer that runs it has it now (its settings revision included), or null.
+  // A thread the service no longer has is null; one whose delete is still under way (in the trash) is an error, as it
+  // may yet be put back.
   registerHandler('threads:get', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ thread?: unknown }>('threads.get', { threadId })
-    return res.thread ?? null
+    try {
+      const res = await guiMms.request<{ thread?: unknown }>('threads.get', { threadId })
+      return res.thread ?? null
+    } catch (error) {
+      const details = error instanceof MmsProtocolError ? error.details as { deleting?: unknown } | undefined : undefined
+      if (error instanceof MmsProtocolError && error.code === 'thread_not_found' && details?.deleting !== true) return null
+      throw error
+    }
   })
   registerHandler('threads:setWorktreeEnabled', async (_e, threadId: string, enabled: boolean, picked?: boolean) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(

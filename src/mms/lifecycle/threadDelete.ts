@@ -41,6 +41,44 @@ export interface ThreadDeleteDeps {
   restore(threadId: string): Promise<unknown>
   /** Archives a thread a person started; a subagent thread or an owned thread is left as it is. */
   archive(threadId: string): void
+  /**
+   * Stops what still runs in these threads, their queued messages with it, and waits (within a bound) for it to end:
+   * a delete never leaves a turn or its provider running in a thread that is gone.
+   */
+  stopRuns?(threadIds: readonly string[]): Promise<void>
+  /** Whether a turn or run that `stopRuns` would stop is running in any of these threads. */
+  isRunning?(threadIds: readonly string[]): boolean
+  /**
+   * Refuses, before anything stops, what would refuse the trash anyway: the profile shutting down, an open terminal, a
+   * pending question, a running agent, chat or workflow in these threads, or another thread's turn. Their own turns
+   * are not refused here: `stopRuns` ends them.
+   */
+  assertCanStop?(threadIds: readonly string[]): void
+  /** What would refuse a delete that keeps the work, read before anything stops (`ResourcePurgeService.deletePrecheck`). */
+  precheck?(threadId: string, options: { soleCopies: boolean }): Promise<{ blockers: string[]; soleCopies: string[] }>
+  /**
+   * Waits up to `budgetMs` for the profile's other requests to settle. The trash and the purge each refuse while one
+   * is in flight, and a window still shows the thread for a moment, so its reads of it keep arriving meanwhile.
+   */
+  settle?(budgetMs: number): Promise<void>
+}
+
+/** How long a step refused for a passing reason is tried again; a refusal still there after it is reported. */
+export const BUSY_RETRY_MS = 5_000
+
+/** How long a delete that `stopBeforeDelete` prepared counts as prepared: its own request follows at once. */
+const PREPARED_FOR_MS = 10_000
+
+/**
+ * A refusal that ends by itself within moments: another request in flight (a window's read of the thread it still
+ * shows), or a thread's lease its stopped turn is letting go. Work that stays (a terminal, a question, an agent, a
+ * workflow, another thread's turn) is refused at once, as before.
+ */
+function isPassingBusy(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  if (error.name === 'LeaseBusyError') return true
+  const code = (error as { code?: unknown }).code
+  return (code === 'busy' || code === 'profile_busy') && /requests are still active/.test(error.message)
 }
 
 export interface DeleteOptions {
@@ -64,7 +102,60 @@ const keepsWork = (intent: DeleteIntent): boolean => !intent.expiry
 interface ThreadMeta { id: string; settledAt?: string; lineage?: Thread['lineage'] }
 
 export class ThreadDeleter {
-  constructor(private readonly deps: ThreadDeleteDeps) {}
+  constructor(private readonly deps: ThreadDeleteDeps, private readonly busyRetryMs = BUSY_RETRY_MS) {}
+
+  /** Threads whose delete `stopBeforeDelete` already checked and stopped, with when: the delete does not stop them again. */
+  private readonly prepared = new Map<string, number>()
+
+  /**
+   * Runs a step that refuses while the profile is busy once other requests settled, and again while it is refused for a
+   * passing reason, until `busyRetryMs` has passed. `attempt` counts from 0, so a step can leave out on a retry what
+   * belonged to its first try (the caller's operation id, which the refusal used up). Any other refusal, and a passing
+   * one past the budget, is the step's own error.
+   */
+  private async whenSettled<T>(step: (attempt: number) => Promise<T>): Promise<T> {
+    const until = Date.now() + this.busyRetryMs
+    for (let attempt = 0; ; attempt++) {
+      await this.deps.settle?.(Math.max(1, Math.min(2_000, until - Date.now())))
+      try {
+        return await step(attempt)
+      } catch (error) {
+        if (!isPassingBusy(error) || Date.now() >= until) throw error
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+  }
+
+  /** The members of `threadId`'s delete that are still listed (the thread first). */
+  private liveMembers(threadId: string): string[] {
+    return [threadId, ...this.subagentsOf(threadId)].filter((id) => this.deps.getThread(id))
+  }
+
+  /**
+   * Everything that would refuse this delete and can be known before anything stops, then the Stop. A refused delete
+   * never stops a turn or drops a queue.
+   */
+  private async checkThenStop(members: readonly string[], intent: DeleteIntent): Promise<void> {
+    // With nothing running there is nothing to stop, and the trash and the preview check everything as before.
+    if (!members.length || (this.deps.isRunning && !this.deps.isRunning(members))) return
+    this.deps.assertCanStop?.(members)
+    // An expiry takes the thread's files with it as asked; a delete that keeps the work checks what would refuse it.
+    if (!intent.expiry && this.deps.precheck) {
+      const precheck = this.deps.precheck
+      // Files that may be the only copy refuse only a delete that may not discard them.
+      const soleCopies = !(intent.human && intent.discard)
+      const found = await Promise.all(members.map(async (id) => ({ id, ...await precheck(id, { soleCopies }) })))
+      for (const member of found) this.refuseFor(member.id, member.blockers, member.soleCopies.length > 0, intent)
+    }
+    await this.deps.stopRuns?.(members)
+  }
+
+  /** The refusals a preview, or the check before a Stop, can give. */
+  private refuseFor(taskId: string, blockers: readonly string[], soleCopies: boolean, intent: DeleteIntent): void {
+    if (blockers.length) throw new DomainRpcError('thread_delete_blocked', `The thread could not be deleted: ${blockers.join('; ')}`, { threadId: taskId })
+    if (soleCopies && !(intent.human && intent.discard) && !intent.expiry)
+      throw new DomainRpcError('thread_has_unpublished_work', 'The thread has unpublished work. Delete it from the Mousse app.', { threadId: taskId })
+  }
 
   private get intentsPath(): string { return join(this.deps.store.root, 'delete-intents.json') }
 
@@ -155,6 +246,20 @@ export class ThreadDeleter {
   }
 
   /**
+   * The delete's Stop, before the delete is admitted: what runs in an archived thread and its subagent threads ends,
+   * with their queues. A running turn's own request (the send waiting for it) would otherwise keep the delete from
+   * being admitted. A thread that is not archived is left running: its delete is refused.
+   */
+  async stopBeforeDelete(threadId: string, options: Pick<DeleteOptions, 'human' | 'discard'>): Promise<void> {
+    const listed = this.deps.getThread(threadId)
+    if (!listed || !this.isArchived(listed)) return
+    // A refusal is the delete's answer, with nothing stopped.
+    await this.checkThenStop(this.liveMembers(threadId), { human: options.human, discard: options.human && options.discard, at: new Date().toISOString() })
+    this.prepared.set(threadId, Date.now())
+  }
+
+
+  /**
    * Deletes `threadId` and its subagent threads for good. Every member is trashed and checked before anything is
    * purged, so a refusal (not archived, unpublished work, a blocker, busy) puts the whole family back as it was.
    * A thread already in the trash (a delete cut short) is finished, so pressing Delete again works.
@@ -169,18 +274,28 @@ export class ThreadDeleter {
     if (listed && !options.expiry && !this.isArchived(this.deps.getThread(threadId) ?? listed)) throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
     const intent: DeleteIntent = { human: options.human, discard: options.human && options.discard, at: new Date().toISOString(), ...(options.expiry ? { expiry: true as const } : {}) }
     const members = [threadId, ...this.subagentsOf(threadId)]
+    const preparedAt = this.prepared.get(threadId)
+    this.prepared.delete(threadId)
     const trashedHere: string[] = []
     // Check everything first: the thread, then its subagent threads. Nothing is purged until all of them may go.
     try {
+      // What would refuse the delete is checked before the family's turns stop (with their queues); `stopBeforeDelete`
+      // did both just before when it ran.
+      if (listed && !(preparedAt !== undefined && Date.now() - preparedAt < PREPARED_FOR_MS)) await this.checkThenStop(this.liveMembers(threadId), intent)
       for (const id of members) {
         const current = this.deps.store.get(id)
         if (current?.state === 'purge-started' || current?.state === 'purged') continue
         this.setIntent(id, intent)
         if (!current || current.state === 'active') {
-          await this.deps.trash(id, id === threadId ? options.operationId : undefined, id === threadId ? options.expectedGeneration : undefined, keepsWork(intent))
+          await this.whenSettled((attempt) => {
+            // Unarchived while the delete waited: the thread is in use again, and stays.
+            if (id === threadId && listed && !options.expiry && !this.isArchived(this.deps.getThread(threadId) ?? { id: threadId }))
+              throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
+            return this.deps.trash(id, id === threadId && attempt === 0 ? options.operationId : undefined, id === threadId ? options.expectedGeneration : undefined, keepsWork(intent))
+          })
           trashedHere.push(id)
         }
-        await this.check(id, intent)
+        await this.whenSettled(() => this.check(id, intent))
       }
     } catch (error) {
       // Only what this delete trashed goes back, and the thread itself when it was left by an earlier one: a member
@@ -204,9 +319,7 @@ export class ThreadDeleter {
   /** Refuses what this delete may not do; the preview is read again right before the purge. */
   private async check(taskId: string, intent: DeleteIntent): Promise<Awaited<ReturnType<ThreadDeleteDeps['purge']['preview']>>> {
     const preview = await this.deps.purge.preview(taskId, { keepWork: keepsWork(intent) })
-    if (preview.blockers.length) throw new DomainRpcError('thread_delete_blocked', `The thread could not be deleted: ${preview.blockers.join('; ')}`, { threadId: taskId })
-    if (preview.items.some((item) => item.discardRequired) && !(intent.human && intent.discard) && !intent.expiry)
-      throw new DomainRpcError('thread_has_unpublished_work', 'The thread has unpublished work. Delete it from the Mousse app.', { threadId: taskId })
+    this.refuseFor(taskId, preview.blockers, preview.items.some((item) => item.discardRequired), intent)
     return preview
   }
 
@@ -215,10 +328,13 @@ export class ThreadDeleter {
     const record = this.deps.store.get(taskId)
     if (!record || record.state === 'purged') { this.setIntent(taskId, undefined); return }
     if (record.state === 'purge-started' && record.purge) {
-      await this.deps.purge.purge({ taskId, operationId: record.purge.operationId, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
+      const purge = record.purge
+      await this.whenSettled(() => this.deps.purge.purge({ taskId, operationId: purge.operationId, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) }))
     } else {
-      const preview = await this.check(taskId, intent)
-      await this.deps.purge.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: intent.discard, human: intent.human, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
+      await this.whenSettled(async () => {
+        const preview = await this.check(taskId, intent)
+        await this.deps.purge.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: intent.discard, human: intent.human, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
+      })
     }
     this.setIntent(taskId, undefined)
   }

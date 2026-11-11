@@ -1626,7 +1626,12 @@ export async function dispatchMethod(
   return result
 }
 
-function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  // Deleting an archived thread stops what still runs in it first, once nothing that would refuse the delete is found:
+  // the send waiting for its turn is a request the delete's admission would otherwise wait for, and refuse. Another
+  // computer's delete is refused anyway.
+  if (method === 'threads.delete' && isObject(params) && typeof params.threadId === 'string' && ctx.connection?.clientType !== 'bridge')
+    await ctx.mms.stopThreadBeforeDelete?.(params.threadId, { human: ctx.connection?.clientType === 'gui', discard: params.discard === true })
   // Installation lifecycle commands must not wait on themselves in a personal
   // request barrier. Every actual personal service has this ownership method;
   // the fallback preserves legacy isolated handler test doubles.
@@ -1821,6 +1826,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
   }
   if (isObject(params) && typeof params.threadId === 'string' &&
       !['threads.delete', 'threads.inventory', 'threads.focus',
+        // Answers "not found" for a thread being deleted, so a window that shows it knows to leave it.
+        'threads.get',
         // These name the thread only so a router can find its computer; they worked for a thread being trashed before.
         'orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'runs.get', 'runs.resumeNow', 'runs.cancelPause',
         'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'].includes(method) &&
@@ -2021,6 +2028,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.get': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
+      // A thread being deleted is not found; until its delete is done (purged), that delete may still put it back (`deleting`).
+      const state = ctx.mms.threads.lifecycleStore.get(threadId)?.state
+      if (state && state !== 'active') throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId, ...(state !== 'purged' ? { deleting: true } : {}) })
       const thread = ctx.mms.threads.getThread(threadId)
       if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       return { thread }

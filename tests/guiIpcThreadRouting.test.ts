@@ -477,3 +477,26 @@ describe("a new chat's settings on another computer (threads:applySettings)", ()
     expect(sent('threads.setPermissionMode')).toHaveLength(1)
   })
 })
+
+describe('a window leaving a deleted thread', () => {
+  it('reads a thread the service no longer has as null, and one whose delete is under way as an error', async () => {
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('thread_not_found', 'Thread not found', { threadId: 'gone' }) })
+    await expect(invoke('threads:get', 'gone')).resolves.toBeNull()
+    request.mockImplementationOnce(async () => { throw new MmsProtocolError('thread_not_found', 'Thread not found', { threadId: 'trashed', deleting: true }) })
+    await expect(invoke('threads:get', 'trashed')).rejects.toThrow('Thread not found')
+    request.mockImplementationOnce(async () => { throw new Error('MMS client not connected') })
+    await expect(invoke('threads:get', 'unknown')).rejects.toThrow('not connected')
+  })
+
+  it('gives every window that asks at once the same new chat', async () => {
+    let made = 0
+    request.mockImplementation(async (method: string) => {
+      if (method === 'threads.create') return { thread: { id: `new-${++made}`, name: 'New Chat' } }
+      return {}
+    })
+    const [first, second] = await Promise.all([invoke('threads:newChatAfterDelete'), invoke('threads:newChatAfterDelete')])
+    expect(first).toEqual({ id: 'new-1', name: 'New Chat' })
+    expect(second).toBe(first)
+    expect(made).toBe(1)
+  })
+})

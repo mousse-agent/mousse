@@ -9322,6 +9322,14 @@ export class OrchestratorService extends EventEmitter {
   }
 
   // retained for non-GUI callers (CLI, remote)
+  /** The threads whose turn is running in this process now. */
+  activeTurnThreadIds(): string[] {
+    const ids = new Set<string>()
+    if (this.boundSession.threadId !== '__unbound__' && this.boundSession.isTurnActive()) ids.add(this.boundSession.threadId)
+    for (const [threadId, session] of this.sessions) if (session.isTurnActive()) ids.add(threadId)
+    return [...ids]
+  }
+
   isTurnActive(threadId?: string): boolean {
     if (threadId) {
       const session =
@@ -9801,7 +9809,23 @@ export class OrchestratorService extends EventEmitter {
     reuseLastUser = false,
     opts?: OrchestratorSendOptions
   ): Promise<OrchestratorResponse> {
-    return this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
+    const threadId = opts?.threadId ?? this.getBoundThreadId() ?? '__unbound__'
+    this.sendsInFlight.set(threadId, (this.sendsInFlight.get(threadId) ?? 0) + 1)
+    try {
+      return await this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
+    } finally {
+      const left = (this.sendsInFlight.get(threadId) ?? 1) - 1
+      if (left > 0) this.sendsInFlight.set(threadId, left)
+      else this.sendsInFlight.delete(threadId)
+    }
+  }
+
+  /** Sends being handled now, by thread (`__unbound__` when none was named): one may still wait for its repository or folder. */
+  private readonly sendsInFlight = new Map<string, number>()
+
+  /** The threads with a send being handled now; `__unbound__` stands for a send that named none. */
+  sendingThreadIds(): string[] {
+    return [...this.sendsInFlight.keys()]
   }
 
   /**
