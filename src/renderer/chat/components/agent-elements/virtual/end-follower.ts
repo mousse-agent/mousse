@@ -1,9 +1,10 @@
 import { motionScale } from "../../../../lib/motion";
 import {
   COLLAPSE_MS,
+  QUEUED_TURN_HOLD_MS,
   collapsedReserve,
-  glideStep,
   heldReserve,
+  heldTotalReserve,
   pinnedReserve,
 } from "./end-follow";
 import type { FollowMode } from "./follow-mode";
@@ -16,10 +17,13 @@ import type { FollowMode } from "./follow-mode";
  *   grows into the space below it. The space shrinks as fast as the reply grows, so the end, and
  *   the view, do not move. When the reply reaches the bottom the space is gone and the end is
  *   followed from there. A reader who leaves the end (a scroll, a jump to a prompt) ends the pin.
- * - **Glide:** while a turn runs, the view eases toward the moving end, one step a frame, instead
- *   of jumping on every update. Any input from the user stops it at once. With Animation speed Off
- *   or the system reducing motion, when no turn runs, and when the end is more than a screen away,
- *   it lands at once.
+ * - **Follow:** whenever the transcript changes size, the view lands on the new end in the same
+ *   frame, before paint. It never eases toward it: an eased scroll shows the reply and the queued
+ *   messages under it drifting off the bottom and back on every update.
+ * - **Hold:** while a turn runs, something near the end that goes away (a queued message sent into
+ *   the reply, a line replaced) leaves its space under the content until the reply grows into it,
+ *   so the view does not drop and come back a frame later. When a turn ends with messages still
+ *   queued, the end is held the same way until the next turn starts and is pinned: one move.
  * - **Close:** a space that no longer holds a pinned prompt never stays. While the reader follows
  *   the end (the turn ended, they came back down, they asked for the latest), the part they do not
  *   see is dropped and the rest closes over a quarter of a second, so the reply settles onto the
@@ -38,10 +42,13 @@ export function createEndFollower(options: {
   let reserve = 0;
   /** The turn held near the top, by its row key; null when nothing is pinned. */
   let anchorKey: string | null = null;
-  /** A turn is running: following glides. */
+  /** A turn is running: content that leaves near the end has its space held. */
   let live = false;
-  let glideFrame = 0;
-  let glideAt = 0;
+  /** The height (content and space) the transcript is held at; null when nothing is held. */
+  let holdTotal: number | null = null;
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The content's height the last time the space was sized: a smaller one means something left. */
+  let lastContent = 0;
   let collapseFrame = 0;
 
   const setReserve = (px: number) => {
@@ -71,14 +78,15 @@ export function createEndFollower(options: {
     container.scrollTop = top;
   };
 
-  const stopGlide = () => {
-    if (glideFrame) cancelAnimationFrame(glideFrame);
-    glideFrame = 0;
-  };
-
   const stopCollapse = () => {
     if (collapseFrame) cancelAnimationFrame(collapseFrame);
     collapseFrame = 0;
+  };
+
+  const releaseHold = () => {
+    if (holdTimer !== null) clearTimeout(holdTimer);
+    holdTimer = null;
+    holdTotal = null;
   };
 
   const held = (container: HTMLElement) =>
@@ -92,7 +100,6 @@ export function createEndFollower(options: {
   /** Closes the space: what is out of sight at once, the rest eased, the view riding the end down. */
   const startCollapse = (container: HTMLElement) => {
     if (collapseFrame) return;
-    stopGlide();
     setReserve(held(container));
     if (reserve === 0) return;
     const duration = COLLAPSE_MS * motionScale();
@@ -113,14 +120,15 @@ export function createEndFollower(options: {
   };
 
   /**
-   * Sizes the space for what is pinned; otherwise closes it while the end is followed, or trims what
-   * no longer holds the view of a reader up in the thread.
+   * Sizes the space for what is pinned or held; otherwise closes it while the end is followed, or
+   * trims what no longer holds the view of a reader up in the thread.
    */
-  const updateReserve = (container: HTMLElement) => {
+  const sizeReserve = (container: HTMLElement, content: number) => {
+    const following = options.mode() === "following-end";
     if (anchorKey) {
       const top = anchorTop(container);
       if (top !== null) {
-        const next = pinnedReserve({ rowTop: top, clientHeight: container.clientHeight, contentHeight: contentHeight(container) });
+        const next = pinnedReserve({ rowTop: top, clientHeight: container.clientHeight, contentHeight: content });
         setReserve(next);
         // The reply reached the bottom of the viewport: from here the end is followed.
         if (next === 0) anchorKey = null;
@@ -128,21 +136,29 @@ export function createEndFollower(options: {
       }
       anchorKey = null;
     }
+    if (holdTotal !== null && !following) releaseHold();
+    // Something near the end left while a turn runs at the end: hold its space for what replaces it.
+    // Only for a transcript taller than the viewport; a short one does not scroll either way.
+    const total = lastContent + reserve;
+    if (holdTotal === null && live && following && !collapseFrame && content < lastContent - 0.5 && total > container.clientHeight) {
+      holdTotal = total;
+    }
+    if (holdTotal !== null) {
+      const next = heldTotalReserve({ total: holdTotal, contentHeight: content });
+      setReserve(next);
+      // The content grew back into it; a hold waiting for the next turn keeps its timer.
+      if (next === 0 && holdTimer === null) holdTotal = null;
+      return;
+    }
     if (reserve === 0 || collapseFrame) return;
-    if (options.mode() === "following-end") startCollapse(container);
+    if (following) startCollapse(container);
     else setReserve(held(container));
   };
 
-  const glide = (now: number) => {
-    glideFrame = 0;
-    const container = options.container();
-    if (!container || options.mode() !== "following-end") return;
-    const end = container.scrollHeight - container.clientHeight;
-    const next = glideStep(container.scrollTop, end, now - glideAt, motionScale());
-    glideAt = now;
-    if (next !== container.scrollTop) write(container, next);
-    // The last step lands exactly on the end (glideStep returns it), whatever the pixel rounding.
-    if (next !== end) glideFrame = requestAnimationFrame(glide);
+  const updateReserve = (container: HTMLElement) => {
+    const content = contentHeight(container);
+    sizeReserve(container, content);
+    lastContent = content;
   };
 
   return {
@@ -164,7 +180,7 @@ export function createEndFollower(options: {
     pin(turnKey: string) {
       const container = options.container();
       stopCollapse();
-      stopGlide();
+      releaseHold();
       anchorKey = turnKey;
       if (!container) return;
       updateReserve(container);
@@ -175,63 +191,71 @@ export function createEndFollower(options: {
 
     /**
      * The transcript changed size (a streamed update, an image, a card opening, the viewport). Runs
-     * after layout and before paint. Resizes the space, then moves toward the end if following.
+     * after layout and before paint. Resizes the space, then lands on the end if following, so the
+     * frame that shows the change shows it at the end.
      */
     follow() {
       const container = options.container();
       if (!container) return;
       updateReserve(container);
-      if (options.mode() !== "following-end") {
-        stopGlide();
-        return;
-      }
+      if (options.mode() !== "following-end") return;
       const end = container.scrollHeight - container.clientHeight;
-      const distance = Math.abs(container.scrollTop - end);
-      if (distance < 1) return;
-      // More than a screen away, a glide would only stream text past the reader: land.
-      if (!live || collapseFrame || motionScale() === 0 || distance > container.clientHeight) {
-        stopGlide();
-        write(container, end);
-        return;
-      }
-      if (!glideFrame) {
-        glideAt = performance.now();
-        glideFrame = requestAnimationFrame(glide);
-      }
+      if (Math.abs(container.scrollTop - end) >= 1) write(container, end);
     },
 
-    /** The turn ended: unpin, and close the space under the reply (see the summary above). */
-    turnEnded() {
+    /**
+     * The turn ended: unpin, and close the space under the reply (see the summary above). With
+     * messages still queued (`nextQueued`) the next turn is about to start: a reader at the end is
+     * held where they are until it does, so its pin is the only move.
+     */
+    turnEnded(nextQueued = false) {
       live = false;
       anchorKey = null;
+      releaseHold();
       const container = options.container();
-      if (container && reserve > 0) updateReserve(container);
+      if (!container) return;
+      if (nextQueued && options.mode() === "following-end") {
+        stopCollapse();
+        const content = contentHeight(container);
+        holdTotal = content + reserve;
+        lastContent = content;
+        holdTimer = setTimeout(() => {
+          holdTimer = null;
+          holdTotal = null;
+          const current = options.container();
+          if (current) updateReserve(current);
+        }, QUEUED_TURN_HOLD_MS);
+        return;
+      }
+      if (reserve > 0) updateReserve(container);
     },
 
     /**
      * After a scroll or any input from the person, once the follow mode has taken it in: leaving the
-     * end ends a pin; back at the end, a space left over closes.
+     * end ends a pin and a hold; back at the end, a space left over closes.
      */
     settle() {
       const container = options.container();
       if (!container) return;
-      if (anchorKey && options.mode() !== "following-end") anchorKey = null;
-      if (!anchorKey && reserve > 0) updateReserve(container);
+      const following = options.mode() === "following-end";
+      if (anchorKey && !following) anchorKey = null;
+      if (holdTotal !== null && !following) releaseHold();
+      if (!anchorKey && holdTotal === null && reserve > 0) updateReserve(container);
     },
 
     /** Any input from the person: stop every motion of ours where it is. `settle` follows it. */
     cancel() {
-      stopGlide();
       stopCollapse();
     },
 
     /** The size of the space under the content, for tests. */
     reserve: () => reserve,
     pinned: () => anchorKey,
+    holding: () => holdTotal !== null,
 
     dispose() {
-      stopGlide();
       stopCollapse();
+      releaseHold();
     },
   };
 }

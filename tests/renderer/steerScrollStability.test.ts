@@ -22,9 +22,8 @@ const realResizeObserver = globalThis.ResizeObserver
 let observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = []
 
 beforeEach(() => {
-  // Reduced motion: following the end lands at once, so each step can be checked as it happens (the
-  // glide while a turn runs is in endFollow.test.ts). Live text shows as it arrives (pacing is in
-  // replyPacing.test.ts).
+  // Reduced motion: the space under a finished reply closes at once, so each step can be checked as
+  // it happens. Live text shows as it arrives (pacing is in replyPacing.test.ts).
   setReplyPacing(false)
   window.matchMedia = ((query: string) => ({
     matches: query === '(prefers-reduced-motion: reduce)',
