@@ -58,7 +58,7 @@ export function MemoryRows({ settings, onUpdate }: { settings: MousseSettings; o
     let live = true
     const read = () => api.memoryStatus().then((next) => { if (live) { setStatus(next); setUnavailable(false) } }, () => { if (live) setUnavailable(true) })
     void read()
-    const timer = setInterval(read, REFRESH_MS)
+    const timer = setInterval(() => void read(), REFRESH_MS)
     return () => { live = false; clearInterval(timer) }
   }, [])
 

@@ -84,27 +84,33 @@ function finite(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
+/** A window's preload sends its renderer's heap, private memory and image cache (KB), and its canvases. */
+function onWindowMemory(event: Electron.IpcMainEvent, raw: unknown): void {
+  const value = raw as Record<string, unknown> | null
+  const usedHeapKb = finite(value?.usedHeapKb)
+  const totalHeapKb = finite(value?.totalHeapKb)
+  if (usedHeapKb === undefined || totalHeapKb === undefined) return
+  let pid = 0
+  try { pid = event.sender.getOSProcessId() } catch { return }
+  windowReports.set(pid, {
+    usedHeapKb,
+    totalHeapKb,
+    privateKb: finite(value?.privateKb),
+    imagesKb: finite(value?.imagesKb),
+    canvases: finite(value?.canvases),
+    webglContexts: finite(value?.webglContexts),
+    at: Date.now()
+  })
+}
+
+let listening = false
+
 export function registerMemoryDiagnosticsIpc(registerHandler: RegisterHandler, guiMms: DaemonRequester, options: { acrylic: () => boolean }): { stop: () => void } {
-  // A window's preload sends its renderer's heap, private memory and image cache (KB), and its canvases.
-  const onWindowMemory = (event: Electron.IpcMainEvent, raw: unknown): void => {
-    const value = raw as Record<string, unknown> | null
-    const usedHeapKb = finite(value?.usedHeapKb)
-    const totalHeapKb = finite(value?.totalHeapKb)
-    if (usedHeapKb === undefined || totalHeapKb === undefined) return
-    let pid = 0
-    try { pid = event.sender.getOSProcessId() } catch { return }
-    windowReports.set(pid, {
-      usedHeapKb,
-      totalHeapKb,
-      privateKb: finite(value?.privateKb),
-      imagesKb: finite(value?.imagesKb),
-      canvases: finite(value?.canvases),
-      webglContexts: finite(value?.webglContexts),
-      at: Date.now()
-    })
+  // One listener for the process, however often the handlers are registered again.
+  if (!listening) {
+    ipcMain.on('diagnostics:windowMemory', onWindowMemory)
+    listening = true
   }
-  ipcMain.removeAllListeners('diagnostics:windowMemory')
-  ipcMain.on('diagnostics:windowMemory', onWindowMemory)
 
   registerHandler('diagnostics:memoryStatus', async () => guiMms.request('diagnostics.memory.status', {}))
   registerHandler('diagnostics:memoryNoticeShown', async (_event, kind: BreachKind) => guiMms.request('diagnostics.memory.noticeShown', { kind }))
@@ -135,7 +141,8 @@ export function registerMemoryDiagnosticsIpc(registerHandler: RegisterHandler, g
     stop: () => {
       clearTimeout(first)
       clearInterval(timer)
-      ipcMain.removeListener('diagnostics:windowMemory', onWindowMemory)
+      ipcMain.removeListener?.('diagnostics:windowMemory', onWindowMemory)
+      listening = false
     }
   }
 }
