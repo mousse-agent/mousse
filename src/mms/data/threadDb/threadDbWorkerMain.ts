@@ -19,8 +19,9 @@ const noteHeap = (): void => {
   if (stats) Atomics.store(stats, WORKER_STAT_HEAP_KB, Math.round(v8.getHeapStatistics().used_heap_size / 1024))
 }
 if (stats) {
-  Atomics.store(stats, WORKER_STAT_ALIVE, 1)
+  // The heap first: a worker read as running always has its heap to show.
   noteHeap()
+  Atomics.store(stats, WORKER_STAT_ALIVE, 1)
   process.on('exit', () => {
     Atomics.store(stats, WORKER_STAT_ALIVE, 0)
     Atomics.store(stats, WORKER_STAT_OPEN, 0)

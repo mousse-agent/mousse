@@ -61,6 +61,11 @@ export function threadDbWorkerScript(): string | undefined {
 }
 
 const SYNC_TIMEOUT_MS = 120_000
+/**
+ * The search index and import workers stop after this long without a request, and start again on the next one. Each
+ * idle worker holds about 11 MB (its own V8 heap and the worker bundle), and both are used in bursts.
+ */
+export const IDLE_WORKER_STOP_MS = 2 * 60_000
 
 /**
  * What one worker reports about itself for the memory monitor, in shared memory it writes and the daemon only reads:
@@ -83,21 +88,36 @@ function markEnded(stats: Int32Array): void {
 
 interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void }
 
+interface AsyncWorkerOptions {
+  /** The worker reports when it has had no request for `ms`; `stop` is then called once. */
+  idle?: { ms: number; stop: () => void }
+  /** Called once when the worker thread ends for any reason (a crash, `terminate`). */
+  onExit?: () => void
+}
+
 /** A worker answering requests by id. It keeps the process alive only while a request is in flight. */
 class AsyncWorker {
   private readonly worker: Worker
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
-  /** What the worker reports about itself (`WORKER_STAT_*`). */
+  /** What the worker reports about itself (`WORKER_STAT_*`); a new worker starts with its own, all zero. */
   readonly stats = newWorkerStats()
+  private idleTimer?: ReturnType<typeof setTimeout>
+  private readonly idle?: AsyncWorkerOptions['idle']
+  /** Set once the thread has ended: a request then fails at once instead of waiting for an answer that never comes. */
+  private exited?: Error
 
-  constructor(script: string, role: 'read' | 'index' | 'import') {
+  constructor(script: string, role: 'read' | 'index' | 'import', options: AsyncWorkerOptions = {}) {
+    this.idle = options.idle
     this.worker = new Worker(script, { workerData: { role, stats: this.stats }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
     this.worker.on('message', (message: { id: number; ok: boolean; value?: unknown; error?: WireError }) => {
       const entry = this.pending.get(message.id)
       if (!entry) return
       this.pending.delete(message.id)
-      if (!this.pending.size) this.worker.unref()
+      if (!this.pending.size) {
+        this.worker.unref()
+        this.armIdle()
+      }
       if (message.ok) entry.resolve(message.value)
       else entry.reject(fromWireError(message.error!))
     })
@@ -109,14 +129,19 @@ class AsyncWorker {
     this.worker.on('error', failAll)
     this.worker.on('exit', (code) => {
       markEnded(this.stats)
-      failAll(new Error(`Thread database ${role} worker stopped (${code})`))
+      this.exited = new Error(`Thread database ${role} worker stopped (${code})`)
+      this.clearIdle()
+      failAll(this.exited)
+      options.onExit?.()
     })
     // After the listeners: adding a message listener refs a worker again.
     this.worker.unref()
   }
 
   call(op: string, args: unknown[]): Promise<unknown> {
+    if (this.exited) return Promise.reject(this.exited)
     const id = this.nextId++
+    this.clearIdle()
     return new Promise((resolve, reject) => {
       if (!this.pending.size) this.worker.ref()
       this.pending.set(id, { resolve, reject })
@@ -124,7 +149,39 @@ class AsyncWorker {
     })
   }
 
+  private armIdle(): void {
+    if (!this.idle) return
+    this.clearIdle()
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = undefined
+      if (!this.pending.size) this.idle!.stop()
+    }, this.idle.ms)
+    this.idleTimer.unref?.()
+  }
+
+  private clearIdle(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = undefined
+  }
+
+  /**
+   * Closes what the worker holds open (the search index, any thread database), then ends it. Only called with no
+   * request in flight; the owner has already stopped sending to it.
+   */
+  async retire(): Promise<void> {
+    this.clearIdle()
+    if (this.exited) return
+    try {
+      await this.call('closeEverything', [])
+    } catch {
+      // Ending the worker closes its connections anyway; SQLite recovers an unclosed WAL at the next open.
+    }
+    this.clearIdle()
+    if (!this.exited) await this.worker.terminate()
+  }
+
   terminate(): Promise<number> {
+    this.clearIdle()
     return this.worker.terminate()
   }
 }
@@ -142,10 +199,14 @@ export class ThreadDbClient {
   private syncPort?: MessagePort
   private syncFlag?: Int32Array
   private closed = false
+  private readonly idleWorkerStopMs: number
+  /** Index and import workers that went idle and are closing; `close` waits for them. */
+  private readonly retiring = new Set<Promise<void>>()
   readonly mode: 'worker' | 'inline'
 
-  constructor(options: { script?: string | null; syncTimeoutMs?: number } = {}) {
+  constructor(options: { script?: string | null; syncTimeoutMs?: number; idleWorkerStopMs?: number } = {}) {
     this.syncTimeoutMs = options.syncTimeoutMs ?? SYNC_TIMEOUT_MS
+    this.idleWorkerStopMs = options.idleWorkerStopMs ?? IDLE_WORKER_STOP_MS
     const script = options.script === null ? undefined : options.script ?? threadDbWorkerScript()
     if (!script) {
       this.mode = 'inline'
@@ -156,8 +217,8 @@ export class ThreadDbClient {
     this.mode = 'worker'
     this.writerScript = script
     this.startWriter()
-    this.reader = new AsyncWorker(script, 'read')
     this.script = script
+    this.reader = this.startReader()
   }
 
   private writerScript?: string
@@ -216,7 +277,8 @@ export class ThreadDbClient {
         try { resolve(runOp(this.inlineRead!, op, args) as Result<K>) } catch (error) { reject(error as Error) } finally { this.inlineRead!.closeAll() }
       }))
     }
-    return this.reader!.call(op, args) as Promise<Result<K>>
+    this.reader ??= this.startReader()
+    return this.reader.call(op, args) as Promise<Result<K>>
   }
 
   /**
@@ -226,7 +288,7 @@ export class ThreadDbClient {
   callIndex<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
     if (this.closed) return Promise.reject(new Error('Thread database client is closed'))
     if (this.inlineRead) return this.call(op, ...args)
-    this.indexer ??= new AsyncWorker(this.script!, 'index')
+    this.indexer ??= this.startIdleWorker('index')
     return this.indexer.call(op, args) as Promise<Result<K>>
   }
 
@@ -238,8 +300,48 @@ export class ThreadDbClient {
   callImport<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
     if (this.closed) return Promise.reject(new Error('Thread database client is closed'))
     if (this.inlineRead) return this.call(op, ...args)
-    this.importer ??= new AsyncWorker(this.script!, 'import')
+    this.importer ??= this.startIdleWorker('import')
     return this.importer.call(op, args) as Promise<Result<K>>
+  }
+
+  /**
+   * An index or import worker that ends itself once idle. It is forgotten first, so a request that comes while it
+   * closes starts a new worker instead of reaching this one.
+   */
+  private startIdleWorker(role: 'index' | 'import'): AsyncWorker {
+    const forget = (): boolean => {
+      if (role === 'index' ? this.indexer !== worker : this.importer !== worker) return false
+      if (role === 'index') this.indexer = undefined
+      else this.importer = undefined
+      return true
+    }
+    const worker: AsyncWorker = new AsyncWorker(this.script!, role, {
+      idle: {
+        ms: this.idleWorkerStopMs,
+        stop: () => {
+          if (!forget()) return
+          const done: Promise<void> = worker.retire().catch(() => undefined).finally(() => this.retiring.delete(done))
+          this.retiring.add(done)
+        }
+      },
+      // A worker that died is forgotten, so the next request starts a new one.
+      onExit: () => { forget() }
+    })
+    return worker
+  }
+
+  /** The read worker; one that died is forgotten, and the next read starts a new one. */
+  private startReader(): AsyncWorker {
+    const worker: AsyncWorker = new AsyncWorker(this.script!, 'read', {
+      onExit: () => { if (this.reader === worker) this.reader = undefined }
+    })
+    return worker
+  }
+
+  /** Workers running now, by role, for tests and diagnostics. */
+  workerRoles(): string[] {
+    if (this.mode === 'inline') return []
+    return [this.writer && 'write', this.reader && 'read', this.indexer && 'index', this.importer && 'import'].filter((role): role is string => Boolean(role))
   }
 
   /** Closes the write worker's connection to a thread's database (checkpointing it) before its folder moves. */
@@ -288,7 +390,7 @@ export class ThreadDbClient {
     }
     this.closed = true
     this.inlineRead?.closeEverything()
-    await Promise.all([this.writer?.terminate(), this.reader?.terminate(), this.indexer?.terminate(), this.importer?.terminate()])
+    await Promise.all([this.writer?.terminate(), this.reader?.terminate(), this.indexer?.terminate(), this.importer?.terminate(), ...this.retiring])
   }
 }
 

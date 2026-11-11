@@ -76,6 +76,99 @@ describe('thread database workers', () => {
   })
 })
 
+describe('index and import workers', () => {
+  it('end once idle and start again on the next request', async () => {
+    const out = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-idle-')))
+    const options = getThreadDbWorkerBuildOptions(resolve(__dirname, '..'), 'out/cli')
+    await build({ ...options, outfile: join(out, 'threadDbWorker.js'), logLevel: 'silent' })
+    const client = new ThreadDbClient({ script: join(out, 'threadDbWorker.js'), idleWorkerStopMs: 300 })
+    const wait = (ms: number) => new Promise((done) => setTimeout(done, ms))
+    try {
+      expect(client.workerRoles()).toEqual(['write', 'read'])
+      expect(await client.callIndex('exists', out)).toBe(false)
+      expect(await client.callImport('exists', out)).toBe(false)
+      expect(client.workerRoles()).toEqual(['write', 'read', 'index', 'import'])
+      // Requests inside the idle time keep the worker.
+      for (let i = 0; i < 3; i++) {
+        await wait(150)
+        expect(await client.callIndex('exists', out)).toBe(false)
+      }
+      expect(client.workerRoles()).toContain('index')
+      await wait(700)
+      expect(client.workerRoles()).toEqual(['write', 'read'])
+      // A request after the stop starts a new worker that answers.
+      expect(await client.callIndex('exists', out)).toBe(false)
+      expect(client.workerRoles()).toEqual(['write', 'read', 'index'])
+    } finally {
+      await client.close()
+      rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    }
+  }, 60_000)
+})
+
+describe('workers that are slow or die', () => {
+  /**
+   * Speaks the workers' protocols: "slow" answers after 600 ms, "die" ends the worker thread, anything else answers at
+   * once with its own name and the worker's start count, so a test can tell a new worker from the old one.
+   */
+  async function fakeClient(idleWorkerStopMs: number): Promise<{ client: ThreadDbClient; out: string }> {
+    const out = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-fake-')))
+    const script = join(out, 'fake.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(script, `
+      import { parentPort, workerData, threadId } from 'node:worker_threads'
+      const { role, flag, port } = workerData
+      if (role === 'write') parentPort.on('message', (request) => {
+        port.postMessage({ id: request.id, ok: true, value: request.op })
+        Atomics.store(flag, 0, 1)
+        Atomics.notify(flag, 0)
+      })
+      else parentPort.on('message', (request) => {
+        if (request.op === 'die') process.exit(3)
+        if (request.op === 'slow') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600)
+        parentPort.postMessage({ id: request.id, ok: true, value: request.op + ':' + threadId })
+      })
+    `)
+    return { client: new ThreadDbClient({ script, idleWorkerStopMs }), out }
+  }
+  const wait = (ms: number) => new Promise((done) => setTimeout(done, ms))
+
+  it('a request slower than the idle time keeps its worker', async () => {
+    const { client, out } = await fakeClient(200)
+    try {
+      const first = await client.callIndex('info' as never) as unknown as string
+      expect(await client.callIndex('slow' as never)).toBe(`slow:${first.split(':')[1]}`)
+      // The idle time counts from the answer: the same worker answers right after.
+      expect(await client.callIndex('info' as never)).toBe(first)
+      expect(client.workerRoles()).toContain('index')
+    } finally {
+      await client.close()
+      rmSync(out, { recursive: true, force: true })
+    }
+  })
+
+  it('a worker that died is replaced by the next request, and closing does not wait on it', async () => {
+    const { client, out } = await fakeClient(200)
+    try {
+      for (const call of [(op: string) => client.callIndex(op as never), (op: string) => client.callImport(op as never), (op: string) => client.call(op as never)]) {
+        const before = await call('info') as unknown as string
+        await expect(call('die')).rejects.toThrow(/stopped \(3\)/)
+        const after = await call('info') as unknown as string
+        expect(after).toMatch(/^info:/)
+        expect(after).not.toBe(before)
+      }
+      // An index worker that died while idle is not retired again: its idle time passes and closing still finishes.
+      await expect(client.callIndex('die' as never)).rejects.toThrow()
+      expect(client.workerRoles()).not.toContain('index')
+      await wait(600)
+      expect(client.workerRoles()).toEqual(['write', 'read'])
+    } finally {
+      await client.close()
+      rmSync(out, { recursive: true, force: true })
+    }
+  }, 30_000)
+})
+
 describe('a write worker that does not answer in time', () => {
   it('is replaced, and its late reply never answers the next request', async () => {
     const out = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-slow-')))

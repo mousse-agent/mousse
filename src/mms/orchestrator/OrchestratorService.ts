@@ -1661,7 +1661,8 @@ export class OrchestratorService extends EventEmitter {
   readonly residency = new ThreadResidency({
     loadedThreadIds: () => this.sessions.keys(),
     holdReason: (threadId) => this.releaseHoldReason(threadId),
-    releaseIfIdle: (threadId) => this.releaseIfIdle(threadId)
+    releaseIfIdle: (threadId) => this.releaseIfIdle(threadId),
+    releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) }
   })
 
   /** How many threads have a session in memory (the memory monitor's count). */
@@ -2001,6 +2002,8 @@ export class OrchestratorService extends EventEmitter {
     this.threadStore = store
     // The thread database cache's byte cap passes over threads a session holds: their text is the session's.
     store?.setThreadsInUse?.((threadId) => this.sessions.has(threadId))
+    // Uses of cached threads are timed on the clock the idle sweep reads.
+    store?.setThreadDataClock?.(() => this.residency.now())
     this.installTitleGuard()
     this.installQueueJournal()
   }
@@ -8879,7 +8882,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     if (threadId && threadId !== this.session.threadId) {
-      const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId) ?? this.measuredSession(threadId)
+      const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId) ?? await this.measuredSession(threadId)
       return this.sessionAls.run(session, () => run())
     }
     return run()
@@ -8889,8 +8892,13 @@ export class OrchestratorService extends EventEmitter {
    * A thread for the context gauge, read from storage without registering a session. A window measures every
    * thread it shows; a registered session holds the whole thread and stays until the daemon stops, so measuring
    * used to keep every thread a person looked at in memory. Measuring only reads, so a copy is enough.
+   *
+   * A thread in `thread.db` is read in the read worker, and only what the gauge needs: the model context's active
+   * messages and the newest message that reports its turn's tokens, never the transcript. Nothing of it enters the
+   * thread database cache. A thread with no model context, or kept as JSON, is read whole as before: first off the
+   * event loop, then left out of the cache again unless it was there already.
    */
-  private measuredSession(threadId: string): ThreadSession {
+  private async measuredSession(threadId: string): Promise<ThreadSession> {
     const store = this.threadStore
     if (store?.lifecycleStore?.get(threadId)) store.assertThreadAdmission(threadId)
     const thread = store?.getThread(threadId)
@@ -8899,10 +8907,24 @@ export class OrchestratorService extends EventEmitter {
     if (cached?.threadId === threadId && cached.version === version) return cached.session
     const session = new ThreadSession(threadId)
     if (store && thread) {
-      const data = store.loadThreadData(threadId)
-      session.load(data.messages, data.llmContext ?? migrateLegacyContext(data.messages), [], undefined, undefined, this.harness.instanceMap.migrate(thread.modelOverride))
+      const modelOverride = this.harness.instanceMap.migrate(thread.modelOverride)
+      const gauge = await store.readGaugeData(threadId)
+      if (gauge) {
+        session.load(gauge.messages, gauge.llmContext, [], undefined, undefined, modelOverride)
+      } else {
+        const wasWarm = store.isThreadDataWarm(threadId)
+        await store.warmThread(threadId).catch(() => undefined)
+        const leave = !wasWarm && !this.sessions.has(threadId) && !this.residency.isWarming(threadId)
+        try {
+          const data = store.loadThreadData(threadId)
+          session.load(data.messages, data.llmContext ?? migrateLegacyContext(data.messages), [], undefined, undefined, modelOverride)
+        } finally {
+          if (leave) store.forgetThreadData(threadId)
+        }
+      }
     }
-    this.measured = { threadId, version, session }
+    // A session loaded meanwhile is what the gauge reads from now; this copy is not kept for it.
+    if (!this.sessions.has(threadId)) this.measured = { threadId, version, session }
     return session
   }
 
