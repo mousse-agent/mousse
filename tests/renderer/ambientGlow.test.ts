@@ -89,6 +89,45 @@ describe('the ambient glow while the window is not focused', () => {
     expect(chat.hasAttribute('data-ambient-rest')).toBe(false)
   })
 
+  it('rests while the window is hidden or minimised, and moves again when it shows', () => {
+    const { chat } = mount(true)
+    const setHidden = (hidden: boolean) => act(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    try {
+      // A minimised window can keep focus, so visibility alone must rest the glow.
+      setHidden(true)
+      expect(chat.hasAttribute('data-ambient-rest')).toBe(true)
+      setHidden(false)
+      expect(chat.hasAttribute('data-ambient-rest')).toBe(false)
+    } finally {
+      Reflect.deleteProperty(document, 'hidden')
+    }
+  })
+
+  it('stops listening for visibility once the glow goes', () => {
+    const { chat } = mount(true)
+    act(() => root!.unmount())
+    root = undefined
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+    try {
+      document.dispatchEvent(new Event('visibilitychange'))
+      expect(chat.hasAttribute('data-ambient-rest')).toBe(false)
+    } finally {
+      Reflect.deleteProperty(document, 'hidden')
+    }
+  })
+
+  it('gives the waves layers of their own only while they move', () => {
+    // will-change keeps a full-size layer for each wave; at rest, or with motion off or reduced, they go.
+    expect(block(glowCss, '.app .chat--empty .ambient-glow-wave {')).not.toContain('will-change')
+    const moving = block(glowCss, '@media (prefers-reduced-motion: no-preference) {')
+    expect(moving).toContain("html:not([data-motion='off']) .app .chat--empty:not([data-ambient-rest]) .ambient-glow-wave {")
+    expect(moving).toContain('will-change: transform, opacity')
+    expect(glowCss.match(/will-change:/g)).toHaveLength(1)
+  })
+
   it('holds the waves, the rim and the swirl while resting', () => {
     const rest = glowCss.slice(glowCss.indexOf('.app .chat--empty[data-ambient-rest] .ambient-glow-wave'))
     const selectors = rest.slice(0, rest.indexOf('{'))
@@ -119,7 +158,6 @@ describe('the idle start page costs no layout or paint', () => {
     expect(box).not.toMatch(/animation|transition|will-change/)
     const wave = block(glowCss, '.app .chat--empty .ambient-glow-wave {')
     expect(wave).not.toMatch(/anchor/)
-    expect(wave).toContain('will-change: transform, opacity')
     expect(glowCss).not.toMatch(/\.chat--empty::(before|after)/)
   })
 
