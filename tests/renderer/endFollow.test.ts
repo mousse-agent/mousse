@@ -80,7 +80,8 @@ describe('holding the end while something near it is replaced', () => {
  */
 function transcript(options: { content: number; mode?: FollowMode; scrollTop?: number }) {
   const clientHeight = 800
-  const state = { content: options.content, mode: (options.mode ?? 'following-end') as FollowMode, scrollTop: 0, writes: 0 }
+  // `queue`: where the queued messages start, in scroll space; null when nothing is queued.
+  const state = { content: options.content, mode: (options.mode ?? 'following-end') as FollowMode, scrollTop: 0, writes: 0, queue: null as number | null }
   const reserveEl = document.createElement('div')
   const reserve = () => Number.parseFloat(reserveEl.style.height || '0')
   const scrollHeight = () => Math.max(clientHeight, state.content + reserve())
@@ -102,9 +103,14 @@ function transcript(options: { content: number; mode?: FollowMode; scrollTop?: n
       return top === undefined ? null : { getBoundingClientRect: () => ({ top: top - container.scrollTop }) }
     }
   } as unknown as HTMLElement
+  const after = {
+    get childElementCount() { return state.queue === null ? 0 : 1 },
+    getBoundingClientRect: () => ({ top: (state.queue ?? state.content) - container.scrollTop })
+  } as unknown as HTMLElement
   const follower = createEndFollower({
     container: () => container,
     rows: () => rows,
+    after: () => after,
     mode: () => state.mode,
     onProgrammaticScroll: () => { state.writes += 1 }
   })
@@ -250,6 +256,64 @@ describe('the transcript while a reply streams', () => {
     const next = send(t, 'next')
     expect(t.container.scrollTop).toBe(next - PIN_TOP)
     expect(t.container.scrollTop).toBeGreaterThan(at)
+  })
+
+  /** A long reply at the end, 2 queued messages under it (150 px, then 40 px of gap to the end). */
+  function longTurnWithQueue() {
+    const t = transcript({ content: 3000 })
+    send(t, 'first')
+    t.state.content += 1200
+    t.follower.follow()
+    t.state.content += 190
+    t.state.queue = t.state.content - 190
+    t.follower.follow()
+    expect(t.container.scrollTop).toBe(t.end())
+    return t
+  }
+  const queueOnScreen = (t: ReturnType<typeof transcript>) => t.state.queue! - t.container.scrollTop
+
+  it('keeps the queue where it was when the turn ends and its work folds away above it, with no space under it', () => {
+    const t = longTurnWithQueue()
+    const painted = queueOnScreen(t)
+    // The turn ends: its work folds into "Worked for" (480 px) and its live line (32 px) leaves, both above the queue.
+    t.state.content -= 512
+    t.state.queue! -= 512
+    t.follower.turnEnded(true)
+    t.follower.follow()
+    expect(queueOnScreen(t)).toBe(painted)
+    // Nothing blank opens under the queue: the view is on the end of the content.
+    expect(t.reserve()).toBe(0)
+    for (let index = 0; index < 20; index++) frame()
+    expect(queueOnScreen(t)).toBe(painted)
+    // The next turn shows and is pinned: one move, up to it.
+    t.state.queue = null
+    const next = send(t, 'next')
+    expect(t.container.scrollTop).toBe(next - PIN_TOP)
+  })
+
+  it('keeps the queue where it was when the work folds away a commit after the turn ended', () => {
+    const t = longTurnWithQueue()
+    const painted = queueOnScreen(t)
+    t.state.content -= 32
+    t.state.queue! -= 32
+    t.follower.turnEnded(true)
+    t.follower.follow()
+    expect(queueOnScreen(t)).toBe(painted)
+    t.state.content -= 480
+    t.state.queue! -= 480
+    t.follower.follow()
+    expect(queueOnScreen(t)).toBe(painted)
+    expect(t.reserve()).toBe(0)
+  })
+
+  it('holds what leaves under the queue when the turn ends (the gap under a reply)', () => {
+    const t = longTurnWithQueue()
+    const painted = queueOnScreen(t)
+    t.state.content -= 40
+    t.follower.turnEnded(true)
+    t.follower.follow()
+    expect(queueOnScreen(t)).toBe(painted)
+    expect(t.reserve()).toBe(40)
   })
 
   it('closes the space as after any turn when the queued turn does not start', () => {

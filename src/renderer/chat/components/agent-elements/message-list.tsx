@@ -1547,6 +1547,7 @@ export const MessageList = memo(function MessageList({
   followerRef.current ??= createEndFollower({
     container: () => chatContainerRef.current,
     rows: () => rowsRef.current,
+    after: () => afterTurnsRef.current,
     mode: () => followModeRef.current,
     onProgrammaticScroll: () => {
       programmaticScrollAtRef.current = performance.now();
