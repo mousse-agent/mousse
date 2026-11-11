@@ -1,7 +1,9 @@
 /**
- * Issue #920: a steer into a bot's Claude Code turn. A bot's turn is one query with no live session, so a steer
- * interrupts it and goes in as the prompt of a query that restarts the turn. The steer is accepted only once that
- * query reads it; a Stop before then hands it back, once, by its drain's token.
+ * Issue #920: a steer into a Claude Code turn that runs as one query with no live session, driven here through a bot's
+ * locked turn (the app does not steer bot threads; a person's turn past the live-process cap takes the same path, see
+ * `tests/claudeOneShotSteerStop.test.ts`). A steer interrupts the query and goes in as the prompt of a query that
+ * restarts the turn. The steer is accepted only once that query reads it; a Stop before then hands it back, once, by
+ * its drain's token.
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

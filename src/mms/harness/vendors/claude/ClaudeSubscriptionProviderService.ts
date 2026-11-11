@@ -4,7 +4,7 @@ import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liv
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { ModelInfo, Options, PermissionMode, Query, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
+import type { ModelInfo, Options, PermissionMode, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
 import type {
   ClaudeSubscriptionStatus,
   CliProviderConfig,
@@ -78,6 +78,12 @@ import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type Sessi
  * Stop (seen keeping its requests and helpers going for about 7 s).
  */
 const CLAUDE_STOP_GRACE_MS = 1_000
+/**
+ * How long a stopped one-shot query that carries unread steers is still read before the turn decides their fate: its
+ * process was sent SIGTERM, and what it wrote before it exited (a sign it read the steers) still counts. Past this the
+ * steers it has not been seen reading are handed back. Longer than the grace, so a process `reapClosed` kills is gone by then.
+ */
+const ONE_SHOT_STOP_DRAIN_MS = 1_500
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /** What a live process is started for, in the order of the key `chat` builds; a change needs a new process. */
@@ -2382,13 +2388,23 @@ export class ClaudeSubscriptionProviderService {
       // A live query outlives the turn: the turn is interrupted, and only Stop, an idle release or a
       // replacement closes the query.
       if (live && liveRun) live.abandon(liveRun)
-      else if (query) {
-        // A one-shot query ends its process with the turn; one that does not exit is killed (`reapClosed`).
-        const target = claudeQueryProcess(query)
-        query.close()
-        this.reapClosed(input.threadId, target)
-      }
+      else if (query) endOneShot(query)
       this.questions.dismissAllForThread(input.threadId)
+    }
+    /**
+     * A one-shot query ends its process with the turn; one that does not exit is killed (`reapClosed`). One whose prompt
+     * carries steers Claude Code has not been seen reading is sent SIGTERM at once through Mousse's handle, as a warm
+     * session's is (#905): the SDK's close and the turn's abort only end its input, and Claude Code still runs a prompt
+     * it already has (seen sending a steer to the model half a second after the Stop). Its output is not closed here:
+     * the turn reads what the process wrote before it died (`drainCarried`), then closes it.
+     */
+    const endOneShot = (ending: Query): void => {
+      const target = claudeQueryProcess(ending)
+      if (carried) {
+        if (!target?.terminate?.())
+          console.warn('[claude] could not signal the Claude Code process of a stopped steer; it ends with its input, and may still read the steer', { threadId: input.threadId, ...(target ? { pid: target.pid } : {}) })
+      } else ending.close()
+      this.reapClosed(input.threadId, target)
     }
     input.signal?.addEventListener('abort', cancel, { once: true })
     this.readyToCommit.delete(input.threadId)
@@ -2440,8 +2456,9 @@ export class ClaudeSubscriptionProviderService {
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     /**
-     * A one-shot query's steers (no live session: a bot's turn, or a turn past the live cap), collected and waiting to
-     * go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
+     * A one-shot query's steers (no live session: a turn past the live-process cap; a bot's turn is one too, but bot
+     * threads are not steered), collected and waiting to go in as the prompt of the query that restarts the turn. Taken,
+     * not accepted: Claude Code has not seen them.
      */
     const steers: OneShotSteer[] = []
     /** The steers the restarted query carries as its prompt, under that prompt's id, until Claude Code reads it. */
@@ -2837,16 +2854,45 @@ export class ClaudeSubscriptionProviderService {
         promptId = randomUUID()
         let nextPrompt: AsyncIterable<SDKUserMessage> = messages()
         const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
+        /**
+         * Stop ended a query whose prompt carries steers it had not been seen reading, and sent its process SIGTERM
+         * (`endOneShot`). What the process wrote before it died is still read, until its output ends or
+         * `ONE_SHOT_STOP_DRAIN_MS` passes: a read frame among it (the model may have the steers) accepts them, so they are
+         * not handed back to run a second time. Nothing of it is shown; the turn was stopped.
+         */
+        const drainCarried = async (output: AsyncIterator<SDKMessage>): Promise<void> => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const expired = new Promise<'expired'>((resolve) => { timer = setTimeout(() => resolve('expired'), ONE_SHOT_STOP_DRAIN_MS) })
+          try {
+            while (carried) {
+              const next = await Promise.race([output.next().catch((): IteratorResult<SDKMessage> => ({ done: true, value: undefined })), expired])
+              if (next === 'expired' || next.done) return
+              metrics.observe(next.value)
+              if (oneShotPromptRead(next.value, carried.id)) carriedRead()
+            }
+          } finally {
+            clearTimeout(timer)
+          }
+        }
         for (;;) {
           const turnTextLength = frames.text.length
+          // Checked right before the start: a steer a Stop came before is handed back, and no process ever gets it.
+          controller.signal.throwIfAborted()
           query = await this.createQuery(nextPrompt, options)
           this.queries.set(input.threadId, query)
+          // A Stop while the query was being started found no query to end: it is ended now, before it reads anything.
+          if (controller.signal.aborted) endOneShot(query)
+          // Read by hand, not with `for await`: leaving that loop on a Stop would close the SDK's output at once, and
+          // the frames the stopped process still writes would never be read (`drainCarried`).
+          const output = query[Symbol.asyncIterator]()
           try {
-            for await (const message of query) {
+            for (;;) {
+              const next = await output.next()
+              if (next.done) break
+              const message = next.value
               // Read before the frame is shown, so the steer is in place above what the model says after it; and
               // before a Stop is checked, so a read frame that arrived before the Stop accepts the steer instead of
-              // handing it back. A read whose frame had not reached Mousse when the Stop aborted is not seen: that
-              // steer is still handed back, the at-least-once window the design accepts.
+              // handing it back. Frames after the Stop are still read for this (`drainCarried`).
               if (carried && oneShotPromptRead(message, carried.id)) carriedRead()
               if (controller.signal.aborted) metrics.observe(message)
               controller.signal.throwIfAborted()
@@ -2865,6 +2911,8 @@ export class ClaudeSubscriptionProviderService {
               }
             }
           } catch (error) {
+            // Before the steers it carries are handed back: whatever the stopped process wrote before it died is read.
+            if (carried && controller.signal.aborted) await drainCarried(output)
             // The query may end with an error of its own after the interrupt that ended a held turn.
             if (frames.rateLimits.hold && !controller.signal.aborted && !(error instanceof AppError && error.code === 'provider_usage_limit')) throw usageLimitFromWindows(frames.rateLimits)
             // The SDK throws after the error result an interrupt produces; a steer resumes from here.
@@ -3069,8 +3117,12 @@ type OneShotSteer = { text: string; token?: string; steered: () => void }
  * (or `completed`), a frame or result names its id, or the model answers at all. The prompt is that query's only
  * message, so anything the model writes, and a successful result, answers it. Starting the process (`system` frames)
  * is not a read, and nor is a failed result: an interrupt or a Stop that came first ends the query that way too.
- * Only frames that arrived are checked: if Claude Code read the prompt but the frame showing it had not reached Mousse
- * when a Stop aborted the query, the steer is handed back anyway (at least once, never lost).
+ *
+ * On a Stop the query's process is sent SIGTERM at once, and the frames it wrote before it exited are still checked
+ * (`drainCarried`). What remains is at least once, never lost: a steer is handed back, though the model may have it,
+ * when Claude Code sent it to the model but was killed before writing any frame that shows it (Claude Code writes its
+ * `started` frame as it takes the prompt, so this takes a SIGTERM landing between the two), or when the process did
+ * not exit and wrote nothing within `ONE_SHOT_STOP_DRAIN_MS`, or could not be signalled at all.
  */
 function oneShotPromptRead(message: unknown, id: string): boolean {
   if (typeof message !== 'object' || message === null) return false
