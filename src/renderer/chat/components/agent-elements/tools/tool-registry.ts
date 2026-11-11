@@ -13,6 +13,7 @@ import {
   IconFilePlus as FilePlus,
   IconChecklist as ListTodo,
   IconLogout as LogOut,
+  Plug,
 } from "../../../../lib/icons";
 import {
   isRefusedSubagentResult,
@@ -26,8 +27,28 @@ export type ToolMeta = {
   icon: React.ComponentType<{ className?: string; size?: number }>;
   title: (part: any) => string;
   subtitle?: (part: any) => string;
+  /** The full detail when the subtitle shortens it, for the tooltip. */
+  detailTitle?: (part: any) => string;
   variant: ToolVariant;
 };
+
+/** Claude Code's `ToolSearch` query: `select:A,B` loads those tools by name; anything else is a search. */
+function toolSearchQuery(part: any): string {
+  const query = part.input?.query;
+  return typeof query === "string" ? query.trim() : "";
+}
+
+/** The tools a `select:` query names, by their short names (`mcp__mousse__thread_list` is `thread_list`). */
+function toolSearchSubtitle(part: any): string {
+  const query = toolSearchQuery(part);
+  if (!query.startsWith("select:")) return query;
+  return query
+    .slice("select:".length)
+    .split(",")
+    .map((name) => name.trim().split("__").pop() ?? "")
+    .filter(Boolean)
+    .join(", ");
+}
 
 function getDisplayPath(filePath: string): string {
   if (!filePath) return "";
@@ -383,6 +404,18 @@ export const toolRegistry: Record<string, ToolMeta> = {
         ? normalized.slice(0, 47) + "..."
         : normalized;
     },
+    variant: "simple",
+  },
+  "tool-ToolSearch": {
+    icon: Plug,
+    title: (part) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      if (isPending) return "Loading tools";
+      return part.state === "output-error" ? "Couldn't load tools" : "Loaded tools";
+    },
+    subtitle: toolSearchSubtitle,
+    detailTitle: toolSearchQuery,
     variant: "simple",
   },
   "tool-KillShell": {

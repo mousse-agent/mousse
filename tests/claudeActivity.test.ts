@@ -457,6 +457,26 @@ describe('what the frame reader keeps of a call', () => {
     expect(saved(events).byCall('long')).toMatchObject({ kind: 'command', status: 'done', output: 'all green\n', nativeId: 'b1' })
   })
 
+  it('a tool search and a Mousse app tool keep their names on the saved row', () => {
+    const events = readFrames([
+      stream('ts', 'ToolSearch'),
+      assistant('ts', 'ToolSearch', { query: 'select:mcp__mousse__profiler_overview', max_results: 5 }),
+      answer('ts', [{ type: 'tool_reference', tool_name: 'mcp__mousse__profiler_overview' }]),
+      stream('po', 'mcp__mousse__profiler_overview'),
+      assistant('po', 'mcp__mousse__profiler_overview', {}),
+      answer('po', '{"cpu":3}')
+    ])
+    for (const [callId, name] of [['ts', 'ToolSearch'], ['po', 'mcp__mousse__profiler_overview']] as const) {
+      expect(of(events, callId).filter((event) => event.phase === 'start').every((event) => event.toolName === name)).toBe(true)
+      expect(completeOf(events, callId)?.toolName).toBe(name)
+    }
+    expect(lastStartOf(events, 'po')?.activity).toMatchObject({ kind: 'generic', server: 'mousse' })
+    const { rows } = saved(events)
+    // The row's own name, not only the item's: the chat names the row from it.
+    expect(rows.map((row) => row.toolCall?.toolName)).toEqual(['ToolSearch', 'mcp__mousse__profiler_overview'])
+    expect(rows.map((row) => row.toolCall?.details)).toEqual([[], []])
+  })
+
   it('a failed foreground command is failed by its result, not by the task end', () => {
     const events = readFrames([
       stream('long', 'Bash'),

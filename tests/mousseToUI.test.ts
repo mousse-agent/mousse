@@ -6,6 +6,7 @@ import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
 import { TranscriptAssembler } from '../src/mms/run/transcript/TranscriptAssembler'
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
+import { toolRegistry } from '../src/renderer/chat/components/agent-elements/tools/tool-registry'
 
 const base = (overrides: Partial<ChatMessage>): ChatMessage => ({
   id: 'm1',
@@ -840,5 +841,55 @@ describe('provider events through the assembler into the cards', () => {
     expect(getToolStatus(part, 'ready').isInterrupted).toBe(true)
     expect(getToolStatus(part, 'streaming')).toMatchObject({ isInterrupted: true, isPending: false })
     expect(part.output).toMatchObject({ interrupted: true, summary: 'Stopped' })
+  })
+
+  it('names a tool search and a Mousse app tool by the names the runtime gave them', () => {
+    const query = 'select:mcp__mousse__profiler_overview'
+    const messages = replay([
+      event('start', 'toolu_ts', 'ToolSearch', { activity: { kind: 'generic', input: { query } } as never }),
+      event('complete', 'toolu_ts', 'ToolSearch', { activity: { kind: 'generic', output: '' } as never }),
+      event('start', 'toolu_po', 'mcp__mousse__profiler_overview', { activity: { kind: 'generic', server: 'mousse', input: {} } as never }),
+      event('complete', 'toolu_po', 'mcp__mousse__profiler_overview', { activity: { kind: 'generic', output: '{"cpu":3}' } as never }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as unknown as Array<Record<string, any>>
+    expect(parts[0]).toMatchObject({ type: 'tool-ToolSearch', state: 'output-available', input: { query } })
+    expect(parts[1]).toMatchObject({ type: 'tool-mcp__mousse__profiler_overview', state: 'output-available' })
+  })
+})
+
+describe('tool rows without a name of their own', () => {
+  const unnamed = (id: string, title: string, extra: Partial<ChatMessage> = {}): ChatMessage =>
+    base({ id, kind: 'mcp_tool_call', toolCall: { title, summary: title, details: [], status: 'complete' }, ...extra })
+  const typeOf = (message: ChatMessage) => partOf(mousseToUIMessages([message])[0]!).type
+
+  it('reads an identifier title as the name, an MCP one as its server and tool', () => {
+    expect(typeOf(unnamed('a', 'ToolSearch'))).toBe('tool-ToolSearch')
+    // "thread" holds "read": the name is not guessed from the words of an identifier.
+    expect(typeOf(unnamed('b', 'mcp__mousse__thread_list'))).toBe('tool-mcp__mousse__thread_list')
+    expect(typeOf(unnamed('c', 'mcp__mousse__profiler_overview'))).toBe('tool-mcp__mousse__profiler_overview')
+  })
+
+  it('never guesses a web search from a title that says search', () => {
+    expect(typeOf(unnamed('a', 'Searching deferred tools'))).not.toBe('tool-WebSearch')
+    expect(typeOf(unnamed('b', 'Tool search'))).not.toBe('tool-WebSearch')
+  })
+
+  it('takes the name an older row kept only on its item', () => {
+    const item = { ...activityBase, id: 'i', callId: 'i', toolName: 'mcp__mousse__profiler_overview', kind: 'generic', server: 'mousse', output: '{}' } as AgentActivityItem
+    expect(typeOf(unnamed('i', 'Called a tool', { activity: item }))).toBe('tool-mcp__mousse__profiler_overview')
+  })
+})
+
+describe('the tool search row', () => {
+  const meta = toolRegistry['tool-ToolSearch']!
+  const part = (state: string, query = 'select:Read,mcp__mousse__thread_list') => ({ type: 'tool-ToolSearch', state, input: { query } })
+
+  it('says what it does, names the tools it loads, and keeps the full query for the tooltip', () => {
+    expect(meta.title(part('input-available'))).toBe('Loading tools')
+    expect(meta.title(part('output-available'))).toBe('Loaded tools')
+    expect(meta.title(part('output-error'))).toBe("Couldn't load tools")
+    expect(meta.subtitle!(part('output-available'))).toBe('Read, thread_list')
+    expect(meta.detailTitle!(part('output-available'))).toBe('select:Read,mcp__mousse__thread_list')
+    expect(meta.subtitle!(part('output-available', 'slack send'))).toBe('slack send')
   })
 })
