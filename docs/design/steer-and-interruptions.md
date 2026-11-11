@@ -1,6 +1,6 @@
 # Steer waits for commands, Pi cuts in, and cut-off turns are marked
 
-Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). PR 1 (acceptance per token) and PR C (the mark) are built; PR 2 (the hold on Claude Code, Send now) builds §2.2–§2.4 and §2.9–§2.11, with §2.4 updated to spike S1. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
+Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). PR 1 (acceptance per token) and PR C (the mark) are built; PR 2 (the hold on Claude Code, Send now) builds §2.2–§2.4 and §2.9–§2.11, with §2.4 updated to spike S1. PR 3 (Codex, ACP agents and Cursor) builds §2.5 and §2.7, with the per-provider windows and defaults in §6, item 4. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
 
 ## Summary
 
@@ -288,7 +288,7 @@ This change does not change behaviour, and it lands first (§6). Tests:
   - acceptance (`onSteer` → `sink.steerAccepted(text, token)`) only once the re-prompt carrying the text is accepted: the ACP prompt request is accepted, or the next Cursor run starts. Today it is accepted before the cancel (`acp/session.ts:791-793`);
   - **the boundary drain:** at the end of a provider turn (the ACP prompt's response, or the Cursor run's end), the adapter reports `boundary()` and drains with `drainSteerEntry({ expect: 'native' })`. A drained steer goes in as the guidance re-prompt (ACP) or the next run (Cursor), with no cancel, and is accepted by its token as above. This is the path strict release uses. Each adapter gets a strict-boundary test: a steer held during a tool, the provider turn ends, the steer goes in as the next prompt, and nothing is cancelled.
 
-  Until PR 3 they stay at `steerBoundary: 'none'`, on the tokenless path.
+  Until PR 3 they stay at `steerBoundary: 'none'`, on the tokenless path. PR 3 moves them; the tokenless path stays only for a caller that offers no `drainSteerEntry`.
 - **Hand-back limits.** After the cancel is sent, the text is not handed back if the agent ends the turn or the session dies. In that case it goes in the next re-prompt or the follow-up turn, as for any drained, unaccepted steer when the turn ends. A cancel the agent ignores ends the turn (`steerFailure`, `acp/session.ts`); the steer then runs as the follow-up.
 - **Sparse events.** An ACP agent that never sends `completed` for a call keeps the steer held until the turn ends, when it runs as a follow-up turn, or until Send now. The hold never outlives the turn.
 - **Subagents.** Only Grok marks subagent calls ("subagent: …", `acp/session.ts:684`). Other ACP calls count as foreground.
@@ -779,6 +779,10 @@ Spikes come first, then small PRs in order. Each run-engine PR is Tier 5 and goe
 
    The other providers stay at `steerBoundary: 'none'` (today's behaviour) until their PR.
 4. **PR 3: Codex, ACP agents and Cursor** on the hold (`start`, the release window, strict release, `mayCut`). The ACP and Cursor token migration (§2.7), the Codex fixture, and SPEC §13.6.
+   - **Windows and defaults, by the pass rule.** Each adapter declares its window (`steerSettleMs`, read by `steerReleaseWindow`): Codex 232 ms and Grok 100 ms (S4), best effort by default, strict per instance. Cursor, Antigravity and other ACP agents were not measured, so they ship **strict as their default**, which the setting cannot loosen, rather than staying at `none`: a steer during their commands waits for the agent's turn to end, or Send now, instead of ending the command. Their window is the 1 s cap, so a steer that arrives within 1 s of a tool's result is held too.
+   - **Two rules the adapters needed.** The provider's turn end closes the release window (no call of that turn can start any more), so a command that ends right before the turn does still lets the held steer start the next turn of the same run. And while the only open call waits for a person's answer, a held steer stops waiting, also under strict release: nothing can start until they answer, so it cuts and answers the ask (§2.1).
+   - **Codex's plan row** (`turn/plan/updated`) stays open for the whole provider turn and runs nothing: it is not a foreground tool.
+   - **Acceptance.** ACP: the steer is read once the agent works on the prompt that carries it (its first update) or answers it. Cursor: once the run that carries it starts. Codex: unchanged (#927). Any earlier end hands it back by its token.
 5. **PR 4: Pi cut-in** (§3) on top of PR 2, with Pi at `announce`. Closes #368.
 6. **PR C: the mark** (§4). Independent, so it can land first. Tier 4.
 7. **Later, each gated on its spike:** Claude `'next'` during a hold (S1), and Codex native `turn/steer` (S2).

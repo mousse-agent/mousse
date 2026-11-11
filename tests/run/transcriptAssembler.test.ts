@@ -680,6 +680,14 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
     expect(ids(assembler)).toEqual(['q1'])
   })
 
+  it('a plan row (open for the whole provider turn, nothing runs in it) holds nothing', () => {
+    const { assembler } = harness()
+    assembler.tool(start('plan:turn-1', 'update_plan', { toolName: 'update_plan', kind: 'plan', steps: [{ step: 'Run the tests', status: 'inProgress' }] }))
+    expect(ids(assembler)).toEqual([])
+    assembler.tool(start('b1', 'shell'))
+    expect(ids(assembler)).toEqual(['b1'])
+  })
+
   it('a foreground subagent with a nested command holds nothing', () => {
     const { assembler } = harness()
     assembler.tool(agent('a1'))

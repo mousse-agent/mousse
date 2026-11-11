@@ -1115,7 +1115,8 @@ class HoldingAdapter implements ProviderAdapter {
   private turn: { sink: TurnSink; ctl: TurnControl; run: (fn: () => unknown) => unknown; end: () => void; runId: string } | undefined
 
   constructor(boundary: 'announce' | 'start') {
-    this.capabilities = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, steerBoundary: boundary }
+    // A `start` provider with a measured window: best effort unless the instance asks for strict.
+    this.capabilities = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, steerBoundary: boundary, steerSettleMs: boundary === 'start' ? STEER_SETTLE_MS : null }
   }
 
   configured(): boolean {
@@ -1587,6 +1588,21 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     await waitFor(() => w.held() !== undefined, 'held for the running call')
     expect(w.held()).toMatchObject({ tools: 1, detail: 'sleep 30 # runs' })
     w.adapter.toolDone('runs')
+    await waitFor(() => w.delivered().length > 0, 'cut while only the asking call is open')
+    expect(w.delivered()).toEqual(['cut:answer it'])
+    w.adapter.toolDone('asks')
+    await w.finish()
+  })
+
+  it('start, strict release: a held steer does not wait for a person\'s answer when nothing else runs; it cuts and answers it', async () => {
+    const w = await world('start', { strict: true })
+    w.adapter.toolStart('b1')
+    await w.steer('answer it')
+    await waitFor(() => w.held() !== undefined, 'held for the command')
+    w.adapter.toolDone('b1')
+    // The next call asks a person: the provider cannot go on (or end its turn) until they answer.
+    w.adapter.toolStart('asks')
+    w.adapter.awaiting('asks', true)
     await waitFor(() => w.delivered().length > 0, 'cut while only the asking call is open')
     expect(w.delivered()).toEqual(['cut:answer it'])
     w.adapter.toolDone('asks')

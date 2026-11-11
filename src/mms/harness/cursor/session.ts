@@ -62,7 +62,24 @@ export interface CursorChatInput {
   onThinking?(text: string): void
   onTool?(event: CursorToolEvent): void
   drainSteer?(): string | undefined
-  onSteer?(text: string): void
+  /**
+   * A steer drain with its token (`TurnControl.drainSteerEntry`). With `expect`, it takes only when the decision now is
+   * one of those deliveries. A drain is read (`steerTaken`, then `onSteer` with its token) only once the run that
+   * carries it started, and handed back (`returnSteer`) when that never happens.
+   */
+  drainSteerEntry?(opts?: { expect?: Array<'cut' | 'native' | 'hold'> }): { text: string; token: string } | undefined
+  /** The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. */
+  peekSteer?(): { delivery: 'cut' | 'native' | 'hold' } | undefined
+  /** The check right before the run is cancelled for a drained steer (`TurnControl.mayCut`): false hands it back. */
+  mayCut?(token: string): boolean
+  steerTaken?(token: string): void
+  returnSteer?(text: string, token: string): void
+  /** The steer is read: the run that carries it started. `token` names its drain, when it had one. */
+  onSteer?(text: string, token?: string): void
+  /** The run ended and none of its tools runs (`TurnSink.boundary`). */
+  onBoundary?(): void
+  /** Another run of the turn was sent (`TurnSink.providerTurn`). */
+  onProviderTurn?(): void
   /**
    * The id provider refs name for interrupt and terminate: a turn key at once, then the agent's id
    * once it is known.
@@ -279,6 +296,14 @@ interface Turn {
   stop: AbortController
   /** Resolves once the turn has ended, either way. */
   settled: Promise<void>
+  /** Hands back the steers the turn drained that no run took; called when the turn ends early. */
+  handBack?: () => void
+}
+
+/** A steer the turn drained; `token` names its drain when it had one. */
+interface DrainedSteer {
+  text: string
+  token?: string
 }
 
 /** What a turn produced so far; kept when it ends early. */
@@ -537,6 +562,7 @@ export class CursorSessions {
         input.onSession?.(id)
       })
     } catch (error) {
+      turn.handBack?.()
       if (error instanceof TurnStopped) return interrupted()
       if (error instanceof CursorHostExitedError) {
         // The prompt may already have reached Cursor: the outcome is unknown, so the turn ends as
@@ -581,8 +607,31 @@ export class CursorSessions {
     const model = { id: input.model || CURSOR_DEFAULT_MODEL }
     const mcpServers = input.mcp ? cursorMcpServers(input.mcp) : undefined
     let thinking = ''
-    const pendingSteers: string[] = []
+    // Steers drained for the next run, and those the next run carries until it starts. A drain with a token is read
+    // (`steerTaken`, `onSteer`) only once that run started; a failure before hands it back (`returnSteer`), so it is
+    // never lost (docs/design/steer-and-interruptions.md §2.6, §2.7).
+    const pendingSteers: DrainedSteer[] = []
+    let carried: DrainedSteer[] = []
     let steerFailure: Error | undefined
+    // The hold: a person's steer waits while a tool runs. While a run streams only a cut is taken; once it ended (the
+    // boundary), whatever can go in becomes the next run.
+    const holds = Boolean(input.peekSteer && input.drainSteerEntry)
+    let running = false
+    const drain = (): DrainedSteer | undefined => {
+      if (holds) {
+        const delivery = input.peekSteer!()?.delivery
+        if (!delivery || delivery === 'hold' || (running && delivery !== 'cut')) return undefined
+        return input.drainSteerEntry!({ expect: running ? ['cut'] : ['cut', 'native'] })
+      }
+      if (input.drainSteerEntry) return input.drainSteerEntry()
+      const text = input.drainSteer?.()
+      return text ? { text } : undefined
+    }
+    // However the turn ends early (a Stop, a failure, the host gone), drained steers no run took go back
+    // (`chat` calls it); they run as the follow-up.
+    turn.handBack = (): void => {
+      for (const entry of [...carried.splice(0), ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
+    }
     for (;;) {
       if (stop.aborted) throw new TurnStopped()
       if (steerFailure) throw steerFailure
@@ -611,6 +660,25 @@ export class CursorSessions {
         throw this.failure(error)
       }
       started(runId)
+      running = true
+      // A boundary the previous run's end reported is over; the steers this run carries are read now.
+      input.onProviderTurn?.()
+      // Each is saved or handed back on its own, so one failed save loses none of the others.
+      let unsaved: { error: unknown } | undefined
+      for (const entry of carried.splice(0)) {
+        if (!entry.token) continue
+        input.steerTaken?.(entry.token)
+        try {
+          input.onSteer?.(entry.text, entry.token)
+        } catch (error) {
+          input.returnSteer?.(entry.text, entry.token)
+          unsaved ??= { error }
+        }
+      }
+      if (unsaved) {
+        void active.cancel().catch(() => undefined)
+        throw unsaved.error
+      }
       // An accepted prompt makes the history fingerprint stale until the turn commits.
       const saved = store.saved(input.threadId)
       if (saved) {
@@ -667,17 +735,25 @@ export class CursorSessions {
       let cancelling = false
       const collectSteer = () => {
         if (stop.aborted || steerFailure) return
-        let steer: string | undefined
+        let entry: DrainedSteer | undefined
         try {
-          steer = input.drainSteer?.()?.trim()
+          entry = drain()
         } catch (error) {
           steerFailure = error instanceof Error ? error : new Error(String(error))
           return
         }
-        if (!steer) return
-        input.onSteer?.(steer)
-        pendingSteers.push(steer)
-        if (cancelling) return
+        const steer = entry?.text.trim()
+        if (!entry || !steer) return
+        const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}) }
+        // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
+        if (running && !cancelling && drained.token && input.mayCut && !input.mayCut(drained.token)) {
+          input.returnSteer?.(drained.text, drained.token)
+          return
+        }
+        // A drain without a token keeps the old rule: read when it is drained.
+        if (!drained.token) input.onSteer?.(steer)
+        pendingSteers.push(drained)
+        if (!running || cancelling) return
         cancelling = true
         void interruptWithDeadline({
           interrupt: async () => {
@@ -700,6 +776,7 @@ export class CursorSessions {
       try {
         end = await ended
       } finally {
+        running = false
         clearInterval(steerTimer)
         stop.removeEventListener('abort', onStop)
       }
@@ -719,11 +796,16 @@ export class CursorSessions {
         throw new Error(`${label} lost its connection to Cursor (${end.transportFailure}). Send the message again.`)
       }
       if (stop.aborted) throw new TurnStopped()
+      if (steerFailure) throw steerFailure
+      // The run is over and none of its tools runs: a held steer goes in as the next run, with no cancel (strict
+      // release waits for this).
+      if (end.status !== 'cancelled' || cancelling) input.onBoundary?.()
       collectSteer()
       if (steerFailure) throw steerFailure
       if (end.status === 'cancelled' && !pendingSteers.length) throw new TurnStopped()
       if (!pendingSteers.length) return { text: progress.text, interrupted: false, ...(progress.usage ? { usage: progress.usage } : {}) }
-      prompt = pendingSteers.splice(0).join('\n')
+      carried = pendingSteers.splice(0)
+      prompt = carried.map((entry) => entry.text).join('\n')
       images = []
     }
   }

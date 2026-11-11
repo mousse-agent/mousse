@@ -22,7 +22,9 @@ import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
-import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
+import { parseTranscript, readTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
+import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
+import { holdControl, type HoldControl } from '../support/steerHoldControl'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../src/shared/types'
 import { serializeAppError, type AppError } from '../../src/shared/errors'
 
@@ -202,8 +204,9 @@ describe('CodexAdapter', () => {
     expect(adapter.driver).toBe('codex')
     expect(adapter.capabilities).toEqual({
       steer: 'native',
-      // Not on the steer hold yet: a person's steer cuts in at once, as before.
-      steerBoundary: 'none',
+      // On the steer hold: Codex reports a tool when it starts, and a held steer waits out S4's 232 ms window after it.
+      steerBoundary: 'start',
+      steerSettleMs: 232,
       interrupt: true,
       rollback: 'none',
       fork: 'portable',
@@ -1676,6 +1679,284 @@ describe('CodexAdapter', () => {
       replay.assertDone()
       expect(asked).toHaveLength(1)
       expect(questions.listPendingForThread('thread-1')).toEqual([])
+    })
+  })
+
+  describe("the hold: a person's steer waits for a running command (docs/design/steer-and-interruptions.md §2.5)", () => {
+    const STEER = 'Use pnpm, not npm'
+    const commandItem = (id: string, command: string, status: string, extra: Record<string, unknown> = {}) => ({
+      type: 'commandExecution', id, command, cwd: '/w', processId: '4242', status, commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null, ...extra
+    })
+    const started = (id: string, command = 'npm test', turn = 'turn-1') => note('item/started', { threadId: T, turnId: turn, item: commandItem(id, command, 'inProgress') })
+    const finished = (id: string, command = 'npm test', turn = 'turn-1') =>
+      note('item/completed', { threadId: T, turnId: turn, item: commandItem(id, command, 'completed', { aggregatedOutput: 'ok\n', exitCode: 0, durationMs: 5 }) })
+    const interrupt = (id: number, turn = 'turn-1') => out({ id, method: 'turn/interrupt', params: { threadId: T, turnId: turn } })
+    /** The run goes on with the steer as its next turn, which answers it. */
+    const answers = (id: number, steer = STEER): TranscriptFrame[] => [
+      ...turnStart(id, steer, 'turn-2'),
+      ...message('msg-2', ['Switching to pnpm'], 'turn-2'),
+      completed('completed', 'turn-2')
+    ]
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+    /**
+     * Cue actions: `steer` (a person's message arrives; `agent: true` for an agent's), `held` (it must be held, not
+     * drained), `drained` (wait until the adapter drained it), `now` (Send now), `sleep` (let time pass).
+     */
+    const cues = (hold: HoldControl) => async (frame: unknown) => {
+      const action = frame as { action: string; text?: string; agent?: boolean; ms?: number }
+      if (action.action === 'steer') hold.steer(action.text ?? STEER, { person: !action.agent })
+      else if (action.action === 'held') {
+        await vi.waitFor(() => expect(hold.held()).toBe(true))
+        expect(hold.drained()).not.toContain(action.text ?? STEER)
+      } else if (action.action === 'drained') await vi.waitFor(() => expect(hold.drained()).toContain(action.text ?? STEER))
+      else if (action.action === 'now') hold.sendNow()
+      else if (action.action === 'sleep') await sleep(action.ms ?? 0)
+      else throw new Error(`unknown cue ${JSON.stringify(frame)}`)
+    }
+    const run = async (frames: TranscriptFrame[] | 'fixture', options: { strict?: boolean; settleMs?: number } = {}) => {
+      const hold = holdControl(CODEX_CAPS, options)
+      const transcript = frames === 'fixture'
+        ? readTranscript(join(__dirname, 'fixtures', 'steer-during-command', 'codex.ndjson'))
+        : parseTranscript([{ kind: 'transcript', adapter: 'codex', scenario: 'unit', boundary: CODEX_APP_SERVER_BOUNDARY, recordedAt: 'hand-authored', version: 1 }, ...frames].map((line) => JSON.stringify(line)).join('\n'))
+      const replay = new ReplayTransport(transcript, { onCue: cues(hold), stallMs: 3_000 })
+      const sink = hold.wrap(recordingSink())
+      const result = await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'Run the tests' }), sink, hold.ctl, host())
+      replay.assertDone()
+      const events = hold.log.map(([event, detail]) => `${event}:${detail}`)
+      return { hold, sink, result, events }
+    }
+    const before = (events: string[], a: string, b: string) => {
+      expect(events).toContain(a)
+      expect(events).toContain(b)
+      expect(events.indexOf(a)).toBeLessThan(events.indexOf(b))
+    }
+    const head = (prompt = 'Run the tests'): TranscriptFrame[] => [...handshake(), ...threadStart(4), ...turnStart(5, prompt)]
+
+    it('the fixture: a steer during a command waits for its result and the window, then cuts once, taken by the next turn', async () => {
+      const { hold, sink, result, events } = await run('fixture')
+      expect(result.text).toBe('Switching to pnpm')
+      // The command ran to its end: its result is in the transcript before the steer.
+      const commandEnd = sink.calls.find(([name, value]) => name === 'tool' && (value as { phase: string; callId: string }).phase === 'complete' && (value as { callId: string }).callId === 'cmd-1')
+      expect(commandEnd?.[1]).toMatchObject({ activity: { exitCode: 0 } })
+      before(events, 'tool:complete:cmd-1', `drain:${STEER}`)
+      // Not before the window after the result closed: a second command of the same response would start inside it.
+      expect(hold.at('drain')! - hold.at('tool', 'complete:cmd-1')!).toBeGreaterThanOrEqual(232 - 10)
+      expect(hold.at('drain')! - hold.at('tool', 'complete:cmd-1')!).toBeLessThan(232 + 500)
+      // Checked at dispatch, then taken only once the turn that carries it is accepted.
+      before(events, `drain:${STEER}`, 'mayCut:true')
+      before(events, 'mayCut:true', 'taken:drain-1')
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+      expect(events.filter((event) => event.startsWith('returned:'))).toEqual([])
+    })
+
+    it('strict release: the held steer waits past the window and the model\'s text, for turn/completed, and goes in with no interrupt', async () => {
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        ...message('msg-1', ['All 12 passed.']),
+        cue({ action: 'sleep', ms: 400 }),
+        cue({ action: 'held' }),
+        completed('completed'),
+        ...answers(6)
+      ], { strict: true })
+      before(events, 'boundary:', `drain:${STEER}`)
+      // No cut: nothing was interrupted, so no check at dispatch either.
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
+
+    it('Send now during the command interrupts at once, before the command\'s result', async () => {
+      const { events } = await run([
+        ...head(),
+        started('cmd-1', 'sleep 20'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        cue({ action: 'now' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        ...answers(7)
+      ])
+      // The command never reported a result: the cut ended it (its row is closed when the run ends).
+      if (events.includes('tool:complete:cmd-1')) before(events, `drain:${STEER}`, 'tool:complete:cmd-1')
+      before(events, `drain:${STEER}`, 'mayCut:true')
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
+
+    it('text between two commands closes the window: the steer cuts there (the documented best-effort window)', async () => {
+      const { hold, events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        cue({ action: 'held' }),
+        ...message('msg-1', ['Now the build:']),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        ...answers(7)
+      ], { settleMs: 5_000 })
+      // A long window: only the model's output can have closed it.
+      expect(hold.at('drain')! - hold.at('text', 'Now the build:')!).toBeLessThan(1_000)
+      before(events, 'text:Now the build:', `drain:${STEER}`)
+    })
+
+    it('strict release: text between two commands keeps the steer held through the second command, to the turn\'s end', async () => {
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        ...message('msg-1', ['Now the build:']),
+        cue({ action: 'sleep', ms: 300 }),
+        cue({ action: 'held' }),
+        started('cmd-2', 'npm run build'),
+        finished('cmd-2', 'npm run build'),
+        completed('completed'),
+        ...answers(6)
+      ], { strict: true })
+      before(events, 'tool:complete:cmd-2', `drain:${STEER}`)
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+    })
+
+    it('a delayed start notification: the next command\'s start reaches Mousse after the window, so the cut meets it (the documented best-effort window)', async () => {
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        // Codex is already running cmd-2; Mousse hears of it only after the window closed and the cut went out.
+        interrupt(6),
+        started('cmd-2', 'npm run build'),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        ...answers(7)
+      ])
+      before(events, `drain:${STEER}`, 'tool:start:cmd-2')
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
+
+    it('strict release: a delayed start notification finds the steer still held, and it goes in at the turn\'s end', async () => {
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        cue({ action: 'sleep', ms: 400 }),
+        cue({ action: 'held' }),
+        started('cmd-2', 'npm run build'),
+        finished('cmd-2', 'npm run build'),
+        completed('completed'),
+        ...answers(6)
+      ], { strict: true })
+      before(events, 'tool:complete:cmd-2', `drain:${STEER}`)
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+    })
+
+    it('a command that starts while the cut waits behind an earlier steer is not interrupted: the steer is held again', async () => {
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        // An agent's steer joins natively; its turn/steer is not answered yet.
+        cue({ action: 'steer', text: 'Subagent finished', agent: true }),
+        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Subagent finished') } }),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        // The person's steer is drained after the window; its cut waits behind the unanswered turn/steer.
+        cue({ action: 'drained' }),
+        started('cmd-2', 'npm run build'),
+        inn({ id: 6, result: { turnId: 'turn-1' } }),
+        cue({ action: 'held' }),
+        finished('cmd-2', 'npm run build'),
+        interrupt(7),
+        inn({ id: 7, result: {} }),
+        completed('interrupted'),
+        ...answers(8)
+      ])
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:false', 'mayCut:true'])
+      before(events, 'tool:start:cmd-2', 'mayCut:false')
+      before(events, 'mayCut:false', `returned:${STEER}`)
+      before(events, 'tool:complete:cmd-2', 'mayCut:true')
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual(['accepted:Subagent finished@drain-1', `accepted:${STEER}@drain-3`])
+    })
+
+    it('a command that ends right before the turn does: the turn\'s end closes the window, so the steer starts the next turn of the same run', async () => {
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        completed('completed'),
+        ...answers(6)
+      ])
+      before(events, 'boundary:', `drain:${STEER}`)
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+    })
+
+    it('the boundary ends when the next server turn starts: a steer before that turn writes anything cuts it', async () => {
+      const LATER = 'And keep the lockfile'
+      const { events } = await run([
+        ...head(),
+        started('cmd-1'),
+        cue({ action: 'steer' }),
+        cue({ action: 'held' }),
+        finished('cmd-1'),
+        completed('completed'),
+        ...turnStart(6, STEER, 'turn-2'),
+        // Turn 2 has shown nothing yet: a person's steer is not a native one for the turn that ended.
+        cue({ action: 'steer', text: LATER }),
+        interrupt(7, 'turn-2'),
+        inn({ id: 7, result: {} }),
+        completed('interrupted', 'turn-2'),
+        ...turnStart(8, LATER, 'turn-3'),
+        ...message('msg-3', ['Keeping it'], 'turn-3'),
+        completed('completed', 'turn-3')
+      ])
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`, `accepted:${LATER}@drain-2`])
+    })
+
+    it('a change waiting for a person\'s approval does not hold: the steer cuts and answers it', async () => {
+      const asked: string[] = []
+      questions.on('pending', (request: { requestId: string }) => void asked.push(request.requestId))
+      const { events } = await run([
+        ...head(),
+        note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: 'patch-1', changes: [{ path: 'src/a.ts', kind: { type: 'update' }, diff: '' }], status: 'inProgress' } }),
+        inn({ id: 'srv-1', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-1', startedAtMs: 0, reason: null } }),
+        cue({ action: 'steer', text: 'Leave src/a.ts alone' }),
+        interrupt(6),
+        out({ id: 'srv-1', result: { decision: 'decline' } }),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        ...answers(7, 'Leave src/a.ts alone')
+      ])
+      expect(asked).toHaveLength(1)
+      before(events, 'awaiting:patch-1:true', 'drain:Leave src/a.ts alone')
+      expect(events).toContain('awaiting:patch-1:false')
+    })
+
+    it('the turn\'s plan row is not a running tool: a steer while the model writes after it cuts at once', async () => {
+      const { events } = await run([
+        ...head(),
+        note('turn/plan/updated', { threadId: T, turnId: 'turn-1', explanation: null, plan: [{ step: 'Run the tests', status: 'inProgress' }] }),
+        ...message('msg-1', ['Running them now']),
+        cue({ action: 'steer' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        ...answers(7)
+      ])
+      expect(events).toContain('tool:start:plan:turn-1')
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
     })
   })
 

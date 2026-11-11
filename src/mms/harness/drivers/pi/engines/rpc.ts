@@ -35,6 +35,7 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   steer: 'native',
   // Until Pi cuts in (PR 4), its steers keep their next-step path.
   steerBoundary: 'none',
+  steerSettleMs: null,
   interrupt: true,
   rollback: 'none',
   fork: 'native',
@@ -175,6 +176,7 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     capabilities: {
       steer: capabilities.steer,
       steerBoundary: capabilities.steerBoundary,
+      steerSettleMs: capabilities.steerSettleMs,
       interrupt: capabilities.interrupt,
       rollback: capabilities.rollback,
       fork: capabilities.fork,

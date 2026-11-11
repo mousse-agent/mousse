@@ -445,8 +445,24 @@ export type CodexChatInput = {
   /** The Codex thread (and, once known, turn) serving this chat. */
   onSession?: (session: { codexThreadId: string; turnId?: string }) => void
   drainSteer?: () => string | undefined
-  /** `drainSteer` that also says whether the text is a person's (`cut`): see `TurnControl.drainSteerEntry`. */
-  drainSteerEntry?: () => { text: string; token?: string; cut?: boolean } | undefined
+  /**
+   * `drainSteer` that also says whether the text is a person's (`cut`): see `TurnControl.drainSteerEntry`. With
+   * `expect`, it takes only when the decision now is one of those deliveries.
+   */
+  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token?: string; cut?: boolean } | undefined
+  /**
+   * The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. With it, the turn drains
+   * only what it can deliver now: a cut, or a native steer (`turn/steer`, or the next turn at a boundary).
+   */
+  peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
+  /** The check right before `turn/interrupt` for a drained cut (`TurnControl.mayCut`): false hands it back. */
+  mayCut?: (token: string) => boolean
+  /** The server turn ended inside the run (`turn/completed`), and no command of it runs (`TurnSink.boundary`). */
+  onBoundary?: () => void
+  /** The server accepted another turn of the run (`TurnSink.providerTurn`). */
+  onProviderTurn?: () => void
+  /** A person is asked about the call `callId` (an approval or a question); false once it is answered. */
+  onToolAwaiting?: (callId: string, waiting: boolean) => void
   /** The drain `token` names was taken by a turn the server accepted; it will not be handed back. */
   steerTaken?: (token?: string) => void
   /** Hands back a drained steer no turn took (a Stop, a failed turn, a refused `turn/start`): it is not lost. */
@@ -658,6 +674,11 @@ class TurnRun {
 
   cancelQuestions(): void {
     this.questionsDone.abort(new Error('The Codex turn ended'))
+  }
+
+  /** A person is asked about the call `callId`, or no longer (`CodexChatInput.onToolAwaiting`). */
+  toolAwaiting(callId: string, waiting: boolean): void {
+    this.input.onToolAwaiting?.(callId, waiting)
   }
 
   /** The directory this turn runs in. */
@@ -2281,7 +2302,8 @@ export class CodexProviderService {
             input: command === undefined || where === undefined ? undefined : { command, cwd: where, params: requestDetails(approval, ['command', 'cwd']) },
             ...(where !== undefined ? { cwd: where } : {})
           },
-          approval.reason
+          approval.reason,
+          approval.itemId
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -2314,7 +2336,8 @@ export class CodexProviderService {
               : undefined,
             cwd: run.cwd
           },
-          approval.reason
+          approval.reason,
+          approval.itemId
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -2361,8 +2384,11 @@ export class CodexProviderService {
     prompt: string,
     kind: 'command' | 'edit',
     tool: { name: string; input: unknown; cwd?: string },
-    reason?: string | null
+    reason?: string | null,
+    itemId?: string
   ): Promise<'accept' | 'decline' | 'cancel'> {
+    // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
+    if (itemId) run.toolAwaiting(itemId, true)
     try {
       const answer = await this.questions.requestAnswers(
         [
@@ -2396,6 +2422,8 @@ export class CodexProviderService {
       return answer.permission === 'allow' ? 'accept' : 'decline'
     } catch {
       return run.questionSignal.aborted ? 'cancel' : 'decline'
+    } finally {
+      if (itemId) run.toolAwaiting(itemId, false)
     }
   }
 
@@ -2998,6 +3026,12 @@ export class CodexProviderService {
         // In order behind native steers already on their way.
         steering = steering.then(() => {
           if (!land(entry)) return
+          // The check at dispatch (docs/design/steer-and-interruptions.md §2.3): a command that started while the cut
+          // waited behind earlier steers is not ended for it. The drain goes back, and the hold resumes.
+          if (entry.token && input.mayCut && !input.mayCut(entry.token)) {
+            input.returnSteer?.(entry.text, entry.token)
+            return
+          }
           cutHeld.push(entry)
           cutWaiting = true
           steerWake?.()
@@ -3008,13 +3042,28 @@ export class CodexProviderService {
         })
         steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
       }
+      // The hold (docs/design/steer-and-interruptions.md §2.5): a person's steer waits while a command, MCP call or web
+      // search runs, and through the release window after it. Each poll asks first and takes only what can go in now.
+      const holds = Boolean(input.peekSteer && input.drainSteerEntry)
       const collectSteer = (): void => {
         if (signal.aborted) return
-        const entry = input.drainSteerEntry ? input.drainSteerEntry() : undefined
-        const steer = (entry ? entry.text : input.drainSteer?.())?.trim()
+        let entry: { text: string; token?: string; cut?: boolean } | undefined
+        let asCut: boolean
+        if (holds) {
+          const delivery = input.peekSteer!()?.delivery
+          if (!delivery || delivery === 'hold') return
+          entry = input.drainSteerEntry!({ expect: [delivery] })
+          // `native`: an agent's steer, or a held steer at the server turn's end, joins without a cut (`turn/steer`
+          // while a turn is open, else the next turn of the run).
+          asCut = delivery === 'cut'
+        } else {
+          entry = input.drainSteerEntry ? input.drainSteerEntry() : undefined
+          asCut = entry?.cut === true
+        }
+        const steer = (entry ? entry.text : holds ? undefined : input.drainSteer?.())?.trim()
         if (!steer) return
         const drainedSteer = { text: steer, ...(entry?.token ? { token: entry.token } : {}) }
-        if (entry?.cut) return cut(drainedSteer)
+        if (asCut) return cut(drainedSteer)
         deliver(drainedSteer)
       }
       if (input.drainSteer || input.drainSteerEntry) {
@@ -3075,6 +3124,8 @@ export class CodexProviderService {
         starting.catch(() => undefined)
         await Promise.race([starting, aborted])
         current.turnOpen = true
+        // A boundary the previous turn's end reported is over: a steer now waits for this turn's commands, or cuts.
+        input.onProviderTurn?.()
         // The server took the turn that carries the held steers and cut messages: they are read now, and the reply
         // goes on below them. Each is saved or handed back on its own, so one failed save loses none of the others.
         let unsaved: { error: unknown } | undefined
@@ -3093,6 +3144,9 @@ export class CodexProviderService {
         else for (const steer of undelivered.splice(0)) deliver(steer)
         lastTurn = await Promise.race([completion, aborted])
         current.turnOpen = false
+        // The server turn is over and none of its commands runs: a held steer goes in as the next turn, with no
+        // interrupt (strict release waits for this).
+        if (lastTurn.status !== 'failed') input.onBoundary?.()
         // Stop must not wait for a steer the server has not answered yet.
         await Promise.race([steering, aborted])
         collectSteer()

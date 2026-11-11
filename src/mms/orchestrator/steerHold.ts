@@ -115,6 +115,11 @@ export class SteerHold {
     this.atBoundary = true
   }
 
+  /** The provider began another turn of its own (`TurnSink.providerTurn`): the boundary is over. */
+  providerTurn(): void {
+    this.atBoundary = false
+  }
+
   /** A person is asked about `callId`: it is not a foreground tool while they are. */
   awaiting(callId: string, waiting: boolean): void {
     if (waiting) this.waitingOnPerson.add(callId)
@@ -127,7 +132,8 @@ export class SteerHold {
 
   /** The window after the last foreground tool's result is still open (`start` providers only). */
   releaseOpen(): boolean {
-    if (this.options.caps.steerBoundary !== 'start' || this.lastToolEventAt === undefined || this.outputSinceTool) return false
+    // At the provider's turn end no call of that turn can start any more: there is nothing left to wait out.
+    if (this.options.caps.steerBoundary !== 'start' || this.lastToolEventAt === undefined || this.outputSinceTool || this.atBoundary) return false
     return this.now() - this.lastToolEventAt < this.settleMs
   }
 
@@ -205,11 +211,14 @@ export class SteerHold {
     if (!pending) return undefined
     const tools = this.adopted ? this.foregroundTools() : []
     const forced = this.forcedGeneration !== undefined && this.forcedGeneration === this.generation && this.heldKeys !== undefined
+    // The turn waits for a person's answer and no other tool runs: nothing can start until they answer, so neither the
+    // window nor strict release keeps the steer back. It cuts, and answers the ask (§2.1).
+    const asking = this.askingOnly(tools)
     const delivery = steerDelivery(this.options.caps, {
       foreground: tools.length,
-      releaseOpen: this.adopted && this.releaseOpen(),
+      releaseOpen: this.adopted && !asking && this.releaseOpen(),
       strict: this.options.strict,
-      held: this.heldKeys !== undefined,
+      held: this.heldKeys !== undefined && !asking,
       atBoundary: this.atBoundary,
       forced
     }, { person: pending.person })
@@ -267,6 +276,12 @@ export class SteerHold {
   mayCut(token: string): boolean {
     if (this.forcedTokens.has(token)) return true
     if (!this.adopted) return true
-    return this.foregroundTools().length === 0 && !this.releaseOpen()
+    const tools = this.foregroundTools()
+    return tools.length === 0 && (this.askingOnly(tools) || !this.releaseOpen())
+  }
+
+  /** A person is asked about a call, and no foreground tool runs besides. */
+  private askingOnly(tools: ForegroundTool[]): boolean {
+    return this.waitingOnPerson.size > 0 && tools.length === 0
   }
 }

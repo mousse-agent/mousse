@@ -55,6 +55,9 @@ export const classifyGrokOption: ClassifyOption = (option) => {
  */
 export const GROK_CAPS: HarnessCaps = Object.freeze({
   ...ACP_BASE_CAPABILITIES,
+  // Spike S4 (Grok 1.0.77 over ACP): every call of a response was reported before any ran, so no start arrived after
+  // a result (G = 0); 2 × 0 + 100.
+  steerSettleMs: 100,
   planMode: false,
   contextUsage: 'none',
   toolControl: 'approval_only',

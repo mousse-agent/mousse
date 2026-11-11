@@ -79,13 +79,17 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
  * codex-cli 0.162: a steer sent while a shell command ran returned the running turn's id, the
  * command finished normally (exit 0), and the same turn went on to answer with the steer applied.
  * Nothing is cancelled, so reconciler rule 4 may deliver delegation notices into a live run.
- * A person's message is not left to wait for the command: the service cuts the server turn and starts
- * the next one with it (`drainSteerEntry`'s `cut`).
+ * A person's message is not left to wait for the reply: the service cuts the server turn and starts
+ * the next one with it (`drainSteerEntry`'s `cut`). While a command, MCP call or web search runs it
+ * waits instead (the hold, docs/design/steer-and-interruptions.md §2.5): Codex reports a tool only
+ * when it starts, so the steer also waits out the release window after the last result.
  */
 export const CODEX_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'native',
-  // Until the Codex adapter adopts the hold (PR 3), a steer cuts in at once.
-  steerBoundary: 'none',
+  steerBoundary: 'start',
+  // Spike S4 (codex app-server 0.167.0): at most 65.7 ms from a result to the next start of the same response,
+  // over 216 pairs; 2 × 65.7 + 100.
+  steerSettleMs: 232,
   interrupt: true,
   rollback: 'none',
   fork: 'portable',
@@ -190,7 +194,13 @@ export class CodexAdapter implements ProviderAdapter {
       autoCompactTokens: host.context.compactionTokens,
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       drainSteer: () => ctl.drainSteer(),
-      ...(ctl.drainSteerEntry ? { drainSteerEntry: () => ctl.drainSteerEntry!() } : {}),
+      ...(ctl.drainSteerEntry ? { drainSteerEntry: (opts) => ctl.drainSteerEntry!(opts) } : {}),
+      // The hold (docs/design/steer-and-interruptions.md §2.5): offered only for a turn on it.
+      ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
+      ...(ctl.mayCut ? { mayCut: (token: string) => ctl.mayCut!(token) } : {}),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
       steerTaken: (token) => ctl.steerTaken?.(token),
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
       // Called once Codex has the text: its `turn/steer` was answered, or, for a cut, the server accepted the turn

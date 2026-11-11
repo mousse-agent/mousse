@@ -23,6 +23,8 @@ import { replayCursorHost } from '../../src/mms/run/testkit/cursorHostReplay'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { readTranscript, ReplayTransport } from '../../src/mms/run/testkit/ReplayTransport'
 import { FakeCursorHost, hostFailure } from './fakeCursorHost'
+import { CURSOR_CAPS } from '../../src/mms/harness/drivers/cursor'
+import { holdControl, type HoldControl } from '../support/steerHoldControl'
 
 const FIXTURES = join(__dirname, '..', 'run', 'fixtures')
 const INSTANCE = 'cursor:work'
@@ -47,7 +49,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
   const texts = new Map<string, string>()
-  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void } = {}): TurnSpec => ({
+  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void; hold?: HoldControl } = {}): TurnSpec => ({
     binding,
     input: {
       threadId,
@@ -60,7 +62,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       nativeHistory: options.history ?? '',
       signal: options.signal ?? new AbortController().signal
     } as unknown as TurnInput,
-    sink: {
+    sink: (options.hold ? options.hold.wrap.bind(options.hold) : <S>(sink: S) => sink)({
       text: (event: { phase: string; content: string }) => event.phase !== 'start' && texts.set(threadId, event.content),
       thinking: () => {},
       tool: options.tool ?? (() => {}),
@@ -68,8 +70,8 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       providerRef: () => {},
       steerAccepted: () => {},
       usage: () => {}
-    } as unknown as TurnSpec['sink'],
-    control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
+    } as unknown as TurnSpec['sink']),
+    control: options.hold?.ctl ?? ({ drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control']),
     host: {
       ...(options.mcp ? { bridge: { mcp: options.mcp, turnToken: 't', sessionInstructions: '', turnPreamble: '', userMcp: 'native' } } : {}),
       context: { nativeHistoryAfterTurn: (text: string) => text }
@@ -231,6 +233,129 @@ describe('Cursor behind the gateway', () => {
     expect(host.transports).toHaveLength(1)
     expect(notices.filter(([threadId, text]) => threadId === 'b' && text.includes('restarted')).map(([, text]) => text)).toEqual(['Work was restarted to stop another chat, so this reply was cut short.'])
     expect(notices.some(([threadId, text]) => threadId === 'a' && text.includes('restarted'))).toBe(false)
+  })
+})
+
+describe("the hold: a person's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
+  const STEER = 'Use pnpm, not npm'
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  function held(options: { cancel?: 'ends' | 'never' } = {}) {
+    let runs = 0
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: () => ({ runId: `run-${++runs}` }),
+      cancel: (params, fake) => {
+        if (options.cancel === 'never') return new Promise(() => {})
+        setTimeout(() => fake.emit({ event: 'run_end', runId: params.runId as string, status: 'cancelled' }), 5)
+        return { cancelled: true }
+      }
+    })
+    const delta = (runId: string, update: Record<string, unknown>) => host.emit({ event: 'delta', runId, update } as never)
+    const shell = (callId: string, command = 'npm test') => ({ type: 'shell', args: { command } })
+    const toolStart = (runId: string, callId: string) => delta(runId, { type: 'tool-call-started', callId, toolCall: shell(callId) })
+    const toolDone = (runId: string, callId: string) => delta(runId, { type: 'tool-call-completed', callId, toolCall: { ...shell(callId), result: { status: 'success', value: { exitCode: 0 } } } })
+    const writes = (runId: string, text: string) => delta(runId, { type: 'text-delta', text })
+    const end = (runId: string, status = 'finished') => host.emit({ event: 'run_end', runId, status } as never)
+    const hold = holdControl(CURSOR_CAPS)
+    const { turn } = setup(host.connect)
+    const events = () => hold.log.map(([event, detail]) => `${event}:${detail}`)
+    /** The run `n` streams (its updates are watched). */
+    const running = (n: number) => vi.waitFor(() => expect(events().filter((event) => event === 'providerTurn:')).toHaveLength(n))
+    const sent = () => host.calls('send').map((params) => params.text)
+    return { host, hold, turn: () => turn('thread', { hold }), events, running, toolStart, toolDone, writes, end, sent }
+  }
+  const order = (events: string[], ...steps: string[]) => {
+    let from = 0
+    for (const step of steps) {
+      const at = events.indexOf(step, from)
+      expect(at, `${step} in ${JSON.stringify(events)}`).toBeGreaterThanOrEqual(from)
+      from = at + 1
+    }
+  }
+
+  it('strict boundary drain: a steer held during a tool goes in as the next run when the run ends, and nothing is cancelled', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.toolStart('run-1', 'call-1')
+    c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.hold.held()).toBe(true))
+    c.toolDone('run-1', 'call-1')
+    c.writes('run-1', 'All 12 passed.')
+    // Cursor's gaps were never measured: the steer stays held past the output (strict release).
+    await sleep(300)
+    expect(c.hold.held()).toBe(true)
+    c.end('run-1')
+    await c.running(2)
+    c.writes('run-2', 'Switching to pnpm')
+    c.end('run-2')
+    expect(await handle.result).toMatchObject({ aborted: false })
+    expect(c.host.calls('cancel')).toEqual([])
+    expect(c.sent()).toEqual(['hi', STEER])
+    order(c.events(), 'tool:complete:call-1', 'boundary:', `drain:${STEER}`, 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
+    expect(c.events().filter((event) => event.startsWith('mayCut'))).toEqual([])
+  })
+
+  it('a steer while Cursor writes cancels the run, and is read only once the next run started', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    order(c.events(), `drain:${STEER}`, 'mayCut:true', 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
+    expect(c.sent()).toEqual(['hi', STEER])
+  })
+
+  it('a tool that starts between the drain and the cancel keeps the steer: handed back, held, and sent at the run\'s end', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.beforeMayCut = () => c.toolStart('run-1', 'late')
+    c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.events()).toContain(`returned:${STEER}`))
+    await vi.waitFor(() => expect(c.hold.held()).toBe(true))
+    c.toolDone('run-1', 'late')
+    c.end('run-1')
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    expect(c.host.calls('cancel')).toEqual([])
+    order(c.events(), 'mayCut:false', `returned:${STEER}`, 'boundary:', `drain:${STEER}`)
+    expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-2`])
+  })
+
+  it('Send now during a tool cancels the run at once, and the steer goes in once', async () => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    c.toolStart('run-1', 'call-1')
+    c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.hold.held()).toBe(true))
+    c.hold.sendNow()
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    expect(c.sent()).toEqual(['hi', STEER])
+    expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+  })
+
+  it('a host that ends after the cancel and before the next run hands the steer back, never read', async () => {
+    const c = held({ cancel: 'never' })
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toHaveLength(1))
+    c.host.crash()
+    expect(await handle.result).toMatchObject({ aborted: true })
+    expect(c.events().filter((event) => event.startsWith('returned:'))).toEqual([`returned:${STEER}`])
+    expect(c.events().filter((event) => event.startsWith('accepted:') || event.startsWith('taken:'))).toEqual([])
   })
 })
 

@@ -43,6 +43,8 @@ export interface AcpProcess extends AcpConnection {
   turnSignal?: AbortSignal
   /** Who answers the running turn's permission requests (its bridge's); the sessions' own otherwise. */
   turnPrompter?: PermissionPrompter
+  /** The running turn's `onToolAwaiting`: a person is asked about a call. */
+  turnToolAwaiting?: (callId: string, waiting: boolean) => void
   /** The permission mode of the turn running now, read per request; cleared when the turn ends. */
   permissionMode?: PermissionMode
   /** `initialize` advertised `mcpCapabilities.http`; otherwise the Mousse server goes through the stdio bridge. */
@@ -82,6 +84,15 @@ export interface AcpProcess extends AcpConnection {
   cancelRequested?: boolean
   /** The slash commands the agent advertised (`available_commands_update`), without the slash. */
   commands?: Set<string>
+}
+
+/** Session updates that show the agent working on the prompt in flight (not session bookkeeping). */
+const PROMPT_WORK_UPDATES = new Set(['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan'])
+
+/** A steer the turn drained; `token` names its drain when it had one. */
+interface DrainedSteer {
+  text: string
+  token?: string
 }
 
 /** How long a steer waits for a cancelled prompt's own completion before sending the next one. */
@@ -197,7 +208,26 @@ export interface AcpChatInput {
   orchestrationInstructions?: string
   onText: (text: string) => void
   drainSteer?: () => string | undefined
-  onSteer?: (text: string) => void
+  /**
+   * A steer drain with its token (`TurnControl.drainSteerEntry`). With `expect`, it takes only when the decision now is
+   * one of those deliveries. A drain is taken (`steerTaken`, then `onSteer` with its token) only once the prompt that
+   * carries it reached the agent, and handed back (`returnSteer`) when that never happens.
+   */
+  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token: string } | undefined
+  /** The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. */
+  peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
+  /** The check right before `session/cancel` for a drained steer (`TurnControl.mayCut`): false hands it back. */
+  mayCut?: (token: string) => boolean
+  steerTaken?: (token: string) => void
+  returnSteer?: (text: string, token: string) => void
+  /** The steer is read: the prompt carrying it reached the agent. `token` names its drain, when it had one. */
+  onSteer?: (text: string, token?: string) => void
+  /** The prompt ended and nothing of it runs (`TurnSink.boundary`). */
+  onBoundary?: () => void
+  /** Another prompt of the turn was sent (`TurnSink.providerTurn`). */
+  onProviderTurn?: () => void
+  /** A person is asked about the call `callId` (a permission request); false once it is answered. */
+  onToolAwaiting?: (callId: string, waiting: boolean) => void
   /** A tool call started, changed or ended; `status` says how it ended (`unfinished`: the turn ended first). */
   onTool?: (event: ProviderToolEvent & { status?: 'completed' | 'failed' | 'unfinished' }) => void
   /** Who answers this turn's permission requests (the turn bridge's `permission`). */
@@ -289,7 +319,11 @@ export class AcpSessions {
     const classify = this.options.classifyOption ?? classifyGenericOption
     const handlers: AcpClientHandlers = {
       requestPermission: async (request) => {
-        const answer = await answerPermission(active?.turnPrompter ?? this.prompter, scope, request, { label, classify })
+        // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
+        const callId = request.toolCall?.toolCallId
+        const awaiting = callId ? active?.turnToolAwaiting : undefined
+        awaiting?.(callId!, true)
+        const answer = await answerPermission(active?.turnPrompter ?? this.prompter, scope, request, { label, classify }).finally(() => awaiting?.(callId!, false))
         // A prompt the agent then ends `cancelled` ends because Mousse's answer cancelled the request
         // (dismissed, timed out, or refused by policy), not because the agent chose to stop.
         if (answer.outcome.outcome === 'cancelled' && active) active.cancelRequested = true
@@ -624,6 +658,7 @@ export class AcpSessions {
       next.cwd = input.cwd
       next.turnSignal = input.signal
       next.turnPrompter = input.prompter
+      next.turnToolAwaiting = input.onToolAwaiting
       // Read per request, so a change applies from the next turn without restarting the agent.
       next.permissionMode = input.permissionMode ?? 'ask'
       this.turning.add(next)
@@ -643,6 +678,29 @@ export class AcpSessions {
     let steerFailure: unknown
     // A prompt is in flight, and the agent's silence is counted (`PROMPT_SILENCE_MS`).
     let prompting = false
+    // Steers drained for the next prompt, and those the prompt in flight carries that the agent has not shown it has.
+    // A drain with a token is read (`steerTaken`, `onSteer`) only once the agent works on the prompt that carries it,
+    // or answers it; until then a failure hands it back (`returnSteer`), so it is never lost
+    // (docs/design/steer-and-interruptions.md §2.6, §2.7).
+    const pendingSteers: DrainedSteer[] = []
+    const carried: DrainedSteer[] = []
+    const readCarried = (): void => {
+      for (const entry of carried.splice(0)) {
+        if (!entry.token) continue
+        input.steerTaken?.(entry.token)
+        try {
+          input.onSteer?.(entry.text, entry.token)
+        } catch (error) {
+          // Not saved: it goes back, and the turn fails rather than going on without it.
+          input.returnSteer?.(entry.text, entry.token)
+          steerFailure ??= error
+          closeAcpConnection(current)
+        }
+      }
+    }
+    const handBack = (): void => {
+      for (const entry of [...carried.splice(0), ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
+    }
     const silenceMs = this.options.promptSilenceMs ?? PROMPT_SILENCE_MS
     let silenceTimer: ReturnType<typeof setTimeout> | undefined
     let silenceFailure: Error | undefined
@@ -676,15 +734,22 @@ export class AcpSessions {
       noteCommands(current, update)
       if (!update || typeof update !== 'object') return
       const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
+      // The agent works on the prompt that carries drained steers: they are read now, before what it writes.
+      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate)) readCarried()
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
         text += event.content.text ?? ''
         input.onText(text)
       }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
-        const title = event.name === 'start_subagent' ? `${label} subagent: ${event.title ?? 'Task'}` : event.title ?? event.name ?? `${label} tool`
+        const subagent = event.name === 'start_subagent'
+        const title = subagent ? `${label} subagent: ${event.title ?? 'Task'}` : event.title ?? event.name ?? `${label} tool`
         toolTitles.set(event.toolCallId, title)
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name })
+        // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
+        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(subagent ? { activity: { kind: 'subagent', description: event.title ?? 'Task' } } : {}) })
       }
+      // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
+      if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && toolTitles.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed')
+        input.onTool?.({ phase: 'update', callId: event.toolCallId, title: toolTitles.get(event.toolCallId)! })
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
         input.onTool?.({ phase: 'complete', callId: event.toolCallId, title: event.title ?? toolTitles.get(event.toolCallId) ?? `${label} tool`, status: event.status as 'completed' | 'failed' })
         toolTitles.delete(event.toolCallId)
@@ -782,16 +847,36 @@ export class AcpSessions {
         }
         return { type: 'image' as const, data: image.data, mimeType }
       })
-      const pendingSteers: string[] = []
       let cancelSent = false
       const turnProcess = active
+      // The hold (docs/design/steer-and-interruptions.md §2.7): a person's steer waits while a tool runs. While a prompt
+      // runs only a cut is taken; between prompts (the boundary), whatever can go in joins the next prompt.
+      const holds = Boolean(input.peekSteer && input.drainSteerEntry)
+      const drain = (): DrainedSteer | undefined => {
+        if (holds) {
+          const delivery = input.peekSteer!()?.delivery
+          if (!delivery || delivery === 'hold' || (prompting && delivery !== 'cut')) return undefined
+          return input.drainSteerEntry!({ expect: prompting ? ['cut'] : ['cut', 'native'] })
+        }
+        if (input.drainSteerEntry) return input.drainSteerEntry()
+        const text = input.drainSteer?.()
+        return text ? { text } : undefined
+      }
       const collectSteer = () => {
         if (input.signal?.aborted || steerFailure) return
         try {
-          const steer = input.drainSteer?.()?.trim()
-          if (!steer) return
-          input.onSteer?.(steer)
-          pendingSteers.push(steer)
+          const entry = drain()
+          const steer = entry?.text.trim()
+          if (!entry || !steer) return
+          const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}) }
+          // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
+          if (prompting && !cancelSent && drained.token && input.mayCut && !input.mayCut(drained.token)) {
+            input.returnSteer?.(drained.text, drained.token)
+            return
+          }
+          // A drain without a token keeps the old rule: read when it is drained.
+          if (!drained.token) input.onSteer?.(steer)
+          pendingSteers.push(drained)
           if (prompting && !cancelSent) {
             cancelSent = true
             questions.autoRejectPendingForThread(input.threadId)
@@ -846,11 +931,15 @@ export class AcpSessions {
         if (steerFailure) throw steerFailure
         collectSteer()
         if (pendingSteers.length) {
-          const guidance = 'Additional guidance:\n' + pendingSteers.splice(0).join('\n')
+          const steers = pendingSteers.splice(0)
+          carried.push(...steers)
+          const guidance = 'Additional guidance:\n' + steers.map((entry) => entry.text).join('\n')
           if (commandTurn) blocks = [blocks[0], blocks[1] ? `${blocks[1]}\n\n${guidance}` : guidance]
           else blocks = [`${blocks[0]}\n\n${guidance}`]
         }
         prompting = true
+        // A boundary the previous prompt's end reported is over.
+        input.onProviderTurn?.()
         cancelSent = false
         active.cancelRequested = false
         active.activity = watchSilence
@@ -879,6 +968,8 @@ export class AcpSessions {
           active.prompting = undefined
         }
         prompting = false
+        // The agent answered the prompt: it has the steers it carried, whatever it says of how it ended.
+        readCarried()
         watchSilence()
         if (completion) {
           // A steer's cancel: the next prompt waits (briefly) for the cancelled task to report its end.
@@ -901,10 +992,16 @@ export class AcpSessions {
           if (ended) throw ended
         }
         input.signal?.throwIfAborted()
+        if (steerFailure) throw steerFailure
+        // The prompt is over and none of its tools runs: a held steer goes in as the next prompt, with no cancel
+        // (strict release waits for this).
+        input.onBoundary?.()
         collectSteer()
         if (steerFailure) throw steerFailure
         if (!pendingSteers.length) break
-        blocks = [pendingSteers.splice(0).join('\n')]
+        const steers = pendingSteers.splice(0)
+        carried.push(...steers)
+        blocks = [steers.map((entry) => entry.text).join('\n')]
         commandTurn = false
         attachments = []
         if (text) text += '\n\n'
@@ -912,6 +1009,8 @@ export class AcpSessions {
       for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
       return text
     } catch (error) {
+      // Drained steers no prompt delivered go back; they run as the follow-up.
+      handBack()
       this.close(current)
       this.sessions.delete(input.threadId)
       if (steerFailure) throw steerFailure
@@ -925,6 +1024,7 @@ export class AcpSessions {
       current.onUpdate = (update) => noteCommands(current, update)
       current.turnSignal = undefined
       current.turnPrompter = undefined
+      current.turnToolAwaiting = undefined
       current.permissionMode = undefined
       this.turning.delete(current)
     }

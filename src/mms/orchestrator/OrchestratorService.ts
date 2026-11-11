@@ -78,7 +78,7 @@ import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '.
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
-import { STEER_SETTLE_MS, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
+import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
@@ -1811,8 +1811,8 @@ export class OrchestratorService extends EventEmitter {
   private turnStates = new Map<string, TurnState>()
   /** The steer hold of each run whose turn runs in this process (`SteerHold`), for Send now. */
   private readonly steerHolds = new Map<string, SteerHold>()
-  /** The release window after a foreground tool on a `start` provider (`STEER_SETTLE_MS`; tests lengthen it). */
-  private steerSettleMs = STEER_SETTLE_MS
+  /** Replaces every instance's release window after a foreground tool (`steerReleaseWindow`); tests lengthen it. */
+  private steerSettleMs: number | undefined
   /** Each thread's running `/compact`, so a Stop can end it (`stopCompaction`). */
   private readonly compactions = new Map<string, AbortController>()
   /** Running compactions whose result was taken: a Stop or Send now comes too late for them. */
@@ -11887,13 +11887,15 @@ export class OrchestratorService extends EventEmitter {
       // goes in once it has its result. A remote source that cannot be read without taking keeps the whole turn on the
       // behaviour from before the hold: the peek could not see its steers.
       const assembler = this.transcript
+      // The instance's release: its own measured window, and strict where it asked for it or no window was measured.
+      const release = steerReleaseWindow(instance.caps, this.settingsStore.get().runs.steerRelease?.[instance.instanceId])
       const hold = new SteerHold({
         caps: opts?.externalDrainSteer && !opts.externalPeekSteer ? { ...instance.caps, steerBoundary: 'none' } : instance.caps,
-        strict: this.settingsStore.get().runs.steerRelease?.[instance.instanceId] === 'strict',
+        strict: release.strict,
         // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
         // waits, Mousse's own calls that ask the person do not hold.
         foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
-        settleMs: this.steerSettleMs
+        settleMs: this.steerSettleMs ?? release.settleMs
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
       turnHold = { hold, runId: engineRunId }
@@ -11978,6 +11980,7 @@ export class OrchestratorService extends EventEmitter {
         },
         toolAwaiting: (callId, waiting) => hold.awaiting(callId, waiting),
         boundary: () => hold.boundary(),
+        providerTurn: () => hold.providerTurn(),
         nativeMessages: (nativeMessages, checkpoint) => {
           // A completed-turn measurement becomes stale as soon as the live loop
           // appends or compacts native history. Estimate until the final provider

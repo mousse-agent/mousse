@@ -759,6 +759,8 @@ export class TranscriptAssembler {
   private ownsForeground(message: ChatMessage): boolean {
     if (isBackgroundOrSubagent(message) && !message.activity?.notMovable) return false
     if (isWaitTool(toolNameOf(message))) return false
+    // A plan row (Codex's `turn/plan/updated`) stays open for the whole provider turn, and nothing runs in it.
+    if (message.activity?.kind === 'plan') return false
     const seen = new Set<string>([message.id])
     let parentId = message.activity?.parentId
     while (parentId && !seen.has(parentId)) {

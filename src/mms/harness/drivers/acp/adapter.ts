@@ -115,12 +115,23 @@ export class AcpAdapter implements ProviderAdapter {
       orchestrationInstructions: host.bridge?.sessionInstructions || undefined,
       ...(host.bridge?.permission ? { prompter: host.bridge.permission } : {}),
       drainSteer: () => ctl.drainSteer(),
-      onSteer: (steer) => {
+      // Per drain, with its token (docs/design/steer-and-interruptions.md §2.6, §2.7): read only once the prompt that
+      // carries it reached the agent, handed back otherwise.
+      ...(ctl.drainSteerEntry ? { drainSteerEntry: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => ctl.drainSteerEntry!(opts) } : {}),
+      // The hold: offered only for a turn on it.
+      ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
+      ...(ctl.mayCut ? { mayCut: (token: string) => ctl.mayCut!(token) } : {}),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
+      onSteer: (steer, token) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.
         streams.thinking.break()
         streams.text.break()
-        sink.steerAccepted(steer)
+        sink.steerAccepted(steer, token)
       },
       onText: (content) => {
         progress()

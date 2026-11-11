@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { heartbeatToleranceMs, steerDelivery, steerStrategy, stopStrategy, type SteerTurnFacts } from '../../src/mms/run/CommandPolicy'
+import { heartbeatToleranceMs, MAX_STEER_SETTLE_MS, steerDelivery, steerReleaseWindow, steerStrategy, stopStrategy, type SteerTurnFacts } from '../../src/mms/run/CommandPolicy'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
+import { GENERIC_ACP_CAPS } from '../../src/mms/harness/acp/presets/generic'
+import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
+import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
+import { CURSOR_CAPS } from '../../src/mms/harness/drivers/cursor'
+import { PI_RPC_CAPS } from '../../src/mms/harness/drivers/pi'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { ProviderCapabilities } from '../../src/mms/harness/adapter'
@@ -119,6 +124,33 @@ describe('steerDelivery (docs/design/steer-and-interruptions.md §2.2)', () => {
 
   it('strict, after a tool finished and model output closed the window, a new steer (nothing held) cuts', () => {
     expect(steerDelivery(hold('start'), turn({ strict: true, held: false, foreground: 0, releaseOpen: false }), person)).toBe('cut')
+  })
+})
+
+describe('steerReleaseWindow (§2.3.2, §6 pass rule)', () => {
+  it('each start provider uses its own measured window: Codex 232 ms, Grok 100 ms, best effort unless the instance asks for strict', () => {
+    expect(steerReleaseWindow(CODEX_CAPS, undefined)).toEqual({ strict: false, settleMs: 232 })
+    expect(steerReleaseWindow(CODEX_CAPS, 'best_effort')).toEqual({ strict: false, settleMs: 232 })
+    expect(steerReleaseWindow(CODEX_CAPS, 'strict')).toEqual({ strict: true, settleMs: 232 })
+    expect(steerReleaseWindow(GROK_CAPS, undefined)).toEqual({ strict: false, settleMs: 100 })
+    expect(steerReleaseWindow(GROK_CAPS, 'strict')).toEqual({ strict: true, settleMs: 100 })
+  })
+
+  it('a start provider whose gap was never measured is strict whatever the setting, with the window at the 1 s cap', () => {
+    for (const unmeasured of [CURSOR_CAPS, GENERIC_ACP_CAPS, ANTIGRAVITY_CAPABILITIES]) {
+      expect(unmeasured.steerBoundary).toBe('start')
+      for (const setting of [undefined, 'best_effort', 'strict'] as const)
+        expect(steerReleaseWindow(unmeasured, setting)).toEqual({ strict: true, settleMs: MAX_STEER_SETTLE_MS })
+    }
+    // A window over the cap cannot keep its margin, and caps saved before the key existed have none: strict.
+    expect(steerReleaseWindow(caps({ steerBoundary: 'start', steerSettleMs: 1_500 }), 'best_effort')).toEqual({ strict: true, settleMs: MAX_STEER_SETTLE_MS })
+    const { steerSettleMs: _gone, ...old } = CODEX_CAPS
+    expect(steerReleaseWindow(old as ProviderCapabilities, undefined)).toEqual({ strict: true, settleMs: MAX_STEER_SETTLE_MS })
+  })
+
+  it('an announce or none provider has no window', () => {
+    expect(steerReleaseWindow(CLAUDE_SUBSCRIPTION_CAPABILITIES, undefined)).toEqual({ strict: false, settleMs: 0 })
+    expect(steerReleaseWindow(PI_RPC_CAPS, undefined)).toEqual({ strict: false, settleMs: 0 })
   })
 })
 
