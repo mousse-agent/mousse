@@ -111,7 +111,9 @@ describe('lifecycle public protocol acceptance', () => {
       })] }))
       pending = f.rpc.request('orchestrator.send', { threadId: thread.id, content: 'wait in provider seam' })
       await started
-      // A delete stops the turn first and waits for it to end; this provider ignores the Stop, so the wait is cut short.
+      // This case assumes a provider that ignores Stop, so the turn outlives the delete's Stop and the delete is refused.
+      // (The delete stops a turn and waits for it to end; with a provider that honours Stop it then succeeds, as
+      // tests/threadDeleteRunning.test.ts shows.) The wait is cut short here.
       ;(f.services as unknown as { deleteStopWaitMs: number }).deleteStopWaitMs = 300
       for (const attempt of [() => peer.request('threads.delete', { threadId: archived(f.services.threads, thread.id) }), () => f.services.trashThread(thread.id)]) {
         await expect(attempt()).rejects.toThrow(/active|busy|drain|running|blocked/i)

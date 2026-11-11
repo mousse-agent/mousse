@@ -1057,8 +1057,15 @@ export class MmsProfileServices {
       restore: (threadId) => this.restoreThread(threadId),
       archive: (threadId) => this.archiveIfStartedByPerson(threadId),
       stopRuns: (threadIds) => this.stopRunsForDelete(threadIds),
+      isRunning: (threadIds) => this.runningForDelete(threadIds).length > 0,
+      assertCanStop: (threadIds) => this.assertCanStopForDelete(threadIds),
+      precheck: (threadId) => {
+        // A thread never moved has no lifecycle record yet; the trash would make the same one.
+        if (!this.threads.lifecycleStore.get(threadId)) this.threads.getThreadDir(threadId)
+        return this.lifecycle.cleanup.deletePrecheck(threadId)
+      },
       // The delete's own request, and the other lifecycle calls, are not waited for (as at its admission).
-      settle: () => this.requests.waitForIdle(2_000, (active) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))).catch(() => undefined)
+      settle: (budgetMs) => this.requests.waitForIdle(budgetMs, (active) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))).catch(() => undefined)
     })
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
@@ -1269,7 +1276,7 @@ export class MmsProfileServices {
     if (activeRequests.length) {
       throw new ResourceLifecycleError(
         'busy',
-        'Cannot trash thread: profile requests are still active'
+        `Cannot trash thread: profile requests are still active (${activeRequests.map(([key, count]) => `${key}=${count}`).join(', ')})`
       )
     }
     const root = this.threads.lifecycleStore.require(taskId)
@@ -1414,20 +1421,58 @@ export class MmsProfileServices {
   }
 
   /** `threads.delete` before its admission: see `ThreadDeleter.stopBeforeDelete`. */
-  stopThreadBeforeDelete(threadId: string): Promise<void> {
-    return this.threadDeletes.stopBeforeDelete(threadId)
+  async stopThreadBeforeDelete(threadId: string, options: { human: boolean; discard: boolean }): Promise<void> {
+    this.threads.assertLifecycleMutationAvailable()
+    try {
+      await this.threadDeletes.stopBeforeDelete(threadId, options)
+    } catch (error) {
+      // A profile shutting down refuses the delete as its request would.
+      if (error instanceof Error && 'code' in error && error.code === 'profile_draining') throw new DomainRpcError('profile_draining', error.message)
+      throw error
+    }
   }
 
-  /** How long a delete waits for the turns it stopped to end; a stopped turn may wait up to 20 s for its checkpoint. */
-  private deleteStopWaitMs = 25_000
+  /**
+   * How long a delete waits for the turns it stopped to end. A stopped turn may wait up to 20 s for its checkpoint;
+   * with the admission wait (2 s) and the retries (5 s), a delete answers well inside a request's 60 s.
+   */
+  private deleteStopWaitMs = 20_000
+
+  /**
+   * What refuses a delete's trash, checked before its Stop (`ThreadDeleteDeps.assertCanStop`): shutdown, the threads'
+   * own terminals, questions, agents, chats and workflows, and any other execution of the profile. Their own turns, and
+   * the sends waiting for them, end with the Stop; requests that come and go are waited for by the delete.
+   */
+  private assertCanStopForDelete(threadIds: readonly string[]): void {
+    this.requests.assertAccepting()
+    const owned = [...new Set(threadIds.flatMap((id) => this.threads.lifecycleStore.get(id) ? this.lifecycleOwnedTasks(id).map((task) => task.taskId) : [id]))]
+    const family = new Set([...owned, ...threadIds])
+    for (const id of family) this.threadRuntimes.assertDeletable(id, { ignoreTurn: true })
+    this.platform.chats.assertLifecycleIdle(family)
+    this.platform.workflowRuns.assertLifecycleIdle(family)
+    const others = this.orchestrator.activeTurnThreadIds().filter((id) => !family.has(id))
+    const otherWork = Object.entries(this.orchestrator.getOwnedActivity()).filter(([label, count]) =>
+      count > 0 && label !== 'turn' && label !== 'send' && !(label.startsWith('bot-turn:') && family.has(label.slice('bot-turn:'.length))))
+    if (others.length || otherWork.length || this.platform.getActiveCount() || this.scheduled.getActiveCount() || this.mcpManager.getActiveCount())
+      throw new ResourceLifecycleError('busy', 'Cannot trash thread: profile execution is still active')
+  }
 
   /**
    * A delete's Stop: the turns of these threads end, with their queued messages, and the delete waits for them to
    * unwind (their provider gone, their lease let go). A turn still running after the wait is left to the trash, which
    * refuses it as busy.
    */
+  /**
+   * The threads among these whose turn or run a delete's Stop ends. A bot's turns end in the trash's drain instead
+   * (`personalBots.quiesceForTrash`), which ends its activation first.
+   */
+  private runningForDelete(threadIds: readonly string[]): string[] {
+    const bots = new Set(this.personalBots?.botThreadsAmong([...threadIds]) ?? [])
+    return threadIds.filter((id) => !bots.has(id) && (this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null))
+  }
+
   private async stopRunsForDelete(threadIds: readonly string[]): Promise<void> {
-    const running = (): string[] => threadIds.filter((id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null)
+    const running = (): string[] => this.runningForDelete(threadIds)
     const stopping = running()
     if (!stopping.length) return
     for (const threadId of stopping) {

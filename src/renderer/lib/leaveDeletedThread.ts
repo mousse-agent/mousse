@@ -26,18 +26,15 @@ export function threadAfterDeletion(threads: readonly Thread[], deletedId: strin
   return visibleThreads(threads).find((thread) => thread.id !== deletedId && !thread.settledAt)?.id
 }
 
-/** A thread the service no longer has (deleted, or in the middle of its delete): `threads.get` answers it is not found. */
-function isGone(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /not.found|thread_not_found|trashed/i.test(message)
-}
-
 export interface LeaveDeletedThreadDeps {
-  /** The thread as the service has it now; null or a not-found error when it is gone. */
+  /**
+   * The thread as the service has it now: null once it is gone for good. An error (the service out of reach, or the
+   * thread's delete still under way, which may yet put it back) leaves the answer open.
+   */
   getThread(threadId: string): Promise<Thread | null>
   /** Shows a listed thread (the store switches at once, then the service is asked). */
   open(threadId: string): Promise<void>
-  /** Makes a new chat and shows it. */
+  /** Makes a new chat, or takes the one another window of this profile just made, and shows it. */
   createNew(): Promise<void>
 }
 
@@ -51,45 +48,65 @@ const defaultDeps: LeaveDeletedThreadDeps = {
     const store = useAppStore.getState()
     // The newest empty chat is reused, as the new-chat command does; a private one is not.
     const draft = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly && !entry.settledAt))
-    const thread = draft ?? await window.mousse.threads.create()
+    const thread = draft ?? await window.mousse.threads.newChatAfterDelete()
     store.upsertThread(thread)
     store.switchToThread(thread.id)
     await selectOrSettle(thread.id)
   }
 }
 
-/**
- * Leaves `threadId` when the window still shows it and the service confirms it is gone. A thread a refused delete put
- * back is still there, so the window stays on it.
- */
-export async function leaveDeletedThread(threadId: string, deps: LeaveDeletedThreadDeps = defaultDeps): Promise<boolean> {
-  try {
-    if (await deps.getThread(threadId)) return false
-  } catch (error) {
-    if (!isGone(error)) return false
-  }
+/** The window still shows `threadId`, and no newer list brought it back. */
+function stillShownAndGone(threadId: string): boolean {
   const state = useAppStore.getState()
-  // The person moved on meanwhile, or a newer list brought the thread back.
-  if (state.activeThreadId !== threadId || state.threads.some((thread) => thread.id === threadId)) return false
-  const next = threadAfterDeletion(state.threads, threadId)
-  if (next) await deps.open(next)
-  else await deps.createNew()
-  return true
+  return state.activeThreadId === threadId && !state.threads.some((thread) => thread.id === threadId)
 }
 
 /**
- * Watches the store's thread list: when the shown thread leaves it, the window leaves the thread. Returns the
- * unsubscribe function.
+ * Leaves `threadId` when the window still shows it and the service says it is gone. `stays`: the service still has
+ * it (a refused delete put it back), or the window moved on. `unknown`: the service could not say yet.
  */
-export function watchDeletedShownThread(deps: LeaveDeletedThreadDeps = defaultDeps): () => void {
+export async function leaveDeletedThread(threadId: string, deps: LeaveDeletedThreadDeps = defaultDeps): Promise<'left' | 'stays' | 'unknown'> {
+  let thread: Thread | null
+  try {
+    thread = await deps.getThread(threadId)
+  } catch {
+    return 'unknown'
+  }
+  if (thread || !stillShownAndGone(threadId)) return 'stays'
+  const next = threadAfterDeletion(useAppStore.getState().threads, threadId)
+  if (next) await deps.open(next)
+  else await deps.createNew()
+  return 'left'
+}
+
+/** Waits between asks while the answer is open; about a minute in all, longer than a delete may take. */
+export const LEAVE_RETRY_DELAYS_MS: readonly number[] = [300, 600, 1_200, 2_400, 5_000, 10_000, 15_000, 25_000]
+
+/**
+ * Watches the store's thread list: when the shown thread leaves it, the window leaves the thread, asking again while the
+ * service cannot say yet. Returns the unsubscribe function.
+ */
+export function watchDeletedShownThread(deps: LeaveDeletedThreadDeps = defaultDeps, delays: readonly number[] = LEAVE_RETRY_DELAYS_MS): () => void {
   const leaving = new Set<string>()
-  return useAppStore.subscribe((state, previous) => {
+  let stopped = false
+  const leave = async (threadId: string): Promise<void> => {
+    for (let attempt = 0; !stopped && stillShownAndGone(threadId); attempt++) {
+      if (await leaveDeletedThread(threadId, deps) !== 'unknown') return
+      if (attempt >= delays.length) return
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]))
+    }
+  }
+  const unsubscribe = useAppStore.subscribe((state, previous) => {
     if (state.threads === previous.threads) return
     const shown = state.activeThreadId
     if (!shownThreadLeftList(previous.threads, state.threads, shown) || leaving.has(shown)) return
     leaving.add(shown)
-    void leaveDeletedThread(shown, deps)
+    void leave(shown)
       .catch((error: unknown) => console.warn('the window could not leave a deleted thread', error))
       .finally(() => leaving.delete(shown))
   })
+  return () => {
+    stopped = true
+    unsubscribe()
+  }
 }

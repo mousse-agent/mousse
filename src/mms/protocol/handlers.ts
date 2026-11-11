@@ -1627,10 +1627,11 @@ export async function dispatchMethod(
 }
 
 async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
-  // Deleting an archived thread stops what still runs in it first: the send waiting for its turn is a request the
-  // delete's admission would otherwise wait for, and refuse. Another computer's delete is refused anyway.
+  // Deleting an archived thread stops what still runs in it first, once nothing that would refuse the delete is found:
+  // the send waiting for its turn is a request the delete's admission would otherwise wait for, and refuse. Another
+  // computer's delete is refused anyway.
   if (method === 'threads.delete' && isObject(params) && typeof params.threadId === 'string' && ctx.connection?.clientType !== 'bridge')
-    await ctx.mms.stopThreadBeforeDelete?.(params.threadId)
+    await ctx.mms.stopThreadBeforeDelete?.(params.threadId, { human: ctx.connection?.clientType === 'gui', discard: params.discard === true })
   // Installation lifecycle commands must not wait on themselves in a personal
   // request barrier. Every actual personal service has this ownership method;
   // the fallback preserves legacy isolated handler test doubles.
@@ -2026,7 +2027,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const thread = ctx.mms.threads.getThread(threadId)
-      if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      if (!thread) {
+        // In the trash, its delete is still under way and may yet put it back (`deleting`).
+        const state = ctx.mms.threads.lifecycleStore.get(threadId)?.state
+        throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId, ...(state === 'trashed' || state === 'purge-started' ? { deleting: true } : {}) })
+      }
       return { thread }
     }
     case 'threads.create': {

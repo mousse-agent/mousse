@@ -345,6 +345,46 @@ export class ResourcePurgeService {
     }
     return { kept, skip, failed }
   }
+  /**
+   * Why the files at `resource` may be the only copy (scratch folders, browser runtime files), or undefined. A purge
+   * removes such files only with a person's Discard; `deletePrecheck` asks the same before a delete stops anything.
+   */
+  private soleCopyReason(inventory: Awaited<ReturnType<typeof buildResourceInventory>>, resource: Awaited<ReturnType<typeof buildResourceInventory>>['resources'][number]): string | undefined {
+    const scratch = inventory.sources.filter((source) => resource.sourceIds.includes(source.id)).some((source) => {
+      const workflow = dirname(source.path) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces')
+      const agent = basename(source.path) === 'run.json' && dirname(dirname(source.path)) === join(this.store.profileHome, 'agent-runs')
+      const terminal = basename(source.path) === 'terminal-workspace.json'
+      if (!workflow && !agent && !terminal) return false
+      const value = JSON.parse(readFileSync(source.path, 'utf8'))
+      return workflow && value.kind === 'scratch' && value.worktreePath === resource.identity || agent && resource.identity === join(dirname(source.path), 'workspace') || terminal && value.kind === 'task-terminal-scratch' && resource.identity === join(dirname(source.path), 'terminal-workspace')
+    })
+    if (scratch) return 'Scratch files have no durable reconstruction proof'
+    return within(join(this.store.profileHome, 'browser', 'worker-artifacts'), resource.identity) ? 'Browser runtime files include content outside the durable artifact index' : undefined
+  }
+
+  /**
+   * What would refuse a delete that keeps the work, read from an active thread before anything stops or moves: the
+   * inventory's blockers, and files that may be the only copy (which need a person's Discard). Read-only; the trash and
+   * the preview still check everything again.
+   */
+  async deletePrecheck(taskId: string): Promise<{ blockers: string[]; soleCopies: string[] }> {
+    const record = this.store.require(taskId)
+    const ownedIds = new Set(this.owned(taskId).map((task) => task.taskId))
+    const inventory = await buildResourceInventory(this.store, record, { keepWork: true })
+    const soleCopies: string[] = []
+    for (const resource of inventory.resources) {
+      if (!ownedIds.has(resource.ownerTaskId) || ['worktree', 'agent-session', 'artifact', 'git-ref'].includes(resource.kind)) continue
+      if (resource.identity.includes('#') || !isAbsolute(resource.identity) || !within(this.store.profileHome, resource.identity)) continue
+      try {
+        if (!this.soleCopyReason(inventory, resource) || !await present(resource.identity)) continue
+        if ((await walkOwnedContentAsync(resource.identity)).some((entry) => entry.kind !== 'directory')) soleCopies.push(resource.identity)
+      } catch {
+        // Unreadable now: the preview after the trash judges it.
+      }
+    }
+    return { blockers: [...inventory.blockers], soleCopies }
+  }
+
   /** `taskId` and the threads it owns; one trashed on its own keeps its own choice, and one deleted for good is gone. */
   private owned(taskId: string): TaskLifecycleRecord[] {
     const records = this.store.list(), ids = new Set([taskId])
@@ -598,16 +638,9 @@ export class ResourcePurgeService {
       try {
         assertLifecyclePath(this.store.profileHome, resource.identity)
         const stat = await lstat(resource.identity), content = await walkOwnedContentAsync(resource.identity)
-        const scratch = inventory.sources.filter((source) => resource.sourceIds.includes(source.id)).some((source) => {
-          const workflow = dirname(source.path) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces')
-          const agent = basename(source.path) === 'run.json' && dirname(dirname(source.path)) === join(this.store.profileHome, 'agent-runs')
-          const terminal = basename(source.path) === 'terminal-workspace.json'
-          if (!workflow && !agent && !terminal) return false
-          const value = JSON.parse(readFileSync(source.path, 'utf8'))
-          return workflow && value.kind === 'scratch' && value.worktreePath === resource.identity || agent && resource.identity === join(dirname(source.path), 'workspace') || terminal && value.kind === 'task-terminal-scratch' && resource.identity === join(dirname(source.path), 'terminal-workspace')
-        })
-        const discardRequired = (scratch || within(join(this.store.profileHome, 'browser', 'worker-artifacts'), resource.identity)) && content.some((entry) => entry.kind !== 'directory')
-        preview.items.push({ id: resource.id, kind: 'path', identity: resource.identity, ownerTaskId: resource.ownerTaskId, content, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, discardRequired, ...(discardRequired ? { reason: scratch ? 'Scratch files have no durable reconstruction proof' : 'Browser runtime files include content outside the durable artifact index' } : {}), status: 'pending' })
+        const soleCopy = this.soleCopyReason(inventory, resource)
+        const discardRequired = soleCopy !== undefined && content.some((entry) => entry.kind !== 'directory')
+        preview.items.push({ id: resource.id, kind: 'path', identity: resource.identity, ownerTaskId: resource.ownerTaskId, content, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, discardRequired, ...(discardRequired ? { reason: soleCopy } : {}), status: 'pending' })
       } catch (error) { preview.blockers.push((error as Error).message) }
     }
     // Delete maximal owned containers once, with task data last. Contained source entries are accounted by their parent snapshot.

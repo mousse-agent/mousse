@@ -16,15 +16,19 @@ const at = '2026-11-11T10:00:00.000Z'
 const thread = (id: string, over: Partial<Thread> = {}): Thread =>
   ({ id, name: id, createdAt: at, updatedAt: at, order: 0, startedAt: at, ...over })
 
-const notFound = () => Object.assign(new Error("Error invoking remote method 'threads:get': MmsProtocolError: Thread not found"), {})
+/** What `threads:get` throws while the thread's delete is still under way, or the service cannot answer. */
+const notYet = () => new Error("Error invoking remote method 'threads:get': MmsProtocolError: Thread not found")
 
 let service: Map<string, Thread>
-let api: { get: ReturnType<typeof vi.fn>; select: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> }
+/** Threads in the trash: their delete is under way and may still put them back. */
+let deleting: Set<string>
+let api: { get: ReturnType<typeof vi.fn>; select: ReturnType<typeof vi.fn>; newChatAfterDelete: ReturnType<typeof vi.fn> }
 let stop: () => void
 
 /** The window shows `shown`; the service and the window's list both have `threads`. */
 function windowShowing(shown: string, threads: Thread[]): void {
   service = new Map(threads.map((entry) => [entry.id, entry]))
+  deleting = new Set()
   useAppStore.setState({ threads, activeThreadId: shown, messages: [] })
 }
 
@@ -38,20 +42,20 @@ const settled = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 beforeEach(() => {
   api = {
+    // As main answers it: the thread, null once it is gone, an error while its delete is under way.
     get: vi.fn(async (id: string) => {
-      const found = service.get(id)
-      if (!found) throw notFound()
-      return found
+      if (deleting.has(id)) throw notYet()
+      return service.get(id) ?? null
     }),
     select: vi.fn(async () => undefined),
-    create: vi.fn(async () => {
+    newChatAfterDelete: vi.fn(async () => {
       const made = thread('new-chat', { name: 'New Chat', startedAt: undefined })
       service.set(made.id, made)
       return made
     })
   }
   ;(window as unknown as { mousse: unknown }).mousse = { threads: api }
-  stop = watchDeletedShownThread()
+  stop = watchDeletedShownThread(undefined, [20, 20, 20, 20])
 })
 
 afterEach(() => {
@@ -66,7 +70,7 @@ describe('the shown thread is deleted', () => {
     deleteInService('a')
     await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('b'))
     expect(api.select).toHaveBeenCalledWith('b')
-    expect(api.create).not.toHaveBeenCalled()
+    expect(api.newChatAfterDelete).not.toHaveBeenCalled()
   })
 
   it('from elsewhere (another window, the CLI, its expiry): the chat leaves it the same way', async () => {
@@ -81,7 +85,7 @@ describe('the shown thread is deleted', () => {
     windowShowing('a', [thread('a'), thread('old', { settledAt: at })])
     deleteInService('a')
     await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('new-chat'))
-    expect(api.create).toHaveBeenCalledTimes(1)
+    expect(api.newChatAfterDelete).toHaveBeenCalledTimes(1)
     expect(api.select).toHaveBeenCalledWith('new-chat')
   })
 
@@ -99,6 +103,41 @@ describe('the shown thread is deleted', () => {
     await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('b'))
     await settled()
     expect(api.select).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('while the service cannot say yet', () => {
+  it('waits out a delete still under way, then leaves once the thread is gone', async () => {
+    windowShowing('a', [thread('a'), thread('b')])
+    // Trashed, not yet purged: the list no longer has it, but the delete may still put it back.
+    deleting.add('a')
+    deleteInService('a')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(useAppStore.getState().activeThreadId).toBe('a')
+    deleting.delete('a')
+    await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('b'))
+  })
+
+  it('stays when a delete under way puts the thread back (refused)', async () => {
+    windowShowing('a', [thread('a'), thread('b')])
+    deleting.add('a')
+    deleteInService('a')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    // Put back: the service has it again, and its list follows.
+    deleting.delete('a')
+    service.set('a', thread('a'))
+    useAppStore.getState().setThreads([...service.values()])
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(useAppStore.getState().activeThreadId).toBe('a')
+    expect(api.select).not.toHaveBeenCalled()
+  })
+
+  it('asks again after an error, instead of staying on a deleted thread for good', async () => {
+    windowShowing('a', [thread('a'), thread('b')])
+    api.get.mockRejectedValueOnce(new Error('MMS client not connected'))
+    deleteInService('a')
+    await vi.waitFor(() => expect(useAppStore.getState().activeThreadId).toBe('b'))
+    expect(api.get).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -133,7 +172,7 @@ describe('the window stays', () => {
   it('where the person went meanwhile', async () => {
     windowShowing('a', [thread('a'), thread('b'), thread('c')])
     let answer: (value: unknown) => void = () => {}
-    api.get.mockImplementationOnce(() => new Promise((_resolve, reject) => { answer = () => reject(notFound()) }))
+    api.get.mockImplementationOnce(() => new Promise((resolve) => { answer = () => resolve(null) }))
     deleteInService('a')
     useAppStore.getState().switchToThread('c')
     answer(undefined)
