@@ -1545,9 +1545,12 @@ export class ThreadDataStore extends EventEmitter {
     return true
   }
 
-  getThread(id: string): Thread | undefined {
-    if (!this.isLifecycleVisible(id)) return undefined
-    // Prefer warm list cache (common after list/setModel/pin paths).
+  /**
+   * A thread from the warm list caches only, or undefined. Nothing is read from disk, scanned, migrated or registered,
+   * and its lifecycle state is not checked: a thread in the trash may still be returned until the next listing. For
+   * lookups that must have no side effects, such as working out which threads a request or a delete touches.
+   */
+  peekThread(id: string): Thread | undefined {
     if (this.listCache && this.listCacheProjectsKey === this.projectsCacheKey()) {
       const hit = this.listCache.find((t) => t.id === id)
       if (hit) return hit
@@ -1560,6 +1563,14 @@ export class ThreadDataStore extends EventEmitter {
       const hit = threads.find((t) => t.id === id)
       if (hit) return hit
     }
+    return undefined
+  }
+
+  getThread(id: string): Thread | undefined {
+    if (!this.isLifecycleVisible(id)) return undefined
+    // Prefer warm list cache (common after list/setModel/pin paths).
+    const cached = this.peekThread(id)
+    if (cached) return cached
 
     const standalone = this.readStandaloneIndex().find((t) => t.id === id)
     if (standalone) return standalone

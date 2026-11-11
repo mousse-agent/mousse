@@ -586,6 +586,27 @@ describe('other threads keep working through a delete', () => {
       await p.close()
     }
   })
+
+  it('deletes a shared subagent while its parent works in the worktree they share, and the worktree stays', async () => {
+    const p = await profile()
+    try {
+      const at = project(p.f)
+      const { thread: parent, workspace } = await worktreeThread(p.f, at, 'parent')
+      const child = sharedSubagent(p.f, parent.id, workspace.worktreePath)
+      expect(readThreadWorkspaceRecord(p.f.services.threads.getThreadDir(child.id))).toBeUndefined()
+      await p.run(parent.id, false)
+      archived(p.f.services.threads, child.id)
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: child.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(p.f.services.threads.getThread(child.id)).toBeUndefined()
+      // The parent's turn, its worktree and its record of it are as they were.
+      expect(p.adapter.live(parent.id)).toBe(1)
+      expect(existsSync(join(workspace.worktreePath, 'a.txt'))).toBe(true)
+      expect(readThreadWorkspaceRecord(p.f.services.threads.getThreadDir(parent.id))?.worktreePath).toBe(workspace.worktreePath)
+    } finally {
+      await p.close()
+    }
+  })
 })
 
 describe('a delete is refused, stopping nothing, while other work touches what it deletes', () => {
@@ -723,6 +744,36 @@ describe('a delete is refused, stopping nothing, while other work touches what i
     }
   })
 
+  it('a send with no thread yet (`__unbound__`) is in flight, even one made from another thread\'s work', async () => {
+    const p = await profile()
+    let release = () => {}
+    let send: Promise<unknown> | undefined
+    try {
+      const target = await p.thread('to delete')
+      const other = await p.thread('makes the send')
+      await p.run(target.id)
+      archived(p.f.services.threads, target.id)
+      const hold = new Promise<void>((resolve) => { release = resolve })
+      const orchestrator = p.f.services.orchestrator
+      vi.spyOn(orchestrator as unknown as { sendOwned: () => Promise<unknown> }, 'sendOwned').mockImplementation(async () => { await hold; return {} })
+      vi.spyOn(orchestrator, 'getBoundThreadId').mockReturnValue(null)
+      send = runInWorkScope({ threadIds: [other.id] }, () => orchestrator.send({ content: 'hello' } as never))
+      await waitFor(() => orchestrator.getOwnedWork().some((entry) => entry.label === 'send'), 'the send to be in flight')
+      // The profile's, never the scope of the work that made it. (The target's own send is in flight too.)
+      const sends = orchestrator.getOwnedWork().filter((entry) => entry.label === 'send' && entry.scope?.threadIds[0] !== target.id)
+      expect(sends.map((entry) => entry.scope)).toEqual([null])
+      const stops = stopsFor(p.f.services)
+      await expect(p.f.rpc.request('threads.delete', { threadId: target.id })).rejects.toThrow(/profile execution is still active/)
+      expect(stops).not.toHaveBeenCalled()
+      untouched(p, target.id)
+    } finally {
+      release()
+      await send?.catch(() => undefined)
+      vi.restoreAllMocks()
+      await p.close()
+    }
+  })
+
   it('profile-wide work (an automation run) is in flight', async () => {
     const p = await profile()
     let release = () => {}
@@ -741,6 +792,47 @@ describe('a delete is refused, stopping nothing, while other work touches what i
       await run
     } finally {
       release()
+      await p.close()
+    }
+  })
+})
+
+describe('working out what a delete touches only reads', () => {
+  it('a request\'s scope and a thread\'s facts never scan, migrate or register a thread missing from the list caches', async () => {
+    const p = await profile()
+    let hold: ReturnType<typeof holdRequests> | undefined
+    let read: Promise<unknown> | undefined
+    try {
+      const at = project(p.f)
+      const { thread: other, workspace } = await worktreeThread(p.f, at, 'not in the caches')
+      const trashed = await p.thread('in the trash')
+      archived(p.f.services.threads, trashed.id)
+      await p.f.services.trashThread(trashed.id, undefined, undefined, true)
+      const threads = p.f.services.threads
+      const internals = threads as unknown as { invalidateListCache(): void; storageMigration: { migrateRepository(...args: unknown[]): string } }
+      hold = holdRequests(p.f.services, 'threads.get')
+      internals.invalidateListCache()
+      expect(threads.peekThread(other.id)).toBeUndefined()
+      const lookup = vi.spyOn(threads, 'getThread')
+      const migrate = vi.spyOn(internals.storageMigration, 'migrateRepository')
+      const register = vi.spyOn(threads.lifecycleStore, 'registerTask')
+      const touched = () => [lookup, migrate, register].flatMap((spy) => spy.mock.calls).filter((args) => JSON.stringify(args).includes(other.id))
+      // A live thread missing from the caches and a thread in the trash are still threads of this computer.
+      read = p.f.rpc.request('threads.get', { threadId: other.id, target: { parentThreadId: trashed.id } }).catch(() => undefined)
+      await hold.admitted()
+      expect(hold.scopes).toEqual([{ threadIds: [other.id, trashed.id] }])
+      expect(touched()).toEqual([])
+      // What a delete compares, read from the thread's lifecycle record and its files.
+      const services = p.f.services as unknown as { threadWorkspaceFacts(id: string): { worktree?: string; ownWorktree: boolean; projectId?: string } | undefined }
+      internals.invalidateListCache()
+      expect(services.threadWorkspaceFacts(other.id)).toMatchObject({ worktree: workspace.worktreePath, ownWorktree: true, projectId: at.projectId })
+      expect(services.threadWorkspaceFacts('thread-of-another-computer')).toBeUndefined()
+      expect(touched()).toEqual([])
+      expect(lookup.mock.calls.filter(([id]) => id === 'thread-of-another-computer')).toEqual([])
+    } finally {
+      hold?.release()
+      await read
+      vi.restoreAllMocks()
       await p.close()
     }
   })

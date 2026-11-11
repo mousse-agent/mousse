@@ -9932,8 +9932,9 @@ export class OrchestratorService extends EventEmitter {
     const threadId = opts?.threadId ?? this.getBoundThreadId() ?? '__unbound__'
     this.sendsInFlight.set(threadId, (this.sendsInFlight.get(threadId) ?? 0) + 1)
     try {
-      // Counted under its thread, so a delete of another thread neither waits for it nor is refused by it.
-      return await this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts), threadId === '__unbound__' ? undefined : threadScope(threadId))
+      // Counted under its thread, so a delete of another thread neither waits for it nor is refused by it. A send with no
+      // thread yet (`__unbound__`) is the profile's (`null`), never the scope of the work that called it.
+      return await this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts), threadScope(threadId))
     } finally {
       const left = (this.sendsInFlight.get(threadId) ?? 1) - 1
       if (left > 0) this.sendsInFlight.set(threadId, left)

@@ -2,7 +2,11 @@
  * The threads a piece of owned work belongs to: what a delete reads to tell another thread's work from work that touches
  * the deleted thread. A request is counted under its threads only when it names nothing beyond them.
  */
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { canonicalPathAsync, canonicalPathSync, pathsOverlap } from '../src/mms/lifecycle/canonicalPath'
 import { OwnedWorkBarrier } from '../src/mms/execution/OwnedWorkBarrier'
 import { currentWorkScope, requestWorkScope, threadScope } from '../src/mms/execution/workScope'
 
@@ -84,5 +88,23 @@ describe('owned work', () => {
     await waited
     expect(barrier.count).toBe(0)
     expect(currentWorkScope()).toBeNull()
+  })
+})
+
+describe('the paths a delete compares', () => {
+  it('resolve links through the nearest folder that exists, also for a path that is not there yet', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'work-scope-')))
+    try {
+      mkdirSync(join(root, 'real'))
+      symlinkSync(join(root, 'real'), join(root, 'link'), 'dir')
+      const missing = join(root, 'link', 'missing', 'deeper')
+      expect(canonicalPathSync(missing)).toBe(join(root, 'real', 'missing', 'deeper'))
+      expect(canonicalPathSync(missing)).toBe(await canonicalPathAsync(missing))
+      expect(pathsOverlap(canonicalPathSync(missing), canonicalPathSync(join(root, 'real')))).toBe(true)
+      // On macOS `/tmp` links to `/private/tmp`.
+      if (process.platform === 'darwin') expect(canonicalPathSync(join('/tmp', `missing-${process.pid}`, 'child'))).toBe(join('/private/tmp', `missing-${process.pid}`, 'child'))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

@@ -116,7 +116,7 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from './execution/OwnedWorkBarrier'
 import { threadScope, type WorkScope } from './execution/workScope'
-import { pathsOverlap } from './lifecycle/canonicalPath'
+import { canonicalPathSync, pathsOverlap } from './lifecycle/canonicalPath'
 import { readThreadWorkspaceRecord } from './workspace/ThreadWorkspaceManager'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
@@ -128,8 +128,7 @@ import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
 import { threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
@@ -218,7 +217,15 @@ function requestsBusy(prefix: string, active: Array<{ label: string; why: Delete
 }
 
 /** A thread's facts a delete compares (`MmsProfileServices.threadWorkspaceFacts`). */
-interface ThreadWorkspaceFacts { location?: string; worktree?: string; projectFolder: boolean; repositoryId?: string; projectId?: string }
+interface ThreadWorkspaceFacts {
+  location?: string
+  worktree?: string
+  /** The worktree is the thread's own (its workspace record), not its parent's folder it shares. */
+  ownWorktree: boolean
+  projectFolder: boolean
+  repositoryId?: string
+  projectId?: string
+}
 /** What a thread's `meta.json` says of where it works. */
 type ThreadFacts = Pick<Thread, 'projectId' | 'lineage' | 'workspaceBinding'>
 
@@ -232,11 +239,6 @@ function readThreadFacts(location: string, threadId: string): ThreadFacts | unde
   } catch {
     return undefined
   }
-}
-
-/** A real path (short names, junctions and links resolved) when it exists; else the path as given, made absolute. */
-function canonicalPathSync(path: string): string {
-  try { return realpathSync.native(path) } catch { return resolve(path) }
 }
 
 export class MmsProfileServices {
@@ -1407,13 +1409,14 @@ export class MmsProfileServices {
       return facts.get(id)
     }
     // Folders of the family no other thread may work in: their own worktrees (never a project's own folder, which is the
-    // person's and which no delete touches) and their thread folders.
+    // person's and which no delete touches) and their thread folders. A shared subagent's folder is its parent's: its
+    // delete removes nothing there (its inventory has no worktree), so its parent's work there does not count.
     const owned: string[] = [], repositories = new Set<string>(), projects = new Set<string>()
     for (const id of family) {
       const own = factsOf(id)
       if (!own) continue
       if (own.location) owned.push(own.location)
-      if (own.worktree && !own.projectFolder) owned.push(own.worktree)
+      if (own.worktree && own.ownWorktree && !own.projectFolder) owned.push(own.worktree)
       if (own.repositoryId) repositories.add(own.repositoryId)
       if (own.projectId) projects.add(own.projectId)
     }
@@ -1434,24 +1437,27 @@ export class MmsProfileServices {
 
   /**
    * Where a thread keeps its data and works: its folder, its worktree (or project folder) and repository, its project.
-   * Read only, from what is on disk: no thread folder is resolved, registered or migrated. A thread in the trash is read
-   * from its lifecycle record and its `meta.json` there. A subagent with no workspace record of its own works in its
+   * Read only: from the list caches (`ThreadDataStore.peekThread`), else from the thread's lifecycle record and the
+   * `meta.json` and `workspace.json` in its folder. No project is scanned, and no thread folder is resolved, registered
+   * or migrated. A thread in the trash is read the same way. A subagent with no workspace record of its own works in its
    * parent's (a `shared` one in the parent's folder, `workspaceBinding.sharedPath`), so it has its parent's facts.
    */
   private threadWorkspaceFacts(threadId: string, seen = new Set<string>()): ThreadWorkspaceFacts | undefined {
     const record = this.threads.lifecycleStore.get(threadId)
-    const meta: ThreadFacts | undefined = this.threads.getThread(threadId) ?? (record ? readThreadFacts(record.location, threadId) : undefined)
+    // The list caches, then the lifecycle record's `meta.json`: never `getThread`, which may scan every project and
+    // migrate and register what it finds. A thread found in neither is of unknown reach (undefined).
+    const meta: ThreadFacts | undefined = this.threads.peekThread(threadId) ?? (record ? readThreadFacts(record.location, threadId) : undefined)
     if (!meta && !record) return undefined
     const location = record?.location
     const workspace = location ? readThreadWorkspaceRecord(location) : undefined
-    const facts: ThreadWorkspaceFacts = { location, worktree: workspace?.worktreePath, projectFolder: workspace?.kind === 'project-folder', repositoryId: workspace?.repositoryId, projectId: meta?.projectId }
+    const facts: ThreadWorkspaceFacts = { location, worktree: workspace?.worktreePath, ownWorktree: Boolean(workspace?.worktreePath), projectFolder: workspace?.kind === 'project-folder', repositoryId: workspace?.repositoryId, projectId: meta?.projectId }
     const parent = meta?.lineage?.parentThreadId
     if (workspace || !parent || parent === threadId || seen.has(parent)) return facts
     seen.add(threadId)
     const up = this.threadWorkspaceFacts(parent, seen)
     if (!up) return facts
-    // The shared path is the parent's own folder: a project's own folder stays one.
-    return { ...facts, worktree: meta?.workspaceBinding?.sharedPath ?? up.worktree, projectFolder: up.projectFolder, repositoryId: up.repositoryId, projectId: facts.projectId ?? up.projectId }
+    // The shared path is the parent's own folder: a project's own folder stays one. It is not this thread's own.
+    return { ...facts, worktree: meta?.workspaceBinding?.sharedPath ?? up.worktree, ownWorktree: false, projectFolder: up.projectFolder, repositoryId: up.repositoryId, projectId: facts.projectId ?? up.projectId }
   }
 
   /**
