@@ -4,7 +4,7 @@ import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liv
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { ModelInfo, Options, PermissionMode, Query, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
+import type { ModelInfo, Options, PermissionMode, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
 import type {
   ClaudeSubscriptionStatus,
   CliProviderConfig,
@@ -78,6 +78,12 @@ import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type Sessi
  * Stop (seen keeping its requests and helpers going for about 7 s).
  */
 const CLAUDE_STOP_GRACE_MS = 1_000
+/**
+ * How long a stopped one-shot query that carries unread steers is still read before the turn decides their fate: its
+ * process was sent SIGTERM, and what it wrote before it exited (a sign it read the steers) still counts. Past this the
+ * steers it has not been seen reading are handed back. Longer than the grace, so a process `reapClosed` kills is gone by then.
+ */
+const ONE_SHOT_STOP_DRAIN_MS = 1_500
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /** What a live process is started for, in the order of the key `chat` builds; a change needs a new process. */
@@ -208,7 +214,7 @@ export type ClaudeSubscriptionChatInput = {
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
-  /** A drained steer was pushed to Claude; `token` names its drain (`drainSteerEntry`), when it had one. */
+  /** Claude Code read a drained steer: it is accepted. `token` names its drain (`drainSteerEntry`), when it had one. */
   onSteer?: (text: string, token?: string) => void
   /** A drained steer could not be pushed because the turn's result had already arrived: it is the next turn. */
   returnSteer?: (text: string, token?: string) => void
@@ -2382,13 +2388,23 @@ export class ClaudeSubscriptionProviderService {
       // A live query outlives the turn: the turn is interrupted, and only Stop, an idle release or a
       // replacement closes the query.
       if (live && liveRun) live.abandon(liveRun)
-      else if (query) {
-        // A one-shot query ends its process with the turn; one that does not exit is killed (`reapClosed`).
-        const target = claudeQueryProcess(query)
-        query.close()
-        this.reapClosed(input.threadId, target)
-      }
+      else if (query) endOneShot(query)
       this.questions.dismissAllForThread(input.threadId)
+    }
+    /**
+     * A one-shot query ends its process with the turn; one that does not exit is killed (`reapClosed`). One whose prompt
+     * carries steers Claude Code has not been seen reading is sent SIGTERM at once through Mousse's handle, as a warm
+     * session's is (#905): the SDK's close and the turn's abort only end its input, and Claude Code still runs a prompt
+     * it already has (seen sending a steer to the model half a second after the Stop). Its output is not closed here:
+     * the turn reads what the process wrote before it died (`drainCarried`), then closes it.
+     */
+    const endOneShot = (ending: Query): void => {
+      const target = claudeQueryProcess(ending)
+      if (carried) {
+        if (!target?.terminate?.())
+          console.warn('[claude] could not signal the Claude Code process of a stopped steer; it ends with its input, and may still read the steer', { threadId: input.threadId, ...(target ? { pid: target.pid } : {}) })
+      } else ending.close()
+      this.reapClosed(input.threadId, target)
     }
     input.signal?.addEventListener('abort', cancel, { once: true })
     this.readyToCommit.delete(input.threadId)
@@ -2439,7 +2455,29 @@ export class ClaudeSubscriptionProviderService {
       branch ? branch.turns : saved?.sessionId === sessionId ? saved.turns ?? [] : []
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
-    const steers: string[] = []
+    /**
+     * A one-shot query's steers (no live session: a turn past the live-process cap; a bot's turn is one too, but bot
+     * threads are not steered), collected and waiting to go in as the prompt of the query that restarts the turn. Taken,
+     * not accepted: Claude Code has not seen them.
+     */
+    const steers: OneShotSteer[] = []
+    /** The steers the restarted query carries as its prompt, under that prompt's id, until the model answers it. */
+    let carried: { id: string; steers: OneShotSteer[] } | undefined
+    /** The model answered the restarted query's prompt (`oneShotPromptRead`): the steers it carries are accepted, once. */
+    const carriedRead = (): void => {
+      const read = carried
+      carried = undefined
+      for (const steer of read?.steers ?? []) steer.steered()
+    }
+    /**
+     * A one-shot turn that ends by a Stop, an interrupt or a failure hands back every steer Claude Code has not read,
+     * by its token, oldest first: the ones the restarted query carried unread, then the ones not sent yet.
+     */
+    const returnUnreadOneShotSteers = (): void => {
+      const unread = [...(carried?.steers ?? []), ...steers.splice(0)]
+      carried = undefined
+      for (const steer of unread) input.returnSteer?.(steer.text, steer.token)
+    }
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let interruptRequested = false
     /**
@@ -2522,8 +2560,9 @@ export class ClaudeSubscriptionProviderService {
         }, () => cancel())
         return
       }
-      steers.push(steer)
-      steered()
+      // Taken, not accepted: it is accepted only once the restarted query reads it, and handed back if the turn ends first.
+      input.steerTaken?.(drained?.token)
+      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), steered })
       if (query && !interruptRequested) {
         interruptRequested = true
         this.questions.autoRejectPendingForThread(input.threadId)
@@ -2815,12 +2854,46 @@ export class ClaudeSubscriptionProviderService {
         promptId = randomUUID()
         let nextPrompt: AsyncIterable<SDKUserMessage> = messages()
         const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
+        /**
+         * Stop ended a query whose prompt carries steers it had not been seen reading, and sent its process SIGTERM
+         * (`endOneShot`). What the process wrote before it died is still read, until its output ends or
+         * `ONE_SHOT_STOP_DRAIN_MS` passes: a read frame among it (the model may have the steers) accepts them, so they are
+         * not handed back to run a second time. Nothing of it is shown; the turn was stopped.
+         */
+        const drainCarried = async (output: AsyncIterator<SDKMessage>): Promise<void> => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const expired = new Promise<'expired'>((resolve) => { timer = setTimeout(() => resolve('expired'), ONE_SHOT_STOP_DRAIN_MS) })
+          try {
+            while (carried) {
+              const next = await Promise.race([output.next().catch((): IteratorResult<SDKMessage> => ({ done: true, value: undefined })), expired])
+              if (next === 'expired' || next.done) return
+              metrics.observe(next.value)
+              if (oneShotPromptRead(next.value, carried.id)) carriedRead()
+            }
+          } finally {
+            clearTimeout(timer)
+          }
+        }
         for (;;) {
           const turnTextLength = frames.text.length
+          // Checked right before the start: a steer a Stop came before is handed back, and no process ever gets it.
+          controller.signal.throwIfAborted()
           query = await this.createQuery(nextPrompt, options)
           this.queries.set(input.threadId, query)
+          // A Stop while the query was being started found no query to end: it is ended now, before it reads anything.
+          if (controller.signal.aborted) endOneShot(query)
+          // Read by hand, not with `for await`: leaving that loop on a Stop would close the SDK's output at once, and
+          // the frames the stopped process still writes would never be read (`drainCarried`).
+          const output = query[Symbol.asyncIterator]()
           try {
-            for await (const message of query) {
+            for (;;) {
+              const next = await output.next()
+              if (next.done) break
+              const message = next.value
+              // Read before the frame is shown, so the steer is in place above what the model says after it; and
+              // before a Stop is checked, so a read frame that arrived before the Stop accepts the steer instead of
+              // handing it back. Frames after the Stop are still read for this (`drainCarried`).
+              if (carried && oneShotPromptRead(message, carried.id)) carriedRead()
               if (controller.signal.aborted) metrics.observe(message)
               controller.signal.throwIfAborted()
               frames.observe(message)
@@ -2838,6 +2911,8 @@ export class ClaudeSubscriptionProviderService {
               }
             }
           } catch (error) {
+            // Before the steers it carries are handed back: whatever the stopped process wrote before it died is read.
+            if (carried && controller.signal.aborted) await drainCarried(output)
             // The query may end with an error of its own after the interrupt that ended a held turn.
             if (frames.rateLimits.hold && !controller.signal.aborted && !(error instanceof AppError && error.code === 'provider_usage_limit')) throw usageLimitFromWindows(frames.rateLimits)
             // The SDK throws after the error result an interrupt produces; a steer resumes from here.
@@ -2859,13 +2934,18 @@ export class ClaudeSubscriptionProviderService {
           delete options.forkSession
           delete options.sessionId
           metrics.beginQuery(sessionId)
-          const guidance = steers.splice(0).join('\n')
+          // Steers the query just ended carried and never read go first, in the order they were sent.
+          const sending = [...(carried?.steers ?? []), ...steers.splice(0)]
+          const guidanceId = randomUUID()
+          carried = { id: guidanceId, steers: sending }
+          const guidance = sending.map((steer) => steer.text).join('\n')
           nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
             yield {
               type: 'user',
               message: { role: 'user', content: guidance },
               parent_tool_use_id: null,
-              session_id: sessionId
+              session_id: sessionId,
+              uuid: guidanceId as SDKUserMessage['uuid']
             }
           })()
           interruptRequested = false
@@ -2907,6 +2987,8 @@ export class ClaudeSubscriptionProviderService {
         if (!success && liveRun.ids.size > 0) live.meta.pushedFailed = true
         liveRun.onRead = undefined
       } else query?.close()
+      // No steer is collected after the abort above: a one-shot turn's steers Claude Code never read go back now.
+      returnUnreadOneShotSteers()
       // After the cancel above has started: a steer Claude Code has not read is accepted or handed back before the turn
       // ends, never left behind.
       try {
@@ -3026,6 +3108,38 @@ export class ClaudeSubscriptionProviderService {
     this.readyToCommit.clear()
   }
 }
+
+/** A steer a one-shot query took: its text, its drain's token when it had one, and its acceptance. */
+type OneShotSteer = { text: string; token?: string; steered: () => void }
+
+/**
+ * The model answered the prompt a one-shot query was started with (`id`): it streams or writes a message, Claude Code's
+ * `command_lifecycle` frame says `completed`, or the query ends with a successful result. The prompt is that query's
+ * only message, so anything the model writes answers it.
+ *
+ * A `started` lifecycle is not a read: it says only that Claude Code took the prompt for its next request, about 200 ms
+ * before that request goes out (hands-on, #928). A Stop in between kills the process before the model gets the steer,
+ * and the session keeps no copy of it, so a steer accepted then would be lost. Every way a one-shot query ends without
+ * an answer (a Stop, an interrupt, a failure, the process dying) hands the steer back; a query that runs to its end
+ * answers it. Starting the process (`system` frames), a failed result, and a message Claude Code makes up itself (a
+ * `<synthetic>` one, such as the "No response requested." it writes on resuming an interrupted session) are not reads.
+ *
+ * On a Stop the query's process is sent SIGTERM at once, and the frames it wrote before it exited are still checked
+ * (`drainCarried`). What remains is at least once, never lost: a steer is handed back, though the model may have it,
+ * when Claude Code sent it to the model but was killed before the model's first frame reached Mousse, when the process
+ * did not exit and wrote nothing within `ONE_SHOT_STOP_DRAIN_MS`, or when it could not be signalled at all.
+ */
+function oneShotPromptRead(message: unknown, id: string): boolean {
+  if (typeof message !== 'object' || message === null) return false
+  const frame = message as { type?: unknown; command_uuid?: unknown; state?: unknown; subtype?: unknown; is_error?: unknown; message?: { model?: unknown } }
+  if (frame.type === 'command_lifecycle') return frame.command_uuid === id && frame.state === 'completed'
+  if (frame.type === 'stream_event') return true
+  if (frame.type === 'assistant') return frame.message?.model !== SYNTHETIC_MODEL
+  return frame.type === 'result' && frame.subtype === 'success' && frame.is_error !== true
+}
+
+/** The model Claude Code names on a message it made up itself, with no request to the model. */
+const SYNTHETIC_MODEL = '<synthetic>'
 
 /** Claude Code could not resume a session cut (`cutRefused`); `fork` when the cut was a fork's branch. */
 class CutRefused extends Error {
