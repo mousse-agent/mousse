@@ -12,7 +12,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { readDurableQueue } from '../../src/mms/queue/durableQueue'
+import { mutateDurableQueue, readDurableQueue } from '../../src/mms/queue/durableQueue'
+import { promoteQueuedMessageToSteer } from '../../src/mms/queue/ThreadMessageQueue'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -32,6 +33,13 @@ class SteeringAdapter implements ProviderAdapter {
   holdPrompts = new Set<string>()
   /** Whether turns take steers at all (a turn that never reads one leaves it to the orchestrator). */
   takeSteers = true
+  /**
+   * Whether a taken steer is also reported read. When false the turn takes the text (`steerTaken`) and never reports
+   * it read (`steerAccepted`), as a provider whose turn ends before the steered message reached its model.
+   */
+  acceptSteers = true
+  /** Every steer text a turn took without reporting it read, in order. */
+  readonly takenUnread: string[] = []
   private readonly releases = new Map<string, () => void>()
   private readonly interrupts = new Set<() => void>()
   /** The runs started, by prompt. */
@@ -57,6 +65,11 @@ class SteeringAdapter implements ProviderAdapter {
       const entry = ctl.drainSteerEntry ? ctl.drainSteerEntry() : undefined
       const text = entry ? entry.text : ctl.drainSteer()
       if (!text) return
+      if (!this.acceptSteers) {
+        this.takenUnread.push(text)
+        ctl.steerTaken?.(entry?.token)
+        return
+      }
       this.steers.push(text)
       ctl.steerTaken?.(entry?.token)
       sink.steerAccepted(text)
@@ -266,6 +279,46 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
     // C shows once: as the prompt of its own turn, not also inside the turn that never read it.
     expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer the provider took but never reported read is not lost when the turn ends: it runs once, as the next turn', async () => {
+    const w = world()
+    w.adapter.acceptSteers = false
+    const { first, c } = await w.queuedBehindTurn()
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.takenUnread.length > 0, 'steer taken')
+    expect(w.adapter.takenUnread).toEqual(['C'])
+    // The turn ends with C taken and never reported read.
+    w.adapter.acceptSteers = true
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    // C shows once: as the prompt of its own turn, not also inside the turn that never reported it read.
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer another process promotes after the turn last read steers is not lost: it runs once, as the next turn', async () => {
+    const w = world()
+    const { first, c } = await w.queuedBehindTurn()
+    // The turn reads no more steers; then another process marks C as a steer into this run, on disk only.
+    w.adapter.takeSteers = false
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => promoteQueuedMessageToSteer(items, c.id, { steerRunId: runId }).items)
+    expect(w.queue().find((item) => item.id === c.id)?.state).toBe('steering')
+
+    w.adapter.release('first')
+    await first
+    w.adapter.takeSteers = true
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
   })
 
   it('Steer after Stop sends C first, as the next turn, and A and B follow once each', async () => {

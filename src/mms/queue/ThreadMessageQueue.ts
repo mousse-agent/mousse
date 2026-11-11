@@ -629,11 +629,12 @@ export function drainNextNormal(
   }
 }
 
-/** Drop all steer-intent items after they have been injected into the active turn. */
-export function dropSteerItems(items: QueuedMessage[], ids?: string[]): QueuedMessage[] {
-  if (!ids || ids.length === 0) {
-    return items.filter((item) => item.intent !== 'steer')
-  }
+/**
+ * Drop the named steer items once the model has them (their text and ids are saved). Only the named ones go: an empty
+ * list drops nothing, so a steer no turn has read yet is never dropped by a caller that had none to name.
+ */
+export function dropSteerItems(items: QueuedMessage[], ids: readonly string[]): QueuedMessage[] {
+  if (ids.length === 0) return items
   const drop = new Set(ids)
   return items.filter((item) => !(item.intent === 'steer' && drop.has(item.id)))
 }

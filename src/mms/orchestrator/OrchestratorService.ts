@@ -12124,6 +12124,10 @@ export class OrchestratorService extends EventEmitter {
     }
     // Active owner re-reads durable queue before claim.
     this.refreshSessionQueueFromDisk(session)
+    // No turn of the thread runs here or elsewhere: a steer still `steering` was never reported read by the turn that
+    // ended (the provider took it and the turn ended first, or another process promoted it after the turn's last
+    // drain). It runs once, first, as a turn of its own, and its copy inside the ended turn is hidden.
+    this.returnOrphanedSteers(session)
     const claimToken = createLeaseToken()
     const claimOwner = {
       ownerPid: process.pid,
@@ -12530,8 +12534,9 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Startup: messages sent with Steer into a turn the previous daemon ran are still `steering` on disk, and no turn
-   * here will read them. One the provider accepted (its id is saved in `acceptedSteerItemIds`, the daemon died before
+   * Startup, and before each claim after a turn: messages sent with Steer into a turn that has ended (the previous
+   * daemon's, or one here that ended before it reported them read) are still `steering` on disk, and no turn will read
+   * them. One the provider accepted (its id is saved in `acceptedSteerItemIds`, the daemon died before
    * the queue dropped it) is dropped now, as the drain's claim does. The others go back first in the queue, in the
    * order they were steered, as a Stop hands them back (`returnUnreadSteerItems`), and the startup drain runs them
    * once, as turns of their own, before what was queued behind them. That give-back is at-least-once: a steer handed

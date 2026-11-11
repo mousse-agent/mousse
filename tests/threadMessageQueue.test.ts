@@ -88,6 +88,16 @@ describe('ThreadMessageQueue domain', () => {
     expect(drainNextNormal(drained.items).next).toBeNull()
   })
 
+  it('drops only the named steer items: an empty list drops none', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'steer-a' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'steer-b' }).items
+    const [a, b] = listPendingQueue(items).map((item) => item.id)
+    items = promoteQueuedMessageToSteer(items, a).items
+    items = promoteQueuedMessageToSteer(items, b).items
+    expect(dropSteerItems(items, [])).toEqual(items)
+    expect(dropSteerItems(items, [a]).map((item) => item.id)).toEqual([b])
+  })
+
   it('recovers a late steer as next-turn guidance', () => {
     let items = enqueueMessage([], { threadId: 't1', content: 'late guidance' }).items
     items = promoteQueuedMessageToSteer(items, items[0].id).items
