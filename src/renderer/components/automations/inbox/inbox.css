@@ -76,7 +76,7 @@
 }
 
 .inbox .inbox-composer-send { color: var(--surface-strong, #18151c); }
-.inbox-composer-send:hover:not(:disabled) { background: var(--accent-hover); }
+.inbox-composer-send:hover:not(:disabled) { background-color: var(--accent-hover); }
 .inbox .inbox-composer-send:disabled { background: transparent; color: var(--text-secondary); opacity: 0.55; cursor: default; }
 .inbox .inbox-composer-send[aria-busy='true'] { background: rgba(var(--accent-rgb), 0.22); color: var(--accent); opacity: 1; cursor: progress; }
 
@@ -112,10 +112,10 @@
 .inbox [role='option']:focus-visible,
 .inbox-draft button:focus-visible,
 .inbox-strip button:focus-visible {
-  outline: 2px solid rgba(var(--accent-rgb), 0.65);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
-.inbox-icon-btn:hover:not(:disabled) { background: var(--ui-hover); color: var(--text-primary); }
+.inbox-icon-btn:hover:not(:disabled) { background-color: var(--ui-hover); color: var(--text-primary); }
 .inbox-icon-btn:disabled { opacity: 0.4; cursor: default; }
 .inbox-icon-btn[aria-pressed='true'] {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -263,7 +263,7 @@
 .inbox-quiet-row:hover,
 .inbox-row[data-cursor]:not([data-open]),
 .inbox-fold[data-cursor],
-.inbox-quiet-row[data-cursor]:not([data-open]) { background: var(--ui-hover); }
+.inbox-quiet-row[data-cursor]:not([data-open]) { background-color: var(--ui-hover); }
 
 .inbox-row[data-open],
 .inbox-quiet-row[data-open],
@@ -419,7 +419,7 @@
   color: var(--text-primary);
 }
 
-.inbox-text-btn:hover:not(:disabled) { background: var(--ui-hover); }
+.inbox-text-btn:hover:not(:disabled) { background-color: var(--ui-hover); }
 .inbox .inbox-text-btn.muted,
 .inbox-text-btn.muted { color: var(--text-secondary); }
 .inbox-text-btn.muted:hover:not(:disabled) { color: var(--text-primary); }
@@ -442,7 +442,7 @@
 
 .inbox .inbox-primary-btn,
 .inbox-draft .inbox-primary-btn { color: var(--surface-strong, #18151c); }
-.inbox-primary-btn:hover:not(:disabled) { background: var(--accent-hover); }
+.inbox-primary-btn:hover:not(:disabled) { background-color: var(--accent-hover); }
 /* Disabled: a muted fill, so it never reads as a dimmed enabled button. Working: the accent, softly, with a spinner. */
 .inbox .inbox-primary-btn:disabled,
 .inbox-draft .inbox-primary-btn:disabled { background: var(--ui-pressed); color: var(--text-secondary); cursor: default; }
