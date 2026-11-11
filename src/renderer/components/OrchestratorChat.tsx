@@ -379,6 +379,12 @@ export function OrchestratorChat() {
     setSendError(null)
   }, [])
   const sendIds = useRef(new SendRetryIds())
+  // Prompts sent here and still on their way, by thread (their send answers when the turn ends). A message sent
+  // meanwhile is queued behind them, even before the thread reports the turn running.
+  const promptsOnTheWay = useRef(new Map<string, number>())
+  // Steers sent here and still on their way, by their request ids. One the running turn could not take yet is queued
+  // and then sent now: it shows in the reply it joins, never for a moment in the queue too.
+  const [steersOnTheWay, setSteersOnTheWay] = useState<ReadonlySet<string>>(() => new Set())
   const blankSendPending = useRef(false)
   useEffect(() => { setSendError(null); setSendChanges(null) }, [profileId, activeThreadId])
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
@@ -417,7 +423,8 @@ export function OrchestratorChat() {
     hold: queueHold,
     onDraftToComposer: onQueueDraftToComposer,
     lastPromptId: lastUserMessage?.id ?? null,
-    lastPromptQueueItemId: lastUserMessage?.queueItemId ?? null
+    lastPromptQueueItemId: lastUserMessage?.queueItemId ?? null,
+    hiddenRequestIds: steersOnTheWay
   })
   // The notice about the moved edit goes once the composer is empty again (sent or cleared).
   const { draftMoved: queueDraftMoved, dismissDraftMoved } = queue
@@ -928,11 +935,18 @@ export function OrchestratorChat() {
       // row for the durable message by matching its content; stale hydration snapshots retain it.
       // The messages the transcript had before this one, to tell it from an identical one sent earlier.
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
-      // During a reply or a compaction the message goes to the queue, so it is painted there.
-      const queuesNow = loading || compactionRunning
+      // During a reply or a compaction the message goes to the queue, so it is painted there; so does one sent while
+      // an earlier prompt is still on its way (its turn is not reported running yet), or while messages wait in the
+      // queue (between two queued turns).
+      const onTheWay = targetThreadId ? promptsOnTheWay.current.get(targetThreadId) ?? 0 : 0
+      const queueWaiting = Boolean(targetThreadId) && targetThreadId === queue.threadId && queue.items.length > 0
+      const queuesNow = loading || turnActive || compactionRunning || onTheWay > 0 || queueWaiting
       const optimisticMessageId = !queuesNow && targetThreadId
         ? `optimistic:${crypto.randomUUID()}`
         : null
+      const promptThread = optimisticMessageId ? targetThreadId : null
+      if (promptThread) promptsOnTheWay.current.set(promptThread, onTheWay + 1)
+      if (steer) setSteersOnTheWay((current) => new Set(current).add(requestId))
       if (optimisticMessageId) {
         useAppStore.getState().addMessage({
           id: optimisticMessageId,
@@ -955,7 +969,9 @@ export function OrchestratorChat() {
           order: Number.MAX_SAFE_INTEGER,
           intent: 'normal',
           state: 'pending',
-          source: 'gui'
+          source: 'gui',
+          // The daemon's item carries the same id: whichever arrives first, the queue shows one.
+          clientRequestId: requestId
         }])
       }
       // Optimistically mark the selected thread busy; queue accepts keep loading true.
@@ -1085,9 +1101,16 @@ export function OrchestratorChat() {
         ).catch(() => false)
         if (stillVisible()) setLoading(stillActive)
         return false
+      } finally {
+        if (steer) setSteersOnTheWay((current) => { const next = new Set(current); next.delete(requestId); return next })
+        if (promptThread) {
+          const left = (promptsOnTheWay.current.get(promptThread) ?? 1) - 1
+          if (left > 0) promptsOnTheWay.current.set(promptThread, left)
+          else promptsOnTheWay.current.delete(promptThread)
+        }
       }
     },
-    [activeThreadId, profileId, chatMode, loading, compactionRunning, setLoading, queue.threadId, queue.steer]
+    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer]
   )
 
   const handleStop = useCallback(async () => {

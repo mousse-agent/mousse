@@ -544,6 +544,39 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+describe('a message shown while its send is on its way', () => {
+  function SendingChat({ optimistic, hidden, onReconciled }: { optimistic: QueuedMessage[]; hidden?: ReadonlySet<string>; onReconciled?: (id: string) => void }) {
+    const thread = useThreadQueue({ threadId: 't1', optimisticItems: optimistic, hiddenRequestIds: hidden, onOptimisticItemReconciled: onReconciled })
+    return createElement(QueuedMessages, { queue: thread })
+  }
+  const ids = () => rows().map((item) => item.dataset.queuedId)
+
+  it('shows once when the queue lists it before the send answers', async () => {
+    const reconciled = vi.fn()
+    const copy = queued('optimistic:x', 'two', { clientRequestId: 'req-2' })
+    act(() => root.render(createElement(SendingChat, { optimistic: [copy], onReconciled: reconciled })))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
+    expect(ids()).toEqual(['a', 'optimistic:x'])
+    // The daemon lists the item its send queued; the send has not answered yet.
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-2', 'two', { clientRequestId: 'req-2' })] }) })
+    expect(ids()).toEqual(['a', 'srv-2'])
+    expect(reconciled).toHaveBeenCalledWith('optimistic:x')
+  })
+
+  it('keeps an identical message sent earlier apart from it', async () => {
+    const copy = queued('optimistic:x', 'two', { clientRequestId: 'req-2' })
+    act(() => root.render(createElement(SendingChat, { optimistic: [copy] })))
+    await act(async () => { push!({ threadId: 't1', items: [queued('srv-1', 'two', { clientRequestId: 'req-1' })] }) })
+    expect(ids()).toEqual(['srv-1', 'optimistic:x'])
+  })
+
+  it('does not show a steer the running turn could not take yet, which is sent now as soon as its send answers', async () => {
+    act(() => root.render(createElement(SendingChat, { optimistic: [], hidden: new Set(['req-3']) })))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-3', 'steer this', { clientRequestId: 'req-3' })] }) })
+    expect(ids()).toEqual(['a'])
+  })
+})
+
 describe('a change that answers after the thread changed', () => {
   /** The chat with a thread switch: the hook stays, the conversation (and its queue) is drawn per thread. */
   function SwitchingChat({ threadId }: { threadId: string | null }) {

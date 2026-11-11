@@ -7779,6 +7779,8 @@ export class OrchestratorService extends EventEmitter {
     input: OrchestratorSendInput,
     opts?: {
       source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number; permissionMode?: PermissionMode; origin?: QueuedMessage['origin']; sentFrom?: QueuedMessage['sentFrom']
+      /** The sender's id for the send that queued it, kept on the item (`QueuedMessage.clientRequestId`). */
+      clientRequestId?: string
       /** A fixed id: an item with it already on the queue is returned as it is (the continue message of a pause). */
       id?: string
       /** Ahead of every pending item. */
@@ -7815,6 +7817,7 @@ export class OrchestratorService extends EventEmitter {
           images: request.images,
           intent: opts?.intent ?? 'normal',
           source: opts?.source,
+          clientRequestId: opts?.clientRequestId,
           internal: opts?.internal,
           runId: opts?.runId,
           inboxIds: opts?.inboxIds,
@@ -7842,6 +7845,7 @@ export class OrchestratorService extends EventEmitter {
       images: request.images,
       intent: opts?.intent ?? 'normal',
       source: opts?.source,
+      clientRequestId: opts?.clientRequestId,
       internal: opts?.internal,
       runId: opts?.runId,
       inboxIds: opts?.inboxIds,
@@ -10299,6 +10303,7 @@ export class OrchestratorService extends EventEmitter {
       }
       const item = this.enqueueForThread(threadId, input, {
         source: opts?.source,
+        ...(opts?.clientRequestId ? { clientRequestId: opts.clientRequestId } : {}),
         runId: run?.runId,
         permissionMode: opts?.permissionMode,
         origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined)

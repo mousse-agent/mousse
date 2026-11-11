@@ -51,8 +51,11 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(result.queueItem?.content).toBe('hello while busy')
     expect(orch.listQueue(thread.id)).toHaveLength(1)
 
-    const second = await orch.send('second', false, { threadId: thread.id })
+    const second = await orch.send('second', false, { threadId: thread.id, clientRequestId: 'req-second' })
     expect(second.queued).toBe(true)
+    // The window that sent it tells it from the copy it shows by the id it gave the send.
+    expect(second.queueItem?.clientRequestId).toBe('req-second')
+    expect(orch.listQueue(thread.id).find((item) => item.content === 'second')?.clientRequestId).toBe('req-second')
     expect(orch.listQueue(thread.id).map((i) => i.content)).toEqual([
       'hello while busy',
       'second'
