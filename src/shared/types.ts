@@ -900,6 +900,11 @@ export interface ChatMessage {
    * Older transcripts do not carry it.
    */
   steered?: boolean
+  /**
+   * On a steered message that is the copy of a queued message sent now: that queue item's id. A turn that ends
+   * before it reads the steer hides exactly this copy, never another message with the same words.
+   */
+  steerItemId?: string
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
   hidden?: boolean
   /** Original presentation visibility while a conversation-undo is active. */

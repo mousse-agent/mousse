@@ -388,11 +388,6 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
   }
 }
 
-/** A shown copy of a message sent with Steer into a running turn (`steerThread`). */
-function isSteerEcho(message: ChatMessage, text: string): boolean {
-  return message.role === 'user' && message.steered === true && !message.hidden && message.content === text
-}
-
 /** The conversation branch a send names (an edited prompt's), if any. */
 function expectedBranchOf(input: OrchestratorSendInput): string | undefined {
   return typeof input === 'object' ? input.conversationBranchId : undefined
@@ -9120,7 +9115,8 @@ export class OrchestratorService extends EventEmitter {
     mode?: ChatMode,
     subagentNotice?: SubagentNoticeItem[],
     steered?: boolean,
-    origin?: AgentOrigin
+    origin?: AgentOrigin,
+    steerItemId?: string
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -9133,6 +9129,7 @@ export class OrchestratorService extends EventEmitter {
       ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {}),
       ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {}),
       ...(role === 'user' && steered ? { steered: true } : {}),
+      ...(role === 'user' && steered && steerItemId ? { steerItemId } : {}),
       ...(role === 'user' && origin ? { origin } : {})
     }
     this.messages.push(msg)
@@ -9834,7 +9831,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin).id
+        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin, item?.id).id
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -11432,6 +11429,7 @@ export class OrchestratorService extends EventEmitter {
           // The fork or merge-back history this turn was handed is canonical now (SPEC §16.2).
           handoffs?.committed()
           this.acknowledgeDrainedSteers(session)
+          acceptTakenDrains()
           if (session.executionLease) {
             heartbeatExecutionLease(session.executionLease)
           }
@@ -11480,6 +11478,7 @@ export class OrchestratorService extends EventEmitter {
           ]))
           this.persist(true)
           this.acknowledgeDrainedSteers(session)
+          acceptTakenDrains()
           // The model has the steered message and has not answered it yet.
           this.setTurnStep(session.threadId, { kind: 'waiting' })
         },
@@ -11511,15 +11510,43 @@ export class OrchestratorService extends EventEmitter {
         const cut = entries.some((steer) => !steer.origin && !steer.byAgent && !notices.has(steer.text.trim()))
         return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut }
       }
+      // Drains the provider took (`steerTaken`) and has not reported read: still restorable whole.
+      const takenDrains = new Map<string, { entries: SteerEntry[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
+      // Drains the turn accepted (text saved, rows dropped): the model has them.
+      const acceptedDrains = new Set<string>()
+      // An acceptance with no token (`steerAccepted`, `nativeMessages`) saves every drained item: every taken drain is
+      // accepted with it.
+      const acceptTakenDrains = (): void => {
+        for (const token of takenDrains.keys()) acceptedDrains.add(token)
+        takenDrains.clear()
+      }
       const turnControl: TurnControl = {
         drainSteer: () => drainEntry()?.text,
         drainSteerEntry: drainEntry,
-        steerTaken: (token) => { if (token) drained.delete(token) },
+        steerTaken: (token) => {
+          const entry = token ? drained.get(token) : undefined
+          if (!token || !entry) return
+          drained.delete(token)
+          takenDrains.set(token, entry)
+        },
         // Text the provider could not give its turn waits for the turn to end, then runs as the next turn.
         // Rows a steer carried are held again, unread, and follow it into that turn.
+        //
+        // Exactly once: a hand-back must restore the drain's rows, never only its text. A drain the provider took and
+        // never reported read is restored whole, as one it never took: its rows go back first in the queue and its
+        // copy is hidden, so it runs once, as a turn of its own. Handing back only its text would leave its row
+        // `steering`, and the step before each claim (`returnOrphanedSteers`) would run that row as well as the text.
+        // A drain already accepted is never handed back: the model has it.
         returnSteer: (text, token) => {
-          const entry = token ? drained.get(token) : undefined
-          if (token) drained.delete(token)
+          if (token && acceptedDrains.has(token)) {
+            console.warn('a steer the turn already accepted was handed back; it is not run again', { threadId: session.threadId, drain: token })
+            return
+          }
+          const entry = token ? drained.get(token) ?? takenDrains.get(token) : undefined
+          if (token) {
+            drained.delete(token)
+            takenDrains.delete(token)
+          }
           // Returned drains go ahead of anything steered since, oldest first.
           const put = (...items: SteerEntry[]): void => {
             turn.pendingSteer.splice(returnedAhead, 0, ...items)
@@ -12126,8 +12153,18 @@ export class OrchestratorService extends EventEmitter {
     this.refreshSessionQueueFromDisk(session)
     // No turn of the thread runs here or elsewhere: a steer still `steering` was never reported read by the turn that
     // ended (the provider took it and the turn ended first, or another process promoted it after the turn's last
-    // drain). It runs once, first, as a turn of its own, and its copy inside the ended turn is hidden.
-    this.returnOrphanedSteers(session)
+    // drain). It runs once, first, as a turn of its own, and its copy inside the ended turn is hidden. A failure (the
+    // queue lock, a read or a save) ends this drain as a failed claim does: nothing is claimed, the caller hears.
+    try {
+      this.returnOrphanedSteers(session)
+    } catch (err) {
+      this.emit('queue-drain-failed', {
+        threadId: session.threadId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+      settle('failed')
+      return
+    }
     const claimToken = createLeaseToken()
     const claimOwner = {
       ownerPid: process.pid,
@@ -12543,44 +12580,56 @@ export class OrchestratorService extends EventEmitter {
    * to the provider and not yet reported accepted is known only to the dead process's memory, so a provider whose own
    * session resumes may already have it. The copy each left inside the run it was steered into is hidden, so the
    * message shows once, as its own turn's prompt. Called only while no turn of the thread runs here or elsewhere.
+   *
+   * Throws when the queue or the saved context cannot be read or written; nothing is changed then (fail closed).
    */
   private returnOrphanedSteers(session: ThreadSession): void {
     const steering = session.queue.filter((item) => item.state === 'steering')
     if (!steering.length || session.isTurnRunning()) return
-    const accepted = new Set(session.nativeContext.acceptedSteerItemIds ?? [])
     let taken: string[] = []
     let returned: QueuedMessage[] = []
     // Decided under the queue lock, from the items as they are on disk.
-    const settle = (items: QueuedMessage[]): QueuedMessage[] => {
+    const settle = (items: QueuedMessage[], accepted: ReadonlySet<string>): QueuedMessage[] => {
       const onDisk = items.filter((item) => item.state === 'steering')
       taken = onDisk.filter((item) => accepted.has(item.id)).map((item) => item.id)
       returned = onDisk.filter((item) => !accepted.has(item.id))
       const kept = taken.length ? dropSteerItems(items, taken) : items
       return returned.length ? demoteSteerItems(kept, returned.map((item) => item.id), { toFront: true }) : kept
     }
-    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, settle) : settle(session.queue)
-    let changed = false
+    if (this.threadStore) {
+      const store = this.threadStore
+      const threadId = session.threadId
+      // What was accepted is read from disk, under the queue lock, as the claim reads it: another process may have
+      // accepted a steer and saved its id, then died before it dropped the row, and this process's memory never saw
+      // that id. A read that fails throws, and the queue is left as it was.
+      session.queue = mutateDurableQueue(store, threadId, (items) =>
+        settle(items, new Set(store.loadThreadData(threadId).llmContext?.acceptedSteerItemIds ?? [])))
+    } else {
+      session.queue = settle(session.queue, new Set(session.nativeContext.acceptedSteerItemIds ?? []))
+    }
     if (taken.length) {
-      // As the acknowledgement would have: the ids leave the context once their items have left the queue.
-      const left = [...accepted].filter((id) => !taken.includes(id))
-      session.nativeContext = { ...session.nativeContext, acceptedSteerItemIds: left.length ? left : undefined }
-      changed = true
+      // As the acknowledgement would have: the ids leave this process's own record once their items have left the
+      // queue. Nothing is saved for it. Ids another process saved stay on disk, where they match no row any more,
+      // and this memory, which may be older than that process's, is not written back over them.
+      const own = session.nativeContext.acceptedSteerItemIds ?? []
+      const left = own.filter((id) => !taken.includes(id))
+      if (left.length !== own.length) session.nativeContext = { ...session.nativeContext, acceptedSteerItemIds: left.length ? left : undefined }
     }
-    // A copy is in the run the steer was bound to (`steerRunId`): looked for only among the messages since that run
-    // started, so a wake, bot or continuation turn never reaches an earlier turn's steer with the same words. Without
-    // a run to go by, nothing is hidden: shown twice beats hiding another message.
-    for (const item of returned) {
-      const run = item.steerRunId ? this.runEngine?.getRun(item.steerRunId) : null
-      const since = run?.startedAt ?? run?.requestedAt
-      if (!since) continue
-      const text = item.content.trim()
-      let index = session.messages.length - 1
-      while (index >= 0 && session.messages[index].timestamp >= since && !isSteerEcho(session.messages[index], text)) index -= 1
-      if (index < 0 || session.messages[index].timestamp < since) continue
-      session.messages[index] = { ...session.messages[index], hidden: true }
-      changed = true
+    // The copy of each returned steer inside the turn it was steered into, found by the queue item it is a copy of
+    // (`steerItemId`), never by its words: an earlier message with the same text stays. A steer with no copy here
+    // (another process promoted it, or an older build wrote the copy) hides nothing.
+    const returnedIds = new Set(returned.map((item) => item.id))
+    let hidden = false
+    session.messages.forEach((message, index) => {
+      if (message.role !== 'user' || !message.steered || message.hidden || !message.steerItemId || !returnedIds.has(message.steerItemId)) return
+      session.messages[index] = { ...message, hidden: true }
+      hidden = true
+    })
+    if (hidden) {
+      this.sessionAls.run(session, () => this.persist(true))
+      // The app merges message updates by id and removes rows only on a full replacement.
+      this.emitThreadMessages(session.threadId, session.messages, true)
     }
-    if (changed) this.sessionAls.run(session, () => this.persist(true))
     this.emitQueueUpdated(session.threadId, session.queue)
   }
 
