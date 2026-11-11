@@ -74,15 +74,15 @@ describe('syncLinuxLauncher', () => {
     writeFileSync(current, '')
     const kept = join(apps, 'Mousse-0.1.1.AppImage')
     writeFileSync(kept, '')
-    const other = `[Desktop Entry]\nName=T3\nExec=${join(apps, 'T3-Code.AppImage')}\n`
+    const other = `[Desktop Entry]\nName=Other app\nExec=${join(apps, 'Other-App.AppImage')}\n`
     const pinned = `[Desktop Entry]\nName=Mousse old\nExec=${kept}\n`
-    writeFileSync(join(applications, 't3.desktop'), other)
+    writeFileSync(join(applications, 'other-app.desktop'), other)
     writeFileSync(join(applications, 'mousse-old.desktop'), pinned)
     writeFileSync(join(applications, 'mousse.desktop'), `[Desktop Entry]\nName=Mousse\nExec=${current}\nIcon=mousse\n`)
 
     const changes = sync({ appImage: current })
 
-    expect(readFileSync(join(applications, 't3.desktop'), 'utf8')).toBe(other)
+    expect(readFileSync(join(applications, 'other-app.desktop'), 'utf8')).toBe(other)
     expect(readFileSync(join(applications, 'mousse-old.desktop'), 'utf8')).toBe(pinned)
     expect(changes.launchers).toEqual([])
     expect(refreshed).toEqual([])
