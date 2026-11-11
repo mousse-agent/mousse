@@ -252,7 +252,7 @@ Until then, PR 2 holds and then pushes `now` after `mayCut`.
 Before any hold, a steer is accepted per drain, in one step that also saves its text.
 
 - **Each drain** (`drained`, `OS.ts:11472`) keeps the item ids and the carried inbox rows it took.
-- **`steerTaken(token)`** stays an in-memory note that the provider has the text: the drain will not be handed back. It keeps the token's entry until acceptance, and it saves and drops nothing.
+- **`steerTaken(token)`** stays an in-memory note that the provider has the text. It keeps the token's entry until acceptance, and it saves and drops nothing. A taken drain can still be handed back (`returnSteer(text, token)`) while it is not accepted: it is then restored whole, its rows back in the queue and its copy hidden, so it runs once (#906). An accepted drain is never handed back.
 - **`sink.steerAccepted(text, token)` is the single acceptance step.** In one `persist` it appends the text to the model context and adds that token's item ids to `nativeContext.acceptedSteerItemIds`. After that write, it drops that token's queue rows (`dropSteerItems` with those ids only) and deletes the token's entry. This keeps today's rule that queue rows go only after the text and ids are saved (`OS.ts:12034`).
 - **Crash windows:**
   - a crash between `steerTaken` and `steerAccepted` leaves the row `steering` and not accepted, so `returnOrphanedSteers` runs it once after the restart. That is the documented at-least-once case for providers that resume their session;
