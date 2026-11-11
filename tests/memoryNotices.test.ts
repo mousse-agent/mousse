@@ -46,7 +46,7 @@ describe('memory notice', () => {
     expect(memoryNoticesEnabled({ notifications: { threadCompletionSound: true, allRemoteThreads: false, memoryNotices: false } })).toBe(false)
   })
 
-  it('the About row tooltip lists the counts and what the windows draw', () => {
+  it('the About row tooltip lists the service counts', () => {
     const status: MemoryStatus = {
       sample: {
         t: 1, up: 60,
@@ -59,7 +59,6 @@ describe('memory notice', () => {
     }
     expect(memoryBreakdown(status).split('\n')).toEqual([
       'Loaded threads 1, runtimes 2, SQLite 3, workers 2, terminals 0, providers 1',
-      '1 window (1600x1000 at 1x; 1 shown, 6.1 MB of pixels), acrylic off, WebGL contexts 0, canvases 0, applet views 0, in-app browser 0, DevTools 0',
       'Growth 2.5 MB/h',
       'Log: <Mousse home>/diagnostics/memory.jsonl'
     ])

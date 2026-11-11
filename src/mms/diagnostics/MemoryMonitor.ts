@@ -292,7 +292,7 @@ export class MemoryMonitor {
     return {
       sample,
       detail: this.detail,
-      trend: memoryTrend(this.history, 15 * 60_000),
+      trend: memoryTrend(this.history, trendStep(this.history, this.thresholds.sampleIntervalMs)),
       growthMbPerHour: sample ? serviceGrowthMbPerHour(this.history, this.thresholds, sample.t) : null,
       breaches: [...this.active.values()].map((entry) => entry.breach),
       notice: this.pendingNotice(),
@@ -343,3 +343,8 @@ export class MemoryMonitor {
   }
 }
 
+/** About 40 trend points over the history held: never finer than one sample, nor coarser than 15 minutes. */
+export function trendStep(history: readonly MemorySample[], intervalMs: number): number {
+  const span = history.length > 1 ? history[history.length - 1].t - history[0].t : 0
+  return Math.min(15 * 60_000, Math.max(intervalMs, Math.ceil(span / 40)))
+}

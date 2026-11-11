@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { MemoryMonitor, type ServiceCountsReading } from '../src/mms/diagnostics/MemoryMonitor'
+import { MemoryMonitor, trendStep, type ServiceCountsReading } from '../src/mms/diagnostics/MemoryMonitor'
 import { MemoryLog, pruneMemoryLog, readMemoryLog, samplesOf } from '../src/mms/diagnostics/memoryLog'
 import { readHeapDetail, sampleOwnProcess } from '../src/mms/diagnostics/processMemory'
 import { childKindOf, liveChildProcesses, liveFileWatchers, resetLiveCounts, trackChildProcess, trackFileWatcher } from '../src/mms/diagnostics/liveCounts'
@@ -208,6 +208,15 @@ describe('memory monitor', () => {
     for (const personal of [dir, 'bob', 'Fix the login page', 'mousse-agent/secret-project', process.env.USERNAME, process.env.USER]) {
       if (personal) expect(everything).not.toContain(personal)
     }
+  })
+
+  it('keeps about 40 trend points whatever the history holds', () => {
+    const at = (minutes: number) => ({ t: T0 + minutes * MIN }) as never
+    expect(trendStep([at(0)], MIN)).toBe(MIN)
+    expect(trendStep([at(0), at(10)], MIN)).toBe(MIN)
+    expect(trendStep([at(0), at(120)], MIN)).toBe(3 * MIN)
+    expect(trendStep([at(0), at(360)], MIN)).toBe(9 * MIN)
+    expect(trendStep([at(0), at(6_000)], MIN)).toBe(15 * MIN)
   })
 
   it('drops an app report that stopped arriving', async () => {

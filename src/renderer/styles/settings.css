@@ -436,6 +436,7 @@ html[data-theme='high-contrast'] .settings-group-icon {
 .memory-table thead th { color: var(--text-secondary); }
 .memory-table tbody tr + tr { border-top: 1px solid color-mix(in srgb, var(--text-secondary) 14%, transparent); }
 .memory-table .memory-table-total th, .memory-table .memory-table-total td { font-weight: 600; }
+.memory-hints { margin: 6px 8px 0; color: var(--text-secondary); font-size: 11.5px; }
 .settings-status-bad { color: var(--danger); }
 
 .settings-group-desc {

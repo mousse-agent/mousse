@@ -21,7 +21,6 @@ export function memoryBreakdown(status: MemoryStatus): string {
   if (!sample) return 'No sample yet'
   const c = sample.counts
   const lines = [`Loaded threads ${c.loadedThreads}, runtimes ${c.threadRuntimes}, SQLite ${c.sqliteConnections ?? '-'}, workers ${c.workerThreads}, terminals ${c.ptys}, providers ${c.providerProcesses}`]
-  if (sample.hints) lines.push(appHintsLine(sample.hints))
   if (status.growthMbPerHour !== null) lines.push(`Growth ${status.growthMbPerHour} MB/h`)
   for (const breach of status.breaches) lines.push(`Out of bounds: ${breach.summary}`)
   lines.push(`Log: <Mousse home>/${status.logFile}`)
@@ -111,6 +110,7 @@ export function MemoryRows({ settings, onUpdate }: { settings: MousseSettings; o
             </tbody>
           </table>
         )}
+        {sample?.hints && <p className="memory-hints">{appHintsLine(sample.hints)}</p>}
       </SettingsRow>
       <SettingsRow
         title="Memory notices"
