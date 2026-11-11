@@ -38,6 +38,17 @@ export const toolStart = (id: string, name: string, uuid?: string): Frame => ({
   event: { type: 'content_block_start', content_block: { type: 'tool_use', id, name } }
 })
 
+/**
+ * The whole `assistant` message that holds a `tool_use` block: its input is complete, and Claude Code runs the call.
+ * A call announced (`toolStart`) that never gets this message was dropped before it ran.
+ */
+export const toolUse = (id: string, name: string, input: Record<string, unknown> = {}): Frame => ({
+  type: 'assistant',
+  session_id: SESSION,
+  parent_tool_use_id: null,
+  message: { id: `msg-${id}`, role: 'assistant', model: 'claude-test', content: [{ type: 'tool_use', id, name, input }] }
+})
+
 export const toolResult = (id: string): Frame => ({
   type: 'user',
   session_id: SESSION,
@@ -68,6 +79,17 @@ export const lifecycle = (uuid: string, state: 'queued' | 'started' | 'completed
   state,
   uuid: `lifecycle-${uuid}-${state}`,
   session_id: SESSION
+})
+
+/** Claude Code runs the call `callId` as task `taskId` (about 3 s after a command starts; at once for a subagent). */
+export const taskStarted = (callId: string, taskId: string, extra: Frame = {}): Frame => ({
+  type: 'system',
+  subtype: 'task_started',
+  session_id: SESSION,
+  task_id: taskId,
+  tool_use_id: callId,
+  description: 'run it',
+  ...extra
 })
 
 export const roster = (...tasks: Array<{ id: string; type?: string; ambient?: boolean }>): Frame => ({
@@ -144,8 +166,13 @@ export class FakeClaudeProcess {
   backgrounded = 0
   /** The call each `backgroundTasks` named (undefined: the call with no id, which also moves a running command). */
   readonly backgroundCalls: Array<string | undefined> = []
-  /** What `backgroundTasks` answers: `true` (moved), `false`, or `throw` (background tasks are off for the session). */
+  /**
+   * What `backgroundTasks` answers: `true` (moved), `false`, or `throw` (background tasks are off for the session). Like
+   * the real Claude Code (spike S1), a call named by id that is not a task yet (no `task_started` for it) answers false.
+   */
   backgroundAnswer: boolean | 'throw' = true
+  /** The calls Claude Code runs as a task (`task_started` emitted for them): only these can be moved by id. */
+  private readonly taskCalls = new Set<string>()
   closed = false
   /** The prompt stream ended (the real process would exit and take its background work with it). */
   inputEnded = false
@@ -196,6 +223,7 @@ export class FakeClaudeProcess {
     for (const frame of frames) {
       if (this.ended) return
       this.trackTasks(frame)
+      if (frame.subtype === 'task_started' && typeof frame.tool_use_id === 'string') this.taskCalls.add(frame.tool_use_id)
       const stamped = frame.user_message_uuids
       if (Array.isArray(stamped)) for (const id of stamped) this.started.add(String(id))
       if (frame.type === 'command_lifecycle' && frame.state === 'started') this.started.add(String(frame.command_uuid))
@@ -358,6 +386,7 @@ export class FakeClaudeProcess {
         this.backgroundCalls.push(toolUseId)
         await this.backgroundGate
         if (this.backgroundAnswer === 'throw') throw new Error('Background tasks are disabled in this session.')
+        if (toolUseId !== undefined && !this.taskCalls.has(toolUseId)) return false
         return this.backgroundAnswer
       },
       supportedModels: async () => []

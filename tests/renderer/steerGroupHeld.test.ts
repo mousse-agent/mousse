@@ -8,7 +8,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SteerGroup } from '../../src/renderer/chat/components/agent-elements/steer-group'
-import { HeldSteerContext, type HeldSteerState } from '../../src/renderer/chat/components/agent-elements/steer-hold'
+import { HeldSteerContext, newestSteerMessageId, type HeldSteerState } from '../../src/renderer/chat/components/agent-elements/steer-hold'
 import type { HeldSteer } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -52,7 +52,12 @@ function show(state: HeldSteerState | null, messages: UIMessage[] = [steered('m1
   act(() => root.render(createElement(HeldSteerContext.Provider, { value: state },
     createElement(SteerGroup, { messages, UserMessageComponent: UserMessage as never }))))
 }
-const label = () => host.querySelector('.steer-group-label')!
+/** The label row as it reads on screen: hidden text (a button's description) left out. */
+const label = () => {
+  const copy = host.querySelector('.steer-group-label')!.cloneNode(true) as HTMLElement
+  for (const hidden of copy.querySelectorAll('[hidden]')) hidden.remove()
+  return copy
+}
 const wait = () => host.querySelector<HTMLElement>('.steer-hold-wait')
 const button = () => host.querySelector<HTMLButtonElement>('.steer-hold-send')
 
@@ -62,9 +67,17 @@ describe('the Steer block of a held steer', () => {
     expect(label().textContent).toBe('Steer·Waits for Bash·Send now')
     expect(wait()!.getAttribute('title')).toBe('Goes in when Bash finishes\nnpm test')
     expect(button()!.getAttribute('title')).toBe('Stop Bash and send now')
-    expect(button()!.getAttribute('aria-label')).toBe('Send steer now, stops Bash')
     // A quiet text button: no border, no fill.
     expect(button()!.className).toBe('steer-hold-send')
+  })
+
+  it('the button\'s accessible name starts with what it shows, and its description gives the command (a tooltip on text cannot take focus)', () => {
+    show({ threadId: 't1', held: hold() })
+    expect(button()!.getAttribute('aria-label')).toBe('Send now: stops Bash')
+    expect(button()!.getAttribute('aria-label')!.startsWith(button()!.textContent!)).toBe(true)
+    const described = button()!.getAttribute('aria-describedby')
+    expect(described).toBeTruthy()
+    expect(document.getElementById(described!)!.textContent).toBe('Goes in when Bash finishes\nnpm test')
   })
 
   it('with several tools: "Waits for 2 tools", and the tooltip lists them', () => {
@@ -82,6 +95,23 @@ describe('the Steer block of a held steer', () => {
     expect(label().textContent).toBe('Steer')
   })
 
+  it('a hold with no queue item (a device\'s limited steer, a run-bound steer) shows on the newest Steer block only', () => {
+    const older = [steered('m1', 'an older steer')]
+    const newest = [steered('m2', 'the steer that waits')]
+    show({ threadId: 't1', held: hold({ itemIds: [] }), newestSteerId: 'm2' }, older)
+    expect(wait()).toBeNull()
+    show({ threadId: 't1', held: hold({ itemIds: [] }), newestSteerId: 'm2' }, newest)
+    expect(wait()!.textContent).toBe('Waits for Bash')
+    expect(button()!.textContent).toBe('Send now')
+  })
+
+  it('newestSteerMessageId finds the last steered user message', () => {
+    const plain = { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'hi' }] } as UIMessage
+    const reply = { id: 'a1', role: 'assistant', parts: [{ type: 'text', text: 'ok' }] } as UIMessage
+    expect(newestSteerMessageId([plain, steered('s1', 'a'), reply, steered('s2', 'b'), reply])).toBe('s2')
+    expect(newestSteerMessageId([plain, reply])).toBeUndefined()
+  })
+
   it('keeps the tool\'s name while the hold waits out the window after its result', () => {
     // The service keeps the last tool's name in `waitsFor` with no tool running.
     show({ threadId: 't1', held: hold({ tools: 0 }) })
@@ -93,7 +123,10 @@ describe('the Steer block of a held steer', () => {
     await act(async () => button()!.click())
     expect(steerNow).toHaveBeenCalledExactlyOnceWith({ threadId: 't1', runId: 'run-1', holdGeneration: 3, itemIds: ['item-1'], clientRequestId: expect.any(String) })
     expect(button()!.textContent).toBe('Sending…')
-    expect(button()!.disabled).toBe(true)
+    // Unavailable while it sends, but still focusable: `aria-disabled`, not `disabled`, so keyboard focus stays on it.
+    expect(button()!.disabled).toBe(false)
+    expect(button()!.getAttribute('aria-disabled')).toBe('true')
+    expect(document.activeElement === button() || button()!.tabIndex >= 0).toBe(true)
     // A second click while sending sends nothing.
     await act(async () => button()!.click())
     expect(steerNow).toHaveBeenCalledTimes(1)

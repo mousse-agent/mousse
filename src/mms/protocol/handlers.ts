@@ -2623,7 +2623,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
     }
     case 'orchestrator.steerNow': {
-      // Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the hold the click was shown for.
+      // Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the hold the click was shown for. Only a
+      // person sends it: a window on this computer, or one on another of the user's computers (a routed call). The CLI
+      // and agents have no Send now: it ends a command another caller's turn runs.
+      if (!isPerson(ctx.connection)) throw new DomainRpcError('forbidden', 'Send now is only for a person at a Mousse window')
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'runId', 'holdGeneration', 'itemIds', 'clientRequestId'])
       const threadId = asString(p.threadId, 'threadId', 256)

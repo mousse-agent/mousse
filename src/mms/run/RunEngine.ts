@@ -2176,6 +2176,8 @@ export class RunEngine extends EventEmitter {
         steerNow: request
       })
       store.appendEvent({ threadId, runId, type: 'steer.now_requested', payload: { ...request, itemIds: request.itemIds.join(','), now: true } })
+      // The audit record of a person's action on the run (agents cannot Send now): it ended the command the run waited for.
+      store.appendEvent({ threadId, runId, type: 'person.action', payload: { action: 'steered_run', runId, now: true, requestId: command.clientRequestId } })
       const sequence = store.maxSeq(threadId)
       this.putReceipt(command, 'accepted', { runId, sequence })
       store.db.checkpoint('steerNow.beforeCommit')

@@ -1394,6 +1394,33 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     await w.finish()
   })
 
+  it('start: only the turn\'s own calls restart the window; a subagent\'s calls working on do not keep the steer held', async () => {
+    const w = await world('start')
+    w.adapter.toolStart('agent', 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'research' } as ActivityPatch)
+    w.adapter.toolStart('child', 'Bash', undefined, 'agent')
+    w.adapter.toolStart('b1')
+    await w.steer('not for the subagent')
+    await waitFor(() => w.held() !== undefined, 'held for b1')
+    w.adapter.toolDone('b1')
+    const done = Date.now()
+    // The subagent's command writes output more often than the window lasts, for as long as the steer waits.
+    let ticking = true
+    const ticks = (async () => {
+      while (ticking) {
+        w.adapter.toolOutput('child')
+        await sleep(STEER_SETTLE_MS / 3)
+      }
+    })()
+    await waitFor(() => w.delivered().length > 0, 'released while the subagent works on')
+    ticking = false
+    await ticks
+    expect(Date.now() - done).toBeLessThan(STEER_SETTLE_MS * 4)
+    expect(w.delivered()).toEqual(['cut:not for the subagent'])
+    w.adapter.toolDone('child')
+    w.adapter.toolDone('agent', 'Agent')
+    await w.finish()
+  })
+
   it('start: text between two commands closes the window and the steer cuts (the documented best-effort window)', async () => {
     const w = await world('start')
     // A long window, so only the model's output can close it within the test.

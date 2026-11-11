@@ -457,8 +457,14 @@ class CancelTimedOut extends Error {
 export interface SteerOptions {
   /** Send now: pushed at once with no background move, and the foreground tools are stopped. */
   forced?: boolean
-  /** The turn's own subagent calls still in the foreground: each is moved to the background before the push. */
+  /**
+   * The turn's own subagent calls still in the foreground that Claude Code runs as a task (`task_started`): each is
+   * moved to the background before the push. A subagent call with no task yet is not moved: Claude Code drops a call
+   * whose input still streams when an immediate message arrives (spike S1).
+   */
   subagents?: readonly string[]
+  /** A subagent that was moved: it is not moved again for a later steer. */
+  moved?: (callId: string) => void
   /** A subagent that could not be moved: the steer is not pushed, and waits for it. */
   notMovable?: (callId: string) => void
   /** The check at dispatch, right before the push; false: the steer is not pushed. */
@@ -919,6 +925,9 @@ export class LiveSession<Turn = unknown> {
    *   immediate message waits for a running command on Claude Code (spike S1). Each is stopped as its task
    *   (`stopTask`) when Claude Code reported one for every call (`task_started`, about 3 s after a command starts);
    *   otherwise the turn is interrupted, which ends the command and leaves the pushed steer queued, so it runs once.
+   *   With no call left to stop (the command ended as the click came), the push alone is the cut.
+   * - A subagent call Claude Code has not started a task for yet is not moved (`options.subagents` leaves it out): the
+   *   push alone drops a call whose input still streams (spike S1).
    *
    * Pushed is not read, and taken (`run.read`, a `started` lifecycle) is not read either: `run.answered` and `onRead`
    * say when the model answers it, and `unreadFate` what became of one it had not answered when the turn ended.
@@ -931,7 +940,10 @@ export class LiveSession<Turn = unknown> {
     try {
       if (!options.forced) {
         for (const callId of options.subagents ?? []) {
-          if (await this.moveToBackground(query, callId)) continue
+          if (await this.moveToBackground(query, callId)) {
+            options.moved?.(callId)
+            continue
+          }
           options.notMovable?.(callId)
           return false
         }
@@ -962,7 +974,7 @@ export class LiveSession<Turn = unknown> {
       run.deferredResult = undefined
       run.steerIds.add(id)
       pushed?.(id)
-      if (options.forced) this.stopForeground(query, options.foreground?.() ?? [])
+      if (options.forced) this.stopForeground(run, query, id, options.foreground?.() ?? [])
       return id
     } finally {
       run.steerInFlight--
@@ -996,16 +1008,23 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * Send now, after the steer is pushed: ends the tools the turn waits for. Each by its task when Claude Code named one
-   * for every call; otherwise one interrupt, which ends the command and keeps the pushed steer queued (spike S1). Not
-   * awaited: the steer is already in place.
+   * Send now, after the steer `id` is pushed: ends the tools the turn waits for. Each by its task when Claude Code named
+   * one for every call; otherwise one interrupt, which ends the command and keeps the pushed steer queued (spike S1).
+   * Not awaited: the steer is already in place.
+   * - No call left to stop (the command ended on its own meanwhile): nothing more. The push alone cuts the next
+   *   request, and an interrupt would also stop the turn's background agents and shells.
+   * - Never an interrupt once Claude Code took the steer (`run.read`, a `started` lifecycle): it would end the steer's
+   *   own request, whose aborted result the run waits past (a steered run ends at the steer's own result), so the run
+   *   would never end.
    */
-  private stopForeground(query: Query, calls: ReadonlyArray<{ callId: string; taskId?: string }>): void {
+  private stopForeground(run: LiveRun, query: Query, id: string, calls: ReadonlyArray<{ callId: string; taskId?: string }>): void {
+    if (calls.length === 0) return
     const stopTask = (query as { stopTask?: (taskId: string) => Promise<void> }).stopTask
     const interrupt = (): void => {
+      if (run.read.has(id) || run.settled || run.abandoned || this.dead || this.query !== query) return
       void Promise.resolve(query.interrupt()).catch(() => undefined)
     }
-    if (calls.length > 0 && typeof stopTask === 'function' && calls.every((call) => call.taskId)) {
+    if (typeof stopTask === 'function' && calls.every((call) => call.taskId)) {
       for (const call of calls) void Promise.resolve(stopTask.call(query, call.taskId!)).catch(interrupt)
       return
     }

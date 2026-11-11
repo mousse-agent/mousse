@@ -43,9 +43,9 @@
   font: inherit;
   cursor: pointer;
 }
-.steer-hold-send:hover:not(:disabled) { background: var(--ui-hover); }
+.steer-hold-send:hover:not([aria-disabled="true"]) { background: var(--ui-hover); }
 .steer-hold-send:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
-.steer-hold-send:disabled { cursor: default; color: inherit; }
+.steer-hold-send[aria-disabled="true"] { cursor: default; color: inherit; }
 
 .steer-group-messages {
   display: flex;

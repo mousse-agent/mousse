@@ -21,7 +21,7 @@ export const SteerGroup = memo(function SteerGroup({ messages, UserMessageCompon
   // While the turn holds one of these steers for a running tool, the label row says what it waits for.
   const hold = useHeldSteer();
   const itemIds = messages.map((message) => (message.metadata as { steerItemId?: string } | undefined)?.steerItemId);
-  const held = hold?.held && heldInBlock(hold.held, itemIds) ? hold.held : undefined;
+  const held = hold?.held && heldInBlock(hold.held, itemIds, { messageIds: messages.map((message) => message.id), newestSteerId: hold.newestSteerId }) ? hold.held : undefined;
   return (
     <div className="steer-group" role="group" aria-label="Steered messages" data-steer-group={messages[0]?.id}>
       <div className="steer-group-label">

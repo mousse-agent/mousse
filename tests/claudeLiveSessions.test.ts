@@ -16,7 +16,7 @@ import {
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
 import { STOP_GRACE_MS } from '../src/mms/harness/stopProcesses'
-import { FakeClaudeCli, lifecycle, messageStart, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
+import { FakeClaudeCli, lifecycle, messageStart, notification, resultFrame, roster, SESSION, taskStarted, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const homes: string[] = []
@@ -918,7 +918,7 @@ describe('result routing and steering edge cases', () => {
     const process = f.cli.last
     process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
     // A foreground subagent the steer moves to the background first.
-    process.emit(toolStart('agent-1', 'Agent', process.uuid(0)), textDelta('answer', process.uuid(0)))
+    process.emit(toolStart('agent-1', 'Agent', process.uuid(0)), taskStarted('agent-1', 'task-agent-1'), textDelta('answer', process.uuid(0)))
     await later(30)
     drainSteer.mockReturnValueOnce('late steer')
     await vi.waitFor(() => expect(process.backgroundCalls).toEqual(['agent-1']))
@@ -1396,7 +1396,7 @@ describe('result routing and steering edge cases', () => {
     await inputs(f.cli, 3)
     const uuid = process.uuid(2)
     // A foreground subagent the steer moves to the background first.
-    process.emit(toolStart('agent-1', 'Agent', uuid))
+    process.emit(toolStart('agent-1', 'Agent', uuid), taskStarted('agent-1', 'task-agent-1'))
     await later(30)
     drainSteer.mockReturnValueOnce('late steer')
     await vi.waitFor(() => expect(process.backgrounded).toBe(1))
@@ -2425,7 +2425,7 @@ describe('background helpers as the real Claude Code reports them', () => {
     })
     wakeA.catch(() => undefined)
     // A foreground subagent of the wake, which the steer moves to the background first.
-    process.emit(toolStart('agent-1', 'Agent'))
+    process.emit(toolStart('agent-1', 'Agent'), taskStarted('agent-1', 'task-agent-1'))
     await later(30)
     drainSteer.mockReturnValueOnce('a steer')
     // The steer waits for foreground work to move, and the wake's result arrives meanwhile: it is held back.

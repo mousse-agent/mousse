@@ -18,7 +18,7 @@ import {
 import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
 import { TurnActionsContext, type TurnActions } from './agent-elements/turn-actions'
 import { TurnProgressContext, type TurnProgressState } from './agent-elements/turn-progress'
-import { HeldSteerContext, type HeldSteerState } from './agent-elements/steer-hold'
+import { HeldSteerContext, newestSteerMessageId, type HeldSteerState } from './agent-elements/steer-hold'
 import { QueuedMessages } from '../../components/QueuedMessages'
 import type { ThreadQueue } from '../../hooks/useThreadQueue'
 import './agent-elements/agent-ui.css'
@@ -114,9 +114,11 @@ function TurnProgressProvider({ threadId, children }: { threadId?: string | null
 }
 
 /** The Steer block's wait line and Send now (`SteerHoldLine`): only what reads it renders when the hold changes. */
-function HeldSteerProvider({ threadId, children }: { threadId?: string | null; children: ReactNode }) {
+function HeldSteerProvider({ threadId, messages, children }: { threadId?: string | null; messages: UIMessage[]; children: ReactNode }) {
   const held = useAppStore(state => (threadId ? state.turnStates[threadId]?.heldSteer : undefined))
-  const value = useMemo<HeldSteerState>(() => ({ threadId, held }), [threadId, held])
+  // A held steer with no queue item (a device's limited steer, a run-bound steer) is shown on the newest Steer block.
+  const newestSteerId = useMemo(() => (held && held.itemIds.length === 0 ? newestSteerMessageId(messages) : undefined), [held, messages])
+  const value = useMemo<HeldSteerState>(() => ({ threadId, held, ...(newestSteerId ? { newestSteerId } : {}) }), [threadId, held, newestSteerId])
   return <HeldSteerContext.Provider value={value}>{children}</HeldSteerContext.Provider>
 }
 
@@ -182,7 +184,7 @@ export function MousseAgentChatShell({
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
       <TurnActionsContext.Provider value={turnActions ?? null}>
       <TurnProgressProvider threadId={threadId}>
-      <HeldSteerProvider threadId={threadId}>
+      <HeldSteerProvider threadId={threadId} messages={messages}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}

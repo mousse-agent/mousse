@@ -15,6 +15,7 @@ import {
 import { subagentToolName } from '../../../shared/subagentTools'
 import { parseProviderToolCall } from '../../../shared/toolCallDisplay'
 import type { ChatMessage, TurnPhase } from '../../../shared/types'
+import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../mcp/attachment'
 import type {
   StreamingLlmTextEvent,
   StreamingLlmThinkingEvent,
@@ -67,8 +68,14 @@ export interface TranscriptHooks {
  * turn is one of these, the thread shows Waiting instead of Working. Mousse's own delegation
  * tools return at once and wake the parent later, so they are not here.
  * - `TaskOutput`: Claude Code waiting for a background shell or subagent (older Claude Code).
+ * - `thread_wait`: Mousse's tool that waits for another thread's run (`mcp__mousse__thread_wait` over MCP).
  */
-export const WAIT_TOOL_NAMES: ReadonlySet<string> = new Set(['TaskOutput'])
+export const WAIT_TOOL_NAMES: ReadonlySet<string> = new Set(['TaskOutput', 'thread_wait'])
+
+/** A wait tool (`WAIT_TOOL_NAMES`), by its own name or as the Mousse MCP server's tool. */
+function isWaitTool(name: string): boolean {
+  return WAIT_TOOL_NAMES.has(name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) ? name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) : name)
+}
 
 /** A foreground call a held steer waits for (`TranscriptAssembler.foregroundTools`). */
 export interface ForegroundTool {
@@ -671,24 +678,40 @@ export class TranscriptAssembler {
    * (`waitingOnPerson`, the provider's call ids), a background call, a subagent call (unless the provider could not
    * move it to the background: `notMovable`), a wait-only tool, and every call whose parent chain reaches a subagent
    * or background call. A call whose parent cannot be found counts as the turn's own: it may hold, never cut.
+   *
+   * `asksPerson`: while the thread has a question pending that no provider call reported (`waitingOnPerson` only knows
+   * the provider's own approvals and questions), the calls that may be the one asking it: Mousse's own tools that ask
+   * the person (`ask_user`, an approval). The steer answers such a question, as it answers the provider's.
    */
-  foregroundTools(waitingOnPerson: ReadonlySet<string> = new Set()): ForegroundTool[] {
+  foregroundTools(waitingOnPerson: ReadonlySet<string> = new Set(), asksPerson?: (toolName: string) => boolean): ForegroundTool[] {
     const tools: ForegroundTool[] = []
     for (const [callId, messageId] of this.state.activeToolCallMessageIds) {
       if (waitingOnPerson.has(callId)) continue
       const message = this.hooks.getMessage(messageId)
       if (!message || !this.ownsForeground(message)) continue
       const toolName = toolNameOf(message)
+      if (asksPerson?.(toolName)) continue
       const detail = activityDetail(message.activity)
       tools.push({ callId, toolName: displayToolName(toolName), ...(detail ? { detail } : {}) })
     }
     return tools
   }
 
+  /**
+   * Whether `callId` is one of the turn's own foreground calls (open or ended): its events restart a held steer's
+   * release window (§2.3); a subagent's, a background call's or a wait tool's do not. A call with no row counts.
+   */
+  ownsForegroundCall(callId: string | undefined): boolean {
+    if (!callId) return true
+    const messageId = this.state.activeToolCallMessageIds.get(callId) ?? this.callToMessage.get(callId)
+    const message = messageId ? this.hooks.getMessage(messageId) : undefined
+    return !message || this.ownsForeground(message)
+  }
+
   /** The call is the turn's own foreground call: not excluded itself, and no subagent or background call above it. */
   private ownsForeground(message: ChatMessage): boolean {
     if (isBackgroundOrSubagent(message) && !message.activity?.notMovable) return false
-    if (WAIT_TOOL_NAMES.has(toolNameOf(message))) return false
+    if (isWaitTool(toolNameOf(message))) return false
     const seen = new Set<string>([message.id])
     let parentId = message.activity?.parentId
     while (parentId && !seen.has(parentId)) {
@@ -715,7 +738,7 @@ export class TranscriptAssembler {
       const message = this.hooks.getMessage(messageId)
       const call = message?.toolCall
       // Vendor runtimes name the tool in the title; the pi loop parses it into `toolName`.
-      if (!WAIT_TOOL_NAMES.has(message?.activity?.toolName ?? call?.toolName ?? call?.title ?? '')) return false
+      if (!isWaitTool(message?.activity?.toolName ?? call?.toolName ?? call?.title ?? '')) return false
     }
     return true
   }

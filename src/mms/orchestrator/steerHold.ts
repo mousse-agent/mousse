@@ -67,6 +67,8 @@ export class SteerHold {
   private lastWaitsFor: { name: string; detail?: string } | undefined
   /** Send now requests not yet consumed. */
   private readonly forces: SteerForce[] = []
+  /** Every request id this hold was given: a click replayed with the same id is not checked (or reported) again. */
+  private readonly requestIds = new Set<string>()
   /** The generation a valid Send now forced; the next drain takes it. */
   private forcedGeneration: number | undefined
   /** Drains made under a force: they may always cut. */
@@ -133,15 +135,22 @@ export class SteerHold {
     return this.heldKeys?.has(key) === true
   }
 
-  /** A Send now request for this turn. It is checked at the next decision against the hold then. */
+  /**
+   * A Send now request for this turn. It is checked at the next decision against the hold then. Idempotent: a request
+   * id the hold already has (pending, or settled once) changes nothing, so a replayed click neither forces again nor
+   * is reported a second time.
+   */
   requestForce(force: SteerForce): void {
-    if (!this.forces.some((entry) => entry.requestId === force.requestId)) this.forces.push(force)
+    if (this.requestIds.has(force.requestId)) return
+    this.requestIds.add(force.requestId)
+    this.forces.push(force)
   }
 
   /** The request was not accepted (its run is not the active one): it forces nothing. */
   dropForce(requestId: string): void {
     const index = this.forces.findIndex((entry) => entry.requestId === requestId)
     if (index >= 0) this.forces.splice(index, 1)
+    this.requestIds.delete(requestId)
   }
 
   /** A force for `requestId` is waiting to be checked. */
@@ -152,12 +161,14 @@ export class SteerHold {
   /**
    * Checks the waiting Send now requests against the hold now. Valid: the click's generation is the current hold's
    * and every item it named is still held; the next drain is then forced. Every request is settled here, once.
+   * `person`: the held batch has a person's steer. Only that can be forced (`steerDelivery`: an agent's steer or a
+   * notice is never forced), so a click on any other hold is stale.
    */
-  settleForces(): { applied: SteerForce[]; stale: SteerForce[] } {
+  settleForces(person = true): { applied: SteerForce[]; stale: SteerForce[] } {
     const applied: SteerForce[] = []
     const stale: SteerForce[] = []
     for (const force of this.forces.splice(0)) {
-      const valid = this.heldKeys !== undefined && force.holdGeneration === this.generation && force.itemIds.every((id) => this.heldKeys!.has(id))
+      const valid = person && this.heldKeys !== undefined && force.holdGeneration === this.generation && force.itemIds.every((id) => this.heldKeys!.has(id))
       if (valid && this.forcedGeneration !== this.generation) {
         this.forcedGeneration = this.generation
         applied.push(force)

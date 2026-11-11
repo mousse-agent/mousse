@@ -724,6 +724,43 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
     assembler.tool(start('m1', 'mcp__github__create_issue', { toolName: 'mcp__github__create_issue', kind: 'generic' }))
     expect(assembler.foregroundTools()).toEqual([{ callId: 'm1', toolName: 'create_issue' }])
   })
+
+  it('Mousse\'s thread_wait only waits: it never holds, by its own name or as the Mousse server\'s tool', () => {
+    const { assembler } = harness()
+    assembler.tool(start('w1', 'thread_wait', { toolName: 'thread_wait', kind: 'generic' }))
+    assembler.tool(start('w2', 'mcp__mousse__thread_wait', { toolName: 'mcp__mousse__thread_wait', kind: 'generic' }))
+    expect(ids(assembler)).toEqual([])
+    // Another server's tool of the same name is not Mousse's wait.
+    assembler.tool(start('w3', 'mcp__other__thread_wait', { toolName: 'mcp__other__thread_wait', kind: 'generic' }))
+    expect(ids(assembler)).toEqual(['w3'])
+  })
+
+  it('asksPerson: a call that may be asking the pending question does not hold; the others still do', () => {
+    const { assembler } = harness()
+    assembler.tool(start('ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' }))
+    assembler.tool(start('b1', 'Bash'))
+    const asks = (name: string) => name === 'mcp__mousse__ask_user'
+    expect(assembler.foregroundTools(new Set(), asks).map((tool) => tool.callId)).toEqual(['b1'])
+    // With no question pending (no predicate), ask_user holds like any call.
+    expect(ids(assembler)).toEqual(['ask', 'b1'])
+  })
+
+  it('ownsForegroundCall: the turn\'s own calls, open or ended; not a subagent\'s, a background call or a wait tool', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool(agent('bg', { background: true }))
+    assembler.tool(start('w1', 'TaskOutput', { toolName: 'TaskOutput', kind: 'generic' }))
+    assembler.tool(start('root', 'Bash'))
+    expect(['a1', 'child', 'bg', 'w1', 'root'].map((id) => assembler.ownsForegroundCall(id))).toEqual([false, false, false, false, true])
+    assembler.tool(done('root', 'Bash'))
+    assembler.tool(done('child', 'Bash'))
+    expect(assembler.ownsForegroundCall('root')).toBe(true)
+    expect(assembler.ownsForegroundCall('child')).toBe(false)
+    // An event with no row, or no call id, counts as the turn's own.
+    expect(assembler.ownsForegroundCall('unknown')).toBe(true)
+    expect(assembler.ownsForegroundCall(undefined)).toBe(true)
+  })
 })
 
 describe('TranscriptAssembler text coalescing', () => {

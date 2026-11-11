@@ -91,6 +91,7 @@ import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManage
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
+import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../run/mcp/attachment'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
 import { DevGuiTools } from '../devgui/DevGuiTools'
@@ -11818,7 +11819,9 @@ export class OrchestratorService extends EventEmitter {
       const hold = new SteerHold({
         caps: opts?.externalDrainSteer && !opts.externalPeekSteer ? { ...instance.caps, steerBoundary: 'none' } : instance.caps,
         strict: this.settingsStore.get().runs.steerRelease?.[instance.instanceId] === 'strict',
-        foreground: (waiting) => assembler.foregroundTools(waiting),
+        // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
+        // waits, Mousse's own calls that ask the person do not hold.
+        foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
         settleMs: this.steerSettleMs
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
@@ -11837,7 +11840,8 @@ export class OrchestratorService extends EventEmitter {
       const pendingFacts = (): PendingSteerFacts | undefined => {
         const raw = opts?.externalPeekSteer?.()
         const external: SteerEntry[] = typeof raw === 'string' ? (raw.trim() ? [{ text: raw.trim() }] : []) : (raw ?? [])
-        const own = this.peekSteerForSession(session, turn)
+        // The journal is read only while a steer is held: a Send now names a hold windows were shown.
+        const own = this.peekSteerForSession(session, turn, hold.holdGeneration !== undefined)
         const notices = new Set((turn.carriedSteers ?? []).map((entry) => entry.text.trim()))
         const entries = [
           ...external.map((entry, index) => ({ entry, key: entry.itemId ?? `remote:${index}:${entry.text.trim()}` })),
@@ -11863,9 +11867,14 @@ export class OrchestratorService extends EventEmitter {
         }
         let decision = hold.decide(facts)!
         if (hold.adopted) {
-          if (decision.delivery === 'hold') this.setHeldSteer(session.threadId, hold.hold(facts, decision.tools, engineRunId))
+          // Windows show the wait line and Send now only for a person's steer: an agent's steer or a notice that waits for
+          // a tool is never forced (§2.2), so a click on it would do nothing.
+          if (decision.delivery === 'hold') {
+            const shown = hold.hold(facts, decision.tools, engineRunId)
+            this.setHeldSteer(session.threadId, facts.person ? shown : undefined)
+          }
           this.collectSteerNow(session, engineRunId, hold)
-          const settled = hold.settleForces()
+          const settled = hold.settleForces(facts.person)
           if (settled.applied.length || settled.stale.length) this.settleSteerNow(session, engineRunId, settled)
           if (settled.applied.length) decision = hold.decide(facts)!
         }
@@ -11886,8 +11895,9 @@ export class OrchestratorService extends EventEmitter {
         tool: (event) => {
           if (event.kind !== 'skill_loaded') conversationToolsUsed = true
           this.handleStreamingToolEvent(event)
-          // After the assembler: the call's row is open (or closed) when the window restarts.
-          hold.toolEvent()
+          // After the assembler: the call's row is open (or closed) when the window restarts. Only the turn's own calls
+          // restart it (§2.3): a subagent's or a background call's events say nothing about the turn's next tool.
+          if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
         },
         toolAwaiting: (callId, waiting) => hold.awaiting(callId, waiting),
         boundary: () => hold.boundary(),
@@ -12619,12 +12629,14 @@ export class OrchestratorService extends EventEmitter {
    */
   private peekSteerForSession(
     session: ThreadSession,
-    turn: { runId?: string; pendingSteer: SteerEntry[] }
+    turn: { runId?: string; pendingSteer: SteerEntry[] },
+    /** A steer is held, so a Send now for it may be pending in the journal. Without a hold no click can apply. */
+    held = true
   ): SteerEntry[] {
     const asking = this.questions.listPendingForThread(session.threadId).length > 0
     const own = asking ? turn.pendingSteer.filter((entry) => !entry.origin && !entry.byAgent) : [...turn.pendingSteer]
     const store = this.threadStore
-    if (store && session.threadId !== '__unbound__') {
+    if (held && store && session.threadId !== '__unbound__') {
       try {
         if (store.getQueueJournal()?.commands.listUnfinished(session.threadId).some((row) => row.intent.op === 'steer_now')) repairQueueJournal(store, session.threadId)
       } catch (error) {
@@ -12646,6 +12658,25 @@ export class OrchestratorService extends EventEmitter {
       ...own,
       ...disk.map((item): SteerEntry => ({ text: item.content, itemId: item.id, ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {}) }))
     ]
+  }
+
+  /**
+   * While the thread has a question pending, which of the turn's calls may be the one asking it: Mousse's own tools
+   * that ask the person (`asksUser`: `ask_user`, a quick action's approval), the ones that ask before they edit
+   * (`editsWorkspace`), and the relay's (its approvals). A Mousse tool the registry does not know counts too. Such a
+   * call does not hold a steer, which answers the question, as it answers one the provider asks. Undefined while no
+   * question waits: every call holds as usual.
+   */
+  private mousseCallsAskingPerson(threadId: string): ((toolName: string) => boolean) | undefined {
+    if (this.questions.listPendingForThread(threadId).length === 0) return undefined
+    const registry = this.mcpRegistry
+    return (toolName) => {
+      if (toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return true
+      const prefixed = toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
+      const tool = registry?.get(prefixed ? toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) : toolName)
+      if (!tool) return prefixed
+      return Boolean(tool.asksUser) || tool.access === 'editsWorkspace'
+    }
   }
 
   /** Send now requests on held rows of `runId` (`QueuedMessage.steerNow`), handed to the run's hold to check. */

@@ -539,6 +539,7 @@ export type ProtocolEventType =
   | 'turn.aborted'
   | 'turn.paused'
   | 'turn.steered'
+  | 'steer.now'
   | 'connection.failed'
   | 'activity'
   | 'activity.snapshot'

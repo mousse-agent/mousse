@@ -2584,6 +2584,8 @@ export class ClaudeSubscriptionProviderService {
         void live.steer(liveRun, steer, pushed, {
           forced,
           subagents: frames.foregroundSubagents(),
+          // Moved once: a later steer does not ask again.
+          moved: (callId) => frames.markBackgrounded(callId),
           // Waited for from now on: the next peek holds, without trying the move again.
           notMovable: (callId) => {
             frames.markNotMovable(callId)
