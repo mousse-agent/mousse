@@ -52,11 +52,13 @@ describe('glass blur on surfaces that stay on screen', () => {
     expect(body).not.toMatch(/backdrop-filter/)
   })
 
-  it('uses the glass blur token only in the acrylic theme file', () => {
+  it('uses the glass blur token only in the acrylic theme file and the Automations page', () => {
     const users = cssFiles(RENDERER)
       .filter((file) => /backdrop-filter:\s*var\(--glass-blur\)/.test(readFileSync(file, 'utf8')))
       .map((file) => relative(RENDERER, file).replace(/\\/g, '/'))
-    expect(users).toEqual(['styles/themes/acrylic.css'])
+      .sort()
+    // The Automations page keeps its own styles; the token is `none` outside acrylic, so it draws no blur there.
+    expect(users).toEqual(['styles/automations-page.css', 'styles/themes/acrylic.css'])
   })
 
   it('keeps the blur where something shows through: the frosted composer and toasts', () => {
