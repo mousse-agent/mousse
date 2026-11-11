@@ -46,21 +46,20 @@ describe('memory notice', () => {
     expect(memoryNoticesEnabled({ notifications: { threadCompletionSound: true, allRemoteThreads: false, memoryNotices: false } })).toBe(false)
   })
 
-  it('the About row tooltip lists each process and the counts', () => {
+  it('the About row tooltip lists the counts and what the windows draw', () => {
     const status: MemoryStatus = {
       sample: {
         t: 1, up: 60,
         service: { rss: 200, private: 180, heapUsed: 60, heapTotal: 80 },
         counts: { sqliteConnections: 3, workerThreads: 2, loadedThreads: 1, threadRuntimes: 2, threadCacheThreads: 1, threadCacheMb: 1, replayEvents: 9, ptys: 0, fileWatchers: 2, providerProcesses: 1, profiles: 1 },
-        app: [{ kind: 'main', rss: 210, private: 150 }, { kind: 'window', rss: 400, private: 350, heapUsed: 90, heapTotal: 120 }]
+        app: [{ kind: 'main', role: 'main', rss: 210, private: 150 }, { kind: 'renderer', role: 'window', rss: 400, private: 350, heapUsed: 90, heapTotal: 120 }],
+        hints: { windows: [{ w: 1600, h: 1000, scale: 1, visible: true }], surfaceMb: 6.1, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0 }
       },
       detail: null, trend: [], growthMbPerHour: 2.5, breaches: [], notice: null, logFile: 'diagnostics/memory.jsonl'
     }
     expect(memoryBreakdown(status).split('\n')).toEqual([
-      'Service: 180 MB, heap 60/80',
-      'App main: 150 MB',
-      'Window 1: 350 MB, heap 90/120',
       'Loaded threads 1, runtimes 2, SQLite 3, workers 2, terminals 0, providers 1',
+      '1 window (1600x1000 at 1x; 1 shown, 6.1 MB of pixels), acrylic off, WebGL contexts 0, canvases 0, applet views 0, in-app browser 0, DevTools 0',
       'Growth 2.5 MB/h',
       'Log: <Mousse home>/diagnostics/memory.jsonl'
     ])

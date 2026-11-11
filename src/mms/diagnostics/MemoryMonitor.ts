@@ -19,6 +19,7 @@ import {
   noticeDue,
   serviceGrowthMbPerHour,
   toMb,
+  type AppHints,
   type AppProcessMemory,
   type BreachKind,
   type ChildMemory,
@@ -97,7 +98,7 @@ export class MemoryMonitor {
   private detail: MemoryDetail | null = null
   private active = new Map<BreachKind, { breach: MemoryBreach; loggedAt: number }>()
   private pending: MemoryNotice | null = null
-  private appReports = new Map<string, { at: number; processes: AppProcessMemory[] }>()
+  private appReports = new Map<string, { at: number; processes: AppProcessMemory[]; hints?: AppHints }>()
   private timer: NodeJS.Timeout | null = null
   private ticks = 0
   private running: Promise<void> | null = null
@@ -137,8 +138,8 @@ export class MemoryMonitor {
   }
 
   /** The desktop app's processes, sent by its main process about once a minute. */
-  acceptAppReport(connectionId: string, processes: AppProcessMemory[]): void {
-    this.appReports.set(connectionId, { at: this.now(), processes })
+  acceptAppReport(connectionId: string, processes: AppProcessMemory[], hints?: AppHints): void {
+    this.appReports.set(connectionId, { at: this.now(), processes, ...(hints ? { hints } : {}) })
   }
 
   forgetConnection(connectionId: string): void {
@@ -181,7 +182,7 @@ export class MemoryMonitor {
       this.lastChildren = await (this.options.readChildren ?? (() => readChildMemory(liveChildProcesses())))()
       if (this.options.readReplayBytes) this.lastReplayMb = toMb(this.options.readReplayBytes())
     }
-    const app = this.freshAppProcesses(t)
+    const { processes: app, hints } = this.freshAppReport(t)
     return {
       t,
       up: Math.round((this.options.uptime ?? process.uptime)()),
@@ -190,18 +191,25 @@ export class MemoryMonitor {
       ...(reading.workerHeaps.length ? { workers: reading.workerHeaps.map(toMb) } : {}),
       ...(withDetail && this.lastChildren?.length ? { children: this.lastChildren } : {}),
       ...(app.length ? { app } : {}),
+      ...(hints ? { hints } : {}),
       ...(withDetail && this.lastReplayMb !== undefined ? { replayMb: this.lastReplayMb } : {})
     }
   }
 
-  private freshAppProcesses(now: number): AppProcessMemory[] {
-    const maxAge = this.thresholds.sampleIntervalMs * APP_REPORT_FRESH_INTERVALS
-    const out: AppProcessMemory[] = []
+  private freshAppReport(now: number): { processes: AppProcessMemory[]; hints?: AppHints } {
+    // The app reports once a minute whatever the service's interval is.
+    const maxAge = Math.max(this.thresholds.sampleIntervalMs, 60_000) * APP_REPORT_FRESH_INTERVALS
+    const processes: AppProcessMemory[] = []
+    let hints: AppHints | undefined
     for (const [id, report] of this.appReports) {
-      if (now - report.at > maxAge) this.appReports.delete(id)
-      else out.push(...report.processes)
+      if (now - report.at > maxAge) {
+        this.appReports.delete(id)
+        continue
+      }
+      processes.push(...report.processes)
+      hints ??= report.hints
     }
-    return out
+    return { processes, ...(hints ? { hints } : {}) }
   }
 
   private async check(sample: MemorySample): Promise<void> {

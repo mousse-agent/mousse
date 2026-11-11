@@ -426,9 +426,16 @@ html[data-theme='high-contrast'] .settings-group-icon {
 .settings-status-ok { color: var(--success); }
 .settings-status-warn { color: var(--warning); }
 
-/* Settings > General > About > Memory: the service's trend beside Report. */
-.memory-row-controls { display: inline-flex; align-items: center; gap: 10px; }
-.memory-sparkline { color: var(--text-secondary); flex: none; }
+/* Settings > General > About > Memory: trends beside Report, and every process in a table below. */
+.memory-row-controls { display: inline-flex; align-items: center; gap: 12px; }
+.memory-trend { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); font-size: 11px; }
+.memory-sparkline { flex: none; }
+.memory-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.memory-table th, .memory-table td { padding: 3px 8px; text-align: right; font-weight: 400; white-space: nowrap; }
+.memory-table th:first-child { text-align: left; }
+.memory-table thead th { color: var(--text-secondary); }
+.memory-table tbody tr + tr { border-top: 1px solid color-mix(in srgb, var(--text-secondary) 14%, transparent); }
+.memory-table .memory-table-total th, .memory-table .memory-table-total td { font-weight: 600; }
 .settings-status-bad { color: var(--danger); }
 
 .settings-group-desc {

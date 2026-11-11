@@ -2,6 +2,7 @@ import type { KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
 import { FaceMotion, faceUniforms, stillPose, WHISKER_MIN_SIZE, type FaceUniforms } from './facePoses'
 import { MICE_FRAGMENT_SHADER, MICE_UNIFORMS, MICE_VERTEX_SHADER, type MiceUniform } from './miceShader'
+import { noteWebGlContext } from '../../../lib/webglCount'
 
 /**
  * The shared face renderer (Bot Phase 1 §5.12, bot-ui §4.3). One WebGL context serves every face:
@@ -685,6 +686,7 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
   }
   if (!gl || softwareWebGl(gl)) return null
   const context = gl
+  const releaseCount = noteWebGlContext(doc)
   let state: 'pending' | 'ready' | 'lost' | 'failed' = 'pending'
   let program: WebGLProgram | null = null
   let uniforms = {} as Record<MiceUniform, WebGLUniformLocation | null>
@@ -819,6 +821,7 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       restored.clear()
       lost.clear()
       context.getExtension('WEBGL_lose_context')?.loseContext()
+      releaseCount()
     }
   }
 }

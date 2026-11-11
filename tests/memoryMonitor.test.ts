@@ -191,13 +191,20 @@ describe('memory monitor', () => {
     const now = { t: T0 }
     const monitor = monitorAt(dir, { mb: () => 600, now })
     await run(monitor, now, 5)
-    monitor.acceptAppReport('c1', [{ kind: 'main', rss: 200, private: 150 }, { kind: 'window', rss: 500, private: 420, heapUsed: 90, heapTotal: 120 }])
+    monitor.acceptAppReport('c1', [
+      { kind: 'main', role: 'main', rss: 200, private: 150 },
+      { kind: 'renderer', role: 'window', rss: 500, private: 420, heapUsed: 90, heapTotal: 120 },
+      { kind: 'gpu', role: 'gpu', rss: 400, private: 334, cpu: 2 }
+    ], { windows: [{ w: 1200, h: 800, scale: 2, visible: true }], surfaceMb: 14.6, acrylic: false, views: { applet: 1, browser: 0, devtools: 0 }, webglContexts: 2, canvases: 2 })
     await run(monitor, now, 1)
     const issue = await monitor.issue()
     monitor.stop()
     const everything = `${issue.title}\n${issue.body}\n${decodeURIComponent(issue.url)}`
     expect(issue.title).toContain('Service 600 MB')
-    expect(issue.body).toContain('| Window 1 | 420 | 500 | 90 | 120 |')
+    expect(issue.body).toContain('| Window | 420 | 500 | - | 90 | 120 |')
+    expect(issue.body).toContain('| GPU | 334 | 400 | 2 | - | - |')
+    expect(issue.body).toContain('WebGL contexts 2')
+    expect(monitor.status().sample?.hints?.surfaceMb).toBe(14.6)
     for (const personal of [dir, 'bob', 'Fix the login page', 'mousse-agent/secret-project', process.env.USERNAME, process.env.USER]) {
       if (personal) expect(everything).not.toContain(personal)
     }
@@ -215,11 +222,17 @@ describe('memory monitor', () => {
     monitor.stop()
   })
 
-  it('takes only known process kinds and numbers from the app', () => {
-    expect(validateAppReport({ processes: [{ kind: 'window', rss: 12.34, private: 10 }] })).toEqual({ processes: [{ kind: 'window', rss: 12.3, private: 10 }] })
-    expect(() => validateAppReport({ processes: [{ kind: 'window', rss: 1, title: 'My thread' }] })).toThrow(/Unexpected field/)
+  it('takes only known process kinds, roles and numbers from the app', () => {
+    expect(validateAppReport({ processes: [{ kind: 'renderer', role: 'applet', rss: 12.34, private: 10, cpu: 0.25 }] }))
+      .toEqual({ processes: [{ kind: 'renderer', role: 'applet', rss: 12.3, private: 10, cpu: 0.3 }] })
+    expect(() => validateAppReport({ processes: [{ kind: 'renderer', rss: 1, title: 'My thread' }] })).toThrow(/Unexpected field/)
     expect(() => validateAppReport({ processes: [{ kind: 'C:/x', rss: 1 }] })).toThrow(/Unknown process kind/)
+    expect(() => validateAppReport({ processes: [{ kind: 'renderer', role: 'https://example.com', rss: 1 }] })).toThrow(/Unknown process role/)
     expect(() => validateAppReport({ processes: [{ kind: 'main', rss: '1' }] })).toThrow()
+    const hints = { windows: [{ w: 800, h: 600, scale: 1.25, visible: false }], surfaceMb: 0, acrylic: true, views: { applet: 0, browser: 1, devtools: 0 }, webglContexts: 0, canvases: 1 }
+    expect(validateAppReport({ processes: [], hints }).hints).toEqual(hints)
+    expect(() => validateAppReport({ processes: [], hints: { ...hints, title: 'x' } })).toThrow(/Unexpected field/)
+    expect(() => validateAppReport({ processes: [], hints: { ...hints, windows: [{ w: 1, h: 1, scale: 1, visible: true, url: 'x' }] } })).toThrow(/Unexpected field/)
   })
 })
 

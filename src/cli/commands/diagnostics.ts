@@ -6,7 +6,6 @@ import { resolveMousseHome } from '../paths'
 import { memoryLogPath, readMemoryLog, samplesOf, type MemoryLogLine } from '../../mms/diagnostics/memoryLog'
 import {
   MEMORY_THRESHOLDS_ENV,
-  appMb,
   detectBreaches,
   memoryIssue,
   memoryTrend,
@@ -17,7 +16,9 @@ import {
   type MemoryBreach,
   type MemoryDetail,
   type MemorySample,
-  type ProcessMemory
+  type MemoryTrendPoint,
+  appHintsLine,
+  memoryTable
 } from '../../shared/diagnostics/memory'
 
 /**
@@ -75,7 +76,7 @@ export interface MemoryLogSummary {
   detail: MemoryDetail | null
   /** The latest service run's samples. */
   run: MemorySample[]
-  hourly: Array<{ t: number; service: number; app: number | null }>
+  hourly: MemoryTrendPoint[]
   growth: number | null
   breaches: MemoryBreach[]
   recentBreaches: Array<{ t: number; breaches: MemoryBreach[] }>
@@ -109,25 +110,29 @@ function mb(n: number | undefined): string {
   return n === undefined ? '-' : n.toFixed(1)
 }
 
-function row(name: string, p: ProcessMemory): string {
-  return `  ${name.padEnd(12)} private ${mb(p.private).padStart(7)}  rss ${mb(p.rss).padStart(7)}  heap ${mb(p.heapUsed)}/${mb(p.heapTotal)}  external ${mb(p.external)}`
+/** The per-process table, like Task Manager with roles. */
+export function formatMemoryTable(sample: MemorySample): string[] {
+  const rows = memoryTable(sample)
+  const width = Math.max(16, ...rows.map((r) => r.label.length + 2))
+  const head = `  ${'Process'.padEnd(width)}${'Private'.padStart(9)}${'Working set'.padStart(13)}${'CPU %'.padStart(8)}${'Heap used/total'.padStart(18)}`
+  return [head, ...rows.map((r) => `  ${r.label.padEnd(width)}${mb(r.private).padStart(9)}${mb(r.rss).padStart(13)}${mb(r.cpu).padStart(8)}${(r.heapUsed === undefined ? '-' : `${mb(r.heapUsed)}/${mb(r.heapTotal)}`).padStart(18)}`)]
 }
 
 function formatMemorySummary(summary: MemoryLogSummary, path: string): string {
   const sample = summary.sample!
   const out: string[] = []
-  out.push(`Memory at ${new Date(sample.t).toLocaleString()} (service up ${(sample.up / 3600).toFixed(1)} h, ${summary.version}), MB`)
-  out.push(row('Service', sample.service))
-  let windows = 0
-  for (const p of sample.app ?? []) {
-    const label = p.kind === 'main' ? 'App main' : p.kind === 'window' ? `Window ${++windows}` : p.kind === 'gpu' ? 'GPU' : p.kind === 'utility' ? 'Utility' : 'Other'
-    out.push(row(label, p))
-  }
-  if (sample.app?.length) out.push(`  ${'App total'.padEnd(12)} ${mb(appMb(sample) ?? undefined)}`)
+  const up = sample.up < 3600 ? `${Math.round(sample.up / 60)} min` : `${(sample.up / 3600).toFixed(1)} h`
+  out.push(`Memory at ${new Date(sample.t).toLocaleString()} (service up ${up}, ${summary.version}), MB`)
+  out.push(...formatMemoryTable(sample))
+  if (sample.hints) out.push(`  Windows: ${appHintsLine(sample.hints)}`)
   const c = sample.counts
   out.push(`  Counts: SQLite connections ${c.sqliteConnections ?? '-'}, workers ${c.workerThreads}, loaded threads ${c.loadedThreads}, runtimes ${c.threadRuntimes}, thread cache ${c.threadCacheThreads} (${mb(c.threadCacheMb)} MB), replay ${c.replayEvents} events, terminals ${c.ptys}, file watchers ${c.fileWatchers}, provider processes ${c.providerProcesses}`)
-  if (sample.children?.length) out.push(`  Providers: ${sample.children.map((child) => `${child.kind} ${child.mb === null ? '-' : child.mb.toFixed(1)}`).join(', ')}`)
-  if (summary.hourly.length > 1) out.push(`Service MB, hourly over the last day: ${summary.hourly.map((point) => Math.round(point.service)).join(' ')}`)
+  if (summary.hourly.length > 1) {
+    const series = (pick: (point: (typeof summary.hourly)[number]) => number | null) => summary.hourly.map((point) => { const v = pick(point); return v === null ? '-' : String(Math.round(v)) }).join(' ')
+    out.push(`Hourly over the last day, MB: service ${series((point) => point.service)}`)
+    if (summary.hourly.some((point) => point.gpu !== null)) out.push(`  GPU ${series((point) => point.gpu)}`)
+    if (summary.hourly.some((point) => point.app !== null)) out.push(`  App ${series((point) => point.app)}`)
+  }
   if (summary.growth !== null) out.push(`Growth: ${summary.growth} MB/h over ${summary.thresholds.growthWindowHours} h`)
   out.push(summary.breaches.length ? `Out of bounds now: ${summary.breaches.map((breach) => breach.summary).join('; ')}` : `Within bounds (service limit ${summary.thresholds.servicePrivateMb} MB, ${Math.round(serviceMb(sample))} MB now)`)
   for (const entry of summary.recentBreaches) out.push(`  ${new Date(entry.t).toLocaleString()}: ${entry.breaches.map((breach) => breach.summary).join('; ')}`)

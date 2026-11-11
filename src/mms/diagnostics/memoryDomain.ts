@@ -11,7 +11,7 @@
 import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../protocol/domainRegistry'
 import { connectionIsLocal } from '../protocol/threadVisibility'
 import type { HandlerContext } from '../protocol/handlers'
-import type { AppProcessKind, AppProcessMemory, BreachKind } from '../../shared/diagnostics/memory'
+import { APP_PROCESS_KINDS, APP_PROCESS_ROLES, BREACH_KINDS, type AppHints, type AppProcessKind, type AppProcessMemory, type AppProcessRole, type BreachKind } from '../../shared/diagnostics/memory'
 import type { MemoryMonitor } from './MemoryMonitor'
 
 export const MEMORY_DIAGNOSTICS_METHODS = [
@@ -28,9 +28,8 @@ export interface MemoryMonitorHolder {
   monitor: MemoryMonitor | null
 }
 
-const APP_KINDS: readonly AppProcessKind[] = ['main', 'window', 'gpu', 'utility', 'other']
-const BREACH_KINDS: readonly BreachKind[] = ['service-high', 'service-growth', 'app-high', 'counts']
 const MAX_APP_PROCESSES = 64
+const MAX_WINDOWS = 32
 const MAX_MB = 1_000_000
 
 function monitorOf(holder: MemoryMonitorHolder, ctx: HandlerContext): MemoryMonitor {
@@ -45,21 +44,51 @@ function mb(value: unknown, required: boolean): number | undefined {
   return Math.round(value * 10) / 10
 }
 
-/** Only known kinds and numbers are kept; anything else in a report is refused. */
-export function validateAppReport(params: unknown): { processes: AppProcessMemory[] } {
-  const raw = domainObject(params, ['processes'])
+function count(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100_000) throw new DomainRpcError('invalid_params', `${name} must be a count`)
+  return value
+}
+
+function validateHints(value: unknown): AppHints {
+  const raw = domainObject(value, ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb'])
+  if (!Array.isArray(raw.windows) || raw.windows.length > MAX_WINDOWS) throw new DomainRpcError('invalid_params', 'windows must be a list of at most 32')
+  const windows = raw.windows.map((entry) => {
+    const w = domainObject(entry, ['w', 'h', 'scale', 'visible'])
+    const scale = typeof w.scale === 'number' && Number.isFinite(w.scale) && w.scale > 0 && w.scale <= 16 ? Math.round(w.scale * 100) / 100 : 1
+    if (typeof w.visible !== 'boolean') throw new DomainRpcError('invalid_params', 'visible must be a boolean')
+    return { w: count(w.w, 'w'), h: count(w.h, 'h'), scale, visible: w.visible }
+  })
+  const views = domainObject(raw.views, ['applet', 'browser', 'devtools'])
+  if (typeof raw.acrylic !== 'boolean') throw new DomainRpcError('invalid_params', 'acrylic must be a boolean')
+  const imagesMb = mb(raw.imagesMb, false)
+  return {
+    windows,
+    surfaceMb: mb(raw.surfaceMb, true)!,
+    acrylic: raw.acrylic,
+    views: { applet: count(views.applet, 'applet'), browser: count(views.browser, 'browser'), devtools: count(views.devtools, 'devtools') },
+    webglContexts: count(raw.webglContexts, 'webglContexts'),
+    canvases: count(raw.canvases, 'canvases'),
+    ...(imagesMb !== undefined ? { imagesMb } : {})
+  }
+}
+
+/** Only known kinds, roles and numbers are kept; anything else in a report is refused. */
+export function validateAppReport(params: unknown): { processes: AppProcessMemory[]; hints?: AppHints } {
+  const raw = domainObject(params, ['processes', 'hints'])
   if (!Array.isArray(raw.processes) || raw.processes.length > MAX_APP_PROCESSES) throw new DomainRpcError('invalid_params', 'processes must be a list of at most 64')
   const processes = raw.processes.map((entry) => {
-    const value = domainObject(entry, ['kind', 'rss', 'private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers'])
-    if (!APP_KINDS.includes(value.kind as AppProcessKind)) throw new DomainRpcError('invalid_params', 'Unknown process kind')
+    const value = domainObject(entry, ['kind', 'role', 'cpu', 'rss', 'private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers'])
+    if (!APP_PROCESS_KINDS.includes(value.kind as AppProcessKind)) throw new DomainRpcError('invalid_params', 'Unknown process kind')
+    if (value.role !== undefined && !APP_PROCESS_ROLES.includes(value.role as AppProcessRole)) throw new DomainRpcError('invalid_params', 'Unknown process role')
     const out: AppProcessMemory = { kind: value.kind as AppProcessKind, rss: mb(value.rss, true)! }
-    for (const key of ['private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers'] as const) {
+    if (value.role !== undefined) out.role = value.role as AppProcessRole
+    for (const key of ['private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers', 'cpu'] as const) {
       const n = mb(value[key], false)
       if (n !== undefined) out[key] = n
     }
     return out
   })
-  return { processes }
+  return { processes, ...(raw.hints !== undefined ? { hints: validateHints(raw.hints) } : {}) }
 }
 
 export function registerMemoryDiagnosticsMethods(registry: DomainHandlerRegistry, holder: MemoryMonitorHolder): () => void {
@@ -77,7 +106,7 @@ export function registerMemoryDiagnosticsMethods(registry: DomainHandlerRegistry
     handle: (ctx, input) => {
       const monitor = monitorOf(holder, ctx)
       if (ctx.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'Only the desktop app reports its processes.')
-      monitor.acceptAppReport(ctx.connection.id, input.processes)
+      monitor.acceptAppReport(ctx.connection.id, input.processes, input.hints)
       return { ok: true }
     }
   })

@@ -71,7 +71,7 @@ describe('memory limits', () => {
     const history = series(20, () => 1_500)
     const [breach] = detectBreaches(history, DEFAULT_MEMORY_THRESHOLDS, last(history))
     expect(breach).toMatchObject({ kind: 'service-high', severe: true })
-    expect(breach.summary).toBe('Service 1500 MB, above 600 MB for 15 min')
+    expect(breach.summary).toBe('Service 1500 MB, above 500 MB for 15 min')
   })
 
   it('finds steady growth over the window, and not a flat run with spikes', () => {
@@ -102,18 +102,36 @@ describe('memory limits', () => {
     expect(detectBreaches(once, DEFAULT_MEMORY_THRESHOLDS, last(once))).toEqual([])
   })
 
-  it('checks the app processes when the app reports', () => {
-    const history = series(20, () => 150).map((sample) => ({
-      ...sample,
-      app: [{ kind: 'main' as const, rss: 200, private: 150 }, { kind: 'window' as const, rss: 1_400, private: 1_300 }]
-    }))
-    const [breach] = detectBreaches(history, DEFAULT_MEMORY_THRESHOLDS, last(history))
-    expect(breach.kind).toBe('app-high')
-    expect(breach.summary).toContain('largest window 1300 MB')
+  it('checks each kind of app process against its own limit, the GPU process included', () => {
+    const app = (gpu: number, window: number) => [
+      { kind: 'main' as const, role: 'main' as const, rss: 200, private: 150 },
+      { kind: 'renderer' as const, role: 'window' as const, rss: window + 50, private: window },
+      { kind: 'gpu' as const, role: 'gpu' as const, rss: gpu + 100, private: gpu },
+      { kind: 'utility' as const, role: 'network' as const, rss: 40, private: 13 }
+    ]
+    // The idle nightly's numbers: within every limit.
+    const idle = series(20, () => 306).map((sample) => ({ ...sample, app: app(334, 221) }))
+    expect(detectBreaches(idle, DEFAULT_MEMORY_THRESHOLDS, last(idle))).toEqual([])
+
+    const gpu = series(20, () => 150).map((sample) => ({ ...sample, app: app(700, 221) }))
+    expect(detectBreaches(gpu, DEFAULT_MEMORY_THRESHOLDS, last(gpu))).toEqual([{ kind: 'gpu-high', summary: 'GPU process 700 MB, above 600 MB for 15 min' }])
+
+    const window = series(20, () => 150).map((sample) => ({ ...sample, app: app(334, 900) }))
+    expect(detectBreaches(window, DEFAULT_MEMORY_THRESHOLDS, last(window)).map((b) => b.kind)).toEqual(['renderer-high'])
+
+    // A GPU spike for a minute is not a breach.
+    const spike = series(20, () => 150).map((sample, i) => ({ ...sample, app: app(i === 20 ? 1_500 : 334, 221) }))
+    expect(detectBreaches(spike, DEFAULT_MEMORY_THRESHOLDS, last(spike))).toEqual([])
+
+    // All of them together above the app limit.
+    const total = series(20, () => 150).map((sample) => ({ ...sample, app: app(580, 780).concat([{ kind: 'renderer' as const, role: 'applet' as const, rss: 800, private: 700 }]) }))
+    expect(detectBreaches(total, DEFAULT_MEMORY_THRESHOLDS, last(total)).map((b) => b.kind)).toEqual(['app-high'])
   })
 
   it('takes overrides from the environment, and ignores anything not a limit', () => {
-    const t = resolveMemoryThresholds('{"servicePrivateMb":50,"serviceSustainMinutes":0,"sampleIntervalMs":10,"counts":{"ptys":1},"evil":"x"}')
+    const t = resolveMemoryThresholds('{"servicePrivateMb":50,"serviceSustainMinutes":0,"sampleIntervalMs":10,"counts":{"ptys":1},"processPrivateMb":{"gpu":100,"x":1},"evil":"x"}')
+    expect(t.processPrivateMb.gpu).toBe(100)
+    expect(t.processPrivateMb.renderer).toBe(DEFAULT_MEMORY_THRESHOLDS.processPrivateMb.renderer)
     expect(t.servicePrivateMb).toBe(50)
     expect(t.serviceSustainMinutes).toBe(0)
     expect(t.sampleIntervalMs).toBe(1_000)
@@ -142,7 +160,12 @@ describe('memory issue text', () => {
     const history = series(20, () => 700)
     const sample = {
       ...history[history.length - 1],
-      app: [{ kind: 'main' as const, rss: 210, private: 160, heapUsed: 40, heapTotal: 60 }, { kind: 'window' as const, rss: 400, private: 350 }],
+      app: [
+        { kind: 'main' as const, role: 'main' as const, rss: 210, private: 160, heapUsed: 40, heapTotal: 60, cpu: 1.5 },
+        { kind: 'renderer' as const, role: 'window' as const, rss: 400, private: 350 },
+        { kind: 'gpu' as const, role: 'gpu' as const, rss: 420, private: 334 }
+      ],
+      hints: { windows: [{ w: 1600, h: 1000, scale: 1.5, visible: true }], surfaceMb: 13.7, acrylic: true, views: { applet: 2, browser: 0, devtools: 0 }, webglContexts: 1, canvases: 3, imagesMb: 4.2 },
       children: [{ kind: 'claude', mb: 220 }, { kind: 'C:\\Users\\alice\\bin\\tool', mb: 10 }],
       workers: [12.5, 3]
     }
@@ -159,11 +182,17 @@ describe('memory issue text', () => {
       breaches: detectBreaches(history, DEFAULT_MEMORY_THRESHOLDS, sample.t),
       thresholds: DEFAULT_MEMORY_THRESHOLDS
     })
-    expect(issue.title).toBe('Memory: Service 700 MB, above 600 MB for 15 min')
+    expect(issue.title).toBe('Memory: Service 700 MB, above 500 MB for 15 min')
     expect(issue.body).toContain('**Version:** 0.1.3-nightly.20261111')
-    expect(issue.body).toContain('| Service | 700 | 730 | 50 | 70 | - |')
-    expect(issue.body).toContain('| Window 1 | 350 | 400 |')
-    expect(issue.body).toContain('claude 220')
+    expect(issue.body).toContain('| Service | 700 | 730 | - | 50 | 70 |')
+    expect(issue.body).toContain('| Service workers (2) | - | - | - | 15.5 | - |')
+    expect(issue.body).toContain('| Provider: claude | - | 220 |')
+    expect(issue.body).toContain('| Provider: other | - | 10 |')
+    expect(issue.body).toContain('| Main | 160 | 210 | 1.5 | 40 | 60 |')
+    expect(issue.body).toContain('| Window | 350 | 400 | - | - | - |')
+    expect(issue.body).toContain('| GPU | 334 | 420 |')
+    expect(issue.body).toContain('| App total | 844 |')
+    expect(issue.body).toContain('1 window (1600x1000 at 1.5x; 1 shown, 13.7 MB of pixels), acrylic on, WebGL contexts 1, canvases 3, applet views 2')
     expect(issue.body).not.toMatch(/alice|Users|home\//)
     expect(issue.body).not.toMatch(/[\\]/)
     expect(issue.url.startsWith('https://github.com/mousse-agent/mousse/issues/new?title=')).toBe(true)

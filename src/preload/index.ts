@@ -1,5 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
@@ -1375,18 +1375,31 @@ const api = {
 
 contextBridge.exposeInMainWorld('mousse', api)
 
-// This window's JS heap, once a minute, for the memory monitor. A timer and one small message; nothing per frame.
+// This window's renderer memory, once a minute, for the memory monitor: JS heap, private memory, decoded images and
+// canvases. A timer and one small message; nothing per frame, no GPU work.
 {
-  const sendHeap = (): void => {
+  const sendMemory = async (): Promise<void> => {
     try {
       const heap = process.getHeapStatistics()
-      ipcRenderer.send('diagnostics:windowHeap', { usedHeapSize: heap.usedHeapSize, totalHeapSize: heap.totalHeapSize })
+      let privateKb: number | undefined
+      try { privateKb = (await process.getProcessMemoryInfo()).private } catch { /* not offered */ }
+      let imagesKb: number | undefined
+      try { imagesKb = Math.round(webFrame.getResourceUsage().images.size / 1024) } catch { /* not offered */ }
+      const webgl = Number(document.documentElement?.dataset.mousseWebglContexts ?? 0)
+      ipcRenderer.send('diagnostics:windowMemory', {
+        usedHeapKb: heap.usedHeapSize,
+        totalHeapKb: heap.totalHeapSize,
+        privateKb,
+        imagesKb,
+        canvases: document.querySelectorAll('canvas').length,
+        webglContexts: Number.isFinite(webgl) ? webgl : 0
+      })
     } catch {
       // Not offered in this renderer.
     }
   }
-  setTimeout(sendHeap, 10_000)
-  setInterval(sendHeap, 60_000)
+  setTimeout(() => void sendMemory(), 10_000)
+  setInterval(() => void sendMemory(), 60_000)
 }
 
 export type MousseAPI = typeof api

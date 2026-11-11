@@ -395,7 +395,7 @@ export function registerGuiIpc(
   activeGuiMms = guiMms
   registerLinuxWindowResizeIpc(getWindow)
   registerAppletIpc(registerHandler, guiMms, () => [getWindow()])
-  registerMemoryDiagnosticsIpc(registerHandler, guiMms)
+  registerMemoryDiagnosticsIpc(registerHandler, guiMms, { acrylic: () => appearanceUsesAcrylic(normalizeAppearance(settings.get().appearance)) })
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
