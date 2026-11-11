@@ -505,7 +505,7 @@ export class TranscriptAssembler {
     return message
   }
 
-  /** Rewrites an assistant reply; a non-streaming update is persisted at once. */
+  /** Rewrites an assistant reply; a non-streaming update is persisted at once and records when the reply ended. */
   updateAssistant(
     messageId: string,
     content: string,
@@ -520,7 +520,8 @@ export class TranscriptAssembler {
       content,
       streaming,
       ...(responseMetadata ? { responseMetadata } : {}),
-      ...(incomplete ? { incomplete: true } : {})
+      ...(incomplete ? { incomplete: true } : {}),
+      ...(streaming ? {} : { completedAt: new Date().toISOString() })
     }
     this.hooks.updateMessage(updated)
     this.emitText(updated, streaming)

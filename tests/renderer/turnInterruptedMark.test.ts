@@ -65,7 +65,7 @@ describe('the mark on a cut-off turn', () => {
     ['daemon_restart', 'Interrupted', 'Mousse restarted during this turn.'],
     ['crash', 'Interrupted', 'Mousse quit during this turn.']
   ] as const)('cause %s reads "%s" after the time, with why in its tooltip', (cause, word, title) => {
-    show([...turn('r1', 0), stopLine('r1', { cause }, 8, cause === 'user' || cause === 'agent' ? TURN_STOPPED_TEXT : RESTART_INTERRUPTED_TEXT)])
+    show([...turn('r1', 0), stopLine('r1', { cause }, 7, cause === 'user' || cause === 'agent' ? TURN_STOPPED_TEXT : RESTART_INTERRUPTED_TEXT)])
     expect(headers()).toEqual([`Worked for 7s · ${word}`])
     expect(marks()).toEqual([{ word, title }])
     // The line itself shows nothing of its own.
@@ -106,7 +106,7 @@ describe('the mark on a cut-off turn', () => {
   })
 
   it('the latest turn\'s mark gives way while its "Run interrupted" notice shows, and comes back after', () => {
-    const thread = [...turn('r1', 0), stopLine('r1', { cause: 'user' }, 8), ...turn('r2', 20, 3), stopLine('r2', { cause: 'daemon_restart' }, 24, RESTART_INTERRUPTED_TEXT)]
+    const thread = [...turn('r1', 0), stopLine('r1', { cause: 'user' }, 7), ...turn('r2', 20, 3), stopLine('r2', { cause: 'daemon_restart' }, 24, RESTART_INTERRUPTED_TEXT)]
     show(thread, { phase: 'stopped' })
     expect(headers()).toEqual(['Worked for 7s · Stopped', 'Worked for 3s'])
     show(thread, { phase: 'idle' })
@@ -124,7 +124,7 @@ describe('the mark on a cut-off turn', () => {
   it('a marker that arrives after a snapshot renders its turn again', () => {
     show(turn('r1', 0))
     expect(headers()).toEqual(['Worked for 7s'])
-    show([...turn('r1', 0), stopLine('r1', { cause: 'user' }, 8)])
+    show([...turn('r1', 0), stopLine('r1', { cause: 'user' }, 7)])
     expect(headers()).toEqual(['Worked for 7s · Stopped'])
   })
 
@@ -134,7 +134,7 @@ describe('the mark on a cut-off turn', () => {
   })
 
   it('an unchanged marker keeps its turn and the memoised row', () => {
-    const thread = [...turn('r1', 0), stopLine('r1', { cause: 'user' }, 8), ...turn('r2', 20, 3)]
+    const thread = [...turn('r1', 0), stopLine('r1', { cause: 'user' }, 7), ...turn('r2', 20, 3)]
     const messages = mousseToUIMessages(thread)
     const [first] = groupMessagesIntoTurns(messages)
     expect(groupMessagesIntoTurns(messages)[0]!.end).toBe(first!.end)
@@ -144,5 +144,95 @@ describe('the mark on a cut-off turn', () => {
     show([...thread.slice(0, -1), { ...thread.at(-1)!, content: 'Reply r2, longer' }])
     expect(counts.TurnRow).toBe(1)
     expect(headers()).toEqual(['Worked for 7s · Stopped', 'Worked for 3s'])
+  })
+})
+
+describe('the time of a stopped turn', () => {
+  /** A turn stopped 15 s in: its prompt, a thought at 1 s, and a reply that started streaming at 3 s. Saved as a restart reads them. */
+  const stoppedTurn = (cause: TurnEnd['cause'] = 'user'): ChatMessage[] => [
+    { id: 'u-r1', role: 'user', content: 'Prompt r1', timestamp: at(0), turnId: 'r1' },
+    { id: 't-r1', role: 'system', kind: 'thinking', content: '', timestamp: at(1), thinking: { content: 'Planning', status: 'complete' } } as ChatMessage,
+    { id: 'a-r1', role: 'assistant', content: 'Partial reply', timestamp: at(3), incomplete: true },
+    stopLine('r1', { cause }, 15)
+  ]
+
+  it.each(['user', 'agent'] as const)('a turn stopped by cause %s runs to its Stop line, not to where its last message started', (cause) => {
+    show(stoppedTurn(cause))
+    expect(headers()).toEqual(['Worked for 15s · Stopped'])
+  })
+
+  it('shows the same time after a restart as when it was stopped', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(start)
+      const live = stoppedTurn().slice(0, -1).map((message) => message.id === 'a-r1' ? { ...message, incomplete: undefined, streaming: true } : message)
+      shown = reuseUIMessages(shown, mousseToUIMessages(live))
+      act(() => root.render(createElement(MessageList, { messages: shown, status: 'streaming' })))
+      // Stop at 15 s: the reply ends and Mousse writes its Stop line.
+      vi.setSystemTime(start + 15_000)
+      show(stoppedTurn())
+      expect(headers()).toEqual(['Worked for 15s · Stopped'])
+      // A restart: the window opens the thread again from what was saved.
+      act(() => root.unmount())
+      root = createRoot(host)
+      shown = []
+      vi.setSystemTime(start + 3_600_000)
+      show(stoppedTurn())
+      expect(headers()).toEqual(['Worked for 15s · Stopped'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a line a boot wrote after a crash, long after the turn, does not stretch its time', () => {
+    show([...stoppedTurn().slice(0, -1), stopLine('r1', { cause: 'crash' }, 3_600, RESTART_INTERRUPTED_TEXT)])
+    expect(headers()).toEqual(['Worked for 3s · Interrupted'])
+  })
+
+  it('a finished turn keeps the time its saved messages give', () => {
+    show(turn('r1', 0, 12))
+    expect(headers()).toEqual(['Worked for 12s'])
+  })
+})
+
+describe('the time of a finished turn', () => {
+  /** A turn whose final reply started streaming at 3 s and finished at 20 s, as it is saved. */
+  const longReply = (completedAt: number | null = 20): ChatMessage[] => [
+    { id: 'u-r1', role: 'user', content: 'Prompt r1', timestamp: at(0), turnId: 'r1' },
+    { id: 't-r1', role: 'system', kind: 'thinking', content: '', timestamp: at(1), thinking: { content: 'Planning', status: 'complete' } } as ChatMessage,
+    { id: 'a-r1', role: 'assistant', content: 'A long reply', timestamp: at(3), ...(completedAt != null ? { completedAt: at(completedAt) } : {}) }
+  ]
+
+  it('a long final reply shows its full time while open and after a restart', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(start)
+      const live = longReply(null).map((message) => message.id === 'a-r1' ? { ...message, streaming: true } : message)
+      shown = reuseUIMessages(shown, mousseToUIMessages(live))
+      act(() => root.render(createElement(MessageList, { messages: shown, status: 'streaming' })))
+      // The reply finishes at 20 s.
+      vi.setSystemTime(start + 20_000)
+      show(longReply())
+      expect(headers()).toEqual(['Worked for 20s'])
+      // A restart: the window opens the thread again from what was saved.
+      act(() => root.unmount())
+      root = createRoot(host)
+      shown = []
+      vi.setSystemTime(start + 3_600_000)
+      show(longReply())
+      expect(headers()).toEqual(['Worked for 20s'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an earlier turn runs to where its last reply ended, not to where it started', () => {
+    show([...longReply(), ...turn('r2', 60, 4)])
+    expect(headers()).toEqual(['Worked for 20s', 'Worked for 4s'])
+  })
+
+  it('a reply saved before replies recorded their end keeps today\'s time', () => {
+    show(longReply(null))
+    expect(headers()).toEqual(['Worked for 3s'])
   })
 })
