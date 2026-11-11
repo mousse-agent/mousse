@@ -39,6 +39,12 @@ export interface SteerHoldOptions {
   strict: boolean
   /** The turn's foreground tools now, leaving out the calls a person is asked about. */
   foreground: (waitingOnPerson: ReadonlySet<string>) => ForegroundTool[]
+  /**
+   * The thread has a question or an approval pending that no call reported (`awaiting`): one Mousse asks for its own
+   * tools (`ask_user`, a quick action's or a relayed tool's approval). Like a reported one, it means the turn waits
+   * for a person, so a steer goes in and answers it.
+   */
+  asking?: () => boolean
   /** The release window after the last foreground tool (`start` providers). */
   settleMs?: number
   now?: () => number
@@ -241,10 +247,13 @@ export class SteerHold {
     this.heldKeys = new Set(pending.keys)
     const oldest = tools[0]
     if (oldest) this.lastWaitsFor = { name: oldest.toolName, ...(oldest.detail ? { detail: oldest.detail } : {}) }
+    // No call of the turn runs and the window after the last one has closed: strict release keeps the steer for the
+    // provider's turn end, so the line says that, not the name of a tool that finished.
+    const turnEnd = tools.length === 0 && !this.releaseOpen()
     const waits = this.lastWaitsFor ?? { name: 'tool' }
     return {
-      waitsFor: waits.name,
-      ...(waits.detail ? { detail: waits.detail } : {}),
+      waitsFor: turnEnd ? 'turn' : waits.name,
+      ...(turnEnd ? { untilTurnEnd: true } : waits.detail ? { detail: waits.detail } : {}),
       tools: tools.length,
       ...(tools.length > 1 ? { toolList: tools.map((tool) => ({ name: tool.toolName, ...(tool.detail ? { detail: tool.detail } : {}) })) } : {}),
       since: this.heldSince ?? new Date(this.now()).toISOString(),
@@ -280,8 +289,8 @@ export class SteerHold {
     return tools.length === 0 && (this.askingOnly(tools) || !this.releaseOpen())
   }
 
-  /** A person is asked about a call, and no foreground tool runs besides. */
+  /** A person is asked about a call (or Mousse asks them for one of its own tools), and no foreground tool runs besides. */
   private askingOnly(tools: ForegroundTool[]): boolean {
-    return this.waitingOnPerson.size > 0 && tools.length === 0
+    return tools.length === 0 && (this.waitingOnPerson.size > 0 || this.options.asking?.() === true)
   }
 }

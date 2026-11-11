@@ -25,6 +25,7 @@ import { readTranscript, ReplayTransport } from '../../src/mms/run/testkit/Repla
 import { FakeCursorHost, hostFailure } from './fakeCursorHost'
 import { CURSOR_CAPS } from '../../src/mms/harness/drivers/cursor'
 import { holdControl, type HoldControl } from '../support/steerHoldControl'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 
 const FIXTURES = join(__dirname, '..', 'run', 'fixtures')
 const INSTANCE = 'cursor:work'
@@ -35,7 +36,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown, extra: { loadDeadlineMs?: number } = {}) {
+function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown, extra: { loadDeadlineMs?: number; questions?: UserQuestionService } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-cursor-driver-'))
   homes.push(home)
   const stateDir = instanceStateDir(home, INSTANCE)
@@ -44,7 +45,8 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   if (initial) writeFileSync(join(stateDir, 'cursor.json'), JSON.stringify(initial(home)))
   let stored: unknown = { [INSTANCE]: { driver: 'cursor', enabled: true, config: { displayName: 'Work' } } }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
-  const harness = testHarness({ drivers: [cursorDriver({ connect, cancelDeadlineMs: 200, ...extra })], instances, profileHome: home })
+  const { questions, ...driverOptions } = extra
+  const harness = testHarness({ drivers: [cursorDriver({ connect, cancelDeadlineMs: 200, ...driverOptions })], instances, profileHome: home, ...(questions ? { questions } : {}) })
   const notices: Array<[string, string]> = []
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
@@ -256,13 +258,16 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     const toolDone = (runId: string, callId: string) => delta(runId, { type: 'tool-call-completed', callId, toolCall: { ...shell(callId), result: { status: 'success', value: { exitCode: 0 } } } })
     const writes = (runId: string, text: string) => delta(runId, { type: 'text-delta', text })
     const end = (runId: string, status = 'finished') => host.emit({ event: 'run_end', runId, status } as never)
-    const hold = holdControl(CURSOR_CAPS)
-    const { turn } = setup(host.connect)
+    const questions = new UserQuestionService()
+    // As in the orchestrator: a question pending in the thread means the turn waits for a person.
+    const hold = holdControl(CURSOR_CAPS, { questions: { pending: () => questions.listPendingForThread('thread').length > 0 } })
+    const { turn } = setup(host.connect, undefined, { questions })
     const events = () => hold.log.map(([event, detail]) => `${event}:${detail}`)
     /** The run `n` streams (its updates are watched). */
     const running = (n: number) => vi.waitFor(() => expect(events().filter((event) => event === 'providerTurn:')).toHaveLength(n))
     const sent = () => host.calls('send').map((params) => params.text)
-    return { host, hold, turn: () => turn('thread', { hold }), events, running, toolStart, toolDone, writes, end, sent }
+    const mcpStart = (runId: string, callId: string, toolName: string) => delta(runId, { type: 'tool-call-started', callId, toolCall: { type: 'mcp', args: { toolName, providerIdentifier: 'mousse', args: {} } } })
+    return { host, hold, questions, turn: () => turn('thread', { hold }), events, running, toolStart, toolDone, mcpStart, writes, end, sent }
   }
   const order = (events: string[], ...steps: string[]) => {
     let from = 0
@@ -272,6 +277,30 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
       from = at + 1
     }
   }
+
+  it.each([['held for a command before', true], ['sent while it asks', false]] as const)('Mousse\'s ask_user over MCP does not hold a steer (%s): it cancels the run and answers the question', async (_name, heldBefore) => {
+    const c = held()
+    const handle = await c.turn()
+    await c.running(1)
+    if (heldBefore) {
+      c.toolStart('run-1', 'call-1')
+      c.hold.steer(STEER)
+      await vi.waitFor(() => expect(c.hold.held()).toBe(true))
+      c.toolDone('run-1', 'call-1')
+    }
+    c.mcpStart('run-1', 'ask-1', 'ask_user')
+    await vi.waitFor(() => expect(c.events()).toContain('tool:start:ask-1'))
+    const answer = c.questions.requestAnswers([{ id: 'q', prompt: 'Which package manager?', options: [{ id: 'npm', label: 'npm' }, { id: 'skip', label: 'Skip' }] }], 'thread')
+    answer.catch(() => undefined)
+    if (!heldBefore) c.hold.steer(STEER)
+    await vi.waitFor(() => expect(c.host.calls('cancel')).toEqual([{ runId: 'run-1' }]))
+    await expect(answer).resolves.toEqual({ q: 'skip' })
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    expect(c.sent()).toEqual(['hi', STEER])
+    expect(c.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+  })
 
   it('strict boundary drain: a steer held during a tool goes in as the next run when the run ends, and nothing is cancelled', async () => {
     const c = held()

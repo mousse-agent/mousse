@@ -644,6 +644,83 @@ describe('Codex activity against a scripted app-server', () => {
     expect(itemsOf(harness.rows)).toHaveLength(4)
   })
 
+  it('a helper\'s commands and their output are not the turn\'s own calls: they never restart a held steer\'s window', async () => {
+    const events: ProviderToolEvent[] = []
+    const s = server({
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          send(spawn())
+          send(helperTurn())
+          send(itemFrame('started', PARENT, 'turn-1', cmd('own-1')))
+          send(itemFrame('started', HELPER, 'h-turn-1', cmd('hc1')))
+          for (const text of ['a\n', 'b\n', 'c\n']) send(delta(HELPER, 'h-turn-1', 'hc1', text))
+          send(itemFrame('completed', PARENT, 'turn-1', cmd('own-1', { status: 'completed', aggregatedOutput: '', exitCode: 0 })))
+          send(turnDone(PARENT, 'turn-1'))
+        })
+    })
+    await chat(create(s, { helperIdleCapMs: 40, helperPinCapMs: 40 }), events)
+    const helperEvents = events.filter((event) => event.callId === `${HELPER}:hc1`)
+    expect(helperEvents.map((event) => event.phase)).toEqual(expect.arrayContaining(['start', 'update']))
+    const harness = assembled()
+    // Each event as the orchestrator sees it: its row exists (or has just closed) when the hold is told.
+    for (const event of events) {
+      harness.feed([event])
+      if (event.callId === `${HELPER}:hc1` || event.callId === `helper:${HELPER}`) expect(harness.assembler.ownsForegroundCall(event.callId), `${event.phase} ${event.callId}`).toBe(false)
+      if (event.callId === 'own-1') expect(harness.assembler.ownsForegroundCall(event.callId)).toBe(true)
+    }
+  })
+
+  it('a cut steer taken while the run waits for its helpers starts the next turn, and never interrupts it', async () => {
+    const events: ProviderToolEvent[] = []
+    let turns = 0
+    const interrupted: string[] = []
+    const s = server({
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          turns += 1
+          if (turns === 1) {
+            send(spawn())
+            send(helperTurn())
+            send(turnDone(PARENT, 'turn-1'))
+            return
+          }
+          // The steer's turn: the helper ends, and so does the turn.
+          send(itemFrame('completed', PARENT, 'turn-1', { type: 'subAgentActivity', id: 'sub-1', kind: 'completed', agentThreadId: HELPER, agentPath: '/' }))
+          send(turnDone(HELPER, 'h-turn-1'))
+          send(turnDone(PARENT, 'turn-1'))
+        }),
+      onInterrupt: (send, params) => {
+        interrupted.push(params.threadId as string)
+        interruptReply(send, params)
+      }
+    })
+    let ready = false
+    let steer: { text: string; token: string; cut: boolean } | undefined = { text: 'use pnpm', token: 'drain-1', cut: true }
+    const accepted: string[] = []
+    const returned: string[] = []
+    const result = chat(create(s), events, {
+      // Taken once the first turn has completed and only the helper runs.
+      drainSteerEntry: () => {
+        if (!ready) return undefined
+        const entry = steer
+        steer = undefined
+        return entry
+      },
+      steerTaken: () => undefined,
+      onSteer: (text, token) => void accepted.push(`${text}@${token}`),
+      returnSteer: (text) => void returned.push(text),
+      onTool: (event) => {
+        events.push(event)
+        if (event.callId === `helper:${HELPER}` && event.phase === 'start') setTimeout(() => (ready = true), 100)
+      }
+    })
+    await expect(result).resolves.toBeDefined()
+    expect(turns).toBe(2)
+    expect(interrupted.filter((thread) => thread === PARENT)).toEqual([])
+    expect(accepted).toEqual(['use pnpm@drain-1'])
+    expect(returned).toEqual([])
+  })
+
   it('a turn that completes after Stop was requested leaves the plan to Stop: it ends stopped, not done', async () => {
     const events: ProviderToolEvent[] = []
     const s = server({

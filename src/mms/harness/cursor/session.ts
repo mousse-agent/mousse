@@ -97,6 +97,11 @@ export interface CursorChatResult {
 export interface CursorSessionsOptions {
   label: string
   host: CursorHostClient
+  /**
+   * The thread's questions: a person's steer that cancels a run answers the approvals and questions it waits on (Mousse's
+   * own, such as `ask_user`), as on every provider, so no card waits for a run that is being cut.
+   */
+  questions?: { autoRejectPendingForThread(threadId: string): unknown }
   /** `JsonlLocalAgentStore` directory of the instance. */
   storeDir: string
   /** The credential turns run with; undefined when the instance is signed out. */
@@ -755,6 +760,7 @@ export class CursorSessions {
         pendingSteers.push(drained)
         if (!running || cancelling) return
         cancelling = true
+        this.options.questions?.autoRejectPendingForThread(input.threadId)
         void interruptWithDeadline({
           interrupt: async () => {
             await active.cancel()

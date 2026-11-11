@@ -108,6 +108,38 @@ export const CLAUDE_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
 /** Tool-name prefix Claude gives the MCP relay's tools. Never auto-allowed: the runtime's approvals apply. */
 export const CLAUDE_RELAY_TOOL_PREFIX = `mcp__${MOUSSE_RELAY_SERVER_NAME}__`
 
+/**
+ * Which server Mousse serves a call's tool name belongs to, and the tool's own name there, however the runtime names
+ * an MCP call: `mcp__mousse__ask_user` (Claude, Codex, Cursor), `mousse__ask_user`, `mousse.ask_user`,
+ * `mousse/ask_user`, `mousse: ask_user`, or `ask_user (mousse MCP Server)` (titles some ACP agents give). Undefined
+ * for any other name, a bare tool name included.
+ */
+export function mousseServerToolOf(toolName: string): { server: 'mousse' | 'relay'; tool: string } | undefined {
+  const name = toolName.trim()
+  if (name.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return { server: 'relay', tool: name.slice(CLAUDE_RELAY_TOOL_PREFIX.length) }
+  if (name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { server: 'mousse', tool: name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) }
+  const relay = /^mousse-relay(?:__|[./:]\s*)(\S+)$/i.exec(name) ?? /^(\S+) \(mousse-relay MCP Server\)$/i.exec(name)
+  if (relay) return { server: 'relay', tool: relay[1]! }
+  const own = /^mousse(?:__|[./:]\s*)([A-Za-z0-9_-]+)$/i.exec(name) ?? /^([A-Za-z0-9_-]+) \(mousse MCP Server\)$/i.exec(name)
+  return own ? { server: 'mousse', tool: own[1]! } : undefined
+}
+
+/**
+ * While the thread has a question pending, whether a call named `toolName` may be the one asking it: a relayed tool
+ * (its approval), a Mousse tool that asks the person (`asksUser`: `ask_user`, a quick action's approval) or asks before
+ * it edits (`editsWorkspace`), and a Mousse tool `lookup` does not know. A bare name is looked up as it is.
+ */
+export function mousseCallAsksPerson(
+  toolName: string,
+  lookup: (tool: string) => { asksUser?: unknown; access?: string } | undefined
+): boolean {
+  const served = mousseServerToolOf(toolName)
+  if (served?.server === 'relay') return true
+  const tool = lookup(served ? served.tool : toolName)
+  if (!tool) return served !== undefined
+  return Boolean(tool.asksUser) || tool.access === 'editsWorkspace'
+}
+
 /** A tool of a server Mousse serves (`mcp__mousse__*` or `mcp__mousse-relay__*`): its calls reach Mousse. */
 export function isMousseServerTool(toolName: string): boolean {
   return toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) || toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)

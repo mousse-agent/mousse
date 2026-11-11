@@ -1703,9 +1703,16 @@ describe('CodexAdapter', () => {
      * Cue actions: `steer` (a person's message arrives; `agent: true` for an agent's), `held` (it must be held, not
      * drained), `drained` (wait until the adapter drained it), `now` (Send now), `sleep` (let time pass).
      */
+    /** Mousse's own questions asked in the thread (`ask` cue), as its MCP server's `ask_user` asks them. */
+    const asked: Array<Promise<unknown>> = []
     const cues = (hold: HoldControl) => async (frame: unknown) => {
       const action = frame as { action: string; text?: string; agent?: boolean; ms?: number }
-      if (action.action === 'steer') hold.steer(action.text ?? STEER, { person: !action.agent })
+      if (action.action === 'ask') {
+        const answer = questions.requestAnswers([{ id: 'q', prompt: 'Which package manager?', options: [{ id: 'npm', label: 'npm' }, { id: 'skip', label: 'Skip' }] }], 'thread-1')
+        answer.catch(() => undefined)
+        asked.push(answer)
+        await vi.waitFor(() => expect(questions.listPendingForThread('thread-1')).toHaveLength(1))
+      } else if (action.action === 'steer') hold.steer(action.text ?? STEER, { person: !action.agent })
       else if (action.action === 'held') {
         await vi.waitFor(() => expect(hold.held()).toBe(true))
         expect(hold.drained()).not.toContain(action.text ?? STEER)
@@ -1715,7 +1722,8 @@ describe('CodexAdapter', () => {
       else throw new Error(`unknown cue ${JSON.stringify(frame)}`)
     }
     const run = async (frames: TranscriptFrame[] | 'fixture', options: { strict?: boolean; settleMs?: number } = {}) => {
-      const hold = holdControl(CODEX_CAPS, options)
+      // As in the orchestrator: a question pending in the thread means the turn waits for a person.
+      const hold = holdControl(CODEX_CAPS, { ...options, questions: { pending: () => questions.listPendingForThread('thread-1').length > 0 } })
       const transcript = frames === 'fixture'
         ? readTranscript(join(__dirname, 'fixtures', 'steer-during-command', 'codex.ndjson'))
         : parseTranscript([{ kind: 'transcript', adapter: 'codex', scenario: 'unit', boundary: CODEX_APP_SERVER_BOUNDARY, recordedAt: 'hand-authored', version: 1 }, ...frames].map((line) => JSON.stringify(line)).join('\n'))
@@ -1942,6 +1950,94 @@ describe('CodexAdapter', () => {
       expect(asked).toHaveLength(1)
       before(events, 'awaiting:patch-1:true', 'drain:Leave src/a.ts alone')
       expect(events).toContain('awaiting:patch-1:false')
+    })
+
+    describe('a question for the person: the steer cuts and answers it, under either release', () => {
+      const userInput = (id: string) =>
+        inn({ id, method: 'item/tool/requestUserInput', params: { threadId: T, turnId: 'turn-1', itemId: 'ask-1', isBlocking: true, autoResolutionMs: null, questions: [{ id: 'q1', header: 'Scope', question: 'Which module?', isOther: false, isSecret: false, options: [{ label: 'run', description: '' }, { label: 'Skip', description: '' }] }] } })
+      const askItem = note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'dynamicToolCall', id: 'ask-1', tool: 'request_user_input', arguments: {}, status: 'inProgress', contentItems: null, success: null, durationMs: null } })
+      const mousseAsk = (status: string, extra: Record<string, unknown> = {}) => ({ type: 'mcpToolCall', id: 'mcp-ask', server: 'mousse', tool: 'ask_user', arguments: { questions: [] }, status, result: null, error: null, durationMs: null, ...extra })
+
+      it.each([['best effort', false], ['strict', true]] as const)('%s: Codex\'s own question (requestUserInput) does not hold a steer already held for a command', async (_name, strict) => {
+        const { events } = await run([
+          ...head(),
+          started('cmd-1'),
+          cue({ action: 'steer' }),
+          cue({ action: 'held' }),
+          finished('cmd-1'),
+          askItem,
+          userInput('srv-1'),
+          interrupt(6),
+          // The steer answered the question as the person: the reject-like option.
+          out({ id: 'srv-1', result: { answers: { q1: { answers: ['Skip'] } } } }),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...answers(7)
+        ], { strict })
+        before(events, 'awaiting:ask-1:true', `drain:${STEER}`)
+        expect(events).toContain('awaiting:ask-1:false')
+        expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+        expect(questions.listPendingForThread('thread-1')).toEqual([])
+      })
+
+      it.each([['best effort', false], ['strict', true]] as const)('%s: Mousse\'s ask_user over MCP does not hold a steer already held for a command', async (_name, strict) => {
+        asked.length = 0
+        const { events } = await run([
+          ...head(),
+          started('cmd-1'),
+          cue({ action: 'steer' }),
+          cue({ action: 'held' }),
+          finished('cmd-1'),
+          note('item/started', { threadId: T, turnId: 'turn-1', item: mousseAsk('inProgress') }),
+          cue({ action: 'ask' }),
+          interrupt(6),
+          inn({ id: 6, result: {} }),
+          note('item/completed', { threadId: T, turnId: 'turn-1', item: mousseAsk('failed', { error: { message: 'dismissed' } }) }),
+          completed('interrupted'),
+          ...answers(7)
+        ], { strict })
+        before(events, 'tool:start:mcp-ask', `drain:${STEER}`)
+        expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+        // Answered as the person by the steer's cut: its reject-like option.
+        await expect(asked[0]).resolves.toEqual({ q: 'skip' })
+        expect(questions.listPendingForThread('thread-1')).toEqual([])
+      })
+
+      it('a steer during Mousse\'s ask_user goes in at once, with no wait for the window', async () => {
+        asked.length = 0
+        const { hold, events } = await run([
+          ...head(),
+          note('item/started', { threadId: T, turnId: 'turn-1', item: mousseAsk('inProgress') }),
+          cue({ action: 'ask' }),
+          cue({ action: 'steer' }),
+          interrupt(6),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...answers(7)
+        ], { settleMs: 5_000 })
+        // A 5 s window: only the asking rule can have let it through.
+        expect(hold.at('drain')! - hold.at('tool', 'start:mcp-ask')!).toBeLessThan(1_000)
+        expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+        await expect(asked[0]).resolves.toEqual({ q: 'skip' })
+      })
+    })
+
+    it('two steers around a cut reach the next turn in the order they were sent', async () => {
+      const SECOND = 'and keep the lockfile'
+      const { events } = await run([
+        ...head(),
+        ...message('msg-1', ['Looking around']),
+        cue({ action: 'steer' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        // The second arrives as the interrupted turn ends: it is taken at the boundary, after the cut one.
+        cue({ action: 'steer', text: SECOND }),
+        completed('interrupted'),
+        ...turnStart(7, `${STEER}\n${SECOND}`, 'turn-2'),
+        ...message('msg-2', ['Switching'], 'turn-2'),
+        completed('completed', 'turn-2')
+      ])
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`, `accepted:${SECOND}@drain-2`])
     })
 
     it('the turn\'s plan row is not a running tool: a steer while the model writes after it cuts at once', async () => {

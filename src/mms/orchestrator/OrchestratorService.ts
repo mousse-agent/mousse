@@ -91,7 +91,7 @@ import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManage
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
-import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../run/mcp/attachment'
+import { mousseCallAsksPerson } from '../run/mcp/attachment'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
 import { DevGuiTools } from '../devgui/DevGuiTools'
@@ -11895,6 +11895,9 @@ export class OrchestratorService extends EventEmitter {
         // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
         // waits, Mousse's own calls that ask the person do not hold.
         foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
+        // Such a question means the turn waits for a person, as a provider's own does: the steer goes in and answers it,
+        // and neither the window nor strict release keeps it back.
+        asking: () => this.questions.listPendingForThread(session.threadId).length > 0,
         settleMs: this.steerSettleMs ?? release.settleMs
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
@@ -12752,13 +12755,8 @@ export class OrchestratorService extends EventEmitter {
   private mousseCallsAskingPerson(threadId: string): ((toolName: string) => boolean) | undefined {
     if (this.questions.listPendingForThread(threadId).length === 0) return undefined
     const registry = this.mcpRegistry
-    return (toolName) => {
-      if (toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return true
-      const prefixed = toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
-      const tool = registry?.get(prefixed ? toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) : toolName)
-      if (!tool) return prefixed
-      return Boolean(tool.asksUser) || tool.access === 'editsWorkspace'
-    }
+    // Every runtime names an MCP call its own way (`mousseServerToolOf`).
+    return (toolName) => mousseCallAsksPerson(toolName, (tool) => registry?.get(tool))
   }
 
   /** Send now requests on held rows of `runId` (`QueuedMessage.steerNow`), handed to the run's hold to check. */

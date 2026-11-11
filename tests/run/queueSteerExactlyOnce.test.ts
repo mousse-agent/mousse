@@ -25,6 +25,9 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import type { ActivityPatch } from '../../src/shared/agentActivity'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { SettingsStore } from '../../src/mms/settings/SettingsStore'
+import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
+import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 
 vi.setConfig({ testTimeout: 60_000 })
 
@@ -1114,9 +1117,10 @@ class HoldingAdapter implements ProviderAdapter {
   expect: SteerDelivery[] = ['cut']
   private turn: { sink: TurnSink; ctl: TurnControl; run: (fn: () => unknown) => unknown; end: () => void; runId: string } | undefined
 
-  constructor(boundary: 'announce' | 'start') {
-    // A `start` provider with a measured window: best effort unless the instance asks for strict.
-    this.capabilities = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, steerBoundary: boundary, steerSettleMs: boundary === 'start' ? STEER_SETTLE_MS : null }
+  constructor(boundary: 'announce' | 'start', settleMs: number | null = boundary === 'start' ? STEER_SETTLE_MS : null) {
+    // A `start` provider with a measured window: best effort unless the instance asks for strict. With no measured
+    // window (`settleMs: null`, as Cursor and most ACP agents), always strict.
+    this.capabilities = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, steerBoundary: boundary, steerSettleMs: settleMs }
   }
 
   configured(): boolean {
@@ -1200,6 +1204,11 @@ class HoldingAdapter implements ProviderAdapter {
     this.emit((sink) => sink.tool({ kind: 'mcp_tool_result', phase: 'complete', callId, title: name, summary: '', details: [], response: 'ok' }))
   }
 
+  /** Several events in one go, as one read of the provider's output delivers them. */
+  together(...steps: Array<() => void>): void {
+    this.emit(() => steps.forEach((step) => step()))
+  }
+
   /** A running call's own output: never model output. */
   toolOutput(callId: string, name = 'Bash'): void {
     this.emit((sink) => sink.tool({ kind: 'mcp_tool_call', phase: 'update', callId, title: name, summary: '', details: [], activity: { output: 'tick\n' } }))
@@ -1243,12 +1252,12 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     home = undefined
   })
 
-  const world = async (boundary: 'announce' | 'start' = 'announce', options: { strict?: boolean } = {}) => {
+  const world = async (boundary: 'announce' | 'start' = 'announce', options: { strict?: boolean; settleMs?: number | null; release?: (instanceId: string, d: Phase6Daemon) => Promise<void> } = {}) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-steer-hold-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     mkdirSync(join(home, 'project'))
-    const adapter = new HoldingAdapter(boundary)
+    const adapter = new HoldingAdapter(boundary, options.settleMs === undefined ? undefined : options.settleMs)
     const d = phase6Daemon(home, [adapter])
     daemons.push(d)
     const project = d.projects.openProject(join(home, 'project'))
@@ -1256,7 +1265,7 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     d.orch.setThreadModelOverride(thread.id, MODEL)
     let sends = 0
     const send = (text: string) => d.orch.send(text, false, { threadId: thread.id, clientRequestId: `send-${++sends}` })
-    if (options.strict) {
+    if (options.strict || options.release) {
       // Strict release is set per instance and read when a turn starts: a first turn names the instance.
       const warmup = send('warmup')
       await waitFor(() => adapter.runId !== undefined, 'warmup running')
@@ -1264,7 +1273,8 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
       adapter.end()
       await warmup
       await waitFor(() => d.engine.getActiveRun(thread.id) === null, 'warmup ended')
-      d.settings.runs.steerRelease = { [instanceId]: 'strict' }
+      if (options.release) await options.release(instanceId, d)
+      else d.settings.runs.steerRelease = { [instanceId]: 'strict' }
     }
     const first = send('first')
     await waitFor(() => adapter.runId !== undefined, 'first turn running')
@@ -1961,4 +1971,194 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     w.adapter.end()
     await second
   })
+
+  // -------- Review findings on Codex, ACP agents and Cursor --------
+
+  it('Grok: a subagent call reporting progress does not restart the window after the turn\'s own command', async () => {
+    const w = await world('start', { settleMs: 100 })
+    w.adapter.toolStart('sub', 'Grok subagent: research', { toolName: 'start_subagent', kind: 'subagent', description: 'research' } as ActivityPatch)
+    w.adapter.toolStart('b1')
+    await w.steer('not for the subagent')
+    await waitFor(() => w.held() !== undefined, 'held for b1')
+    w.adapter.toolDone('b1')
+    const done = Date.now()
+    let ticking = true
+    const ticks = (async () => {
+      // The subagent's own row gets an update every 40 ms, for as long as the steer waits.
+      while (ticking) {
+        w.adapter.toolOutput('sub', 'Grok subagent: research')
+        await sleep(40)
+      }
+    })()
+    await waitFor(() => w.delivered().length > 0, 'released while the subagent reports progress')
+    ticking = false
+    await ticks
+    expect(Date.now() - done).toBeLessThan(500)
+    w.adapter.toolDone('sub', 'Grok subagent: research')
+    await w.finish()
+  })
+
+  it('start, strict release: a helper\'s event right after the provider\'s turn end does not hide the boundary from the steer', async () => {
+    const w = await world('start', { strict: true })
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('helper', 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'look around' } as ActivityPatch)
+    w.adapter.toolStart('helper:cmd', 'Bash', undefined, 'helper')
+    w.adapter.toolStart('b1')
+    await w.steer('at the boundary')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    await sleep(STEER_SETTLE_MS * 2)
+    // The turn ends, and in the same read the helper's command writes output.
+    w.adapter.together(() => w.adapter.boundary(), () => w.adapter.toolOutput('helper:cmd'))
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    expect(w.delivered()).toEqual(['native:at the boundary'])
+    w.adapter.toolDone('helper:cmd')
+    w.adapter.toolDone('helper', 'Agent')
+    await w.finish()
+  })
+
+  it('strict release: once no call runs, the wait line says the steer waits for the turn to end, not for a finished tool', async () => {
+    const w = await world('start', { strict: true })
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('b1')
+    await w.steer('later')
+    await waitFor(() => w.held() !== undefined, 'held')
+    expect(w.held()).toMatchObject({ waitsFor: 'Bash', detail: 'sleep 30 # b1' })
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.held()?.untilTurnEnd === true, 'the line names the turn\'s end')
+    expect(w.held()).toMatchObject({ waitsFor: 'turn', tools: 0 })
+    expect(w.held()!.detail).toBeUndefined()
+    // Another command: the line names it again.
+    w.adapter.toolStart('b2')
+    await waitFor(() => w.held()?.detail === 'sleep 30 # b2', 'the second command')
+    expect(w.held()!.untilTurnEnd).toBeUndefined()
+    w.adapter.toolDone('b2')
+    w.adapter.boundary()
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    await w.finish()
+  })
+
+  describe.each([
+    ['Codex (best effort, a long window)', { settleMs: 5_000 }],
+    ['Cursor or an ACP agent (no measured window: strict)', { settleMs: null }]
+  ] as const)("Mousse's ask_user on %s: the turn waits for a person, so the steer goes in at once", (_name, options) => {
+    const ask = (w: Awaited<ReturnType<typeof world>>) => {
+      const answer = w.d.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], w.thread.id)
+      answer.catch(() => undefined)
+      return waitFor(() => w.d.questions.listPendingForThread(w.thread.id).length === 1, 'the question pending')
+    }
+    it('a steer held for a command goes in once Mousse asks the person', async () => {
+      const w = await world('start', { settleMs: options.settleMs === null ? null : undefined })
+      if (options.settleMs !== null) (w.d.orch as unknown as { steerSettleMs: number }).steerSettleMs = options.settleMs
+      w.adapter.end()
+      await w.first
+      const turn = w.send('again')
+      await waitFor(() => w.adapter.prompts.includes('again') && w.adapter.runId !== undefined, 'a turn with the window under test')
+      w.adapter.toolStart('b1')
+      await w.steer('use pnpm')
+      await waitFor(() => w.held() !== undefined, 'held for the command')
+      w.adapter.toolDone('b1')
+      w.adapter.toolStart('ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' } as ActivityPatch)
+      await ask(w)
+      const asked = Date.now()
+      await waitFor(() => w.delivered().length > 0, 'cut while Mousse asks')
+      expect(Date.now() - asked).toBeLessThan(800)
+      expect(w.delivered()).toEqual(['cut:use pnpm'])
+      w.adapter.end()
+      await turn
+      await w.finish()
+    })
+
+    it('a steer sent while Mousse asks goes in at once', async () => {
+      const w = await world('start', { settleMs: options.settleMs === null ? null : undefined })
+      if (options.settleMs !== null) (w.d.orch as unknown as { steerSettleMs: number }).steerSettleMs = options.settleMs
+      w.adapter.end()
+      await w.first
+      const turn = w.send('again')
+      await waitFor(() => w.adapter.prompts.includes('again') && w.adapter.runId !== undefined, 'a turn with the window under test')
+      w.adapter.toolStart('ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' } as ActivityPatch)
+      await ask(w)
+      const sent = Date.now()
+      // The Steer button's path (`orchestrator.steer`): a send would answer the question and start over instead.
+      expect(w.d.orch.steerThreadOrEnqueueExternal(w.thread.id, 'use pnpm')).toMatchObject({ steered: true })
+      await waitFor(() => w.delivered().length > 0, 'cut at once')
+      expect(Date.now() - sent).toBeLessThan(800)
+      expect(w.held()).toBeUndefined()
+      w.adapter.end()
+      await turn
+      await w.finish()
+    })
+  })
+
+  it('runs.steerRelease set over the protocol reaches the next turn: strict holds past the window', async () => {
+    const configHome = mkdtempSync(join(tmpdir(), 'mousse-steer-release-'))
+    extra.push(() => rmSync(configHome, { recursive: true, force: true }))
+    const settings = new SettingsStore(MousseConfigStore.load(configHome))
+    const w = await world('start', {
+      release: async (instanceId, d) => {
+        await dispatchMethod({ mms: { settings }, globalSequence: () => 0, connection: { id: 'gui-1', clientType: 'gui' } } as unknown as HandlerContext, 'settings.set', { partial: { runs: { steerRelease: { [instanceId]: 'strict' } } } })
+        expect(settings.get().runs.steerRelease).toEqual({ [instanceId]: 'strict' })
+        // The daemon reads the settings the protocol saved, from the next turn on.
+        d.settings.runs = settings.get().runs
+      }
+    })
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('b1')
+    await w.steer('strict over the protocol')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    w.adapter.writes('More text')
+    await sleep(STEER_SETTLE_MS * 2)
+    expect(w.delivered()).toEqual([])
+    w.adapter.boundary()
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    expect(w.delivered()).toEqual(['native:strict over the protocol'])
+    await w.finish()
+  })
+
+  it('a provider with no measured window stays strict when the instance asks for best effort', async () => {
+    const w = await world('start', {
+      settleMs: null,
+      release: async (instanceId) => { w0.instance = instanceId }
+    })
+    w.d.settings.runs.steerRelease = { [w0.instance!]: 'best_effort' }
+    w.adapter.end()
+    await w.first
+    const turn = w.send('again')
+    await waitFor(() => w.adapter.prompts.includes('again') && w.adapter.runId !== undefined, 'a turn that read the setting')
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('b1')
+    await w.steer('still strict')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    // Past the 1 s cap and the model's text: best effort would have released it.
+    w.adapter.writes('More text')
+    await sleep(1_300)
+    expect(w.delivered()).toEqual([])
+    w.adapter.boundary()
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    expect(w.delivered()).toEqual(['native:still strict'])
+    w.adapter.end()
+    await turn
+    await w.finish()
+  })
+
+  it('strict release with a tool the provider never reports complete: the steer runs once, as the follow-up turn', async () => {
+    const w = await world('start', { settleMs: null })
+    w.adapter.toolStart('b1')
+    await w.steer('follow up')
+    await waitFor(() => w.held() !== undefined, 'held')
+    // The turn ends with b1 still open (no completion was ever reported).
+    w.adapter.end()
+    await w.first
+    await waitFor(() => w.adapter.prompts.includes('follow up'), 'the follow-up turn')
+    w.adapter.end()
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id) && w.d.engine.getActiveRun(w.thread.id) === null && readDurableQueue(w.d.store, w.thread.id).length === 0, 'idle')
+    expect(w.adapter.prompts.filter((prompt) => prompt === 'follow up')).toHaveLength(1)
+    expect(w.delivered()).toEqual([])
+    expect(w.inContext('follow up')).toBe(1)
+  })
 })
+
+/** The instance a warmup named, handed back by a test's `release` hook. */
+const w0: { instance?: string } = {}

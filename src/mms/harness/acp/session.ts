@@ -343,6 +343,7 @@ export class AcpSessions {
       ...(quirks.xaiExtensions ? xaiHandlers({
         questions,
         scope,
+        awaiting: () => active?.turnToolAwaiting,
         promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params)
       }) : {})
     }
@@ -701,6 +702,17 @@ export class AcpSessions {
     const handBack = (): void => {
       for (const entry of [...carried.splice(0), ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
     }
+    // The prompt in flight (xAI tags each one), and whether an earlier prompt of the turn may still send updates: one a
+    // steer cancelled whose own end never came within `PROMPT_COMPLETE_WAIT_MS`. Its late updates are not work on
+    // the prompt that carries the steers, so they never mark those read.
+    let promptInFlight: string | undefined
+    let earlierMayTrail = false
+    const ofPromptInFlight = (update: object): boolean => {
+      const meta = (update as { _meta?: unknown })._meta
+      const tagged = meta && typeof meta === 'object' ? (meta as { promptId?: unknown }).promptId : undefined
+      if (typeof tagged === 'string' && promptInFlight) return tagged === promptInFlight
+      return !earlierMayTrail
+    }
     const silenceMs = this.options.promptSilenceMs ?? PROMPT_SILENCE_MS
     let silenceTimer: ReturnType<typeof setTimeout> | undefined
     let silenceFailure: Error | undefined
@@ -735,7 +747,8 @@ export class AcpSessions {
       if (!update || typeof update !== 'object') return
       const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
       // The agent works on the prompt that carries drained steers: they are read now, before what it writes.
-      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate)) readCarried()
+      // An update that may be a cancelled prompt's late one does not count: the carrying prompt's reply reads them then.
+      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) readCarried()
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
         text += event.content.text ?? ''
         input.onText(text)
@@ -952,6 +965,7 @@ export class AcpSessions {
         }
         // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
         const promptId = quirks.xaiExtensions ? randomUUID() : undefined
+        promptInFlight = promptId
         const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
           prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
         const completion = promptId ? this.completionOf(active, promptId) : undefined
@@ -975,8 +989,10 @@ export class AcpSessions {
           // A steer's cancel: the next prompt waits (briefly) for the cancelled task to report its end.
           if (cancelSent) {
             let timer: ReturnType<typeof setTimeout> | undefined
-            await Promise.race([completion.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, PROMPT_COMPLETE_WAIT_MS) })])
+            const ended = await Promise.race([completion.done.then(() => true), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), PROMPT_COMPLETE_WAIT_MS) })])
             clearTimeout(timer)
+            // Its end did not come: it may still send updates while the next prompt runs.
+            if (!ended) earlierMayTrail = true
           }
           completion.dispose()
           // However the prompt ended, a refusal or an error is never a finished turn.

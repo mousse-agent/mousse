@@ -1,14 +1,26 @@
 /**
  * A turn control on the steer hold for adapter tests (docs/design/steer-and-interruptions.md §2.2, §2.3): the real
  * `SteerHold` and `steerDelivery` decide, fed by what the adapter reports through the sink, the way the orchestrator
- * feeds them. Foreground tools are the calls the sink saw start and not end (a subagent or plan call never counts).
+ * feeds them: the sink's tool events build rows in a real `TranscriptAssembler`, whose `foregroundTools` are what a
+ * steer waits for, and only the turn's own calls (`ownsForegroundCall`) restart the release window. With `questions`,
+ * a question pending in the thread means the turn waits for a person, and Mousse's own calls that may be asking it
+ * do not hold (`mousseCallAsksPerson`), as in the orchestrator.
  * Every drain, take, hand-back and acceptance is logged in order, with the time it happened.
  */
 import type { TurnControl, TurnSink } from '../../src/mms/harness/adapter'
 import { SteerHold } from '../../src/mms/orchestrator/steerHold'
 import { steerReleaseWindow, type SteerDelivery } from '../../src/mms/run/CommandPolicy'
-import type { ForegroundTool } from '../../src/mms/run/transcript/TranscriptAssembler'
+import { mousseCallAsksPerson } from '../../src/mms/run/mcp/attachment'
+import { TranscriptAssembler, type TranscriptStreamState } from '../../src/mms/run/transcript/TranscriptAssembler'
+import type { ChatMessage } from '../../src/shared/types'
 import type { HarnessCaps } from '../../src/shared/harness/types'
+
+/** Mousse's tools that ask the person, as the app-tool registry describes them (`asksUser`, `access`). */
+const MOUSSE_TOOLS: Record<string, { asksUser?: 'question' | 'approval'; access: string }> = {
+  ask_user: { asksUser: 'question', access: 'actsAsCaller' },
+  present_plan: { access: 'actsAsCaller' },
+  thread_read: { access: 'readsOthers' }
+}
 
 interface Pending {
   text: string
@@ -35,21 +47,39 @@ export interface HoldControl {
   pendingTexts(): string[]
   /** Runs once, right before the next `mayCut` answers: something that happens while the cut is on its way. */
   beforeMayCut: (() => void) | undefined
+  /** What windows would show for the hold now (`TurnState.heldSteer`); undefined when nothing is held. */
+  heldSteer(): import('../../src/shared/types').HeldSteer | undefined
 }
 
 export function holdControl(
   caps: Pick<HarnessCaps, 'steer' | 'steerBoundary' | 'steerSettleMs'>,
-  options: { strict?: boolean; settleMs?: number } = {}
+  options: { strict?: boolean; settleMs?: number; questions?: { pending: () => boolean } } = {}
 ): HoldControl {
   const startedAt = Date.now()
   const log: Array<[string, string, number]> = []
   const note = (event: string, detail: string): void => void log.push([event, detail, Date.now() - startedAt])
-  const open = new Map<string, ForegroundTool & { excluded: boolean }>()
+  const rows: ChatMessage[] = []
+  const state: TranscriptStreamState = { activeAssistantMessageId: null, activeThinkingMessageId: null, activeToolCallMessageIds: new Map(), callToMessage: new Map() }
+  const assembler = new TranscriptAssembler({
+    getMessage: (id) => rows.find((row) => row.id === id),
+    addMessage: (row) => void rows.push(row),
+    updateMessage: (row) => {
+      const index = rows.findIndex((entry) => entry.id === row.id)
+      if (index !== -1) rows[index] = row
+    },
+    removeMessage: () => undefined,
+    emitAdded: () => undefined,
+    emitUpdated: () => undefined,
+    persist: () => undefined,
+    setPhase: () => undefined
+  }, state)
+  const asking = (): boolean => options.questions?.pending() === true
   const release = steerReleaseWindow(caps, options.strict ? 'strict' : undefined)
   const hold = new SteerHold({
     caps,
     strict: release.strict,
-    foreground: (waiting) => [...open.values()].filter((tool) => !tool.excluded && !waiting.has(tool.callId)).map(({ callId, toolName, detail }) => ({ callId, toolName, ...(detail ? { detail } : {}) })),
+    foreground: (waiting) => assembler.foregroundTools(waiting, asking() ? (name) => mousseCallAsksPerson(name, (tool) => MOUSSE_TOOLS[tool]) : undefined),
+    asking,
     settleMs: options.settleMs ?? release.settleMs
   })
   const pending: Pending[] = []
@@ -113,18 +143,11 @@ export function holdControl(
     // Own properties: callers spread a sink.
     const wrapped = { ...sink } as S
     wrapped.tool = (event) => {
-      if (event.phase === 'start') {
-        const activity = event.activity as { kind?: string; command?: string } | undefined
-        open.set(event.callId, {
-          callId: event.callId,
-          toolName: event.title,
-          ...(activity?.command ? { detail: activity.command } : {}),
-          excluded: Boolean(event.parentCallId) || activity?.kind === 'subagent' || activity?.kind === 'plan'
-        })
-      } else if (event.phase === 'complete') open.delete(event.callId)
+      assembler.tool(event)
       note('tool', `${event.phase}:${event.callId}`)
       sink.tool(event)
-      hold.toolEvent()
+      // As the orchestrator: only the turn's own calls restart the window (§2.3).
+      if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
     }
     wrapped.text = (event) => {
       hold.modelOutput(event.phase)
@@ -155,6 +178,7 @@ export function holdControl(
     return wrapped
   }
   const control: HoldControl = {
+    heldSteer: () => (hold.holdGeneration !== undefined && facts() ? hold.hold(facts()!, hold.foregroundTools(), 'run-1') : undefined),
     beforeMayCut: undefined,
     ctl,
     wrap,
