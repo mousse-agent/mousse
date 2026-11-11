@@ -369,6 +369,8 @@ class PiTurn {
   /** A bot's built-in calls with a `started` ledger row, by call id. */
   readonly ledgerRows = new Map<string, string>()
   readonly steers: Array<{ text: string; token?: string }> = []
+  /** Native `steer` requests sent at `turn_end` and not answered yet; the turn's end waits for them. */
+  readonly steerSends = new Set<Promise<void>>()
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   /** When the turn's last request was answered, and the longest cache lifetime its requests wrote (`cacheWrite1h`). */
   promptCache: { at?: number; ttlMs?: number } = {}
@@ -1927,11 +1929,12 @@ export class PiRpcEngine implements ProviderAdapter {
         if (entry) {
           turn.steers.push(entry)
           turn.awaitingModel = true
-          this.send(thread, { type: 'steer', message: entry.text }).catch(() => {
+          const sending: Promise<void> = this.send(thread, { type: 'steer', message: entry.text }).then(() => undefined, () => {
             const index = turn.steers.indexOf(entry)
             if (index >= 0) turn.steers.splice(index, 1)
             turn.ctl.returnSteer?.(entry.text, entry.token)
-          })
+          }).finally(() => turn.steerSends.delete(sending))
+          turn.steerSends.add(sending)
         }
         return
       }
@@ -2080,15 +2083,50 @@ export class PiRpcEngine implements ProviderAdapter {
         return
       case 'agent_settled':
         if (turn.phase === 'stopping') return turn.settled()
-        // Mousse's own record decides: a refused step ends the turn, whatever Pi made of it.
-        if (turn.refusal) return turn.failed(this.requestError(turn.refusal, turn))
-        if (turn.pendingError && this.mousseRefusal(turn.pendingError)) return turn.failed(this.requestError(turn.pendingError, turn))
-        if (turn.retryExhaustedError) return turn.failed(turn.retryExhaustedError)
-        if (turn.pendingError) return turn.failed(this.requestError(turn.pendingError, turn))
-        return turn.settled()
+        // A steer sent at the last `turn_end` that Pi never read would stay in Pi's queue and reach the model at the
+        // next prompt, while Mousse also runs it as a turn of its own: Pi's queue is emptied first (#368).
+        if (turn.steers.length || turn.steerSends.size) {
+          void this.returnUnreadAtEnd(thread, turn).then(() => this.endTurn(turn))
+          return
+        }
+        return this.endTurn(turn)
       default:
         return
     }
+  }
+
+  /** The prompt settled (not stopped): the turn ends as Mousse's own record of it says. */
+  private endTurn(turn: PiTurn): void {
+    // Mousse's own record decides: a refused step ends the turn, whatever Pi made of it.
+    if (turn.refusal) return turn.failed(this.requestError(turn.refusal, turn))
+    if (turn.pendingError && this.mousseRefusal(turn.pendingError)) return turn.failed(this.requestError(turn.pendingError, turn))
+    if (turn.retryExhaustedError) return turn.failed(turn.retryExhaustedError)
+    if (turn.pendingError) return turn.failed(this.requestError(turn.pendingError, turn))
+    return turn.settled()
+  }
+
+  /**
+   * The turn's end with steers Pi was sent and never read (#368): wait for any native `steer` still unanswered, then
+   * `clear_queue`, and hand back once each steer it returns and each one still held, as Stop does. Each then runs
+   * once, as the next turn, and Pi's queue holds nothing. A `clear_queue` that fails killed Pi on its deadline, and
+   * its queue with it: the steers are handed back all the same.
+   */
+  private async returnUnreadAtEnd(thread: PiThreadProcess, turn: PiTurn): Promise<void> {
+    while (turn.steerSends.size) await Promise.all([...turn.steerSends])
+    // A Stop meanwhile hands them back itself.
+    if (!turn.steers.length || turn.phase === 'stopping' || !thread.alive) return
+    try {
+      const cleared = await this.send<{ steering: string[]; followUp: string[] }>(thread, { type: 'clear_queue' })
+      for (const text of [...cleared.steering, ...cleared.followUp]) {
+        const index = turn.steers.findIndex((steer) => steer.text === text)
+        const steer = index >= 0 ? turn.steers.splice(index, 1)[0] : undefined
+        turn.ctl.returnSteer?.(text, steer?.token)
+      }
+    } catch {
+      // Handed back below.
+    }
+    // Pi neither showed nor returned them: it does not have them.
+    this.returnSteers(turn)
   }
 
   private streamUpdate(turn: PiTurn, update: { type: string; contentIndex: number; delta?: string; content?: string } | undefined): void {

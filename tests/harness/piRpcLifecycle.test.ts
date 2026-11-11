@@ -28,7 +28,7 @@ function alive(pid: number): boolean {
   }
 }
 
-function setup(options: { warmMs?: number; promptDeadlineMs?: number; apiKey?: () => string; sweepHook?: () => Promise<void> } = {}) {
+function setup(options: { warmMs?: number; promptDeadlineMs?: number; apiKey?: () => string; sweepHook?: () => Promise<void>; onCommand?: (type: string) => void } = {}) {
   const scratch = scratchDir('mousse-pi-life-')
   cleanups.push(() => scratch.cleanup())
   const stateDir = join(scratch.dir, 'state')
@@ -46,7 +46,8 @@ function setup(options: { warmMs?: number; promptDeadlineMs?: number; apiKey?: (
     ...(options.warmMs ? { warmMs: options.warmMs } : {}),
     onSpawn: (pid, threadId) => spawned.push({ pid, threadId }),
     ...(options.apiKey ? { apiKey: options.apiKey } : {}),
-    ...(options.sweepHook ? { sweepHook: options.sweepHook } : {})
+    ...(options.sweepHook ? { sweepHook: options.sweepHook } : {}),
+    ...(options.onCommand ? { onCommand: options.onCommand } : {})
   })
   cleanups.push(() => engine.stop())
   const project = (name: string, config: Record<string, unknown> = {}) => {
@@ -238,6 +239,31 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     t.controller.abort()
     await expect(pending).resolves.toMatchObject({ aborted: true })
     expect(returned.map(([text]) => text)).toEqual(['first steer', 'second steer'])
+  }, 30_000)
+
+  it('a steer Pi queued after its last step is handed back once when the turn ends, after Pi’s queue is cleared (#368)', async () => {
+    const order: string[] = []
+    const { engine, project } = setup({ onCommand: (type) => void order.push(type) })
+    const t = turn(project('p', { onPrompt: 'steerAtEnd' }))
+    let drains = 0
+    t.ctl.drainSteerEntry = () => (drains++ === 0 ? { text: 'late steer', token: 'drain-1', cut: true } : undefined)
+    const taken: Array<string | undefined> = []
+    const accepted: string[] = []
+    const returned: Array<[string, string | undefined]> = []
+    t.ctl.steerTaken = (token) => void taken.push(token)
+    t.sink.steerAccepted = (text) => void accepted.push(text)
+    t.ctl.returnSteer = (text, token) => {
+      returned.push([text, token])
+      order.push('handed back')
+    }
+    const result = await run(engine, t)
+    expect(result.aborted).toBeFalsy()
+    // Never read, so neither taken nor accepted: handed back once, with its drain, to run as the next turn.
+    expect(taken).toEqual([])
+    expect(accepted).toEqual([])
+    expect(returned).toEqual([['late steer', 'drain-1']])
+    // Pi's queue was emptied before the hand-back, and the turn settled only after both: Pi will not inject it later.
+    expect(order.filter((step) => ['steer', 'clear_queue', 'handed back'].includes(step))).toEqual(['steer', 'clear_queue', 'handed back'])
   }, 30_000)
 
   it('stop() with a turn running (the instance removed) kills the process and ends the turn', async () => {
