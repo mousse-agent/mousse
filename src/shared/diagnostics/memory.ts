@@ -74,9 +74,11 @@ export interface ServiceCounts {
   fileWatchers: number
   providerProcesses: number
   profiles: number
+  /** Turns running now, across profiles: the service is idle at 0. */
+  activeTurns: number
 }
 
-export type CountName = Exclude<keyof ServiceCounts, 'threadCacheMb' | 'profiles'>
+export type CountName = Exclude<keyof ServiceCounts, 'threadCacheMb' | 'profiles' | 'activeTurns'>
 
 /** A provider or tool process the service started, by kind (`claude`, `codex`, `mcp`...), and its memory in MB. */
 export interface ChildMemory {
@@ -87,8 +89,10 @@ export interface ChildMemory {
 export interface MemorySample {
   /** Epoch ms. */
   t: number
-  /** Service uptime in seconds; samples of one service run share `t - up * 1000`. */
+  /** Service uptime in seconds at `t`. */
   up: number
+  /** The service run: its pid and start time, the same in every sample of one run. */
+  run?: string
   service: ProcessMemory
   counts: ServiceCounts
   /** Heap used by each worker thread of the service, MB. */
@@ -146,6 +150,8 @@ export interface MemoryStatus {
   detail: MemoryDetail | null
   trend: MemoryTrendPoint[]
   growthMbPerHour: number | null
+  /** The service's memory soon after it started (minutes 5 to 15), MB. */
+  baselineMb: number | null
   breaches: MemoryBreach[]
   notice: MemoryNotice | null
   logFile: string
@@ -155,14 +161,20 @@ export interface MemoryIssue {
   title: string
   body: string
   url: string
+  /** False when the body did not fit in the link: the link opens a short issue and the body goes on the clipboard. */
+  complete: boolean
 }
 
 export interface MemoryThresholds {
   sampleIntervalMs: number
-  /** The service's private memory (RSS where the OS gives none) above this, for `serviceSustainMinutes`. */
+  /** The service's private memory (RSS where the OS gives none) above this while idle (no turn running), for `serviceSustainMinutes`. */
   servicePrivateMb: number
   serviceSustainMinutes: number
-  /** Sustained above this is severe: one local V8 heap snapshot a day. */
+  /** Or, busy or not, above this many times its baseline (minutes 5 to 15 after it started)... */
+  serviceBaselineFactor: number
+  /** ...but never below this. */
+  serviceBaselineFloorMb: number
+  /** Sustained above this, the breach is marked severe. */
   serviceSevereMb: number
   /** Growth of the service's memory over the last `growthWindowHours`, in one run of the service. */
   growthMbPerHour: number
@@ -180,18 +192,20 @@ export interface MemoryThresholds {
 }
 
 /**
- * The limits. An empty service measures about 130 MB private. An idle nightly was seen at about 306 MB for the
- * service, 334 MB for the GPU process, 221 MB for a window and 149 MB for main. The limits sit above that, to catch
- * what keeps growing or is clearly wrong. Change them here.
+ * The limits. An empty service measures about 130 MB private; an idle nightly was seen at about 306 MB, which is
+ * what the idle limit catches. The GPU process was seen at 334 MB, a window at 221 MB and main at 149 MB. Change
+ * them here.
  */
 export const DEFAULT_MEMORY_THRESHOLDS: MemoryThresholds = {
   sampleIntervalMs: 60_000,
-  servicePrivateMb: 500,
+  servicePrivateMb: 300,
   serviceSustainMinutes: 15,
-  serviceSevereMb: 1_200,
-  growthMbPerHour: 40,
+  serviceBaselineFactor: 2.5,
+  serviceBaselineFloorMb: 250,
+  serviceSevereMb: 800,
+  growthMbPerHour: 20,
   growthWindowHours: 3,
-  growthFloorMb: 300,
+  growthFloorMb: 200,
   appPrivateMb: 2_000,
   processPrivateMb: { main: 400, renderer: 800, gpu: 600, utility: 250, other: 0 },
   appSustainMinutes: 15,
@@ -204,18 +218,32 @@ export const DEFAULT_MEMORY_THRESHOLDS: MemoryThresholds = {
     loadedThreads: 40,
     threadRuntimes: 400,
     threadCacheThreads: 64,
-    replayEvents: 4_096,
+    // Per profile: each profile's replay ring keeps at most 512 events (MMS_PROTOCOL_REPLAY_RING_SIZE).
+    replayEvents: 512,
     ptys: 32,
     fileWatchers: 32,
     providerProcesses: 24
   }
 }
 
-/** The environment variable that overrides limits, as JSON, for testing: `{"servicePrivateMb":50,"serviceSustainMinutes":0}`. */
+/**
+ * The environment variable that overrides limits, as JSON, for testing: `{"servicePrivateMb":50,"serviceSustainMinutes":0}`.
+ * `off` stops the monitor. A packaged build takes only `off` or a `sampleIntervalMs` of 30 s or more.
+ */
 export const MEMORY_THRESHOLDS_ENV = 'MOUSSE_MEMORY_MONITOR'
+export const PACKAGED_MIN_INTERVAL_MS = 30_000
+
+/** A packaged build (the Electron app run as itself), as opposed to a checkout run with `electron <entry>` or plain Node. */
+export function isPackagedRuntime(proc: { versions: { electron?: string }; defaultApp?: boolean } = process): boolean {
+  return Boolean(proc.versions.electron) && !proc.defaultApp
+}
 
 /** Limits with the numeric fields of `override` (a JSON string or object) put over the defaults; anything else is ignored. */
-export function resolveMemoryThresholds(override?: string | Record<string, unknown> | null, base: MemoryThresholds = DEFAULT_MEMORY_THRESHOLDS): MemoryThresholds {
+export function resolveMemoryThresholds(
+  override?: string | Record<string, unknown> | null,
+  base: MemoryThresholds = DEFAULT_MEMORY_THRESHOLDS,
+  options: { packaged?: boolean } = {}
+): MemoryThresholds {
   let raw: unknown = override
   if (typeof override === 'string') {
     try { raw = JSON.parse(override) } catch { raw = null }
@@ -223,6 +251,12 @@ export function resolveMemoryThresholds(override?: string | Record<string, unkno
   const next: MemoryThresholds = { ...base, counts: { ...base.counts }, processPrivateMb: { ...base.processPrivateMb } }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return next
   const value = raw as Record<string, unknown>
+  if (options.packaged) {
+    // People's builds: the interval may be slowed, never sped up, and the limits are fixed.
+    const interval = value.sampleIntervalMs
+    if (typeof interval === 'number' && Number.isFinite(interval) && interval >= PACKAGED_MIN_INTERVAL_MS) next.sampleIntervalMs = interval
+    return next
+  }
   for (const key of Object.keys(base) as (keyof MemoryThresholds)[]) {
     if (key === 'counts' || key === 'processPrivateMb') continue
     const n = value[key]
@@ -277,9 +311,21 @@ function median(values: number[]): number {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
 }
 
-/** When this sample's service run started, to the second. */
-function runStart(sample: MemorySample): number {
-  return Math.round((sample.t - sample.up * 1000) / 1000)
+/**
+ * Which service run a sample is from: the run id it carries, else (older lines) its start time to the nearest 10 s,
+ * which a second of jitter between reading the time and the uptime cannot move.
+ */
+export function runOf(sample: MemorySample): string {
+  return sample.run ?? `start-${Math.round((sample.t - sample.up * 1000) / 10_000)}`
+}
+
+/** The service's memory soon after it started: the median of minutes 5 to 15 of the latest sample's run. */
+export function serviceBaselineMb(history: MemorySample[]): number | null {
+  const latest = history[history.length - 1]
+  if (!latest) return null
+  const run = runOf(latest)
+  const early = history.filter((s) => runOf(s) === run && s.up >= 300 && s.up <= 900).map(serviceMb)
+  return early.length >= 3 ? round1(median(early)) : null
 }
 
 /**
@@ -291,8 +337,9 @@ function sustained(history: MemorySample[], minutes: number, intervalMs: number,
   const latest = history[history.length - 1]
   if (minutes <= 0) return test(latest) ? [latest] : null
   const start = now - minutes * 60_000
-  const slack = Math.max(intervalMs * 1.5, 1_000)
-  const window = history.filter((sample) => sample.t >= start - slack && runStart(sample) === runStart(latest))
+  // Half a sample: enough for a few seconds of jitter, never a whole minute early.
+  const slack = Math.max(intervalMs * 0.5, 1_000)
+  const window = history.filter((sample) => sample.t >= start - slack && runOf(sample) === runOf(latest))
   if (!window.length || window[0].t > start + slack) return null
   return window.every(test) ? window : null
 }
@@ -302,7 +349,7 @@ export function serviceGrowthMbPerHour(history: MemorySample[], thresholds: Memo
   if (history.length < 4) return null
   const latest = history[history.length - 1]
   const windowMs = thresholds.growthWindowHours * 3_600_000
-  const run = history.filter((sample) => sample.t >= now - windowMs && runStart(sample) === runStart(latest))
+  const run = history.filter((sample) => sample.t >= now - windowMs && runOf(sample) === runOf(latest))
   if (run.length < 4) return null
   const span = run[run.length - 1].t - run[0].t
   if (span < windowMs * 0.9) return null
@@ -336,12 +383,21 @@ export function detectBreaches(history: MemorySample[], thresholds: MemoryThresh
   if (!latest) return breaches
   const interval = thresholds.sampleIntervalMs
 
-  const high = sustained(history, thresholds.serviceSustainMinutes, interval, now, (s) => serviceMb(s) > thresholds.servicePrivateMb)
+  const minutes = thresholds.serviceSustainMinutes
+  const now_ = Math.round(serviceMb(latest))
+  const idle = sustained(history, minutes, interval, now, (s) => serviceMb(s) > thresholds.servicePrivateMb && (s.counts.activeTurns ?? 0) === 0)
+  const baseline = serviceBaselineMb(history)
+  const baselineLimit = baseline === null ? null : Math.max(thresholds.serviceBaselineFloorMb, baseline * thresholds.serviceBaselineFactor)
+  // The baseline rule starts once the baseline is known; samples before minute 15 are not judged against it.
+  const grown = baselineLimit === null ? null : sustained(history, minutes, interval, now, (s) => s.up > 900 && serviceMb(s) > baselineLimit)
+  const high = idle ?? grown
   if (high) {
     const severe = high.every((s) => serviceMb(s) > thresholds.serviceSevereMb)
     breaches.push({
       kind: 'service-high',
-      summary: `Service ${Math.round(serviceMb(latest))} MB, above ${thresholds.servicePrivateMb} MB for ${thresholds.serviceSustainMinutes} min`,
+      summary: idle
+        ? `Service ${now_} MB while idle, above ${thresholds.servicePrivateMb} MB for ${minutes} min`
+        : `Service ${now_} MB, above ${thresholds.serviceBaselineFactor}x its start (${Math.round(baseline!)} MB) for ${minutes} min`,
       ...(severe ? { severe: true } : {})
     })
   }
@@ -374,8 +430,9 @@ export function detectBreaches(history: MemorySample[], thresholds: MemoryThresh
   const recent = history.slice(-Math.max(1, thresholds.countSustainSamples))
   if (recent.length >= Math.max(1, thresholds.countSustainSamples)) {
     for (const name of Object.keys(thresholds.counts) as CountName[]) {
-      const limit = thresholds.counts[name]
-      if (recent.every((s) => (s.counts[name] ?? 0) > limit)) over.push(`${COUNT_LABELS[name]} ${latest.counts[name]} (bound ${limit})`)
+      // The replay buffer's bound is per profile.
+      const limitOf = (s: MemorySample) => (name === 'replayEvents' ? thresholds.counts[name] * Math.max(1, s.counts.profiles ?? 1) : thresholds.counts[name])
+      if (recent.every((s) => (s.counts[name] ?? 0) > limitOf(s))) over.push(`${COUNT_LABELS[name]} ${latest.counts[name]} (bound ${limitOf(latest)})`)
     }
   }
   if (over.length) breaches.push({ kind: 'counts', summary: `Above bound: ${over.join(', ')}` })
@@ -384,10 +441,9 @@ export function detectBreaches(history: MemorySample[], thresholds: MemoryThresh
 
 export const NOTICE_EVERY_MS = 24 * 3_600_000
 
-/** Whether a notice of `kind` may show now: at most one a day for each kind. */
-export function noticeDue(shownAt: Partial<Record<BreachKind, number>>, kind: BreachKind, now: number): boolean {
-  const last = shownAt[kind]
-  return last === undefined || !Number.isFinite(last) || now - last >= NOTICE_EVERY_MS || now < last
+/** Whether a memory notice may show now: at most one a day, whatever its kind. */
+export function noticeDue(lastShownAt: number | undefined, now: number): boolean {
+  return lastShownAt === undefined || !Number.isFinite(lastShownAt) || now - lastShownAt >= NOTICE_EVERY_MS || now < lastShownAt
 }
 
 /** Service and app memory every `stepMs`, from oldest to newest (the last sample in each step). */
@@ -527,27 +583,30 @@ export function memoryIssueText(input: MemoryReportInput): { title: string; body
   const growth = serviceGrowthMbPerHour(input.history, thresholds, sample.t)
   if (growth !== null) lines.push(`**Growth:** ${growth} MB/h over ${thresholds.growthWindowHours} h`)
   const per = thresholds.processPrivateMb
-  lines.push('', `_Limits: service ${thresholds.servicePrivateMb} MB for ${thresholds.serviceSustainMinutes} min, growth ${thresholds.growthMbPerHour} MB/h, GPU ${per.gpu}, window ${per.renderer}, main ${per.main}, utility ${per.utility}, app ${thresholds.appPrivateMb} MB. Numbers only: no paths, names or thread content._`)
+  const baseline = serviceBaselineMb(input.history)
+  if (baseline !== null) lines.push(`**Service at start (minutes 5 to 15):** ${baseline} MB`)
+  lines.push('', `_Limits: service ${thresholds.servicePrivateMb} MB idle or ${thresholds.serviceBaselineFactor}x its start for ${thresholds.serviceSustainMinutes} min, growth ${thresholds.growthMbPerHour} MB/h, GPU ${per.gpu}, window ${per.renderer}, main ${per.main}, utility ${per.utility}, app ${thresholds.appPrivateMb} MB. Numbers only: no paths, names or thread content._`)
   return { title: title.slice(0, 200), body: lines.join('\n') }
 }
 
-/** GitHub keeps a prefilled issue link working up to about 8 KB. */
-const MAX_ISSUE_URL = 7_500
+/** A prefilled issue link this long or shorter opens reliably from every browser and OS. */
+export const MAX_ISSUE_URL = 2_000
 
-/** The new-issue page with the text filled in. Nothing is sent until the person submits it there. */
+/** What the short link's body says when the report did not fit: the full text is on the clipboard. */
+export const PASTE_REPORT_TEXT = 'The memory report is on your clipboard. Paste it here, review it, then submit.'
+
 export function memoryIssueUrl(title: string, body: string): string {
-  const base = `https://github.com/${MEMORY_ISSUE_REPO}/issues/new`
-  let text = body
-  let url = `${base}?title=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`
-  // Too long: drop the least useful lines from the end until it fits.
-  while (url.length > MAX_ISSUE_URL && text.includes('\n')) {
-    text = text.slice(0, text.lastIndexOf('\n'))
-    url = `${base}?title=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`
-  }
-  return url
+  return `https://github.com/${MEMORY_ISSUE_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`
+}
+
+/** The new-issue link: with the whole report when it fits, else a short one that asks to paste it. Nothing is sent until the person submits. */
+export function memoryIssueLink(title: string, body: string, max = MAX_ISSUE_URL): { url: string; complete: boolean } {
+  const full = memoryIssueUrl(title, body)
+  if (full.length <= max) return { url: full, complete: true }
+  return { url: memoryIssueUrl(title, PASTE_REPORT_TEXT), complete: false }
 }
 
 export function memoryIssue(input: MemoryReportInput): MemoryIssue {
   const { title, body } = memoryIssueText(input)
-  return { title, body, url: memoryIssueUrl(title, body) }
+  return { title, body, ...memoryIssueLink(title, body) }
 }

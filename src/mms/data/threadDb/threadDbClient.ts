@@ -62,6 +62,9 @@ export function threadDbWorkerScript(): string | undefined {
 
 const SYNC_TIMEOUT_MS = 120_000
 
+/** Where each worker writes its open connection count in the shared counters. */
+const OPEN_COUNT_SLOTS = { write: 0, read: 1, index: 2, import: 3 } as const
+
 interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void }
 
 /** A worker answering requests by id. It keeps the process alive only while a request is in flight. */
@@ -70,8 +73,8 @@ class AsyncWorker {
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
 
-  constructor(script: string, role: 'read' | 'index' | 'import') {
-    this.worker = new Worker(script, { workerData: { role }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
+  constructor(script: string, role: 'read' | 'index' | 'import', openCounts?: Int32Array) {
+    this.worker = new Worker(script, { workerData: { role, openCounts, slot: OPEN_COUNT_SLOTS[role] }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
     this.worker.on('message', (message: { id: number; ok: boolean; value?: unknown; error?: WireError }) => {
       const entry = this.pending.get(message.id)
       if (!entry) return
@@ -133,6 +136,8 @@ export class ThreadDbClient {
   private readonly inlineWrite?: ThreadDbEngine
   private readonly inlineRead?: ThreadDbEngine
   private writer?: Worker
+  /** Each worker's open SQLite connections, written by the worker itself: read without a request. */
+  private readonly openCounts = new Int32Array(new SharedArrayBuffer(4 * 4))
   private reader?: AsyncWorker
   private indexer?: AsyncWorker
   private importer?: AsyncWorker
@@ -154,7 +159,7 @@ export class ThreadDbClient {
     this.mode = 'worker'
     this.writerScript = script
     this.startWriter()
-    this.reader = new AsyncWorker(script, 'read')
+    this.reader = new AsyncWorker(script, 'read', this.openCounts)
     this.script = script
   }
 
@@ -164,10 +169,11 @@ export class ThreadDbClient {
 
   /** A write worker with its own reply port and flag. A worker that timed out is replaced by a new one. */
   private startWriter(): void {
+    Atomics.store(this.openCounts, OPEN_COUNT_SLOTS.write, 0)
     const flag = new Int32Array(new SharedArrayBuffer(4))
     const { port1, port2 } = new MessageChannel()
     this.writer = new Worker(this.writerScript!, {
-      workerData: { role: 'write', flag, port: port2 },
+      workerData: { role: 'write', flag, port: port2, openCounts: this.openCounts, slot: OPEN_COUNT_SLOTS.write },
       transferList: [port2],
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
     })
@@ -221,7 +227,7 @@ export class ThreadDbClient {
   callIndex<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
     if (this.closed) return Promise.reject(new Error('Thread database client is closed'))
     if (this.inlineRead) return this.call(op, ...args)
-    this.indexer ??= new AsyncWorker(this.script!, 'index')
+    this.indexer ??= new AsyncWorker(this.script!, 'index', this.openCounts)
     return this.indexer.call(op, args) as Promise<Result<K>>
   }
 
@@ -233,7 +239,7 @@ export class ThreadDbClient {
   callImport<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
     if (this.closed) return Promise.reject(new Error('Thread database client is closed'))
     if (this.inlineRead) return this.call(op, ...args)
-    this.importer ??= new AsyncWorker(this.script!, 'import')
+    this.importer ??= new AsyncWorker(this.script!, 'import', this.openCounts)
     return this.importer.call(op, args) as Promise<Result<K>>
   }
 
@@ -245,8 +251,9 @@ export class ThreadDbClient {
   }
 
   /**
-   * The memory monitor's counts: worker threads started, the SQLite connections their engines hold (null when one
-   * did not answer within a few seconds), and each worker's heap in bytes. Starts nothing.
+   * The memory monitor's counts: worker threads started, the SQLite connections their engines hold, and each
+   * worker's heap in bytes. The counts are read from shared memory each worker writes itself, so nothing waits on a
+   * worker and no request can time out; the heaps are asked for without blocking. Starts nothing.
    */
   async diagnostics(): Promise<{ workers: number; connections: number | null; workerHeaps: number[] }> {
     if (this.closed) return { workers: 0, connections: 0, workerHeaps: [] }
@@ -254,15 +261,8 @@ export class ThreadDbClient {
       return { workers: 0, connections: this.inlineWrite.openCount() + (this.inlineRead?.openCount() ?? 0), workerHeaps: [] }
     }
     const asyncWorkers = [this.reader, this.indexer, this.importer].filter((worker): worker is AsyncWorker => Boolean(worker))
-    let connections: number | null = 0
-    try {
-      // The write worker answers between saves; a count takes microseconds.
-      connections += this.callSync('openCount')
-    } catch {
-      connections = null
-    }
-    const counts = await Promise.all(asyncWorkers.map((worker) => within(worker.call('openCount', []) as Promise<number>, 5_000)))
-    for (const count of counts) connections = connections === null || typeof count !== 'number' ? null : connections + count
+    let connections = 0
+    for (let slot = 0; slot < this.openCounts.length; slot++) connections += Atomics.load(this.openCounts, slot)
     const heaps = await Promise.all([
       this.writer ? within(workerHeapUsed(this.writer), 5_000) : Promise.resolve(null),
       ...asyncWorkers.map((worker) => within(worker.heapUsed(), 5_000))

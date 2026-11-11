@@ -196,7 +196,8 @@ export function dataFromLoad(load: DbLoad): StoredThreadData {
 export class ThreadDbEngine {
   private readonly connections = new Map<string, Connection>()
 
-  constructor(private readonly options: { idleCloseMs: number; checkpointOnClose?: boolean }) {}
+  /** `onOpenCount` hears the number of open connections each time it changes (the memory monitor's shared counter). */
+  constructor(private readonly options: { idleCloseMs: number; checkpointOnClose?: boolean; onOpenCount?: (count: number) => void }) {}
 
   /** Open SQLite connections held by this engine (the memory monitor's count). */
   openCount(): number {
@@ -247,6 +248,7 @@ export class ThreadDbEngine {
       }
       connection = { db, ino: stat.ino, statements: new Map() }
       this.connections.set(dir, connection)
+      this.options.onOpenCount?.(this.connections.size)
     }
     if (connection.timer) clearTimeout(connection.timer)
     if (this.options.idleCloseMs > 0) {
@@ -272,6 +274,7 @@ export class ThreadDbEngine {
     const connection = this.connections.get(dir)
     if (!connection) return
     this.connections.delete(dir)
+    this.options.onOpenCount?.(this.connections.size)
     if (connection.timer) clearTimeout(connection.timer)
     if (this.options.checkpointOnClose !== false) try {
       connection.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')

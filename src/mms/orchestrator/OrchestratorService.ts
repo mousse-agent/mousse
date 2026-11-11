@@ -1668,6 +1668,16 @@ export class OrchestratorService extends EventEmitter {
   loadedSessionCount(): number {
     return this.sessions.size
   }
+
+  /** How many turns are running now (the memory monitor's idle check). */
+  activeTurnCount(): number {
+    // A thread counts once, as `isTurnActive(threadId)` reads it: its bound session first.
+    let active = this.boundSession.isTurnActive() ? 1 : 0
+    for (const [threadId, session] of this.sessions) {
+      if (threadId !== this.boundSession.threadId && session.isTurnActive()) active += 1
+    }
+    return active
+  }
   /**
    * The last thread the context gauge measured without a session (`measuredSession`), kept while the thread is
    * unchanged so typing in its composer does not read it again. Only one: nothing else releases what it holds.

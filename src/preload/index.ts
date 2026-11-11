@@ -1217,7 +1217,7 @@ const api = {
     memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('diagnostics:memoryStatus'),
     memoryNoticeShown: (kind: BreachKind): Promise<void> => ipcRenderer.invoke('diagnostics:memoryNoticeShown', kind),
     /** Opens the prefilled GitHub issue in the browser; nothing is sent until the person submits it there. */
-    memoryReport: (): Promise<{ ok: boolean; url: string }> => ipcRenderer.invoke('diagnostics:memoryReport'),
+    memoryReport: (): Promise<{ ok: boolean; url: string; copied: boolean; complete: boolean }> => ipcRenderer.invoke('diagnostics:memoryReport'),
     onMemoryNotice: (cb: (notice: MemoryNotice) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, notice: MemoryNotice) => cb(notice)
       ipcRenderer.on('diagnostics:memoryNotice', handler)

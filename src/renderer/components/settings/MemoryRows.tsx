@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { appHintsLine, appMb, memoryTable, serviceMb, type MemoryStatus, type MemoryTrendPoint } from '../../../shared/diagnostics/memory'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
 import { ExternalLink } from '../../lib/icons'
-import { memoryNoticesEnabled } from '../../hooks/useMemoryNotices'
+import { memoryNoticesEnabled, openMemoryReport } from '../../hooks/useMemoryNotices'
 import { SettingsRow, Switch } from './SettingsRow'
 
 const REFRESH_MS = 60_000
@@ -85,7 +85,7 @@ export function MemoryRows({ settings, onUpdate }: { settings: MousseSettings; o
               className="settings-btn"
               disabled={!sample}
               title="Open a prefilled GitHub issue with these numbers. You review it; nothing is sent until you submit."
-              onClick={() => void window.mousse.diagnostics.memoryReport()}
+              onClick={() => void openMemoryReport()}
             >
               <ExternalLink size={14} />Report
             </button>
@@ -115,7 +115,7 @@ export function MemoryRows({ settings, onUpdate }: { settings: MousseSettings; o
       <SettingsRow
         title="Memory notices"
         anchor="general-memory-notices"
-        description={<span title="At most once a day for each kind. The numbers are logged either way.">When memory goes out of bounds.</span>}
+        description={<span title="At most once a day. The numbers are logged either way.">When memory goes out of bounds.</span>}
         control={
           <Switch
             label="Show a notice when memory goes out of bounds"

@@ -1,11 +1,16 @@
 import { arch, platform, release, totalmem } from 'node:os'
 import type { ParsedArgs } from '../parseArgs'
+import { flagBool } from '../parseArgs'
+import { closeMmsContext, openMms } from '../mmsContext'
+import { HEAP_SNAPSHOT_WARNING } from '../../mms/diagnostics/heapSnapshot'
 import { exitWithError, writeOutput } from '../output'
 import { DIAGNOSTICS_HELP } from '../help'
 import { resolveMousseHome } from '../paths'
 import { memoryLogPath, readMemoryLog, samplesOf, type MemoryLogLine } from '../../mms/diagnostics/memoryLog'
 import {
   MEMORY_THRESHOLDS_ENV,
+  isPackagedRuntime,
+  runOf,
   detectBreaches,
   memoryIssue,
   memoryTrend,
@@ -22,8 +27,9 @@ import {
 } from '../../shared/diagnostics/memory'
 
 /**
- * `mousse-cli diagnostics memory [report]`: reads the service's memory log from the Mousse home (the service need
- * not be running). `report` prints the issue text and the link that opens it prefilled; nothing is sent.
+ * `mousse-cli diagnostics memory [report|snapshot]`: reads the service's memory log from the Mousse home (the
+ * service need not be running). `report` prints the issue text and the link that opens it prefilled; nothing is
+ * sent. `snapshot --yes` asks the running service for a V8 heap snapshot, which holds what threads contain.
  */
 export async function runDiagnostics(args: ParsedArgs): Promise<void> {
   const { globals, subcommand, positional } = args
@@ -33,7 +39,11 @@ export async function runDiagnostics(args: ParsedArgs): Promise<void> {
   }
   if (subcommand !== 'memory') exitWithError(`Unknown diagnostics subcommand: ${subcommand}`, globals.mode)
   const action = positional[0]
-  if (action !== undefined && action !== 'report') exitWithError(`Unknown diagnostics memory action: ${action}`, globals.mode)
+  if (action !== undefined && action !== 'report' && action !== 'snapshot') exitWithError(`Unknown diagnostics memory action: ${action}`, globals.mode)
+  if (action === 'snapshot') {
+    await runHeapSnapshot(args)
+    return
+  }
   const path = memoryLogPath(resolveMousseHome(globals.homeDir))
   const lines = readMemoryLog(path)
   const summary = summarizeMemoryLog(lines, Date.now())
@@ -51,7 +61,10 @@ export async function runDiagnostics(args: ParsedArgs): Promise<void> {
       breaches: summary.breaches,
       thresholds: summary.thresholds
     })
-    writeOutput(globals.mode, issue, () => `${issue.title}\n\n${issue.body}\n\nOpen this link to review and submit it yourself (nothing is sent until you do):\n${issue.url}\n`)
+    const how = issue.complete
+      ? 'Open this link to review and submit it yourself (nothing is sent until you do):'
+      : 'The text is too long for a link. Open this link, paste the text above into it, review it and submit it yourself:'
+    writeOutput(globals.mode, issue, () => `${issue.title}\n\n${issue.body}\n\n${how}\n${issue.url}\n`)
     return
   }
   writeOutput(globals.mode, {
@@ -83,12 +96,14 @@ export interface MemoryLogSummary {
   thresholds: ReturnType<typeof resolveMemoryThresholds>
 }
 
-export function summarizeMemoryLog(lines: MemoryLogLine[], now: number, env: NodeJS.ProcessEnv = process.env): MemoryLogSummary {
-  const thresholds = resolveMemoryThresholds(env[MEMORY_THRESHOLDS_ENV] === 'off' ? undefined : env[MEMORY_THRESHOLDS_ENV])
+export function summarizeMemoryLog(lines: MemoryLogLine[], now: number, env: NodeJS.ProcessEnv = process.env, packaged = isPackagedRuntime()): MemoryLogSummary {
+  const thresholds = resolveMemoryThresholds(env[MEMORY_THRESHOLDS_ENV] === 'off' ? undefined : env[MEMORY_THRESHOLDS_ENV], undefined, { packaged })
   const samples = samplesOf(lines)
-  const sample = samples[samples.length - 1] ?? null
-  const start = sample ? Math.round((sample.t - sample.up * 1000) / 1000) : 0
-  const run = sample ? samples.filter((s) => Math.round((s.t - s.up * 1000) / 1000) === start) : []
+  const last = samples[samples.length - 1] ?? null
+  const run = last ? samples.filter((s) => runOf(s) === runOf(last)) : []
+  // The log keeps the windows' hints only when they change: the latest sample shows the last ones known.
+  const hints = [...run].reverse().find((s) => s.hints)?.hints
+  const sample = last && !last.hints && hints ? { ...last, hints } : last
   const breachLines = lines.filter((line): line is Extract<MemoryLogLine, { type: 'breach' }> => line.type === 'breach')
   const lastStart = [...lines].reverse().find((line): line is Extract<MemoryLogLine, { type: 'start' }> => line.type === 'start')
   return {
@@ -139,4 +154,21 @@ function formatMemorySummary(summary: MemoryLogSummary, path: string): string {
   out.push(`Log: ${path} (${summary.samples} samples since ${summary.since ? new Date(summary.since).toLocaleString() : '-'})`)
   out.push('Report: mousse-cli diagnostics memory report')
   return out.join('\n')
+}
+
+/** `diagnostics memory snapshot`: warns what the file holds, and writes it only with `--yes`, while no turn runs. */
+async function runHeapSnapshot(args: ParsedArgs): Promise<void> {
+  const { globals } = args
+  process.stderr.write(`${HEAP_SNAPSHOT_WARNING}\n`)
+  if (!flagBool(args.flags, 'yes')) {
+    exitWithError('Not written. Run `mousse-cli diagnostics memory snapshot --yes` to write it.', globals.mode)
+  }
+  const ctx = await openMms(globals)
+  try {
+    const written = await ctx.client.request<{ file: string; mb: number }>('diagnostics.memory.heapSnapshot', { confirm: true })
+    const home = resolveMousseHome(globals.homeDir)
+    writeOutput(globals.mode, { ...written, path: `${home}/${written.file}` }, () => `Heap snapshot written: ${home}/${written.file} (${written.mb} MB).\nIt holds what the service had in memory. Keep it on this computer.`)
+  } finally {
+    await closeMmsContext(ctx)
+  }
 }

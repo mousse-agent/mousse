@@ -95,7 +95,7 @@ describe('per-process table', () => {
     const sample: MemorySample = {
       t: NOW, up: 60,
       service: { rss: 380, private: 306, heapUsed: 90, heapTotal: 120 },
-      counts: { sqliteConnections: 3, workerThreads: 2, loadedThreads: 1, threadRuntimes: 1, threadCacheThreads: 1, threadCacheMb: 1, replayEvents: 9, ptys: 0, fileWatchers: 2, providerProcesses: 1, profiles: 1 },
+      counts: { sqliteConnections: 3, workerThreads: 2, loadedThreads: 1, threadRuntimes: 1, threadCacheThreads: 1, threadCacheMb: 1, replayEvents: 9, ptys: 0, fileWatchers: 2, providerProcesses: 1, profiles: 1, activeTurns: 0 },
       workers: [4, 6],
       children: [{ kind: 'codex', mb: 80 }],
       app: appProcessRows(METRICS.slice(0, 4), [{ pid: 12, role: 'window' }], new Map(), MAIN, NOW, 180_000)

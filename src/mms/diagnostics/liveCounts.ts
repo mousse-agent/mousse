@@ -57,6 +57,11 @@ function alive(pid: number): boolean {
   }
 }
 
+/** Stops counting `pid` (its process ended). */
+export function untrackChildProcess(pid: number): void {
+  children.delete(pid)
+}
+
 /** The tracked processes still running, as `{ pid, kind }`. */
 export function liveChildProcesses(): Array<{ pid: number; kind: string }> {
   const out: Array<{ pid: number; kind: string }> = []

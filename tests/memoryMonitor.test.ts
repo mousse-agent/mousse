@@ -6,12 +6,16 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryMonitor, trendStep, type ServiceCountsReading } from '../src/mms/diagnostics/MemoryMonitor'
 import { MemoryLog, pruneMemoryLog, readMemoryLog, samplesOf } from '../src/mms/diagnostics/memoryLog'
 import { readHeapDetail, sampleOwnProcess } from '../src/mms/diagnostics/processMemory'
-import { childKindOf, liveChildProcesses, liveFileWatchers, resetLiveCounts, trackChildProcess, trackFileWatcher } from '../src/mms/diagnostics/liveCounts'
+import { childKindOf, liveChildProcesses, liveFileWatchers, resetLiveCounts, trackChildProcess, trackFileWatcher, untrackChildProcess } from '../src/mms/diagnostics/liveCounts'
 import { readServiceCounts } from '../src/mms/diagnostics/startMemoryMonitor'
-import { validateAppReport } from '../src/mms/diagnostics/memoryDomain'
+import { registerMemoryDiagnosticsMethods, validateAppReport, type MemoryMonitorHolder } from '../src/mms/diagnostics/memoryDomain'
+import { HEAP_SNAPSHOT_RELATIVE_DIR, writeHeapSnapshotFile } from '../src/mms/diagnostics/heapSnapshot'
+import { DomainHandlerRegistry } from '../src/mms/protocol/domainRegistry'
+import { EventSequenceRing } from '../src/mms/protocol/eventRing'
 import { summarizeMemoryLog } from '../src/cli/commands/diagnostics'
 import { resolveMemoryThresholds, type MemoryNotice } from '../src/shared/diagnostics/memory'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
+import type { HandlerContext } from '../src/mms/protocol/handlers'
 
 const MIN = 60_000
 const T0 = Date.UTC(2026, 10, 11, 8, 0, 0)
@@ -30,11 +34,11 @@ afterEach(() => {
 })
 
 const READING: ServiceCountsReading = {
-  counts: { sqliteConnections: 2, workerThreads: 2, loadedThreads: 1, threadRuntimes: 1, threadCacheThreads: 1, threadCacheMb: 0.5, replayEvents: 12, ptys: 0, fileWatchers: 1, profiles: 1 },
+  counts: { sqliteConnections: 2, workerThreads: 2, loadedThreads: 1, threadRuntimes: 1, threadCacheThreads: 1, threadCacheMb: 0.5, replayEvents: 12, ptys: 0, fileWatchers: 1, profiles: 1, activeTurns: 0 },
   workerHeaps: [4 * 1024 * 1024]
 }
 
-function monitorAt(dir: string, opts: { mb: () => number; now: { t: number }; notices?: MemoryNotice[]; thresholds?: string; snapshots?: string[] }) {
+function monitorAt(dir: string, opts: { mb: () => number; now: { t: number }; notices?: MemoryNotice[]; thresholds?: string }) {
   return new MemoryMonitor({
     homeDir: dir,
     version: '0.1.3',
@@ -48,7 +52,6 @@ function monitorAt(dir: string, opts: { mb: () => number; now: { t: number }; no
     readDetail: () => ({ heapSpaces: { old_space: 50 }, heap: { totalHeapSize: 80, usedHeapSize: 60, heapSizeLimit: 4096, mallocedMemory: 1, externalMemory: 4, nativeContexts: 1, detachedContexts: 0 } }),
     readChildren: async () => [{ kind: 'claude', mb: 210 }],
     childCount: () => 1,
-    writeHeapSnapshot: opts.snapshots ? (file) => { opts.snapshots!.push(file); writeFileSync(file, '{}'); return file } : null,
     log: new MemoryLog(dir, { flushIntervalMs: 1 })
   })
 }
@@ -86,8 +89,11 @@ describe('process sampler', () => {
     expect(liveChildProcesses()).toEqual([{ pid: process.pid, kind: 'claude' }])
     child.emit('exit')
     expect(liveChildProcesses()).toEqual([])
-    // A pid alone is dropped once nothing runs under it.
+    // A pid alone is dropped once nothing runs under it, or when its exit is reported.
     trackChildProcess(2 ** 22 + 12345, 'codex')
+    expect(liveChildProcesses()).toEqual([])
+    trackChildProcess(process.pid, 'claude')
+    untrackChildProcess(process.pid)
     expect(liveChildProcesses()).toEqual([])
     expect(childKindOf('C:\\Users\\alice\\AppData\\claude.exe')).toBe('claude')
     expect(childKindOf('/usr/bin/codex')).toBe('codex')
@@ -96,13 +102,13 @@ describe('process sampler', () => {
 
   it('sums the counts over every profile, without reading any thread', async () => {
     const profile = (sessions: number, ptys: number) => ({
-      orchestrator: { loadedSessionCount: () => sessions },
+      orchestrator: { loadedSessionCount: () => sessions, activeTurnCount: () => ptys },
       threadRuntimes: { runtimeCount: () => sessions + 1 },
       threads: { threadDbCacheStats: () => ({ threads: sessions, bytes: sessions * 1024 * 1024, coldLoads: 0, stateReads: 0 }), listAllThreads: () => { throw new Error('read a thread') } },
       ptyManager: { list: () => Array.from({ length: ptys }) }
     }) as unknown as MmsProfileServices
     const reading = await readServiceCounts([profile(2, 1), profile(3, 0)], () => 77)
-    expect(reading.counts).toMatchObject({ loadedThreads: 5, threadRuntimes: 7, threadCacheThreads: 5, threadCacheMb: 5, ptys: 1, replayEvents: 77, profiles: 2 })
+    expect(reading.counts).toMatchObject({ loadedThreads: 5, threadRuntimes: 7, threadCacheThreads: 5, threadCacheMb: 5, ptys: 1, replayEvents: 77, profiles: 2, activeTurns: 1 })
   })
 })
 
@@ -126,7 +132,7 @@ describe('memory monitor', () => {
     expect(monitor.status()).toMatchObject({ breaches: [], notice: null, logFile: 'diagnostics/memory.jsonl' })
   })
 
-  it('logs the full breakdown on a breach, notices once a day per kind, and remembers it across restarts', async () => {
+  it('logs the full breakdown on a breach, notices once a day, and remembers it across restarts', async () => {
     const dir = home()
     const now = { t: T0 }
     let mb = 150
@@ -168,22 +174,91 @@ describe('memory monitor', () => {
     again.stop()
   })
 
-  it('writes one heap snapshot a day, only when severe', async () => {
+  it('never writes a heap snapshot by itself, however severe', async () => {
     const dir = home()
     const now = { t: T0 }
-    let mb = 600
-    const snapshots: string[] = []
-    const monitor = monitorAt(dir, { mb: () => mb, now, snapshots })
-    await run(monitor, now, 6)
-    expect(snapshots).toEqual([])
-    mb = 1_000
-    await run(monitor, now, 10)
-    expect(snapshots).toHaveLength(1)
-    expect(readdirSync(join(dir, 'diagnostics')).filter((name) => name.endsWith('.heapsnapshot'))).toHaveLength(1)
+    const monitor = monitorAt(dir, { mb: () => 2_000, now })
+    await run(monitor, now, 20)
+    monitor.stop()
+    expect(readdirSync(join(dir, 'diagnostics')).filter((name) => name.includes('heap'))).toEqual([])
+  })
+
+  it('a steady 600 MB service stays in breach every minute, with real await jitter in each sample', async () => {
+    const dir = home()
+    // Two clocks, as in the service: the wall clock moves while a sample awaits its counts and memory, and the
+    // uptime is read on its own, off by up to a second.
+    const now = { t: T0 }
+    let seed = 7
+    const jitter = (ms: number) => { seed = (seed * 16807) % 2147483647; return Math.floor((seed / 2147483647) * ms) }
+    const monitor = new MemoryMonitor({
+      homeDir: dir,
+      version: '0.1.3',
+      readCounts: async () => { await new Promise((resolve) => setImmediate(resolve)); now.t += jitter(1_500); return READING },
+      now: () => now.t,
+      uptime: () => (now.t - T0) / 1000 + 600 + jitter(1_000) / 1000,
+      sampleProcess: async () => { now.t += jitter(800); return { rss: 640, private: 600, heapUsed: 60, heapTotal: 80 } },
+      readDetail: () => ({ heapSpaces: {}, heap: { totalHeapSize: 80, usedHeapSize: 60, heapSizeLimit: 4096, mallocedMemory: 1, externalMemory: 4, nativeContexts: 1, detachedContexts: 0 } }),
+      readChildren: async () => [],
+      childCount: () => 0,
+      log: new MemoryLog(dir, { flushIntervalMs: 1 })
+    })
+    const inBreach: boolean[] = []
+    for (let minute = 0; minute < 40; minute++) {
+      await monitor.tick()
+      inBreach.push(monitor.status().breaches.some((breach) => breach.kind === 'service-high'))
+      now.t = T0 + (minute + 1) * MIN + jitter(2_000)
+    }
+    monitor.stop()
+    // Not before 15 minutes of history, then every minute after.
+    expect(inBreach.slice(0, 15).every((b) => !b)).toBe(true)
+    expect(inBreach.slice(15)).toEqual(Array(25).fill(true))
+    expect(new Set(monitor.status().trend.length ? [monitor.status().sample!.run] : []).size).toBe(1)
+  })
+
+  it('writes a heap snapshot only when asked, confirmed and idle, outside the numbers-only log', async () => {
+    const dir = home()
+    const now = { t: T0 }
+    const monitor = monitorAt(dir, { mb: () => 150, now })
+    let active = 1
+    const holder: MemoryMonitorHolder = {
+      monitor,
+      activeTurns: () => active,
+      writeHeapSnapshot: () => writeHeapSnapshotFile(dir, now.t, (file) => { writeFileSync(file, '{"snapshot":{}}'); return file })
+    }
+    const registry = new DomainHandlerRegistry()
+    registerMemoryDiagnosticsMethods(registry, holder)
+    const ctx = (clientType: 'cli' | 'bridge') => ({ connection: { id: 'c1', capabilities: new Set<string>(), clientType } }) as unknown as HandlerContext
+    await expect(registry.dispatch(ctx('cli'), 'diagnostics.memory.heapSnapshot', {})).rejects.toMatchObject({ code: 'confirm_required' })
+    await expect(registry.dispatch(ctx('cli'), 'diagnostics.memory.heapSnapshot', { confirm: true })).rejects.toMatchObject({ code: 'busy' })
+    await expect(registry.dispatch(ctx('bridge'), 'diagnostics.memory.heapSnapshot', { confirm: true })).rejects.toMatchObject({ code: 'forbidden' })
+    active = 0
+    const written = await registry.dispatch(ctx('cli'), 'diagnostics.memory.heapSnapshot', { confirm: true }) as { file: string; mb: number }
+    expect(written.file).toMatch(new RegExp(`^${HEAP_SNAPSHOT_RELATIVE_DIR}/heap-.*\\.heapsnapshot$`))
+    expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toHaveLength(1)
+    // Only two are kept.
+    for (let i = 1; i <= 3; i++) { now.t += 1_000; await registry.dispatch(ctx('cli'), 'diagnostics.memory.heapSnapshot', { confirm: true }) }
+    expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toHaveLength(2)
     await monitor.flush()
     const line = readMemoryLog(join(dir, 'diagnostics', 'memory.jsonl')).find((entry) => entry.type === 'heap-snapshot')
-    expect(line).toMatchObject({ kind: 'service-high', file: expect.stringMatching(/^diagnostics\/heap-.*\.heapsnapshot$/) })
+    expect(line).toMatchObject({ type: 'heap-snapshot', file: written.file })
     monitor.stop()
+  })
+
+  it('logs the windows hints only when they change, or hourly', async () => {
+    const dir = home()
+    const now = { t: T0 }
+    const monitor = monitorAt(dir, { mb: () => 150, now })
+    const hints = { windows: [{ w: 1200, h: 800, scale: 1, visible: true }], surfaceMb: 3.7, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0 }
+    for (let i = 0; i < 4; i++) {
+      monitor.acceptAppReport('c1', [{ kind: 'main', rss: 200 }], i < 3 ? hints : { ...hints, webglContexts: 1 })
+      await run(monitor, now, 1)
+    }
+    monitor.stop()
+    const samples = samplesOf(readMemoryLog(join(dir, 'diagnostics', 'memory.jsonl')))
+    expect(samples.map((sample) => sample.hints?.webglContexts ?? null)).toEqual([0, null, null, 1])
+    // The CLI still shows the last hints known.
+    const summary = summarizeMemoryLog(readMemoryLog(join(dir, 'diagnostics', 'memory.jsonl')).slice(0, -1), now.t, {}, false)
+    expect(summary.sample?.hints?.webglContexts).toBe(0)
   })
 
   it('builds an issue with no home path, username or thread title', async () => {
@@ -281,12 +356,39 @@ describe('memory log', () => {
     const monitor = monitorAt(dir, { mb: () => 600, now })
     await run(monitor, now, 6)
     monitor.stop()
-    const summary = summarizeMemoryLog(readMemoryLog(join(dir, 'diagnostics', 'memory.jsonl')), now.t, { MOUSSE_MEMORY_MONITOR: '{"serviceSustainMinutes":3,"servicePrivateMb":500}' })
+    const summary = summarizeMemoryLog(readMemoryLog(join(dir, 'diagnostics', 'memory.jsonl')), now.t, { MOUSSE_MEMORY_MONITOR: '{"serviceSustainMinutes":3,"servicePrivateMb":500}' }, false)
     expect(summary.samples).toBe(6)
     expect(summary.version).toBe('0.1.3')
     expect(summary.sample?.service.private).toBe(600)
     expect(summary.breaches.map((b) => b.kind)).toEqual(['service-high'])
     expect(summary.recentBreaches).toHaveLength(1)
     expect(summary.detail?.heapSpaces.old_space).toBe(50)
+  })
+})
+
+describe('replay buffer size', () => {
+  it('keeps a running total that events take with them when they leave', () => {
+    const ring = new EventSequenceRing(3)
+    ring.push('a', { text: 'x'.repeat(100) })
+    ring.push('b', { text: 'y'.repeat(200) })
+    const first = ring.approximateBytes()
+    expect(first).toBeGreaterThan(300)
+    expect(first).toBeLessThan(340)
+    // Measured once: asking again walks nothing new and gives the same.
+    expect(ring.approximateBytes()).toBe(first)
+    ring.push('c', { text: 'z'.repeat(50) })
+    ring.push('d', { text: 'w'.repeat(10) })
+    // 'a' was evicted: its 100 characters left with it.
+    const after = ring.approximateBytes()
+    expect(after).toBeGreaterThan(260)
+    expect(after).toBeLessThan(first)
+    // A superseded streaming message is replaced, not added.
+    const message = (text: string) => ({ message: { id: 'm1', text } })
+    const stream = new EventSequenceRing(10)
+    stream.push('thread.message-updated', message('a'.repeat(1_000)), 't1')
+    stream.approximateBytes()
+    stream.push('thread.message-updated', message('a'.repeat(2_000)), 't1')
+    expect(stream.size).toBe(1)
+    expect(stream.approximateBytes()).toBeLessThan(2_100)
   })
 })

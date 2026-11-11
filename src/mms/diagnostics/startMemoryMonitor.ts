@@ -6,7 +6,8 @@ import type { MousseMainService } from '../MousseMainService'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import type { MmsProtocolServer } from '../protocol/server'
 import { existingThreadDbClient } from '../data/threadDb/threadDbClient'
-import { MEMORY_THRESHOLDS_ENV, resolveMemoryThresholds, toMb } from '../../shared/diagnostics/memory'
+import { DEFAULT_MEMORY_THRESHOLDS, MEMORY_THRESHOLDS_ENV, isPackagedRuntime, resolveMemoryThresholds, toMb } from '../../shared/diagnostics/memory'
+import { writeHeapSnapshotFile } from './heapSnapshot'
 import { MemoryMonitor, type ServiceCountsReading } from './MemoryMonitor'
 import { liveFileWatchers } from './liveCounts'
 import { MEMORY_NOTICE_EVENT, registerMemoryDiagnosticsMethods, type MemoryMonitorHolder } from './memoryDomain'
@@ -18,7 +19,9 @@ export async function readServiceCounts(profiles: MmsProfileServices[], replayEv
   let threadCacheThreads = 0
   let threadCacheBytes = 0
   let ptys = 0
+  let activeTurns = 0
   for (const services of profiles) {
+    activeTurns += services.orchestrator.activeTurnCount()
     loadedThreads += services.orchestrator.loadedSessionCount()
     threadRuntimes += services.threadRuntimes.runtimeCount()
     const cache = services.threads.threadDbCacheStats()
@@ -38,7 +41,8 @@ export async function readServiceCounts(profiles: MmsProfileServices[], replayEv
       replayEvents: replayEvents(),
       ptys,
       fileWatchers: liveFileWatchers(),
-      profiles: profiles.length
+      profiles: profiles.length,
+      activeTurns
     },
     workerHeaps: db.workerHeaps
   }
@@ -51,16 +55,22 @@ export function prepareMemoryMonitor(opts: {
   homeDir: string
   version: string
   env?: NodeJS.ProcessEnv
+  packaged?: boolean
 }): { start: () => void; stop: () => void } | null {
   const env = opts.env ?? process.env
   if (env[MEMORY_THRESHOLDS_ENV] === 'off' || !opts.mms.domains) return null
-  const holder: MemoryMonitorHolder = { monitor: null }
+  const profiles = () => opts.mms.getInstallationHost()?.liveServices() ?? [opts.mms]
+  const holder: MemoryMonitorHolder = {
+    monitor: null,
+    activeTurns: () => profiles().reduce((sum, services) => sum + services.orchestrator.activeTurnCount(), 0),
+    writeHeapSnapshot: () => writeHeapSnapshotFile(opts.homeDir)
+  }
   const offClosed = registerMemoryDiagnosticsMethods(opts.mms.domains, holder)
   const monitor = new MemoryMonitor({
     homeDir: opts.homeDir,
     version: opts.version,
-    thresholds: resolveMemoryThresholds(env[MEMORY_THRESHOLDS_ENV]),
-    readCounts: () => readServiceCounts(opts.mms.getInstallationHost()?.liveServices() ?? [opts.mms], () => opts.protocolServer.replayEventCount()),
+    thresholds: resolveMemoryThresholds(env[MEMORY_THRESHOLDS_ENV], DEFAULT_MEMORY_THRESHOLDS, { packaged: opts.packaged ?? isPackagedRuntime() }),
+    readCounts: () => readServiceCounts(profiles(), () => opts.protocolServer.replayEventCount()),
     readReplayBytes: () => opts.protocolServer.replayBytes(),
     onNotice: (notice) => opts.protocolServer.emitInstallationEvent(MEMORY_NOTICE_EVENT, notice)
   })

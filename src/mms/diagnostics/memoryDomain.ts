@@ -5,6 +5,8 @@
  * - `diagnostics.memory.appReport`: the desktop app's main process sends its processes' memory.
  * - `diagnostics.memory.noticeShown`: a window showed the notice; none of that kind again for a day.
  * - `diagnostics.memory.issue`: the prefilled issue's title, body and link. Nothing is sent anywhere.
+ * - `diagnostics.memory.heapSnapshot`: a V8 heap snapshot a person asked for, with `confirm: true`; refused while
+ *   a turn runs. It goes to `diagnostics/heap-snapshots/`, outside the numbers-only log.
  *
  * `diagnostics.memory.notice` is the event a due notice raises, sent to every profile's clients.
  */
@@ -18,7 +20,8 @@ export const MEMORY_DIAGNOSTICS_METHODS = [
   'diagnostics.memory.status',
   'diagnostics.memory.appReport',
   'diagnostics.memory.noticeShown',
-  'diagnostics.memory.issue'
+  'diagnostics.memory.issue',
+  'diagnostics.memory.heapSnapshot'
 ] as const
 
 export const MEMORY_NOTICE_EVENT = 'diagnostics.memory.notice'
@@ -26,6 +29,10 @@ export const MEMORY_NOTICE_EVENT = 'diagnostics.memory.notice'
 /** Filled in once the monitor exists; the methods are registered before the protocol server starts. */
 export interface MemoryMonitorHolder {
   monitor: MemoryMonitor | null
+  /** Turns running now, across profiles. */
+  activeTurns?: () => number
+  /** Writes a heap snapshot; returns its home-relative file and size. */
+  writeHeapSnapshot?: () => { file: string; mb: number }
 }
 
 const MAX_APP_PROCESSES = 64
@@ -128,6 +135,24 @@ export function registerMemoryDiagnosticsMethods(registry: DomainHandlerRegistry
     scope: 'installation',
     validate: empty,
     handle: async (ctx) => await monitorOf(holder, ctx).issue()
+  })
+  registry.register({
+    method: 'diagnostics.memory.heapSnapshot',
+    scope: 'installation',
+    validate: (params) => {
+      const raw = domainObject(params, ['confirm'])
+      return { confirm: raw.confirm === true }
+    },
+    handle: (ctx, input) => {
+      const monitor = monitorOf(holder, ctx)
+      if (!input.confirm) throw new DomainRpcError('confirm_required', 'A heap snapshot holds thread text, paths and tokens. Confirm to write one.')
+      const active = holder.activeTurns?.() ?? 0
+      if (active > 0) throw new DomainRpcError('busy', `A turn is running (${active}). Write the snapshot when Mousse is idle.`)
+      if (!holder.writeHeapSnapshot) throw new DomainRpcError('unavailable', 'Heap snapshots are not available in this service.')
+      const written = holder.writeHeapSnapshot()
+      monitor.noteHeapSnapshot(written.file, written.mb)
+      return written
+    }
   })
   return registry.onConnectionClosed((id) => holder.monitor?.forgetConnection(id))
 }

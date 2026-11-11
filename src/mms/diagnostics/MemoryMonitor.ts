@@ -1,14 +1,14 @@
 /**
- * The service's memory monitor. About once a minute it reads its own memory and counts (a few microseconds of
- * work plus one small question to each thread database worker), adds the desktop app's last report, appends one
- * line to `diagnostics/memory.jsonl`, and checks the limits. On a breach it logs the full breakdown, offers one
- * notice a day for each kind of breach, and, only when the breach is severe, writes one V8 heap snapshot a day
- * beside the log. Nothing leaves the computer: a report is text the person opens in GitHub and submits themselves.
+ * The service's memory monitor. About once a minute it reads its own memory and counts (a few microseconds of work,
+ * with no request to any worker), adds the desktop app's last report, appends one line to
+ * `diagnostics/memory.jsonl`, and checks the limits. On a breach it logs the full breakdown and offers one notice a
+ * day. It never writes a heap snapshot by itself: that freezes the service and holds what threads contain, so only a
+ * person asks for one (`mousse-cli diagnostics memory snapshot`). Nothing leaves the computer: a report is text the
+ * person opens in GitHub and submits themselves.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { arch, platform, release, totalmem } from 'node:os'
 import { join } from 'node:path'
-import v8 from 'node:v8'
 import { logWarn } from '../log/diag'
 import {
   DEFAULT_MEMORY_THRESHOLDS,
@@ -17,6 +17,7 @@ import {
   memoryIssue,
   memoryTrend,
   noticeDue,
+  serviceBaselineMb,
   serviceGrowthMbPerHour,
   toMb,
   type AppHints,
@@ -45,13 +46,8 @@ const HISTORY_MS = 6 * 3_600_000
 const BREACH_RELOG_MS = 3_600_000
 /** The app's report counts while it is this many sample intervals old or newer. */
 const APP_REPORT_FRESH_INTERVALS = 3
-
-/** One heap snapshot a day, only below this heap size (writing one needs about as much memory again). */
-export const HEAP_SNAPSHOT_MAX_HEAP_MB = 1_024
-export const HEAP_SNAPSHOT_EVERY_MS = 24 * 3_600_000
-export const HEAP_SNAPSHOT_KEEP = 2
-/** A snapshot bigger than this is deleted again. */
-export const HEAP_SNAPSHOT_MAX_FILE_MB = 1_536
+/** The windows' hints change rarely: logged when they change, and at least this often. */
+const HINTS_RELOG_MS = 3_600_000
 
 export interface ServiceCountsReading {
   counts: Omit<ServiceCounts, 'providerProcesses'>
@@ -75,14 +71,14 @@ export interface MemoryMonitorOptions {
   readDetail?: () => MemoryDetail
   readChildren?: () => Promise<ChildMemory[]>
   childCount?: () => number
-  /** Writes a heap snapshot to `file` and returns its path; null turns snapshots off. */
-  writeHeapSnapshot?: ((file: string) => string) | null
+  /** This service run's id; by default its pid and start time. */
+  runId?: string
   log?: MemoryLog
 }
 
 interface MonitorState {
-  noticeShownAt: Partial<Record<BreachKind, number>>
-  heapSnapshotAt?: number
+  /** When a memory notice last showed, of any kind. */
+  noticeShownAt?: number
 }
 
 const STATE_RELATIVE_PATH = 'diagnostics/memory-state.json'
@@ -105,11 +101,17 @@ export class MemoryMonitor {
   private lastChildren: ChildMemory[] | undefined
   private lastReplayMb: number | undefined
   private started = false
+  private readonly uptime: () => number
+  private readonly runId: string
+  private loggedHints: { json: string; at: number } | null = null
 
   constructor(private readonly options: MemoryMonitorOptions) {
     this.thresholds = options.thresholds ?? DEFAULT_MEMORY_THRESHOLDS
     this.log = options.log ?? new MemoryLog(options.homeDir)
     this.now = options.now ?? Date.now
+    this.uptime = options.uptime ?? process.uptime
+    // Once, so every sample of this run carries the same id however long a sample's awaits take.
+    this.runId = options.runId ?? `${process.pid}-${Math.round(this.now() - this.uptime() * 1000)}`
     this.diagnosticsDir = join(options.homeDir, 'diagnostics')
     this.statePath = join(options.homeDir, STATE_RELATIVE_PATH)
     this.state = this.loadState()
@@ -164,15 +166,29 @@ export class MemoryMonitor {
       this.history.push(sample)
       const cutoff = sample.t - HISTORY_MS
       while (this.history.length && this.history[0].t < cutoff) this.history.shift()
-      this.log.append({ type: 'sample', ...sample })
+      this.log.append({ type: 'sample', ...this.compact(sample) })
       await this.check(sample)
     } catch (error) {
       logWarn('memory', 'memory sample failed', error)
     }
   }
 
+  /** The log line: the windows' hints only when they changed or an hour passed. */
+  private compact(sample: MemorySample): MemorySample {
+    if (!sample.hints) return sample
+    const json = JSON.stringify(sample.hints)
+    if (this.loggedHints && this.loggedHints.json === json && sample.t - this.loggedHints.at < HINTS_RELOG_MS) {
+      const { hints: _same, ...rest } = sample
+      return rest
+    }
+    this.loggedHints = { json, at: sample.t }
+    return sample
+  }
+
   private async takeSample(withDetail: boolean): Promise<MemorySample> {
+    // The time and the uptime are read together, before any await.
     const t = this.now()
+    const up = Math.round(this.uptime())
     const [service, reading] = await Promise.all([
       (this.options.sampleProcess ?? sampleOwnProcess)(),
       this.options.readCounts()
@@ -185,7 +201,8 @@ export class MemoryMonitor {
     const { processes: app, hints } = this.freshAppReport(t)
     return {
       t,
-      up: Math.round((this.options.uptime ?? process.uptime)()),
+      up,
+      run: this.runId,
       service,
       counts: { ...reading.counts, providerProcesses: (this.options.childCount ?? (() => liveChildProcesses().length))() },
       ...(reading.workerHeaps.length ? { workers: reading.workerHeaps.map(toMb) } : {}),
@@ -233,57 +250,29 @@ export class MemoryMonitor {
       this.log.append({ type: 'breach', t: sample.t, breaches: toLog, sample: full, detail: this.detail ?? readHeapDetail() })
       logWarn('memory', `out of bounds: ${toLog.map((breach) => breach.summary).join('; ')}`)
     }
-    const due = breaches.find((breach) => noticeDue(this.state.noticeShownAt, breach.kind, sample.t))
-    if (due && this.pending?.kind !== due.kind) {
-      this.pending = { kind: due.kind, summary: due.summary, at: sample.t }
+    // One notice a day, whatever its kind.
+    if (!this.pending && noticeDue(this.state.noticeShownAt, sample.t)) {
+      const first = breaches[0]
+      this.pending = { kind: first.kind, summary: first.summary, at: sample.t }
       try { this.options.onNotice?.(this.pending) } catch { /* a failing listener never stops sampling */ }
     }
-    const severe = breaches.find((breach) => breach.severe)
-    if (severe) this.maybeHeapSnapshot(severe, sample)
   }
 
-  private maybeHeapSnapshot(breach: MemoryBreach, sample: MemorySample): void {
-    const write = this.options.writeHeapSnapshot === undefined ? (file: string) => v8.writeHeapSnapshot(file) : this.options.writeHeapSnapshot
-    if (!write) return
-    const last = this.state.heapSnapshotAt
-    if (last !== undefined && sample.t - last < HEAP_SNAPSHOT_EVERY_MS && sample.t >= last) return
-    if ((sample.service.heapTotal ?? 0) > HEAP_SNAPSHOT_MAX_HEAP_MB) return
-    this.state.heapSnapshotAt = sample.t
-    this.saveState()
-    try {
-      mkdirSync(this.diagnosticsDir, { recursive: true })
-      const stamp = new Date(sample.t).toISOString().replace(/[:.]/g, '-')
-      const name = `heap-${stamp}.heapsnapshot`
-      const file = write(join(this.diagnosticsDir, name))
-      const mb = toMb(statSync(file).size)
-      if (mb > HEAP_SNAPSHOT_MAX_FILE_MB) {
-        rmSync(file, { force: true })
-        return
-      }
-      this.log.append({ type: 'heap-snapshot', t: sample.t, kind: breach.kind, file: `diagnostics/${name}`, mb })
-      this.pruneHeapSnapshots()
-    } catch (error) {
-      logWarn('memory', 'heap snapshot failed', error)
-    }
+  /** Notes a heap snapshot a person asked for: its size and home-relative file, nothing from inside it. */
+  noteHeapSnapshot(file: string, mb: number): void {
+    this.log.append({ type: 'heap-snapshot', t: this.now(), file, mb })
   }
 
-  private pruneHeapSnapshots(): void {
-    const snapshots = readdirSync(this.diagnosticsDir).filter((name) => /^heap-.*\.heapsnapshot$/.test(name)).sort()
-    for (const name of snapshots.slice(0, Math.max(0, snapshots.length - HEAP_SNAPSHOT_KEEP))) {
-      rmSync(join(this.diagnosticsDir, name), { force: true })
-    }
-  }
-
-  /** The person saw the notice: none of this kind again for a day. */
-  noticeShown(kind: BreachKind): void {
-    this.state.noticeShownAt[kind] = this.now()
-    if (this.pending?.kind === kind) this.pending = null
+  /** A window showed the notice: none again for a day, of any kind. */
+  noticeShown(_kind: BreachKind): void {
+    this.state.noticeShownAt = this.now()
+    this.pending = null
     this.saveState()
   }
 
-  /** A notice waiting for a window, unless one of its kind was shown in the last day. */
+  /** A notice waiting for a window, unless one was shown in the last day. */
   pendingNotice(): MemoryNotice | null {
-    if (this.pending && !noticeDue(this.state.noticeShownAt, this.pending.kind, this.now())) this.pending = null
+    if (this.pending && !noticeDue(this.state.noticeShownAt, this.now())) this.pending = null
     return this.pending
   }
 
@@ -294,6 +283,7 @@ export class MemoryMonitor {
       detail: this.detail,
       trend: memoryTrend(this.history, trendStep(this.history, this.thresholds.sampleIntervalMs)),
       growthMbPerHour: sample ? serviceGrowthMbPerHour(this.history, this.thresholds, sample.t) : null,
+      baselineMb: serviceBaselineMb(this.history),
       breaches: [...this.active.values()].map((entry) => entry.breach),
       notice: this.pendingNotice(),
       logFile: MEMORY_LOG_RELATIVE_PATH
@@ -323,13 +313,17 @@ export class MemoryMonitor {
 
   private loadState(): MonitorState {
     try {
-      if (!existsSync(this.statePath)) return { noticeShownAt: {} }
-      const raw = JSON.parse(readFileSync(this.statePath, 'utf8')) as Partial<MonitorState>
-      const shown: Partial<Record<BreachKind, number>> = {}
-      for (const [kind, at] of Object.entries(raw.noticeShownAt ?? {})) if (typeof at === 'number') shown[kind as BreachKind] = at
-      return { noticeShownAt: shown, ...(typeof raw.heapSnapshotAt === 'number' ? { heapSnapshotAt: raw.heapSnapshotAt } : {}) }
+      if (!existsSync(this.statePath)) return {}
+      const raw = JSON.parse(readFileSync(this.statePath, 'utf8')) as { noticeShownAt?: unknown }
+      if (typeof raw.noticeShownAt === 'number') return { noticeShownAt: raw.noticeShownAt }
+      // An earlier build kept one time per kind: the latest of them counts.
+      if (raw.noticeShownAt && typeof raw.noticeShownAt === 'object') {
+        const times = Object.values(raw.noticeShownAt).filter((at): at is number => typeof at === 'number')
+        if (times.length) return { noticeShownAt: Math.max(...times) }
+      }
+      return {}
     } catch {
-      return { noticeShownAt: {} }
+      return {}
     }
   }
 

@@ -7,10 +7,10 @@
  * checks the limits. No GPU work is done to read any of it. The window asks main for the status and the prefilled
  * issue; main opens the issue in the browser.
  */
-import { app, BrowserWindow, ipcMain, screen, shell, webContents } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, screen, shell, webContents } from 'electron'
 import { toMb, type AppHints, type AppProcessMemory, type BreachKind, type MemoryIssue } from '../../shared/diagnostics/memory'
-import { openExternalSafely } from '../safeExternalUrl'
 import { appHints, appProcessRows, type ContentsLike, type WindowGeometry, type WindowReport } from './appProcesses'
+import { openMemoryIssue } from './memoryReport'
 import { webContentsRole } from './webContentsRoles'
 
 type RegisterHandler = (channel: string, handler: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown) => void
@@ -114,12 +114,12 @@ export function registerMemoryDiagnosticsIpc(registerHandler: RegisterHandler, g
 
   registerHandler('diagnostics:memoryStatus', async () => guiMms.request('diagnostics.memory.status', {}))
   registerHandler('diagnostics:memoryNoticeShown', async (_event, kind: BreachKind) => guiMms.request('diagnostics.memory.noticeShown', { kind }))
-  // Opens the new-issue page with the numbers filled in. The person reviews and submits it there, or not.
-  registerHandler('diagnostics:memoryReport', async () => {
-    const issue = await guiMms.request<MemoryIssue>('diagnostics.memory.issue', {}, 30_000)
-    const ok = await openExternalSafely((target) => shell.openExternal(target), issue.url, 'diagnostics:memoryReport')
-    return { ok, url: issue.url }
-  })
+  // Opens the new-issue page with the numbers filled in; the person reviews and submits it there, or not. A report
+  // too long for a link goes on the clipboard and the link asks to paste it; so does one the browser would not open.
+  registerHandler('diagnostics:memoryReport', async () => openMemoryIssue(
+    await guiMms.request<MemoryIssue>('diagnostics.memory.issue', {}, 30_000),
+    { open: (target) => shell.openExternal(target), copy: (text) => clipboard.writeText(text) }
+  ))
 
   let unavailable = 0
   const report = async (): Promise<void> => {

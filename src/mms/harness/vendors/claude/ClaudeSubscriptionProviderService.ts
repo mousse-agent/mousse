@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { trackChildProcess } from '../../../diagnostics/liveCounts'
+import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liveCounts'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -769,6 +769,12 @@ function cutForHistory(saved: SavedSession, key: string, home: string): { at: st
   return undefined
 }
 
+/** Stops counting a query's Claude Code once its process exits; the SDK's process object says when. */
+function untrackClaudeOnExit(query: unknown, pid: number): void {
+  const child = (query as { transport?: { process?: { once?: (event: 'exit', listener: () => void) => unknown } } } | undefined)?.transport?.process
+  if (typeof child?.once === 'function') child.once('exit', () => untrackChildProcess(pid))
+}
+
 export class ClaudeSubscriptionProviderService {
   private readonly dir: string
   private readonly settingsPath: string
@@ -1424,7 +1430,13 @@ export class ClaudeSubscriptionProviderService {
     // another program given the pid since. The callback is the SDK's own, not in its published types.
     let spawned: { pid: number; spawnedAt: number } | undefined
     const reported = (options as { onProcessSpawned?: (pid: number) => void }).onProcessSpawned
-    const created = sdk.query({ prompt, options: { ...options, onProcessSpawned: (pid: number) => { spawned = { pid, spawnedAt: Date.now() }; trackChildProcess(pid, 'claude'); reported?.(pid) } } as Options })
+    const created = sdk.query({ prompt, options: { ...options, onProcessSpawned: (pid: number) => {
+      spawned = { pid, spawnedAt: Date.now() }
+      // Counted for the memory monitor until the SDK's process exits.
+      trackChildProcess(pid, 'claude')
+      queueMicrotask(() => untrackClaudeOnExit(created, pid))
+      reported?.(pid)
+    } } as Options })
     noteClaudeQuerySpawn(created, () => spawned)
     return created
   }

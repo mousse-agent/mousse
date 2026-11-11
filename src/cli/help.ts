@@ -218,6 +218,11 @@ export const DIAGNOSTICS_HELP = `Usage:
                                       Print the issue text and a link that opens it
                                       prefilled on GitHub. Numbers only; nothing is
                                       sent until you submit it there.
+  mousse-cli diagnostics memory snapshot --yes
+                                      Write a V8 heap snapshot of the running service
+                                      to <home>/diagnostics/heap-snapshots/. It holds
+                                      thread text, paths and tokens: keep it local.
+                                      Refused while a turn runs.
 `
 
 export const SERVICE_HELP = `Usage:

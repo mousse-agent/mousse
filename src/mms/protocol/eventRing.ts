@@ -27,6 +27,9 @@ export class EventSequenceRing {
   private readonly keys = new WeakMap<ProtocolEvent, string>()
   /** The newest sequence dropped for space; replay from before it has a gap. Superseded events leave no gap. */
   private evictedThrough = 0
+  /** The retained events' measured size, kept as events leave; each event is measured once, when first asked. */
+  private bytes = 0
+  private readonly sizes = new WeakMap<ProtocolEvent, number>()
 
   constructor(maxSize = MMS_PROTOCOL_REPLAY_RING_SIZE) {
     this.maxSize = maxSize
@@ -41,17 +44,18 @@ export class EventSequenceRing {
     return this.ring.length
   }
 
-  /** The retained events' size as JSON text, in UTF-16 code units (about bytes for ASCII). */
+  /**
+   * About how many bytes the retained events hold: a running total, where only events not measured yet are
+   * walked (string lengths and a few bytes a value, no JSON text made). Events that leave take their size with them.
+   */
   approximateBytes(): number {
-    let bytes = 0
     for (const event of this.ring) {
-      try {
-        bytes += JSON.stringify(event.data)?.length ?? 0
-      } catch {
-        // An event that cannot be encoded is not counted.
-      }
+      if (this.sizes.has(event)) continue
+      const size = approximateSize(event.data, 0)
+      this.sizes.set(event, size)
+      this.bytes += size
     }
-    return bytes
+    return this.bytes
   }
 
   /** Append an event; returns the assigned sequence. */
@@ -71,7 +75,10 @@ export class EventSequenceRing {
       const older = this.latest.get(key)
       if (older) {
         const index = this.ring.lastIndexOf(older)
-        if (index !== -1) this.ring.splice(index, 1)
+        if (index !== -1) {
+          this.ring.splice(index, 1)
+          this.bytes -= this.sizes.get(older) ?? 0
+        }
       }
       this.latest.set(key, event)
       this.keys.set(event, key)
@@ -79,6 +86,7 @@ export class EventSequenceRing {
     this.ring.push(event)
     while (this.ring.length > this.maxSize) {
       const evicted = this.ring.shift()!
+      this.bytes -= this.sizes.get(evicted) ?? 0
       this.evictedThrough = evicted.sequence
       const evictedKey = this.keys.get(evicted)
       if (evictedKey !== undefined && this.latest.get(evictedKey) === evicted) this.latest.delete(evictedKey)
@@ -102,4 +110,18 @@ export class EventSequenceRing {
       events: this.ring.filter((e) => e.sequence > afterSeq)
     }
   }
+}
+
+/** A value's rough size: string lengths, 8 bytes a number, and the keys of objects. */
+function approximateSize(value: unknown, depth: number): number {
+  if (typeof value === 'string') return value.length
+  if (typeof value === 'number' || typeof value === 'boolean') return 8
+  if (!value || typeof value !== 'object' || depth > 32) return 4
+  let size = 2
+  if (Array.isArray(value)) {
+    for (const item of value) size += approximateSize(item, depth + 1) + 1
+    return size
+  }
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) size += key.length + approximateSize(item, depth + 1) + 2
+  return size
 }

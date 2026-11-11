@@ -1,21 +1,22 @@
 /**
- * The memory log: `<home>/diagnostics/memory.jsonl`, one JSON object per line, append only. It rotates at about
- * 1.5 MB and keeps three older files, and a rotated file older than a week is deleted, so it never holds more than
- * about 6 MB or more than a few days. Lines hold numbers and fixed names only (see `shared/diagnostics/memory.ts`).
+ * The memory log: `<home>/diagnostics/memory.jsonl`, one JSON object per line, append only. A sample line is about
+ * 0.8 KB (1.1 MB a day at one a minute); the file rotates at 2 MB and keeps five older files, and a rotated file older
+ * than 7 days is deleted. So it covers the last 7 days in at most 12 MB (less time with many windows or views).
+ * Lines hold numbers and fixed names only (see `shared/diagnostics/memory.ts`).
  */
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { RotatingFileLog } from '../log/rotatingFileLog'
-import { MEMORY_LOG_RELATIVE_PATH, type BreachKind, type MemoryBreach, type MemoryDetail, type MemorySample } from '../../shared/diagnostics/memory'
+import { MEMORY_LOG_RELATIVE_PATH, type MemoryBreach, type MemoryDetail, type MemorySample } from '../../shared/diagnostics/memory'
 
-export const MEMORY_LOG_MAX_BYTES = 1_500_000
-export const MEMORY_LOG_KEEP = 3
+export const MEMORY_LOG_MAX_BYTES = 2_000_000
+export const MEMORY_LOG_KEEP = 5
 export const MEMORY_LOG_MAX_AGE_MS = 7 * 24 * 3_600_000
 
 export type MemoryLogLine =
   | ({ type: 'sample' } & MemorySample)
   | { type: 'breach'; t: number; breaches: MemoryBreach[]; sample: MemorySample; detail: MemoryDetail }
-  | { type: 'heap-snapshot'; t: number; kind: BreachKind; file: string; mb: number }
+  | { type: 'heap-snapshot'; t: number; file: string; mb: number }
   | { type: 'start'; t: number; version: string; pid: number }
 
 export function memoryLogPath(homeDir: string): string {

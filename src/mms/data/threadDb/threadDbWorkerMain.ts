@@ -6,10 +6,15 @@ import { parentPort, workerData, type MessagePort } from 'node:worker_threads'
 import { ThreadDbEngine } from './threadDbEngine'
 import { runOp, toWireError } from './threadDbClient'
 
-const data = workerData as { role: 'write'; flag: Int32Array; port: MessagePort } | { role: 'read' | 'index' | 'import' }
+const data = workerData as ({ role: 'write'; flag: Int32Array; port: MessagePort } | { role: 'read' | 'index' | 'import' }) & { openCounts?: Int32Array; slot?: number }
+
+/** Open connections, written where the daemon reads them without asking (the memory monitor). */
+const onOpenCount = data.openCounts && data.slot !== undefined
+  ? (count: number) => { Atomics.store(data.openCounts!, data.slot!, count) }
+  : undefined
 
 if (data.role === 'write') {
-  const engine = new ThreadDbEngine({ idleCloseMs: 2_000 })
+  const engine = new ThreadDbEngine({ idleCloseMs: 2_000, onOpenCount })
   parentPort!.on('message', (request: { id: number; op: string; args: unknown[] }) => {
     let reply: { id: number; ok: boolean; value?: unknown; error?: ReturnType<typeof toWireError> }
     try {
@@ -24,7 +29,7 @@ if (data.role === 'write') {
 } else {
   // Reads (and index work and imports, each in a worker of its own) open a connection per thread request and close it after, so
   // these workers hold no thread database open between requests.
-  const engine = new ThreadDbEngine({ idleCloseMs: 0, checkpointOnClose: false })
+  const engine = new ThreadDbEngine({ idleCloseMs: 0, checkpointOnClose: false, onOpenCount })
   process.on('exit', () => engine.closeEverything())
   parentPort!.on('message', (request: { id: number; op: string; args: unknown[] }) => {
     try {
