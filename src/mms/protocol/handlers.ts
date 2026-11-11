@@ -21,7 +21,7 @@ import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
 import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
-import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
+import { assertLifecyclePath, isLifecycleIdentity } from '../lifecycle/ResourceLifecycleStore'
 import { ARCHIVE_BEFORE_DELETE } from '../lifecycle/threadDelete'
 /**
  * Method handlers against daemon-owned MousseMainService.
@@ -1630,8 +1630,9 @@ export async function dispatchMethod(
 async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   // Deleting an archived thread stops what still runs in it first, once nothing that would refuse the delete is found:
   // the send waiting for its turn is a request the delete's admission would otherwise wait for, and refuse. Another
-  // computer's delete is refused anyway.
-  if (method === 'threads.delete' && isObject(params) && typeof params.threadId === 'string' && ctx.connection?.clientType !== 'bridge')
+  // computer's delete is refused anyway. A thread of another computer (a qualified id) is routed to its owner, which
+  // stops it there.
+  if (method === 'threads.delete' && isObject(params) && isLifecycleIdentity(params.threadId) && ctx.connection?.clientType !== 'bridge')
     await ctx.mms.stopThreadBeforeDelete?.(params.threadId, { human: ctx.connection?.clientType === 'gui', discard: params.discard === true })
   // Installation lifecycle commands must not wait on themselves in a personal
   // request barrier. Every actual personal service has this ownership method;
@@ -1640,8 +1641,9 @@ async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unk
     // A request that names only threads of this computer is counted under them, so a delete of another thread does
     // not wait for it. One that names anything else (a project terminal's `__unbound__`, a chat's task id) is the profile's.
     // Read only: a listed thread, or one with a lifecycle record (live, in the trash, a subagent's, a bot's). An id found
-    // in neither is counted as the profile's; nothing is scanned, migrated or registered for it before admission.
-    const isThread = (id: string): boolean => Boolean(ctx.mms.threads?.peekThread?.(id) || ctx.mms.threads?.lifecycleStore?.get(id))
+    // in neither is counted as the profile's; nothing is scanned, migrated or registered for it before admission. An id
+    // no lifecycle record can have (another computer's qualified thread id) is never a thread here.
+    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || ctx.mms.threads?.lifecycleStore?.get(id))
     return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params, isThread))
   }
   return dispatchOwnedMethod(ctx, method, params)
