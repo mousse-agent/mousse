@@ -8,6 +8,7 @@ import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearV
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
 import { setTurnChangedFiles } from '../lib/turnChangedFilesSetting'
+import { setReplyPacing } from '../lib/replyPacingSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { setAnimationSpeed } from '../lib/motion'
@@ -203,10 +204,11 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyFrostedComposer(normalized)
 }
 
-/** Chat display settings that live under appearance: math and the changed-files summary. */
+/** Chat display settings that live under appearance: math, reply pacing and the changed-files summary. */
 function applyChatDisplay(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
   setRenderMath(normalized.renderMath)
+  setReplyPacing(normalized.replyPacing)
   setTurnChangedFiles(normalized.turnChangedFiles)
 }
 

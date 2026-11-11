@@ -7,6 +7,11 @@ import { runCommand } from '../../../src/renderer/commands/commandRegistry'
 import { attachCommandShortcuts } from '../../../src/renderer/commands/useCommandShortcuts'
 import { useAppStore } from '../../../src/renderer/stores/appStore'
 import '../../../src/renderer/styles/app.css'
+import { setReplyPacing } from '../../../src/renderer/lib/replyPacingSetting'
+
+// The checks here hold the reading line frame by frame as text streams in, so streamed text shows as
+// it arrives (pacing is in replyPacing.test.ts).
+setReplyPacing(false)
 
 // Ctrl/Cmd+F goes through the command registry like in the app: a thread is open and the dispatcher listens.
 useAppStore.setState({ activeThreadId: 'fixture', appInfo: { platform: 'win32', repoRoot: '', llmProvider: '' } })
