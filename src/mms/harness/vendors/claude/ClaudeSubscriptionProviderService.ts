@@ -208,7 +208,7 @@ export type ClaudeSubscriptionChatInput = {
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
-  /** A drained steer was pushed to Claude; `token` names its drain (`drainSteerEntry`), when it had one. */
+  /** Claude Code read a drained steer: it is accepted. `token` names its drain (`drainSteerEntry`), when it had one. */
   onSteer?: (text: string, token?: string) => void
   /** A drained steer could not be pushed because the turn's result had already arrived: it is the next turn. */
   returnSteer?: (text: string, token?: string) => void
@@ -2439,7 +2439,28 @@ export class ClaudeSubscriptionProviderService {
       branch ? branch.turns : saved?.sessionId === sessionId ? saved.turns ?? [] : []
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
-    const steers: string[] = []
+    /**
+     * A one-shot query's steers (no live session: a bot's turn, or a turn past the live cap), collected and waiting to
+     * go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
+     */
+    const steers: OneShotSteer[] = []
+    /** The steers the restarted query carries as its prompt, under that prompt's id, until Claude Code reads it. */
+    let carried: { id: string; steers: OneShotSteer[] } | undefined
+    /** Claude Code read the restarted query's prompt: the steers it carries are accepted, once. */
+    const carriedRead = (): void => {
+      const read = carried
+      carried = undefined
+      for (const steer of read?.steers ?? []) steer.steered()
+    }
+    /**
+     * A one-shot turn that ends by a Stop, an interrupt or a failure hands back every steer Claude Code has not read,
+     * by its token, oldest first: the ones the restarted query carried unread, then the ones not sent yet.
+     */
+    const returnUnreadOneShotSteers = (): void => {
+      const unread = [...(carried?.steers ?? []), ...steers.splice(0)]
+      carried = undefined
+      for (const steer of unread) input.returnSteer?.(steer.text, steer.token)
+    }
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let interruptRequested = false
     /**
@@ -2522,8 +2543,9 @@ export class ClaudeSubscriptionProviderService {
         }, () => cancel())
         return
       }
-      steers.push(steer)
-      steered()
+      // Taken, not accepted: it is accepted only once the restarted query reads it, and handed back if the turn ends first.
+      input.steerTaken?.(drained?.token)
+      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), steered })
       if (query && !interruptRequested) {
         interruptRequested = true
         this.questions.autoRejectPendingForThread(input.threadId)
@@ -2821,6 +2843,9 @@ export class ClaudeSubscriptionProviderService {
           this.queries.set(input.threadId, query)
           try {
             for await (const message of query) {
+              // Read before the frame is shown, so the steer is in place above what the model says after it; and
+              // before a Stop is checked, so a steer Claude Code did read is not handed back as well.
+              if (carried && oneShotPromptRead(message, carried.id)) carriedRead()
               if (controller.signal.aborted) metrics.observe(message)
               controller.signal.throwIfAborted()
               frames.observe(message)
@@ -2859,13 +2884,18 @@ export class ClaudeSubscriptionProviderService {
           delete options.forkSession
           delete options.sessionId
           metrics.beginQuery(sessionId)
-          const guidance = steers.splice(0).join('\n')
+          // Steers the query just ended carried and never read go first, in the order they were sent.
+          const sending = [...(carried?.steers ?? []), ...steers.splice(0)]
+          const guidanceId = randomUUID()
+          carried = { id: guidanceId, steers: sending }
+          const guidance = sending.map((steer) => steer.text).join('\n')
           nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
             yield {
               type: 'user',
               message: { role: 'user', content: guidance },
               parent_tool_use_id: null,
-              session_id: sessionId
+              session_id: sessionId,
+              uuid: guidanceId as SDKUserMessage['uuid']
             }
           })()
           interruptRequested = false
@@ -2907,6 +2937,8 @@ export class ClaudeSubscriptionProviderService {
         if (!success && liveRun.ids.size > 0) live.meta.pushedFailed = true
         liveRun.onRead = undefined
       } else query?.close()
+      // No steer is collected after the abort above: a one-shot turn's steers Claude Code never read go back now.
+      returnUnreadOneShotSteers()
       // After the cancel above has started: a steer Claude Code has not read is accepted or handed back before the turn
       // ends, never left behind.
       try {
@@ -3025,6 +3057,24 @@ export class ClaudeSubscriptionProviderService {
     this.closeLive()
     this.readyToCommit.clear()
   }
+}
+
+/** A steer a one-shot query took: its text, its drain's token when it had one, and its acceptance. */
+type OneShotSteer = { text: string; token?: string; steered: () => void }
+
+/**
+ * Claude Code read the prompt a one-shot query was started with (`id`): its `command_lifecycle` frame says `started`
+ * (or `completed`), a frame or result names its id, or the model answers at all. The prompt is that query's only
+ * message, so anything the model writes, and a successful result, answers it. Starting the process (`system` frames)
+ * is not a read, and nor is a failed result: an interrupt or a Stop that came first ends the query that way too.
+ */
+function oneShotPromptRead(message: unknown, id: string): boolean {
+  if (typeof message !== 'object' || message === null) return false
+  const frame = message as { type?: unknown; command_uuid?: unknown; state?: unknown; user_message_uuid?: unknown; user_message_uuids?: unknown; subtype?: unknown; is_error?: unknown }
+  if (frame.type === 'command_lifecycle') return frame.command_uuid === id && (frame.state === 'started' || frame.state === 'completed')
+  if (frame.user_message_uuid === id || (Array.isArray(frame.user_message_uuids) && frame.user_message_uuids.includes(id))) return true
+  if (frame.type === 'stream_event' || frame.type === 'assistant') return true
+  return frame.type === 'result' && frame.subtype === 'success' && frame.is_error !== true
 }
 
 /** Claude Code could not resume a session cut (`cutRefused`); `fork` when the cut was a fork's branch. */
