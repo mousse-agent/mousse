@@ -439,9 +439,29 @@ export function releaseExecutionLease(threadDir: string, token: string): boolean
     if (!still || still.token !== token) return false
     unlinkSync(lockPath)
     untrackHeld(token)
-    return true
   } catch {
     return false
+  }
+  for (const listener of releaseListeners) {
+    try {
+      listener(threadDir)
+    } catch {
+      // A listener never fails the release.
+    }
+  }
+  return true
+}
+
+const releaseListeners = new Set<(threadDir: string) => void>()
+
+/**
+ * Hear each execution lease this process releases, by thread directory, right after the release. A listener runs
+ * inside the releaser's call: it must be quick and leave real work for later.
+ */
+export function onExecutionLeaseReleased(listener: (threadDir: string) => void): () => void {
+  releaseListeners.add(listener)
+  return () => {
+    releaseListeners.delete(listener)
   }
 }
 
