@@ -130,6 +130,55 @@ export function cursorToolTitle(toolCall: unknown, label = 'Cursor'): string {
   return type === 'shell' ? `Shell: ${short}` : `${name} ${short}`
 }
 
+/**
+ * Tool names for Cursor's call types. Its `type` is a category, not a tool name: `ls` lists a folder (it is not a file
+ * search) and `task` runs a Cursor subagent, not a Mousse one. A type with no card of its own gets a neutral name,
+ * so it shows as a plain row ("List Directory") rather than a wrong card.
+ */
+const CURSOR_TOOL_NAMES: Record<string, string> = {
+  shell: 'Bash',
+  read: 'Read',
+  edit: 'Edit',
+  write: 'Write',
+  grep: 'Grep',
+  glob: 'Glob',
+  ls: 'list_directory',
+  delete: 'delete_file',
+  semSearch: 'semantic_search',
+  readLints: 'read_lints',
+  updateTodos: 'update_todos',
+  createPlan: 'create_plan',
+  task: 'cursor_task',
+  generateImage: 'generate_image',
+  recordScreen: 'record_screen'
+}
+
+/** An MCP server's name as a tool-name segment: `my-server` is `my_server`. */
+function mcpSegment(name: string): string {
+  return name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+}
+
+/**
+ * The tool name a Cursor call shows as: a known type's tool name, or an MCP call's `mcp__<server>__<tool>` (its
+ * tool name alone when Cursor does not say which server). Undefined when the call names nothing.
+ */
+export function cursorToolName(toolCall: unknown): string | undefined {
+  const call = toolCall && typeof toolCall === 'object' ? (toolCall as { type?: unknown; args?: unknown }) : {}
+  const type = str(call.type)
+  if (!type) return undefined
+  if (type === 'mcp') {
+    const args = call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
+    const tool = str(args.toolName)?.trim()
+    if (!tool) return undefined
+    if (tool.startsWith('mcp__')) return tool
+    const server = mcpSegment(str(args.providerIdentifier) ?? '')
+    return server ? `mcp__${server}__${tool}` : tool
+  }
+  if (Object.prototype.hasOwnProperty.call(CURSOR_TOOL_NAMES, type)) return CURSOR_TOOL_NAMES[type]
+  // A type added after this list: snake case keeps it a plain row named after it.
+  return `cursor_${type.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()}`
+}
+
 /** Raised inside a turn when its Stop arrives before the work it waits for. */
 class TurnStopped extends Error {
   constructor() {
@@ -505,7 +554,7 @@ export class CursorSessions {
               if (!callId) return
               const title = cursorToolTitle(update.toolCall, label)
               tools.set(callId, title)
-              const toolName = str((update.toolCall as { type?: unknown } | undefined)?.type)
+              const toolName = cursorToolName(update.toolCall)
               input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}) })
               return
             }
