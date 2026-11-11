@@ -1078,8 +1078,8 @@ describe('result routing and steering edge cases', () => {
     await inputs(f.cli, 2)
     process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
     await inputs(f.cli, 3)
-    // Claude took the steer into the running turn and says so, and the model's first reply frame after the fold names it.
-    process.emit(lifecycle(process.uuid(2), 'started'), textDelta('on it', process.uuid(2)))
+    // Claude took the steer into the running turn and says so; later frames carry only the prompt's id.
+    process.emit(lifecycle(process.uuid(2), 'started'), textDelta('on it', process.uuid(1)))
     await later(10)
     abort.abort()
     await expect(second).rejects.toThrow()
@@ -1121,6 +1121,46 @@ describe('result routing and steering edge cases', () => {
     expect(process.interruptOptions).toEqual([{ cancelQueued: true }])
     expect(onSteer).not.toHaveBeenCalled()
     expect(returnSteer).toHaveBeenCalledExactlyOnceWith('steer', undefined)
+  })
+
+  it('a steer folded into a turn the person started is answered by the model output after it, which names only the prompt: a Stop keeps it accepted', async () => {
+    const f = fixture()
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const onSteer = vi.fn()
+    const returnSteer = vi.fn()
+    const turn = f.chat({
+      prompt: 'go',
+      signal: abort.signal,
+      onSteer,
+      returnSteer,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    const process = f.cli.last
+    const prompt = process.uuid(0)
+    const steer = process.uuid(1)
+    process.emit(textDelta('working', prompt), toolStart('tool-1', 'Bash', prompt), toolResult('tool-1'))
+    // Folded after the first tool: Claude Code keeps the prompt's id on every frame of the turn.
+    process.emit(lifecycle(steer, 'started'))
+    await later(10)
+    expect(onSteer).not.toHaveBeenCalled()
+    // A background agent's frame and a keep-alive are not the model answering it.
+    process.emit(textDelta('agent work', undefined, { parent_tool_use_id: 'tool-1' }), { type: 'stream_event', session_id: SESSION, parent_tool_use_id: null, event: { type: 'ping' } })
+    await later(10)
+    expect(onSteer).not.toHaveBeenCalled()
+    process.emit(messageStart(prompt), textDelta('on the steer', prompt), toolStart('tool-2', 'Bash', prompt), toolResult('tool-2'))
+    await vi.waitFor(() => expect(onSteer).toHaveBeenCalledExactlyOnceWith('steer'))
+    process.emit(textDelta('still on it', prompt))
+    await later(10)
+    // Stop before Claude Code's `completed` and the turn's result.
+    abort.abort()
+    await expect(turn).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // Nothing of this run is left unanswered, so the interrupt is the plain one.
+    expect(process.interruptOptions).toEqual([undefined])
+    expect(onSteer).toHaveBeenCalledTimes(1)
+    expect(returnSteer).not.toHaveBeenCalled()
   })
 
   it('the wake a cut-off turn owes is not swallowed by a message pushed before it', async () => {
@@ -1714,6 +1754,26 @@ describe('result routing and steering edge cases', () => {
       await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('may run twice'), expect.objectContaining({ messageIds: [steer] })))
       process.answer(steer, 'STEERANSWER')
       await vi.waitFor(() => expect(session.owedResults).toBe(0))
+      expect(returned).toHaveBeenCalledTimes(1)
+      expect(read).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('Stop hands back a late steer Claude Code could not drop; the interrupted turn\'s error result that names it is no sign it may run twice', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const { f, process, steer, turn, stop, returned, read } = await heldForDroppedSteer()
+      stop.abort()
+      await turn.catch(() => undefined)
+      expect(returned).toHaveBeenCalledExactlyOnceWith('late steer', undefined)
+      const session = (f.service as unknown as { live: Map<string, { owedResults: number }> }).live.get('thread')!
+      expect(session.owedResults).toBe(1)
+      process.emit(resultFrame({ uuids: [steer], error: 'interrupted', terminalReason: 'aborted_streaming' }))
+      await vi.waitFor(() => expect(session.owedResults).toBe(0))
+      await later(20)
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('may run twice'), expect.anything())
       expect(returned).toHaveBeenCalledTimes(1)
       expect(read).not.toHaveBeenCalled()
     } finally {
@@ -2825,8 +2885,9 @@ describe('a plan usage limit', () => {
 })
 
 /**
- * A pushed steer counts as read only when Claude Code reads it (its `command_lifecycle` `started` frame, or a frame or
- * result that names its id). One Claude Code has not read when the turn ends is handed back by its token, and only
+ * A pushed steer counts as read only when the model answers it (model output that names its id or follows its
+ * `command_lifecycle` `started` frame, a `completed` frame, or a successful result that names it). One the model has not
+ * answered when the turn ends is handed back by its token, and only
  * once Claude Code can no longer run it, so it is neither lost nor run twice.
  */
 describe('a steer Claude Code has not read when the turn ends', () => {
@@ -2954,6 +3015,30 @@ describe('a steer Claude Code has not read when the turn ends', () => {
     await turn
     expect(onSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1')
     expect(returnSteer).not.toHaveBeenCalled()
+  })
+
+  it('B with only a `completed` lifecycle is accepted at once; a Stop after that never hands it back', async () => {
+    const f = fixture()
+    const { process, abort, turn, onSteer, returnSteer, steer } = await steeredDuringCommand(f)
+    process.emit(lifecycle(steer, 'completed'))
+    await vi.waitFor(() => expect(onSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1'))
+    abort.abort()
+    f.service.stopThread('thread')
+    await expect(turn).rejects.toThrow()
+    expect(onSteer).toHaveBeenCalledTimes(1)
+    expect(returnSteer).not.toHaveBeenCalled()
+  })
+
+  it('B taken, then an error result that names it: not a read, so B is handed back once and never accepted', async () => {
+    const f = fixture()
+    const { process, turn, onSteer, returnSteer, steer } = await steeredDuringCommand(f)
+    process.emit(lifecycle(steer, 'started'))
+    await later(20)
+    // A failed turn's error result names the messages it had taken, though the model may never have had them.
+    process.emit(resultFrame({ uuids: [process.uuid(0), steer], error: 'request failed' }))
+    await expect(turn).rejects.toThrow()
+    expect(onSteer).not.toHaveBeenCalled()
+    expect(returnSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1')
   })
 
   it('the cancel sweeps Claude Code\'s queue in the interrupt itself, so B cannot start between a plain interrupt and a second cancel', async () => {

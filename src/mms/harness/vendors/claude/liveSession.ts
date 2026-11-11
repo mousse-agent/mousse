@@ -484,6 +484,12 @@ export class LiveRun {
    * back then, because the request that would carry it may never have gone out (#928).
    */
   readonly answered = new Set<string>()
+  /**
+   * Pushed ids Claude Code took for its next request (`started`) that the model has not answered yet. The run's next
+   * main-turn model frame answers them (`LiveSession.answerTaken`): Claude Code names a message only when a turn's
+   * `user_message_uuid` changes, so a steer folded into a turn the person started is never named by a reply frame.
+   */
+  readonly awaitingAnswer = new Set<string>()
   /** Pushed ids Claude Code dropped unread (a cancel took them from its queue): it will never run them. */
   readonly dropped = new Set<string>()
   /**
@@ -613,7 +619,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 
 /**
  * What Claude Code says about a pushed message (`command_lifecycle`, an internal frame of the stream): `queued` when it
- * enters the command queue, `started` when it drains into a turn (the model reads it), then one of `completed`,
+ * enters the command queue, `started` when it drains into a turn (taken for the next request, not yet answered), then one of `completed`,
  * `cancelled`, `discarded` or `refused`.
  */
 function lifecycleOf(message: SDKMessage): { id: string; state: string } | undefined {
@@ -630,6 +636,19 @@ function modelOutput(message: SDKMessage): boolean {
   if (message.type === 'stream_event') return true
   if (message.type !== 'assistant') return false
   return (message as { message?: { model?: unknown } }).message?.model !== '<synthetic>'
+}
+
+/**
+ * Model output of the main turn: not a background agent's (`parent_tool_use_id`), and not a keep-alive `ping`. Claude
+ * Code says `started` for a message after the tool round that took it has ended, just before the request that carries
+ * it (or as a new turn starts), so the first such frame after `started` is the model answering that request.
+ */
+function mainTurnModelOutput(message: SDKMessage): boolean {
+  if (!modelOutput(message)) return false
+  if ((message as { parent_tool_use_id?: unknown }).parent_tool_use_id != null) return false
+  if (message.type !== 'stream_event') return true
+  const event = (message as { event?: { type?: unknown } }).event
+  return event?.type !== 'ping'
 }
 
 function echoedIds(message: SDKMessage): string[] {
@@ -875,9 +894,9 @@ export class LiveSession<Turn = unknown> {
    * Delivers a steer to the live turn without interrupting it: foreground subagents move to the
    * background first (a steer aborts the stream, which would end them), then the text is pushed as an
    * immediate user message the run owns. Returns the pushed message's id, or false when the run ended first.
-   * Pushed is not read: `run.read` and `onRead` say when Claude Code reads it, and `unreadFate` what became of
-   * one it had not read when the turn ended. `pushed` is told the id at the moment of the push, before anything
-   * else can run.
+   * Pushed is not read, and taken (`run.read`, a `started` lifecycle) is not read either: `run.answered` and `onRead`
+   * say when the model answers it, and `unreadFate` what became of one it had not answered when the turn ended.
+   * `pushed` is told the id at the moment of the push, before anything else can run.
    */
   async steer(run: LiveRun, text: string, pushed?: (id: string) => void): Promise<string | false> {
     const query = this.query
@@ -1141,6 +1160,7 @@ export class LiveSession<Turn = unknown> {
     if (!owner) return
     // Also one Claude Code had taken for a request it had not sent yet: the cancel took it back unanswered.
     if (!owner.answered.has(id)) owner.dropped.add(id)
+    owner.awaitingAnswer.delete(id)
     owner.owned.delete(id)
     if (owner.abandoned) {
       if (owner.owned.size === 0) this.finishCancelled(owner)
@@ -1277,30 +1297,50 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * Claude Code took `ids` of the runs that pushed them (`read`), and, when `answered`, the model answered them
-   * (`LiveRun.answered`, which alone tells `onRead`).
+   * What Claude Code said about `ids` of the runs that pushed them. Each signal marks them taken (`read`):
+   * - `started`: Claude Code took them for its next request, which has not gone out yet. The run's next main-turn model
+   *   frame answers them (`awaitingAnswer`, `answerTaken`);
+   * - `answered`: the model answered them (`LiveRun.answered`, which alone tells `onRead`);
+   * - `named`: a frame or result named them that says nothing of the model (a tool result, a message Claude Code made
+   *   up, an error result: an interrupted turn's names the message that started it, though the model may never have
+   *   had it).
+   * Only `started` and `answered` show that Claude Code runs a steer it had handed back (`readAfterHandBack`).
    */
-  private markRead(ids: readonly string[], answered: boolean): void {
+  private markRead(ids: readonly string[], signal: 'started' | 'answered' | 'named'): void {
     for (const run of this.ownersOf(ids)) {
       for (const id of ids) {
         if (!run.ids.has(id)) continue
         const taken = !run.read.has(id)
-        if (taken) {
-          run.read.add(id)
-          if (run.handedBackBy) this.readAfterHandBack(run, id)
-        }
-        if (answered && !run.answered.has(id)) {
-          run.answered.add(id)
-          try {
-            run.onRead?.(id)
-          } catch (error) {
-            console.warn('[claude-live] a read message could not be reported', error instanceof Error ? error.message : String(error))
-          }
-        }
+        if (taken) run.read.add(id)
+        if (signal !== 'named' && run.handedBackBy && !run.mayRunTwice.has(id)) this.readAfterHandBack(run, id)
+        if (signal === 'started' && !run.answered.has(id)) run.awaitingAnswer.add(id)
+        if (signal === 'answered') this.answer(run, id)
         // A steer that was unread at the run's result runs now, as a turn of its own: the run goes on to its result.
         if (taken && run.lateSteers.has(id) && !run.settled && !run.abandoned) this.resume(run)
       }
     }
+  }
+
+  /** The model answered `id`, a message `run` pushed: told once (`onRead`). */
+  private answer(run: LiveRun, id: string): void {
+    run.awaitingAnswer.delete(id)
+    if (run.answered.has(id)) return
+    run.answered.add(id)
+    try {
+      run.onRead?.(id)
+    } catch (error) {
+      console.warn('[claude-live] a read message could not be reported', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * `message`, a main-turn model frame, reached `run`: the model answers what Claude Code took for this request. A steer
+   * folded into a turn keeps the turn's `user_message_uuid`, so no reply frame names it; this frame is its answer. No
+   * frame of the request before can follow `started` (`mainTurnModelOutput`).
+   */
+  private answerTaken(run: LiveRun, message: SDKMessage): void {
+    if (run.awaitingAnswer.size === 0 || !mainTurnModelOutput(message)) return
+    for (const id of [...run.awaitingAnswer]) this.answer(run, id)
   }
 
   private failCancelled(run: LiveRun, error: Error): void {
@@ -1389,7 +1429,8 @@ export class LiveSession<Turn = unknown> {
     if (lifecycle) {
       // `started`: Claude Code took the message for its next request, which has not gone out yet; `completed`: answered.
       // Only the read is taken from this frame.
-      if (lifecycle.state === 'started' || lifecycle.state === 'completed') this.markRead([lifecycle.id], lifecycle.state === 'completed')
+      if (lifecycle.state === 'started' || lifecycle.state === 'completed')
+        this.markRead([lifecycle.id], lifecycle.state === 'completed' ? 'answered' : 'started')
       else if (lifecycle.state === 'cancelled') this.lateSteerCancelled(lifecycle.id)
       return
     }
@@ -1404,7 +1445,7 @@ export class LiveSession<Turn = unknown> {
       return
     }
     // Read before the frame reaches its run, so a steer is in place before what the model says after it.
-    if (echoed.length) this.markRead(echoed, modelOutput(message))
+    if (echoed.length) this.markRead(echoed, modelOutput(message) ? 'answered' : 'named')
     if (owner) {
       this.strayTurn = false
       this.passOver(owner, echoed)
@@ -1413,6 +1454,8 @@ export class LiveSession<Turn = unknown> {
     }
     const target = owner ?? this.frameTarget(message)
     if (!target) return
+    // Before the frame reaches its run too: a steer folded into this turn is answered by it, though it does not name it.
+    this.answerTaken(target, message)
     // A turn Claude started on its own begins at its first root frame: a background agent's frames (they
     // name a parent tool call) and tool results say nothing about whether the wake began.
     const root = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id == null && message.type !== 'user'
@@ -1681,7 +1724,7 @@ export class LiveSession<Turn = unknown> {
     if (echoed.length) {
       // A result that names a message took it; a successful one answered it. An interrupted turn's error result names
       // the message that started it too, though the model may never have had it.
-      this.markRead(echoed, message.subtype === 'success' && message.is_error !== true)
+      this.markRead(echoed, message.subtype === 'success' && message.is_error !== true ? 'answered' : 'named')
       target = this.ownerOf(echoed)
       if (!target) return
       this.passOver(target, echoed)
@@ -1742,7 +1785,8 @@ export class LiveSession<Turn = unknown> {
    * its own. Settling now would leave that turn with no run to show it, while the steer counted as read. So the run is
    * held at the result, and Claude Code is asked to drop each such steer (`cancelAsyncMessage`):
    * - dropped: it never runs there, and the run ends with the result; the steer is handed back (`unreadFate`);
-   * - read (a `started` frame, or a frame that names it): the run goes on to the steer's own result (`resume`);
+   * - taken (a `started` frame, or a frame that names it): the run goes on to the steer's own result (`resume`). Taken
+   *   is not read: the steer is accepted once the model answers it (`markRead`), or when that result arrives;
    * - not dropped (false) with no read yet: the run waits up to `lateSteerReadMs` for a read signal. A `cancelled`
    *   lifecycle ends the wait: Claude Code dropped it after all (`lateSteerCancelled`). With no signal the run ends with
    *   the result, and the steer is handed back (`endTaken`).
@@ -1810,18 +1854,19 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * A held run whose steer `cancelAsyncMessage` could not drop (it answered false), and which no read signal followed
+   * A held run whose steer `cancelAsyncMessage` could not drop (it answered false), and which nothing showed taken
    * within `lateSteerReadMs` (a `started` or `completed` lifecycle, or a frame or result that names it: each resumes the
-   * run at once), ends with its result, and the steer is handed back (`unreadFate` says `dropped`): it runs once, as the
-   * next turn. False alone is not a read. Claude Code answers it for a steer its queue gave up a moment before the cancel
+   * run at once; only the model's answer or the turn's result then makes the steer read), ends with its result, and the
+   * steer is handed back (`unreadFate` says `dropped`): it runs once, as the next turn. False alone is not a read. Claude Code answers it for a steer its queue gave up a moment before the cancel
    * came, then drops that steer as the turn starts; it says so with a `cancelled` lifecycle (`lateSteerCancelled`), but
    * a steer that ran is never silent for this long. At least once, never lost: a Claude Code that ran the steer and sent
    * neither lifecycle nor frames would run it twice, so a warning says it was handed back (ids only).
    *
    * Its turn may still come: until its result, or `lateSteerStandInMs` with no sign of it, a cancelled stand-in owns the
    * steer, so that turn's frames reach no other run (the next prompt's run among them) and are dropped. Its first frame
-   * names the steer and the rest follow it (`frameTarget`); its result names the steer and ends the stand-in. A read
-   * then means the steer may run twice (`readAfterHandBack`).
+   * names the steer and the rest follow it (`frameTarget`); its result names the steer and ends the stand-in. A
+   * `started` lifecycle or model output for it then means the steer may run twice (`readAfterHandBack`); an error
+   * result that names it does not.
    */
   private endTaken(run: LiveRun): void {
     const unread = [...run.lateSteers].filter((id) => run.taken.has(id) && run.owned.has(id) && !run.read.has(id))
