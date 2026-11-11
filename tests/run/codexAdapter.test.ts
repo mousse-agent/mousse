@@ -1340,6 +1340,112 @@ describe('CodexAdapter', () => {
     expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Focus on tests', 'And lint'])
   })
 
+  describe('a native steer counts as read only once Codex has it', () => {
+    /** A control whose steers join the turn natively, with every take and hand-back recorded by token. */
+    function steerControl(queue: string[]) {
+      const taken: Array<string | undefined> = []
+      const returned: Array<[string, string | undefined]> = []
+      let drains = 0
+      const ctl: TurnControl = {
+        drainSteer: () => undefined,
+        drainSteerEntry: () => {
+          const text = queue.shift()
+          return text ? { text, token: `drain-${++drains}`, cut: false } : undefined
+        },
+        steerTaken: (token) => void taken.push(token),
+        returnSteer: (text, token) => void returned.push([text, token]),
+        heartbeat: () => {}
+      }
+      return { ctl, taken, returned }
+    }
+    const accepted = (sink: ReturnType<typeof recordingSink>) => sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)
+
+    it('is saved after Codex answers turn/steer, not before', async () => {
+      const steers: string[] = []
+      const sink = recordingSink()
+      const savedWhileSent: unknown[][] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus on tests' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus on tests') } }),
+          cue({ check: true }),
+          inn({ id: 6, result: { turnId: 'turn-1' } }),
+          ...message('msg-1', ['Tests pass']),
+          completed('completed')
+        ],
+        (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) steers.push(steer)
+          else savedWhileSent.push(accepted(sink))
+        }
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      await new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())
+      replay.assertDone()
+      expect(savedWhileSent).toEqual([[]])
+      expect(accepted(sink)).toEqual(['Focus on tests'])
+      expect(taken).toEqual(['drain-1'])
+      expect(returned).toEqual([])
+    })
+
+    it('is handed back, never read, when Stop lands before Codex has it', async () => {
+      const controller = new AbortController()
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          // Codex refuses it (the turn ended), so it waits for the next turn; Stop comes first.
+          completed('completed'),
+          inn({ id: 6, error: { code: -32600, message: 'no active turn to steer' } }),
+          cue({ stop: true })
+        ],
+        (frame) => {
+          const steer = (frame as { steer?: string }).steer
+          if (steer) steers.push(steer)
+          else controller.abort(new Error('stopped by the user'))
+        }
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input({ signal: controller.signal }), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(accepted(sink)).toEqual([])
+      expect(taken).toEqual([])
+      expect(returned).toEqual([['Focus', 'drain-1']])
+    })
+
+    it('is handed back by its token when its save fails', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ steer: 'Focus' }),
+          out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+          inn({ id: 6, result: { turnId: 'turn-1' } })
+        ],
+        (frame) => void steers.push((frame as { steer: string }).steer)
+      )
+      const { ctl, taken, returned } = steerControl(steers)
+      const sink = recordingSink()
+      sink.steerAccepted = () => {
+        throw new Error('disk full')
+      }
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow()
+      await replay.idle()
+      expect(taken).toEqual(['drain-1'])
+      expect(returned).toEqual([['Focus', 'drain-1']])
+    })
+  })
+
   describe("a person's steer cuts the turn and is taken only by the turn that starts with it", () => {
     /** A control whose steers are a person's (`cut`), with every take and hand-back recorded by token. */
     function cutControl(queue: string[]) {
@@ -1456,6 +1562,34 @@ describe('CodexAdapter', () => {
       expect(sink.calls.filter(([name]) => name === 'steerAccepted')).toEqual([])
       expect(taken).toEqual([])
       expect(returned).toEqual([['Use pnpm', 'drain-1']])
+    })
+
+    it('accepts or hands back every message the next turn carries, even when one fails to save', async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          // A second message drained while the cut turn ends, under its own drain.
+          cue({ steer: 'And keep the lockfile' }),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          ...turnStart(7, 'Use pnpm\nAnd keep the lockfile', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const { ctl, taken, returned } = cutControl(steers)
+      const sink = recordingSink()
+      const record = sink.steerAccepted
+      sink.steerAccepted = (text, token) => {
+        if (text === 'Use pnpm') throw new Error('disk full')
+        record(text, token)
+      }
+      await expect(new CodexAdapter(() => service(replay)).startTurn(input(), sink, ctl, host())).rejects.toThrow('disk full')
+      await replay.idle()
+      expect(taken).toEqual(['drain-1', 'drain-2'])
+      // The one whose save failed is handed back; the other, which Codex has, is read.
+      expect(returned).toEqual([['Use pnpm', 'drain-1']])
+      expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['And keep the lockfile'])
     })
 
     it('settles the approval the cut turn was asking, as the person, so no card is left waiting', async () => {
