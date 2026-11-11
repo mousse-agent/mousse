@@ -161,12 +161,29 @@ describe('a steer into a bot\'s Claude Code turn (#920)', () => {
     expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 
-  it('a steer Claude Code read just before the Stop is accepted once and not handed back', async () => {
+  it('a steer Claude Code took for its next request just before the Stop, with no answer from the model, is handed back once', async () => {
+    const turn = botTurn([
+      interruptedByTheSteer,
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        // Taken is not read: the request that would carry it has not gone out when the Stop lands.
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        turn.stop.abort()
+        yield init
+      }
+    ])
+    await expect(turn.run()).rejects.toThrow()
+    expect(turn.steer.onSteer).not.toHaveBeenCalled()
+    expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  it('a steer the model answered just before the Stop is accepted once and not handed back', async () => {
     const turn = botTurn([
       interruptedByTheSteer,
       async function* (prompt) {
         const { uuid } = await firstMessage(prompt)
         yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield { type: 'assistant', message: { role: 'assistant', model: 'sonnet', content: [{ type: 'text', text: 'on it' }] }, parent_tool_use_id: null, session_id: SESSION }
         turn.stop.abort()
         yield init
       }

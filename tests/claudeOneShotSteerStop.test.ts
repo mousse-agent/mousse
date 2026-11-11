@@ -31,6 +31,8 @@ const init = { type: 'system', subtype: 'init', session_id: SESSION }
 const interrupted = { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['interrupted'], session_id: SESSION }
 const done = { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: SESSION }
 const started = (uuid: string | undefined) => ({ type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION })
+/** The model's first streamed frame for the request that carries the steer. */
+const answer = { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } }, parent_tool_use_id: null, uuid: 'event-1', session_id: SESSION }
 
 /** The Claude Code process behind a fake query, as the SDK's transport holds it: Mousse's handle signals it. */
 type FakeProcess = { pid: number; exitCode: number | null; signalCode: string | null; kill: ReturnType<typeof vi.fn> }
@@ -188,7 +190,7 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 
-  it('a Stop after the restarted query read the steer, with that frame still in flight, counts it read and does not hand it back', async () => {
+  it('a Stop after the model answered the steer, with that frame still in flight, counts it read and does not hand it back', async () => {
     let turn!: ReturnType<typeof cappedTurn>
     turn = cappedTurn([
       interruptedByTheSteers(() => turn.pending),
@@ -199,6 +201,62 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
         // Written before the SIGTERM landed; Mousse reads them after the Stop.
         yield init
         yield started(uuid)
+        yield answer
+      }
+    ], ONE)
+    await expect(turn.run()).rejects.toThrow()
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+    expect(turn.steer.returnSteer).not.toHaveBeenCalled()
+  })
+
+  it('Claude Code took the steer for its next request, then a Stop came before the model answered: handed back once, never accepted', async () => {
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        // Taken about 200 ms before the request goes out; the Stop lands in between (hands-on t8).
+        yield started(uuid)
+        turn.stop.abort()
+        yield init
+      }
+    ], ONE)
+    await expect(turn.run()).rejects.toThrow()
+    expect(turn.queries[1]!.process.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(turn.steer.onSteer).not.toHaveBeenCalled()
+    expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  it('a taken steer whose only answer is a message Claude Code made up itself is handed back once on a Stop', async () => {
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        yield { type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'No response requested.' }] }, session_id: SESSION }
+        turn.stop.abort()
+        yield init
+      }
+    ], ONE)
+    await expect(turn.run()).rejects.toThrow()
+    expect(turn.steer.onSteer).not.toHaveBeenCalled()
+    expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  it('a taken steer the model answered before the Stop is accepted once and not handed back', async () => {
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        yield answer
+        turn.stop.abort()
+        yield init
       }
     ], ONE)
     await expect(turn.run()).rejects.toThrow()
@@ -216,7 +274,7 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     expect(turn.steer.returnSteer.mock.calls).toEqual([['use the other file', 'drain-1'], ['and keep the tests', 'drain-2']])
   })
 
-  it('two steers, then a Stop as the restarted query reads them: each is accepted once and none is handed back', async () => {
+  it('two steers, then a Stop as the model answers them: each is accepted once and none is handed back', async () => {
     let turn!: ReturnType<typeof cappedTurn>
     turn = cappedTurn([
       interruptedByTheSteers(() => turn.pending),
@@ -224,9 +282,10 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
         const { uuid } = await firstMessage(prompt)
         yield init
         turn.stop.abort()
-        // Written before the SIGTERM landed: a frame that is not a read, then the read.
+        // Written before the SIGTERM landed: frames that are not a read, then the model's answer.
         yield init
         yield started(uuid)
+        yield answer
       }
     ], TWO)
     await expect(turn.run()).rejects.toThrow()

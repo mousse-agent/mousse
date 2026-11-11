@@ -2461,9 +2461,9 @@ export class ClaudeSubscriptionProviderService {
      * not accepted: Claude Code has not seen them.
      */
     const steers: OneShotSteer[] = []
-    /** The steers the restarted query carries as its prompt, under that prompt's id, until Claude Code reads it. */
+    /** The steers the restarted query carries as its prompt, under that prompt's id, until the model answers it. */
     let carried: { id: string; steers: OneShotSteer[] } | undefined
-    /** Claude Code read the restarted query's prompt: the steers it carries are accepted, once. */
+    /** The model answered the restarted query's prompt (`oneShotPromptRead`): the steers it carries are accepted, once. */
     const carriedRead = (): void => {
       const read = carried
       carried = undefined
@@ -3113,25 +3113,33 @@ export class ClaudeSubscriptionProviderService {
 type OneShotSteer = { text: string; token?: string; steered: () => void }
 
 /**
- * Claude Code read the prompt a one-shot query was started with (`id`): its `command_lifecycle` frame says `started`
- * (or `completed`), a frame or result names its id, or the model answers at all. The prompt is that query's only
- * message, so anything the model writes, and a successful result, answers it. Starting the process (`system` frames)
- * is not a read, and nor is a failed result: an interrupt or a Stop that came first ends the query that way too.
+ * The model answered the prompt a one-shot query was started with (`id`): it streams or writes a message, Claude Code's
+ * `command_lifecycle` frame says `completed`, or the query ends with a successful result. The prompt is that query's
+ * only message, so anything the model writes answers it.
+ *
+ * A `started` lifecycle is not a read: it says only that Claude Code took the prompt for its next request, about 200 ms
+ * before that request goes out (hands-on, #928). A Stop in between kills the process before the model gets the steer,
+ * and the session keeps no copy of it, so a steer accepted then would be lost. Every way a one-shot query ends without
+ * an answer (a Stop, an interrupt, a failure, the process dying) hands the steer back; a query that runs to its end
+ * answers it. Starting the process (`system` frames), a failed result, and a message Claude Code makes up itself (a
+ * `<synthetic>` one, such as the "No response requested." it writes on resuming an interrupted session) are not reads.
  *
  * On a Stop the query's process is sent SIGTERM at once, and the frames it wrote before it exited are still checked
  * (`drainCarried`). What remains is at least once, never lost: a steer is handed back, though the model may have it,
- * when Claude Code sent it to the model but was killed before writing any frame that shows it (Claude Code writes its
- * `started` frame as it takes the prompt, so this takes a SIGTERM landing between the two), or when the process did
- * not exit and wrote nothing within `ONE_SHOT_STOP_DRAIN_MS`, or could not be signalled at all.
+ * when Claude Code sent it to the model but was killed before the model's first frame reached Mousse, when the process
+ * did not exit and wrote nothing within `ONE_SHOT_STOP_DRAIN_MS`, or when it could not be signalled at all.
  */
 function oneShotPromptRead(message: unknown, id: string): boolean {
   if (typeof message !== 'object' || message === null) return false
-  const frame = message as { type?: unknown; command_uuid?: unknown; state?: unknown; user_message_uuid?: unknown; user_message_uuids?: unknown; subtype?: unknown; is_error?: unknown }
-  if (frame.type === 'command_lifecycle') return frame.command_uuid === id && (frame.state === 'started' || frame.state === 'completed')
-  if (frame.user_message_uuid === id || (Array.isArray(frame.user_message_uuids) && frame.user_message_uuids.includes(id))) return true
-  if (frame.type === 'stream_event' || frame.type === 'assistant') return true
+  const frame = message as { type?: unknown; command_uuid?: unknown; state?: unknown; subtype?: unknown; is_error?: unknown; message?: { model?: unknown } }
+  if (frame.type === 'command_lifecycle') return frame.command_uuid === id && frame.state === 'completed'
+  if (frame.type === 'stream_event') return true
+  if (frame.type === 'assistant') return frame.message?.model !== SYNTHETIC_MODEL
   return frame.type === 'result' && frame.subtype === 'success' && frame.is_error !== true
 }
+
+/** The model Claude Code names on a message it made up itself, with no request to the model. */
+const SYNTHETIC_MODEL = '<synthetic>'
 
 /** Claude Code could not resume a session cut (`cutRefused`); `fork` when the cut was a fork's branch. */
 class CutRefused extends Error {
