@@ -1055,7 +1055,10 @@ export class MmsProfileServices {
       listThreads: () => this.threads.listAllThreads(),
       trash: (threadId, operationId, expectedGeneration, keepWork) => this.trashThread(threadId, operationId, expectedGeneration, keepWork),
       restore: (threadId) => this.restoreThread(threadId),
-      archive: (threadId) => this.archiveIfStartedByPerson(threadId)
+      archive: (threadId) => this.archiveIfStartedByPerson(threadId),
+      stopRuns: (threadIds) => this.stopRunsForDelete(threadIds),
+      // The delete's own request, and the other lifecycle calls, are not waited for (as at its admission).
+      settle: () => this.requests.waitForIdle(2_000, (active) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))).catch(() => undefined)
     })
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
@@ -1408,6 +1411,32 @@ export class MmsProfileServices {
   deleteThreadForGood(taskId: string, options: DeleteOptions): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     return this.threadDeletes.delete(taskId, options)
+  }
+
+  /** `threads.delete` before its admission: see `ThreadDeleter.stopBeforeDelete`. */
+  stopThreadBeforeDelete(threadId: string): Promise<void> {
+    return this.threadDeletes.stopBeforeDelete(threadId)
+  }
+
+  /** How long a delete waits for the turns it stopped to end; a stopped turn may wait up to 20 s for its checkpoint. */
+  private deleteStopWaitMs = 25_000
+
+  /**
+   * A delete's Stop: the turns of these threads end, with their queued messages, and the delete waits for them to
+   * unwind (their provider gone, their lease let go). A turn still running after the wait is left to the trash, which
+   * refuses it as busy.
+   */
+  private async stopRunsForDelete(threadIds: readonly string[]): Promise<void> {
+    const running = (): string[] => threadIds.filter((id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null)
+    const stopping = running()
+    if (!stopping.length) return
+    for (const threadId of stopping) {
+      await this.orchestrator.stopThread(threadId, 'deleted', { clearQueue: true }).catch((error: unknown) => {
+        console.warn('a delete could not stop the thread\'s turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+      })
+    }
+    const until = Date.now() + this.deleteStopWaitMs
+    while (running().length && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50))
   }
 
   async restoreThread(

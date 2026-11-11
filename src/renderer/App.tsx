@@ -25,6 +25,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { ToastHost } from './components/ui/Toast'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
+import { watchDeletedShownThread } from './lib/leaveDeletedThread'
 
 import { openSurface } from './lib/surfaces'
 import { DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
@@ -381,7 +382,9 @@ export default function App() {
       window.mousse.app.onOpenThread(applyIfCurrent((threadId: string) => void selectThread(threadId))),
       // A thread the person is not looking at finished, needs them, or stopped.
       window.mousse.app.onThreadToast(applyIfCurrent(showThreadToast)),
-      watchOpenedThreadToasts()
+      watchOpenedThreadToasts(),
+      // The shown thread deleted anywhere (here, another window, the CLI, its expiry, its parent's delete): leave it.
+      watchDeletedShownThread()
     ]
 
     // Subscribe before requesting the first selected-thread snapshot. Initial

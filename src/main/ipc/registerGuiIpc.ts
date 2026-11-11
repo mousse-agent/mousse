@@ -1829,14 +1829,15 @@ export function registerGuiIpc(
   }
 
   // Deletes an archived thread for good; its worktrees, branches and Git refs stay. The window asked first, so scratch
-  // files only the thread had go with it.
+  // files only the thread had go with it. A window showing a thread of this computer leaves it when the list without it
+  // arrives (`watchDeletedShownThread`), as for a delete from anywhere else; another computer's thread is left here.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId, discard: true }
     )
     broadcastIfRouted([threadId], res)
-    if (currentPresentation().getActiveThreadId() === threadId) {
+    if (isQualifiedId(threadId) && currentPresentation().getActiveThreadId() === threadId) {
       // Never fall back to a subagent: it sits under its parent in the sidebar.
       const next = visibleThreads(res.threads).find((t) => !t.settledAt)
       if (next) await selectThread(next.id)

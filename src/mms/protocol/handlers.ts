@@ -1626,7 +1626,11 @@ export async function dispatchMethod(
   return result
 }
 
-function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  // Deleting an archived thread stops what still runs in it first: the send waiting for its turn is a request the
+  // delete's admission would otherwise wait for, and refuse. Another computer's delete is refused anyway.
+  if (method === 'threads.delete' && isObject(params) && typeof params.threadId === 'string' && ctx.connection?.clientType !== 'bridge')
+    await ctx.mms.stopThreadBeforeDelete?.(params.threadId)
   // Installation lifecycle commands must not wait on themselves in a personal
   // request barrier. Every actual personal service has this ownership method;
   // the fallback preserves legacy isolated handler test doubles.
