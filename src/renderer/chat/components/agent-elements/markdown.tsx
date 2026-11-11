@@ -18,6 +18,7 @@ import { MathInline } from "../../../markdown/math/MathView";
 import { useRenderMath } from "../../../markdown/math/renderMathSetting";
 import { mathRenderers, mousseMathPlugin } from "../../../markdown/math/streamdown-math";
 import { mermaidRenderer } from "./markdown-mermaid";
+import { CachedBlock, cachedSplit, MarkdownSetupContext } from "./markdown-cache";
 import { countRender } from "./render-counts";
 import { createIncrementalNormalizer, createIncrementalSplitter } from "./streaming-markdown";
 
@@ -225,6 +226,11 @@ function splitBlocks(text: string): string[] {
   countRender("blocksSplit", blocks.length);
   return blocks;
 }
+
+// A finished reply splits the same way each time it is drawn: kept in the markdown cache. A reply
+// still streaming changes on every update, so its splits are not kept.
+const splitFinished = cachedSplit("plain", splitBlocks);
+const splitFinishedWithMath = cachedSplit("math", parseBlocksKeepingMath);
 
 function normalizeText(text: string): string {
   return normalizeCodeFenceLanguages(normalizeMarkdown(text), false);
@@ -450,10 +456,16 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       onCopy={math ? copyMathAsTex : undefined}
       data-streaming={streaming || undefined}
     >
+      <MarkdownSetupContext.Provider value={math ? "math" : "plain"}>
       <Streamdown
         components={math ? markdownMathComponents : markdownComponents}
         plugins={math ? markdownMathPlugins : markdownPlugins}
-        parseMarkdownIntoBlocksFn={math ? parseBlocksKeepingMath : incremental ? live.split : splitBlocks}
+        BlockComponent={CachedBlock}
+        parseMarkdownIntoBlocksFn={
+          math
+            ? streaming ? parseBlocksKeepingMath : splitFinishedWithMath
+            : incremental ? live.split : splitFinished
+        }
         remend={markdownRemend}
         isAnimating={drawingDiagram}
         urlTransform={safeMarkdownUrl}
@@ -462,6 +474,7 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       >
         {safeContent}
       </Streamdown>
+      </MarkdownSetupContext.Provider>
     </div>
   );
 });

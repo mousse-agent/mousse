@@ -194,6 +194,12 @@ describe('the profiler in the service', () => {
     expect(validateAppReport({ processes: [], windows: [counters] }).windows).toEqual([counters])
     expect(() => validateAppReport({ processes: [], windows: [{ ...counters, title: 'Fix the login page' }] })).toThrow(/Unexpected field/)
     expect(() => validateAppReport({ processes: [], windows: [{ ...counters, caches: { 'C:/Users/alice': { entries: 1 } } }] })).toThrow(/Unknown cache name/)
+    // A cache bounded by size: its estimated KB and budget, whole numbers only.
+    const sized = { ...counters, caches: { markdown: { entries: 40, kbEstimated: 1_536, limitKb: 10_240 } } }
+    expect(validateAppReport({ processes: [], windows: [sized] }).windows).toEqual([sized])
+    expect(() => validateAppReport({ processes: [], windows: [{ ...counters, caches: { markdown: { entries: 1, kbEstimated: 'big' } } }] })).toThrow(/kbEstimated/)
+    expect(() => validateAppReport({ processes: [], windows: [{ ...counters, caches: { markdown: { entries: 1, kbEstimated: -1 } } }] })).toThrow(/kbEstimated/)
+    expect(() => validateAppReport({ processes: [], windows: [{ ...counters, caches: { markdown: { entries: 1, text: '# Plan' } } }] })).toThrow(/Unexpected field/)
     expect(() => validateAppReport({ processes: [], views: [{ role: 'browser', w: 1, h: 1, visible: true, url: 'https://x' }] })).toThrow(/Unexpected field/)
     expect(() => validateAppReport({ processes: [], requestId: '../../etc' })).toThrow(/requestId/)
   })

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UIMessage } from "ai";
 import { invokeCommand, isCommandRegistered } from "../../../../commands/commandRegistry";
 import { useRenderMath } from "../../../../markdown/math/renderMathSetting";
+import { useLiveTextVersion } from "../../../../stores/liveTextStore";
 import type { TurnWindowApi } from "../virtual/use-turn-window";
 import { createFindPainter, type FindPainter } from "./dom-highlight";
 import {
@@ -162,7 +163,14 @@ export function useThreadFind(options: Options): ThreadFind {
   const index = useMemo(() => new FindIndex(math), [math]);
   // Follows index.revision, so the results catch up as the build reads more of the thread.
   const [indexRevision, setIndexRevision] = useState(0);
-  const searchedTurns = useThrottled(turns, searching && isStreaming ? STREAMING_REINDEX_MS : 0);
+  // Text streamed into a reply goes to its live text, not `turns`: while the bar is open over a
+  // stream, its version is followed too (and only then, so a delta renders nothing here otherwise).
+  const liveVersion = useLiveTextVersion(searching && isStreaming);
+  const searchedInput = useMemo(() => ({ turns, liveVersion }), [turns, liveVersion]);
+  const { turns: searchedTurns, liveVersion: searchedLiveVersion } = useThrottled(
+    searchedInput,
+    searching && isStreaming ? STREAMING_REINDEX_MS : 0,
+  );
 
   const result = useMemo(
     () =>
@@ -173,9 +181,9 @@ export function useThreadFind(options: Options): ThreadFind {
             readMissing: index.missing(searchedTurns, READ_ON_THE_SPOT + 1) <= READ_ON_THE_SPOT,
           })
         : { matches: NO_MATCHES, complete: true },
-    // indexRevision: the same turns, with more of them read.
+    // indexRevision: the same turns, with more of them read. searchedLiveVersion: a reply's live text grew.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [searching, query, searchedTurns, index, indexRevision],
+    [searching, query, searchedTurns, searchedLiveVersion, index, indexRevision],
   );
   const matches = result.matches;
   const activeIndex = useMemo(() => reselect(matches, active), [matches, active]);

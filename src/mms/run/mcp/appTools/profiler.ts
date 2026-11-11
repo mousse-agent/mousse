@@ -96,7 +96,7 @@ const DESCRIPTIONS: Record<ProfilerToolName, string> = {
   profiler_service_breakdown:
     "When the background service is the big one: its V8 heap and heap spaces, worker heaps, counts (loaded and cached threads, runtimes, workers, SQLite connections, replay buffer, terminals, file watchers, child processes) against their bounds, cache sizes, and each of this profile's threads in memory you may list, by id, with its measured cache size; private, bot and out-of-scope threads and other profiles as totals.",
   profiler_window_breakdown:
-    "When a window's renderer is big or the UI is slow: per window, DOM nodes, mounted turns and rows, images with decoded size, canvases, WebGL contexts, in-app browser tabs, JS heap and code caches; applet and browser views with their sizes. Read on demand from the open app.",
+    "When a window's renderer is big or the UI is slow: per window, DOM nodes, mounted turns and rows, images with decoded size, canvases, WebGL contexts, in-app browser tabs, JS heap, and the window's caches (parsed Markdown, highlighted code) with their entries and estimated size; applet and browser views with their sizes. Read on demand from the open app.",
   profiler_gpu_hints:
     "When the GPU process is big: its memory, the windows' sizes and scale, the pixels they draw, acrylic, WebGL contexts, canvases, and applet, browser and DevTools views.",
   profiler_children:

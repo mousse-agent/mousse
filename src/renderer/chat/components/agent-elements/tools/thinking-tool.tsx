@@ -53,6 +53,8 @@ export function ThinkingCollapsed({
       <div className="max-h-[175px] overflow-y-auto">
         <Markdown
           content={step.thoughtContent ?? ""}
+          // A thought still being written changes on every update: its splits are not kept.
+          streaming={isAnimating}
           className="text-base text-muted-foreground leading-relaxed [&_p]:leading-relaxed"
         />
       </div>

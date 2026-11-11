@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { appHints, appProcessRows, utilityRole, type MetricLike, type WindowReport } from '../src/main/diagnostics/appProcesses'
+import { appHints, appProcessRows, sendAppReport, utilityRole, type MetricLike, type WindowReport } from '../src/main/diagnostics/appProcesses'
+import type { WindowCounters } from '../src/shared/diagnostics/profiler'
 import { appProcessLabels, memoryTable, type MemorySample } from '../src/shared/diagnostics/memory'
 import { liveWebGlContexts, noteWebGlContext } from '../src/renderer/lib/webglCount'
 
@@ -110,5 +111,30 @@ describe('per-process table', () => {
       ['Network', 13, 30, 'app'],
       ['App total', 717, null, 'total']
     ])
+  })
+})
+
+describe('sending the report to a service from before the window caches had sizes', () => {
+  const counters = { domNodes: 1, mountedTurns: 1, mountedRows: 1, images: 0, imagesDecodedMbEstimated: 0, canvases: 0, canvasMbEstimated: 0, webglContexts: 0, browserTabs: 0, jsHeapUsedMb: 1, jsHeapTotalMb: 2 }
+  const sized: WindowCounters = { ...counters, caches: { codeHighlight: { entries: 3, kbEstimated: 2_048, limitKb: 51_200 }, other: { entries: 2, limit: 10 } } }
+  const refusal = (code: string) => Object.assign(new Error('refused'), { code })
+
+  it('sends again without the cache sizes when the service refuses a field it does not know', async () => {
+    const sent: unknown[] = []
+    await sendAppReport(async (report) => {
+      sent.push(report)
+      if (sent.length === 1) throw refusal('unknown_field')
+    }, { processes: [], windows: [sized] })
+    expect(sent).toHaveLength(2)
+    expect((sent[1] as { windows: WindowCounters[] }).windows).toEqual([{ ...counters, caches: { codeHighlight: { entries: 3 }, other: { entries: 2, limit: 10 } } }])
+  })
+
+  it('sends once when the service takes it, and passes any other refusal on', async () => {
+    let calls = 0
+    await sendAppReport(async () => { calls += 1 }, { processes: [], windows: [sized] })
+    expect(calls).toBe(1)
+    await expect(sendAppReport(async () => { throw refusal('unavailable') }, { processes: [], windows: [sized] })).rejects.toMatchObject({ code: 'unavailable' })
+    // Without the sizes there is nothing to drop: the refusal stands.
+    await expect(sendAppReport(async () => { throw refusal('unknown_field') }, { processes: [], windows: [{ ...counters, caches: {} }] })).rejects.toMatchObject({ code: 'unknown_field' })
   })
 })

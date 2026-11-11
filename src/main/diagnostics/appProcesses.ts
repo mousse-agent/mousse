@@ -4,6 +4,7 @@
  * set and CPU, plus the windows' own heap reports. Pure, so it is tested without Electron.
  */
 import type { AppHints, AppProcessKind, AppProcessMemory, AppProcessRole } from '../../shared/diagnostics/memory'
+import { NEWER_WINDOW_CACHE_FIELDS, type WindowCacheSize, type WindowCounters } from '../../shared/diagnostics/profiler'
 
 /** The fields of Electron's ProcessMetric this reads. Sizes in KB, as Electron gives them. */
 export interface MetricLike {
@@ -43,6 +44,45 @@ const UTILITY_ROLES: Array<[RegExp, AppProcessRole]> = [
 
 /** When one renderer hosts several contents, the one that names it best. */
 const RENDERER_ORDER: ContentsLike['role'][] = ['window', 'applet', 'browser', 'devtools', 'renderer']
+
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined
+}
+
+/** A cache size a window's preload sent, numbers only; `undefined` without a count of entries. */
+export function windowCacheSizeOf(raw: unknown): WindowCacheSize | undefined {
+  const value = raw as Record<string, unknown> | null
+  const entries = count(value?.entries)
+  if (entries === undefined) return undefined
+  const limit = count(value?.limit)
+  const kbEstimated = count(value?.kbEstimated)
+  const limitKb = count(value?.limitKb)
+  return {
+    entries,
+    ...(limit !== undefined ? { limit } : {}),
+    ...(kbEstimated !== undefined ? { kbEstimated } : {}),
+    ...(limitKb !== undefined ? { limitKb } : {})
+  }
+}
+
+/**
+ * Sends the app's memory report. A service from before the window caches' sizes refuses the whole report as having
+ * a field it does not know (`unknown_field`): the report goes again without them. Any other refusal is thrown.
+ */
+export async function sendAppReport<R extends { windows?: WindowCounters[] }>(request: (report: R) => Promise<unknown>, report: R): Promise<void> {
+  try {
+    await request(report)
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code
+    const sized = (cache: WindowCacheSize) => NEWER_WINDOW_CACHE_FIELDS.some((field) => cache[field] !== undefined)
+    if (code !== 'unknown_field' || !report.windows?.some((w) => Object.values(w.caches).some(sized))) throw error
+    const windows = report.windows.map((w) => ({
+      ...w,
+      caches: Object.fromEntries(Object.entries(w.caches).map(([name, cache]) => [name, { entries: cache.entries, ...(cache.limit !== undefined ? { limit: cache.limit } : {}) }]))
+    }))
+    await request({ ...report, windows })
+  }
+}
 
 export function kb(value: number | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? Math.round((value / 1024) * 10) / 10 : undefined

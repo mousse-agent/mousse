@@ -54,7 +54,7 @@ function answerCollects(): void {
       totalHeapKb: 80_000,
       canvases: 1,
       webglContexts: 0,
-      ...(request.detail ? { counters: { domNodes: 3000, mountedTurns: 4, mountedRows: 20, images: 1, imagesDecodedMbEstimated: 0.5, canvases: 1, canvasMbEstimated: 0.2, webglContexts: 0, browserTabs: 0, jsHeapUsedMb: 48.8, jsHeapTotalMb: 78.1, caches: { codeHighlight: { entries: 3, limit: 100 }, 'C:/Users/alice': { entries: 1 } } } } : {})
+      ...(request.detail ? { counters: { domNodes: 3000, mountedTurns: 4, mountedRows: 20, images: 1, imagesDecodedMbEstimated: 0.5, canvases: 1, canvasMbEstimated: 0.2, webglContexts: 0, browserTabs: 0, jsHeapUsedMb: 48.8, jsHeapTotalMb: 78.1, caches: { codeHighlight: { entries: 3, limit: 100 }, markdown: { entries: 9, kbEstimated: 1_536.4, limitKb: 10_240, text: '# Plan' }, 'C:/Users/alice': { entries: 1 } } } } : {})
     })
   })
 }
@@ -106,8 +106,8 @@ describe("the desktop app's process report", () => {
     const report = service.reports().at(-1)!.params as { requestId: string; windows: Array<Record<string, unknown>>; hints: { acrylic: boolean } }
     expect(report.requestId).toBe('req-1')
     expect(report.hints.acrylic).toBe(true)
-    // A cache whose name is not a fixed name is dropped.
-    expect(report.windows).toEqual([{ w: 1200, h: 800, scale: 1.5, visible: true, domNodes: 3000, mountedTurns: 4, mountedRows: 20, images: 1, imagesDecodedMbEstimated: 0.5, canvases: 1, canvasMbEstimated: 0.2, webglContexts: 0, browserTabs: 0, jsHeapUsedMb: 48.8, jsHeapTotalMb: 78.1, caches: { codeHighlight: { entries: 3, limit: 100 } } }])
+    // A cache whose name is not a fixed name is dropped; a cache keeps only its numbers.
+    expect(report.windows).toEqual([{ w: 1200, h: 800, scale: 1.5, visible: true, domNodes: 3000, mountedTurns: 4, mountedRows: 20, images: 1, imagesDecodedMbEstimated: 0.5, canvases: 1, canvasMbEstimated: 0.2, webglContexts: 0, browserTabs: 0, jsHeapUsedMb: 48.8, jsHeapTotalMb: 78.1, caches: { codeHighlight: { entries: 3, limit: 100 }, markdown: { entries: 9, kbEstimated: 1_536, limitKb: 10_240 } } }])
     handle.stop()
   })
 })

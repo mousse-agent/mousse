@@ -127,8 +127,14 @@ function validateWindowCounters(value: unknown): WindowCounters {
     if (names.length > 16) throw new DomainRpcError('invalid_params', 'At most 16 caches')
     for (const name of names) {
       if (!CACHE_NAME.test(name)) throw new DomainRpcError('invalid_params', 'Unknown cache name')
-      const cache = domainObject((raw.caches as Record<string, unknown>)[name], ['entries', 'limit'])
-      out.caches[name] = { entries: bigCount(cache.entries, 'entries'), ...(cache.limit !== undefined ? { limit: bigCount(cache.limit, 'limit') } : {}) }
+      // Counts only: entries and their limit, and for a cache bounded by size, its estimated KB and budget.
+      const cache = domainObject((raw.caches as Record<string, unknown>)[name], ['entries', 'limit', 'kbEstimated', 'limitKb'])
+      out.caches[name] = {
+        entries: bigCount(cache.entries, 'entries'),
+        ...(cache.limit !== undefined ? { limit: bigCount(cache.limit, 'limit') } : {}),
+        ...(cache.kbEstimated !== undefined ? { kbEstimated: bigCount(cache.kbEstimated, 'kbEstimated') } : {}),
+        ...(cache.limitKb !== undefined ? { limitKb: bigCount(cache.limitKb, 'limitKb') } : {})
+      }
     }
   }
   return out

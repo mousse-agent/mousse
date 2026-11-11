@@ -1,6 +1,7 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
+import type { WindowCacheSize } from '../shared/diagnostics/profiler'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
@@ -187,7 +188,7 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 }
 
 /** The window's own counters for the profiler (`diagnostics.provideCounters`), read only when main asks. */
-let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, { entries: number; limit?: number }> }) | null = null
+let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, WindowCacheSize> }) | null = null
 
 const api = {
   platform: process.platform,
@@ -1234,7 +1235,7 @@ const api = {
      * The window's own counters (mounted turns and rows, its caches), read only when the profiler asks for this
      * window's detail. Returns a function that removes the provider.
      */
-    provideCounters: (provider: () => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, { entries: number; limit?: number }> }): (() => void) => {
+    provideCounters: (provider: () => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, WindowCacheSize> }): (() => void) => {
       windowCountersProvider = provider
       return () => { if (windowCountersProvider === provider) windowCountersProvider = null }
     }
