@@ -49,8 +49,14 @@ function show(messages: ChatMessage[], progress: TurnProgressState | null = null
   const list = createElement(MessageList, { messages: shown, status: chatStatusFromPhase('idle') })
   act(() => root.render(createElement(TurnProgressContext.Provider, { value: progress }, list)))
 }
-const marks = () => [...host.querySelectorAll<HTMLElement>('[data-turn-end]')].map((mark) => ({ word: mark.textContent, title: mark.getAttribute('title') }))
-const headers = () => [...host.querySelectorAll('.turn-work-label')].map((label) => label.textContent)
+/** The text a sighted reader sees: without the screen-reader-only reason. */
+const visibleText = (element: Element) => {
+  const copy = element.cloneNode(true) as Element
+  for (const hidden of copy.querySelectorAll('.sr-only')) hidden.remove()
+  return copy.textContent
+}
+const marks = () => [...host.querySelectorAll<HTMLElement>('[data-turn-end]')].map((mark) => ({ word: visibleText(mark), title: mark.getAttribute('title') }))
+const headers = () => [...host.querySelectorAll('.turn-work-label')].map(visibleText)
 
 describe('the mark on a cut-off turn', () => {
   it.each([
@@ -70,6 +76,15 @@ describe('the mark on a cut-off turn', () => {
   it('a crash that may have run tools names them in the tooltip', () => {
     show([...turn('r1', 0), stopLine('r1', { cause: 'crash', tools: ['bash'] }, 8, RESTART_INTERRUPTED_TEXT)])
     expect(marks()).toEqual([{ word: 'Interrupted', title: 'Mousse quit during this turn. May have run: bash' }])
+  })
+
+  it('screen readers get the reason as text inside the mark, which find in thread skips with the header', () => {
+    show([...turn('r1', 0), stopLine('r1', { cause: 'crash', tools: ['bash'] }, 8, RESTART_INTERRUPTED_TEXT)])
+    const mark = host.querySelector<HTMLElement>('[data-turn-end]')!
+    const reason = mark.querySelector('.sr-only')
+    expect(reason?.textContent).toBe(': Mousse quit during this turn. May have run: bash')
+    expect(mark.textContent).toBe('Interrupted: Mousse quit during this turn. May have run: bash')
+    expect(reason?.closest('[data-find-ignore]')).not.toBeNull()
   })
 
   it('no mark on a finished turn, a steered turn, a paused turn, a failed turn or a bot\'s wall', () => {

@@ -313,11 +313,22 @@ const TURN_END_WORDS: Record<TurnEnd["cause"], { word: string; detail: string }>
   crash: { word: "Interrupted", detail: "Mousse quit during this turn." },
 };
 
-/** " · Stopped" after a cut-off turn's time: one muted word, with why in its tooltip. */
+/**
+ * " · Stopped" after a cut-off turn's time: one muted word, with why in its tooltip. The mark takes no focus, so
+ * screen readers get why as hidden text too; find in thread skips it with the rest of the header (`data-find-ignore`).
+ */
 function TurnEndLabel({ end, separate }: { end: TurnEndMark; separate: boolean }) {
   const { word, detail } = TURN_END_WORDS[end.cause] ?? TURN_END_WORDS.user;
   const title = end.tools?.length ? `${detail} May have run: ${end.tools.join(", ")}` : detail;
-  return <>{separate ? " · " : null}<span className="turn-work-end" data-turn-end={end.cause} title={title}>{word}</span></>;
+  return (
+    <>
+      {separate ? " · " : null}
+      <span className="turn-work-end" data-turn-end={end.cause} title={title}>
+        {word}
+        <span className="sr-only">: {title}</span>
+      </span>
+    </>
+  );
 }
 
 /**
