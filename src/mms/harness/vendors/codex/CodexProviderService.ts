@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -635,6 +636,11 @@ class TurnRun {
   readonly finished: Promise<void>
   /** Codex's own subagents this turn started; they outlive the parent's turn unless Mousse waits for them. */
   readonly helpers: NativeHelpers
+  /**
+   * Runs `fn` in the async context of the chat that made this run. The process serves every thread, and its output
+   * arrives in the context of the chat that started it: this run's events must not run as that other chat's.
+   */
+  readonly inScope = AsyncLocalStorage.snapshot()
   private finish!: () => void
 
   constructor(
@@ -2225,14 +2231,14 @@ export class CodexProviderService {
       if (compaction.turnId !== undefined && (turnOf?.turnId === compaction.turnId || turnOf?.turn?.id === compaction.turnId)) return
     }
     const run = this.turns.get(threadId)
-    if (run) return run.handle(notification)
+    if (run) return run.inScope(() => run.handle(notification))
     // A native helper's own thread: its turn belongs to the run that started it.
     const owner = [...this.turns.values()].find((candidate) => candidate.helpers.has(threadId))
     const tracker = owner?.helpers ?? [...this.orphans].find((helpers) => helpers.has(threadId))
     if (tracker) {
       tracker.handle(notification)
       // A helper's own helpers keep the run open and are stopped with it, but get no rows of their own.
-      if (!tracker.isNested(threadId)) owner?.helperNotification(threadId, notification)
+      if (owner && !tracker.isNested(threadId)) owner.inScope(() => owner.helperNotification(threadId, notification))
       // A stopped tracker is kept only while a helper still lacks its turn id, whichever path resolved it.
       if (!tracker.awaitingTurn()) this.orphans.delete(tracker)
       return
