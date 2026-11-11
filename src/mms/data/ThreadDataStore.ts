@@ -376,16 +376,24 @@ export class ThreadDataStore extends EventEmitter {
   /** Thread folders loaded whole, by the thread that owns them, for `setThreadsInUse`. */
   private readonly loadedDirs = new Map<string, string>()
   private threadsInUse?: (threadId: string) => boolean
+  private threadDataClock?: () => number
 
   private threadDb(): ThreadDbStore {
     if (!this.threadDbStore) {
       this.threadDbStore = new ThreadDbStore(sharedThreadDbClient())
+      if (this.threadDataClock) this.threadDbStore.now = this.threadDataClock
       this.threadDbStore.pinned = (dir) => {
         const id = this.loadedDirs.get(dir)
         return id !== undefined && Boolean(this.threadsInUse?.(id))
       }
     }
     return this.threadDbStore
+  }
+
+  /** The clock uses of cached threads are timed on (the idle sweep's), for `releaseIdleThreadData`. */
+  setThreadDataClock(now: () => number): void {
+    this.threadDataClock = now
+    if (this.threadDbStore) this.threadDbStore.now = now
   }
 
   /** Says which threads a loaded session holds; the thread database cache keeps them past its byte cap. */
@@ -415,6 +423,21 @@ export class ThreadDataStore extends EventEmitter {
     const threadDir = this.getThreadDir(id)
     this.loadedDirs.delete(threadDir)
     if (ThreadDbStore.usesDb(threadDir)) this.threadDb().forget(threadDir)
+  }
+
+  /** True when this process holds a thread kept in thread.db in memory (its next read needs no load). */
+  isThreadDataWarm(id: string): boolean {
+    const threadDir = this.getThreadDir(id)
+    return Boolean(this.threadDbStore?.isWarm(threadDir))
+  }
+
+  /** Drops threads kept in thread.db that no session holds and nothing used for `idleMs` before `now`; returns how many. */
+  releaseIdleThreadData(idleMs: number, now?: number): number {
+    const store = this.threadDbStore
+    if (!store) return 0
+    const dropped = store.dropIdle(idleMs, now)
+    for (const dir of dropped) this.loadedDirs.delete(dir)
+    return dropped.length
   }
 
   /** Thread database cache size, for diagnostics and tests. */
@@ -464,6 +487,22 @@ export class ThreadDataStore extends EventEmitter {
   async readMessage(id: string, messageId: string): Promise<ChatMessage | undefined> {
     const payload = await this.threadDb().client.call('messageById', this.getThreadDir(id), messageId)
     return payload === undefined ? undefined : (JSON.parse(payload) as ChatMessage)
+  }
+
+  /**
+   * What the context gauge measures, read in the read worker without loading the thread or keeping it: the model
+   * context with only its active messages (`activeStartIndex` 0), and as `messages` only the newest message that
+   * reports the tokens its turn used. Undefined for a JSON thread or one with no model context, which the gauge
+   * estimates from the whole transcript instead.
+   */
+  async readGaugeData(id: string): Promise<{ messages: ChatMessage[]; llmContext: NonNullable<ThreadData['llmContext']> } | undefined> {
+    const threadDir = this.getThreadDir(id)
+    if (!ThreadDbStore.usesDb(threadDir)) return undefined
+    const gauge = await this.threadDb().client.call('gauge', threadDir)
+    if (gauge.context === undefined) return undefined
+    const { $retired: _retired, ...header } = JSON.parse(gauge.context) as Record<string, unknown>
+    const llmContext = { ...header, messages: gauge.active.map((payload) => JSON.parse(payload) as unknown), activeStartIndex: 0 } as unknown as NonNullable<ThreadData['llmContext']>
+    return { messages: gauge.latest === undefined ? [] : [JSON.parse(gauge.latest) as ChatMessage], llmContext }
   }
 
   /** The thread database's change sequence and epoch, or undefined for a JSON thread. */

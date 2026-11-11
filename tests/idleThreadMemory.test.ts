@@ -21,6 +21,7 @@ import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ThreadRuntimeManager } from '../src/mms/runtime/ThreadRuntimeManager'
 import type { ChatMessage, Task } from '../src/shared/types'
+import { migrateLegacyContext } from '../src/mms/orchestrator/nativeContext'
 import { createOrchestrator } from './run/phase6Fixture'
 
 vi.setConfig({ testTimeout: 120_000 })
@@ -172,6 +173,27 @@ describe('thread database cache byte cap', () => {
     expect(big.isWarm(dirs[1]!)).toBe(true)
   })
 
+  it('drops threads nothing used for the idle time, except those a session holds', () => {
+    const dirs = threads(3, 50)
+    const store = new ThreadDbStore(client)
+    let clock = Date.parse('2026-11-10T12:00:00.000Z')
+    store.now = () => clock
+    store.pinned = (threadDir) => threadDir === dirs[0]
+    for (const threadDir of dirs) store.load(threadDir)
+    expect(store.dropIdle(10 * 60_000)).toEqual([])
+    // Thread 2 used 5 minutes later is still idle long enough 11 minutes after that; thread 1 even more so.
+    clock += 5 * 60_000
+    store.load(dirs[2]!)
+    clock += 6 * 60_000
+    expect(store.dropIdle(10 * 60_000)).toEqual([dirs[1]!])
+    clock += 5 * 60_000
+    expect(store.dropIdle(10 * 60_000)).toEqual([dirs[2]!])
+    expect(store.isWarm(dirs[0]!)).toBe(true)
+    expect(store.cacheStats().threads).toBe(1)
+    // A dropped thread reads again whole.
+    expect(store.load(dirs[1]!).messages.length).toBeGreaterThan(0)
+  })
+
   it('passes over threads a session holds', () => {
     const dirs = threads(4, 300)
     const store = new ThreadDbStore(client, { threads: 64, bytes: 1 * MB })
@@ -320,6 +342,139 @@ describe('releasing idle threads frees what they held', () => {
 
       // Released threads open as before.
       expect(orch.getOrCreateSession(ids[0]!).messages).toHaveLength(1_100)
+    } finally {
+      store.closeThreadStorage()
+    }
+  })
+
+  /**
+   * `count` started threads of about `kb` KB each, written and closed. With `context`, each also has a model context
+   * built from its transcript, of which the first `activeStart` messages are out of view (as after a compaction).
+   */
+  function seedThreads(count: number, kb: number, context?: { activeStart: number }): string[] {
+    const writer = new ThreadDataStore(new ProjectManager())
+    const ids: string[] = []
+    for (let i = 0; i < count; i++) {
+      const thread = writer.createThread(`Shown ${i}`, undefined, undefined, { started: true })
+      const messages = transcript(kb, `shown${i}`)
+      const llmContext = context ? { ...migrateLegacyContext(messages), activeStartIndex: context.activeStart } : undefined
+      writer.mutateThreadData(thread.id, () => ({ messages, ...(llmContext ? { llmContext } : {}) }))
+      ids.push(thread.id)
+    }
+    writer.closeThreadStorage()
+    return ids
+  }
+
+  it('the context gauge of threads a window shows keeps none of them in memory', async () => {
+    const ids = seedThreads(10, 1_000, { activeStart: 0 })
+    const store = new ThreadDataStore(new ProjectManager())
+    const orch = createOrchestrator(home, store)
+    try {
+      const before = heapUsed()
+      for (const id of ids) {
+        const usage = await orch.getContextUsage({ draftInput: '', mode: 'agent' }, id)
+        expect(usage.used).toBeGreaterThan(0)
+      }
+      const after = heapUsed()
+      for (const id of ids) expect(orch.hasSession(id)).toBe(false)
+      // Only the gauge's own copy of the last thread's model context stays; not ten threads in the cache.
+      expect(store.threadDbCacheStats()).toMatchObject({ threads: 0, bytes: 0 })
+      expect((after - before) / MB).toBeLessThan(4)
+    } finally {
+      store.closeThreadStorage()
+    }
+  })
+
+  it('switching threads measures each in the read worker: no synchronous load, no transcript, same figures', async () => {
+    const ids = seedThreads(2, 1_000, { activeStart: 40 })
+    const store = new ThreadDataStore(new ProjectManager())
+    const orch = createOrchestrator(home, store)
+    const syncLoads = vi.spyOn(store, 'loadThreadData')
+    const gaugeReads = vi.spyOn(store, 'readGaugeData')
+    try {
+      // A → B → A → B, as a person switching between two threads.
+      const measured: Array<Awaited<ReturnType<typeof orch.getContextUsage>>> = []
+      for (const id of [ids[0]!, ids[1]!, ids[0]!, ids[1]!]) measured.push(await orch.getContextUsage({ draftInput: '', mode: 'agent' }, id))
+      expect(syncLoads).not.toHaveBeenCalled()
+      expect(gaugeReads).toHaveBeenCalledTimes(4)
+      expect(store.threadDbCacheStats()).toMatchObject({ threads: 0, coldLoads: 0 })
+      // Typing in the composer of the thread shown reads nothing again.
+      await orch.getContextUsage({ draftInput: 'typing', mode: 'agent' }, ids[1]!)
+      expect(gaugeReads).toHaveBeenCalledTimes(4)
+      // The same figures as a loaded thread gives: only what is out of view was left unread.
+      syncLoads.mockRestore()
+      for (const [index, id] of ids.entries()) {
+        orch.getOrCreateSession(id)
+        const loaded = await orch.getContextUsage({ draftInput: '', mode: 'agent' }, id)
+        expect(measured[index]).toEqual(loaded)
+      }
+    } finally {
+      store.closeThreadStorage()
+    }
+  })
+
+  it('a thread with no model context is read whole off the event loop, and leaves the cache again', async () => {
+    const ids = seedThreads(2, 300)
+    const store = new ThreadDataStore(new ProjectManager())
+    const orch = createOrchestrator(home, store)
+    try {
+      for (const id of [ids[0]!, ids[1]!, ids[0]!]) {
+        const usage = await orch.getContextUsage({ draftInput: '', mode: 'agent' }, id)
+        expect(usage.used).toBeGreaterThan(0)
+      }
+      // Read in the read worker first, so the synchronous read found it in memory: never a cold load on the loop.
+      expect(store.threadDbCacheStats()).toMatchObject({ threads: 0, bytes: 0, coldLoads: 0 })
+    } finally {
+      store.closeThreadStorage()
+    }
+  })
+
+  it('the context gauge leaves a thread in memory that was there already', async () => {
+    const ids = seedThreads(2, 100)
+    const store = new ThreadDataStore(new ProjectManager())
+    const orch = createOrchestrator(home, store)
+    try {
+      await store.warmThread(ids[0]!)
+      orch.getOrCreateSession(ids[1]!)
+      for (const id of ids) await orch.getContextUsage({ draftInput: '', mode: 'agent' }, id)
+      expect(store.isThreadDataWarm(ids[0]!)).toBe(true)
+      expect(store.isThreadDataWarm(ids[1]!)).toBe(true)
+      expect(orch.hasSession(ids[0]!)).toBe(false)
+    } finally {
+      store.closeThreadStorage()
+    }
+  })
+
+  it('the sweep drops threads read without a session once idle, and keeps loaded ones', async () => {
+    const ids = seedThreads(3, 100)
+    const store = new ThreadDataStore(new ProjectManager())
+    const orch = createOrchestrator(home, store)
+    // One clock for the sweep and for when cached threads were last used.
+    let clock = Date.parse('2026-11-10T12:00:00.000Z')
+    orch.residency.now = () => clock
+    try {
+      // Read whole without a session, as a bot or an export does; and one thread with a session.
+      store.loadThreadData(ids[0]!)
+      await store.warmThread(ids[1]!)
+      orch.getOrCreateSession(ids[2]!)
+      orch.residency.touch(ids[2]!)
+      expect(store.threadDbCacheStats().threads).toBe(3)
+      orch.residency.sweepNow()
+      expect(store.threadDbCacheStats().threads).toBe(3)
+
+      clock += 5 * 60_000
+      orch.residency.sweepNow()
+      expect(store.threadDbCacheStats().threads).toBe(3)
+
+      // Past the idle time: the two read without a session go. The loaded one is the session's to release.
+      clock += 6 * 60_000
+      orch.residency.touch(ids[2]!)
+      orch.residency.sweepNow()
+      expect(store.isThreadDataWarm(ids[0]!)).toBe(false)
+      expect(store.isThreadDataWarm(ids[1]!)).toBe(false)
+      expect(store.isThreadDataWarm(ids[2]!)).toBe(true)
+      expect(orch.hasSession(ids[2]!)).toBe(true)
+      expect(store.loadThreadData(ids[0]!).messages.length).toBeGreaterThan(0)
     } finally {
       store.closeThreadStorage()
     }

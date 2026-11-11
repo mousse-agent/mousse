@@ -131,6 +131,8 @@ export class ThreadDbStore {
   stateReads = 0
   lastSave?: SaveStats
   private cachedBytes = 0
+  /** The clock a use is stamped with; the idle sweep passes the same clock to `dropIdle`. */
+  now: () => number = Date.now
   /** Whether a thread folder's data is held by a loaded session (set by the thread store). */
   pinned?: (dir: string) => boolean
 
@@ -157,7 +159,7 @@ export class ThreadDbStore {
     for (const rows of collections.values()) sortRows(rows)
     const state = new Map<string, Skeleton>(load.state.map((row) => [row.key, skeletonOf(JSON.parse(row.payload)) ?? null]))
     const stateSizes = new Map<string, number>(load.state.map((row) => [row.key, row.payload.length]))
-    return { info: load.info, collections, state, usedAt: Date.now(), bytes: entryBytes({ collections, stateSizes }), stateSizes }
+    return { info: load.info, collections, state, usedAt: this.now(), bytes: entryBytes({ collections, stateSizes }), stateSizes }
   }
 
   private remember(dir: string, entry: Entry): Entry {
@@ -248,7 +250,7 @@ export class ThreadDbStore {
       this.applyChanges(entry, changes)
       this.resize(dir, entry, entryBytes(entry))
     }
-    entry.usedAt = Date.now()
+    entry.usedAt = this.now()
     this.entries.delete(dir)
     this.entries.set(dir, entry)
     return entry
@@ -269,6 +271,20 @@ export class ThreadDbStore {
 
   forget(dir: string): void {
     this.drop(dir)
+  }
+
+  /**
+   * Drops threads not used for `idleMs` that no loaded session holds, and returns their folders. A thread something
+   * read whole without a session (a gauge, a bot, an export) otherwise stays until the caps push it out.
+   */
+  dropIdle(idleMs: number, now = this.now()): string[] {
+    const dropped: string[] = []
+    for (const [dir, entry] of [...this.entries]) {
+      if (now - entry.usedAt < idleMs || this.pinned?.(dir)) continue
+      this.drop(dir)
+      dropped.push(dir)
+    }
+    return dropped
   }
 
   forgetAll(): void {

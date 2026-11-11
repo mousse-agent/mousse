@@ -50,6 +50,8 @@ export type BuildResult =
   | { ok: false; stale: true }
 
 export interface ThreadDbSummary { seq: number; messages: number }
+/** See `ThreadDbEngine.gauge`. */
+export interface ThreadDbGauge { info: DbInfo; context?: string; active: string[]; latest?: string }
 
 export interface MessagePageRequest { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }
 export interface MessagePage {
@@ -310,6 +312,34 @@ export class ThreadDbEngine {
     db.exec('BEGIN')
     try {
       return { info: readInfo(db), state: db.prepare('SELECT key, payload FROM state').all() as unknown as DbStateRow[] }
+    } finally {
+      db.exec('COMMIT')
+    }
+  }
+
+  /**
+   * What the context gauge measures, without the transcript: the model context's header (`context` state), its active
+   * messages (those from `activeStartIndex`), and the newest transcript message that reports the tokens its turn used.
+   * Long text is put back; image data is not (the gauge counts an image, not its bytes). `context` is absent when the
+   * thread has no model context, which the gauge then estimates from the whole transcript.
+   */
+  gauge(dir: string): ThreadDbGauge {
+    const { db } = this.open(dir)
+    db.exec('BEGIN')
+    try {
+      const info = readInfo(db)
+      const header = db.prepare("SELECT payload FROM state WHERE key = 'context'").get() as { payload: string } | undefined
+      if (!header) return { info, active: [] }
+      const parsed = JSON.parse(header.payload) as { activeStartIndex?: unknown }
+      const start = Number.isInteger(parsed.activeStartIndex) ? Math.max(0, parsed.activeStartIndex as number) : 0
+      const rows = db.prepare("SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'c:a' ORDER BY ord, rid LIMIT -1 OFFSET ?").all(start) as unknown as Array<DbRow & { blob_paths: string | null }>
+      const latest = db.prepare("SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' AND json_extract(payload, '$.responseMetadata.tokensUsed') IS NOT NULL ORDER BY ord DESC, rid DESC LIMIT 1").get() as (DbRow & { blob_paths: string | null }) | undefined
+      return {
+        info,
+        context: header.payload,
+        active: hydrateRows(dir, rows, { images: false }).map((row) => row.payload),
+        ...(latest ? { latest: hydrateRows(dir, [latest], { images: false })[0]!.payload } : {})
+      }
     } finally {
       db.exec('COMMIT')
     }
