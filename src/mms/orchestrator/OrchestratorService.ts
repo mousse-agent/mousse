@@ -8902,7 +8902,7 @@ export class OrchestratorService extends EventEmitter {
     const store = this.threadStore
     if (store?.lifecycleStore?.get(threadId)) store.assertThreadAdmission(threadId)
     const thread = store?.getThread(threadId)
-    const version = thread ? `${thread.updatedAt} ${JSON.stringify(thread.modelOverride ?? null)}` : undefined
+    const version = thread ? `${thread.updatedAt}\0${JSON.stringify(thread.modelOverride ?? null)}` : undefined
     const cached = this.measured
     if (cached?.threadId === threadId && cached.version === version) return cached.session
     const session = new ThreadSession(threadId)

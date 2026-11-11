@@ -116,6 +116,8 @@ describe('thread database worker stats', () => {
       const idle = await until(() => client.diagnostics(), (d) => d.workers === 2, 5_000)
       expect(idle.workers).toBe(2)
       expect(internals.indexer).toBeUndefined()
+      // Forgotten at once; it reads as ended once its retire (close, then exit) has finished.
+      await until(() => Atomics.load(first.stats, WORKER_STAT_ALIVE), (alive) => alive === 0, 5_000)
       expect(Atomics.load(first.stats, WORKER_STAT_ALIVE)).toBe(0)
       expect(Atomics.load(first.stats, 0)).toBe(0)
 
