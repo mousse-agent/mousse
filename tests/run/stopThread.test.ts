@@ -617,6 +617,37 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       expect(s.run(s.parentRunId).outcome).toMatchObject({ interruptedBy: 'agent' })
       expect(stopLine(s)).toMatchObject({ content: 'Turn stopped.', turnId: s.parentRunId, turnEnd: { cause: 'agent' } })
     })
+
+    it('a subagent its parent cancels (task_cancel) writes cause agent, and no agent.action row', async () => {
+      const s = await scene()
+      await (s.d.orch as any).taskCancel(s.parentId, { subagent: 'Worker' })
+      await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
+      expect(s.run(s.delegation.childRunId).outcome).toMatchObject({ interruptedBy: 'agent' })
+      const childLine = s.d.orch.getMessages(s.childThreadId).filter((message) => message.role === 'system').at(-1)
+      expect(childLine).toMatchObject({ content: 'Turn stopped.', turnId: s.delegation.childRunId, turnEnd: { cause: 'agent' } })
+      expect(s.d.engine.store.hasAgentAction(s.childThreadId, 'stopped_run')).toBe(false)
+    })
+
+    it('the launched threads a task_cancel reaches are stopped as the agent\'s too (launcher_stopped keeps the cause)', async () => {
+      const s = await scene()
+      const launched = s.d.store.createThread('Launched', undefined, undefined, { started: true, createdByThreadId: s.childThreadId })
+      const agentRun = s.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
+      s.d.engine.markStarting(agentRun.runId)
+      s.d.engine.markRunning(agentRun.runId)
+      await (s.d.orch as any).taskCancel(s.parentId, { subagent: 'Worker' })
+      expect(s.run(agentRun.runId).outcome).toMatchObject({ stopRequested: true, stopRequestedBy: 'agent' })
+    })
+
+    it('the launched threads a person\'s Stop reaches stay the person\'s', async () => {
+      const s = await scene()
+      const launched = s.d.store.createThread('Launched', undefined, undefined, { started: true, createdByThreadId: s.parentId })
+      const agentRun = s.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
+      s.d.engine.markStarting(agentRun.runId)
+      s.d.engine.markRunning(agentRun.runId)
+      await s.d.orch.stopThread(s.parentId, 'user')
+      expect(s.run(agentRun.runId).outcome).toMatchObject({ stopRequested: true })
+      expect(s.run(agentRun.runId).outcome?.stopRequestedBy).toBeUndefined()
+    })
   })
 
   it('the Stop fence: a run that is being stopped can start no subagent and continue none', async () => {

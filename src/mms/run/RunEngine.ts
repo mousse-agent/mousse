@@ -181,6 +181,11 @@ export interface StopRequest {
    * agent's (`interruptedBy: 'agent'`) and one `agent.action` event is written in the same transaction.
    */
   actor?: AgentActor
+  /**
+   * An agent's own Stop with no other thread's change to audit (`task_cancel` of its subagent, and the
+   * launched threads such a Stop reaches): everything it ends is the agent's, and no `agent.action` event is written.
+   */
+  byAgent?: boolean
 }
 
 export interface StopResult {
@@ -1178,7 +1183,7 @@ export class RunEngine extends EventEmitter {
       const activeRuns: StopResult['activeRuns'] = []
       const cancelledRuns: StopResult['cancelledRuns'] = []
       // A Stop an agent asked for ends everything in the subtree as the agent's (`interruptedBy: 'agent'`).
-      const asAgent = request.actor !== undefined
+      const asAgent = request.actor !== undefined || request.byAgent === true
       for (const run of this.store.listNonTerminalRuns().filter((entry) => depths.has(entry.threadId))) {
         // A paused run has no turn to abort: the Stop ends the pause, and with it the timer.
         if (run.status === 'paused') {

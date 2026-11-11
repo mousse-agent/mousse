@@ -135,7 +135,8 @@ describe('orchestrator and engine safety (review round 2)', () => {
     expect(d.engine.getRun(delegation.childRunId)!.status).toBe('queued')
 
     await d.orch.cancelDelegation(parentId, delegationId)
-    expect(d.engine.getRun(delegation.childRunId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user' } })
+    // The parent's task_cancel: the subagent's run is the agent's to have ended.
+    expect(d.engine.getRun(delegation.childRunId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'agent' } })
     expect(d.engine.outbox.get(childStart.effectId)!.status).toBe('cancelled')
     provisioning.resolve()
     await waitFor(() => childError !== undefined, 'the child turn to refuse to start')

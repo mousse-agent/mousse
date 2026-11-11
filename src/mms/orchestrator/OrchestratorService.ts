@@ -2993,7 +2993,7 @@ export class OrchestratorService extends EventEmitter {
   async stopThread(
     threadId: string,
     reason: string,
-    opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string; actor?: AgentActor } = {}
+    opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string; actor?: AgentActor; byAgent?: boolean } = {}
   ): Promise<StopThreadOutcome> {
     // A `/compact` the thread runs stops with it; the full history stays.
     const compactionStopped = this.stopCompaction(threadId)
@@ -3066,7 +3066,8 @@ export class OrchestratorService extends EventEmitter {
     const worked = await Promise.all(providerThreads.map((id) => this.stopProviderWork(id)))
     // A person's Stop reaches the threads the stopped ones launched while they run work an agent started: a creator
     // that is stopped leaves no fan-out running behind it (an agent's own Stop of a thread does not cascade).
-    if (!result.replayed && !opts.actor) await this.stopLaunchedThreads(result.threads)
+    // The cascade keeps the cause of the Stop that started it: an agent's `task_cancel` stays the agent's below.
+    if (!result.replayed && !opts.actor) await this.stopLaunchedThreads(result.threads, opts.byAgent === true)
     const stoppedAnything = aborted || compactionStopped || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
   }
@@ -3076,7 +3077,7 @@ export class OrchestratorService extends EventEmitter {
    * started by an agent's message: that work, and the agent messages queued behind it, end with the creator's Stop. A
    * launched thread a person has taken over (their own run is the latest work) is left alone.
    */
-  private async stopLaunchedThreads(stoppedThreadIds: readonly string[]): Promise<void> {
+  private async stopLaunchedThreads(stoppedThreadIds: readonly string[], byAgent: boolean): Promise<void> {
     const engine = this.runEngine
     const store = this.threadStore
     if (!engine || !store) return
@@ -3085,7 +3086,7 @@ export class OrchestratorService extends EventEmitter {
       if (agentWork.size === 0) return
       const creators = new Set(stoppedThreadIds)
       const launched = store.listAllThreads().filter((thread) => thread.createdByThreadId !== undefined && creators.has(thread.createdByThreadId) && agentWork.has(thread.id))
-      for (const thread of launched) await this.stopThread(thread.id, 'launcher_stopped')
+      for (const thread of launched) await this.stopThread(thread.id, 'launcher_stopped', byAgent ? { byAgent } : {})
     } catch (error) {
       console.warn('threads launched by a stopped thread could not be stopped', { error: error instanceof Error ? error.message : String(error) })
     }
@@ -6746,7 +6747,7 @@ export class OrchestratorService extends EventEmitter {
       // that task started is still live (a repeat after a partial failure): once that run ended, whatever the
       // subagent does now is newer work (a follow-up) that a repeated cancel must not touch.
       if (task.status === 'running' || (task.status === 'cancelled' && this.isRunLive(task.childRunId))) {
-        const stopped = await this.stopThread(task.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId })
+        const stopped = await this.stopThread(task.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId, byAgent: true })
         return { delegationId: task.delegationId, status: engine.delegations.get(task.delegationId)?.status, cancelled: stopped.delegations }
       }
       if (task.status === 'cancelled') return { delegationId: task.delegationId, status: task.status, cancelled: [] }
@@ -6761,7 +6762,7 @@ export class OrchestratorService extends EventEmitter {
     // Nothing is stopped when no task is open: a repeat must not touch newer work.
     if (open.length === 0)
       return { subagent: target.title, childThreadId: target.childThreadId, cancelled: [], note: `"${target.title}" has no open task.` }
-    const stopped = await this.stopThread(target.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId })
+    const stopped = await this.stopThread(target.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId, byAgent: true })
     return { subagent: target.title, childThreadId: target.childThreadId, cancelled: stopped.delegations }
   }
 
