@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from 'react'
+import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import type { ChatMessage } from '../../shared/types'
 import { assistantDisplayText } from '../chat/adapters/mousseToUI'
 import { useAppStore } from './appStore'
@@ -49,17 +49,43 @@ function subscribeVersion(listener: () => void): () => void {
   }
 }
 
+/** `subscribeVersion`, telling its listener at most once every `everyMs`: at the first change, then once at the end of the interval. */
+function subscribeVersionEvery(everyMs: number): (listener: () => void) => () => void {
+  if (everyMs <= 0) return subscribeVersion
+  return (listener) => {
+    let lastAt = -Infinity
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tell = () => {
+      timer = null
+      lastAt = Date.now()
+      listener()
+    }
+    const unsubscribe = subscribeVersion(() => {
+      if (timer !== null) return
+      const wait = lastAt + everyMs - Date.now()
+      if (wait <= 0) tell()
+      else timer = setTimeout(tell, wait)
+    })
+    return () => {
+      unsubscribe()
+      if (timer !== null) clearTimeout(timer)
+    }
+  }
+}
+
 const noSubscription = (): (() => void) => () => {}
 const readVersion = (): number => version
 const readNoVersion = (): number => 0
 
 /**
  * A number that changes whenever any reply's live text does, while `active`; 0 otherwise. Only an
- * active reader subscribes, so a streamed delta renders nothing that does not ask for it.
+ * active reader subscribes, so a streamed delta renders nothing that does not ask for it. With
+ * `everyMs`, the reader renders for it at most once per interval, however many deltas arrive.
  */
-export function useLiveTextVersion(active: boolean): number {
+export function useLiveTextVersion(active: boolean, everyMs = 0): number {
+  const subscribe = useMemo(() => subscribeVersionEvery(everyMs), [everyMs])
   return useSyncExternalStore(
-    active ? subscribeVersion : noSubscription,
+    active ? subscribe : noSubscription,
     active ? readVersion : readNoVersion,
     active ? readVersion : readNoVersion
   )
