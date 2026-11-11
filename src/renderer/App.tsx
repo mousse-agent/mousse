@@ -3,6 +3,7 @@ import { Suspense, useEffect, useRef, useCallback, useState, startTransition, ty
 import { useChatsStore } from './stores/chatsStore'
 import { followPushedList } from './lib/followPushedList'
 import { OrchestratorChat } from './components/OrchestratorChat'
+import { scheduleHighlighterWarmup } from './chat/components/agent-elements/code-highlighter'
 
 import { MainViewTabs } from './components/MainViewTabs'
 
@@ -111,7 +112,10 @@ export default function App() {
   if (!automationsMounted && profileReady && (workspaceReady || automationsOpen)) setAutomationsMounted(true)
   // With the workspace on screen, fetch the split-out pages and panels while idle, so opening one is instant.
   useEffect(() => {
-    if (workspaceReady) preloadSplitSurfaces()
+    if (!workspaceReady) return
+    preloadSplitSurfaces()
+    // The code highlighter too, so the first code block of a session is coloured as it streams.
+    scheduleHighlighterWarmup()
   }, [workspaceReady])
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
