@@ -5,6 +5,7 @@ import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { parseMcpToolType } from "./tools/tool-registry";
 import { isCompactionRow } from "./utils/assistant-blocks";
 import { ThinkingIcon } from "../../../lib/icons";
+import { countRender } from "./render-counts";
 import "./turn-progress.css";
 
 /**
@@ -232,6 +233,7 @@ export function TurnProgressRow({
   awaitingSubagents?: boolean;
   standalone?: boolean;
 }) {
+  countRender("TurnProgressRow");
   const state = useTurnProgressState();
   // The clock is read as the line renders, so a countdown that starts shows its right second at once; the timer
   // only renders the line again each second while one runs.

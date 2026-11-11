@@ -4,12 +4,11 @@ import { flushSync } from 'react-dom'
 import { expiresAtAfter, expiresInLabel } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Clock, Layers, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Clock, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
-import { isThreadActivityActive, type Project, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
-import { pausedStatusLabel } from '../lib/pausedRun'
+import type { Project, Thread, ThreadActivitySnapshot, ThreadActivityState } from '../../shared/types'
 import { worktreeMark } from '../lib/worktreeMark'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
@@ -56,6 +55,8 @@ import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import { ProjectRunsDot } from './automations/inbox/ProjectRunsDot'
+import { countRender } from '../chat/components/agent-elements/render-counts'
+import { plainThreads, sameListedActivity, ThreadCardStatus, ThreadRowStatusIcon } from './ThreadRowStatus'
 import '../styles/threads-sidebar.css'
 import '../styles/sidebar-view-motion.css'
 
@@ -107,17 +108,6 @@ const SIDEBAR_VIEW_OUT_MS = 140
 
 /** Shift+F10 or the context-menu key: open a row's menu from the keyboard. */
 const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)
-
-function threadAge(iso?: string): string {
-  if (!iso) return ''
-  const delta = Date.now() - new Date(iso).getTime()
-  if (!Number.isFinite(delta) || delta < 45_000) return 'now'
-  const minutes = Math.round(delta / 60_000)
-  if (minutes < 60) return `${minutes}m`
-  const hours = Math.round(minutes / 60)
-  if (hours < 36) return `${hours}h`
-  return `${Math.round(hours / 24)}d`
-}
 
 function projectInitials(name: string): string {
   const parts = name.split(/[\s/._-]+/).filter(Boolean)
@@ -265,10 +255,10 @@ function ThreadCardBody({
   projectName,
   project,
   hue,
+  threadId,
   activity,
+  liveActivity,
   awaitsApproval,
-  startedAt,
-  pause,
   isRenaming,
   renamingName,
   isGeneratingTitle,
@@ -284,12 +274,12 @@ function ThreadCardBody({
   project?: Project
   /** The project's hue (`--hue-N`), shared with the row's tint. */
   hue?: number
+  threadId: string
+  /** The activity the list shows for the thread; with `liveActivity`, its status reads the thread's own (`ThreadCardStatus`). */
   activity?: ThreadActivityState
+  liveActivity: boolean
   /** The input it waits for is a permission request. */
-  awaitsApproval?: boolean
-  startedAt?: string
-  /** This thread's own pause (not one a subagent below it is in): when its limit resets. */
-  pause?: Pick<TurnPause, 'until' | 'estimated'>
+  awaitsApproval: boolean
 
   isRenaming: boolean
   renamingName: string
@@ -303,8 +293,6 @@ function ThreadCardBody({
   /** Double-click on the title starts a rename. */
   onStartRename?: (event: React.MouseEvent<HTMLElement>) => void
 }) {
-  const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
-  const status = threadStatus(activity, awaitsApproval)
   return (
     <>
       {projectName ? (
@@ -318,39 +306,7 @@ function ThreadCardBody({
         <span className="threads-sidebar-card-meta">
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
-          {status === 'working' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
-              <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
-              Working{age && age !== 'now' ? ` ${age}` : ''}
-            </span>
-          ) : status === 'waiting' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
-              <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />
-              Waiting{age && age !== 'now' ? ` ${age}` : ''}
-            </span>
-          ) : status === 'approval' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
-              <Shield size={12} strokeWidth={2} aria-hidden="true" />
-              Approval
-            </span>
-          ) : status === 'question' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
-              <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
-              Input
-            </span>
-          ) : status === 'paused' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-paused">
-              <Pause size={12} strokeWidth={2} aria-hidden="true" />
-              {pausedStatusLabel(pause, Date.now())}
-            </span>
-          ) : status === 'done' ? (
-            <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
-              <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
-              Done
-            </span>
-          ) : (
-            <span className="threads-sidebar-card-age">{age}</span>
-          )}
+          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} />
         </span>
         {isRenaming ? (
           <SidebarRenameInput initialName={renamingName} onSubmit={onRename} onCancel={onCancelRename} />
@@ -380,6 +336,7 @@ function ThreadCardBody({
 }
 
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
+  countRender('ThreadsSidebar')
 
   const tabsId = useId()
   const projects = useAppStore((s) => s.projects)
@@ -391,7 +348,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const storeActiveThreadId = useAppStore((s) => s.activeThreadId)
   const speakingThreadId = useSpeakingThreadId()
 
-  const storeActivity = useAppStore((s) => s.threadActivity)
+  // The activity the list is drawn from. A push that only swaps Working and Waiting on a plain thread keeps the one
+  // held, so the list and its other rows stay as they are; that thread's status reads its own (`ThreadRowStatus`).
+  const plainThreadIds = useMemo(() => plainThreads(listedInStore), [listedInStore])
+  const plainRef = useRef(plainThreadIds)
+  plainRef.current = plainThreadIds
+  const heldActivity = useRef<ThreadActivitySnapshot | null>(null)
+  const storeActivity = useAppStore((s) => {
+    const held = heldActivity.current
+    if (held && sameListedActivity(held, s.threadActivity, plainRef.current)) return held
+    heldActivity.current = s.threadActivity
+    return s.threadActivity
+  })
   // A thread a send is starting is listed from the click on, before the service has made it (`pendingThreadRows`).
   const shownProfileId = useAppStore((s) => s.profileId)
   const pendingRows = usePendingThreadRows((s) => s.rows)
@@ -406,7 +374,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     dropPendingThreadRows(servedPendingRows(pendingRows, listedInStore, storeActivity))
     pruneRowKeys(new Set(listedInStore.map((thread) => thread.id)))
   }, [pendingRows, listedInStore, storeActivity])
-  const turnStates = useAppStore((s) => s.turnStates)
   const approvalThreads = useThreadsAwaitingApproval()
 
   const upsertThread = useAppStore((s) => s.upsertThread)
@@ -1070,70 +1037,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     return runWithToast('rename', () => (type === 'thread' ? window.mousse.threads.rename(id, name) : window.mousse.projects.rename(id, name)), { retry: true })
   }
 
+  /** The activity a row shows: rolled up over its subagents, or Working for a send that is starting it. */
+  const shownActivityOf = (threadId: string) => rolledUpActivity[threadId] ?? threadActivity[threadId]
+  /**
+   * A plain thread's row reads its own activity: the list's may be one push behind on Working and Waiting. One with
+   * subagents, or one a starting send shows Working, shows what the list computed.
+   */
+  const liveActivityOf = (threadId: string) =>
+    plainThreadIds.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
   const renderThreadStatus = (threadId: string) => {
-    const status = threadStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], approvalThreads.has(threadId))
-    switch (status) {
-      case 'working':
-        return (
-          <Loader2
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-spinner icon-spin"
-            aria-hidden="true"
-          />
-        )
-      case 'done':
-        return (
-          <CircleCheck
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--completed"
-            aria-label="Agent finished"
-          />
-        )
-      case 'approval':
-        return (
-          <Shield
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-            aria-label="Agent needs approval"
-          />
-        )
-      case 'question':
-        return (
-          <MessageQuestion
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-            aria-label="Agent needs input"
-          />
-        )
-      case 'waiting':
-        return (
-          <CircleDotDashed
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting"
-            aria-label="Agent is waiting"
-          />
-        )
-      case 'paused': {
-        const turn = turnStates[threadId]
-        const own = turn?.phase === 'paused' ? turn.pause : undefined
-        const label = pausedStatusLabel(own, Date.now())
-        return (
-          <Pause
-            size={14}
-            strokeWidth={2}
-            className="threads-sidebar-status-icon threads-sidebar-status-icon--paused"
-            aria-label={label}
-          />
-        )
-      }
-      case 'quiet':
-        return null
-    }
+    // A quiet thread shows nothing, whichever of Working and Waiting the list holds.
+    if (threadStatus(shownActivityOf(threadId), approvalThreads.has(threadId)) === 'quiet') return null
+    return <ThreadRowStatusIcon threadId={threadId} activity={shownActivityOf(threadId)} live={liveActivityOf(threadId)} awaitsApproval={approvalThreads.has(threadId)} />
   }
 
   useEffect(() => {
@@ -1219,7 +1134,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     inTree?: boolean
     clipped?: boolean
   } = {}) => {
-
+    countRender(`SidebarRow:${thread.id}`)
     const isArchived = Boolean(thread.settledAt)
     // A pending row whose thread the service has not made yet: it is the open one already, and has nothing to act on.
     const unmade = unmadeRows.has(thread.id)
@@ -1357,10 +1272,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             projectName={group?.project.name}
             project={group?.project}
             hue={hue}
-            activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
+            threadId={thread.id}
+            activity={shownActivityOf(thread.id)}
+            liveActivity={liveActivityOf(thread.id)}
             awaitsApproval={approvalThreads.has(thread.id)}
-            startedAt={turnStates[thread.id]?.startedAt}
-            pause={turnStates[thread.id]?.phase === 'paused' ? turnStates[thread.id]?.pause : undefined}
             isRenaming={isRenaming}
             renamingName={renaming?.name ?? ''}
             isGeneratingTitle={isGeneratingTitle}

@@ -1326,6 +1326,7 @@ export const MessageList = memo(function MessageList({
   classNames,
   toolRenderers,
 }: MessageListProps) {
+  countRender("MessageList");
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);

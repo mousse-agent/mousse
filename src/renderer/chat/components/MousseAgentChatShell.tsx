@@ -93,6 +93,23 @@ export function RunInterruptedNotice({ onContinue, uncertain, onContinueUncertai
   </div>
 }
 
+/**
+ * What the line under a running turn's Working reads: the turn's phase and step, and a Stop on its way. They change
+ * all through a reply, so only this provider follows them: the chat it wraps stays as it is, and only what reads the
+ * context (the progress line, the turn's end mark) renders.
+ */
+function TurnProgressProvider({ threadId, children }: { threadId?: string | null; children: ReactNode }) {
+  const turnPhase = useAppStore(state => (threadId ? state.turnStates[threadId]?.phase : undefined))
+  const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
+  const stopping = useAppStore(state => Boolean(threadId && state.stopRequests[threadId]))
+  const turnUpdatedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.updatedAt : undefined))
+  const turnProgress = useMemo<TurnProgressState>(
+    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt }),
+    [turnPhase, turnStep, stopping, threadId, turnUpdatedAt]
+  )
+  return <TurnProgressContext.Provider value={turnProgress}>{children}</TurnProgressContext.Provider>
+}
+
 interface MousseAgentChatShellProps {
   threadId?: string | null
   busy?: boolean
@@ -132,15 +149,6 @@ export function MousseAgentChatShell({
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
   const uncertain = useAppStore(state => (threadId ? state.turnStates[threadId]?.uncertain : undefined))
-  // What the line under a running turn's Working reads: the turn's phase and step, and a Stop on its way.
-  const turnPhase = useAppStore(state => (threadId ? state.turnStates[threadId]?.phase : undefined))
-  const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
-  const stopping = useAppStore(state => Boolean(threadId && state.stopRequests[threadId]))
-  const turnUpdatedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.updatedAt : undefined))
-  const turnProgress = useMemo<TurnProgressState>(
-    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt }),
-    [turnPhase, turnStep, stopping, threadId, turnUpdatedAt]
-  )
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
@@ -163,7 +171,7 @@ export function MousseAgentChatShell({
       <SubagentCardsContext.Provider value={subagentCards}>
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
       <TurnActionsContext.Provider value={turnActions ?? null}>
-      <TurnProgressContext.Provider value={turnProgress}>
+      <TurnProgressProvider threadId={threadId}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -179,7 +187,7 @@ export function MousseAgentChatShell({
           enableImagePreview
           enableFind
         />
-      </TurnProgressContext.Provider>
+      </TurnProgressProvider>
       </TurnActionsContext.Provider>
       </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>
