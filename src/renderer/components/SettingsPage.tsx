@@ -2,7 +2,7 @@ import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { applyFrostedComposer, createFrostedComposerSaver } from '../lib/frostedComposer'
-import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
+import { Activity, ArrowLeft, Bot, FlaskConical, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import { DelayedLoader } from './ui/DelayedLoader'
@@ -26,6 +26,7 @@ import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../st
 import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
+import { LabsSettings } from './settings/LabsSettings'
 import { AppearanceSettings } from './settings/AppearanceSettings'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
@@ -46,7 +47,8 @@ const SETTINGS_SECTIONS = [
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },
-  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['delete', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
+  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['delete', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] },
+  { id: 'labs', label: 'Labs', icon: FlaskConical, hue: 3, group: 'This computer', keywords: ['experimental', 'profiler', 'memory', 'ram', 'cpu', 'diagnostics', 'heap', 'leak'] }
 ] as const satisfies ReadonlyArray<{ id: SettingsSectionId; label: string; icon: unknown; hue: number; group: string; keywords: readonly string[] }>
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
@@ -526,6 +528,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           )}
 
           {activeSection === 'shortcuts' && <ShortcutsSettings settings={settings} onUpdate={updateSettings} />}
+
+          {activeSection === 'labs' && <LabsSettings settings={settings} onUpdate={updateSettings} />}
 
           {activeSection === 'agents' && <AgentsSettings settings={settings} options={options} projects={projects} updateSettings={updateSettings} />}
 

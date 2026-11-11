@@ -35,6 +35,7 @@ import {
   type ProcessMemory,
   type ServiceCounts
 } from '../../shared/diagnostics/memory'
+import type { AppViewInfo, WindowCounters } from '../../shared/diagnostics/profiler'
 import { MemoryLog } from './memoryLog'
 import { readChildMemory, readHeapDetail, sampleOwnProcess } from './processMemory'
 import { liveChildProcesses } from './liveCounts'
@@ -75,6 +76,15 @@ export interface MemoryMonitorOptions {
   /** This service run's id; by default its pid and start time. */
   runId?: string
   log?: MemoryLog
+  /** The service's CPU time so far (`process.cpuUsage`), for its CPU use between samples. */
+  cpuUsage?: () => NodeJS.CpuUsage
+}
+
+/** The windows' counters and the app's views from the app's latest report: kept for the profiler's tools, never logged. */
+export interface AppWindowDetail {
+  at: number
+  windows: WindowCounters[]
+  views: AppViewInfo[]
 }
 
 interface MonitorState {
@@ -96,12 +106,16 @@ export class MemoryMonitor {
   private active = new Map<BreachKind, { breach: MemoryBreach; loggedAt: number }>()
   private pending: MemoryNotice | null = null
   private appReports = new Map<string, { at: number; processes: AppProcessMemory[]; hints?: AppHints }>()
+  private windowDetail: AppWindowDetail | null = null
+  private lastCpu: { usage: NodeJS.CpuUsage; at: number } | null = null
   private timer: NodeJS.Timeout | null = null
   private ticks = 0
   private running: Promise<void> | null = null
   private lastChildren: ChildMemory[] | undefined
   private lastReplayMb: number | undefined
   private started = false
+  /** Set by `stop()`: a sample that was reading then writes nothing and raises no notice. */
+  private stopped = false
   private readonly uptime: () => number
   private readonly runId: string
   private loggedHints: { json: string; at: number } | null = null
@@ -123,6 +137,7 @@ export class MemoryMonitor {
   /** Starts sampling: the first sample a few seconds after start, then every interval. The timer never holds the process. */
   start(firstDelayMs = 10_000): void {
     if (this.timer) return
+    this.stopped = false
     this.log.prune(this.now())
     const first = setTimeout(() => {
       void this.tick()
@@ -134,6 +149,8 @@ export class MemoryMonitor {
   }
 
   stop(): void {
+    // A sample already reading when this runs ends without a log line or a notice.
+    this.stopped = true
     if (this.timer) {
       clearTimeout(this.timer)
       clearInterval(this.timer)
@@ -142,9 +159,15 @@ export class MemoryMonitor {
     this.log.flushSync()
   }
 
-  /** The desktop app's processes, sent by its main process about once a minute. */
-  acceptAppReport(connectionId: string, processes: AppProcessMemory[], hints?: AppHints): void {
+  /** The desktop app's processes, sent by its main process about once a minute, or when a profiler tool asks. */
+  acceptAppReport(connectionId: string, processes: AppProcessMemory[], hints?: AppHints, detail?: { windows: WindowCounters[]; views: AppViewInfo[] }): void {
     this.appReports.set(connectionId, { at: this.now(), processes, ...(hints ? { hints } : {}) })
+    if (detail) this.windowDetail = { at: this.now(), ...detail }
+  }
+
+  /** The windows' counters from the app's latest report that had them. */
+  appWindowDetail(): AppWindowDetail | null {
+    return this.windowDetail
   }
 
   forgetConnection(connectionId: string): void {
@@ -160,12 +183,14 @@ export class MemoryMonitor {
 
   private async runTick(): Promise<void> {
     try {
+      if (this.stopped) return
       this.ticks += 1
       if (!this.started) {
         this.started = true
         this.log.append({ type: 'start', t: this.now(), version: this.options.version, pid: process.pid })
       }
       const sample = await this.takeSample((this.ticks - 1) % DETAIL_EVERY === 0)
+      if (this.stopped) return
       this.history.push(sample)
       const cutoff = sample.t - HISTORY_MS
       while (this.history.length && this.history[0].t < cutoff) this.history.shift()
@@ -188,10 +213,45 @@ export class MemoryMonitor {
     return sample
   }
 
+  /**
+   * A sample now, for a profiler tool: not kept in the history or written to the log. With `children`, the child
+   * processes' memory is read again too.
+   */
+  async measure(options: { children?: boolean } = {}): Promise<MemorySample> {
+    return this.takeSample(options.children === true)
+  }
+
+  /** The samples held, oldest first (6 hours at most). */
+  samples(): readonly MemorySample[] {
+    return this.history
+  }
+
+  /** The service's V8 heap statistics and heap spaces, read now. */
+  readDetailNow(): MemoryDetail {
+    this.detail = (this.options.readDetail ?? readHeapDetail)()
+    return this.detail
+  }
+
+  /** The children's memory, read now (one OS listing). */
+  readChildrenNow(): Promise<ChildMemory[]> {
+    return (this.options.readChildren ?? (() => readChildMemory(liveChildProcesses())))()
+  }
+
+  /** CPU use since the previous reading, percent of one core; undefined the first time. */
+  private cpuPercent(t: number): number | undefined {
+    const usage = (this.options.cpuUsage ?? process.cpuUsage)()
+    const last = this.lastCpu
+    this.lastCpu = { usage, at: t }
+    if (!last || t <= last.at) return undefined
+    const micros = usage.user - last.usage.user + (usage.system - last.usage.system)
+    return Math.max(0, Math.round((micros / 1000 / (t - last.at)) * 1000) / 10)
+  }
+
   private async takeSample(withDetail: boolean): Promise<MemorySample> {
     // The time and the uptime are read together, before any await.
     const t = this.now()
     const up = Math.round(this.uptime())
+    const cpu = this.cpuPercent(t)
     const [service, reading] = await Promise.all([
       (this.options.sampleProcess ?? sampleOwnProcess)(),
       this.options.readCounts()
@@ -206,7 +266,7 @@ export class MemoryMonitor {
       t,
       up,
       run: this.runId,
-      service,
+      service: cpu !== undefined ? { ...service, cpu } : service,
       counts: { ...reading.counts, providerProcesses: (this.options.childCount ?? (() => liveChildProcesses().length))() },
       ...(reading.workerHeaps.length ? { workers: reading.workerHeaps.map(toMb) } : {}),
       ...(withDetail && this.lastChildren?.length ? { children: this.lastChildren } : {}),
@@ -256,6 +316,7 @@ export class MemoryMonitor {
     if (toLog.length) {
       // The full breakdown, with the children's memory read now.
       const children = await (this.options.readChildren ?? (() => readChildMemory(liveChildProcesses())))().catch(() => undefined)
+      if (this.stopped) return
       const full: MemorySample = { ...sample, ...(children?.length ? { children } : {}) }
       this.history[this.history.length - 1] = full
       this.log.append({ type: 'breach', t: sample.t, breaches: toLog, sample: full, detail: this.detail ?? readHeapDetail() })

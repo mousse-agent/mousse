@@ -1,3 +1,4 @@
+import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/profiler'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
@@ -126,7 +127,10 @@ export interface NotificationSettings {
   allRemoteThreads: boolean
   /** The channels chosen for each event. A channel not chosen yet is on. */
   events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
-  /** A notice when Mousse uses more memory than expected, at most once a day for each kind. Unset is on. */
+  /**
+   * The profiler's "High memory use" notice, at most once a day (Settings → Labs). Unset is on, but nothing shows while
+   * the profiler itself is off (`experimental.profiler.enabled`).
+   */
   memoryNotices?: boolean
 }
 
@@ -388,10 +392,12 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
  */
 export interface ExperimentalSettings {
   subagentWorktrees: boolean
+  /** The profiler (Settings → Labs). */
+  profiler: ProfilerSettings
 }
 
 export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
-  return { subagentWorktrees: raw?.subagentWorktrees === true }
+  return { subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */

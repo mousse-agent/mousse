@@ -7,6 +7,7 @@ import { delegationTools } from './delegation'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
 import { planTools } from './plans'
+import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
 import { quickActionTools } from './quickActions'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
@@ -27,6 +28,7 @@ export type { BotAppToolDeps } from './bots'
 export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export type { BotMemoryToolHost } from './botMemory'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
+export type { ProfilerToolHost } from './profiler'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,
@@ -41,7 +43,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order runtimes are sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /**
@@ -114,5 +116,6 @@ export function createAppToolRegistry(input: {
   add('applets', appletTools())
   add('bots', [...botTools(input.bots), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
   add('projectGit', projectGitTools(host))
+  add('profiler', profilerTools(host))
   return { registry, families }
 }

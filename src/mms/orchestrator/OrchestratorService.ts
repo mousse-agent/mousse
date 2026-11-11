@@ -1,3 +1,4 @@
+import { profilerService } from '../diagnostics/profilerService'
 import { contextHandoff, previousTurnModel } from './contextHandoff'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
@@ -1673,6 +1674,11 @@ export class OrchestratorService extends EventEmitter {
   /** How many threads have a session in memory (the memory monitor's count). */
   loadedSessionCount(): number {
     return this.sessions.size
+  }
+
+  /** The threads with a session in memory (the profiler's per-thread breakdown). */
+  loadedThreadIds(): string[] {
+    return [...this.sessions.keys()]
   }
 
   /** How many turns are running now (the memory monitor's idle check). */
@@ -3701,6 +3707,13 @@ export class OrchestratorService extends EventEmitter {
       permissionModeFor: (runId) => this.runPermissionMode(runId),
       askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
       agentAccess: () => this.agentAccessSettings(),
+      // Settings → Labs → Profiler, read at every listing and call; the service's profiler is installation-wide.
+      profiler: () => ({
+        settings: this.settingsStore.get().experimental.profiler,
+        service: profilerService(),
+        owner: this,
+        turnActive: (threadId) => this.isTurnActive(threadId)
+      }),
       threadMeta: (threadId) => this.threadStore?.getThread(threadId),
       listThreads: () => this.threadStore?.listAllThreads() ?? [],
       listProjects: () => (this.threadStore?.listProjects() ?? []).map(({ id, name }) => ({ id, name })),

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
+import { normalizeProfilerSettings } from '../src/shared/diagnostics/profiler'
 import { MEMORY_NOTICE_TEXT, memoryNoticesEnabled, openMemoryReport, presentMemoryNotice, type MemoryNoticeDeps } from '../src/renderer/hooks/useMemoryNotices'
 import { openMemoryIssue } from '../src/main/diagnostics/memoryReport'
 import { memoryBreakdown } from '../src/renderer/components/settings/MemoryRows'
@@ -42,13 +43,17 @@ describe('memory notice', () => {
     expect(d.show).toHaveBeenCalledTimes(2)
   })
 
-  it('the setting is on unless turned off', () => {
-    expect(memoryNoticesEnabled(undefined)).toBe(true)
-    expect(memoryNoticesEnabled({ notifications: { threadCompletionSound: true, allRemoteThreads: false } })).toBe(true)
-    expect(memoryNoticesEnabled({ notifications: { threadCompletionSound: true, allRemoteThreads: false, memoryNotices: false } })).toBe(false)
+  it('notices show only while the profiler is on, and its notices switch is not off', () => {
+    const profiler = normalizeProfilerSettings()
+    const notifications = { threadCompletionSound: true, allRemoteThreads: false }
+    expect(memoryNoticesEnabled(undefined)).toBe(false)
+    expect(memoryNoticesEnabled({ experimental: {}, notifications })).toBe(false)
+    expect(memoryNoticesEnabled({ experimental: { profiler }, notifications })).toBe(false)
+    expect(memoryNoticesEnabled({ experimental: { profiler: { ...profiler, enabled: true } }, notifications })).toBe(true)
+    expect(memoryNoticesEnabled({ experimental: { profiler: { ...profiler, enabled: true } }, notifications: { ...notifications, memoryNotices: false } })).toBe(false)
   })
 
-  it('the About row tooltip lists the service counts', () => {
+  it('the Memory row tooltip lists the service counts', () => {
     const status: MemoryStatus = {
       sample: {
         t: 1, up: 60,

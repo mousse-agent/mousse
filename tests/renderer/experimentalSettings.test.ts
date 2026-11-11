@@ -48,13 +48,13 @@ describe('the experimental settings', () => {
     draw()
   }
   const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Give each subagent its own worktree"]')!
-  const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().experimental
+  const saved = () => ({ subagentWorktrees: new SettingsStore(MousseConfigStore.load(home)).get().experimental.subagentWorktrees })
 
   it('give subagents their own worktree only when turned on, and only an explicit true does it', () => {
-    expect(getDefaultSettings().experimental).toEqual({ subagentWorktrees: false })
-    expect(store.get().experimental).toEqual({ subagentWorktrees: false })
+    expect(getDefaultSettings().experimental.subagentWorktrees).toBe(false)
+    expect(store.get().experimental.subagentWorktrees).toBe(false)
     for (const value of ['yes', 1, null, undefined]) expect(normalizeExperimentalSettings({ subagentWorktrees: value as never }).subagentWorktrees).toBe(false)
-    expect(normalizeExperimentalSettings({ subagentWorktrees: true })).toEqual({ subagentWorktrees: true })
+    expect(normalizeExperimentalSettings({ subagentWorktrees: true }).subagentWorktrees).toBe(true)
   })
 
   it('show the row under Agents > Experimental, off by default, and save a change in mousse.conf', () => {
