@@ -91,6 +91,8 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
     return 'ended' as const
   })
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    // The fixture binary, not whatever `claude` is on PATH: a machine without Claude Code must run this too.
+    launchConfig: () => ({ binaryPath: binary }),
     query,
     reap,
     // Every live slot is taken: the turn runs as one query, as a person's turn past the cap does.
