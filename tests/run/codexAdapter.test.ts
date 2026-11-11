@@ -1160,6 +1160,32 @@ describe('CodexAdapter', () => {
     expect(seen).toEqual([[], ['waiting']])
   })
 
+  it('closes a thought when the reply starts, so a thought that resumes after it is a new row', async () => {
+    const sink = recordingSink()
+    const client = {
+      configured: () => true,
+      chat: async (chatInput: { onThinking?: (text: string) => void; onText?: (text: string) => void }) => {
+        chatInput.onThinking?.('Reading the test')
+        chatInput.onText?.('It is flaky.')
+        chatInput.onThinking?.('Reading the test\n\nChecking the order')
+        throw new Error('done')
+      }
+    } as unknown as CodexProviderService
+    await expect(new CodexAdapter(() => client).startTurn(input(), sink, control(), host())).rejects.toThrow('done')
+    const streams = sink.calls
+      .filter(([name]) => name === 'thinking' || name === 'text')
+      .map(([name, value]) => `${name}:${(value as { phase: string }).phase}:${(value as { content: string }).content}`)
+    expect(streams).toEqual([
+      'thinking:start:', 'thinking:delta:Reading the test',
+      // The reply began: the thought is done.
+      'thinking:complete:Reading the test',
+      'text:start:', 'text:delta:It is flaky.',
+      // The thought resumes after the text: the text keeps its row, and the new thought is a row of its own.
+      'text:complete:It is flaky.',
+      'thinking:start:', 'thinking:delta:Checking the order'
+    ])
+  })
+
   it('fingerprints the thread a usage limit ended, and no other failure', async () => {
     const committed: Array<[string, string]> = []
     const client = (failure: Error) =>

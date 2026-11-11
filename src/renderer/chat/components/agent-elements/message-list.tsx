@@ -2329,7 +2329,7 @@ const TurnRow = memo(function TurnRow({
                           )
                         }
                         label={groupLabel}
-                        detail={liveThought || undefined}
+                        liveThought={liveThought}
                         autoOpen={anyToolPending}
                         failed={
                           items.filter(

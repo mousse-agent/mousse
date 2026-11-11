@@ -207,22 +207,24 @@ describe('ClaudeSubscriptionAdapter', () => {
       'providerRef',
       'thinking',
       'thinking',
-      'text',
-      'text',
-      'text',
-      // The steer closes the reply row and the thought: the reply goes on below the steered message.
+      // The reply starts: the thought before it is done.
       'thinking',
+      'text',
+      'text',
+      'text',
+      // The steer closes the reply row: the reply goes on below the steered message.
       'text',
       'steerAccepted',
       'tool',
       'thinking',
+      'thinking',
+      // The answer starts: the thought after the call is done too.
       'thinking',
       'text',
       'text',
       'lineEdits',
       'providerMetrics',
       'usage',
-      'thinking',
       'text'
     ])
     // The thought before the call closes when the call starts; the next one opens a row below it.

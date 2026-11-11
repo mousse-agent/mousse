@@ -136,6 +136,9 @@ export function stepSeenAt(state: TurnProgressState | null | undefined, now = Da
   return now;
 }
 
+/** The steps that read "Thinking…": they show the thinking icon. */
+const THINKING_KINDS: ReadonlySet<TurnProgressKind> = new Set(["thinking", "starting", "waiting", "finishing"]);
+
 /** The turn's start and the wait for the model's first output say nothing more than that it thinks: the tooltip says which. */
 const STARTING: TurnProgress = { kind: "starting", label: "Thinking…", title: "Starting the agent and its tools" };
 const WAITING: TurnProgress = { kind: "waiting", label: "Thinking…", title: "Waiting for the model's first output" };
@@ -212,9 +215,10 @@ export function describeTurnProgress({ state, messages, stepSince, awaitingSubag
 }
 
 /**
- * The live line at the end of a running turn, under its Working: the thinking icon and a short label
- * for what the turn does now, details in its tooltip. The icon turns by a transform on its own box,
- * so the line costs no layout or paint while it animates. It reads the thread's turn from context,
+ * The live line at the end of a running turn, under its Working: a short label for what the turn does
+ * now, details in its tooltip. While the turn thinks it shows the thinking icon; for anything else
+ * (a tool, a retry, a stop), three small dots. Both move by transform or opacity only, so the line
+ * costs no layout or paint while it animates. It reads the thread's turn from context,
  * so a memoised turn row still follows it.
  */
 export function TurnProgressRow({
@@ -243,9 +247,18 @@ export function TurnProgressRow({
     <div
       className="turn-progress flex items-center gap-2 min-w-0 max-w-full select-none"
       role="status" data-find-ignore data-turn-progress={progress.kind} title={progress.title}>
-      <span className="turn-progress-icon" aria-hidden="true">
-        <ThinkingIcon size={18} active />
-      </span>
+      {THINKING_KINDS.has(progress.kind) ? (
+        <span className="turn-progress-icon" aria-hidden="true">
+          <ThinkingIcon size={18} active />
+        </span>
+      ) : (
+        // Running a tool, retrying, stopping, writing, subagents: no thought, so no thinking icon.
+        <span className="turn-progress-dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      )}
       <span className="turn-progress-label">{progress.label}</span>
     </div>
   );

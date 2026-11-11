@@ -224,10 +224,14 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       },
       onText: (text) => {
         progress()
+        // The reply began: the thought before it is done, and one that resumes after it is a new row.
+        streams.thinking.break()
         streams.text.update(text)
       },
       onThinking: (text) => {
         progress()
+        // A thought after text keeps the text above it, as a tool call does.
+        streams.text.break()
         streams.thinking.update(text)
       },
       onStatus: (status) => {

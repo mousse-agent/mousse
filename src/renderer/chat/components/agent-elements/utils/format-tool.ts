@@ -121,15 +121,14 @@ export function latestThoughtHeading(content: string | undefined): string {
   return thoughtHeading(paragraphs[paragraphs.length - 1]);
 }
 
-/** Characters of a live thought shown on its one line; the row truncates what still does not fit. */
+/**
+ * Characters of a live thought kept for its one line: more than any row shows. The row cuts what does not fit at
+ * the start (`an-live-thought`), so the newest words are what shows at any width.
+ */
 const LIVE_THOUGHT_CHARS = 160;
 
-/**
- * The thought as it is being written, for its one live line: the newest paragraph in plain text (a title's
- * markers dropped, even one still open), and of a long one its end, where the words arrive. Empty while the
- * thought has no text.
- */
-export function liveThoughtLine(content: string | undefined): string {
+/** The newest paragraph of a thought being written, whole, in plain text: the live line's tooltip and what is read out. */
+export function liveThoughtText(content: string | undefined): string {
   if (!content?.trim()) return "";
   const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
   const latest = paragraphs[paragraphs.length - 1]!
@@ -137,7 +136,16 @@ export function liveThoughtLine(content: string | undefined): string {
     .map((line) => line.trim().replace(/^#{1,6}\s+/, "").replace(/^>\s?/, ""))
     .filter(Boolean)
     .join(" ");
-  const plain = stripInlineMarkdown(latest).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
+  return stripInlineMarkdown(latest).replace(/(\*\*|__)/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The thought as it is being written, for its one live line: the newest paragraph in plain text (a title's
+ * markers dropped, even one still open), and of a long one its end, where the words arrive. Empty while the
+ * thought has no text.
+ */
+export function liveThoughtLine(content: string | undefined): string {
+  const plain = liveThoughtText(content);
   if (plain.length <= LIVE_THOUGHT_CHARS) return plain;
   const tail = plain.slice(plain.length - LIVE_THOUGHT_CHARS);
   // Start the tail at a word.

@@ -12,8 +12,12 @@ export type ToolCallsGroupProps = {
    * Other tool calls do not change this title.
    */
   label?: string;
-  /** What follows the title: the thought being written, while the group's newest item is one. */
-  detail?: string;
+  /**
+   * The thought being written, while the group's newest item is one: its newest words follow the title (`line`;
+   * `text` whole in the tooltip). Shown on the header only while the group is closed: open, the thought's own row
+   * shows it.
+   */
+  liveThought?: { line: string; text: string };
   /**
    * True while any tool inside the group is still running. Drives the group
    * header shimmer only — completed groups stay static even if the turn is
@@ -40,7 +44,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,
   icon,
   label,
-  detail,
+  liveThought,
   autoOpen = false,
   failed = 0,
   live = false,
@@ -64,7 +68,11 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       icon={icon}
       completeLabel={title}
       shimmerLabel={title}
-      detail={detail ?? (title === "Tool calls" ? `${count}` : undefined)}
+      detail={liveThought ? (expanded ? undefined : liveThought.line || undefined) : title === "Tool calls" ? `${count}` : undefined}
+      liveDetail={Boolean(liveThought)}
+      detailTitle={liveThought && !expanded ? liveThought.text || undefined : undefined}
+      // A group titled with a thought turns its thinking icon; only one of plain tool calls shimmers.
+      shimmer={title === "Tool calls"}
       badge={
         failed > 0 ? (
           <span className="text-[var(--danger)]">· {failed} failed</span>

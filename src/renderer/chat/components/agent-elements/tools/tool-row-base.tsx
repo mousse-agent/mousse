@@ -1,8 +1,35 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
+
+/** How often a thought being written is read out to a screen reader. */
+const ANNOUNCE_MS = 5000;
+
+/** `text`, changing at most every `ms` (the latest value once the wait ends); "" at once. */
+function useThrottledText(text: string, ms: number): string {
+  const [shown, setShown] = useState(text);
+  const last = useRef(0);
+  useEffect(() => {
+    if (!text) {
+      setShown("");
+      return;
+    }
+    const wait = last.current + ms - Date.now();
+    if (wait <= 0) {
+      last.current = Date.now();
+      setShown(text);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      last.current = Date.now();
+      setShown(text);
+    }, wait);
+    return () => window.clearTimeout(timer);
+  }, [text, ms]);
+  return shown;
+}
 
 /** Seconds per sweep of a running row's label shimmer. */
 export const SHIMMER_DURATION_S = 1.2;
@@ -15,6 +42,14 @@ export type ToolRowBaseProps = {
   /** A failed call: the label reads in the danger colour. */
   failed?: boolean;
   detail?: string;
+  /**
+   * The detail is a thought being written: its newest words matter, so a detail too long for the row is cut at its
+   * start, not its end (`an-live-thought`). `detailTitle` is the full text, for the tooltip and screen readers.
+   */
+  liveDetail?: boolean;
+  detailTitle?: string;
+  /** Whether a running row's label shimmers (it paints every frame). A thinking row turns its icon instead. */
+  shimmer?: boolean;
   /** Short status after the detail (a failure count); never truncated. */
   badge?: ReactNode;
   trailingContent?: ReactNode;
@@ -34,6 +69,9 @@ export function ToolRowBase({
   isAnimating,
   failed = false,
   detail,
+  liveDetail = false,
+  detailTitle,
+  shimmer = true,
   badge,
   trailingContent,
   expandable = false,
@@ -74,7 +112,7 @@ export function ToolRowBase({
             detail || trailingContent ? "shrink-0" : "min-w-0 truncate",
           )}
         >
-          {isAnimating && shimmerLabel ? (
+          {isAnimating && shimmerLabel && shimmer ? (
             <TextShimmer
               as="span"
               duration={SHIMMER_DURATION_S}
@@ -83,10 +121,14 @@ export function ToolRowBase({
               {shimmerLabel}
             </TextShimmer>
           ) : (
-            completeLabel
+            isAnimating && shimmerLabel ? shimmerLabel : completeLabel
           )}
         </span>
-        {detail && (
+        {detail && liveDetail ? (
+          <span className="an-live-thought font-normal min-w-0 flex-1 text-an-foreground-muted/60" title={detailTitle ?? detail} aria-label={detailTitle ?? detail}>
+            <bdi>{detail}</bdi>
+          </span>
+        ) : detail && (
           <span className="font-normal truncate min-w-0 flex-1 text-an-foreground-muted/60">
             {detail}
           </span>
@@ -105,8 +147,14 @@ export function ToolRowBase({
     </div>
   );
 
+  // A thought being written is read out now and then, not with every word.
+  const announced = useThrottledText(liveDetail && isAnimating ? detailTitle ?? detail ?? "" : "", ANNOUNCE_MS);
+  const announcement = liveDetail && isAnimating && announced ? (
+    <span role="status" className="sr-only">{`${shimmerLabel ?? completeLabel}: ${announced}`}</span>
+  ) : null;
+
   if (!expandable) {
-    return <div className="an-tool-chrome flex flex-col gap-1">{row}</div>;
+    return <div className="an-tool-chrome flex flex-col gap-1">{row}{announcement}</div>;
   }
 
   const toggle = () => {
@@ -126,6 +174,7 @@ export function ToolRowBase({
       >
         {row}
       </button>
+      {announcement}
       {/* The shared Collapse animates a grid row, so the panel content is laid out once at full size and
           only its clip changes per frame (an animated `height` re-measured the diffs, markdown and nested
           tools every frame). The gap sits inside it as padding so it opens and closes with the panel. */}

@@ -1,4 +1,4 @@
-import { latestThoughtHeading, liveThoughtLine } from "./format-tool";
+import { latestThoughtHeading, liveThoughtLine, liveThoughtText } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
 
 export type ToolPartBase = {
@@ -306,12 +306,14 @@ function isLiveThought(part: unknown): boolean {
 
 /**
  * The live line of a group whose newest item is a thought still being written: that thought as it is written
- * (`liveThoughtLine`), or "" while it has no text yet. Undefined when the newest item is not a live thought.
+ * (`line`, for the row; `text`, whole, for its tooltip), both "" while it has no text yet. Undefined when the
+ * newest item is not a live thought.
  */
-export function liveGroupThought(items: AssistantToolItem[]): string | undefined {
+export function liveGroupThought(items: AssistantToolItem[]): { line: string; text: string } | undefined {
   const last = items[items.length - 1]?.part;
   if (!last || last.type !== "tool-Thinking" || last.state !== "input-available") return undefined;
-  return liveThoughtLine(thoughtTextFromPart(last));
+  const content = thoughtTextFromPart(last);
+  return { line: liveThoughtLine(content), text: liveThoughtText(content) };
 }
 
 /**
