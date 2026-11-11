@@ -163,7 +163,7 @@ describe('thread database worker stats', () => {
   it('in-process mode counts the engines directly', async () => {
     const client = new ThreadDbClient({ script: null })
     try {
-      expect(await client.diagnostics()).toEqual({ workers: 0, connections: 0, workerHeaps: [] })
+      expect(await client.diagnostics()).toEqual({ workers: 0, connections: 0, workerHeaps: [], workerCrashes: 0 })
     } finally {
       await client.close()
     }

@@ -8953,8 +8953,10 @@ export class OrchestratorService extends EventEmitter {
       const storedKey = stored?.modelKey ?? ''
       const matches = stored !== undefined && storedKey.startsWith(prefix) && measured(storedKey.slice(prefix.length)) && stored.contextRevision === (this.nativeContext.revision ?? 0)
       const limit = measured(capacity?.selectedModel) ? capacity!.contextWindow ?? 0 : 0
+      // A copy read for the gauge brings its messages' estimates from the read worker instead of the messages.
+      const estimates = this.session.gaugeEstimates
       const usage = computeContextUsage({
-        messages: getActiveMessages(this.nativeContext), draftInput: request.draftInput,
+        ...(estimates ? { messageEstimates: estimates } : { messages: getActiveMessages(this.nativeContext) }), draftInput: request.draftInput,
         contextLimit: limit, modelName: measured(capacity?.selectedModel) ? capacity!.modelName : selectedModel.model,
         lastMeasuredInput: matches ? stored.input : null,
         lastMeasuredCacheRead: matches ? stored.cacheRead : null,
@@ -9000,8 +9002,9 @@ export class OrchestratorService extends EventEmitter {
    * thread it shows; a registered session holds the whole thread and stays until the daemon stops, so measuring
    * used to keep every thread a person looked at in memory. Measuring only reads, so a copy is enough.
    *
-   * A thread in `thread.db` is read in the read worker, and only what the gauge needs: the model context's active
-   * messages and the newest message that reports its turn's tokens, never the transcript. Nothing of it enters the
+   * A thread in `thread.db` is read in the read worker, and only what the gauge needs: the estimates of the model
+   * context's active messages (parsed and estimated in the worker) and the newest message that reports its turn's
+   * tokens, never the transcript. Nothing of it enters the
    * thread database cache. A thread with no model context, or kept as JSON, is read whole as before: first off the
    * event loop, then left out of the cache again unless it was there already.
    */
@@ -9018,6 +9021,7 @@ export class OrchestratorService extends EventEmitter {
       const gauge = await store.readGaugeData(threadId)
       if (gauge) {
         session.load(gauge.messages, gauge.llmContext, [], undefined, undefined, modelOverride)
+        session.gaugeEstimates = gauge.estimates
       } else {
         const wasWarm = store.isThreadDataWarm(threadId)
         await store.warmThread(threadId).catch(() => undefined)

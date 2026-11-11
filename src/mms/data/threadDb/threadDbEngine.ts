@@ -15,6 +15,8 @@ import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStam
 import { skeletonOf } from './jsonSkeleton'
 import { formatCursor, parseCursor } from '../../../shared/pageCursor'
 import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
+import { estimateMessage, withoutMissingImages, type MessageEstimate } from '../../orchestrator/contextEstimate'
+import type { Message } from '../../../shared/transcript'
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
@@ -51,7 +53,9 @@ export type BuildResult =
 
 export interface ThreadDbSummary { seq: number; messages: number }
 /** See `ThreadDbEngine.gauge`. */
-export interface ThreadDbGauge { info: DbInfo; context?: string; active: string[]; latest?: string }
+export interface ThreadDbGauge { context?: string; estimates: MessageEstimate[]; latest?: string }
+/** How many of the newest transcript messages the gauge looks through for the newest token count. */
+export const GAUGE_TOKEN_LOOKBACK = 500
 
 export interface MessagePageRequest { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }
 export interface MessagePage {
@@ -152,7 +156,7 @@ function readInfo(db: DatabaseSync): DbInfo {
 }
 
 /** Rows as read from the table, with their blobs put back (image data too, unless `images` is false). */
-function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null }>, options: { images?: boolean } = {}): DbRow[] {
+function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null }>, options: { images?: boolean | 'presence' } = {}): DbRow[] {
   return raw.map((row) => {
     const base = { rid: row.rid, coll: row.coll, ord: row.ord, seq: row.seq }
     if (!row.blob_paths) return { ...base, payload: row.payload }
@@ -318,26 +322,29 @@ export class ThreadDbEngine {
   }
 
   /**
-   * What the context gauge measures, without the transcript: the model context's header (`context` state), its active
-   * messages (those from `activeStartIndex`), and the newest transcript message that reports the tokens its turn used.
-   * Long text is put back; image data is not (the gauge counts an image, not its bytes). `context` is absent when the
-   * thread has no model context, which the gauge then estimates from the whole transcript.
+   * What the context gauge measures, without the transcript: the model context's header (`context` state), the
+   * estimate of each active message (those from `activeStartIndex`, see `estimateMessage`), and the newest transcript
+   * message that reports the tokens its turn used, among the newest `GAUGE_TOKEN_LOOKBACK` messages. The messages are
+   * parsed and estimated here, so the daemon's loop only sums the estimates. Image data is not read (an image counts
+   * the same whatever its size); an image whose file is missing counts as the note the model is sent instead, as in
+   * a full read. `context` is absent when the thread has no model context, which the gauge then estimates from the
+   * whole transcript.
    */
   gauge(dir: string): ThreadDbGauge {
     const { db } = this.open(dir)
     db.exec('BEGIN')
     try {
-      const info = readInfo(db)
       const header = db.prepare("SELECT payload FROM state WHERE key = 'context'").get() as { payload: string } | undefined
-      if (!header) return { info, active: [] }
+      if (!header) return { estimates: [] }
       const parsed = JSON.parse(header.payload) as { activeStartIndex?: unknown }
       const start = Number.isInteger(parsed.activeStartIndex) ? Math.max(0, parsed.activeStartIndex as number) : 0
       const rows = db.prepare("SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'c:a' ORDER BY ord, rid LIMIT -1 OFFSET ?").all(start) as unknown as Array<DbRow & { blob_paths: string | null }>
-      const latest = db.prepare("SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' AND json_extract(payload, '$.responseMetadata.tokensUsed') IS NOT NULL ORDER BY ord DESC, rid DESC LIMIT 1").get() as (DbRow & { blob_paths: string | null }) | undefined
+      // Only the newest messages are looked at: a runtime that never reports tokens would otherwise walk the whole
+      // transcript.
+      const latest = db.prepare(`SELECT rid, coll, ord, payload, blob_paths FROM (SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' ORDER BY ord DESC, rid DESC LIMIT ${GAUGE_TOKEN_LOOKBACK}) WHERE json_extract(payload, '$.responseMetadata.tokensUsed') IS NOT NULL ORDER BY ord DESC, rid DESC LIMIT 1`).get() as (DbRow & { blob_paths: string | null }) | undefined
       return {
-        info,
         context: header.payload,
-        active: hydrateRows(dir, rows, { images: false }).map((row) => row.payload),
+        estimates: hydrateRows(dir, rows, { images: 'presence' }).map((row) => estimateMessage(withoutMissingImages([JSON.parse(row.payload) as Message])[0]!)),
         ...(latest ? { latest: hydrateRows(dir, [latest], { images: false })[0]!.payload } : {})
       }
     } finally {

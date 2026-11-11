@@ -15,6 +15,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
+import type { MessageEstimate } from './contextEstimate'
 import { createNativeContext, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
 
 /**
@@ -57,6 +58,11 @@ export class ThreadSession {
   readonly threadId: string
   messages: ChatMessage[] = []
   nativeContext: NativeLlmContext = createNativeContext()
+  /**
+   * Only on a copy read for the context gauge (`measuredSession`): the estimate of each active message, made in the
+   * read worker. Its `nativeContext` then holds no messages, and the gauge sums these instead.
+   */
+  gaugeEstimates?: MessageEstimate[]
   /** Per-thread model selection; absent means use global settings. */
   modelOverride: Thread['modelOverride'] | undefined
   activeTurn: ActiveTurnControl | null = null
