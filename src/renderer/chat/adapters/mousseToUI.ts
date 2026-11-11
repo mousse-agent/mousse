@@ -676,6 +676,9 @@ type ThinkingPartShape = {
   state?: string
   input?: { thought?: unknown }
   output?: unknown
+  /** On a row that joins thoughts: the latest one's id, and where its text starts in `input.thought`. */
+  liveId?: string
+  liveFrom?: number
 }
 
 function asThinkingPart(msg: UIMessage): ThinkingPartShape | null {
@@ -706,10 +709,14 @@ export function mergeConsecutiveThoughts(messages: UIMessage[]): UIMessage[] {
     const prevPart = prev ? asThinkingPart(prev) : null
     const curPart = asThinkingPart(msg)
     if (prev && prevPart && curPart) {
-      const thought = [thoughtText(prevPart.input?.thought), thoughtText(curPart.input?.thought)]
+      const latest = thoughtText(curPart.input?.thought)
+      const thought = [thoughtText(prevPart.input?.thought), latest]
         .filter((t) => t.trim())
         .join('\n\n')
       prevPart.input = { ...(prevPart.input as object), thought }
+      // Only the latest thought can still be written: the row's live text (see liveTextStore) is its, from where it starts.
+      prevPart.liveId = curPart.toolCallId
+      prevPart.liveFrom = latest.trim() ? thought.length - latest.length : thought.length
       if (thoughtText(curPart.output).trim() || thoughtText(prevPart.output).trim()) {
         prevPart.output = [thoughtText(prevPart.output), thoughtText(curPart.output)]
           .filter((t) => t.trim())

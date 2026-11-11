@@ -1,5 +1,6 @@
-import { latestThoughtHeading, liveThoughtLine, liveThoughtText } from "./format-tool";
+import { latestThoughtHeading } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
+import type { LiveThoughtSource } from "../../../../stores/liveTextStore";
 
 export type ToolPartBase = {
   type: string;
@@ -305,15 +306,26 @@ function isLiveThought(part: unknown): boolean {
 }
 
 /**
- * The live line of a group whose newest item is a thought still being written: that thought as it is written
- * (`line`, for the row; `text`, whole, for its tooltip), both "" while it has no text yet. Undefined when the
- * newest item is not a live thought.
+ * A thinking part's text as the transcript holds it, and the thought whose live text (see liveTextStore) can
+ * stand for its end: the newest of the thoughts the row joins.
  */
-export function liveGroupThought(items: AssistantToolItem[]): { line: string; text: string } | undefined {
+export function thoughtSourceOf(part: ToolPartBase & { liveId?: string; liveFrom?: number }): LiveThoughtSource | undefined {
+  if (part.type !== "tool-Thinking") return undefined;
+  const thought = isRecord(part.input) && typeof part.input.thought === "string" ? part.input.thought : "";
+  const id = part.liveId ?? part.toolCallId;
+  if (!id) return undefined;
+  return { id, thought, from: Math.min(part.liveFrom ?? 0, thought.length) };
+}
+
+/**
+ * The thought a group's live line follows, when the group's newest item is a thought still being written. Its
+ * header reads the thought's live text (see `useLiveThought`), so a streamed delta renders the header alone.
+ * Undefined when the newest item is not a live thought.
+ */
+export function liveGroupThought(items: AssistantToolItem[]): LiveThoughtSource | undefined {
   const last = items[items.length - 1]?.part;
   if (!last || last.type !== "tool-Thinking" || last.state !== "input-available") return undefined;
-  const content = thoughtTextFromPart(last);
-  return { line: liveThoughtLine(content), text: liveThoughtText(content) };
+  return thoughtSourceOf(last) ?? { id: "", thought: thoughtTextFromPart(last), from: 0 };
 }
 
 /**

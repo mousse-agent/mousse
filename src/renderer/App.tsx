@@ -35,7 +35,7 @@ import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore, withNewerTimes } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
-import { applyStreamedUpdates } from './stores/liveTextStore'
+import { applyStreamedUpdates, landMessage } from './stores/liveTextStore'
 import { useViewSwap } from './lib/motion'
 import { useMemoryNotices } from './hooks/useMemoryNotices'
 import { useWindowCounters } from './lib/windowCounters'
@@ -151,8 +151,6 @@ export default function App() {
   const applyThreadView = useAppStore((s) => s.applyThreadView)
 
   const setAppInfo = useAppStore((s) => s.setAppInfo)
-
-  const addMessage = useAppStore((s) => s.addMessage)
 
   const setMainView = useAppStore((s) => s.setMainView)
   const openDocument = useAppStore((s) => s.openDocument)
@@ -309,7 +307,7 @@ export default function App() {
     // Anything else that changes the transcript applies the held updates first, so order is kept.
     // The Usage page covers the workspace: the transcript catches up in one write when it closes.
     const messageUpdates = createMessageUpdateBatcher({
-      // Text added to a reply on screen goes to its live text (see liveTextStore); the rest to the store.
+      // Text added to a reply on screen, or to the thought being written, goes to its live text (see liveTextStore); the rest to the store.
       apply: (_threadId, messages) => {
         const state = useAppStore.getState()
         applyStreamedUpdates(messages, state.messages, state.updateMessages)
@@ -324,17 +322,8 @@ export default function App() {
     const unsubs = [
       window.mousse.orchestrator.onThreadMessage(({ threadId, message }) => {
         if (!isSelectedThread(threadId)) return
-        messageUpdates.flush()
-        if (message.role === 'user') {
-          const cur = useAppStore.getState().messages
-          const idx = cur.findIndex((m) => m.id.startsWith('optimistic:') && m.content === message.content)
-          if (idx !== -1) {
-            const next = cur.filter((m) => !(m.id.startsWith('optimistic:') && m.content === message.content))
-            useAppStore.getState().setMessages([...next, message])
-            return
-          }
-        }
-        addMessage(message)
+        // Held updates first, then a thought it follows hands its live text to the transcript, then the message (see liveTextStore).
+        landMessage(message, messageUpdates.flush)
       }),
       window.mousse.orchestrator.onThreadMessageUpdated(({ threadId, message }) => {
         if (!isSelectedThread(threadId)) return
@@ -433,7 +422,6 @@ export default function App() {
     applyThreadView,
     setAppInfo,
     setShortcuts,
-    addMessage,
     setProjects,
     setThreads,
     switchToThread,

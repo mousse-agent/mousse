@@ -15,6 +15,12 @@ import { useAppStore } from './appStore'
  * again after it ended elsewhere), leaves the transcript (another thread opened) or the profile
  * changes, its live text is dropped and the transcript's text is shown, the same text Copy, Find
  * and the model read.
+ *
+ * A thought being written streams the same way: text added to it goes here, and only its row (and
+ * the header of the group it ends) reads it. A thought is live while the transcript holds it as
+ * processing, and while nothing follows it: the moment a message lands after it, its live text is
+ * written to the transcript (`handOverLiveThoughts`), so what reads the transcript's thoughts (a
+ * group's title) sees all of it.
  */
 interface LiveText {
   /** The reply's text as it streams in, as the transcript shows it. */
@@ -126,9 +132,10 @@ function pickText(entry: LiveText | undefined, shown: string): string {
   return shown
 }
 
-/** The text to show for the reply `id`, whose transcript text is `shown`. Renders only when that reply's live text changes. */
-export function useLiveText(id: string, shown: string): string {
+/** The live text of `id`, rendering only when it changes; nothing while `id` is undefined. */
+function useEntry(id: string | undefined): LiveText | undefined {
   const subscribe = useCallback((listener: () => void) => {
+    if (id === undefined) return () => {}
     let set = listeners.get(id)
     if (!set) listeners.set(id, (set = new Set()))
     set.add(listener)
@@ -137,9 +144,33 @@ export function useLiveText(id: string, shown: string): string {
       if (set.size === 0) listeners.delete(id)
     }
   }, [id])
-  const read = () => entries.get(id)
-  const entry = useSyncExternalStore(subscribe, read, read)
-  return pickText(entry, shown)
+  const read = () => (id === undefined ? undefined : entries.get(id))
+  return useSyncExternalStore(subscribe, read, read)
+}
+
+/** The text to show for the reply `id`, whose transcript text is `shown`. Renders only when that reply's live text changes. */
+export function useLiveText(id: string, shown: string): string {
+  return pickText(useEntry(id), shown)
+}
+
+/**
+ * A thought row's text as the transcript holds it (`thought`), and where it can be live: from `from`
+ * on, it is the transcript text of the thought `id`. A row joins back-to-back thoughts, so only its
+ * newest one can still be written.
+ */
+export interface LiveThoughtSource {
+  id: string
+  thought: string
+  from: number
+}
+
+/** The text to show for a thought row: its newest thought's live text over the transcript's. Renders only when that changes. */
+export function useLiveThought(source: LiveThoughtSource | undefined): string {
+  const entry = useEntry(source?.id)
+  if (!source) return ''
+  const own = source.thought.slice(source.from)
+  if (!own) return source.thought
+  return source.thought.slice(0, source.from) + pickText(entry, own)
 }
 
 function sameData(a: unknown, b: unknown): boolean {
@@ -166,15 +197,34 @@ export function isLiveTextUpdate(held: ChatMessage, next: ChatMessage): boolean 
   return sameData(heldRest, nextRest)
 }
 
+/**
+ * True when `next` only adds text to the thought `held`, which already has text: both are still being
+ * written and nothing else about it changed. Its start, its end and anything else go to the transcript.
+ */
+export function isLiveThoughtUpdate(held: ChatMessage, next: ChatMessage): boolean {
+  if (held.id !== next.id || held.kind !== 'thinking' || next.kind !== 'thinking') return false
+  if (held.thinking?.status !== 'processing' || next.thinking?.status !== 'processing') return false
+  if (held.thinking.content === next.thinking.content || !held.thinking.content.trim()) return false
+  const { thinking: _held, ...heldRest } = held
+  const { thinking: _next, ...nextRest } = next
+  return sameData(heldRest, nextRest)
+}
+
+/** Whether the transcript holds `message` as still being written: a reply streaming in, or a thought in progress. */
+function isStillWritten(message: ChatMessage | undefined): boolean {
+  return message?.streaming === true || (message?.kind === 'thinking' && message.thinking?.status === 'processing')
+}
+
 function findFromEnd(messages: readonly ChatMessage[], id: string): ChatMessage | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) if (messages[index]!.id === id) return messages[index]
   return undefined
 }
 
 /**
- * Applies one frame of streamed updates: text added to a reply on screen goes to its live text;
- * the rest goes to `write` (the main store) in one call. A reply whose update went to the store has
- * its live text dropped right after, so its final text takes over once, in the same render.
+ * Applies one frame of streamed updates: text added to a reply on screen, or to the thought that
+ * ends the transcript, goes to its live text; the rest goes to `write` (the main store) in one call.
+ * A message whose update went to the store has its live text dropped right after, so its final text
+ * takes over once, in the same render.
  */
 export function applyStreamedUpdates(
   updates: readonly ChatMessage[],
@@ -183,26 +233,82 @@ export function applyStreamedUpdates(
 ): void {
   const toStore: ChatMessage[] = []
   const handedOver: string[] = []
+  // Set once a message the transcript does not hold yet lands in this frame: nothing ends it any more.
+  let landed = false
   for (const update of updates) {
     const current = findFromEnd(held, update.id)
     if (current && isLiveTextUpdate(current, update)) {
       setLiveText(update.id, { text: assistantDisplayText(update.content), over: assistantDisplayText(current.content) })
       continue
     }
+    if (!landed && current && current === held[held.length - 1] && isLiveThoughtUpdate(current, update)) {
+      setLiveText(update.id, { text: update.thinking!.content, over: current.thinking!.content })
+      continue
+    }
+    if (!current && !landed) {
+      // A message lands after the thought through this channel: the thought's live text goes first, in the same write.
+      landed = true
+      collectLiveThoughts(held, toStore, handedOver)
+    }
     toStore.push(update)
-    if (entries.has(update.id)) handedOver.push(update.id)
+    if (entries.has(update.id) && !handedOver.includes(update.id)) handedOver.push(update.id)
   }
   if (toStore.length > 0) write(toStore)
   for (const id of handedOver) clearLiveText(id)
 }
 
+/** Adds to `toStore` every live thought of `messages` with its live text, and its id to `handedOver`, skipping ones already there. */
+function collectLiveThoughts(messages: readonly ChatMessage[], toStore: ChatMessage[], handedOver: string[]): void {
+  for (const [id, entry] of entries) {
+    if (handedOver.includes(id)) continue
+    const message = findFromEnd(messages, id)
+    if (message?.kind !== 'thinking' || !message.thinking) continue
+    handedOver.push(id)
+    const text = pickText(entry, message.thinking.content)
+    if (text !== message.thinking.content) toStore.push({ ...message, thinking: { ...message.thinking, content: text } })
+  }
+}
+
 /**
- * Drops the live text of every reply the transcript `messages` no longer holds as streaming: it
- * ended (by any path), or it is not there (another thread or profile is shown).
+ * Writes the live text of every thought in `messages` to `write` (the main store), in one call, and
+ * drops it: a message is about to land after the thought, and what reads the transcript's thoughts
+ * then (a group's title, the row once it is done) must see all of it.
+ */
+export function handOverLiveThoughts(messages: readonly ChatMessage[], write: (messages: ChatMessage[]) => void): void {
+  const toStore: ChatMessage[] = []
+  const handedOver: string[] = []
+  collectLiveThoughts(messages, toStore, handedOver)
+  if (toStore.length > 0) write(toStore)
+  for (const id of handedOver) clearLiveText(id)
+}
+
+/**
+ * A new message of the selected thread lands (`onThreadMessage`): the streamed updates held for the
+ * frame are applied first (`flush`), then the live text of a thought it follows is handed to the
+ * transcript, then the message is added. A user message replaces its optimistic copy.
+ */
+export function landMessage(message: ChatMessage, flush: () => void): void {
+  flush()
+  const store = useAppStore.getState()
+  handOverLiveThoughts(store.messages, store.updateMessages)
+  const state = useAppStore.getState()
+  if (message.role === 'user') {
+    const isCopy = (m: ChatMessage) => m.id.startsWith('optimistic:') && m.content === message.content
+    if (state.messages.some(isCopy)) {
+      state.setMessages([...state.messages.filter((m) => !isCopy(m)), message])
+      return
+    }
+  }
+  state.addMessage(message)
+}
+
+/**
+ * Drops the live text of every reply or thought the transcript `messages` no longer holds as being
+ * written: it ended (by any path), or it is not there (another thread or profile is shown).
  */
 export function dropSettledLiveText(messages: readonly ChatMessage[]): void {
   for (const id of [...entries.keys()]) {
-    if (findFromEnd(messages, id)?.streaming !== true) clearLiveText(id)
+    if (!isStillWritten(findFromEnd(messages, id))) clearLiveText(id)
   }
 }
 

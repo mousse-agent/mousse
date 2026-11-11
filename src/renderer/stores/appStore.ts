@@ -73,6 +73,9 @@ export function sameMessageSnapshot(a: ChatMessage[], b: ChatMessage[]): boolean
       left.content !== right.content ||
       left.streaming !== right.streaming ||
       left.kind !== right.kind ||
+      // A thought streams outside the transcript (liveTextStore): a cached copy can lag the view's text.
+      left.thinking?.content !== right.thinking?.content ||
+      left.thinking?.status !== right.thinking?.status ||
       JSON.stringify(left.presentationParts) !== JSON.stringify(right.presentationParts)
     ) {
       return false
