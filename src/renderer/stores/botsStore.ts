@@ -86,6 +86,8 @@ interface BotsState {
   refresh(): Promise<void>
   loadChat(botId: string): Promise<void>
   loadOlder(botId: string): Promise<void>
+  /** Loads older pages until the message is held; false when the chat has no such message. */
+  findMessage(botId: string, messageId: string): Promise<boolean>
   markRead(botId: string): void
   setDraft(botId: string, text: string): void
   setAttachments(botId: string, attachments: AttachedFile[]): void
@@ -127,7 +129,12 @@ export function botsClient(): PersonalBotsClient {
 let epoch = 0
 let refreshOperation: Promise<void> | undefined
 let unsubscribe: Array<() => void> = []
-const pendingSends = new Map<string, { text: string; clientRequestId: string }>()
+/** Each bot's last send whose words came back after a failure: sending the same words again reuses its request id. */
+const failedSends = new Map<string, { text: string; clientRequestId: string }>()
+/** The id of the bubble shown while the message sent with `clientRequestId` is on its way. */
+const pendingId = (clientRequestId: string) => `pending:${clientRequestId}`
+/** Each bot's page of older messages on its way. */
+const olderLoads = new Map<string, Promise<void>>()
 let pendingCreate: { key: string; clientRequestId: string } | undefined
 let createOperation: Promise<BotSummary | null> | undefined
 /** Bots made here that no list has carried yet. */
@@ -170,8 +177,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
   const putMessages = (botId: string, incoming: BotChatMessage[]) => set((state) => {
     if (removed.has(botId)) return {}
     const cache = state.chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
-    const owned = incoming.filter((message) => message.author === 'owner').map((message) => message.text)
-    const pending = (state.pending[botId] ?? []).filter((message) => !owned.includes(message.text))
+    // A confirmed message clears only the bubble sent with its request id, so two identical messages on their way stay two.
+    const owned = new Set(incoming.flatMap((message) => (message.author === 'owner' && message.clientRequestId ? [pendingId(message.clientRequestId)] : [])))
+    const pending = (state.pending[botId] ?? []).filter((message) => !owned.has(message.id))
     return { chats: { ...state.chats, [botId]: { ...cache, messages: upsert(cache.messages, incoming) } }, pending: { ...state.pending, [botId]: pending } }
   })
   /** A list with the bots made here that no list carried yet: one asked for before a bot was made doesn't drop it. */
@@ -224,7 +232,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
       if (get().profileId === profileId) return
       epoch += 1
       refreshOperation = undefined
-      pendingSends.clear()
+      failedSends.clear()
+      olderLoads.clear()
       pendingCreate = undefined
       createOperation = undefined
       created.clear()
@@ -283,20 +292,41 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) { fail(owner, cause, botId) }
     },
 
-    async loadOlder(botId) {
+    loadOlder(botId) {
       const cache = cacheOf(botId)
-      if (!cache.hasMore || cache.loadingOlder || !cache.messages.length) return
+      // A page already on its way is the one asked for again: whoever waits on it waits for that page.
+      const loading = olderLoads.get(botId)
+      if (loading) return loading
+      if (!cache.hasMore || cache.loadingOlder || !cache.messages.length) return Promise.resolve()
       const owner = epoch
       set((state) => ({ chats: { ...state.chats, [botId]: { ...cache, loadingOlder: true } } }))
-      try {
-        const page = await bots().messages(botId, { beforeSeq: cache.messages[0]!.seq, limit: BOT_CHAT_PAGE })
-        if (owner !== epoch) return
-        set((state) => {
-          const current = state.chats[botId] ?? cache
-          return { chats: { ...state.chats, [botId]: { messages: upsert(current.messages, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } } }
-        })
-      } catch (cause) {
-        if (owner === epoch) set((state) => ({ error: errorText(cause), errorBotId: botId, chats: { ...state.chats, [botId]: { ...cacheOf(botId), loadingOlder: false } } }))
+      const operation: Promise<void> = (async () => {
+        try {
+          const page = await bots().messages(botId, { beforeSeq: cache.messages[0]!.seq, limit: BOT_CHAT_PAGE })
+          if (owner !== epoch) return
+          set((state) => {
+            const current = state.chats[botId] ?? cache
+            return { chats: { ...state.chats, [botId]: { messages: upsert(current.messages, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } } }
+          })
+        } catch (cause) {
+          if (owner === epoch) set((state) => ({ error: errorText(cause), errorBotId: botId, chats: { ...state.chats, [botId]: { ...cacheOf(botId), loadingOlder: false } } }))
+        } finally {
+          if (owner === epoch) olderLoads.delete(botId)
+        }
+      })()
+      olderLoads.set(botId, operation)
+      return operation
+    },
+
+    async findMessage(botId, messageId) {
+      for (;;) {
+        const before = cacheOf(botId)
+        if (before.messages.some((message) => message.id === messageId)) return true
+        if (!before.hasMore || !before.messages.length) return false
+        await get().loadOlder(botId)
+        // A page that brought nothing older (it failed, or the profile changed) ends the search.
+        const after = cacheOf(botId)
+        if (!after.messages.length || after.messages[0]!.seq >= before.messages[0]!.seq) return after.messages.some((message) => message.id === messageId)
       }
     },
 
@@ -330,12 +360,13 @@ export const useBotsStore = create<BotsState>((set, get) => {
         return
       }
       const owner = epoch
-      // The same words sent again after a failure reuse their request id, so they are not sent twice.
-      const previous = pendingSends.get(botId)
+      // The same words sent again after a failure reuse their request id, so they are not sent twice. Words sent
+      // again while the first are still on their way are a second message, with their own id.
+      const previous = failedSends.get(botId)
       const admission = previous?.text === text ? previous : { text, clientRequestId: crypto.randomUUID() }
-      pendingSends.set(botId, admission)
+      failedSends.delete(botId)
       const shown: BotChatMessage = {
-        seq: Number.MAX_SAFE_INTEGER, id: `pending:${admission.clientRequestId}`, at: new Date().toISOString(), author: 'owner', kind: 'text',
+        seq: Number.MAX_SAFE_INTEGER, id: pendingId(admission.clientRequestId), at: new Date().toISOString(), author: 'owner', kind: 'text',
         text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '' })) } : {}),
         ...(replyTo ? { replyTo } : {})
       }
@@ -351,12 +382,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
         const message = await bots().send(botId, text, admission.clientRequestId, files, replyTo?.id)
         for (const attached of attachments) if (attached.previewUrl) URL.revokeObjectURL(attached.previewUrl)
         if (owner !== epoch) return
-        pendingSends.delete(botId)
         set((state) => ({ pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) } }))
         putMessages(botId, [message])
       } catch (cause) {
         if (owner !== epoch) return
         // Nothing was sent: the words and files go back into the composer.
+        failedSends.set(botId, admission)
         set((state) => ({
           error: errorText(cause),
           errorBotId: botId,

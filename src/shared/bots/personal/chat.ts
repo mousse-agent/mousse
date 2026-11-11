@@ -59,6 +59,8 @@ export interface BotChatMessage {
   attachments?: Array<{ name: string; path: string }>
   /** The message this one answers, as a short quote: a bot's reply to the owner's message, or the owner's reply to the bot's. */
   replyTo?: BotChatQuote
+  /** The owner's message: the request id it was sent with, which matches it to the bubble shown while it was on its way. */
+  clientRequestId?: string
 }
 
 /** A quoted message: its id (to scroll to it), who wrote it and its first line. `gone` when it was removed. */

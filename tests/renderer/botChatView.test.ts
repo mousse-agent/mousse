@@ -197,6 +197,50 @@ describe('the transcript', () => {
     expect(fake.calls).toContainEqual(['messages', 'inbox', { beforeSeq: 21, limit: 50 }])
     expect(transcript().querySelectorAll('article')).toHaveLength(70)
   })
+
+  it('a quote of a message not loaded yet loads older pages until it is there, then scrolls to it and lights it', async () => {
+    const scrolled: string[] = []
+    const scrollIntoView = vi.fn(function (this: HTMLElement) { scrolled.push(this.getAttribute('data-message-id')!) })
+    Element.prototype.scrollIntoView = scrollIntoView
+    try {
+      fake.chats.inbox = [
+        message(1, { id: 'o-old', author: 'owner', text: 'Research vacuums' }),
+        ...Array.from({ length: 118 }, (_, index) => message(index + 2)),
+        message(120, { id: 'b-late', text: 'The Q7 is the pick.', replyTo: { id: 'o-old', author: 'owner', text: 'Research vacuums' } })
+      ]
+      await open()
+      expect(transcript().querySelector('[data-message-id="o-old"]')).toBeNull()
+      await click(transcript().querySelector('[data-message-id="b-late"] .bot-reply-quote'))
+      await settle()
+      // Two pages back: 71–120 is held, then 21–70, then 1–20 with the quoted message.
+      expect(fake.calls.filter((call) => call[0] === 'messages').slice(1)).toEqual([['messages', 'inbox', { beforeSeq: 71, limit: 50 }], ['messages', 'inbox', { beforeSeq: 21, limit: 50 }]])
+      expect(scrolled).toEqual(['o-old'])
+      expect(transcript().querySelector('[data-message-id="o-old"]')!.classList.contains('is-shown')).toBe(true)
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
+  })
+
+  it('a quote of a message the chat no longer has loads what there is and does nothing else', async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    try {
+      fake.chats.inbox = [
+        ...Array.from({ length: 69 }, (_, index) => message(index + 1)),
+        message(70, { id: 'b-late', text: 'Done.', replyTo: { id: 'deleted', author: 'owner', text: 'Research vacuums' } })
+      ]
+      await open()
+      await click(transcript().querySelector('[data-message-id="b-late"] .bot-reply-quote'))
+      await settle()
+      expect(fake.calls).toContainEqual(['messages', 'inbox', { beforeSeq: 21, limit: 50 }])
+      expect(useBotsStore.getState().chats.inbox?.hasMore).toBe(false)
+      expect(scrollIntoView).not.toHaveBeenCalled()
+      expect(transcript().querySelector('.is-shown')).toBeNull()
+      expect(useBotsStore.getState().error).toBeNull()
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
+  })
 })
 
 describe('while it works', () => {
@@ -279,6 +323,28 @@ describe('the composer', () => {
     // Up in the empty box brings the message back, as in a thread.
     await press('ArrowUp')
     expect(box().value).toBe('Do this every weekday at 9.')
+  })
+
+  it('two identical messages on their way are two bubbles, and each confirmation clears only its own', async () => {
+    await open()
+    const releases: Array<() => void> = []
+    vi.mocked(fake.client.send).mockImplementation((botId, text, clientRequestId) => new Promise((resolve) => {
+      releases.push(() => resolve(message(releases.length + 9, { id: `sent:${clientRequestId}`, author: 'owner', text, clientRequestId })))
+    }))
+    for (let n = 0; n < 2; n += 1) {
+      await type(box(), 'ok')
+      await press('Enter')
+    }
+    const ids = vi.mocked(fake.client.send).mock.calls.map((call) => call[2])
+    expect(new Set(ids).size).toBe(2)
+    expect(transcript().querySelectorAll('.bot-you.is-pending')).toHaveLength(2)
+    // The second message's confirmation comes first (an event can beat the first send's answer).
+    await act(async () => fake.emit.message('inbox', message(20, { id: 'sent-2', author: 'owner', text: 'ok', clientRequestId: ids[1] as string })))
+    expect([...transcript().querySelectorAll('.bot-you.is-pending')].map((bubble) => bubble.getAttribute('data-message-id'))).toEqual([`pending:${ids[0]}`])
+    await act(async () => releases[0]!())
+    await settle()
+    expect(transcript().querySelector('.is-pending')).toBeNull()
+    expect(transcript().querySelectorAll('.bot-you')).toHaveLength(2)
   })
 
   it('puts the words back when sending fails, and says why above the composer', async () => {

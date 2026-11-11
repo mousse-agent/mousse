@@ -86,7 +86,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       // The service saves the files in the bot's files folder; the row names the copies.
       const saved = attachments?.map((file) => ({ name: file.name, path: `/home/me/.mousse/bots/files/${botId}/attachments/2026-11-08/${file.name}` }))
       const quoted = replyTo ? (fake.chats[botId] ?? []).find((entry) => entry.id === replyTo) : undefined
-      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, ...(saved?.length ? { attachments: saved } : {}), ...(quoted ? { replyTo: { id: quoted.id, author: quoted.author, text: quoted.text } } : {}) })
+      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, clientRequestId, ...(saved?.length ? { attachments: saved } : {}), ...(quoted ? { replyTo: { id: quoted.id, author: quoted.author, text: quoted.text } } : {}) })
       fake.chats[botId] = [...(fake.chats[botId] ?? []), row]
       return row
     })),

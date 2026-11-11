@@ -180,7 +180,8 @@ export class BotChatProjection {
       ...(row.error ? { error: row.error } : {}),
       ...(row.activationId ? { activationId: row.activationId } : {}),
       ...(row.attachments?.length ? { attachments: row.attachments } : {}),
-      ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {})
+      ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {}),
+      ...(row.author === 'owner' && row.clientRequestId ? { clientRequestId: row.clientRequestId } : {})
     }
   }
 
