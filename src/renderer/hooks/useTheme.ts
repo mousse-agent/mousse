@@ -43,7 +43,6 @@ const GLASS_OWNED_VARS = [
   '--bg-tertiary',
   '--app-window-bg',
   '--gradient-surface',
-  '--glass-blur',
   '--glass-alpha-base',
   '--glass-alpha-strong',
   '--glass-alpha-soft',
@@ -128,7 +127,6 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
     // glass surface duplicates off-screen render targets and significantly
     // increases GPU-process memory. Keep translucency, but let the single
     // native material provide the blur.
-    root.style.setProperty('--glass-blur', 'none')
     root.style.setProperty(
       '--glass-bg',
       'rgba(var(--acrylic-base-rgb), var(--glass-alpha-base))'
@@ -154,7 +152,6 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
     for (const name of GLASS_OWNED_VARS) {
       root.style.removeProperty(name)
     }
-    root.style.setProperty('--glass-blur', 'none')
     root.setAttribute('data-acrylic', 'false')
   }
 }

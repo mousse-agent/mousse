@@ -274,9 +274,8 @@ html[data-theme='light'] {
   --mousse-blush: #f0def1;
   --mousse-cream: #f4e5f4;
 
-  /* Glass surfaces (semi-transparent for acrylic) */
-  /* The native acrylic material (useTheme) does the blur; nested glass never blurs again. */
-  --glass-blur: none;
+  /* Glass surfaces (semi-transparent for acrylic). The native acrylic material (useTheme) does the blur;
+     nested glass never blurs again. */
   /* Neutral charcoal surfaces keep accent colors expressive without tinting the whole UI. */
   --surface-base: #1b1c23;
   --surface-strong: #17191e;
