@@ -452,6 +452,17 @@ export class LiveRun {
   readonly seen = new Set<string>()
   /** Pushed message ids no result has echoed yet. */
   readonly owned = new Set<string>()
+  /**
+   * Pushed ids Claude Code has read: its `command_lifecycle` frame said `started` (or `completed`), or a frame or result
+   * named the id. Kept after the run is cancelled, since a Stop's interrupt can race a read.
+   */
+  readonly read = new Set<string>()
+  /** Pushed ids Claude Code dropped unread (a cancel took them from its queue): it will never run them. */
+  readonly dropped = new Set<string>()
+  /** Told, at once, each time Claude Code reads a pushed id of this run for the first time. Must not throw. */
+  onRead: ((id: string) => void) | undefined
+  /** The ids of the steers this run pushed (`LiveSession.steer`). */
+  readonly steerIds = new Set<string>()
   steered = false
   settled = false
   /** The turn was cancelled but the stream still owes its result; frames are dropped until then. */
@@ -534,6 +545,17 @@ export interface LiveSessionHooks {
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
+
+/**
+ * What Claude Code says about a pushed message (`command_lifecycle`, an internal frame of the stream): `queued` when it
+ * enters the command queue, `started` when it drains into a turn (the model reads it), then one of `completed`,
+ * `cancelled`, `discarded` or `refused`.
+ */
+function lifecycleOf(message: SDKMessage): { id: string; state: string } | undefined {
+  const frame = message as { type?: unknown; command_uuid?: unknown; state?: unknown }
+  if (frame.type !== 'command_lifecycle' || typeof frame.command_uuid !== 'string' || typeof frame.state !== 'string') return undefined
+  return { id: frame.command_uuid, state: frame.state }
+}
 
 function echoedIds(message: SDKMessage): string[] {
   const frame = message as { user_message_uuid?: unknown; user_message_uuids?: unknown }
@@ -758,9 +780,12 @@ export class LiveSession<Turn = unknown> {
   /**
    * Delivers a steer to the live turn without interrupting it: foreground subagents move to the
    * background first (a steer aborts the stream, which would end them), then the text is pushed as an
-   * immediate user message the run owns. Returns false when the run ended first.
+   * immediate user message the run owns. Returns the pushed message's id, or false when the run ended first.
+   * Pushed is not read: `run.read` and `onRead` say when Claude Code reads it, and `unreadFate` what became of
+   * one it had not read when the turn ended. `pushed` is told the id at the moment of the push, before anything
+   * else can run.
    */
-  async steer(run: LiveRun, text: string): Promise<boolean> {
+  async steer(run: LiveRun, text: string, pushed?: (id: string) => void): Promise<string | false> {
     const query = this.query
     if (!query || run.settled || run.abandoned || this.dead) return false
     run.steerInFlight++
@@ -779,11 +804,12 @@ export class LiveSession<Turn = unknown> {
       // The turn's result may have arrived while the foreground work moved; settling waited for this
       // steer, but a steer never starts a turn the run no longer owns: it is the next queued turn.
       // A cancel under way could sweep the steer up; it waits, then looks again.
+      let id: string
       for (;;) {
         await this.afterCancel()
         if (run.settled || run.resultSeen || run.abandoned || this.dead || this.query !== query) return false
         try {
-          this.push(run, {
+          id = this.push(run, {
             type: 'user',
             message: { role: 'user', content: text },
             parent_tool_use_id: null,
@@ -797,7 +823,9 @@ export class LiveSession<Turn = unknown> {
       }
       run.steered = true
       run.deferredResult = undefined
-      return true
+      run.steerIds.add(id)
+      pushed?.(id)
+      return id
     } finally {
       run.steerInFlight--
       const deferred = run.deferredResult
@@ -838,7 +866,11 @@ export class LiveSession<Turn = unknown> {
     if (query && !this.dead && !over && (run.ids.size > 0 || run.kind === 'continuation')) {
       // The interrupt is sent: a frame of the wake that arrives later must not send another.
       if (run.kind === 'continuation') run.interruptSent = true
-      void this.interruptFor(run, query)
+      // A steer Claude Code has not read is handed back to Mousse when the turn ends: Claude Code must not run it too.
+      // A plain interrupt leaves it queued, and Claude Code starts it at once as a new turn (spike S1), before a second
+      // cancel could land, so the queue is swept in the same round trip.
+      const unreadSteer = [...run.steerIds].some((id) => run.owned.has(id) && !run.read.has(id))
+      void this.interruptFor(run, query, unreadSteer)
     }
     // A run that was never answered keeps owning its ids until each has its result or was cancelled; a
     // wake that owns a steer keeps its place among the runs for that, whatever started it.
@@ -866,33 +898,38 @@ export class LiveSession<Turn = unknown> {
    * owned by the cancelled run, so its result is not given to anyone else. A Claude Code that sends no
    * receipt cannot cancel a prompt it never started; only closing the process drops it, which is not done
    * while the process has background work (the prompt then runs and its result is dropped).
+   *
+   * `sweep`: the run owns a steer Claude Code has not read, which is handed back to Mousse. The queue is cancelled in
+   * the interrupt itself, with no plain interrupt first, so Claude Code cannot start the steer in between.
    */
-  private async interruptFor(run: LiveRun, query: Query): Promise<void> {
+  private async interruptFor(run: LiveRun, query: Query, sweep = false): Promise<void> {
     this.cancelling++
     try {
-      await this.interruptSequence(run, query)
+      await this.interruptSequence(run, query, sweep)
     } finally {
       this.cancelFinished()
     }
   }
 
-  private async interruptSequence(run: LiveRun, query: Query): Promise<void> {
+  private async interruptSequence(run: LiveRun, query: Query, sweep: boolean): Promise<void> {
     type Receipt = { still_queued?: string[]; cancelled?: string[] } | undefined
     const target = query as { interrupt(options?: { cancelQueued?: boolean }): Promise<Receipt> }
-    let receipt: Receipt
-    try {
-      receipt = (await this.bounded(target.interrupt())) ?? undefined
-    } catch (error) {
-      if (error instanceof CancelTimedOut) this.giveUpCancel()
-      return
+    if (!sweep) {
+      let receipt: Receipt
+      try {
+        receipt = (await this.bounded(target.interrupt())) ?? undefined
+      } catch (error) {
+        if (error instanceof CancelTimedOut) this.giveUpCancel()
+        return
+      }
+      if (this.dead) return
+      if (!receipt) {
+        if (run.kind === 'prompt' && !run.started && !run.settled && run.owned.size > 0 && this.obligations.size === 0) this.close('closed')
+        return
+      }
+      const queued = (receipt.still_queued ?? []).filter((id) => run.owned.has(id))
+      if (queued.length === 0) return
     }
-    if (this.dead) return
-    if (!receipt) {
-      if (run.kind === 'prompt' && !run.started && !run.settled && run.owned.size > 0 && this.obligations.size === 0) this.close('closed')
-      return
-    }
-    const queued = (receipt.still_queued ?? []).filter((id) => run.owned.has(id))
-    if (queued.length === 0) return
     let cancelled: Receipt
     try {
       cancelled = (await this.bounded(target.interrupt({ cancelQueued: true }))) ?? undefined
@@ -901,6 +938,13 @@ export class LiveSession<Turn = unknown> {
       return
     }
     if (this.dead) return
+    if (sweep && !cancelled) {
+      // A Claude Code that sends no receipt is older than the queue cancel and ignored it: the steer is still queued and
+      // would run beside the one handed back. Closing the process drops it (a resumed session does not run a message
+      // that was queued when its process ended, spike S1), unless background work keeps the process.
+      if (this.obligations.size === 0) this.close('closed')
+      return
+    }
     if (this.obligations.loseCarried() > 0)
       this.noticeLater('A background helper finished while a message was being cancelled, and its result may not have been delivered. The thread stays waiting until the four-hour limit; Stop releases it now.')
     // Every cancelled id is reconciled against the run that owns it: the cancel swept the whole queue.
@@ -939,6 +983,7 @@ export class LiveSession<Turn = unknown> {
   private cancelId(id: string): void {
     const owner = this.ownerOf([id])
     if (!owner) return
+    if (!owner.read.has(id)) owner.dropped.add(id)
     owner.owned.delete(id)
     if (owner.abandoned) {
       if (owner.owned.size === 0) this.finishCancelled(owner)
@@ -948,6 +993,66 @@ export class LiveSession<Turn = unknown> {
     // is still running and which ends at its own result.
     if (owner.kind === 'prompt' && owner.owned.size === 0 && owner.steerInFlight === 0 && !owner.settled)
       this.failCancelled(owner, new Error('Claude Code cancelled the message before it started; send it again'))
+  }
+
+  /**
+   * What became of `id`, a message `run` pushed that Claude Code had not read when the run ended:
+   * - `read`: Claude Code read it after all (a Stop's interrupt can race the read), or it is no longer queued, so a
+   *   turn took it;
+   * - `dropped`: Claude Code removed it from its queue unread (a cancel's receipt, or `cancelAsyncMessage` here), so
+   *   it never runs there;
+   * - `gone`: the process ended (Stop closes it). A Claude Code killed with a message still queued does not run it
+   *   when the session is resumed (spike S1);
+   * - `cut`: the run was cancelled, and its interrupt sweeps Claude Code's queue (`abandon`). Not waited for, so a Stop
+   *   ends the turn at once;
+   * - `unknown`: Claude Code could not say (no per-message cancel, or the cancel failed). It may still run it.
+   *
+   * Only a run that ended with its result asks Claude Code (`cancelAsyncMessage`, which drops a message still queued
+   * and leaves one a turn already took). Never throws.
+   */
+  async unreadFate(run: LiveRun, id: string): Promise<'read' | 'dropped' | 'gone' | 'cut' | 'unknown'> {
+    const known = (): 'read' | 'dropped' | undefined => (run.read.has(id) ? 'read' : run.dropped.has(id) ? 'dropped' : undefined)
+    if (known()) return known()!
+    const query = this.query
+    if (this.dead || !query) return 'gone'
+    if (run.abandoned) return 'cut'
+    const cancel = (query as { cancelAsyncMessage?: (uuid: string) => Promise<boolean> }).cancelAsyncMessage
+    if (typeof cancel !== 'function') return 'unknown'
+    let removed: boolean
+    try {
+      removed = (await this.bounded(Promise.resolve(cancel.call(query, id)))) === true
+    } catch (error) {
+      // What Claude Code has queued is unknown: as for a cancel that does not answer, the process is not kept.
+      if (error instanceof CancelTimedOut) {
+        this.giveUpCancel()
+        return known() ?? 'gone'
+      }
+      return known() ?? (this.dead ? 'gone' : 'unknown')
+    }
+    if (known()) return known()!
+    if (removed) {
+      // Removed unread: the run that pushed it no longer waits for its result.
+      run.dropped.add(id)
+      this.cancelId(id)
+      return 'dropped'
+    }
+    // No longer in the queue: a turn took it.
+    return 'read'
+  }
+
+  /** Claude Code read `ids` of the runs that pushed them. */
+  private markRead(ids: readonly string[]): void {
+    for (const run of this.ownersOf(ids)) {
+      for (const id of ids) {
+        if (!run.ids.has(id) || run.read.has(id)) continue
+        run.read.add(id)
+        try {
+          run.onRead?.(id)
+        } catch (error) {
+          console.warn('[claude-live] a read message could not be reported', error instanceof Error ? error.message : String(error))
+        }
+      }
+    }
   }
 
   private failCancelled(run: LiveRun, error: Error): void {
@@ -1032,11 +1137,19 @@ export class LiveSession<Turn = unknown> {
       if (open) observeRateLimit(message, open.rateLimits)
       return
     }
+    const lifecycle = lifecycleOf(message)
+    if (lifecycle) {
+      // `started`: a turn took the message, so the model reads it. Only the read is taken from this frame.
+      if (lifecycle.state === 'started' || lifecycle.state === 'completed') this.markRead([lifecycle.id])
+      return
+    }
     if (message.type !== 'stream_event' && message.type !== 'assistant' && message.type !== 'user') return
     const echoed = echoedIds(message)
     const owner = echoed.length ? this.ownerOf(echoed) : undefined
     // A frame that names a message of ours belongs to its run, or to no one once that run is over.
     if (echoed.length && !owner) return
+    // Read before the frame reaches its run, so a steer is in place before what the model says after it.
+    if (echoed.length) this.markRead(echoed)
     if (owner) {
       this.passOver(owner, echoed)
       this.cursor = owner
@@ -1296,6 +1409,8 @@ export class LiveSession<Turn = unknown> {
     const echoed = echoedIds(message)
     let target: LiveRun | undefined
     if (echoed.length) {
+      // A result that names a message answered it: Claude Code read it.
+      this.markRead(echoed)
       target = this.ownerOf(echoed)
       if (!target) return
       this.passOver(target, echoed)

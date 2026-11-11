@@ -689,6 +689,8 @@ class ManualSteerAdapter implements ProviderAdapter {
   /** Every steer text the provider accepted, in order. */
   readonly accepted: string[] = []
   holdPrompts = new Set<string>()
+  /** The turn's end hands back drains it took and did not accept too, as Claude Code's does for a steer it never read. */
+  handBackTaken = false
   turn: {
     prompt: string; ctl: TurnControl; sink: TurnSink; drains: Drain[]; taken: Set<string>; end: (how: 'reply' | 'fail' | 'crash') => void
     /** Runs `fn` in the turn's own async context, as the provider's callbacks run. */
@@ -753,7 +755,7 @@ class ManualSteerAdapter implements ProviderAdapter {
         this.turn = turn
       })
       if (this.turn === turn) this.turn = undefined
-      for (const entry of turn.drains.splice(0)) if (!turn.taken.has(entry.token)) ctl.returnSteer!(entry.text, entry.token)
+      for (const entry of turn.drains.splice(0)) if (!turn.taken.has(entry.token) || this.handBackTaken) ctl.returnSteer!(entry.text, entry.token)
       if (how === 'fail' || how === 'crash') throw new Error(`provider ${how}`)
     }
     const aborted = how === 'stop'
@@ -1055,5 +1057,31 @@ describe('A steer is accepted by its own drain token', () => {
     expect(w.inContext('A')).toBe(1)
     // B shows once, as its own turn's prompt; its copy inside the first turn is hidden.
     expect(w.shownUserMessages()).toEqual(['first', 'A', 'B'])
+  })
+
+  it('a drain the provider took and had not read when Stop came, handed back as the turn ends, waits queued once and runs once', async () => {
+    const w = world()
+    const { running, items, b } = await w.twoDrainsOneAccepted()
+    // B was pushed to the provider (taken) and the model has not read it, as Claude Code with a steer it has not started.
+    w.adapter.take(b)
+    w.adapter.handBackTaken = true
+    expectOnlyAAccepted(w, items)
+
+    await w.d.orch.abortRun(w.d.engine.getActiveRun(w.thread.id)!.runId, 'stop-1', w.thread.id)
+    await running
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped turn ended')
+    expect(w.queue()).toEqual([['B', 'pending']])
+    expect(w.acceptedIds()).not.toContain(items.B)
+    expect(w.inContext('B')).toBe(0)
+    expect(w.shownUserMessages()).toEqual(['first', 'A'])
+    // Nothing runs it until the person sends it.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(w.adapter.prompts).toEqual(['first'])
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, items.B)).toEqual({ ok: true })
+    await w.idle('B ran')
+    expect(w.adapter.prompts).toEqual(['first', 'B'])
+    expect(w.adapter.accepted).toEqual(['A'])
+    expect(w.inContext('A')).toBe(1)
   })
 })

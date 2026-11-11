@@ -61,6 +61,15 @@ export function resultFrame(options: { uuids?: string[]; text?: string; origin?:
   }
 }
 
+/** Claude Code's word on a pushed message: `started` when a turn takes it (the model reads it). */
+export const lifecycle = (uuid: string, state: 'queued' | 'started' | 'completed' | 'cancelled'): Frame => ({
+  type: 'command_lifecycle',
+  command_uuid: uuid,
+  state,
+  uuid: `lifecycle-${uuid}-${state}`,
+  session_id: SESSION
+})
+
 export const roster = (...tasks: Array<{ id: string; type?: string; ambient?: boolean }>): Frame => ({
   type: 'system',
   subtype: 'background_tasks_changed',
@@ -86,6 +95,10 @@ export class FakeClaudeProcess {
   /** The options of each `interrupt()` call. */
   readonly interruptOptions: Array<{ cancelQueued?: boolean } | undefined> = []
   stoppedTasks: string[] = []
+  /** The ids `cancelAsyncMessage` was asked to drop, in order. */
+  readonly cancelAsyncCalls: string[] = []
+  /** Whether the process has `cancelAsyncMessage` (an older Claude Code has no per-message cancel). */
+  cancelAsync = true
   /** The roster's tasks that have not ended: `local_agent` or `local_bash` by id. */
   private readonly liveTasks = new Map<string, string>()
   /**
@@ -153,6 +166,7 @@ export class FakeClaudeProcess {
       this.trackTasks(frame)
       const stamped = frame.user_message_uuids
       if (Array.isArray(stamped)) for (const id of stamped) this.started.add(String(id))
+      if (frame.type === 'command_lifecycle' && frame.state === 'started') this.started.add(String(frame.command_uuid))
       if (this.waiting) {
         const resolve = this.waiting
         this.waiting = undefined
@@ -255,6 +269,14 @@ export class FakeClaudeProcess {
       },
       stopTask: async (taskId: string) => {
         this.stoppedTasks.push(taskId)
+      },
+      // Like the real process: a message still in the queue is dropped (true); one a turn already took is not (false).
+      cancelAsyncMessage: async (uuid: string) => {
+        if (!this.cancelAsync) throw new Error('cancel_async_message is not supported')
+        this.cancelAsyncCalls.push(uuid)
+        if (!this.queued.includes(uuid)) return false
+        this.cancelled.add(uuid)
+        return true
       },
       close: () => {
         this.closed = true

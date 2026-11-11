@@ -73,14 +73,15 @@ export class TurnFrames {
   /**
    * Runs `run` once the message being written has ended: its result arrives (an aborted one, after a steer's cut) or
    * the next top-level assistant message starts. After a steer is pushed Claude Code still sends the rest of the
-   * message it was writing, until its cut lands; the steer's place in the reply is there. `flushNextMessage` runs
-   * whatever still waits (the turn ended first).
+   * message it was writing, until its cut lands; the steer's place in the reply is there. That place says nothing
+   * about whether Claude Code read the steer: an interrupt's message starts there too. What still waits when the turn
+   * ends is dropped with the turn.
    */
   atNextMessage(run: () => void): void {
     this.nextMessage.push(run)
   }
 
-  flushNextMessage(): void {
+  private flushNextMessage(): void {
     for (const run of this.nextMessage.splice(0)) run()
   }
 

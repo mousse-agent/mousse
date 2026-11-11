@@ -2437,6 +2437,59 @@ export class ClaudeSubscriptionProviderService {
     const steers: string[] = []
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let interruptRequested = false
+    /**
+     * Steers pushed into the live turn, by message id. Pushed is not read: a steer is accepted only once Claude Code
+     * reads it (`LiveRun.onRead`), never because a message started or the turn ended. One it has not read when the turn
+     * ends is settled by `settleUnreadSteers`.
+     */
+    const pushedSteers = new Map<string, { text: string; token?: string; steered: () => void; settled: boolean; placed: boolean }>()
+    /** Claude Code read the steer pushed as `id`: it is accepted, and the reply goes on below it. */
+    const steerRead = (id: string): void => {
+      const entry = pushedSteers.get(id)
+      if (!entry || entry.settled) return
+      entry.settled = true
+      entry.steered()
+      if (!entry.placed) {
+        entry.placed = true
+        frames.breakParagraph()
+      }
+    }
+    /**
+     * Claude Code finishes sending the message it was writing until its cut lands: the steer's place in the reply is
+     * where the next message starts, so the old message's last words stay above it. The break is only placed there; the
+     * steer is accepted when Claude Code reads it, which a message start (an interrupt's, or a Stop's) does not show.
+     */
+    const steerPlace = (id: string): void => {
+      const entry = pushedSteers.get(id)
+      if (!entry || entry.settled || entry.placed) return
+      entry.placed = true
+      frames.breakParagraph()
+    }
+    /**
+     * Each steer pushed that Claude Code had not read when the turn ended (a Stop, an interrupt, a failure, or a result
+     * that came first) is accepted if Claude Code read it after all, and otherwise handed back by its token, so it
+     * comes back as queued, and Claude Code must not run it as well (`LiveSession.unreadFate`):
+     * - a cancelled turn's interrupt sweeps Claude Code's queue, and a Stop closes the process;
+     * - after a result, Claude Code is asked to drop it (`cancelAsyncMessage`): dropped, it is handed back; already
+     *   taken by a turn, it is read.
+     * When Claude Code cannot say, it is still handed back: at least once, never lost. Never throws.
+     */
+    const settleUnreadSteers = async (): Promise<void> => {
+      if (!live || !liveRun) return
+      for (const [id, entry] of pushedSteers) {
+        if (entry.settled) continue
+        const fate = await live.unreadFate(liveRun, id)
+        if (entry.settled) continue
+        if (fate === 'read') {
+          steerRead(id)
+          continue
+        }
+        entry.settled = true
+        if (fate === 'unknown')
+          console.warn('[claude] a steer Claude Code had not read is handed back, but Claude Code could not confirm it dropped it; it may run twice', { threadId: input.threadId })
+        input.returnSteer?.(entry.text, entry.token)
+      }
+    }
     const collectSteer = () => {
       if (controller.signal.aborted) return
       if (liveRun && (liveRun.settled || liveRun.abandoned || liveRun.resultSeen)) return
@@ -2452,16 +2505,14 @@ export class ClaudeSubscriptionProviderService {
         // A live turn is steered without interrupting it: the text joins the stream as an immediate
         // message, and background helpers keep running.
         this.questions.autoRejectPendingForThread(input.threadId)
-        void live.steer(liveRun, steer).then((pushed) => {
-          if (pushed) {
-            input.steerTaken?.(drained?.token)
-            // Claude Code finishes sending the message it was writing until its cut lands: the steer takes its place
-            // in the reply where the next message starts, so the old message's last words stay above it.
-            frames.atNextMessage(() => {
-              steered()
-              frames.breakParagraph()
-            })
-          } else input.returnSteer?.(steer, drained?.token)
+        // Known from the moment of the push, so the turn's end settles it whenever it comes.
+        const pushed = (id: string): void => {
+          input.steerTaken?.(drained?.token)
+          pushedSteers.set(id, { text: steer, ...(drained ? { token: drained.token } : {}), steered, settled: false, placed: false })
+          frames.atNextMessage(() => steerPlace(id))
+        }
+        void live.steer(liveRun, steer, pushed).then((id) => {
+          if (id === false) input.returnSteer?.(steer, drained?.token)
         }, () => cancel())
         return
       }
@@ -2709,6 +2760,7 @@ export class ClaudeSubscriptionProviderService {
         }
       }
       if (live && liveRun) {
+        liveRun.onRead = steerRead
         startSteering()
         const aborted = new Promise<never>((_, reject) => {
           const fail = () => reject(controller.signal.reason ?? new Error('Turn cancelled'))
@@ -2815,8 +2867,6 @@ export class ClaudeSubscriptionProviderService {
           if (frames.text) frames.text += '\n\n'
         }
       }
-      // A steer whose next message never started (the turn ended first) was still pushed: it is acknowledged now.
-      frames.flushNextMessage()
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
       const sessionId = frames.sessionId
@@ -2836,7 +2886,6 @@ export class ClaudeSubscriptionProviderService {
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
       throw error
     } finally {
-      frames.flushNextMessage()
       // Only this turn's controller: a live query is not the turn's to abort.
       controller.abort()
       // Background helpers keep calling tools after the turn ended, or was cancelled: they are checked by
@@ -2850,7 +2899,15 @@ export class ClaudeSubscriptionProviderService {
         // process, the adapter reports the history boundary it left (`commitFailed`, `commitInterrupted`),
         // and only a request that starts from it continues on this process (see `reusableLive`).
         if (!success && liveRun.ids.size > 0) live.meta.pushedFailed = true
+        liveRun.onRead = undefined
       } else query?.close()
+      // After the cancel above has started: a steer Claude Code has not read is accepted or handed back before the turn
+      // ends, never left behind.
+      try {
+        await settleUnreadSteers()
+      } catch (error) {
+        console.warn('[claude] steers Claude Code had not read could not be settled', error instanceof Error ? error.message : String(error))
+      }
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
