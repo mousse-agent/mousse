@@ -365,14 +365,26 @@ export interface RunSettings {
   newThreadWorktree: boolean
   /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
+  /**
+   * How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2). `strict`: on
+   * a provider that reports a tool only when it starts, a steer held for a tool waits for the provider's own turn to
+   * end, or Send now. Absent or `best_effort`: it goes in shortly after the tool. No UI sets it.
+   */
+  steerRelease?: Record<string, SteerRelease>
 }
+
+export type SteerRelease = 'best_effort' | 'strict'
 
 export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
 export const MAX_USAGE_LIMIT_PAUSE_CAP = 10
 
 export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSettings {
   const cap = raw?.usageLimitPauseCap
+  const release = raw?.steerRelease && typeof raw.steerRelease === 'object'
+    ? Object.entries(raw.steerRelease).filter((entry): entry is [string, SteerRelease] => entry[1] === 'strict' || entry[1] === 'best_effort')
+    : []
   return {
+    ...(release.length ? { steerRelease: Object.fromEntries(release) } : {}),
     resumeAfterUsageLimit: raw?.resumeAfterUsageLimit === true,
     usageLimitPauseCap:
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP

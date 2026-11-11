@@ -1,6 +1,6 @@
 # Steer waits for commands, Pi cuts in, and cut-off turns are marked
 
-Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). Nothing here is built yet. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
+Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). PR 1 (acceptance per token) and PR C (the mark) are built; PR 2 (the hold on Claude Code, Send now) builds §2.2–§2.4 and §2.9–§2.11, with §2.4 updated to spike S1. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
 
 ## Summary
 
@@ -196,8 +196,8 @@ Send now and Stop end tools by design; the guarantee is about steers only.
 - `LiveSession.steer` makes the background moves, waits for `afterCancel()`, calls `mayCut(token)`, and only then pushes `priority: 'now'`. Claude Code has the tool's result in its conversation by then, so the cut only ends the request that follows.
 
 **Background moves.**
-- `LiveSession.steer` stops calling `backgroundTasks()` with no argument, which the SDK says also moves a foreground Bash.
-- It calls `backgroundTasks(toolUseId)` once for each foreground subagent call still open. The 5 s wait (`STEER_BACKGROUND_MOVE_MS`) stays.
+- `LiveSession.steer` no longer calls `backgroundTasks()` with no argument. S1 showed that this call is what ended commands for the person (#874): it moves a running Bash to the background, where it finishes unseen and a wake turn follows.
+- It calls `backgroundTasks(toolUseId)` once for each foreground subagent call still open. The 5 s wait (`STEER_BACKGROUND_MOVE_MS`) stays; a move that does not answer within it counts as not moved.
 - **A subagent that cannot be moved.** When the call throws (background tasks are disabled for the session) or returns false:
   - the adapter reports a tool-event patch, `{ phase: 'update', callId, activity: { notMovable: true } }`, so `foregroundTools` counts that subagent;
   - it hands the steer back.
@@ -205,8 +205,11 @@ Send now and Stop end tools by design; the guarantee is about steers only.
   The next peek then says `hold` rather than `cut`, so the adapter does not retry the move every poll. The subagent is waited on, never ended.
 
 **Send now.**
-- It drains forced and pushes `now`, with no background move.
-- If S1 shows that `now` only moves the Bash to the background (a `detachedToolCall` or "running in the background" result), Send now then calls `stopTask(taskId)` (SDK 0.3.291 `Query.stopTask`) for that task, with the task id from the result (`claudeActivity.ts:381`). The command is stopped either way.
+- It drains forced and pushes the steer, with no background move. On Claude Code 2.1.322 a `'now'` message waits for a running Bash: it neither kills nor moves it (S1). So pushing alone does not stop the command.
+- Right after the push, Send now stops the foreground calls:
+  - when Claude Code has named a task for every one of them (`task_started`, about 3 s after a command starts), `stopTask(taskId)` for each (SDK 0.3.291 `Query.stopTask`). The command ends, and the steer is read once in the same turn;
+  - otherwise one `interrupt()`. It ends the command, and the pushed steer stays queued and runs once, as the turn's next request. An interrupt also stops background agents, so the task stop is preferred when it is possible.
+- The push comes first, so the steer is already queued when the command ends: it cannot be lost to the interrupt, and it is never sent twice.
 
 **No live session:** the same hold through `drainEntry`, and `mayCut` before `query.interrupt()`.
 
@@ -217,7 +220,7 @@ It may replace the hold for Claude only if S1 proves all three of these:
 2. what Stop, an interrupt and a daemon crash do with a pushed, unread `'next'` message, so a "pushed, unread" state can be given back exactly once;
 3. that Send now can stop the tool (`stopTask` or an interrupt) without the text being sent twice.
 
-Until then, PR 2 holds and then pushes `now` after `mayCut`.
+Until then, PR 2 holds and then pushes `now` after `mayCut`. On 2.1.322 the push after the result only ends the request that follows (S1: `'now'` waits for a running Bash), so a steer released after a command never ends one.
 
 **Spike S1** (hands-on: the real Claude Code CLI against a local fake Messages server, fake key, isolated home, no sign-in). In this order:
 1. `priority: 'next'`, for each of these questions:
@@ -443,7 +446,7 @@ Each new test must fail on the code before its change.
   - a Bash that starts during the move hands the steer back;
   - `backgroundTasks(id)` only for subagent calls, never the no-argument form;
   - a failed move reports `notMovable` and the next peek holds without another move;
-  - Send now pushes `now` during the tool, then `stopTask` when the result says it moved to the background.
+  - Send now pushes the steer during the tool, then interrupts the turn; or stops the command's task (`stopTask`) once Claude Code named it (`task_started`).
 - `tests/run/codexAdapter.test.ts` with a new fixture `steer-during-command`:
   - `item/started` for a command, the steer held, `item/completed`, the window, `turn/interrupt`, then `turn/start` with the text, taken on its acceptance;
   - strict: `turn/completed`, then `turn/start` with the text, and no interrupt;

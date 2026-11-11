@@ -62,6 +62,11 @@ export class TurnFrames {
   private readonly handedOff = new Set<string>()
   /** A task's end that arrived before its call's placeholder result, kept until that result says whether it is the call's end. */
   private readonly earlyEnds = new Map<string, Record<string, unknown>>()
+  /** The task Claude Code runs an open call as (`task_started`): Send now stops it by this id. */
+  private readonly taskIds = new Map<string, string>()
+  /** Open subagent calls Claude Code moved to the background, or that could not be moved there. */
+  private readonly backgrounded = new Set<string>()
+  private readonly unmovable = new Set<string>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
@@ -120,6 +125,38 @@ export class TurnFrames {
       if (this.parents.get(callId) || this.contexts.get(callId)?.kind === 'subagent' || name === 'Agent' || name === 'Task') return true
     }
     return false
+  }
+
+  private isSubagent(callId: string): boolean {
+    const name = this.tools.get(callId)
+    return this.contexts.get(callId)?.kind === 'subagent' || name === 'Agent' || name === 'Task'
+  }
+
+  /**
+   * The turn's own subagent calls still in the foreground (open, not handed off, not moved): a steer moves each to the
+   * background by its id before it is pushed. One that could not be moved is waited for instead.
+   */
+  foregroundSubagents(): string[] {
+    return [...this.tools.keys()].filter((callId) =>
+      !this.parents.get(callId) && this.isSubagent(callId) && !this.handedOff.has(callId) && !this.backgrounded.has(callId) && !this.unmovable.has(callId))
+  }
+
+  /**
+   * The turn's own calls it waits for (Send now stops them): open root calls that are not subagents, or subagents that
+   * could not be moved, with the task each runs as when Claude Code named one.
+   */
+  foregroundCalls(): Array<{ callId: string; taskId?: string }> {
+    return [...this.tools.keys()]
+      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)))
+      .map((callId) => {
+        const taskId = this.taskIds.get(callId)
+        return taskId ? { callId, taskId } : { callId }
+      })
+  }
+
+  /** Claude Code could not move the subagent call `callId` to the background: the turn waits for it. */
+  markNotMovable(callId: string): void {
+    if (this.tools.has(callId)) this.unmovable.add(callId)
   }
 
   /** A steer cut the turn here: what follows is a new paragraph. */
@@ -265,6 +302,9 @@ export class TurnFrames {
     this.parents.delete(callId)
     this.handedOff.delete(callId)
     this.earlyEnds.delete(callId)
+    this.taskIds.delete(callId)
+    this.backgrounded.delete(callId)
+    this.unmovable.delete(callId)
   }
 
   /**
@@ -282,6 +322,8 @@ export class TurnFrames {
     if (frame.subtype === 'task_started') {
       const taskId = typeof frame.task_id === 'string' ? frame.task_id : undefined
       const background = frame.is_backgrounded === true && kind === 'subagent'
+      if (taskId) this.taskIds.set(callId, taskId)
+      if (background) this.backgrounded.add(callId)
       if ((kind !== 'subagent' && kind !== 'command') || (!taskId && !background)) return
       this.sink.onTool?.({
         phase: 'update',

@@ -18,6 +18,14 @@ describe('the turn state of a window that read its thread again', () => {
     expect(resnapshotTurnState('t1', { turnState: own, activeTurn: running }, thinking)).toBe(own)
   })
 
+  it("keeps the service's held steer, so the Steer block still shows what it waits for and Send now", () => {
+    const own: TurnState = {
+      threadId: 't1', turnId: 'run:1', phase: 'tool_running', updatedAt: NOW.toISOString(),
+      heldSteer: { waitsFor: 'Bash', detail: 'sleep 30', tools: 1, since: NOW.toISOString(), holdGeneration: 2, itemIds: ['item-1'], runId: 'run:1' }
+    }
+    expect(resnapshotTurnState('t1', { turnState: own, activeTurn: running }, thinking).heldSteer).toEqual(own.heldSteer)
+  })
+
   it("is the service's own, with its phase, for a turn that runs but has not streamed yet (#873)", () => {
     // At a turn's silent start the service reports it running before it is active.
     const turnState: TurnState = { threadId: 't1', turnId: 'turn-1', phase: 'thinking', updatedAt: '2026-11-11T00:00:00.000Z' }

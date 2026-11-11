@@ -14,6 +14,7 @@ import type { TurnBudget } from './budget'
 import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import type { BotAuthority } from '../../shared/bots/personal/authority'
 import type { ProviderRef } from '../run/types'
+import type { SteerDelivery } from '../run/CommandPolicy'
 
 /**
  * Static capability manifest of a provider adapter (docs/run-engine/SPEC.md §13.2). Every key
@@ -31,6 +32,12 @@ export interface ProviderCapabilities {
    * - `queue_only`: the text waits for the turn to end.
    */
   steer: 'native' | 'interrupt_restart' | 'queue_only'
+  /**
+   * `CommandPolicy.steerDelivery`: when this adapter reports a tool call. `announce`: before it runs (a person's steer
+   * waits from the announcement); `start`: when it starts; `none`: the adapter has not adopted the hold, and a steer
+   * cuts in at once as before. Setting an adapter back to `none` is the per-provider rollback.
+   */
+  steerBoundary: 'announce' | 'start' | 'none'
   /** `CommandPolicy.stopStrategy`. */
   interrupt: boolean
   /** `featureGates.canUndoNatively` (Phase 6). */
@@ -181,6 +188,17 @@ export interface TurnSink {
    */
   status?(status: 'waiting' | 'reasoning'): void
   /**
+   * A person is asked about the call `callId` (an approval or a question), and it waits for them; `false` once they
+   * answered or the ask ended. Such a call is not a foreground tool: a person's steer does not wait for it, it answers it.
+   */
+  toolAwaiting?(callId: string, waiting: boolean): void
+  /**
+   * The provider's own turn ended inside the Mousse turn (Pi's `turn_end`, Codex's `turn/completed`) and no tool
+   * runs: a held steer goes in natively, as the next provider turn, with no cut. Holds until the next model output
+   * or tool event.
+   */
+  boundary?(): void
+  /**
    * Token usage; the orchestrator adds it to the usage statistics, attributed to the latest
    * `providerMetrics` model.
    */
@@ -242,7 +260,22 @@ export interface TurnControl {
    * `cut`: the drain holds a person's message, which the model must read now. A provider whose own steer
    * waits for the current reply or command to end cuts the reply instead and continues with the text.
    */
-  drainSteerEntry?(): { text: string; token: string; cut?: boolean } | undefined
+  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean } | undefined
+  /**
+   * What a drain now would do, without taking anything; undefined when nothing is pending
+   * (docs/design/steer-and-interruptions.md §2.2). An adapter on the hold (`steerBoundary` not `none`)
+   * calls it on its poll and drains only with `drainSteerEntry({ expect })` for the delivery it can make:
+   * with `expect`, a drain takes nothing unless the decision at that moment is one of them. `forced` on a
+   * drain: Send now asked for it, and the adapter stops the running tool. `holdGeneration` names the hold
+   * a Send now click was shown for.
+   */
+  peekSteer?(): { delivery: SteerDelivery; holdGeneration?: number } | undefined
+  /**
+   * The check at dispatch: called right before the adapter sends the cut for the drain `token`, after any
+   * await. False: a foreground tool is known or the release window is open, so the adapter hands the drain
+   * back with `returnSteer(text, token)`, and the hold resumes in the same generation. A forced drain may always cut.
+   */
+  mayCut?(token: string): boolean
   /**
    * The provider took the drain `token` names. Nothing is saved or acknowledged until
    * `TurnSink.steerAccepted(text, token)`. Until then the drain can still be handed back with

@@ -142,6 +142,10 @@ export class FakeClaudeProcess {
   private readonly started = new Set<string>()
   private readonly cancelled = new Set<string>()
   backgrounded = 0
+  /** The call each `backgroundTasks` named (undefined: the call with no id, which also moves a running command). */
+  readonly backgroundCalls: Array<string | undefined> = []
+  /** What `backgroundTasks` answers: `true` (moved), `false`, or `throw` (background tasks are off for the session). */
+  backgroundAnswer: boolean | 'throw' = true
   closed = false
   /** The prompt stream ended (the real process would exit and take its background work with it). */
   inputEnded = false
@@ -349,10 +353,12 @@ export class FakeClaudeProcess {
         await this.permissionGate
         this.permissionModes.push(mode)
       },
-      backgroundTasks: async () => {
+      backgroundTasks: async (toolUseId?: string) => {
         this.backgrounded++
+        this.backgroundCalls.push(toolUseId)
         await this.backgroundGate
-        return true
+        if (this.backgroundAnswer === 'throw') throw new Error('Background tasks are disabled in this session.')
+        return this.backgroundAnswer
       },
       supportedModels: async () => []
     }) as unknown as Query

@@ -257,6 +257,7 @@ export const PROTOCOL_METHODS = [
   'orchestrator.send',
   'orchestrator.abort',
   'orchestrator.steer',
+  'orchestrator.steerNow',
   'orchestrator.retry',
   'orchestrator.isTurnActive',
   'orchestrator.contextUsage',

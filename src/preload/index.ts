@@ -305,6 +305,23 @@ const api = {
       ipcRenderer.on('orchestrator:turn-steered', handler)
       return () => ipcRenderer.removeListener('orchestrator:turn-steered', handler)
     },
+    /** A Send now request's outcome (`steerNow`): the held steer went in, or the click matched nothing. */
+    onSteerNow: (
+      cb: (payload: { threadId?: string; requestId: string; outcome: 'applied' | 'stale' }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { threadId?: string; requestId: string; outcome: 'applied' | 'stale' }
+      ) => cb(payload)
+      ipcRenderer.on('orchestrator:steer-now', handler)
+      return () => ipcRenderer.removeListener('orchestrator:steer-now', handler)
+    },
+    /**
+     * Send now on a held steer (`TurnState.heldSteer`): stops the tool it waits for and sends it at once. `ok` false:
+     * the run is no longer the thread's active one.
+     */
+    steerNow: (request: { threadId: string; runId: string; holdGeneration: number; itemIds: string[]; clientRequestId: string }): Promise<{ ok: boolean; reason?: string }> =>
+      ipcRenderer.invoke('orchestrator:steerNow', request),
     /** `threadId` names the thread that asked; a thread on another computer needs it. */
     answerQuestions: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers, threadId),

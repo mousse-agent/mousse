@@ -17,6 +17,8 @@ export const BRIDGE_REMOTE_METHODS = {
   'threads.settle': { capability: 'write', mutating: true },
   'orchestrator.send': { capability: 'chat', mutating: true },
   'orchestrator.steer': { capability: 'chat', mutating: true },
+  // Send now on a held steer: whoever may steer the thread.
+  'orchestrator.steerNow': { capability: 'chat', mutating: true },
   'orchestrator.abort': { capability: 'chat', mutating: true },
   'orchestrator.isTurnActive': { capability: 'read', mutating: false },
   'orchestrator.contextUsage': { capability: 'read', mutating: false },

@@ -84,6 +84,8 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
  */
 export const CODEX_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'native',
+  // Until the Codex adapter adopts the hold (PR 3), a steer cuts in at once.
+  steerBoundary: 'none',
   interrupt: true,
   rollback: 'none',
   fork: 'portable',

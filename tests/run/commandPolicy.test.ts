@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { heartbeatToleranceMs, steerStrategy, stopStrategy } from '../../src/mms/run/CommandPolicy'
+import { heartbeatToleranceMs, steerDelivery, steerStrategy, stopStrategy, type SteerTurnFacts } from '../../src/mms/run/CommandPolicy'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
@@ -63,6 +63,62 @@ describe('steerStrategy', () => {
     expect(steerStrategy(caps({ steer: 'interrupt_restart', interrupt: false }), run('running'))).toBe(
       'queue'
     )
+  })
+})
+
+describe('steerDelivery (docs/design/steer-and-interruptions.md §2.2)', () => {
+  const turn = (patch: Partial<SteerTurnFacts> = {}): SteerTurnFacts => ({ foreground: 0, releaseOpen: false, strict: false, held: false, atBoundary: false, forced: false, ...patch })
+  const person = { person: true }
+  const agent = { person: false }
+  const hold = (steerBoundary: 'announce' | 'start', steer: ProviderCapabilities['steer'] = 'interrupt_restart') => caps({ steer, steerBoundary })
+
+  it.each(['announce', 'start'] as const)('a person\'s steer on a %s provider: forced cuts, a tool or the window holds, a boundary is native, writing cuts', (boundary) => {
+    const c = hold(boundary)
+    expect(steerDelivery(c, turn({ forced: true, foreground: 2 }), person)).toBe('cut')
+    expect(steerDelivery(c, turn({ foreground: 1 }), person)).toBe('hold')
+    expect(steerDelivery(c, turn({ releaseOpen: true }), person)).toBe('hold')
+    expect(steerDelivery(c, turn({ atBoundary: true }), person)).toBe('native')
+    expect(steerDelivery(c, turn(), person)).toBe('cut')
+  })
+
+  it('an agent\'s steer or a notice on a native provider is always native, during a tool too, and never forced', () => {
+    const c = hold('start', 'native')
+    for (const facts of [turn(), turn({ foreground: 1 }), turn({ releaseOpen: true }), turn({ atBoundary: true }), turn({ forced: true })])
+      expect(steerDelivery(c, facts, agent)).toBe('native')
+  })
+
+  it('an agent\'s steer or a notice on an interrupt_restart provider holds for a tool, is native at a boundary, and cuts while writing', () => {
+    const c = hold('announce')
+    expect(steerDelivery(c, turn({ foreground: 1 }), agent)).toBe('hold')
+    expect(steerDelivery(c, turn({ releaseOpen: true }), agent)).toBe('hold')
+    expect(steerDelivery(c, turn({ atBoundary: true }), agent)).toBe('native')
+    expect(steerDelivery(c, turn(), agent)).toBe('cut')
+  })
+
+  it('steerBoundary none keeps the behaviour from before the hold: a person cuts, anything else follows the capability', () => {
+    for (const facts of [turn(), turn({ foreground: 3 }), turn({ releaseOpen: true, strict: true, held: true }), turn({ atBoundary: true })]) {
+      expect(steerDelivery(caps({ steer: 'interrupt_restart', steerBoundary: 'none' }), facts, person)).toBe('cut')
+      expect(steerDelivery(caps({ steer: 'native', steerBoundary: 'none' }), facts, person)).toBe('cut')
+      expect(steerDelivery(caps({ steer: 'native', steerBoundary: 'none' }), facts, agent)).toBe('native')
+      expect(steerDelivery(caps({ steer: 'interrupt_restart', steerBoundary: 'none' }), facts, agent)).toBe('cut')
+    }
+    // Caps saved before the key existed read as none.
+    const { steerBoundary: _gone, ...old } = hold('announce')
+    expect(steerDelivery(old as ProviderCapabilities, turn({ foreground: 1 }), person)).toBe('cut')
+  })
+
+  it('strict keeps a steer that is already held held until the provider\'s turn ends, on a start provider only', () => {
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: true }), person)).toBe('hold')
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: true, atBoundary: true }), person)).toBe('native')
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: true, forced: true }), person)).toBe('cut')
+    // An announce provider knows every tool before it runs: strict changes nothing there.
+    expect(steerDelivery(hold('announce'), turn({ strict: true, held: true }), person)).toBe('cut')
+    // Best effort releases the same steer.
+    expect(steerDelivery(hold('start'), turn({ strict: false, held: true }), person)).toBe('cut')
+  })
+
+  it('strict, after a tool finished and model output closed the window, a new steer (nothing held) cuts', () => {
+    expect(steerDelivery(hold('start'), turn({ strict: true, held: false, foreground: 0, releaseOpen: false }), person)).toBe('cut')
   })
 })
 

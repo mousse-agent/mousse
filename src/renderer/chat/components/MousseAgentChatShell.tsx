@@ -18,6 +18,7 @@ import {
 import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
 import { TurnActionsContext, type TurnActions } from './agent-elements/turn-actions'
 import { TurnProgressContext, type TurnProgressState } from './agent-elements/turn-progress'
+import { HeldSteerContext, type HeldSteerState } from './agent-elements/steer-hold'
 import { QueuedMessages } from '../../components/QueuedMessages'
 import type { ThreadQueue } from '../../hooks/useThreadQueue'
 import './agent-elements/agent-ui.css'
@@ -103,11 +104,20 @@ function TurnProgressProvider({ threadId, children }: { threadId?: string | null
   const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
   const stopping = useAppStore(state => Boolean(threadId && state.stopRequests[threadId]))
   const turnUpdatedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.updatedAt : undefined))
+  // A steer waits for the running tool: the line's tooltip says when it goes in.
+  const steerHeld = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.heldSteer))
   const turnProgress = useMemo<TurnProgressState>(
-    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt }),
-    [turnPhase, turnStep, stopping, threadId, turnUpdatedAt]
+    () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt, steerHeld }),
+    [turnPhase, turnStep, stopping, threadId, turnUpdatedAt, steerHeld]
   )
   return <TurnProgressContext.Provider value={turnProgress}>{children}</TurnProgressContext.Provider>
+}
+
+/** The Steer block's wait line and Send now (`SteerHoldLine`): only what reads it renders when the hold changes. */
+function HeldSteerProvider({ threadId, children }: { threadId?: string | null; children: ReactNode }) {
+  const held = useAppStore(state => (threadId ? state.turnStates[threadId]?.heldSteer : undefined))
+  const value = useMemo<HeldSteerState>(() => ({ threadId, held }), [threadId, held])
+  return <HeldSteerContext.Provider value={value}>{children}</HeldSteerContext.Provider>
 }
 
 interface MousseAgentChatShellProps {
@@ -172,6 +182,7 @@ export function MousseAgentChatShell({
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
       <TurnActionsContext.Provider value={turnActions ?? null}>
       <TurnProgressProvider threadId={threadId}>
+      <HeldSteerProvider threadId={threadId}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -187,6 +198,7 @@ export function MousseAgentChatShell({
           enableImagePreview
           enableFind
         />
+      </HeldSteerProvider>
       </TurnProgressProvider>
       </TurnActionsContext.Provider>
       </SubagentInheritedProviderContext.Provider>

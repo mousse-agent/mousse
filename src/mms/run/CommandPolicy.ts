@@ -25,6 +25,62 @@ export function steerStrategy(caps: ProviderCapabilities, run: RunRecord | null)
 }
 
 /**
+ * What a drain of pending steers would do now (docs/design/steer-and-interruptions.md §2.2):
+ * - `cut`: end the provider's current reply now and continue the turn with the text;
+ * - `native`: the provider's own steer, or the next provider turn of the same run at a boundary;
+ * - `hold`: take nothing; the steers stay pending until a foreground tool has its result.
+ */
+export type SteerDelivery = 'cut' | 'native' | 'hold'
+
+/** When an adapter reports a tool call (`ProviderCapabilities.steerBoundary`). */
+export type SteerBoundary = 'announce' | 'start' | 'none'
+
+/** What the turn is doing when a steer is decided. */
+export interface SteerTurnFacts {
+  /** Foreground tools announced or running (`TranscriptAssembler.foregroundTools`). */
+  foreground: number
+  /** The release window after the last foreground tool is still open (`start` providers only). */
+  releaseOpen: boolean
+  /** Strict release for this instance (`runs.steerRelease`). */
+  strict: boolean
+  /** A steer is already held in this turn. Strict release keeps it held until the boundary. */
+  held: boolean
+  /** The provider reported the end of its own turn and nothing has run since. */
+  atBoundary: boolean
+  /** Send now: the person asked for the held steer to go in at once. */
+  forced: boolean
+}
+
+/**
+ * How pending steers reach a live turn. A person's steer waits for a foreground tool and cuts while
+ * the model writes; an agent's steer or a subagent notice follows the provider's `steer` capability,
+ * and on an `interrupt_restart` provider it also waits for a tool. A provider at `steerBoundary: 'none'`
+ * keeps the behaviour from before the hold: a person's steer cuts, anything else follows the capability.
+ */
+export function steerDelivery(caps: Pick<ProviderCapabilities, 'steer' | 'steerBoundary'>, turn: SteerTurnFacts, steer: { person: boolean }): SteerDelivery {
+  const capability: SteerDelivery = caps.steer === 'interrupt_restart' ? 'cut' : 'native'
+  // Caps saved before the key existed read as `none`.
+  const boundary: SteerBoundary = caps.steerBoundary ?? 'none'
+  if (boundary === 'none') return steer.person ? 'cut' : capability
+  if (steer.person && turn.forced) return 'cut'
+  // A `native` provider takes an agent's steer at its next step by itself: it waits for the tool.
+  if (!steer.person && caps.steer === 'native') return 'native'
+  if (turn.foreground > 0 || turn.releaseOpen) return 'hold'
+  // Strict release keeps a steer that is already held held until the provider's turn ends. On an
+  // `announce` provider every tool is known before it runs, so there is nothing to wait out.
+  if (turn.strict && turn.held && boundary === 'start' && !turn.atBoundary) return 'hold'
+  if (turn.atBoundary) return 'native'
+  return steer.person ? 'cut' : capability
+}
+
+/**
+ * How long the release window stays open after the last foreground tool's result on a `start`
+ * provider, when the model shows nothing (§2.3): twice the largest gap spike S4 measured on Codex
+ * between a result and the next start of the same response, plus 100 ms.
+ */
+export const STEER_SETTLE_MS = 232
+
+/**
  * `interrupt` asks the provider to stop the live turn; `settle_locally` ends the run without
  * provider I/O (nothing live, or the provider cannot be interrupted and the turn is abandoned by
  * its signal); `noop` for a missing or terminal run.

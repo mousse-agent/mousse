@@ -11,6 +11,8 @@ import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptR
  */
 export const CURSOR_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
+  // Until the Cursor adapter adopts the hold (PR 3), a steer cuts in at once.
+  steerBoundary: 'none',
   interrupt: true,
   rollback: 'none',
   fork: 'portable',

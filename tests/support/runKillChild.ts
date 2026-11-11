@@ -16,6 +16,8 @@
  *   separately; the provider takes both and accepts only `next`, by its drain token, then the process dies;
  * - `steer-two-drains-ack`: as `steer-two-drains`, and the process dies inside the acceptance of `next`: after its text
  *   and id are saved, before its queue row is dropped. What was saved then is written to `at-kill.json`;
+ * - `steer-held`: as `tool`, on a provider on the hold (it peeks, and drains only a cut, as Claude does); `next` is
+ *   steered and held for the running tool, never drained. A drain would be written to `cuts.log`;
  * - `approval`: the provider waits for a saved approval;
  * - `question`: the provider waits for an answer to a question.
  *
@@ -35,7 +37,7 @@ import { isOpenActivityRow } from '../../src/mms/run/restartNote'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon } from '../run/phase6Fixture'
 
-type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'steer-two-drains' | 'steer-two-drains-ack' | 'approval' | 'question'
+type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'steer-two-drains' | 'steer-two-drains-ack' | 'steer-held' | 'approval' | 'question'
 const [mode, home, scenario] = process.argv.slice(2) as ['first' | 'restart', string, Scenario | undefined]
 const twoDrains = scenario === 'steer-two-drains' || scenario === 'steer-two-drains-ack'
 process.env.MOUSSE_HOME = home
@@ -68,14 +70,22 @@ class KillAdapter implements ProviderAdapter {
       sink.text({ phase: 'start', content: '', contentIndex: 0 })
       sink.text({ phase: 'delta', content: 'partial reply', contentIndex: 0 })
       sink.progress()
-      if (scenario === 'tool' || scenario === 'uncertain') {
-        host.tools.toolLedger?.start({ id: 'call-read', name: scenario === 'tool' ? 'read_file' : 'bash', arguments: { path: 'a.txt' } } as never)
+      if (scenario === 'tool' || scenario === 'uncertain' || scenario === 'steer-held') {
+        host.tools.toolLedger?.start({ id: 'call-read', name: scenario === 'uncertain' ? 'bash' : 'read_file', arguments: { path: 'a.txt' } } as never)
         sink.tool({
           kind: 'mcp_tool_call', phase: 'start', callId: 'call-read', title: 'Read', summary: 'Read a.txt', details: [],
           activity: { kind: 'tool', toolName: 'Read' }
         } as never)
       }
       if (scenario === 'approval' || scenario === 'question') this.ask?.(input.threadId, scenario === 'approval')
+      if (scenario === 'steer-held') {
+        // On the hold, as Claude's poll: only a cut is drained, and none may come while the tool runs.
+        setInterval(() => {
+          if (ctl.peekSteer?.()?.delivery !== 'cut') return
+          const entry = ctl.drainSteerEntry?.({ expect: 'cut' })
+          if (entry) appendFileSync(marker('cuts.log'), `${entry.text}\n`)
+        }, 10)
+      }
       writeFileSync(marker('at-point'), '')
       if (scenario === 'steer-taken') {
         // The provider takes the steer once it is there; the acceptance saves, and the acknowledgement kills.
@@ -189,6 +199,12 @@ async function first(): Promise<void> {
   if (!queued.queued || readDurableQueue(d.store, thread.id).length !== 1) throw new Error('nothing was queued')
   if (scenario === 'steer') {
     if (!d.orch.promoteQueueItem(thread.id, queued.queueItem!.id).ok) throw new Error('the steer was refused')
+  }
+  if (scenario === 'steer-held') {
+    if (!d.orch.promoteQueueItem(thread.id, queued.queueItem!.id).ok) throw new Error('the steer was refused')
+    await waitFor(() => d.orch.getTurnState(thread.id).heldSteer?.itemIds.includes(queued.queueItem!.id) === true, 'the steer held')
+    // Several polls see it held.
+    await new Promise<void>((resolve) => setTimeout(resolve, 200))
   }
   if (scenario === 'steer-taken') {
     if (!d.orch.promoteQueueItem(thread.id, queued.queueItem!.id).ok) throw new Error('the steer was refused')

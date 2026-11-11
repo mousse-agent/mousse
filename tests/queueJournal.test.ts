@@ -11,7 +11,7 @@ import type { QueuedMessage } from '../src/shared/types'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { RUN_MIGRATIONS } from '../src/mms/run/db/migrations'
 import { QUEUE_COMMAND_MAX_ATTEMPTS, QUEUE_COMMAND_RETENTION_MS, QueueCommands, type QueueIntent } from '../src/mms/run/QueueCommands'
-import { enqueueMessage, listPendingQueue, normalizeQueuedMessages, claimNextNormal } from '../src/mms/queue/ThreadMessageQueue'
+import { enqueueMessage, listPendingQueue, normalizeQueuedMessages, claimNextNormal, demoteSteerItems, markSteerNow, promoteQueuedMessageToSteer } from '../src/mms/queue/ThreadMessageQueue'
 import { recoverQueueJournal, runQueueCommand, type QueueEffects, type QueueJournal, type QueueStoreLike } from '../src/mms/queue/queueJournal'
 
 const THREAD = 'thread-1'
@@ -40,7 +40,8 @@ describe('queue command journal', () => {
     },
     abandonWorkflow: (invocationId) => void effectLog.push(`abandon:${invocationId}`),
     audit: (intent, entry) => void audits.push(`${intent.threadId}:${entry.action}`),
-    scheduleRepair: () => void (repairs += 1)
+    scheduleRepair: () => void (repairs += 1),
+    steerNowStale: (intent) => void effectLog.push(`stale:${intent.steerNow?.requestId}`)
   })
 
   const seed = (count = 2): QueuedMessage[] => {
@@ -379,5 +380,83 @@ describe('queue command journal', () => {
     const items = seed(1)
     expect(recoverQueueJournal(bare, THREAD, items)).toBe(items)
     expect(() => runQueueCommand(bare, THREAD, 'k', items, () => ({ intent: { ...base, op: 'remove', itemId: items[0].id } }))).toThrow(/need the run engine/)
+  })
+
+  // Send now (docs/design/steer-and-interruptions.md §2.9): the run database holds the request, the journal marks the
+  // held items, and only the run that holds them consumes it.
+  describe('Send now (steer_now)', () => {
+    const steerNow = (key: string, request: { runId: string; holdGeneration: number; itemIds: string[]; requestId: string }) =>
+      new QueueCommands(db).insertPending(key, { op: 'steer_now', threadId: THREAD, itemId: request.itemIds[0] ?? '', cancelRunIds: [], releaseInboxIds: [], steerNow: request })
+    const held = (bind: { steerRunId?: string } = { steerRunId: 'run-1' }) => {
+      const items = seed(2)
+      return normalizeQueuedMessages(promoteQueuedMessageToSteer(items, items[0]!.id, bind).items, THREAD)
+    }
+    const recover = () => (file = recoverQueueJournal(store, THREAD, store.loadMessageQueue(THREAD)))
+
+    it('marks each named item still held for its run, once; a second click for the same hold changes nothing', () => {
+      file = held()
+      const id = file.find((item) => item.state === 'steering')!.id
+      activeRun = 'run-1'
+      steerNow('steer-now:a', { runId: 'run-1', holdGeneration: 2, itemIds: [id], requestId: 'a' })
+      recover()
+      expect(file.find((item) => item.id === id)?.steerNow).toEqual({ runId: 'run-1', holdGeneration: 2, requestId: 'a' })
+      expect(rowOf('steer-now:a')).toMatchObject({ status: 'applied', result: expect.objectContaining({ outcome: 'applied', itemIds: [id] }) })
+      steerNow('steer-now:b', { runId: 'run-1', holdGeneration: 2, itemIds: [id], requestId: 'b' })
+      const saves = store.saves
+      recover()
+      expect(file.find((item) => item.id === id)?.steerNow?.requestId).toBe('a')
+      expect(rowOf('steer-now:b')).toMatchObject({ status: 'applied', result: expect.objectContaining({ outcome: 'applied' }) })
+      expect(store.saves).toBe(saves + 1)
+      expect(effectLog.filter((entry) => entry.startsWith('stale:'))).toEqual([])
+    })
+
+    it('an item with no run of its own counts only while the request\'s run is the active one', () => {
+      file = held({})
+      const id = file.find((item) => item.state === 'steering')!.id
+      activeRun = 'run-2'
+      steerNow('steer-now:x', { runId: 'run-1', holdGeneration: 1, itemIds: [id], requestId: 'x' })
+      recover()
+      expect(file.find((item) => item.id === id)?.steerNow).toBeUndefined()
+      expect(rowOf('steer-now:x')).toMatchObject({ status: 'applied', result: expect.objectContaining({ outcome: 'stale' }) })
+      expect(effectLog.filter((entry) => entry.startsWith('stale:'))).toEqual(['stale:x'])
+      activeRun = 'run-1'
+      steerNow('steer-now:y', { runId: 'run-1', holdGeneration: 1, itemIds: [id], requestId: 'y' })
+      recover()
+      expect(file.find((item) => item.id === id)?.steerNow).toEqual({ runId: 'run-1', holdGeneration: 1, requestId: 'y' })
+    })
+
+    it('a request whose items are no longer held is stale, and its event is written once', () => {
+      file = seed(1)
+      steerNow('steer-now:late', { runId: 'run-1', holdGeneration: 3, itemIds: [file[0]!.id], requestId: 'late' })
+      recover()
+      recover()
+      expect(rowOf('steer-now:late')).toMatchObject({ status: 'applied', result: expect.objectContaining({ outcome: 'stale' }) })
+      expect(effectLog.filter((entry) => entry.startsWith('stale:'))).toEqual(['stale:late'])
+    })
+
+    it('a request that can never be applied is given up and recorded stale, once', () => {
+      file = held()
+      const id = file.find((item) => item.state === 'steering')!.id
+      activeRun = 'run-1'
+      steerNow('steer-now:stuck', { runId: 'run-1', holdGeneration: 1, itemIds: [id], requestId: 'stuck' })
+      store.failSave = 1000
+      for (let attempt = 1; attempt <= QUEUE_COMMAND_MAX_ATTEMPTS + 2; attempt += 1) recoverQueueJournal(store, THREAD, store.loadMessageQueue(THREAD))
+      expect(rowOf('steer-now:stuck')).toMatchObject({ status: 'failed' })
+      expect(effectLog.filter((entry) => entry.startsWith('stale:'))).toEqual(['stale:stuck'])
+    })
+
+    it('the field never leaves steering with its item: a demoted item drops it, and a pending item cannot carry it', () => {
+      file = held()
+      const id = file.find((item) => item.state === 'steering')!.id
+      const marked = markSteerNow(file, { runId: 'run-1', holdGeneration: 1, requestId: 'r', itemIds: [id] }, 'run-1')
+      expect(marked.applied).toEqual([id])
+      const demoted = demoteSteerItems(marked.items, [id])
+      expect(demoted.find((item) => item.id === id)).toMatchObject({ state: 'pending' })
+      expect(demoted.find((item) => item.id === id)?.steerNow).toBeUndefined()
+      // A stray field on a pending item is dropped when the queue is read.
+      const stray = marked.items.map((item) => (item.id === id ? { ...item, state: 'pending' as const } : item))
+      expect(normalizeQueuedMessages(stray, THREAD).find((item) => item.id === id)?.steerNow).toBeUndefined()
+      expect(normalizeQueuedMessages(marked.items, THREAD).find((item) => item.id === id)?.steerNow).toEqual({ runId: 'run-1', holdGeneration: 1, requestId: 'r' })
+    })
   })
 })

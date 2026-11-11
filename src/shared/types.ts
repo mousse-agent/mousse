@@ -1193,6 +1193,12 @@ export interface QueuedMessage {
    */
   promotedWithCopyId?: true
   /**
+   * Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the run and hold the click was shown for,
+   * and its request. The run that holds the item forces the hold once, only for that run and that hold; every path
+   * that moves the item out of `steering` drops the field.
+   */
+  steerNow?: { runId: string; holdGeneration: number; requestId: string }
+  /**
    * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
    * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
    * the turn so its end completes the occurrence. `agent`: a message another thread's agent sent; it
@@ -1588,7 +1594,33 @@ export interface TurnState {
    * that may have run without a recorded result. Continue then asks first, and continues the run acknowledged.
    */
   uncertain?: { runId: string; tools: string[] }
+  /**
+   * A person's steer the turn holds until a foreground tool has its result (docs/design/steer-and-interruptions.md §2.9).
+   * In memory, like `step`; set only while the turn is active.
+   */
+  heldSteer?: HeldSteer
 }
+
+/** What a held steer waits for (`TurnState.heldSteer`). */
+export interface HeldSteer {
+  /** The oldest foreground tool's name (`Bash`), or `compaction`. Kept while the release window is open after the last result. */
+  waitsFor: string
+  /** That tool's first input line (its command, a path). */
+  detail?: string
+  /** How many foreground tools run. */
+  tools: number
+  /** Every foreground tool, for the tooltip. */
+  toolList?: Array<{ name: string; detail?: string }>
+  /** When the hold began. */
+  since: string
+  /** The hold a Send now click names; it rises when the held steers change. */
+  holdGeneration: number
+  /** The held queue items, a row another process promoted included. */
+  itemIds: string[]
+  /** The run the hold belongs to: Send now names it. */
+  runId?: string
+}
+
 export type TurnStateSnapshot = Record<string, TurnState>
 
 /** A step of an active turn that shows nothing in the transcript yet. */

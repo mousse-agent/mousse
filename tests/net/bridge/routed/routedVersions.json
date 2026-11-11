@@ -359,6 +359,11 @@
     "digest": "2f736d5f6a66cf4a",
     "security": "da503b52b5c83a71"
   },
+  "orchestrator.steerNow": {
+    "version": 1,
+    "digest": "17e18b3b34ebef49",
+    "security": "56bf730c16aa9cd1"
+  },
   "projects.list": {
     "version": 1,
     "digest": "e1b2634dfa7c5469",

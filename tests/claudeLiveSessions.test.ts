@@ -237,7 +237,8 @@ describe('a live Claude query', () => {
     await inputs(cli, 2)
     expect(process.inputs[1]).toMatchObject({ priority: 'now' })
     expect(process.text(1)).toContain('also do X')
-    expect(process.backgrounded).toBe(1)
+    // No foreground subagent: nothing is moved. The move with no id would also move a running command (#874).
+    expect(process.backgroundCalls).toEqual([])
     expect(process.interrupts).toBe(0)
     // The interrupt the steer causes ends no run; the run ends at the steer turn's own result.
     process.emit(resultFrame({ uuids: [first], terminalReason: 'aborted_streaming', queued: 1 }))
@@ -909,15 +910,18 @@ describe('result routing and steering edge cases', () => {
     const f = fixture()
     silent(f.cli)
     let open!: () => void
-    const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('late steer').mockReturnValue(undefined)
+    const drainSteer = vi.fn<() => string | undefined>(() => undefined)
     const onSteer = vi.fn()
     const returnSteer = vi.fn()
     const turn = f.chat({ drainSteer, onSteer, returnSteer })
     await inputs(f.cli, 1)
     const process = f.cli.last
     process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
-    process.emit(textDelta('answer', process.uuid(0)))
-    await vi.waitFor(() => expect(process.backgrounded).toBe(1))
+    // A foreground subagent the steer moves to the background first.
+    process.emit(toolStart('agent-1', 'Agent', process.uuid(0)), textDelta('answer', process.uuid(0)))
+    await later(30)
+    drainSteer.mockReturnValueOnce('late steer')
+    await vi.waitFor(() => expect(process.backgroundCalls).toEqual(['agent-1']))
     // The result arrives while the steer waits for the foreground work to move.
     process.emit(resultFrame({ uuids: [process.uuid(0)], text: 'answer' }))
     await later(30)
@@ -1382,15 +1386,20 @@ describe('result routing and steering edge cases', () => {
     f.cli.reply = undefined
     let open!: () => void
     process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    const drainSteer = vi.fn<() => string | undefined>(() => undefined)
     const mine = f.chat({
       prompt: 'mine',
       history: 'h',
-      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('late steer').mockReturnValue(undefined),
+      drainSteer,
       returnSteer: vi.fn()
     })
     await inputs(f.cli, 3)
-    await vi.waitFor(() => expect(process.backgrounded).toBe(1))
     const uuid = process.uuid(2)
+    // A foreground subagent the steer moves to the background first.
+    process.emit(toolStart('agent-1', 'Agent', uuid))
+    await later(30)
+    drainSteer.mockReturnValueOnce('late steer')
+    await vi.waitFor(() => expect(process.backgrounded).toBe(1))
     // The wake that folds the message in answers while the steer still waits for foreground work to move.
     process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
     process.emit(textDelta('report and answer', uuid), resultFrame({ uuids: [uuid], text: 'report and answer', origin: 'task-notification' }))
@@ -2409,11 +2418,16 @@ describe('background helpers as the real Claude Code reports them', () => {
     let open!: () => void
     process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
     const abort = new AbortController()
+    const drainSteer = vi.fn<() => string | undefined>(() => undefined)
     const wakeA = f.service.chat({
       threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal,
-      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('a steer').mockReturnValue(undefined)
+      drainSteer
     })
     wakeA.catch(() => undefined)
+    // A foreground subagent of the wake, which the steer moves to the background first.
+    process.emit(toolStart('agent-1', 'Agent'))
+    await later(30)
+    drainSteer.mockReturnValueOnce('a steer')
     // The steer waits for foreground work to move, and the wake's result arrives meanwhile: it is held back.
     await vi.waitFor(() => expect(process.backgrounded).toBe(1))
     process.emit(resultFrame({ text: 'A done', origin: 'task-notification' }))
@@ -2695,7 +2709,7 @@ describe('background helpers as the real Claude Code reports them', () => {
     // A second steer is still waiting for foreground work, so the wake is not settled by the result.
     let open!: () => void
     process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
-    const waiting = session.steer(wake, 'second steer')
+    const waiting = session.steer(wake, 'second steer', undefined, { subagents: ['agent-1'] })
     process.emit(resultFrame({ uuids: [steerId], text: 'done', origin: 'task-notification' }))
     await later(30)
     expect(session.obligations.carriedIds()).toEqual([])

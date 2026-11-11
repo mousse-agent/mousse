@@ -650,6 +650,82 @@ describe('TranscriptAssembler typed activity', () => {
   })
 })
 
+describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)', () => {
+  const start = (callId: string, name: string, activity?: Record<string, unknown>, parentCallId?: string): StreamingLlmToolEvent => ({
+    kind: 'mcp_tool_call', phase: 'start', callId, title: name, summary: '', details: [],
+    activity: (activity ?? { toolName: name, kind: 'command', command: `run ${callId}` }) as StreamingLlmToolEvent['activity'],
+    ...(parentCallId ? { parentCallId } : {})
+  })
+  const done = (callId: string, name: string): StreamingLlmToolEvent => ({ kind: 'mcp_tool_result', phase: 'complete', callId, title: name, summary: '', details: [], response: 'ok' })
+  const agent = (callId: string, extra: Record<string, unknown> = {}) => start(callId, 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'look around', ...extra })
+  const ids = (assembler: TranscriptAssembler, waiting?: ReadonlySet<string>) => assembler.foregroundTools(waiting).map((tool) => tool.callId)
+
+  it('names the turn\'s own running command with its first line, and drops it at its result', () => {
+    const { assembler } = harness()
+    assembler.tool(start('b1', 'Bash', { toolName: 'Bash', kind: 'command', command: 'npm test\n--watch' }))
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'b1', toolName: 'Bash', detail: 'npm test' }])
+    assembler.tool(done('b1', 'Bash'))
+    expect(assembler.foregroundTools()).toEqual([])
+  })
+
+  it('leaves out background calls, subagent calls, wait-only tools and calls a person is asked about', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(agent('a2', { background: true }))
+    assembler.tool(start('w1', 'TaskOutput', { toolName: 'TaskOutput', kind: 'generic' }))
+    assembler.tool(start('q1', 'Bash'))
+    assembler.tool(start('mcp', 'mcp__mousse__delegate_task', { toolName: 'mcp__mousse__delegate_task', kind: 'generic' }))
+    expect(ids(assembler, new Set(['q1']))).toEqual([])
+    // Once the person answered, the call runs: it holds.
+    expect(ids(assembler)).toEqual(['q1'])
+  })
+
+  it('a foreground subagent with a nested command holds nothing', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    expect(ids(assembler)).toEqual([])
+  })
+
+  it('the same subagent moved to the background holds nothing, nor does its command', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool({ kind: 'mcp_tool_call', phase: 'update', callId: 'a1', title: 'Agent', summary: '', details: [], activity: { kind: 'subagent', background: true } as StreamingLlmToolEvent['activity'] })
+    expect(ids(assembler)).toEqual([])
+  })
+
+  it('a root command and the subagent\'s child command: only the root one holds, and nothing once it ends', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool(start('root', 'Bash'))
+    expect(ids(assembler)).toEqual(['root'])
+    assembler.tool(done('root', 'Bash'))
+    expect(ids(assembler)).toEqual([])
+  })
+
+  it('a call whose parent cannot be found counts as the turn\'s own', () => {
+    const { assembler } = harness()
+    assembler.tool(start('orphan', 'Bash', undefined, 'never-seen'))
+    expect(ids(assembler)).toEqual(['orphan'])
+  })
+
+  it('a subagent the provider could not move to the background holds, and its own calls still do not', () => {
+    const { assembler } = harness()
+    assembler.tool(agent('a1'))
+    assembler.tool(start('child', 'Bash', undefined, 'a1'))
+    assembler.tool({ kind: 'mcp_tool_call', phase: 'update', callId: 'a1', title: 'Agent', summary: '', details: [], activity: { notMovable: true } })
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'a1', toolName: 'Agent', detail: 'look around' }])
+  })
+
+  it('names an MCP tool by its own name', () => {
+    const { assembler } = harness()
+    assembler.tool(start('m1', 'mcp__github__create_issue', { toolName: 'mcp__github__create_issue', kind: 'generic' }))
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'm1', toolName: 'create_issue' }])
+  })
+})
+
 describe('TranscriptAssembler text coalescing', () => {
   afterEach(() => {
     vi.useRealTimers()

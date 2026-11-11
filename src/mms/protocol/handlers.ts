@@ -2622,6 +2622,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       noteSentFrom(ctx, threadId)
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
     }
+    case 'orchestrator.steerNow': {
+      // Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the hold the click was shown for.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'runId', 'holdGeneration', 'itemIds', 'clientRequestId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const runId = asString(p.runId, 'runId', 256)
+      const holdGeneration = asOptionalBoundedInt(p.holdGeneration, 'holdGeneration', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      if (holdGeneration === undefined) throw new DomainRpcError('invalid_params', 'holdGeneration is required')
+      if (!Array.isArray(p.itemIds) || p.itemIds.length > 100) throw new DomainRpcError('invalid_params', 'itemIds must be a list of at most 100 ids')
+      const itemIds = p.itemIds.map((id, index) => asString(id, `itemIds[${index}]`, 256))
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
+      return { ...runCommandResponse(result, runId), clientRequestId }
+    }
     case 'orchestrator.retry': {
       const p = isObject(params) ? params : {}
       const threadId = asOptionalString(p.threadId, 256)

@@ -688,6 +688,11 @@ export class MmsProtocolServer {
       emitToSubscribers(this.ring.push('run.interrupted-on-boot', payload, payload.threadId))
     })
 
+    // A Send now request's outcome: the held steer went in (`applied`), or the click matched nothing (`stale`).
+    onOrch('steer-now', (payload: { threadId: string; requestId: string; outcome: 'applied' | 'stale' }) => {
+      emitToSubscribers(this.ring.push('steer.now', { requestId: payload.requestId, outcome: payload.outcome }, payload.threadId))
+    })
+
     onOrch('turn-steered', (payload: { threadId: string; text: string }) => {
       emitToSubscribers(
         this.ring.push('turn.steered', { text: payload.text }, payload.threadId)

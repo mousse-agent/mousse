@@ -14,6 +14,7 @@ import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
 import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
+import { QueueCommands } from './QueueCommands'
 import type { Answerer } from './approvalRights'
 import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
@@ -122,6 +123,24 @@ export type RunCommand =
        */
       ceiling?: PermissionMode
     }
+  | {
+      /**
+       * Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the hold `holdGeneration` of run `runId`
+       * goes in at once, stopping the tool it waits for. Only a person sends it. Committed with its receipt, its queue
+       * journal entry (`steer_now`) and the `steer.now_requested` event; the journal then marks the held items
+       * (`QueuedMessage.steerNow`), and the run that holds them forces the hold. A run that is not the active one is
+       * `ignored` (`run_not_active`) with no entry.
+       */
+      kind: 'steer_now'
+      threadId: string
+      clientRequestId: string
+      runId: string
+      holdGeneration: number
+      itemIds: string[]
+    }
+
+/** The queue journal key of a Send now request. */
+export const steerNowCommandKey = (threadId: string, clientRequestId: string): string => `steer-now:${threadId}:${clientRequestId}`
 
 /** The delegation row a follow-up `send` writes with its run (the child thread is the command's). */
 export interface SendDelegation {
@@ -1902,7 +1921,11 @@ export class RunEngine extends EventEmitter {
     opts.admit?.()
     let result: CommandResult
     try {
-      result = command.kind === 'send' ? this.commitSend(command, this.trackedFollowUp(command)) : this.commitControl(command)
+      result = command.kind === 'send'
+        ? this.commitSend(command, this.trackedFollowUp(command))
+        : command.kind === 'steer_now'
+          ? this.commitSteerNow(command)
+          : this.commitControl(command)
     } catch (error) {
       if (command.kind === 'stop' && error instanceof RunStoreError && error.code === 'stale_write')
         return { status: 'rejected', reason: 'stale_write', sequence: store.maxSeq(threadId) }
@@ -2116,6 +2139,46 @@ export class RunEngine extends EventEmitter {
       store.db.afterCommit(() =>
         this.emit(kind === 'stop' ? 'stop-requested' : 'steer-accepted', { threadId, runId })
       )
+      return { status: 'accepted', runId, sequence, replayed: false }
+    })
+  }
+
+  /**
+   * Send now's intent, in one transaction: the receipt, the `steer_now` queue journal entry and the
+   * `steer.now_requested` event. The caller then applies the entry to the queue file under the queue lock
+   * (`recoverQueueJournal`); a crash before that is finished by the next queue change, boot repair or the owner's poll.
+   */
+  private commitSteerNow(command: Extract<RunCommand, { kind: 'steer_now' }>): CommandResult {
+    const { store } = this
+    const { threadId, runId } = command
+    return store.db.transaction((): CommandResult => {
+      const run = store.getRun(runId)
+      const activeRunId = store.getActiveRun(threadId)?.runId ?? null
+      if (!run || run.threadId !== threadId || activeRunId !== runId) {
+        const reason = 'run_not_active'
+        store.appendEvent({
+          threadId,
+          runId: run?.threadId === threadId ? runId : null,
+          type: 'command.ignored',
+          payload: { kind: command.kind, runId, activeRunId, reason }
+        })
+        const sequence = store.maxSeq(threadId)
+        this.putReceipt(command, 'ignored', { runId, activeRunId, reason, sequence })
+        return { status: 'ignored', reason, runId, activeRunId, sequence }
+      }
+      const request = { runId, holdGeneration: command.holdGeneration, itemIds: [...command.itemIds], requestId: command.clientRequestId }
+      new QueueCommands(store.db).insertPending(steerNowCommandKey(threadId, command.clientRequestId), {
+        op: 'steer_now',
+        threadId,
+        itemId: command.itemIds[0] ?? '',
+        cancelRunIds: [],
+        releaseInboxIds: [],
+        steerNow: request
+      })
+      store.appendEvent({ threadId, runId, type: 'steer.now_requested', payload: { ...request, itemIds: request.itemIds.join(','), now: true } })
+      const sequence = store.maxSeq(threadId)
+      this.putReceipt(command, 'accepted', { runId, sequence })
+      store.db.checkpoint('steerNow.beforeCommit')
       return { status: 'accepted', runId, sequence, replayed: false }
     })
   }

@@ -202,6 +202,8 @@ describe('CodexAdapter', () => {
     expect(adapter.driver).toBe('codex')
     expect(adapter.capabilities).toEqual({
       steer: 'native',
+      // Not on the steer hold yet: a person's steer cuts in at once, as before.
+      steerBoundary: 'none',
       interrupt: true,
       rollback: 'none',
       fork: 'portable',

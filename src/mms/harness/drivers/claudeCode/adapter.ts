@@ -43,6 +43,8 @@ export type ClaudeSubscriptionClient = Pick<
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
+  // A tool call streams its `tool_use` block before it runs: a person's steer waits from there to its result.
+  steerBoundary: 'announce',
   interrupt: true,
   // An undo or an edit cuts Claude's session at the next turn (issue #360), not as part of the undo.
   rollback: 'none',
@@ -212,7 +214,11 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       integrations,
       drainSteer: () => ctl.drainSteer(),
-      drainSteerEntry: ctl.drainSteerEntry ? () => ctl.drainSteerEntry!() : undefined,
+      drainSteerEntry: ctl.drainSteerEntry ? (opts) => ctl.drainSteerEntry!(opts) : undefined,
+      // The hold: nothing is drained while a foreground tool is announced or running (docs/design/steer-and-interruptions.md §2.4).
+      ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
+      ...(ctl.mayCut ? { mayCut: (token: string) => ctl.mayCut!(token) } : {}),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
       steerTaken: (token) => ctl.steerTaken?.(token),
       onSteer: (text, token) => {

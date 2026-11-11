@@ -324,6 +324,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'orchestrator.abort': chat('thread', ['threadId', 'clearQueue', 'runId', 'clientRequestId'], {
     owned: { runId: 'run' }
   }),
+  // Send now on a held steer: the run and hold the click was shown for, and the held queue items.
+  'orchestrator.steerNow': chat('thread', ['threadId', 'runId', 'holdGeneration', 'itemIds', 'clientRequestId'], {
+    required: ['runId', 'holdGeneration', 'itemIds'],
+    owned: { runId: 'run' }
+  }),
   'orchestrator.retry': chat('thread', ['threadId']),
   'threads.clearContext': chat('thread', ['threadId']),
   'threads.compact': chat('thread', ['threadId', 'focus']),
