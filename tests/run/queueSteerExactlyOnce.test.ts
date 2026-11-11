@@ -12,7 +12,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { readDurableQueue } from '../../src/mms/queue/durableQueue'
+import { mutateDurableQueue, readDurableQueue } from '../../src/mms/queue/durableQueue'
+import { promoteQueuedMessageToSteer } from '../../src/mms/queue/ThreadMessageQueue'
+import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 vi.setConfig({ testTimeout: 60_000 })
@@ -32,6 +34,25 @@ class SteeringAdapter implements ProviderAdapter {
   holdPrompts = new Set<string>()
   /** Whether turns take steers at all (a turn that never reads one leaves it to the orchestrator). */
   takeSteers = true
+  /**
+   * Whether a taken steer is also reported read. When false the turn takes the text (`steerTaken`) and never reports
+   * it read (`steerAccepted`), as a provider whose turn ends before the steered message reached its model.
+   */
+  acceptSteers = true
+  /** Every steer text a turn took without reporting it read, in order. */
+  readonly takenUnread: string[] = []
+  /**
+   * What a turn does with the next steer it drains, once: `drop` keeps it and never takes it or hands it back (Pi
+   * when its native steer arrives after its last step); `taken` takes it and hands it back; `accepted` takes it,
+   * reports it read, and then hands it back anyway (a provider bug); `returnFails` never takes it and hands it back,
+   * and when the hand-back throws the turn ends all the same (Pi at a normal turn end). Turns take no more steers
+   * after it.
+   */
+  oneDrain: 'drop' | 'taken' | 'accepted' | 'returnFails' | undefined
+  /** Every error a hand-back threw under `oneDrain: 'returnFails'`. */
+  readonly returnErrors: unknown[] = []
+  /** Every steer text drained under `oneDrain`. */
+  readonly drainedOnce: string[] = []
   private readonly releases = new Map<string, () => void>()
   private readonly interrupts = new Set<() => void>()
   /** The runs started, by prompt. */
@@ -57,6 +78,33 @@ class SteeringAdapter implements ProviderAdapter {
       const entry = ctl.drainSteerEntry ? ctl.drainSteerEntry() : undefined
       const text = entry ? entry.text : ctl.drainSteer()
       if (!text) return
+      if (this.oneDrain) {
+        const mode = this.oneDrain
+        this.oneDrain = undefined
+        this.takeSteers = false
+        this.drainedOnce.push(text)
+        if (mode === 'drop') return
+        if (mode === 'returnFails') {
+          try {
+            ctl.returnSteer?.(text, entry?.token)
+          } catch (error) {
+            this.returnErrors.push(error)
+          }
+          return
+        }
+        ctl.steerTaken?.(entry?.token)
+        if (mode === 'accepted') {
+          this.steers.push(text)
+          sink.steerAccepted(text)
+        }
+        ctl.returnSteer?.(text, entry?.token)
+        return
+      }
+      if (!this.acceptSteers) {
+        this.takenUnread.push(text)
+        ctl.steerTaken?.(entry?.token)
+        return
+      }
       this.steers.push(text)
       ctl.steerTaken?.(entry?.token)
       sink.steerAccepted(text)
@@ -137,6 +185,19 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     const userMessages = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user').map((message) => message.content)
     /** The person's messages as the transcript shows them (hidden copies left out). */
     const shownUserMessages = () => d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden).map((message) => message.content)
+    // The open thread as the app keeps it: a message added is merged by id, an update merges by id, and only a full
+    // replacement removes rows.
+    const app = new Map<string, ChatMessage>()
+    d.orch.on('thread-message', (event: { threadId: string; message: ChatMessage }) => {
+      if (event.threadId === thread.id) app.set(event.message.id, event.message)
+    })
+    d.orch.on('thread-messages', (event: { threadId: string; messages: ChatMessage[]; replace?: boolean }) => {
+      if (event.threadId !== thread.id) return
+      if (event.replace) app.clear()
+      for (const message of event.messages) app.set(message.id, message)
+    })
+    /** The person's messages the open thread shows. */
+    const appUserMessages = () => [...app.values()].filter((message) => message.role === 'user' && !message.hidden).map((message) => message.content)
     const idle = async (label: string): Promise<void> => {
       await waitFor(() => !d.orch.isActiveTurnRunning(thread.id) && queue().length === 0 && d.engine.getActiveRun(thread.id) === null, label)
       // Nothing more starts once the queue is empty.
@@ -154,7 +215,7 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       expect(pending()).toEqual(['A', 'B', 'C'])
       return { first, a: a.queueItem!, b: b.queueItem!, c: c.queueItem! }
     }
-    return { d, adapter, thread, send, queue, pending, userMessages, shownUserMessages, idle, queuedBehindTurn }
+    return { d, adapter, thread, send, queue, pending, userMessages, shownUserMessages, appUserMessages, idle, queuedBehindTurn }
   }
 
   /** Each text reached the provider once: as a turn's prompt or as a steer, never both, never twice. */
@@ -266,6 +327,217 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
     // C shows once: as the prompt of its own turn, not also inside the turn that never read it.
     expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer the provider took but never reported read is not lost when the turn ends: it runs once, as the next turn', async () => {
+    const w = world()
+    w.adapter.acceptSteers = false
+    const { first, c } = await w.queuedBehindTurn()
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.takenUnread.length > 0, 'steer taken')
+    expect(w.adapter.takenUnread).toEqual(['C'])
+    // The turn ends with C taken and never reported read.
+    w.adapter.acceptSteers = true
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    // C shows once: as the prompt of its own turn, not also inside the turn that never reported it read.
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+    // And so does the open thread, without reopening it.
+    expect(w.appUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer drained and never taken or handed back (Pi, when it arrives after the last step) runs once, as the next turn', async () => {
+    const w = world()
+    w.adapter.oneDrain = 'drop'
+    const { first, c } = await w.queuedBehindTurn()
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.drainedOnce.length > 0, 'steer drained')
+    expect(w.adapter.drainedOnce).toEqual(['C'])
+    w.adapter.release('first')
+    await first
+    w.adapter.takeSteers = true
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+    // The open thread drops the copy inside the first turn at once.
+    expect(w.appUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer the provider took and then handed back runs once, as the next turn, not also as its text', async () => {
+    const w = world()
+    w.adapter.oneDrain = 'taken'
+    const { first, c } = await w.queuedBehindTurn()
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.drainedOnce.length > 0, 'steer taken and handed back')
+    w.adapter.release('first')
+    await first
+    w.adapter.takeSteers = true
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+    expect(w.appUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer whose hand-back throws at the turn’s end runs once, as the next turn, and the turn still ends', async () => {
+    const w = world()
+    w.adapter.oneDrain = 'returnFails'
+    const { first, c } = await w.queuedBehindTurn()
+    // The hand-back fails partway, as a failed save would: the drain is forgotten, its row stays `steering`.
+    const ids = w.d.orch.getOrCreateSession(w.thread.id).drainedExternalSteerIds
+    const remove = ids.delete.bind(ids)
+    let failed = false
+    vi.spyOn(ids, 'delete').mockImplementation((id: string) => {
+      if (id !== c.id || failed) return remove(id)
+      failed = true
+      throw new Error('database is locked')
+    })
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.drainedOnce.length > 0, 'steer drained and its hand-back failed')
+    expect(w.adapter.returnErrors).toHaveLength(1)
+    w.adapter.release('first')
+    await first
+    w.adapter.takeSteers = true
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer handed back after the turn accepted it is not run again', async () => {
+    const w = world()
+    w.adapter.oneDrain = 'accepted'
+    const { first, c } = await w.queuedBehindTurn()
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.drainedOnce.length > 0, 'steer accepted and handed back')
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual(['C'])
+    expect(w.adapter.prompts).toEqual(['first', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
+    expect(w.shownUserMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer another process accepted and saved, then died before dropping, is dropped here, not run again', async () => {
+    const w = world()
+    w.adapter.takeSteers = false
+    const { first, c } = await w.queuedBehindTurn()
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => promoteQueuedMessageToSteer(items, c.id, { steerRunId: runId }).items)
+    // On disk, C's id is saved as accepted (the other process's write); this process's memory never saw it.
+    const load = w.d.store.loadThreadData.bind(w.d.store)
+    vi.spyOn(w.d.store, 'loadThreadData').mockImplementation((threadId: string) => {
+      const data = load(threadId)
+      if (threadId !== w.thread.id) return data
+      const llmContext = data.llmContext ?? { messages: [] }
+      return { ...data, llmContext: { ...llmContext, acceptedSteerItemIds: [...(llmContext.acceptedSteerItemIds ?? []), c.id] } } as typeof data
+    })
+    expect(w.d.orch.getOrCreateSession(w.thread.id).nativeContext.acceptedSteerItemIds ?? []).not.toContain(c.id)
+
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+
+    expect(w.adapter.prompts).toEqual(['first', 'A', 'B'])
+    expect(w.adapter.steers).toEqual([])
+    expect(w.shownUserMessages()).toEqual(['first', 'A', 'B'])
+    // Nothing from disk is copied into this process's memory.
+    expect(w.d.orch.getOrCreateSession(w.thread.id).nativeContext.acceptedSteerItemIds ?? []).not.toContain(c.id)
+  })
+
+  it('hides only the returned steer’s own copy, never an earlier message with the same words', async () => {
+    const w = world()
+    w.adapter.holdPrompts.add('first')
+    const first = w.send('first')
+    await waitFor(() => w.adapter.prompts.includes('first'), 'first turn')
+    const y1 = (await w.send('yes')).queueItem!
+    const y2 = (await w.send('yes')).queueItem!
+    await w.send('B')
+    // The first "yes" is steered and read.
+    expect(w.d.orch.promoteQueueItem(w.thread.id, y1.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.steers.length > 0, 'steer read')
+    // The second is promoted by another process after the turn's last read: it has no copy here.
+    w.adapter.takeSteers = false
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => promoteQueuedMessageToSteer(items, y2.id, { steerRunId: runId }).items)
+
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual(['yes'])
+    expect(w.adapter.prompts).toEqual(['first', 'yes', 'B'])
+    // The "yes" the model read stays where it entered the turn; the second shows as its own turn's prompt.
+    expect(w.shownUserMessages()).toEqual(['first', 'yes', 'yes', 'B'])
+    expect(w.appUserMessages()).toEqual(['first', 'yes', 'yes', 'B'])
+  })
+
+  it('a failure while returning leftover steers ends the drain as failed and claims nothing; the next drain runs them', async () => {
+    const w = world()
+    w.adapter.takeSteers = false
+    const { first, c } = await w.queuedBehindTurn()
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => promoteQueuedMessageToSteer(items, c.id, { steerRunId: runId }).items)
+    const failures: Array<{ threadId: string; error: string }> = []
+    w.d.orch.on('queue-drain-failed', (event: { threadId: string; error: string }) => void failures.push(event))
+    // The queue lock times out, a read fails, or a save throws.
+    const orch = w.d.orch as unknown as { returnOrphanedSteers: (session: unknown) => void; scheduleQueueDrain: (session: unknown, opts?: { onSettled?: (result: string) => void }) => void }
+    const failing = vi.spyOn(orch, 'returnOrphanedSteers').mockImplementation(() => { throw new Error('queue lock timed out') })
+
+    w.adapter.release('first')
+    await first
+    await waitFor(() => failures.length > 0, 'drain failed')
+    expect(failures[0]).toMatchObject({ threadId: w.thread.id, error: 'queue lock timed out' })
+    // The caller hears the failure (the startup pump frees its slot on it).
+    const settled: string[] = []
+    orch.scheduleQueueDrain(w.d.orch.getOrCreateSession(w.thread.id), { onSettled: (result) => void settled.push(result) })
+    expect(settled).toEqual(['failed'])
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.queue().map((item) => item.content)).toEqual(['A', 'B', 'C'])
+
+    failing.mockRestore()
+    w.adapter.takeSteers = true
+    orch.scheduleQueueDrain(w.d.orch.getOrCreateSession(w.thread.id))
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a steer another process promotes after the turn last read steers is not lost: it runs once, as the next turn', async () => {
+    const w = world()
+    const { first, c } = await w.queuedBehindTurn()
+    // The turn reads no more steers; then another process marks C as a steer into this run, on disk only.
+    w.adapter.takeSteers = false
+    const runId = w.d.engine.getActiveRun(w.thread.id)!.runId
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => promoteQueuedMessageToSteer(items, c.id, { steerRunId: runId }).items)
+    expect(w.queue().find((item) => item.id === c.id)?.state).toBe('steering')
+
+    w.adapter.release('first')
+    await first
+    w.adapter.takeSteers = true
+    await w.idle('queue drained')
+
+    expect(w.adapter.steers).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'C', 'A', 'B'])
+    expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
   })
 
   it('Steer after Stop sends C first, as the next turn, and A and B follow once each', async () => {

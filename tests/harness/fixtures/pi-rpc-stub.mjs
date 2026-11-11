@@ -37,6 +37,13 @@ setTimeout(() => {
 }, config.readyDelayMs ?? 0)
 if (config.helperAtStart) helper(true)
 
+/** Native steers Pi queued and has not read (`onPrompt: 'steerAtEnd'`, `steerDelayMs`): `clear_queue` returns them. */
+const queuedSteers = []
+/** `onPrompt: 'steerAtEnd'`: the prompt's last step has ended and the prompt settles once a steer is queued. */
+let settleOnSteer = false
+/** `steer: 'hangSecond'`: the native steers received so far. */
+let steersSeen = 0
+
 let buffer = ''
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk) => {
@@ -54,12 +61,41 @@ function handle(command) {
     case 'get_available_models': return respond(command, { models: [] })
     case 'get_state': return respond(command, { sessionId: `stub-${process.pid}` })
     case 'get_session_stats': return respond(command, {})
-    case 'clear_queue': return respond(command, { steering: config.queued ?? [], followUp: [] })
+    case 'clear_queue': return respond(command, { steering: [...(config.queued ?? []), ...queuedSteers.splice(0)], followUp: [] })
     case 'abort':
       respond(command)
       write({ type: 'agent_end', messages: [] })
       return write({ type: 'agent_settled' })
-    case 'steer': return respond(command)
+    case 'steer':
+      // `steer: 'hangSecond'` (with `onPrompt: 'steerAtEnd'`): Pi queues the first steer unread and runs one more step;
+      // the second is never answered (the engine's command deadline kills the process), and the prompt settles.
+      if (config.steer === 'hangSecond' && settleOnSteer) {
+        steersSeen += 1
+        if (steersSeen === 1) {
+          queuedSteers.push(command.message)
+          respond(command)
+          write({ type: 'turn_start' })
+          write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' } })
+          return write({ type: 'turn_end' })
+        }
+        settleOnSteer = false
+        write({ type: 'agent_end', messages: [] })
+        return write({ type: 'agent_settled' })
+      }
+      // `steerDelayMs`: Pi queues the steer and answers only after the delay.
+      if (config.steerDelayMs) {
+        return void setTimeout(() => {
+          queuedSteers.push(command.message)
+          respond(command)
+        }, config.steerDelayMs)
+      }
+      respond(command)
+      if (!settleOnSteer) return
+      // Queued after Pi's last check of its queue: the prompt ends without reading it, and Pi keeps it for the next.
+      settleOnSteer = false
+      queuedSteers.push(command.message)
+      write({ type: 'agent_end', messages: [] })
+      return write({ type: 'agent_settled' })
     case 'prompt':
       // Pi answers a prompt only after its preflight: a stall never answers.
       if (config.onPrompt === 'stall') return
@@ -80,6 +116,19 @@ function handle(command) {
         return setTimeout(() => process.exit(3), 50)
       }
       if (config.onPrompt === 'hang') return
+      if (config.onPrompt === 'steerAtEnd') {
+        // The last step ends; the engine answers `turn_end` with a native steer, which arrives too late to be read.
+        settleOnSteer = true
+        write({ type: 'turn_start' })
+        write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' } })
+        return write({ type: 'turn_end' })
+      }
+      if (config.onPrompt === 'stepThenHang') {
+        // One step ends (the engine answers `turn_end` with a native steer), and the prompt runs on until `abort`.
+        write({ type: 'turn_start' })
+        write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'working' }], stopReason: 'toolUse' } })
+        return write({ type: 'turn_end' })
+      }
       if (config.onPrompt === 'turn') {
         // As the extension's `before_agent_start` does: the turn the engine hands out.
         return void post('turn', {}).then((turn) => {
