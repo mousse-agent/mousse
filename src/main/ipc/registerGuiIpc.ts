@@ -358,12 +358,17 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   images?: unknown
   conversationBranchId?: string
   expect?: unknown
+  continuationOfRunId?: string
+  acknowledgeUncertain?: boolean
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
     requestId: request.requestId,
     ...(typeof request.conversationBranchId === 'string' ? { conversationBranchId: request.conversationBranchId } : {}),
+    ...(typeof request.continuationOfRunId === 'string' && request.continuationOfRunId
+      ? { continuationOfRunId: request.continuationOfRunId, ...(request.acknowledgeUncertain === true ? { acknowledgeUncertain: true } : {}) }
+      : {}),
     ...(request.expect && typeof request.expect === 'object' ? { expect: request.expect } : {}),
     mode: request.mode,
     images: request.images
@@ -1226,6 +1231,9 @@ export function registerGuiIpc(
     try {
       const body = normalizeSendContent(request)
       const requestId = body.requestId ?? randomUUID()
+      // SPEC §16.4: a continuation of a run is `continue:<runId>`, so a second click replays the first. Only the
+      // receipt key: `requestId` stays the send's own (a slash workflow's receipt, 64 characters at most).
+      const clientRequestId = body.continuationOfRunId ? `continue:${body.continuationOfRunId}` : requestId
       const result = await guiMms.request<{ queued?: boolean; heldByPause?: boolean; message?: string }>(
         'orchestrator.send',
         {
@@ -1234,11 +1242,12 @@ export function registerGuiIpc(
           requestId,
           // The composer sends a message again with the same id only when it may have arrived, so the
           // service answers with the run it already has instead of running it twice.
-          clientRequestId: requestId,
+          clientRequestId,
           mode: body.mode,
           images: body.images,
           source: 'gui',
           ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {}),
+          ...(body.continuationOfRunId ? { continuationOfRunId: body.continuationOfRunId, ...(body.acknowledgeUncertain ? { acknowledgeUncertain: true } : {}) } : {}),
           ...(body.expect ? { expect: body.expect } : {})
         }
       )

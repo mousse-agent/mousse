@@ -358,6 +358,16 @@ describe('a call to another computer that was not confirmed', () => {
     expect(sent('orchestrator.send')[0].params).toMatchObject({ requestId: 'req-9', clientRequestId: 'req-9' })
   })
 
+  it('sends the continuation of a run a restart left uncertain as continue:<runId>, acknowledged, with its own short request id', async () => {
+    presentation.setActiveThreadId('local-thread')
+    const runId = 'run:thread:3f9c1a7e-5b2d-4c8e-9a10-6d4e2b7f8c01:ordinal:12'
+    await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Continue where you left off.', requestId: 'req-c', continuationOfRunId: runId, acknowledgeUncertain: true })
+    const params = sent('orchestrator.send')[0].params as Record<string, unknown>
+    expect(params).toMatchObject({ requestId: 'req-c', clientRequestId: `continue:${runId}`, continuationOfRunId: runId, acknowledgeUncertain: true })
+    // The service takes a request id of at most 64 characters; the receipt key is the one that names the run.
+    expect(String(params.requestId).length).toBeLessThanOrEqual(64)
+  })
+
   it('leaves a thread of another computer, or of this one, that is not in view alone', async () => {
     presentation.setActiveThreadId('local-thread')
     request.mockImplementationOnce(async (method: string, params?: unknown) => {

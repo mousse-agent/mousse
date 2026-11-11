@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useMemo, useRef } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
 import { useAppStore } from '../../stores/appStore'
@@ -52,13 +52,43 @@ function MousseInputBarSlot() {
   return <div ref={ref} className="chat-composer-stack shrink-0">{composer}</div>
 }
 
-/** The last turn of a stopped run; Continue picks the work up again. */
-export function RunInterruptedNotice({ onContinue }: { onContinue?: () => void }) {
+/**
+ * The last turn of a stopped run; Continue picks the work up again. A run a restart left `uncertain` (SPEC §16.4) may
+ * have run tools without a recorded result: Continue names them first, and only a confirm continues the run.
+ */
+export function RunInterruptedNotice({ onContinue, uncertain, onContinueUncertain }: {
+  onContinue?: () => void
+  uncertain?: { runId: string; tools: string[] }
+  onContinueUncertain?: (runId: string) => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  // Focus follows the row: Continue anyway when it opens, Continue… again when it is cancelled.
+  const confirmRef = useRef<HTMLButtonElement>(null)
+  const askRef = useRef<HTMLButtonElement>(null)
+  const opened = useRef(false)
+  useEffect(() => {
+    if (confirming) {
+      opened.current = true
+      confirmRef.current?.focus()
+    } else if (opened.current) askRef.current?.focus()
+  }, [confirming])
+  const tools = uncertain?.tools.length ? uncertain.tools.join(', ') : 'unknown tools'
+  const detail = `May have run without a result: ${tools}. Check before continuing.`
   return <div className="chat-run-interrupted" role="status">
     <span className="chat-run-interrupted-label">
       <X size={12} strokeWidth={1.8} aria-hidden="true" />
-      <span>Run interrupted</span>
-      {onContinue && <button type="button" className="chat-run-interrupted-action" onClick={onContinue}>Continue</button>}
+      {uncertain && confirming
+        ? <>
+            <span title={detail}>May have run: {tools}</span>
+            {onContinueUncertain && <button ref={confirmRef} type="button" className="chat-run-interrupted-action" onClick={() => { opened.current = false; setConfirming(false); onContinueUncertain(uncertain.runId) }}>Continue anyway</button>}
+            <button type="button" className="chat-run-interrupted-action" onClick={() => setConfirming(false)}>Cancel</button>
+          </>
+        : <>
+            <span>Run interrupted</span>
+            {uncertain
+              ? onContinueUncertain && <button ref={askRef} type="button" className="chat-run-interrupted-action" title={detail} onClick={() => setConfirming(true)}>Continue…</button>
+              : onContinue && <button type="button" className="chat-run-interrupted-action" onClick={onContinue}>Continue</button>}
+          </>}
     </span>
   </div>
 }
@@ -101,6 +131,7 @@ export function MousseAgentChatShell({
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
+  const uncertain = useAppStore(state => (threadId ? state.turnStates[threadId]?.uncertain : undefined))
   // What the line under a running turn's Working reads: the turn's phase and step, and a Stop on its way.
   const turnPhase = useAppStore(state => (threadId ? state.turnStates[threadId]?.phase : undefined))
   const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
@@ -119,10 +150,11 @@ export function MousseAgentChatShell({
   const queued = useMemo(() => (queue ? <QueuedMessages queue={queue} /> : null), [queue])
   // The same element while nothing in it changes, so the last turn does not render again with every delta.
   const continueRun = turnActions && !busy ? turnActions.continueRun : undefined
+  const continueUncertain = turnActions && !busy ? turnActions.continueUncertain : undefined
   const lastTurnNotice = useMemo(() => <>
     <WorkspaceRecoveryBanner threadId={threadId} />
-    {interrupted ? <RunInterruptedNotice onContinue={continueRun} /> : undefined}
-  </>, [threadId, interrupted, continueRun])
+    {interrupted ? <RunInterruptedNotice onContinue={continueRun} uncertain={uncertain} onContinueUncertain={continueUncertain} /> : undefined}
+  </>, [threadId, interrupted, continueRun, uncertain, continueUncertain])
   return (
     <MousseComposerContext.Provider value={composer}>
       <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
