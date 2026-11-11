@@ -110,7 +110,7 @@ function loadLanguage(highlighter: HighlighterCore, language: string): Promise<v
 }
 
 /** Grammars most replies use, loaded by the warm-up so their first block is coloured as it streams. */
-export const WARM_LANGUAGES = ["typescript", "javascript", "tsx", "json", "bash", "python", "rust", "go"] as const;
+export const WARM_LANGUAGES = ["typescript", "javascript", "tsx", "json", "shellscript", "python", "rust", "go"] as const;
 
 /** What the warm-up needs from the window; tests pass their own. */
 export type WarmupHost = {
