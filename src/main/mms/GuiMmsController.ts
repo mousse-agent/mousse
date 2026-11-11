@@ -148,6 +148,12 @@ export class GuiMmsController extends EventEmitter {
   private baseBinding: TrustedProfileBinding | null = null
   private state: GuiMmsConnectionState = 'idle'
   private quitting = false
+  /**
+   * Set while an update installs (`stopForInstall`). Unlike `quitting`, `stop()` does not clear it: nothing may start
+   * or reconnect to the service until `resumeAfterInstall`, because a service started now runs the old executable and
+   * keeps the installer from replacing it.
+   */
+  private installing = false
   private reconnectAttempts = 0
   /** The thread of this computer each window shows (`setShownThreadSource`). */
   private shownThreadOf: ((senderId: number) => string | null) | null = null
@@ -183,6 +189,11 @@ export class GuiMmsController extends EventEmitter {
     this.maxReconnect = opts.maxReconnectAttempts ?? 12
     this.reconnectBaseMs = opts.reconnectBaseMs ?? 500
     this.requestTimeoutMs = opts.requestTimeoutMs
+  }
+
+  /** True from `stopForInstall` until `resumeAfterInstall`. */
+  get installingUpdate(): boolean {
+    return this.installing
   }
 
   get connectionState(): GuiMmsConnectionState {
@@ -228,7 +239,7 @@ export class GuiMmsController extends EventEmitter {
    * Does not steal a live foreign owner's lease.
    */
   async start(): Promise<ProtocolHelloOk> {
-    if (this.quitting) throw new Error('GuiMmsController is stopped')
+    this.assertMayConnect()
     if (this.connected && this.lastHello) return this.lastHello
     if (this.startPromise) return this.startPromise
     // Renderer bootstrap requests and main's eager start share one discovery,
@@ -236,7 +247,7 @@ export class GuiMmsController extends EventEmitter {
     const operation = (async () => {
       // Tests may inject endpoint+token without a full runtime publication.
       if (!(this.endpointOverride && this.ownerTokenOverride)) await this.ensureDaemonReady()
-      if (this.quitting) throw new Error('GuiMmsController is stopped')
+      this.assertMayConnect()
       return this.connectOnce()
     })()
     this.startPromise = operation
@@ -277,6 +288,26 @@ export class GuiMmsController extends EventEmitter {
     this.startedDaemon = null
     // Allow a later start() after stop (tests / relaunch of UI client).
     this.quitting = false
+  }
+
+  /**
+   * Disconnects like `stop()` and keeps the controller from starting, reconnecting or spawning the service until
+   * `resumeAfterInstall`. Windows stay open while Mousse quits for the installer and keep asking for data; without
+   * this, the first such request after the service stopped would start it again from the executable being replaced.
+   */
+  async stopForInstall(): Promise<void> {
+    this.installing = true
+    await this.stop()
+  }
+
+  /** The installer did not start: the controller may connect (and start the service) again. */
+  resumeAfterInstall(): void {
+    this.installing = false
+  }
+
+  private assertMayConnect(): void {
+    if (this.installing) throw new Error('Mousse is installing an update')
+    if (this.quitting) throw new Error('GuiMmsController is stopped')
   }
 
   /** Clear reconnect/disconnect monitors and event unsub (all failure/stop paths). */
@@ -381,6 +412,7 @@ export class GuiMmsController extends EventEmitter {
     const sender = this.senderAls.getStore()
     if (!sender) {
       if (!this.client || !this.client.connected) {
+        if (this.installing) throw new Error('Mousse is installing an update')
         if (this.quitting || this.state === 'stopped') {
           throw new Error('MMS client not connected')
         }
@@ -393,6 +425,7 @@ export class GuiMmsController extends EventEmitter {
       }
       return this.client
     }
+    if (this.installing) throw new Error('Mousse is installing an update')
     if (this.quitting || sender.isDestroyed()) throw new Error('Window MMS session is closing')
     let session = this.windowSessions.get(sender.id)
     if (session && !session.client.connected) {
@@ -458,7 +491,7 @@ export class GuiMmsController extends EventEmitter {
       binding: { profileId: bound.profile.id, epoch: bound.epoch }
     }
     openedSession = session
-    if (this.quitting || destroyed || sender.isDestroyed()) {
+    if (this.quitting || this.installing || destroyed || sender.isDestroyed()) {
       await this.closeWindowSession(sender.id, session)
       throw new Error('Window MMS session closed while opening')
     }
@@ -637,6 +670,7 @@ export class GuiMmsController extends EventEmitter {
       )
     }
 
+    this.assertMayConnect()
     this.setState('starting_daemon')
     const child = await this.spawnDaemon()
     const record = await this.waitForSpawnedDaemon(child)
@@ -650,6 +684,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async spawnDaemon(): Promise<ChildProcess> {
+    this.assertMayConnect()
     // Prefer the CLI entry packaged next to main; fall back to source-layout path in dev.
     const candidates = [
       join(__dirname, '../cli/index.js'),
@@ -726,7 +761,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async connectOnce(): Promise<ProtocolHelloOk> {
-    if (this.quitting) throw new Error('GuiMmsController is stopped')
+    this.assertMayConnect()
     this.setState('connecting')
 
     const owner = readOwnerRecord(this.homeDir)
@@ -749,7 +784,7 @@ export class GuiMmsController extends EventEmitter {
 
     try {
       const hello = await connectGuiClient(client, this.homeDir)
-      if (this.quitting) throw new Error('GuiMmsController is stopped')
+      this.assertMayConnect()
 
       this.detachEventHandlers()
       const previous = this.client
@@ -782,7 +817,7 @@ export class GuiMmsController extends EventEmitter {
       this.watchDisconnect(client)
 
       await client.subscribe(client.lastKnownSequence > 0 ? client.lastKnownSequence : 0)
-      if (this.quitting) throw new Error('GuiMmsController is stopped')
+      this.assertMayConnect()
       if (client.requiresResnapshot) {
         this.emit('resnapshot', { reason: 'subscribe_gap_or_instance', hello })
       }
@@ -800,7 +835,7 @@ export class GuiMmsController extends EventEmitter {
         this.detachEventHandlers()
       }
       // After stop, the failure is stop's doing: stay stopped.
-      if (!this.quitting) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
+      if (!this.quitting && !this.installing) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
       throw err
     }
   }
@@ -812,7 +847,7 @@ export class GuiMmsController extends EventEmitter {
       this.disconnectTimer = null
     }
     this.disconnectTimer = setInterval(() => {
-      if (this.quitting || this.client !== client) return
+      if (this.quitting || this.installing || this.client !== client) return
       if (!client.connected && this.state === 'ready') {
         this.scheduleReconnect('disconnect')
       }
@@ -820,7 +855,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private scheduleReconnect(reason: string): void {
-    if (this.quitting) return
+    if (this.quitting || this.installing) return
     if (this.reconnectTimer || this.reconnecting) return
     if (this.reconnectAttempts >= this.maxReconnect) {
       this.enterFailed(new Error(`MMS reconnect exhausted after ${reason}`))
@@ -836,7 +871,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async reconnect(reason: string): Promise<void> {
-    if (this.quitting || this.reconnecting) return
+    if (this.quitting || this.installing || this.reconnecting) return
     const attempt = this.attemptReconnect(reason)
     this.reconnecting = attempt
     let retry = false
@@ -868,7 +903,7 @@ export class GuiMmsController extends EventEmitter {
       this.emit('resnapshot', { reason: `reconnect:${reason}`, hello })
       return false
     } catch (err) {
-      if (this.quitting) return false
+      if (this.quitting || this.installing) return false
       // Tests with auto-start off fail fast; managed daemon keeps retrying while dev restarts MMS.
       if (this.disableAutoStart && !this.managedDaemon) {
         this.enterFailed(err instanceof Error ? err : new Error(String(err)))

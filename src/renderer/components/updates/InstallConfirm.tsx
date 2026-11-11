@@ -5,6 +5,10 @@ import { updateActions } from '../../stores/updateStore'
 import { Modal } from '../ui/Modal'
 import '../../styles/updates.css'
 
+/** What else the install stops, besides this app's own service: everything that runs from the install folder. */
+const OTHER_PROCESSES_DETAIL =
+  'The installer cannot replace files that are in use. Services of other Mousse homes stop, and their running turns are interrupted. MCP hosts, bridges and mousse-cli commands using this install stop as well.'
+
 /** Confirms the restart that installs a downloaded update. Used by the downloads popover and Settings, General. */
 export function InstallConfirm({ open, version, onClose }: { open: boolean; version: string; onClose: () => void }) {
   const running = useAppStore((s) => Object.values(s.turnStates).filter((turn) => isTurnActivePhase(turn.phase)).length)
@@ -17,6 +21,7 @@ export function InstallConfirm({ open, version, onClose }: { open: boolean; vers
       <p>{running > 0
         ? `${running} agent turn${running === 1 ? ' is' : 's are'} running. ${running === 1 ? 'It' : 'They'} will be stopped and marked interrupted; you can continue after the update.`
         : 'Any running agent turns will be stopped and marked interrupted.'}</p>
+      <p title={OTHER_PROCESSES_DETAIL}>Other Mousse services and commands from this install stop too.</p>
     </Modal>
   )
 }

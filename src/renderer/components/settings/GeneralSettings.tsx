@@ -61,7 +61,9 @@ function updateStatus(state: UpdateState): string | undefined {
     case 'up-to-date': return 'Up to date'
     case 'available': return `Version ${state.availableVersion} is available`
     case 'downloading': return `Downloading ${state.availableVersion}… ${state.downloadPercent ?? 0}%`
-    case 'downloaded': return state.error ? `${state.availableVersion} is downloaded but not installed` : `${state.availableVersion} is ready to install`
+    case 'downloaded':
+      if (state.error) return `${state.availableVersion} is downloaded but not installed`
+      return state.notAppliedVersion === state.availableVersion ? `${state.availableVersion} did not install last time` : `${state.availableVersion} is ready to install`
     case 'installing': return `Installing ${state.availableVersion}…`
     case 'error': return state.availableVersion ? `Version ${state.availableVersion} is available` : 'The last update check failed.'
     default: return undefined
@@ -71,6 +73,7 @@ function updateStatus(state: UpdateState): string | undefined {
 /** Colours only outcomes: up to date, or an update ready to install. A failure shows in UpdateErrorNotice. */
 function updateStatusClass(state: UpdateState): string | undefined {
   if (state.phase === 'error' || state.error) return undefined
+  if (state.notAppliedVersion && state.notAppliedVersion === state.availableVersion) return undefined
   if (state.phase === 'up-to-date' || state.phase === 'downloaded') return 'settings-status-ok'
   return undefined
 }

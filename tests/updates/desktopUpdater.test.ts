@@ -7,6 +7,7 @@ import {
   DesktopUpdater,
   FIRST_CHECK_DELAY_MS,
   FOCUS_CHECK_MIN_GAP_MS,
+  RETRY_CHECK_DELAY_MS,
   type UpdaterBackend
 } from '../../src/main/updates/DesktopUpdater'
 import { updaterRecordFile, type UpdaterRecord, type UpdaterRecordStore } from '../../src/main/updates/updaterRecord'
@@ -28,6 +29,10 @@ class FakeBackend implements UpdaterBackend {
   installError: Error | undefined
   /** Reported after quitAndInstall returns, as a failed installer spawn is. */
   lateInstallError: Error | undefined
+  /** What quitAndInstall reports: false when electron-updater ignored the call. */
+  launched: boolean | undefined = true
+  /** Versions whose installer is still in the download folder. */
+  cached = new Set<string>()
   private listeners = new Map<string, Listener[]>()
 
   async checkForUpdates() {
@@ -43,6 +48,10 @@ class FakeBackend implements UpdaterBackend {
     if (this.installError) this.emit('error', this.installError)
     const late = this.lateInstallError
     if (late) queueMicrotask(() => this.emit('error', late))
+    return this.launched
+  }
+  async isDownloadCached(version: string) {
+    return this.cached.has(version)
   }
   on(event: string, listener: Listener) {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener])
@@ -273,6 +282,70 @@ describe('DesktopUpdater', () => {
     expect(updater.getState().notAppliedVersion).toBe(notApplied)
     expect(updater.getState().channel).toBe('stable')
     expect(store.record).toEqual({ channel: 'stable' })
+  })
+
+  it('after an update did not install, checks soon and offers Restart to update for it again', async () => {
+    const store = memoryStore({ install: { from: '0.1.2-nightly.20261021.2', to: '0.1.2-nightly.20261022.3', at: 1 } })
+    const { backend, updater } = setup({ store })
+    backend.offer('0.1.2-nightly.20261022.3')
+    backend.cached.add('0.1.2-nightly.20261022.3')
+    updater.start()
+    await vi.advanceTimersByTimeAsync(RETRY_CHECK_DELAY_MS * 1.1)
+    expect(backend.checks).toBe(1)
+    expect(updater.getState()).toMatchObject({ phase: 'downloaded', availableVersion: '0.1.2-nightly.20261022.3', notAppliedVersion: '0.1.2-nightly.20261022.3' })
+    await updater.install()
+    expect(backend.installs).toEqual([[true, true]])
+    expect(updater.getState().notAppliedVersion).toBeUndefined()
+    updater.dispose()
+  })
+
+  it('offers the update that did not install, without downloading it, when its file is gone', async () => {
+    const store = memoryStore({ install: { from: '0.1.2-nightly.20261021.2', to: '0.1.2-nightly.20261022.3', at: 1 } })
+    const { backend, updater } = setup({ store })
+    backend.offer('0.1.2-nightly.20261022.3')
+    const download = vi.spyOn(backend, 'downloadUpdate')
+    await updater.check()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(updater.getState()).toMatchObject({ phase: 'available', notAppliedVersion: '0.1.2-nightly.20261022.3' })
+    expect(download).not.toHaveBeenCalled()
+    updater.dispose()
+  })
+
+  it('a newer release than the one that did not install is offered, not downloaded', async () => {
+    const store = memoryStore({ install: { from: '0.1.2-nightly.20261021.2', to: '0.1.2-nightly.20261022.3', at: 1 } })
+    const { backend, updater } = setup({ store })
+    backend.offer('0.1.2-nightly.20261023.4')
+    await updater.check()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(updater.getState().phase).toBe('available')
+    updater.dispose()
+  })
+
+  it('tells main once the installer is starting, and not when it could not start or the call was ignored', async () => {
+    for (const [installError, launched] of [[undefined, true], [new Error('spawn EACCES'), true], [undefined, false]] as const) {
+      const started = vi.fn()
+      const backend = new FakeBackend()
+      backend.launched = launched
+      if (installError) backend.installError = installError
+      const updater = new DesktopUpdater({
+        currentVersion: '0.1.2-nightly.20261021.2',
+        repositoryUrl: 'https://github.com/mousse-agent/mousse',
+        store: memoryStore(),
+        loadBackend: async () => backend,
+        prepareInstall: async () => undefined,
+        recoverInstall: async () => undefined,
+        onInstallStarted: started,
+        onState: () => undefined
+      })
+      backend.offer('0.1.2-nightly.20261022.3')
+      await updater.check()
+      await updater.download()
+      await updater.install()
+      expect(started).toHaveBeenCalledTimes(installError || !launched ? 0 : 1)
+      // An ignored call is a failed install: it can be tried again.
+      if (!launched) expect(updater.getState()).toMatchObject({ phase: 'downloaded', error: { during: 'install', message: 'The installer did not start. Try again.' } })
+      updater.dispose()
+    }
   })
 
   it('switching channel saves the choice and checks the new channel without downgrading', async () => {

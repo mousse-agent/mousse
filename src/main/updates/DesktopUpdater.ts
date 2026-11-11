@@ -12,12 +12,17 @@ export interface UpdaterBackend {
   channel: string | null
   checkForUpdates(): Promise<{ isUpdateAvailable: boolean; updateInfo: { version: string; releaseName?: string | null; releaseNotes?: RawReleaseNotes } } | null>
   downloadUpdate(): Promise<unknown>
-  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void
+  /** False when this call did not launch the installer (electron-updater ignores a second call). */
+  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): boolean | void
+  /** Whether the installer of `version` is already downloaded and intact, so downloading it again only checks it. */
+  isDownloadCached?(version: string): Promise<boolean>
   on(event: 'download-progress', listener: (progress: { percent: number }) => void): unknown
   on(event: 'error', listener: (error: Error) => void): unknown
 }
 
 export const FIRST_CHECK_DELAY_MS = 15_000
+/** The first check after an update did not install. */
+export const RETRY_CHECK_DELAY_MS = 3_000
 export const CHECK_INTERVAL_MS = 30 * 60_000
 /** A window regaining focus checks again only when the last check is at least this old. */
 export const FOCUS_CHECK_MIN_GAP_MS = 10 * 60_000
@@ -45,6 +50,8 @@ export interface DesktopUpdaterOptions {
   prepareInstall: () => Promise<void>
   /** Undoes `prepareInstall` after the installer could not start. */
   recoverInstall: () => Promise<void>
+  /** The installer process is starting and Mousse is quitting for it. */
+  onInstallStarted?: () => void
   onState: (state: UpdateState) => void
   now?: () => number
   random?: () => number
@@ -115,7 +122,8 @@ export class DesktopUpdater {
   }
 
   start(): void {
-    if (this.state.phase !== 'disabled') this.schedule(FIRST_CHECK_DELAY_MS)
+    // After an update did not install, its retry is offered soon after the window opens.
+    if (this.state.phase !== 'disabled') this.schedule(this.state.notAppliedVersion ? RETRY_CHECK_DELAY_MS : FIRST_CHECK_DELAY_MS)
   }
 
   /** A window gained focus. Checks when the last check is old enough. */
@@ -173,6 +181,11 @@ export class DesktopUpdater {
         const matched = typeof info.releaseNotes !== 'string' || !info.releaseName || info.releaseName.includes(info.version)
         const notes = normalizeReleaseNotes(matched ? info.releaseNotes : null, info.version, this.options.repositoryUrl)
         this.update({ phase: 'available', availableVersion: info.version, lastCheckedAt: this.now(), ...notes }, ['error'])
+        // The update that did not install last time is offered with Restart to update straight away when its file is
+        // still on disk, where downloading only checks it. Without the file it is offered like any update.
+        if (info.version === this.state.notAppliedVersion && (await backend.isDownloadCached?.(info.version).catch(() => false))) {
+          void this.download()
+        }
       }
       this.schedule(CHECK_INTERVAL_MS)
     } catch (error) {
@@ -220,9 +233,15 @@ export class DesktopUpdater {
       // Silent install, then start the new version. A failure here arrives as an 'error' event:
       // during this call when nothing could start, or just after it while Mousse is quitting.
       this.installStep = 'starting'
-      backend.quitAndInstall(true, true)
+      const launched = backend.quitAndInstall(true, true)
       // Still 'starting' unless the call itself reported a failure.
-      if (this.installStep === 'starting') this.installStep = 'started'
+      if (this.installStep === 'starting') {
+        // electron-updater ignores a call while an earlier one is marked as running (after its installer failed
+        // late); nothing launched, and it clears the mark, so the next try works.
+        if (launched === false) throw new Error('The installer did not start. Try again.')
+        this.installStep = 'started'
+        this.options.onInstallStarted?.()
+      }
     } catch (error) {
       await this.failInstall(error)
     }

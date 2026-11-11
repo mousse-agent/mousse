@@ -26,7 +26,8 @@ export function ipcErrorLine(error: unknown): string {
 const SESSION_CLOSING_LINES = new Set([
   'Window MMS session is closing',
   'Window MMS session closed while opening',
-  'GuiMmsController is stopped'
+  'GuiMmsController is stopped',
+  'Mousse is installing an update'
 ])
 
 /**
