@@ -303,9 +303,10 @@ describe('a chat reply says a short thing once', () => {
 describe('third review (docs/plans/bot-always-free.md)', () => {
   it('a work reminder cancelled while the pass delivers another is not started', async () => {
     const turn = await chat('Two morning jobs', 'm1')
-    const due = new Date(f.clock.now + 60_000).toISOString()
-    const a = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: due, text: 'Job A.', work: { title: 'A', brief: 'Do A.' } })
-    const b = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: due, text: 'Job B.', work: { title: 'B', brief: 'Do B.' } })
+    // A is due a second before B, so the pass delivers A first. (At the same time the pass takes them by id, which is
+    // random: B first would start before the cancel below, and the test would say nothing about a cancel mid-pass.)
+    const a = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Job A.', work: { title: 'A', brief: 'Do A.' } })
+    const b = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 61_000).toISOString(), text: 'Job B.', work: { title: 'B', brief: 'Do B.' } })
     await finish(f, turn.payload, 'completed', { text: 'Both set.' })
     // While A's work is being started, the owner cancels B.
     const engine = f.bots as unknown as { enqueue: (...args: unknown[]) => Promise<unknown> }
