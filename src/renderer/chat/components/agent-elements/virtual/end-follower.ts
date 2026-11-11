@@ -217,7 +217,9 @@ export function createEndFollower(options: {
       if (nextQueued && options.mode() === "following-end") {
         stopCollapse();
         const content = contentHeight(container);
-        holdTotal = content + reserve;
+        // At the end as last painted: what leaves with the turn in this commit (its live line) is
+        // held too, so the end does not drop before the next turn's pin.
+        holdTotal = Math.max(content, lastContent) + reserve;
         lastContent = content;
         holdTimer = setTimeout(() => {
           holdTimer = null;

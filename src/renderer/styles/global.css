@@ -176,6 +176,12 @@ html[data-theme='light'] {
 .an-message-list .turn-work + .turn-answer {
   margin-top: var(--space-16);
 }
+/* A reply's text with no block shown yet (reply pacing) renders nothing and takes no gap, nor does a
+   reply that holds only such text: the live line under it stays put until the first block shows. */
+.an-message-list .group\/assistant-text:empty,
+.an-message-list .turn-answer > .group\/assistant-turn:has(> .group\/assistant-text:empty):not(:has(> :not(.group\/assistant-text:empty))) {
+  display: none;
+}
 .an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
   opacity: 1;
 }

@@ -227,6 +227,31 @@ describe('the transcript while a reply streams', () => {
     expect(t.container.scrollTop).toBeGreaterThan(positions[0]!)
   })
 
+  it('holds the end as painted when the turn ends and its live line leaves in the same commit', () => {
+    const t = transcript({ content: 3000 })
+    send(t, 'first')
+    t.state.content += 1200
+    t.follower.follow()
+    const at = t.container.scrollTop
+    expect(at).toBe(t.end())
+    // The turn ends with a message still queued; its live line (32 px) leaves in the same commit, and
+    // the browser clamps the view to the shorter end before the follower hears of the turn's end.
+    t.state.content -= 32
+    t.follower.turnEnded(true)
+    t.follower.follow()
+    const positions = [t.container.scrollTop]
+    for (let index = 0; index < 20; index++) {
+      frame()
+      positions.push(t.container.scrollTop)
+    }
+    expect(new Set(positions)).toEqual(new Set([at]))
+    expect(t.reserve()).toBe(32)
+    // The next turn shows and is pinned: one move, up to it.
+    const next = send(t, 'next')
+    expect(t.container.scrollTop).toBe(next - PIN_TOP)
+    expect(t.container.scrollTop).toBeGreaterThan(at)
+  })
+
   it('closes the space as after any turn when the queued turn does not start', () => {
     const t = transcript({ content: 3000 })
     send(t)

@@ -15,5 +15,7 @@ type PacedProps = Omit<MarkdownProps, "content"> & {
 export function PacedText({ text, paced, ...props }: PacedProps & { text: string }) {
   const enabled = useReplyPacing();
   const shown = usePacedText(text, paced && enabled);
+  // Nothing finished to show yet: no empty block that would take a gap in the reply.
+  if (!shown) return null;
   return <Markdown {...props} content={shown} />;
 }

@@ -108,8 +108,10 @@ const ask = (id: string, text: string): UIMessage => ({ id, role: 'user', parts:
 const steered = (id: string, text: string): UIMessage => ({ id, role: 'user', parts: [{ type: 'text', text }], metadata: { steered: true } })
 const answer = (id: string, text: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text }] })
 const history = (count: number) => Array.from({ length: count }, (_, i) => [ask(`u${i}`, `Question ${i}`), answer(`a${i}`, `Answer ${i}.`)]).flat()
-const render = (messages: UIMessage[], status: 'ready' | 'submitted' | 'streaming') =>
-  act(() => root.render(createElement(MessageList, { messages, status })))
+const render = (messages: UIMessage[], status: 'ready' | 'submitted' | 'streaming', afterTurns?: string) =>
+  act(() => root.render(createElement(MessageList, { messages, status, afterTurns: afterTurns ? createElement('div', { className: 'queued-message' }, afterTurns) : null })))
+/** The header of the last turn ("Working · 0s" while it runs), or null. */
+const lastHeader = () => [...host.querySelectorAll('[data-turn-key]')].pop()?.querySelector('.turn-work')?.textContent ?? null
 const keysOf = (count: number, ...more: string[]) => [...Array.from({ length: count }, (_, i) => `u${i}`), ...more]
 
 describe('a prompt sent here', () => {
@@ -163,6 +165,41 @@ describe('a prompt sent here', () => {
     render([...before, ask('u-queued', 'Queued one')], 'streaming')
     expect(list().scrollTop).toBe(layout.rowTops.get('u-queued')! - PIN_TOP)
     expect(reserve()).toBeGreaterThan(0)
+  })
+
+  it('shows the queued turn header with its pinned prompt, before its run reports streaming', () => {
+    const before = history(5)
+    const live = [...before, ask('u-live', 'Go'), answer('a-live', 'Done.')]
+    place(keysOf(5, 'u-live'), 200)
+    render(live, 'streaming', 'Queued one')
+    attachLayout()
+    layout.scrollTop = end()
+    grew()
+    // The turn ends with a message still queued.
+    render(live, 'ready', 'Queued one')
+    // The queue's next turn arrives a commit before its run's status: pinned, and its header is
+    // already there, so nothing under the prompt moves when the status comes.
+    place(keysOf(5, 'u-live', 'u-queued'), 80)
+    render([...live, ask('u-queued', 'Queued one')], 'ready')
+    expect(list().scrollTop).toBe(layout.rowTops.get('u-queued')! - PIN_TOP)
+    expect(lastHeader()).toMatch(/^Working/)
+    render([...live, ask('u-queued', 'Queued one')], 'streaming')
+    expect(lastHeader()).toMatch(/^Working/)
+    // Its run ends without a reply: the header goes.
+    render([...live, ask('u-queued', 'Queued one')], 'ready')
+    expect(lastHeader()).toBeNull()
+  })
+
+  it('shows no header for a prompt that arrives with no queued turn waiting and no run', () => {
+    const before = history(5)
+    place(keysOf(5))
+    render(before, 'ready')
+    attachLayout()
+    layout.scrollTop = end()
+    grew()
+    place(keysOf(5, 'u-other'), 80)
+    render([...before, ask('u-other', 'From elsewhere')], 'ready')
+    expect(lastHeader()).toBeNull()
   })
 })
 
