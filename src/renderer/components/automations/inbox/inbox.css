@@ -616,7 +616,8 @@
   color: var(--text-secondary);
 }
 
-.inbox-cell > svg { margin-right: 5px; vertical-align: -2px; }
+/* An icon sits on the text's line (icons are display: block by default), with a small gap; the text still ellipsizes. */
+.inbox-cell > svg { display: inline-block; margin-right: 5px; vertical-align: middle; position: relative; top: -1px; }
 .inbox-cell.is-pending { color: var(--accent); }
 .inbox-cell[data-tone='failed'] { color: var(--danger); }
 
