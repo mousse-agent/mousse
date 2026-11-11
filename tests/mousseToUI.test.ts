@@ -938,6 +938,23 @@ describe('provider events through the assembler into the cards', () => {
       output: { numFiles: 2, text: 'src/a.ts\nsrc/b.ts' },
     })
   })
+
+  it('counts a Claude Grep in content mode by its matching lines, and a cut Glob by its real total', () => {
+    const grepInput = { pattern: 'TODO', output_mode: 'content' }
+    const grepContext = claudeCallContext('Grep', grepInput, true)
+    const grepDone = claudeActivityComplete(grepContext, { mode: 'content', numFiles: 0, filenames: [], content: 'a.ts:1:TODO\nb.ts:4:TODO', numLines: 2 }, undefined, false)
+    const globInput = { pattern: '**/*.ts' }
+    const globContext = claudeCallContext('Glob', globInput, true)
+    const globDone = claudeActivityComplete(globContext, { filenames: ['a.ts'], numFiles: 100, truncated: true, totalMatches: 240 }, undefined, false)
+    const messages = replay([
+      event('start', 'toolu_c', 'Grep', { activity: claudeActivityStart('Grep', grepInput, true) }),
+      event('complete', 'toolu_c', 'Grep', { ...(grepDone.activity ? { activity: grepDone.activity } : {}) }),
+      event('start', 'toolu_d', 'Glob', { activity: claudeActivityStart('Glob', globInput, true) }),
+      event('complete', 'toolu_d', 'Glob', { ...(globDone.activity ? { activity: globDone.activity } : {}) }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as Array<{ output?: { numFiles?: number } }>
+    expect(parts.map((part) => part.output?.numFiles)).toEqual([2, 240])
+  })
 })
 
 describe('tool rows without a name of their own', () => {
