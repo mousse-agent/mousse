@@ -486,7 +486,7 @@ ACP agents and Cursor are checked by hand only if they can run with no account; 
 | Pi is | A person's steer |
 |---|---|
 | Writing or thinking (an assistant message streams, no tool call announced) | **Cut:** the reply is aborted. The text already shown stays as written, above the Steer block; finished tool results stay; and the same turn goes on with the steer. |
-| At `turn_end` (no request yet) | Native `steer`. If Pi then starts an assistant message without having read it, it is cut (§3.2, "Release at `turn_end`"). |
+| At `turn_end` (no request yet) | Native `steer`. If an assistant reply that started after the send is open while the steer is still unread (`sending` or `queued`), it is cut (§3.2, "Release at `turn_end`"). |
 | A tool call is announced or runs | Held (§2). Send now: a cut (Pi's abort ends the tool, §3.5). |
 | Retrying (`auto_retry_start`) | Cut: the abort also cancels the backoff (`engine.ts:1565`). |
 | Compacting (`compaction_start`) | Held until `compaction_end`. A Send now request is still read during the compaction (§2.2) and forces the cut once it ends: a steer never stops a compaction. |
@@ -510,7 +510,7 @@ Agents' steers and subagent notices keep Pi's native next-step path; they never 
 |---|---|---|
 | `drained` | `drainSteerEntry` (token kept) | the lane sends it (`sending`), or a Stop or crash hands it back |
 | `sending` | native `steer` request sent | its response, matched by RPC id: OK → `queued`; error → handed back. A matching user `message_start` → `taken` (Pi can dequeue a steer before it writes the response; the OK that follows then changes nothing). |
-| `queued` | Pi accepted the native steer | its user `message_start` → `taken`; `clear_queue` returns it → `cutHeld`; the aborted run's settlement (step 2.5) → `cutHeld` |
+| `queued` | Pi accepted the native steer | its user `message_start` → `taken`; `clear_queue` returns it → `cutHeld`; the cut's settlement barrier (step 2.5) → `cutHeld` |
 | `cutHeld` | the cut takes it | the continuation `prompt` is accepted → `taken`; Stop, crash, refused prompt → handed back |
 | `taken` | `steerTaken(token)`, then `sink.steerAccepted(text, token)` (§2.6) | — |
 
@@ -605,7 +605,7 @@ Each such steer then runs once as the next turn, and Pi's queue holds nothing. O
   - an `abort` that misses its deadline gives the steer back and ends the turn as a Stop would.
 - **Matching:** repeated identical steers; a steer whose text is part of another; the continuation prompt not matching a queued steer.
 - **Release at `turn_end`:**
-  - an assistant `message_start` while a person's entry is `queued` starts the cut; an agent's queued steer does not;
+  - the condition holds (an assistant `message_start` while a person's entry is `queued`): the cut starts; an agent's queued steer does not;
   - **(a)** the assistant `message_start` arrives before the steer's OK, and the reply goes on forever. The cut starts when the OK is applied, the steer is taken once, and the cut lands without waiting for another assistant start or the turn's end;
   - **(b)** the OK and the assistant `message_start` arrive in one stdout chunk, in either order. Same outcome as (a);
   - a user `message_start` takes a still-`sending` entry, and the OK after it changes nothing;
@@ -828,7 +828,7 @@ Verdicts: Opus, Sol and Fable each requested changes, with no blockers. Each fin
 
 ## 9. Council round 2 responses
 
-Verdicts: Sol, Opus and Fable each requested changes, targeted rather than a redesign.
+Verdicts: Sol, Opus and Fable each requested changes, targeted rather than a redesign. Revision 4 adjusts some of these answers (the Pi settlement, the `turn_end` cut and the S4 rule); see §10.
 
 ### Majors
 
@@ -865,3 +865,33 @@ Verdicts: Sol, Opus and Fable each requested changes, targeted rather than a red
 | `STEER_SETTLE_MS` from twice the p99 (Opus 7) | Replaced by twice the largest measured gap. It is stricter at the sample size required, and it is easier to state as a pass rule. |
 | Refuse cross-process Send now until the read path exists (Sol Q3 alternative) | Not needed: the held poll now reads the field and the journal (§2.2, §2.9). |
 | Let the owner read the database control directly, instead of the queue field (Sol 4 alternative) | The queue-journal pattern was chosen. It is the existing pattern for durable queue changes, and the owner already refreshes the queue file on every poll. The owner reads pending journal entries only as a recovery path. |
+
+## 10. Council round 3 responses
+
+Verdicts: Opus and Fable approved. Sol requested changes on one Pi race. The minors below came with the approvals and are folded in.
+
+### Major
+
+| Finding | Response |
+|---|---|
+| **Pi's `turn_end` cut is triggered by an event, so it can miss** (Sol). The round-2 rule fired on an assistant `message_start` while a person's entry was `queued`. If the assistant start arrives before the native `steer`'s OK (the entry is still `sending`), or both arrive in one stdout chunk, no later event fires and the steer waits a whole reply. | **Fixed** (§3.2, "Release at `turn_end`"): <ul><li>The trigger is a **condition**: while an assistant reply that started after the native send is open, and a person's entry from that send is `sending` or `queued`, the cut runs.</li><li>It is evaluated at the assistant `message_start` (which records `replyStartedSince` on each unread entry) and again when the native send's response is applied in the lane, after any consumption evidence that came first.</li><li>Pi's RPC client dispatches a chunk's events before it resolves the response (`rpcClient.ts:77-84`, `:196-205`), so the one-chunk case is ordered.</li><li>A cut for a `sending` entry starts at once; step 2.1 waits for the OK, and stops with no abort if Pi read the steer meanwhile. A user `message_start` can now take a `sending` entry (ownership table, matching).</li><li>Tests (§3.4): **(a)** the assistant start before the OK with a reply that never ends; **(b)** both in one chunk, in either order; a `sending` entry taken before its OK; a tool announced while the cut waits (`mayCut` false).</li><li>§3.1 states the same condition.</li></ul> |
+
+### Minors
+
+| Finding | Response |
+|---|---|
+| The Pi cut's settlement is attributed by counting `agent_end`, which a retry emits several times | **Fixed** (§3.2): the settlement barrier is the first `agent_settled` after the `abort` request; `runSeq` is gone. The lane starts a cut only after the previous cut's barrier, so no other prompt can settle in between. S3 item 12 now asks about retries and an abort during backoff (§3.3). Test: several `agent_end` before one `agent_settled` (§3.4). |
+| The wait for the barrier has no deadline | **Fixed** (§3.2, steps 2.4–2.5 and Give-back): one `INTERRUPT_DEADLINE_MS` covers the abort and the barrier; missing it gives the steers back. Test (§3.4). |
+| S4 measures the gap at the provider, which hides notification lag | **Fixed** (§6): gap (a) is measured at arrival in Mousse's adapter; (b) is a check on (a). The rule reads: `STEER_SETTLE_MS` = 2 × G + 100 ms; over 1 s, the adapter does not ship best effort (it stays `none` or ships strict), rather than being capped. |
+| "Sending…" can stick when the hold is cleared without a `steer.now_*` event | **Fixed** (§2.9, §2.10): the button also leaves "Sending…" when `heldSteer` clears or its `holdGeneration` changes. Renderer test (§2.12). |
+| When the hold generation resets is not stated | **Fixed** (§0): it is per run and only rises, including across a Codex `turn/start` inside the same run. |
+| Send now's binding ignores items with no `steerRunId` | **Fixed** (§2.9, Apply): such an item counts when the click's run is the thread's active run. Test (§2.12). A journal entry that reaches `failed` now also appends `steer.now_stale` (§2.9, test in §2.12). |
+| Strict mode reads as if it held every steer | **Fixed** (§2.2, §2.3.2): the window follows tool events the same way in both modes; strict only keeps an **already held** steer held until the boundary. A steer arriving after the window closed cuts in both modes. Test in `commandPolicy.test.ts` (§2.12). |
+| A missing `externalPeekSteer` is ambiguous | **Fixed** (§2.2, "What the peek reads"): the whole turn falls back to `steerBoundary: 'none'`. |
+| ACP agents and Cursor have no strict-boundary drain | **Fixed** (§2.7): at the provider turn's end the adapter reports `boundary()` and drains with `expect: 'native'`; the steer goes in as the next prompt or run with no cancel. One strict-boundary test per adapter. |
+
+Also in revision 4, for consistency: the ownership table, §3.1 and the `turn_end` test now use the barrier and the condition wording, and §9 points here.
+
+### Not taken in round 3
+
+None.
