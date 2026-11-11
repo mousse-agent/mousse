@@ -106,6 +106,14 @@ export class FakeClaudeProcess {
    * undefined, like an older one that cannot say what it cancelled.
    */
   receipts = true
+  /**
+   * A Claude Code that sends interrupt receipts but predates `interrupt_cancel_queued_v1`: it ignores `cancelQueued`,
+   * answers like a plain interrupt (`still_queued`, no `cancelled`), and then (spike S1) starts what is still queued at
+   * once as a new turn, unless its process was closed first. What it started that way is in `ranAfterInterrupt`.
+   */
+  ignoresCancelQueued = false
+  /** The ids an interrupt left queued that the process then ran as turns of their own (`ignoresCancelQueued`). */
+  readonly ranAfterInterrupt: string[] = []
   /** While set, `setPermissionMode` and `backgroundTasks` wait for it. */
   permissionGate: Promise<unknown> | undefined
   /** While set, `interrupt()` waits for it before it answers (a slow receipt). */
@@ -219,6 +227,16 @@ export class FakeClaudeProcess {
     this.emit(textDelta(text, uuids[uuids.length - 1], { user_message_uuids: uuids }), resultFrame({ uuids, text }))
   }
 
+  /** Each message still queued starts as a turn of its own and runs to its result, as after an interrupt (spike S1). */
+  private runQueued(): void {
+    for (const id of this.queued) {
+      if (this.ended) return
+      this.ranAfterInterrupt.push(id)
+      this.emit(lifecycle(id, 'started'))
+      this.answer(id, 'ran after the interrupt')
+    }
+  }
+
   /** The process took this message into the turn it is running (folded in) without a frame naming it. */
   markStarted(uuid: string): void {
     this.started.add(uuid)
@@ -263,6 +281,10 @@ export class FakeClaudeProcess {
         for (const [id, type] of [...this.liveTasks]) if (type === 'local_agent') this.emit(notification(id, 'stopped'))
         if (!this.receipts) return undefined
         const queued = this.queued
+        if (this.ignoresCancelQueued) {
+          setTimeout(() => this.runQueued(), 0)
+          return { still_queued: queued }
+        }
         if (!options?.cancelQueued) return { still_queued: queued }
         for (const id of queued) this.cancelled.add(id)
         return { still_queued: [], cancelled: queued }

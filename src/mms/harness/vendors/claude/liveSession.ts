@@ -459,6 +459,11 @@ export class LiveRun {
   readonly read = new Set<string>()
   /** Pushed ids Claude Code dropped unread (a cancel took them from its queue): it will never run them. */
   readonly dropped = new Set<string>()
+  /**
+   * Pushed ids still queued in Claude Code after a cancel it did not confirm, on a process background work keeps: it
+   * may still run them, though the run was cancelled (and a steer among them was handed back).
+   */
+  readonly mayRunTwice = new Set<string>()
   /** Told, at once, each time Claude Code reads a pushed id of this run for the first time. Must not throw. */
   onRead: ((id: string) => void) | undefined
   /** The ids of the steers this run pushed (`LiveSession.steer`). */
@@ -612,6 +617,11 @@ export class LiveSession<Turn = unknown> {
   private reserved = 0
   /** Cancel sequences under way (`interruptFor`); pushes wait for them. */
   private cancelling = 0
+  /**
+   * Whether this Claude Code honors an interrupt's `cancel_queued` (`interrupt_cancel_queued_v1` in the capabilities its
+   * `system/init` frame lists). Unknown until an init frame lists capabilities; the interrupt's receipt then decides.
+   */
+  private cancelQueuedSupported: boolean | undefined
   private cancelWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
   private readonly noticeTimers = new Set<ReturnType<typeof setTimeout>>()
   private idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -899,8 +909,17 @@ export class LiveSession<Turn = unknown> {
    * receipt cannot cancel a prompt it never started; only closing the process drops it, which is not done
    * while the process has background work (the prompt then runs and its result is dropped).
    *
+   * The cancel counts as done only when its receipt has a `cancelled` list. A Claude Code that predates
+   * `interrupt_cancel_queued_v1` ignores the request and answers like a plain interrupt (`still_queued`, no
+   * `cancelled`): nothing was dropped, so no task is lost and nobody is told, and the queued messages still run. As
+   * with no receipt, the process is then closed, which drops them (a resumed session does not run a message that was
+   * queued when its process ended, spike S1); background work keeps it, and then they may run twice
+   * (`LiveRun.mayRunTwice`, and a warning).
+   *
    * `sweep`: the run owns a steer Claude Code has not read, which is handed back to Mousse. The queue is cancelled in
-   * the interrupt itself, with no plain interrupt first, so Claude Code cannot start the steer in between.
+   * the interrupt itself, with no plain interrupt first, so Claude Code cannot start the steer in between. A Claude Code
+   * whose init said it cannot cancel the queue is closed at once when nothing keeps it, not interrupted first: after an
+   * interrupt the steer starts at once as a new turn (spike S1), and its tools would run before the close.
    */
   private async interruptFor(run: LiveRun, query: Query, sweep = false): Promise<void> {
     this.cancelling++
@@ -914,6 +933,15 @@ export class LiveSession<Turn = unknown> {
   private async interruptSequence(run: LiveRun, query: Query, sweep: boolean): Promise<void> {
     type Receipt = { still_queued?: string[]; cancelled?: string[] } | undefined
     const target = query as { interrupt(options?: { cancelQueued?: boolean }): Promise<Receipt> }
+    if (sweep && this.cancelQueuedSupported === false && this.obligations.size === 0) {
+      // After `abandon` has returned, not inside it. Nothing is sent to Claude Code meanwhile.
+      await Promise.resolve()
+      if (this.dead) return
+      if (this.obligations.size === 0) {
+        this.close('closed')
+        return
+      }
+    }
     if (!sweep) {
       let receipt: Receipt
       try {
@@ -938,18 +966,45 @@ export class LiveSession<Turn = unknown> {
       return
     }
     if (this.dead) return
-    if (sweep && !cancelled) {
-      // A Claude Code that sends no receipt is older than the queue cancel and ignored it: the steer is still queued and
-      // would run beside the one handed back. Closing the process drops it (a resumed session does not run a message
-      // that was queued when its process ended, spike S1), unless background work keeps the process.
-      if (this.obligations.size === 0) this.close('closed')
+    if (this.cancelQueuedSupported === false || !Array.isArray(cancelled?.cancelled)) {
+      // The cancel was ignored, or not confirmed: no receipt, or one with no `cancelled` list (a Claude Code that
+      // predates the queue cancel answers it like a plain interrupt). What the run pushed and Claude Code has not read
+      // is still queued and would run unseen, beside a steer handed back. Closing the process drops it (a resumed
+      // session does not run a message that was queued when its process ended, spike S1).
+      if (this.obligations.size === 0) {
+        this.close('closed')
+        return
+      }
+      this.cancelUnconfirmed(run, cancelled?.still_queued)
       return
     }
+    // The cancel was honored, so it swept the whole queue, task notifications included.
     if (this.obligations.loseCarried() > 0)
       this.noticeLater('A background helper finished while a message was being cancelled, and its result may not have been delivered. The thread stays waiting until the four-hour limit; Stop releases it now.')
     // Every cancelled id is reconciled against the run that owns it: the cancel swept the whole queue.
-    for (const id of cancelled?.cancelled ?? []) this.cancelId(id)
+    for (const id of cancelled.cancelled) this.cancelId(id)
     if (run.owned.size === 0 && !run.settled) this.finishCancelled(run)
+  }
+
+  /**
+   * Claude Code did not confirm the cancel of `run`'s queue, and background work keeps its process: what the run pushed
+   * and Claude Code has not read (of what the receipt lists as `stillQueued`, when it has one) may still run there,
+   * though the run was cancelled and a steer among it was handed back. The run keeps owning it, so its result reaches
+   * nobody; it is marked and a warning says so. Ids and counts only.
+   */
+  private cancelUnconfirmed(run: LiveRun, stillQueued: readonly string[] | undefined): void {
+    const listed = Array.isArray(stillQueued) ? new Set(stillQueued) : undefined
+    const atRisk = [...run.owned].filter((id) => !run.read.has(id) && !run.dropped.has(id) && (!listed || listed.has(id)))
+    if (atRisk.length === 0) return
+    for (const id of atRisk) run.mayRunTwice.add(id)
+    const steers = atRisk.filter((id) => run.steerIds.has(id))
+    console.warn('[claude-live] Claude Code did not confirm it cancelled queued messages, and background work keeps its process: they may run twice', {
+      threadId: this.threadId,
+      runId: run.id,
+      messageIds: atRisk,
+      messages: atRisk.length,
+      steers: steers.length
+    })
   }
 
   /** One step of a cancel, held to `interruptTimeoutMs`: the SDK's control requests have no deadline of their own. */
@@ -1003,9 +1058,10 @@ export class LiveSession<Turn = unknown> {
    *   it never runs there;
    * - `gone`: the process ended (Stop closes it). A Claude Code killed with a message still queued does not run it
    *   when the session is resumed (spike S1);
-   * - `cut`: the run was cancelled, and its interrupt sweeps Claude Code's queue (`abandon`). Not waited for, so a Stop
-   *   ends the turn at once;
-   * - `unknown`: Claude Code could not say (no per-message cancel, or the cancel failed). It may still run it.
+   * - `cut`: the run was cancelled, and its interrupt sweeps Claude Code's queue (`abandon`), or closes the process when
+   *   Claude Code does not confirm the sweep. Not waited for, so a Stop ends the turn at once;
+   * - `unknown`: Claude Code could not say (no per-message cancel, or the cancel failed or was ignored on a process that
+   *   stays). It may still run it.
    *
    * Only a run that ended with its result asks Claude Code (`cancelAsyncMessage`, which drops a message still queued
    * and leaves one a turn already took). Never throws.
@@ -1015,7 +1071,8 @@ export class LiveSession<Turn = unknown> {
     if (known()) return known()!
     const query = this.query
     if (this.dead || !query) return 'gone'
-    if (run.abandoned) return 'cut'
+    // A cancel already known to have been ignored on a process that stays leaves it queued there (`mayRunTwice`).
+    if (run.abandoned) return run.mayRunTwice.has(id) ? 'unknown' : 'cut'
     const cancel = (query as { cancelAsyncMessage?: (uuid: string) => Promise<boolean> }).cancelAsyncMessage
     if (typeof cancel !== 'function') return 'unknown'
     let removed: boolean
@@ -1285,6 +1342,7 @@ export class LiveSession<Turn = unknown> {
 
   private routeSystem(message: SDKMessage & { type: 'system' }): void {
     const frame = message as unknown as Record<string, unknown>
+    if (frame.subtype === 'init' && Array.isArray(frame.capabilities)) this.cancelQueuedSupported = frame.capabilities.includes('interrupt_cancel_queued_v1')
     if (frame.subtype === 'background_tasks_changed' && Array.isArray(frame.tasks)) {
       const tasks = (frame.tasks as unknown[]).filter(isRecord).filter((task) => typeof task.task_id === 'string') as Array<{
         task_id: string

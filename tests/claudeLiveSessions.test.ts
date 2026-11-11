@@ -991,6 +991,39 @@ describe('result routing and steering edge cases', () => {
     expect(f.host.continuationStarted).not.toHaveBeenCalled()
   })
 
+  it('a queue cancel Claude Code ignored dropped nothing: the thread is not told a result may be lost, and a steer it may run twice is logged', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    process.ignoresCancelQueued = true
+    f.cli.reply = undefined
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const abort = new AbortController()
+    const second = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
+    await inputs(f.cli, 3)
+    const steer = process.uuid(2)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    await vi.waitFor(() => expect(process.interruptOptions).toEqual([{ cancelQueued: true }]))
+    // The helper's notification is still queued, so its result is not lost; the helper keeps the process.
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('may run twice'), expect.objectContaining({ messageIds: [steer], steers: 1 })))
+    await later(30)
+    expect(f.host.notice).not.toHaveBeenCalled()
+    expect(process.closed).toBe(false)
+    const logged = JSON.stringify(warn.mock.calls.find(([text]) => String(text).includes('may run twice')))
+    expect(logged).not.toContain('queued steer')
+    expect(logged).not.toContain('token')
+    warn.mockRestore()
+  })
+
   it('a steer Claude already folded into the turn is not queued: Stop interrupts plainly, the notification survives and its wake runs', async () => {
     const f = fixture()
     helper(f)
@@ -1122,6 +1155,7 @@ describe('result routing and steering edge cases', () => {
   it('a steer still queued when a steered continuation is cancelled is cancelled with it, or stays owned', async () => {
     for (const receipts of [true, false]) {
       const f = fixture()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       await withHelperTurn(f)
       const process = f.cli.last
       process.receipts = receipts
@@ -1142,11 +1176,15 @@ describe('result routing and steering edge cases', () => {
       // owning it (its helpers keep the process).
       expect(process.interruptOptions).toEqual([{ cancelQueued: true }])
       const session = (f.service as unknown as { live: Map<string, { owedResults: number }> }).live.get('thread')!
+      const runTwice = () => warn.mock.calls.filter(([text]) => String(text).includes('may run twice'))
       if (receipts) {
         expect(process.queued).toEqual([])
         await vi.waitFor(() => expect(session.owedResults).toBe(0))
+        expect(runTwice()).toEqual([])
       } else {
         expect(session.owedResults).toBe(1)
+        // The cancel is unconfirmed and the helpers keep the process: the steer may run there too, which is logged.
+        await vi.waitFor(() => expect(runTwice()).toEqual([[expect.any(String), expect.objectContaining({ messageIds: [steer], messages: 1, steers: 1 })]]))
         // The steer's own result belongs to the cancelled wake, not to the next turn.
         f.service.commitInterrupted('thread', '')
         f.cli.reply = undefined
@@ -1159,6 +1197,7 @@ describe('result routing and steering edge cases', () => {
         process.answer(process.uuid(2), 'next')
         expect(await next).toBe('next')
       }
+      warn.mockRestore()
     }
   })
 
@@ -2623,6 +2662,40 @@ describe('a steer Claude Code has not read when the turn ends', () => {
     expect(onSteer).not.toHaveBeenCalled()
     expect(returnSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1')
     await vi.waitFor(() => expect(process.closed).toBe(true))
+  })
+
+  it.each(['cancel', 'stop'])(
+    'a Claude Code that answers the queue cancel with no cancelled list ignored it: B is handed back once and never runs there (%s)',
+    async (how) => {
+      const f = fixture()
+      const { process, abort, turn, onSteer, returnSteer, steer } = await steeredDuringCommand(f)
+      process.ignoresCancelQueued = true
+      abort.abort()
+      if (how === 'stop') f.service.stopThread('thread')
+      await expect(turn).rejects.toThrow()
+      expect(returnSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1')
+      await vi.waitFor(() => expect(process.closed).toBe(true))
+      await later(30)
+      expect(process.ranAfterInterrupt).not.toContain(steer)
+      expect(onSteer).not.toHaveBeenCalled()
+      expect(returnSteer).toHaveBeenCalledOnce()
+      expect(f.host.notice).not.toHaveBeenCalled()
+    }
+  )
+
+  it('a Claude Code whose init says it cannot cancel the queue is closed without an interrupt, so B never starts there', async () => {
+    const f = fixture()
+    const { process, abort, turn, returnSteer, steer } = await steeredDuringCommand(f)
+    process.ignoresCancelQueued = true
+    process.emit({ type: 'system', subtype: 'init', session_id: SESSION, capabilities: ['interrupt_receipt_v1'] })
+    await later(10)
+    abort.abort()
+    await expect(turn).rejects.toThrow()
+    expect(returnSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1')
+    await vi.waitFor(() => expect(process.closed).toBe(true))
+    expect(process.interrupts).toBe(0)
+    await later(30)
+    expect(process.ranAfterInterrupt).not.toContain(steer)
   })
 
   it('a turn that ends with B still unread hands it back once, after Claude Code dropped it from its queue', async () => {
