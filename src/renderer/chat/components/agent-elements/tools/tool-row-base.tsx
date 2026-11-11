@@ -129,7 +129,7 @@ export function ToolRowBase({
             <bdi>{detail}</bdi>
           </span>
         ) : detail && (
-          <span className="font-normal truncate min-w-0 flex-1 text-an-foreground-muted/60">
+          <span className="font-normal truncate min-w-0 flex-1 text-an-foreground-muted/60" title={detailTitle}>
             {detail}
           </span>
         )}

@@ -34,6 +34,8 @@ export type GenericToolProps = {
   /** Label once the call failed; the title when absent. */
   failedTitle?: string;
   subtitle?: string;
+  /** The full detail when the subtitle shortens it, for the tooltip. */
+  detailTitle?: string;
   isPending: boolean;
   isError?: boolean;
 };
@@ -43,6 +45,7 @@ export const GenericTool = memo(function GenericTool({
   title,
   failedTitle,
   subtitle,
+  detailTitle,
   isPending,
   isError = false,
 }: GenericToolProps) {
@@ -64,6 +67,7 @@ export const GenericTool = memo(function GenericTool({
       isAnimating={isPending}
       failed={failed}
       detail={subtitle}
+      detailTitle={detailTitle || undefined}
     />
   );
 });

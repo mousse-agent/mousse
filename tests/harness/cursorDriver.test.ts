@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
-import { CursorSessions } from '../../src/mms/harness/cursor/session'
+import { CursorSessions, cursorToolName } from '../../src/mms/harness/cursor/session'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
@@ -18,6 +18,7 @@ import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import type { TurnInput, TurnResult } from '../../src/mms/harness/adapter'
+import type { StreamingLlmToolEvent } from '../../src/mms/harness/turnEvents'
 import { replayCursorHost } from '../../src/mms/run/testkit/cursorHostReplay'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { readTranscript, ReplayTransport } from '../../src/mms/run/testkit/ReplayTransport'
@@ -46,7 +47,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
   const texts = new Map<string, string>()
-  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string } } = {}): TurnSpec => ({
+  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string }; tool?: (event: StreamingLlmToolEvent) => void } = {}): TurnSpec => ({
     binding,
     input: {
       threadId,
@@ -62,7 +63,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
     sink: {
       text: (event: { phase: string; content: string }) => event.phase !== 'start' && texts.set(threadId, event.content),
       thinking: () => {},
-      tool: () => {},
+      tool: options.tool ?? (() => {}),
       progress: () => {},
       providerRef: () => {},
       steerAccepted: () => {},
@@ -339,6 +340,40 @@ describe('Stop before the run exists', () => {
     expect(notices).toContainEqual(['thread', "Work could not reopen this chat's agent, so the chat history was handed to a new one."])
     expect(host.calls('create')).toHaveLength(1)
     await vi.waitFor(() => expect(host.calls('prune')).toEqual([expect.objectContaining({ agentIds: ['agent-1'] })]))
+  })
+})
+
+describe('The tool name a Cursor call shows as', () => {
+  it('maps its call types to tool names, an MCP call to its server and tool, and anything else to a plain name', () => {
+    const name = (type: string, args: Record<string, unknown> = {}) => cursorToolName({ type, args })
+    expect(['shell', 'read', 'edit', 'write', 'grep', 'glob'].map((type) => name(type))).toEqual(['Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob'])
+    // A folder listing is not a file search, and a Cursor task is not a Mousse subagent.
+    expect(name('ls', { path: 'src' })).toBe('list_directory')
+    expect(name('task')).toBe('cursor_task')
+    expect(name('mcp', { providerIdentifier: 'mousse', toolName: 'thread_list' })).toBe('mcp__mousse__thread_list')
+    expect(name('mcp', { providerIdentifier: 'my-server', toolName: 'lookup' })).toBe('mcp__my_server__lookup')
+    expect(name('mcp', { toolName: 'lookup' })).toBe('lookup')
+    expect(name('mcp')).toBeUndefined()
+    expect(name('readLints')).toBe('read_lints')
+    expect(name('someNewTool')).toBe('cursor_some_new_tool')
+    expect(cursorToolName(undefined)).toBeUndefined()
+  })
+
+  it('reaches the turn on the tool event', async () => {
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => {
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'tool-call-started', callId: 'c1', toolCall: { type: 'ls', args: { path: 'src' } } } })
+          fake.emit({ event: 'run_end', runId: 'run-1', status: 'finished' })
+        }, 1)
+        return { runId: 'run-1' }
+      }
+    })
+    const { turn } = setup(host.connect)
+    const tools: StreamingLlmToolEvent[] = []
+    expect(await (await turn('thread', { tool: (event) => void tools.push(event) })).result).toMatchObject({ aborted: false })
+    expect(tools.find((event) => event.phase === 'start')).toMatchObject({ title: 'Ls src', activity: { toolName: 'list_directory' } })
   })
 })
 

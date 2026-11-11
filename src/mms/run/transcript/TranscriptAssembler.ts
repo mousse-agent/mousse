@@ -351,14 +351,16 @@ export class TranscriptAssembler {
     event: StreamingLlmToolEvent,
     parsed: { toolName?: string; input?: Record<string, unknown> }
   ): NonNullable<ChatMessage['toolCall']> {
-    const toolName = parsed.toolName ?? event.activity?.toolName ?? event.title
+    // A runtime that reports its tool by name (Claude Code, Codex) sends no `Tool:` detail: the name is on its typed fields.
+    const named = parsed.toolName ?? event.activity?.toolName
+    const toolName = named ?? event.title
     const input = event.input ?? parsed.input
     return {
       title: event.title,
       summary: event.summary,
       details: event.details,
       status: 'processing',
-      ...(parsed.toolName ? { toolName: parsed.toolName } : {}),
+      ...(named ? { toolName: named } : {}),
       // Only a Mousse subagent call keeps its (bounded) record; any other arguments live on the item, capped.
       ...(subagentToolName(toolName) && input ? { input } : {})
     }
@@ -369,8 +371,8 @@ export class TranscriptAssembler {
     parsed: { toolName?: string; input?: Record<string, unknown> },
     existing: ChatMessage['toolCall'] | undefined
   ): NonNullable<ChatMessage['toolCall']> {
-    const toolName = parsed.toolName ?? existing?.toolName
-    const subagent = subagentToolName(toolName ?? event.activity?.toolName ?? event.title)
+    const toolName = parsed.toolName ?? existing?.toolName ?? event.activity?.toolName
+    const subagent = subagentToolName(toolName ?? event.title)
     const input = event.input ? { ...existing?.input, ...event.input } : (existing?.input ?? parsed.input)
     return {
       title: event.title,

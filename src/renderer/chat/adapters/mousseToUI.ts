@@ -7,7 +7,7 @@ import {
   guessMimeTypeFromFilename,
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
-import { commandLabel, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
+import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
@@ -191,19 +191,50 @@ const RICH_TOOL_TYPES = new Set([
   'Read', 'Edit', 'MultiEdit', 'Write', 'Bash', 'Grep', 'Glob',
   'TodoWrite', 'PlanWrite', 'ExitPlanMode',
   'WebSearch', 'WebFetch', 'Skill', 'Task', 'Agent',
-  'Question', 'Thinking', 'cloning', 'QuickAction',
+  'Question', 'Thinking', 'cloning', 'QuickAction', 'ToolSearch',
 ])
 
+function mcpToolSlug(rawName: string | undefined): string {
+  return (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
+}
+
 function mcpCustomType(rawName: string | undefined): string {
-  const name = (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
-  return `tool-mcp__custom__${name}`
+  return `tool-mcp__custom__${mcpToolSlug(rawName)}`
+}
+
+/** A runtime's full MCP tool name (`mcp__<server>__<tool>`, as Claude Code and Codex name them), split. */
+function splitMcpName(rawName: string | undefined): { server: string; tool: string } | undefined {
+  const match = rawName?.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
+  return match ? { server: match[1]!, tool: match[2]! } : undefined
+}
+
+/**
+ * Built-in tools a runtime names in camel case, with their own handling in the list (`TaskOutput` rows are hidden,
+ * MCP resource tools get their own labels). On an MCP-kind row without a server they keep that name.
+ */
+const BUILTIN_TOOL_NAMES = new Set([
+  'TaskOutput', 'TaskStop',
+  'ListMcpResources', 'ListMcpResourcesTool', 'ReadMcpResource', 'ReadMcpResourceTool',
+])
+
+/**
+ * A title that is a tool's name rather than a sentence: a full MCP name (`mcp__mousse__thread_list`), a camel-case
+ * name (`ToolSearch`, `WebFetch`) or a name the cards know (`Read`, `Bash`). A single word such as "Terminal" or
+ * "Reading" is not one: it is guessed from below.
+ */
+function titleIsToolName(title: string): boolean {
+  return /^mcp__\w+$/.test(title) || /^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(title) || (/^\w+$/.test(title) && knownToolName(title) !== undefined)
 }
 
 function fallbackToolName(msg: ChatMessage): string | undefined {
   const detailTool = msg.toolCall?.details.find((d) => d.startsWith('Tool:'))
   const name = detailTool?.replace('Tool:', '').trim().split(/\s+/)[0]
   if (name) return name
-  const lower = (msg.toolCall?.title ?? '').toLowerCase()
+  const title = (msg.toolCall?.title ?? '').trim()
+  if (titleIsToolName(title)) return title
+  // Older rows named only by a sentence: a guess from its words. A search is not guessed (a web search, a tool
+  // search and a code search all say "search"): it stays a generic row rather than a wrong one.
+  const lower = title.toLowerCase()
   if (lower.includes('read')) return 'Read'
   if (lower.includes('edit')) return 'Edit'
   if (lower.includes('write') && !lower.includes('plan')) return 'Write'
@@ -213,7 +244,6 @@ function fallbackToolName(msg: ChatMessage): string | undefined {
   if (lower.includes('todo')) return 'TodoWrite'
   if (lower.includes('quickaction') || lower.includes('quick action')) return 'QuickAction'
   if (lower.includes('plan')) return 'PlanWrite'
-  if (lower.includes('search') || lower.includes('webfetch') || lower.includes('fetch')) return 'WebSearch'
   if (lower.includes('skill')) return 'Skill'
   if (lower.includes('agent') || lower.includes('spawning')) return 'Agent'
   if (lower.includes('task')) return 'Task'
@@ -262,23 +292,28 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
 
   // Structured first (provider boundary parses once), legacy string fields as fallback.
   const genericItem = activity?.kind === 'generic' ? activity : undefined
-  const rawName = toolCall.toolName ?? fallbackToolName(msg)
+  // The provider's own name: on the row (newer rows), else on its item (rows saved before the row kept it). An item
+  // named after its title had no name of its own; the fallback reads that title.
+  const itemName = activity && activity.toolName !== toolCall.title ? activity.toolName : undefined
+  const rawName = toolCall.toolName ?? itemName ?? fallbackToolName(msg)
   const toolName = normalizeToolName(rawName, msg.kind)
+  const mcpName = splitMcpName(rawName)
   const structuredInput = toolCall.input ?? genericItem?.input ?? tryParseArgsJson(toolCall.response)
 
   let type: string
   if (subagentTool) {
     type = 'tool-Subagent'
-  } else if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result') {
-    const server = extractServer(toolCall.details)
+  } else if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result' || mcpName) {
+    // True MCP tool: Server + Tool details identify it, or the full `mcp__<server>__<tool>` name does.
+    const server = extractServer(toolCall.details) ?? mcpName?.server
     if (server) {
-      // True MCP tool: Server + Tool details identify it.
-      const name = (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
-      type = `tool-mcp__${server}__${name}`
+      type = `tool-mcp__${server}__${mcpToolSlug(mcpName?.tool ?? rawName)}`
     } else if (RICH_TOOL_TYPES.has(toolName)) {
       // Pi/build tools arrive with rewritten mcp kinds but no Server
       // detail — render their rich cards (Bash terminal, Edit diff, ...).
       type = `tool-${toolName}`
+    } else if (rawName && BUILTIN_TOOL_NAMES.has(rawName)) {
+      type = `tool-${rawName}`
     } else {
       type = mcpCustomType(rawName)
     }
@@ -305,7 +340,9 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
         ?? (toolCall.summary.match(/[^\s]+\.[a-z]{1,4}/i)?.[0] ?? '')
       input = { file_path: file, ...(toolName === 'Edit' ? { old_string: '', new_string: '' } : {}) }
     } else if (toolName === 'Grep' || toolName === 'Glob' || toolName === 'WebSearch') {
-      input = { pattern: toolCall.summary, query: toolCall.summary }
+      // A runtime that sends no arguments puts the tool's own name in the summary: that is not what it searched for.
+      const query = toolCall.summary === rawName ? '' : toolCall.summary
+      input = { pattern: query, query }
     } else if (toolName === 'TodoWrite') {
       input = { todos: [], action: 'update' }
     } else {

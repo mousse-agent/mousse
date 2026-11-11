@@ -146,6 +146,7 @@ export const ToolRenderer = memo(function ToolRenderer({
         title={title}
         failedTitle={failedToolTitle(title, partType.replace(/^tool-/, ""))}
         subtitle={meta.subtitle?.(part)}
+        detailTitle={meta.detailTitle?.(part)}
         isPending={isPending}
         isError={isError}
       />

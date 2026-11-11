@@ -4,8 +4,12 @@ import type { ChatMessage } from '../src/shared/types'
 import type { AgentActivityItem } from '../src/shared/agentActivity'
 import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
 import { TranscriptAssembler } from '../src/mms/run/transcript/TranscriptAssembler'
+import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
+import { codexToolEvent } from '../src/mms/harness/vendors/codex/codexActivity'
+import { cursorToolName, cursorToolTitle } from '../src/mms/harness/cursor/session'
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
+import { toolRegistry } from '../src/renderer/chat/components/agent-elements/tools/tool-registry'
 
 const base = (overrides: Partial<ChatMessage>): ChatMessage => ({
   id: 'm1',
@@ -840,5 +844,110 @@ describe('provider events through the assembler into the cards', () => {
     expect(getToolStatus(part, 'ready').isInterrupted).toBe(true)
     expect(getToolStatus(part, 'streaming')).toMatchObject({ isInterrupted: true, isPending: false })
     expect(part.output).toMatchObject({ interrupted: true, summary: 'Stopped' })
+  })
+
+  it('names a tool search and a Mousse app tool by the names the runtime gave them', () => {
+    const query = 'select:mcp__mousse__profiler_overview'
+    const messages = replay([
+      event('start', 'toolu_ts', 'ToolSearch', { activity: { kind: 'generic', input: { query } } as never }),
+      event('complete', 'toolu_ts', 'ToolSearch', { activity: { kind: 'generic', output: '' } as never }),
+      event('start', 'toolu_po', 'mcp__mousse__profiler_overview', { activity: { kind: 'generic', server: 'mousse', input: {} } as never }),
+      event('complete', 'toolu_po', 'mcp__mousse__profiler_overview', { activity: { kind: 'generic', output: '{"cpu":3}' } as never }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as unknown as Array<Record<string, any>>
+    expect(parts[0]).toMatchObject({ type: 'tool-ToolSearch', state: 'output-available', input: { query } })
+    expect(parts[1]).toMatchObject({ type: 'tool-mcp__mousse__profiler_overview', state: 'output-available' })
+  })
+
+  it('shows a Codex MCP call (titled `server.tool`) as that server\'s tool', () => {
+    const call = { type: 'mcpToolCall', id: 'mcp1', server: 'docs', tool: 'search_pages', arguments: { query: 'install' }, status: 'inProgress' }
+    const done = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'found 2' }] } }
+    const messages = replay([
+      runtimeToolEvent(codexToolEvent(call as never, 'start')!),
+      runtimeToolEvent(codexToolEvent(done as never, 'complete')!),
+    ])
+    expect(messages[0]!.toolCall).toMatchObject({ title: 'docs.search_pages', toolName: 'mcp__docs__search_pages' })
+    const part = partOf(mousseToUIMessages(messages)[0]!)
+    expect(part).toMatchObject({ type: 'tool-mcp__docs__search_pages', state: 'output-available', input: { query: 'install' } })
+  })
+
+  it('shows a Cursor call by its tool, never its category as a search', () => {
+    const cursor = (callId: string, toolCall: unknown) =>
+      runtimeToolEvent({ phase: 'start', callId, title: cursorToolTitle(toolCall), ...(cursorToolName(toolCall) ? { toolName: cursorToolName(toolCall) } : {}) })
+    const messages = replay([
+      cursor('c1', { type: 'ls', args: { path: 'src' } }),
+      cursor('c2', { type: 'mcp', args: { providerIdentifier: 'mousse', toolName: 'thread_list', args: {} } }),
+      cursor('c3', { type: 'grep', args: { pattern: 'TODO' } }),
+    ])
+    const parts = mousseToUIMessages(messages).flatMap((message) => message.parts) as unknown as Array<Record<string, any>>
+    expect(parts.map((part) => part.type)).toEqual(['tool-mcp__custom__list_directory', 'tool-mcp__mousse__thread_list', 'tool-Grep'])
+    // Cursor sends no arguments: the search card has no pattern rather than the tool's own name as one.
+    expect(parts[2]!.input).toMatchObject({ pattern: '', query: '' })
+  })
+})
+
+describe('tool rows without a name of their own', () => {
+  const unnamed = (id: string, title: string, extra: Partial<ChatMessage> = {}): ChatMessage =>
+    base({ id, kind: 'mcp_tool_call', toolCall: { title, summary: title, details: [], status: 'complete' }, ...extra })
+  const typeOf = (message: ChatMessage) => partOf(mousseToUIMessages([message])[0]!).type
+
+  it('reads an identifier title as the name, an MCP one as its server and tool', () => {
+    expect(typeOf(unnamed('a', 'ToolSearch'))).toBe('tool-ToolSearch')
+    // "thread" holds "read": the name is not guessed from the words of an identifier.
+    expect(typeOf(unnamed('b', 'mcp__mousse__thread_list'))).toBe('tool-mcp__mousse__thread_list')
+    expect(typeOf(unnamed('c', 'mcp__mousse__profiler_overview'))).toBe('tool-mcp__mousse__profiler_overview')
+  })
+
+  it('never guesses a web search from a title that says search: it stays a plain row', () => {
+    expect(typeOf(unnamed('a', 'Searching deferred tools'))).toBe('tool-mcp__custom__tool')
+    expect(typeOf(unnamed('b', 'Tool search'))).toBe('tool-mcp__custom__tool')
+  })
+
+  it('still guesses the tool from a one-word title that is not a tool name', () => {
+    expect(typeOf(unnamed('a', 'Terminal'))).toBe('tool-Bash')
+    expect(typeOf(unnamed('b', 'Command'))).toBe('tool-Bash')
+    expect(typeOf(unnamed('c', 'Reading'))).toBe('tool-Read')
+    expect(typeOf(unnamed('d', 'Editing'))).toBe('tool-Edit')
+    // A name the cards know, and a camel-case name, are taken as they are.
+    expect(typeOf(unnamed('e', 'Read'))).toBe('tool-Read')
+    expect(typeOf(unnamed('f', 'ToolSearch'))).toBe('tool-ToolSearch')
+  })
+
+  it('labels an untyped web fetch and web search', () => {
+    expect(typeOf(unnamed('a', 'WebFetch'))).toBe('tool-WebFetch')
+    expect(typeOf(unnamed('b', 'WebSearch'))).toBe('tool-WebSearch')
+    const named = (id: string, toolName: string) =>
+      base({ id, kind: 'mcp_tool_call', toolCall: { title: 'Called a tool', summary: '', details: [], status: 'complete', toolName } })
+    expect(typeOf(named('c', 'WebFetch'))).toBe('tool-WebFetch')
+    expect(typeOf(named('d', 'WebSearch'))).toBe('tool-WebSearch')
+  })
+
+  it('keeps a built-in tool\'s own name on a row without a server', () => {
+    const named = (id: string, toolName: string) =>
+      base({ id, kind: 'mcp_tool_call', toolCall: { title: toolName, summary: toolName, details: [], status: 'complete', toolName } })
+    expect(typeOf(named('a', 'TaskOutput'))).toBe('tool-TaskOutput')
+    expect(typeOf(named('b', 'TaskStop'))).toBe('tool-TaskStop')
+    expect(typeOf(named('c', 'ListMcpResourcesTool'))).toBe('tool-ListMcpResourcesTool')
+    // A name that is not a built-in stays a plain MCP row.
+    expect(typeOf(named('d', 'FancyThing'))).toBe('tool-mcp__custom__fancything')
+  })
+
+  it('takes the name an older row kept only on its item', () => {
+    const item = { ...activityBase, id: 'i', callId: 'i', toolName: 'mcp__mousse__profiler_overview', kind: 'generic', server: 'mousse', output: '{}' } as AgentActivityItem
+    expect(typeOf(unnamed('i', 'Called a tool', { activity: item }))).toBe('tool-mcp__mousse__profiler_overview')
+  })
+})
+
+describe('the tool search row', () => {
+  const meta = toolRegistry['tool-ToolSearch']!
+  const part = (state: string, query = 'select:Read,mcp__mousse__thread_list') => ({ type: 'tool-ToolSearch', state, input: { query } })
+
+  it('says what it does, names the tools it loads, and keeps the full query for the tooltip', () => {
+    expect(meta.title(part('input-available'))).toBe('Loading tools')
+    expect(meta.title(part('output-available'))).toBe('Loaded tools')
+    expect(meta.title(part('output-error'))).toBe("Couldn't load tools")
+    expect(meta.subtitle!(part('output-available'))).toBe('Read, thread_list')
+    expect(meta.detailTitle!(part('output-available'))).toBe('select:Read,mcp__mousse__thread_list')
+    expect(meta.subtitle!(part('output-available', 'slack send'))).toBe('slack send')
   })
 })
