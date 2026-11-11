@@ -16,6 +16,7 @@ import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
 import { resolveModelChoice } from "../../../lib/modelChoice";
 import { modelLabel } from "../../../../shared/modelChoice";
+import type { TurnEnd } from "../../../../shared/types";
 
 import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
@@ -246,12 +247,18 @@ function TurnWorkStatus({
   startedAt,
   durationMs,
   waitingLabel,
+  end,
+  endYieldsToNotice = false,
 }: {
   active: boolean;
   startedAt?: number | null;
   durationMs: number | null;
   /** Said instead of the time while the reply waits for the user (an approval). */
   waitingLabel?: string;
+  /** A finished turn that a Stop, a restart or a crash cut off. */
+  end?: TurnEndMark;
+  /** The last turn's mark gives way while the "Run interrupted" notice shows for the same turn. */
+  endYieldsToNotice?: boolean;
 }) {
   const fallbackStartRef = useRef<number | null>(null);
   if (!active) fallbackStartRef.current = null;
@@ -279,7 +286,10 @@ function TurnWorkStatus({
         : active
           ? formatWorkingFor(elapsedMs)
           : formatWorkedFor(elapsedMs);
-  if (!label) return null;
+  const mark = !active && end
+    ? endYieldsToNotice ? <LastTurnEndMark end={end} separate={Boolean(label)} /> : <TurnEndLabel end={end} separate={Boolean(label)} />
+    : null;
+  if (!label && !mark) return null;
   const longLabel =
     elapsedMs == null || (active && waitingLabel)
       ? undefined
@@ -287,13 +297,47 @@ function TurnWorkStatus({
   return (
     <div className="turn-work" data-find-ignore>
       {active && !waitingLabel ? (
-        <LiveWorkLabel working={label} title={longLabel} />
+        <LiveWorkLabel working={label!} title={longLabel} />
       ) : (
-        <div className="turn-work-label" title={longLabel}>{label}</div>
+        <div className="turn-work-label" title={longLabel}>{label}{mark}</div>
       )}
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
   );
+}
+
+const TURN_END_WORDS: Record<TurnEnd["cause"], { word: string; detail: string }> = {
+  user: { word: "Stopped", detail: "You stopped this turn before it finished." },
+  agent: { word: "Stopped", detail: "An agent in another thread stopped this turn." },
+  daemon_restart: { word: "Interrupted", detail: "Mousse restarted during this turn." },
+  crash: { word: "Interrupted", detail: "Mousse quit during this turn." },
+};
+
+/**
+ * " · Stopped" after a cut-off turn's time: one muted word, with why in its tooltip. The mark takes no focus, so
+ * screen readers get why as hidden text too; find in thread skips it with the rest of the header (`data-find-ignore`).
+ */
+function TurnEndLabel({ end, separate }: { end: TurnEndMark; separate: boolean }) {
+  const { word, detail } = TURN_END_WORDS[end.cause] ?? TURN_END_WORDS.user;
+  const title = end.tools?.length ? `${detail} May have run: ${end.tools.join(", ")}` : detail;
+  return (
+    <>
+      {separate ? " · " : null}
+      <span className="turn-work-end" data-turn-end={end.cause} title={title}>
+        {word}
+        <span className="sr-only">: {title}</span>
+      </span>
+    </>
+  );
+}
+
+/**
+ * The last turn's mark, hidden while the thread's turn is stopped: the "Run interrupted" notice under its prompt says
+ * the same. Only the last turn reads the thread's turn, so earlier turns do not render again as it changes.
+ */
+function LastTurnEndMark(props: { end: TurnEndMark; separate: boolean }) {
+  if (useTurnProgressState()?.phase === "stopped") return null;
+  return <TurnEndLabel {...props} />;
 }
 
 /**
@@ -696,7 +740,32 @@ function MessageToolbar({
  * user wrote: they join the reply in progress, in place, with only their
  * structured notice kept (their text is what the model reads).
  */
-export type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[] };
+export type Turn = { userMsg?: UIMessage; assistantMsgs: UIMessage[]; end?: TurnEndMark };
+
+/** Why a turn was cut off before it finished (a Stop, a restart, a crash), read from Mousse's line for it. */
+export type TurnEndMark = { messageId: string; cause: TurnEnd["cause"]; tools?: string[] };
+
+function readTurnEnd(message: UIMessage): TurnEnd | undefined {
+  if ((message.role as string) !== "system") return undefined;
+  const end = (message.metadata as { turnEnd?: TurnEnd } | undefined)?.turnEnd;
+  return end && typeof end.cause === "string" ? end : undefined;
+}
+
+/** One mark per marker message, so a turn's `end` keeps its identity while its marker does (memoised rows). */
+const turnEndMarks = new WeakMap<UIMessage, TurnEndMark>();
+
+function turnEndMark(marker: UIMessage, end: TurnEnd): TurnEndMark {
+  let mark = turnEndMarks.get(marker);
+  if (!mark) {
+    mark = { messageId: marker.id, cause: end.cause, ...(end.tools?.length ? { tools: end.tools } : {}) };
+    turnEndMarks.set(marker, mark);
+  }
+  return mark;
+}
+
+function messageTurnId(message: UIMessage | undefined): string | undefined {
+  return (message as { turnId?: string } | undefined)?.turnId;
+}
 
 /** A message that reports results (a subagent's, or the runtime's own background tasks): not something the user wrote. */
 function isResultNotice(msg: UIMessage | undefined): boolean {
@@ -746,6 +815,9 @@ export function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
     current.assistantMsgs.push(steerGroupRow(steered));
     steered = [];
   };
+  // A cut-off turn's marker goes to the turn its run opened (the user message with its `turnId`), wherever it sits:
+  // a boot writes it after newer turns. One with no such turn (an older line) goes to the turn it falls inside.
+  const endMarkers: Array<{ marker: UIMessage; end: TurnEnd; inside: Turn | null }> = [];
 
   for (const msg of messages) {
     if (msg.role === "user" && current && isSteeredMessage(msg) && !isResultNotice(msg)) {
@@ -753,6 +825,11 @@ export function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
       continue;
     }
     flushSteered();
+    const end = readTurnEnd(msg);
+    if (end) {
+      endMarkers.push({ marker: msg, end, inside: current });
+      continue;
+    }
     if (msg.role === "user") {
       if (current && isResultNotice(msg)) {
         let copy = noticeCopies.get(msg);
@@ -772,11 +849,24 @@ export function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
   }
   flushSteered();
   if (current) turns.push(current);
+  if (endMarkers.length) {
+    const byRun = new Map<string, Turn>();
+    for (const turn of turns) {
+      const runId = messageTurnId(turn.userMsg);
+      if (runId && !byRun.has(runId)) byRun.set(runId, turn);
+    }
+    for (const { marker, end, inside } of endMarkers) {
+      const runId = messageTurnId(marker);
+      const turn = (runId ? byRun.get(runId) : undefined) ?? inside;
+      if (turn) turn.end = turnEndMark(marker, end);
+    }
+  }
   return turns;
 }
 
 function sameTurn(a: Turn, b: Turn): boolean {
   if (a.userMsg !== b.userMsg) return false;
+  if (a.end !== b.end) return false;
   if (a.assistantMsgs.length !== b.assistantMsgs.length) return false;
   return a.assistantMsgs.every((message, index) => message === b.assistantMsgs[index]);
 }
@@ -2206,6 +2296,8 @@ const TurnRow = memo(function TurnRow({
                     ? "Waiting for approval"
                     : undefined
                 }
+                end={turn.end}
+                endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
               />
               <div className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
