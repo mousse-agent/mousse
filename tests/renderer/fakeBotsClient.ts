@@ -114,6 +114,11 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       fake.details[botId] = next
       return next
     })),
+    cancelReminder: vi.fn((botId, reminderId) => record('cancelReminder', [botId, reminderId], () => {
+      const next = { ...detail(botId), reminders: (detail(botId).reminders ?? []).filter((item) => item.id !== reminderId) }
+      fake.details[botId] = next
+      return next
+    })),
     exportMemory: vi.fn((botId, dir) => record('exportMemory', [botId, dir], () => ({ files: [`${dir}/memory.md`] })))
   }
   return fake

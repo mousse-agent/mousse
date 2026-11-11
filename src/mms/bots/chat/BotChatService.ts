@@ -300,6 +300,17 @@ export class BotChatService {
     return { stopped: result === 'stopped' }
   }
 
+  /**
+   * `bots.reminders.cancel`: a waiting reminder is cancelled through the bot's own cancel path, so it is never said or
+   * started. One said meanwhile is left as it is; one this bot never had is an error.
+   */
+  reminderCancel(botId: string, reminderId: string): BotDetail {
+    this.engine.definitionOf(botId)
+    if (this.store.reminder(reminderId)?.botId !== botId) throw new BotEngineError('reminder_not_found', 'This bot has no such reminder.')
+    this.engine.tools.reminders.cancel(botId, reminderId)
+    return this.detailOf(botId)
+  }
+
   /** `bots.chat.markRead`: the owner has read up to `seq`. */
   markRead(botId: string, seq: number): Record<string, never> {
     this.engine.markRead(botId, seq)

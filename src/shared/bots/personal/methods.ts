@@ -75,7 +75,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * Methods added after the required Bot UI set (docs/plans/bot-always-free.md): the app calls them when they are there,
  * and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop'] as const
+export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -114,6 +114,8 @@ export interface BotsPersonalV2Api {
   'bots.chat.stop': { params: { botId: string }; result: Record<string, never> }
   /** Stops one piece of work (or a scheduled run) of the bot; the chat goes on. `stopped` is false when it had ended. */
   'bots.work.stop': { params: { botId: string; workId: string }; result: { stopped: boolean } }
+  /** Cancels one waiting reminder; it is never said or started. One already said leaves the detail as it is. */
+  'bots.reminders.cancel': { params: { botId: string; reminderId: string }; result: BotDetail }
   'bots.chat.markRead': { params: { botId: string; seq: number }; result: Record<string, never> }
   'bots.asks.answer': { params: { botId: string; askId: string; answer: 'allow' | 'not_now' }; result: { message: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */

@@ -10,7 +10,7 @@ import { fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClie
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { BotAboutPanel, nextRunText } = await import('../../src/renderer/components/bots/BotAboutPanel')
+const { BotAboutPanel, nextRunText, reminderWhenText } = await import('../../src/renderer/components/bots/BotAboutPanel')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 
 let root: Root
@@ -109,6 +109,30 @@ describe('About this bot', () => {
     expect(fake.calls).toContainEqual(['removeSchedule', 'b1', 's1'])
     expect(rows('RUNS')).toEqual([])
     expect(host.textContent).toContain('Only when you message it. Ask it to run on a schedule.')
+  })
+
+  it('lists its waiting reminders under Runs with when each fires, and cancels one', async () => {
+    const at = new Date(Date.now() + 2 * 60 * 60_000).toISOString()
+    fake.details.b1 = { summary: bot, permissions: [], runs: [], reminders: [
+      { id: 'rem_1', dueAt: at, text: 'Call mum.' },
+      { id: 'rem_2', dueAt: at, text: 'Check the weather.', work: true }
+    ] }
+    await show()
+    const reminders = [...host.querySelectorAll('[data-testid="bot-about-reminder"]')]
+    expect(reminders.map((row) => row.querySelector('.bot-about-clamp')!.textContent)).toEqual(['Call mum.', 'Check the weather.'])
+    expect(reminders[0]!.querySelector('.bot-about-next')!.textContent).toBe(`Reminds: ${reminderWhenText(at)}`)
+    expect(reminders[1]!.querySelector('.bot-about-next')!.textContent).toBe(`Starts: ${reminderWhenText(at)}`)
+    expect(host.textContent).not.toContain('Only when you message it.')
+    await click(button('Cancel reminder: Call mum.'))
+    expect(fake.calls).toContainEqual(['cancelReminder', 'b1', 'rem_1'])
+    expect([...host.querySelectorAll('[data-testid="bot-about-reminder"] .bot-about-clamp')].map((row) => row.textContent)).toEqual(['Check the weather.'])
+  })
+
+  it('writes a reminder further than a week ahead with its date', () => {
+    const now = new Date(2026, 10, 7, 8, 0)
+    expect(reminderWhenText(new Date(2026, 10, 9, 9, 0).toISOString(), now)).toBe(nextRunText(new Date(2026, 10, 9, 9, 0).toISOString(), now))
+    expect(reminderWhenText(new Date(2026, 10, 20, 9, 0).toISOString(), now)).toMatch(/20/)
+    expect(reminderWhenText(new Date(2026, 10, 20, 9, 0).toISOString(), now)).not.toMatch(/^Fri /)
   })
 
   it('says how to get permissions and runs when there are none', async () => {
