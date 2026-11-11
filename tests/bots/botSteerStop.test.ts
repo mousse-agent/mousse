@@ -71,6 +71,8 @@ function botTurn(scripts: Script[]) {
     return Object.assign(script(replay, fake), fake) as unknown as Query
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    // The fixture binary, not whatever `claude` is on PATH: a machine without Claude Code must run this too.
+    launchConfig: () => ({ binaryPath: binary }),
     query,
     // A live process would be kept warm for a person's thread: a bot's turn never takes one.
     live: true,
