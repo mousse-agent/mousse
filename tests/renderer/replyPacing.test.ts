@@ -160,10 +160,13 @@ describe('a paced reply', () => {
     // StrictMode runs effect cleanups once on mount; a cleared timer must not look pending afterwards.
     const strictShow = (text: string) => act(() => root.render(createElement(StrictMode, null, createElement(Probe, { text, paced: true }))))
     const words = 'This first paragraph is long. It keeps going with more words. '.repeat(12)
+    let at = 0
     for (let end = 5; end <= words.length && (seen.at(-1) ?? '') === ''; end += 5) {
       strictShow(words.slice(0, end))
       wait(20)
+      at += 20
     }
+    expect(at).toBeLessThanOrEqual(MAX_HOLD_MS + 40)
     expect(seen.find((value) => value !== '')?.endsWith('.')).toBe(true)
   })
 
