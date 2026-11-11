@@ -22,7 +22,7 @@ import {
 import { ManageTable, rowSentence, whenColumn } from './ManageTable'
 import { AssigneeChip, botNameOf, RunIcon, RunPrChip, LEVEL_VIEW } from './RunParts'
 import {
-  closePane, openManage, openRun, refreshInbox, resolveRun, runAutomationNow, setInboxFilter, toggleFold, undoResolve,
+  closePane, newDrafts, openManage, openRun, refreshInbox, resolveRun, runAutomationNow, setInboxFilter, toggleFold, undoResolve,
   useInboxShowsThread, useInboxStore, openEdit, openDrafts, type InboxFilter
 } from './inboxStore'
 import './inbox.css'
@@ -181,6 +181,8 @@ export function AutomationsInbox({ active }: { active: boolean }) {
   const needsCount = groups.find((group) => group.key === 'needs_you')?.count ?? 0
   // The Drafts row shows while there are drafts, or while the person's words to the manager are pending or failed.
   const requestShows = Boolean(request && !request.draftId && request.status !== 'done')
+  // Writing… only until the draft lands: the manager may still be replying, but the person has what they asked for.
+  const writing = managerWorking && newDrafts(request, index).length === 0
 
   return (
     <div className="inbox" data-testid="automations-inbox" data-thread={showsThread || undefined}>
@@ -210,10 +212,10 @@ export function AutomationsInbox({ active }: { active: boolean }) {
 
         <div className="inbox-scroll" ref={listRef} role="listbox" aria-label="Runs" data-testid="inbox-runs">
           {(drafts.length || requestShows) && !filter.automationId ? (
-            <button type="button" className="inbox-fold inbox-drafts-row" data-testid="inbox-drafts-row" data-state={managerWorking ? 'working' : request?.status === 'failed' ? 'failed' : undefined} aria-pressed={pane === 'drafts'} title={managerWorking ? 'Writing a draft…' : request?.status === 'failed' ? 'The last draft failed' : 'Drafts'} onClick={() => (pane === 'drafts' ? closePane() : openDrafts())}>
+            <button type="button" className="inbox-fold inbox-drafts-row" data-testid="inbox-drafts-row" data-state={writing ? 'working' : request?.status === 'failed' ? 'failed' : undefined} aria-pressed={pane === 'drafts'} title={writing ? 'Writing a draft…' : request?.status === 'failed' ? 'The last draft failed' : 'Drafts'} onClick={() => (pane === 'drafts' ? closePane() : openDrafts())}>
               <span>Drafts</span>
               {drafts.length ? <span className="inbox-group-count">{drafts.length}</span> : null}
-              {managerWorking ? <span className="inbox-drafts-row-note"><Loader2 size={12} strokeWidth={2} className="inbox-spin" aria-hidden="true" />Writing…</span>
+              {writing ? <span className="inbox-drafts-row-note"><Loader2 size={12} strokeWidth={2} className="inbox-spin" aria-hidden="true" />Writing…</span>
                 : request?.status === 'failed' ? <span className="inbox-drafts-row-note"><CircleAlert size={12} strokeWidth={2} aria-hidden="true" />Failed</span> : null}
             </button>
           ) : null}
@@ -234,7 +236,7 @@ export function AutomationsInbox({ active }: { active: boolean }) {
             </div>
           ))}
           {inbox && runs.length > 0 && rows.length === 0 ? <p className="inbox-note">No run matches.</p> : null}
-          {empty ? <p className="inbox-list-empty" data-testid="inbox-no-runs">No runs yet.</p> : null}
+          {empty && pane !== 'run' ? <p className="inbox-list-empty" data-testid="inbox-no-runs">No runs yet.</p> : null}
         </div>
 
         {lastResolved ? (
@@ -248,13 +250,13 @@ export function AutomationsInbox({ active }: { active: boolean }) {
       {!showsThread ? (
         <section className="inbox-pane" aria-label={pane === 'manage' ? 'Manage automations' : pane === 'drafts' ? 'Drafts' : pane === 'edit' ? 'Edit details' : 'Run'}>
           {pane === 'manage' ? (
-            <ManageTable automations={jobs} inbox={inbox} expanded={manageExpanded} now={now} toggling={toggling} onToggle={toggleAutomation} onRunNow={(item) => void runAutomationNow(item.id)} onEdit={(item) => openEdit(item.id)} onDelete={setDeleting} />
+            <ManageTable automations={jobs} inbox={inbox} expanded={manageExpanded} now={now} toggling={toggling} viewerZone={viewerZone} onToggle={toggleAutomation} onRunNow={(item) => void runAutomationNow(item.id)} onEdit={(item) => openEdit(item.id)} onDelete={setDeleting} />
           ) : pane === 'drafts' ? (
             <DraftsPane drafts={drafts} meta={metaOf} bots={library.bots} onBotMade={reloadLibrary} />
           ) : pane === 'edit' && editItem ? (
             <EditDetailsPane key={editItem.id} item={editItem} onDelete={setDeleting} />
           ) : empty ? (
-            <EmptyState automations={jobs} now={now} viewerZone={viewerZone} onCompose={() => composerRef.current?.focus()} />
+            <EmptyState automations={jobs} now={now} viewerZone={viewerZone} />
           ) : openRunRecord ? (
             <RunWithoutThread run={openRunRecord} automation={automations.get(openRunRecord.jobId)} />
           ) : null}
@@ -302,7 +304,6 @@ function InboxRow({ row, automation, automations, cursor, open, folds, now, onAc
   if (row.group === 'quiet') {
     return (
       <div className="inbox-quiet-row" role="option" aria-selected={open} data-row-key={key} data-open={open || undefined} data-cursor={cursor || undefined} data-testid="inbox-run" data-run-id={run.id} onClick={onActivate}>
-        <span className="inbox-run-icon" aria-hidden="true" />
         <span className="inbox-quiet-name">{name}</span>
         <time>{runTime(run.startedAt, now)}</time>
       </div>
@@ -322,7 +323,6 @@ function InboxRow({ row, automation, automations, cursor, open, folds, now, onAc
       data-testid="inbox-run"
       onClick={onActivate}
     >
-      <RunIcon run={run} automation={automation} resolved={row.resolved} />
       <div className="inbox-row-body">
         <div className="inbox-row-top">
           <button type="button" className="inbox-row-name" title={`Only ${name}`} onClick={(event) => { event.stopPropagation(); setInboxFilter({ automationId: run.jobId }) }}>{name}</button>
@@ -330,6 +330,7 @@ function InboxRow({ row, automation, automations, cursor, open, folds, now, onAc
           <time className="inbox-row-time" dateTime={run.startedAt}>{runTime(run.startedAt, now, run.state === 'running')}</time>
         </div>
         <div className="inbox-row-bottom">
+          <RunIcon run={run} automation={automation} resolved={row.resolved} inline />
           <span className={`inbox-row-summary${noReport(run) ? ' is-none' : ''}`}>{runLine(run, now)}</span>
           {bot ? <AssigneeChip name={bot} /> : null}
         </div>
@@ -407,14 +408,13 @@ function KeysPopover({ onClose }: { onClose: () => void }) {
   )
 }
 
-/** No runs yet: the automations there are, each with its next run, Run now and Edit; none: one line and New. */
-function EmptyState({ automations, now, viewerZone, onCompose }: { automations: AutomationItem[]; now: Date; viewerZone: string; onCompose: () => void }) {
+/** No runs yet: the automations there are, each with its next run, Run now and Edit; none: one line. */
+function EmptyState({ automations, now, viewerZone }: { automations: AutomationItem[]; now: Date; viewerZone: string }) {
   if (!automations.length) {
     return (
       <div className="inbox-empty" data-testid="inbox-empty">
         <h2 className="inbox-empty-title">No automations yet</h2>
         <p className="inbox-empty-none">Describe one and the Automation manager drafts it.</p>
-        <button type="button" className="inbox-primary-btn" title={`New automation · ${newKey()}`} onClick={onCompose}>New automation</button>
       </div>
     )
   }

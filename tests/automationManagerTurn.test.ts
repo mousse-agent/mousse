@@ -33,7 +33,7 @@ describe('automations.manager.turn', () => {
     const put = (status: RunStatus, error?: string, threadId = 'manager') => runs.set(RUN, { runId: RUN, threadId, status, outcome: error ? { error } : null })
     expect(turn(RUN)).toEqual({ status: 'unknown' })
     for (const [status, expected] of [
-      ['queued', 'working'], ['starting', 'working'], ['running', 'working'], ['finalizing', 'working'],
+      ['queued', 'queued'], ['starting', 'working'], ['running', 'working'], ['finalizing', 'working'],
       ['completed', 'completed'], ['interrupted', 'stopped'], ['cancelled', 'stopped'], ['paused', 'paused']
     ] as const) {
       put(status)

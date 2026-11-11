@@ -59,19 +59,32 @@ export async function sendToManager(input: { text: string; projectId?: string; p
     status: 'working',
     known
   }
-  if (input.who !== undefined) await client.nextWho(input.botId, pickOf(input.who))
-  if (input.botId) {
-    await createPersonalBotsClient(window.mousse.platformRequest).send(input.botId, message, crypto.randomUUID())
-    useInboxStore.setState({ composing: { ...request, botId: input.botId } })
-    return
+  // Anything that stops the words going out (a refusal, an unreachable service) shows on the request's own card, with
+  // Retry and Edit: the one place a request's outcome shows.
+  let threadId: string | undefined
+  try {
+    if (input.who !== undefined) await client.nextWho(input.botId, pickOf(input.who))
+    if (input.botId) {
+      await createPersonalBotsClient(window.mousse.platformRequest).send(input.botId, message, crypto.randomUUID())
+      startRequest({ ...request, botId: input.botId })
+      return
+    }
+    // Asked on every send: it also tells the daemon which project the manager's turn works in.
+    threadId = await client.managerThread(input.projectId)
+    // `ack`: the send answers once its run is committed; the turn's outcome comes from its events (`watchRequest`).
+    const result = await window.mousse.orchestrator.sendToThread(threadId, { content: message, await: 'ack' })
+    // A refused send ran nothing. An uncertain one (no answer) is watched as sent.
+    if (result?.error && result.requestAcknowledged === false) throw new Error(errorText(result.error))
+    startRequest({
+      ...request,
+      threadId,
+      ...(result?.runId ? { runId: result.runId } : {}),
+      // Behind an earlier turn: Stop takes this message out of the queue.
+      ...(result?.queued && result.queueItem?.id ? { queueItemId: result.queueItem.id } : {})
+    })
+  } catch (cause) {
+    startRequest({ ...request, ...(threadId ? { threadId } : {}), ...(input.botId ? { botId: input.botId } : {}), status: 'failed', error: errorText(cause) })
   }
-  // Asked on every send: it also tells the daemon which project the manager's turn works in.
-  const threadId = await client.managerThread(input.projectId)
-  // `ack`: the send answers once its run is committed; the turn's outcome comes from its events (`watchRequest`).
-  const result = await window.mousse.orchestrator.sendToThread(threadId, { content: message, await: 'ack' })
-  // A refused send ran nothing: the composer keeps the words and shows why. An uncertain one is watched as sent.
-  if (result?.error && result.requestAcknowledged === false) throw new Error(errorText(result.error))
-  startRequest({ ...request, threadId, ...(result?.runId ? { runId: result.runId } : {}) })
 }
 
 /** Retry: the failed or stopped words go to the manager again, with the same project and Who. */

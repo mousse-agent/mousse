@@ -9,7 +9,7 @@ import { NewBotDialog } from '../../bots/NewBotDialog'
 import { NEW_BOT_KEY, whoChoices } from '../DraftCard'
 import type { BotChoice } from '../whoDo'
 import { sendToManager } from './draftActions'
-import { errorText, openDrafts, refreshInbox, useInboxStore } from './inboxStore'
+import { openDrafts, refreshInbox, useInboxStore } from './inboxStore'
 
 export interface InboxComposerHandle {
   focus(): void
@@ -45,7 +45,6 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
   const [projectId, setProjectId] = useState('')
   const [who, setWho] = useState('default')
   const [newBot, setNewBot] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const boxRef = useRef<HTMLDivElement>(null)
@@ -82,17 +81,15 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
     const words = text.trim()
     if (!words || sending) return
     setSending(true)
-    setError(null)
     const project = local.find((entry) => entry.id === chosenProject)
     try {
-      // Returns once the words are sent; the Drafts pane shows the manager working, then its draft or its error.
+      // Returns once the words are sent (or refused): the Drafts pane shows the manager working, then its draft, or the
+      // error with Retry and Edit. The words live on that card, so the composer is free for the next one.
       await sendToManager({ text: words, ...(project ? { projectId: project.id, projectName: project.name } : {}), who })
       setText('')
       setOpen(false)
       openDrafts()
       void refreshInbox()
-    } catch (cause) {
-      setError(errorText(cause))
     } finally {
       setSending(false)
     }
@@ -111,7 +108,7 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
           value={text}
           readOnly={sending}
           onFocus={() => setOpen(true)}
-          onChange={(event) => { setText(event.target.value); if (error) setError(null) }}
+          onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() }
             if (event.key === 'Escape') { setOpen(false); event.currentTarget.blur() }
@@ -138,12 +135,6 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
           <span className="inbox-draft-field" title="Who does it">
             <Select ariaLabel="Who" size="small" value={who} disabled={sending} options={whoChoices(bots)} onChange={(key) => { if (key === NEW_BOT_KEY) setNewBot(true); else setWho(key) }} />
           </span>
-        </div>
-      ) : null}
-      {error ? (
-        <div className="inbox-composer-error" role="alert" data-testid="inbox-composer-error">
-          <span title={error}>{error}</span>
-          <button type="button" className="inbox-text-btn" onClick={() => void send()}>Retry</button>
         </div>
       ) : null}
       {newBot ? (

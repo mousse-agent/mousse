@@ -80,20 +80,6 @@
 .inbox .inbox-composer-send:disabled { background: transparent; color: var(--text-secondary); opacity: 0.55; cursor: default; }
 .inbox .inbox-composer-send[aria-busy='true'] { background: rgba(var(--accent-rgb), 0.22); color: var(--accent); opacity: 1; cursor: progress; }
 
-.inbox-composer-error {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 4px 4px 10px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--danger) 11%, transparent);
-  color: var(--danger);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.inbox-composer-error > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 .inbox-composer input,
 .inbox-search input {
   flex: 1;
@@ -240,7 +226,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 14px 8px 5px;
+  padding: 14px 10px 5px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -264,10 +250,8 @@
 }
 
 .inbox-row {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  gap: 8px;
-  padding: 8px 8px 9px 6px;
+  display: block;
+  padding: 8px 8px 9px 10px;
   border-radius: 10px;
   cursor: default;
   transition: background 0.12s;
@@ -294,7 +278,7 @@
   color: var(--text-secondary);
 }
 
-.inbox-row .inbox-run-icon { margin-top: 0; }
+.inbox-run-icon.inline { width: 14px; height: 14px; margin-right: -1px; }
 .inbox-run-icon[data-tone='running'] { color: var(--status-running); }
 .inbox-run-icon[data-tone='paused'] { color: var(--warning); }
 .inbox-run-icon[data-tone='failed'] { color: var(--danger); }
@@ -400,7 +384,7 @@
   align-items: center;
   gap: 8px;
   height: 26px;
-  padding: 0 8px 0 6px;
+  padding: 0 8px 0 10px;
   border-radius: 8px;
   font-size: 12.5px;
   color: var(--text-secondary);
@@ -620,14 +604,27 @@
 
 .inbox-manage-state { flex-shrink: 0; font-size: 12px; }
 .inbox-manage-state > span { display: inline-flex; align-items: center; gap: 5px; }
-.inbox-manage-state .is-paused { color: var(--text-secondary); }
+.inbox-manage-state .is-paused {
+  display: inline-grid;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+/* Paused, and on hover or focus what a click does: Resume, in the accent. */
+.inbox-manage-state .is-paused > span { grid-area: 1 / 1; align-self: center; justify-self: center; }
+.inbox-manage-state .is-paused > span:last-child { visibility: hidden; }
+.inbox-manage-state .is-paused:is(:hover, :focus-visible) { background: rgba(var(--accent-rgb), 0.12); color: var(--accent); }
+.inbox-manage-state .is-paused:is(:hover, :focus-visible) > span:first-child { visibility: hidden; }
+.inbox-manage-state .is-paused:is(:hover, :focus-visible) > span:last-child { visibility: visible; }
 .inbox-manage-state .is-pending { color: var(--accent); }
 .inbox-manage-state .is-running { color: var(--text-secondary); }
 .inbox-manage-state .is-failed { color: var(--danger); }
 .inbox-manage-state .is-offline { color: var(--text-secondary); }
 
-/* The menu shows on the row's hover or focus; it stays while it is open. */
-.inbox-manage-more { opacity: 0; transition: opacity 0.12s; }
+/* The menu is always there, quietly; the row's hover or focus brings it up. */
+.inbox-manage-more { opacity: 0.45; transition: opacity 0.12s; }
 .inbox-manage-row:hover .inbox-manage-more,
 .inbox-manage-row:focus-within .inbox-manage-more,
 .inbox-manage-more[aria-expanded='true'] { opacity: 1; }
@@ -823,7 +820,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 4px 6px 6px;
+  padding: 6px 4px 6px 10px;
   border-radius: 8px;
 }
 .inbox-ask-row .inbox-run-icon { color: var(--status-input); }

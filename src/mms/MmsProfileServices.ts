@@ -1565,6 +1565,7 @@ export class MmsProfileServices {
       case 'interrupted':
       case 'cancelled': return { status: 'stopped' }
       case 'paused': return { status: 'paused' }
+      case 'queued': return { status: 'queued' }
       default: return { status: 'working' }
     }
   }

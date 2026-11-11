@@ -19,11 +19,11 @@ export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
 /**
- * How one of the Automation manager's turns stands (`automations.manager.turn`), read by its run id: still working,
+ * How one of the Automation manager's turns stands (`automations.manager.turn`), read by its run id: queued, working,
  * done, failed (with its error), stopped, or waiting for a usage limit. `unknown`: no such run of the manager's thread.
  */
 export interface ManagerTurn {
-  status: 'working' | 'completed' | 'failed' | 'stopped' | 'paused' | 'unknown'
+  status: 'queued' | 'working' | 'completed' | 'failed' | 'stopped' | 'paused' | 'unknown'
   error?: string
 }
 

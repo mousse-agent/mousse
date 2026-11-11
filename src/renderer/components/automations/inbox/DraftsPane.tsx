@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { AutomationItem } from '../../../../shared/automations'
 import type { InboxAutomationMeta } from '../../../../shared/automationInbox'
 import { useAppStore } from '../../../stores/appStore'
+import { openAutomationCreate } from '../../../stores/automationCreateStore'
 import { openThread } from '../../../lib/openThread'
 import { closeRailPages } from '../../../lib/railPages'
 import { useChatsStore } from '../../../stores/chatsStore'
@@ -56,7 +57,8 @@ export function DraftsPane({ drafts, meta, bots, onBotMade }: { drafts: Automati
         <span className="inbox-strip-spacer" />
         <button type="button" className="inbox-icon-btn small" title="Close · Esc" aria-label="Close" onClick={closePane}><X size={14} strokeWidth={1.8} /></button>
       </div>
-      {composing && (!composing.draftId || composing.status === 'failed') && !fresh.size ? (
+      {/* An error always shows, even after a draft landed; otherwise the card goes once the new draft is there. */}
+      {composing && (composing.status === 'failed' || (!composing.draftId && !fresh.size)) ? (
         <RequestCard request={composing} working={working} onOpenChat={() => openManagerChat(composing)} />
       ) : null}
       {!drafts.length && !composing ? <p className="inbox-manage-none">No drafts.</p> : null}
@@ -92,10 +94,13 @@ export function DraftsPane({ drafts, meta, bots, onBotMade }: { drafts: Automati
   )
 }
 
-/** The person's last words to the manager: pending while it writes, then an error with Retry, or no draft with its chat. */
+/**
+ * The person's last words to the manager: pending while it writes (or waits for a usage limit), then an error with
+ * Retry and Edit, or no draft with its chat.
+ */
 function RequestCard({ request, working, onOpenChat }: { request: ManagerRequest; working: boolean; onOpenChat: () => void }) {
   const [retrying, setRetrying] = useState(false)
-  const [retryError, setRetryError] = useState<string | null>(null)
+  const [stopping, setStopping] = useState(false)
   const [, setTick] = useState(0)
   useEffect(() => {
     if (!working) return
@@ -106,11 +111,18 @@ function RequestCard({ request, working, onOpenChat }: { request: ManagerRequest
   const elapsed = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
   const retry = () => {
     setRetrying(true)
-    setRetryError(null)
-    void retryRequest(request).catch((cause) => setRetryError(cause instanceof Error ? cause.message : String(cause))).finally(() => setRetrying(false))
+    void retryRequest(request).finally(() => setRetrying(false))
   }
-  const state = working ? 'working' : request.status === 'failed' ? 'failed' : request.status === 'stopped' ? 'stopped' : 'done'
-  const error = retryError ?? request.error
+  const stop = () => {
+    setStopping(true)
+    void stopRequest().finally(() => setStopping(false))
+  }
+  // Edit: the words go back into the composer, and this card goes.
+  const edit = () => {
+    openAutomationCreate({ prompt: request.text, ...(request.projectId ? { projectId: request.projectId } : {}) })
+    dismissRequest()
+  }
+  const state = working ? (request.waiting ? 'waiting' : 'working') : request.status === 'failed' ? 'failed' : request.status === 'stopped' ? 'stopped' : 'done'
   return (
     <section className="inbox-request" data-state={state} data-testid="inbox-request" role="status" aria-live="polite">
       <div className="inbox-request-head">
@@ -120,23 +132,32 @@ function RequestCard({ request, working, onOpenChat }: { request: ManagerRequest
           </span>
         ) : null}
         <strong className="inbox-request-title">
-          {state === 'working' ? 'Writing a draft…' : state === 'failed' ? "Couldn't write the draft" : state === 'stopped' ? 'Stopped' : 'No draft yet: the manager replied in its chat'}
+          {state === 'working' ? 'Writing a draft…'
+            : state === 'waiting' ? 'Waiting for a usage limit'
+              : state === 'failed' ? "Couldn't write the draft"
+                : state === 'stopped' ? 'Stopped' : 'No draft yet: the manager replied in its chat'}
         </strong>
         {state === 'working' ? <span className="inbox-request-time" title="Since you sent it">{elapsed}</span> : null}
+        {state === 'waiting' ? <span className="inbox-request-time" title="Its turn goes on when the limit resets">It goes on by itself</span> : null}
         <span className="inbox-strip-spacer" />
         {!working ? <button type="button" className="inbox-icon-btn small" title="Dismiss" aria-label="Dismiss" onClick={dismissRequest}><X size={13} strokeWidth={1.8} /></button> : null}
       </div>
       <p className="inbox-request-text" title={request.text}>{request.text}</p>
-      {state === 'failed' && error ? <p className="inbox-request-error" data-testid="inbox-request-error" title={error}>{error}</p> : null}
+      {state === 'failed' && request.error ? <p className="inbox-request-error" data-testid="inbox-request-error" title={request.error}>{request.error}</p> : null}
       <div className="inbox-request-actions">
         {state === 'failed' || state === 'stopped' ? (
-          <button type="button" className="inbox-primary-btn" data-testid="inbox-request-retry" disabled={retrying} aria-busy={retrying || undefined} onClick={retry}>
-            {retrying ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : null}
-            {retrying ? 'Retrying…' : 'Retry'}
-          </button>
+          <>
+            <button type="button" className="inbox-primary-btn" data-testid="inbox-request-retry" disabled={retrying} aria-busy={retrying || undefined} onClick={retry}>
+              {retrying ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : null}
+              {retrying ? 'Retrying…' : 'Retry'}
+            </button>
+            <button type="button" className="inbox-text-btn" data-testid="inbox-request-edit" title="Put the words back in the composer" onClick={edit}>Edit</button>
+          </>
         ) : null}
         {request.threadId || request.botId ? <button type="button" className="inbox-text-btn" title="The manager's chat" onClick={onOpenChat}>Open chat</button> : null}
-        {state === 'working' && request.threadId ? <button type="button" className="inbox-text-btn muted" data-testid="inbox-request-stop" onClick={stopRequest}>Stop</button> : null}
+        {working && request.threadId ? (
+          <button type="button" className="inbox-text-btn muted" data-testid="inbox-request-stop" disabled={stopping} aria-busy={stopping || undefined} onClick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button>
+        ) : null}
       </div>
     </section>
   )

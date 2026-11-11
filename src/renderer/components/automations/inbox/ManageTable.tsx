@@ -8,6 +8,7 @@ import type { AutomationItem } from '../../../../shared/automations'
 import { describeSchedule } from '../../../../shared/scheduleLabel'
 import { CircleX, Loader2, Monitor, X } from '../../../lib/icons'
 import { RowMenu, type RowMenuItem } from '../../integrations/RowMenu'
+import { ownedWhenText } from '../automationTime'
 import { whenWords } from '../DraftCard'
 import { closePane, removeTuning, setInboxFilter, toggleTuning } from './inboxStore'
 
@@ -33,11 +34,12 @@ export function automationState(item: AutomationItem, runs: AutomationInbox['run
   return undefined
 }
 
-export function ManageTable({ automations, inbox, expanded, toggling = {}, onToggle, onRunNow, onEdit, onDelete, now }: {
+export function ManageTable({ automations, inbox, expanded, toggling = {}, onToggle, onRunNow, onEdit, onDelete, now, viewerZone }: {
   automations: AutomationItem[]
   inbox: AutomationInbox | null
   expanded: string | null
   now: Date
+  viewerZone: string
   /** Pauses and resumes on their way, with the state each was asked for. */
   toggling?: Record<string, boolean>
   /** On: resume; off: pause until the person resumes it. */
@@ -74,7 +76,7 @@ export function ManageTable({ automations, inbox, expanded, toggling = {}, onTog
             return (
               <Fragment key={item.key}>
                 <li className="inbox-manage-row" data-open={open || undefined} data-paused={paused || undefined} data-state={state?.tone} data-testid="inbox-manage-row" data-automation={item.id}>
-                  <button type="button" className="inbox-manage-main" title={`${item.name}'s runs`} onClick={() => setInboxFilter({ automationId: item.id })}>
+                  <button type="button" className="inbox-manage-main" title={`${item.name}'s runs${!paused && item.next ? ` · next ${ownedWhenText(item.next.at, now, item.computer, viewerZone)}` : ''}`} onClick={() => setInboxFilter({ automationId: item.id })}>
                     <span className="inbox-manage-name">{item.name}</span>
                     <span className="inbox-manage-when">{rowSentence(item, now)}</span>
                   </button>
@@ -83,7 +85,7 @@ export function ManageTable({ automations, inbox, expanded, toggling = {}, onTog
                       : state?.tone === 'running' ? <span className="is-running" title={state.title}><Loader2 size={12} strokeWidth={2} className="inbox-spin" aria-hidden="true" />Running</span>
                         : state?.tone === 'failed' ? <span className="is-failed" title={state.title}><CircleX size={12} strokeWidth={2} aria-hidden="true" />Failed</span>
                           : state?.tone === 'offline' ? <span className="is-offline" title={`${state.title}: it runs when that computer is back`}><Monitor size={12} strokeWidth={1.9} aria-hidden="true" />Offline</span>
-                            : paused ? <span className="is-paused">Paused</span> : null}
+                            : paused ? <button type="button" className="is-paused" data-testid="inbox-manage-resume" title="Resume" aria-label={`Resume ${item.name}`} onClick={() => onToggle(item, true)}><span>Paused</span><span>Resume</span></button> : null}
                   </span>
                   <RowMenu label={`More actions for ${item.name}`} buttonClassName="inbox-icon-btn small inbox-manage-more" items={menu} />
                 </li>
