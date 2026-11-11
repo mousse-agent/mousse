@@ -17,6 +17,13 @@ import { observeRateLimit, RejectedWindows } from './usageLimit'
  */
 export const CLAUDE_TURN_EXTRA_ARGS: Readonly<Record<string, string>> = { 'thinking-display': 'summarized' }
 
+/** The result a steer's cut produced for the message being written, not the end of the turn. */
+function isAbortedResult(message: SDKMessage): boolean {
+  if (message.type !== 'result') return false
+  const reason = (message as { terminal_reason?: unknown }).terminal_reason
+  return reason === 'aborted_streaming' || reason === 'aborted_tools'
+}
+
 /** Where a turn's frames are reported; the slice of the chat input the stream needs. */
 export interface TurnFrameSink {
   onText: (text: string) => void
@@ -71,8 +78,8 @@ export class TurnFrames {
   private readonly nextMessage: Array<() => void> = []
 
   /**
-   * Runs `run` once the message being written has ended: its result arrives (an aborted one, after a steer's cut) or
-   * the next top-level assistant message starts. After a steer is pushed Claude Code still sends the rest of the
+   * Runs `run` once the message being written has ended: its aborted result arrives (after a steer's cut) or the next
+   * top-level assistant message starts. After a steer is pushed Claude Code still sends the rest of the
    * message it was writing, until its cut lands; the steer's place in the reply is there. That place says nothing
    * about whether Claude Code read the steer: an interrupt's message starts there too. What still waits when the turn
    * ends is dropped with the turn.
@@ -130,8 +137,11 @@ export class TurnFrames {
     this.metrics.observe(message)
     observeRateLimit(message, this.rateLimits)
     this.sessionId = message.session_id || this.sessionId
-    // The message being written ended (its result, an aborted one after a steer's cut) or the next one starts.
-    if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || message.type === 'result') this.flushNextMessage()
+    // The message being written ended (an aborted result, after a steer's cut) or the next one starts. A result that ends
+    // the turn places nothing: what follows it, if anything, is a later turn's, which starts with a message of its own
+    // (or the steer's read places it). A break placed there would end the reply with an empty paragraph, which the
+    // turn's result text then fills in again (issue #919).
+    if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || isAbortedResult(message)) this.flushNextMessage()
     this.waiting()
     if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
     if (message.type === 'stream_event') {
