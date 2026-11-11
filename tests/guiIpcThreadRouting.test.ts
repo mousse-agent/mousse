@@ -368,6 +368,22 @@ describe('a call to another computer that was not confirmed', () => {
     expect(String(params.requestId).length).toBeLessThanOrEqual(64)
   })
 
+  it('asks the service for an ack-only answer only when the window opts in, and returns its run as soon as it is committed', async () => {
+    presentation.setActiveThreadId('local-thread')
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      return { message: '', actions: [], runId: 'run:thread:manager:ordinal:3', sequence: 7, accepted: true }
+    })
+    const answer = (await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Every weekday at 9', await: 'ack' })) as { runId?: string; accepted?: boolean }
+    expect(answer).toMatchObject({ runId: 'run:thread:manager:ordinal:3', accepted: true })
+    expect(sent('orchestrator.send')[0].params).toMatchObject({ threadId: 'local-thread', content: 'Every weekday at 9', await: 'ack' })
+    // Every other send still waits for its turn, as it always has.
+    await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Hello' })
+    expect(sent('orchestrator.send')[1].params).not.toHaveProperty('await')
+    await invoke('orchestrator:sendToThread', 'local-thread', 'Plain text')
+    expect(sent('orchestrator.send')[2].params).not.toHaveProperty('await')
+  })
+
   it('leaves a thread of another computer, or of this one, that is not in view alone', async () => {
     presentation.setActiveThreadId('local-thread')
     request.mockImplementationOnce(async (method: string, params?: unknown) => {

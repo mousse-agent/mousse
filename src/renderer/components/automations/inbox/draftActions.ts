@@ -5,7 +5,7 @@ import type { JobSchedule } from '../../../../shared/types'
 import { createAutomationsClient, type AutomationWhoPick } from '../../../services/automationsClient'
 import { createPersonalBotsClient } from '../../../services/personalBotsClient'
 import { useAppStore } from '../../../stores/appStore'
-import { errorText, openEdit, refreshInbox, settleRequest, useInboxStore, type ManagerRequest } from './inboxStore'
+import { errorText, openEdit, refreshInbox, startRequest, useInboxStore, type ManagerRequest } from './inboxStore'
 
 const api = () => createAutomationsClient(window.mousse.platformRequest)
 
@@ -67,12 +67,11 @@ export async function sendToManager(input: { text: string; projectId?: string; p
   }
   // Asked on every send: it also tells the daemon which project the manager's turn works in.
   const threadId = await client.managerThread(input.projectId)
-  useInboxStore.setState({ composing: { ...request, threadId } })
-  // The window's send answers when the turn ends; an error comes back in the answer, not as a throw.
-  void window.mousse.orchestrator.sendToThread(threadId, message).then(
-    (result) => settleRequest(request.at, result?.error ? errorText(result.error) : undefined),
-    (cause) => settleRequest(request.at, errorText(cause))
-  )
+  // `ack`: the send answers once its run is committed; the turn's outcome comes from its events (`watchRequest`).
+  const result = await window.mousse.orchestrator.sendToThread(threadId, { content: message, await: 'ack' })
+  // A refused send ran nothing: the composer keeps the words and shows why. An uncertain one is watched as sent.
+  if (result?.error && result.requestAcknowledged === false) throw new Error(errorText(result.error))
+  startRequest({ ...request, threadId, ...(result?.runId ? { runId: result.runId } : {}) })
 }
 
 /** Retry: the failed or stopped words go to the manager again, with the same project and Who. */

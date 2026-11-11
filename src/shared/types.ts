@@ -538,6 +538,11 @@ export interface OrchestratorSendRequest {
    * daemon refuses the send (`thread_settings_changed`, with the current values) when the thread runs anything else.
    */
   expect?: SendExpectation
+  /**
+   * `ack`: the send answers once its run and turn.start are committed (SPEC §12.7), not when the turn ends; the turn's
+   * outcome comes through turn and run events. Absent: the send answers with the turn's result, as it always has.
+   */
+  await?: 'ack'
 }
 
 /** The model, permission mode and (when known) settings revision a send is bound to (`OrchestratorSendRequest.expect`). */

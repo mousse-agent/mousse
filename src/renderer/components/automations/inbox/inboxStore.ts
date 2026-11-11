@@ -3,6 +3,7 @@
 import { create } from 'zustand'
 import type { AutomationIndex } from '../../../../shared/automations'
 import type { AutomationInbox, InboxCounts, InboxRun, TuningNote } from '../../../../shared/automationInbox'
+import type { TurnPhase, TurnState } from '../../../../shared/types'
 import { createAutomationsClient, type AutomationsClient } from '../../../services/automationsClient'
 import { useAppStore } from '../../../stores/appStore'
 
@@ -45,6 +46,8 @@ export interface ManagerRequest {
   at: number
   /** The manager's hidden thread; absent for a bot. */
   threadId?: string
+  /** The run the send committed (`await: 'ack'`): the turn whose outcome this request waits for. */
+  runId?: string
   botId?: string
   /** What was sent, for Retry and Edit. */
   text: string
@@ -173,6 +176,119 @@ export function stopRequest(): void {
 export function dismissRequest(): void {
   useInboxStore.setState({ composing: null })
 }
+
+// ── Watching the manager's turn ──────────────────────────────────────────────────────────────────────
+// The send answers once its run is committed (`await: 'ack'`), so the turn's outcome comes from the thread's turn
+// events. The run is also read when the watch starts (a turn that ended before it subscribed), every few seconds
+// as a safety net (a turn that failed before it showed a phase), and when the page opens again after a reload.
+
+/** How often a working request reads its run, in case no turn event says it ended. */
+export const REQUEST_POLL_MS = 5_000
+/** A request older than this is not brought back after a reload. */
+const REQUEST_KEEP_MS = 2 * 60 * 60 * 1000
+const ENDED_PHASES = new Set<TurnPhase>(['completed', 'failed', 'stopped'])
+
+let offTurnState: (() => void) | null = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let watching: number | null = null
+
+function stopWatching(): void {
+  offTurnState?.()
+  offTurnState = null
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = null
+  watching = null
+}
+
+/** The turn of the request (its run), from one turn event: ended or not. Another turn of the thread is not its. */
+function onTurnState(state: TurnState): void {
+  const request = useInboxStore.getState().composing
+  if (!request || request.status !== 'working' || state.threadId !== request.threadId) return
+  if (request.runId && state.turnId !== request.runId) return
+  if (state.phase === 'paused') { void checkRequest(request.at); return }
+  if (!ENDED_PHASES.has(state.phase)) return
+  if (state.phase === 'stopped') updateRequest(request.at, { status: 'stopped' })
+  else void settleRequest(request.at, state.phase === 'failed' ? state.error ?? 'The Automation manager stopped with an error.' : undefined)
+}
+
+/** Reads the request's run once and settles it if it ended; without a run id, whether the thread still works. */
+export async function checkRequest(at: number): Promise<void> {
+  const request = useInboxStore.getState().composing
+  if (!request || request.at !== at || request.status !== 'working' || !request.threadId) return
+  try {
+    const turn = request.runId ? await inboxClient().managerTurn(request.runId) : undefined
+    if (turn?.status === 'working') return
+    if (turn?.status === 'completed') return void await settleRequest(at)
+    if (turn?.status === 'failed') return void await settleRequest(at, turn.error ?? 'The Automation manager stopped with an error.')
+    if (turn?.status === 'stopped') return updateRequest(at, { status: 'stopped' })
+    if (turn?.status === 'paused') return void await settleRequest(at, 'Paused by a usage limit. It goes on when the limit resets.')
+    // No run to read (an uncertain send, or a service that restarted): done once the thread is idle.
+    const active = await window.mousse.orchestrator.isTurnActive(request.threadId).catch(() => true)
+    if (!active) await settleRequest(at)
+  } catch {
+    // The next turn event or poll reads it again.
+  }
+}
+
+/** Watches the working request: its turn events, one read now, and a read every few seconds until it ends. */
+export function watchRequest(): void {
+  const request = useInboxStore.getState().composing
+  if (!request || request.status !== 'working' || !request.threadId) { stopWatching(); return }
+  if (watching === request.at) return
+  stopWatching()
+  watching = request.at
+  offTurnState = window.mousse.orchestrator.onTurnState?.(onTurnState) ?? null
+  const at = request.at
+  const poll = () => {
+    pollTimer = setTimeout(() => {
+      if (watching !== at) return
+      void checkRequest(at).finally(() => { if (watching === at && useInboxStore.getState().composing?.status === 'working') poll() })
+    }, REQUEST_POLL_MS)
+  }
+  void checkRequest(at)
+  poll()
+}
+
+/** Starts a request: shown at once, kept across a reload, and watched until its turn ends. */
+export function startRequest(request: ManagerRequest): void {
+  useInboxStore.setState({ composing: request })
+  watchRequest()
+}
+
+const requestKey = (profileId: string) => `mousse.automations.request.${profileId}`
+
+/** The request a reload left, for this profile: still working, or failed (its error is not lost). */
+export function loadRequest(profileId: string): ManagerRequest | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(requestKey(profileId))
+    const request = raw ? JSON.parse(raw) as ManagerRequest : null
+    if (!request || typeof request.at !== 'number' || Date.now() - request.at > REQUEST_KEEP_MS) return null
+    return request.status === 'working' || request.status === 'failed' ? request : null
+  } catch {
+    return null
+  }
+}
+
+function saveRequest(profileId: string, request: ManagerRequest | null): void {
+  try {
+    if (request && (request.status === 'working' || request.status === 'failed')) globalThis.localStorage?.setItem(requestKey(profileId), JSON.stringify(request))
+    else globalThis.localStorage?.removeItem(requestKey(profileId))
+  } catch {
+    // A request that cannot be kept is only lost on a reload.
+  }
+}
+
+/** The page opened for a profile: its request comes back from before a reload, and is watched again. */
+export function restoreRequest(profileId: string): void {
+  useInboxStore.setState({ composing: loadRequest(profileId) })
+  watchRequest()
+}
+
+useInboxStore.subscribe((state, previous) => {
+  if (state.composing === previous.composing) return
+  saveRequest(useAppStore.getState().profileId, state.composing)
+  if (state.composing?.status !== 'working') stopWatching()
+})
 
 export function setInboxFilter(filter: InboxFilter): void {
   useInboxStore.setState({ filter, pane: 'run', manageExpanded: null })

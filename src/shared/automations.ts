@@ -12,11 +12,20 @@ import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRun
 export const AUTOMATIONS_METHODS = [
   'automations.list', 'automations.asks.answer', 'automations.keep', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set',
   'automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.drafts.setWho', 'automations.drafts.nextWho',
-  'automations.manager.thread',
+  'automations.manager.thread', 'automations.manager.turn',
   'automations.inbox.list', 'automations.inbox.counts', 'automations.inbox.resolve', 'automations.inbox.undo', 'automations.inbox.calibrate', 'automations.tuning.remove'
 ] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
+
+/**
+ * How one of the Automation manager's turns stands (`automations.manager.turn`), read by its run id: still working,
+ * done, failed (with its error), stopped, or waiting for a usage limit. `unknown`: no such run of the manager's thread.
+ */
+export interface ManagerTurn {
+  status: 'working' | 'completed' | 'failed' | 'stopped' | 'paused' | 'unknown'
+  error?: string
+}
 
 /**
  * What an automation is, underneath: where its record lives and what opens it. A bot's schedule is a job whose Who is

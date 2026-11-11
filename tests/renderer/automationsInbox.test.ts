@@ -300,6 +300,7 @@ describe('the inbox page', () => {
 })
 
 describe('creating an automation', () => {
+  const RUN_ID = 'run:thread:manager:ordinal:1'
   const typeIn = async (input: HTMLInputElement, text: string) => {
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text)
@@ -312,50 +313,82 @@ describe('creating an automation', () => {
   }
   const draft = automation({ id: 'd-new', name: 'Triage new issues', draft: { draftId: 'd-new', problems: [], prompt: 'Triage' } as AutomationItem['draft'] })
 
-  /** The manager's turn: it answers only when the test settles it, as a long turn does. */
+  /**
+   * The manager: the send answers with its run at once (`await: 'ack'`); the turn's outcome comes as a turn event
+   * (`emit`), or from `automations.manager.turn` (`turn`), which says working until a test changes it.
+   */
   async function mountComposer() {
     const items: AutomationItem[] = []
     const mousse = await mount([], items)
-    let settle: (result: unknown) => void = () => undefined
-    mousse.orchestrator.sendToThread.mockImplementation(() => new Promise((done) => { settle = done }))
+    let listener: ((state: unknown) => void) | undefined
+    const turn: { value: { status: string; error?: string } } = { value: { status: 'working' } }
+    let runs = 0
+    mousse.orchestrator.sendToThread.mockImplementation(async () => ({ message: '', actions: [], runId: runs++ ? `${RUN_ID}${runs}` : RUN_ID, accepted: true }))
+    Object.assign(mousse.orchestrator, {
+      onTurnState: vi.fn((cb: (state: unknown) => void) => { listener = cb; return () => { if (listener === cb) listener = undefined } }),
+      isTurnActive: vi.fn(async () => true)
+    })
     const request = mousse.platformRequest.request.getMockImplementation()!
     mousse.platformRequest.request.mockImplementation(async (method: string, params?: unknown) => {
       if (method === 'automations.manager.thread') return { threadId: 'manager' }
+      if (method === 'automations.manager.turn') return { turn: turn.value }
       if (method === 'automations.drafts.nextWho') return {}
       if (method === 'automations.list') return { items, computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }
       return request(method, params)
     })
-    return { mousse, items, settle: async (result: unknown) => { await act(async () => { settle(result) }); await act(async () => {}) } }
+    const emit = async (state: Record<string, unknown>) => {
+      await act(async () => { listener?.({ threadId: 'manager', updatedAt: '', ...state }) })
+      await act(async () => {})
+    }
+    const create = async (text: string) => {
+      const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
+      await typeIn(input, text)
+      await enter(input)
+      return input
+    }
+    return { mousse, items, turn, emit, create, listening: () => Boolean(listener) }
   }
 
-  it('sends without waiting for the manager\'s turn, shows it working, then lights the draft it wrote', async () => {
-    const { mousse, items, settle } = await mountComposer()
-    const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
+  afterEach(() => { act(() => { useInboxStore.setState({ composing: null }) }); localStorage.clear() })
+
+  it('sends for an ack only: the composer clears and the pane shows the manager working while its turn goes on', async () => {
+    const { mousse, create, listening } = await mountComposer()
     expect($<HTMLButtonElement>('[data-testid="inbox-composer-send"]')!.disabled).toBe(true)
-    await typeIn(input, 'Every weekday at 9, triage new issues')
-    expect($<HTMLButtonElement>('[data-testid="inbox-composer-send"]')!.disabled).toBe(false)
-    await enter(input)
-    // The turn has not ended, and still the composer is free and the Drafts pane says the manager is writing.
-    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('manager', expect.stringContaining('triage new issues'))
+    const input = await create('Every weekday at 9, triage new issues')
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('manager', { content: expect.stringContaining('triage new issues'), await: 'ack' })
     expect(input.value).toBe('')
-    expect(useInboxStore.getState()).toMatchObject({ pane: 'drafts', composing: { status: 'working', threadId: 'manager' } })
+    expect(useInboxStore.getState()).toMatchObject({ pane: 'drafts', composing: { status: 'working', threadId: 'manager', runId: RUN_ID } })
     expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
     expect($('[data-testid="inbox-drafts-row"]')?.dataset.state).toBe('working')
-    // The manager saves a draft and its turn ends: the draft shows, lit, and the pending card goes.
+    expect(listening()).toBe(true)
+    // The request is kept for a reload.
+    expect(JSON.parse(localStorage.getItem('mousse.automations.request.default')!)).toMatchObject({ runId: RUN_ID, status: 'working' })
+  })
+
+  it('learns the outcome from the turn\'s events: another turn is not its; done lights the draft it wrote', async () => {
+    const { items, emit, create } = await mountComposer()
+    await create('Every weekday at 9, triage new issues')
+    await emit({ turnId: 'run:thread:manager:ordinal:0', phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('working')
     items.push(draft)
-    await settle({ message: 'Drafted it.', actions: [] })
+    await emit({ turnId: RUN_ID, phase: 'completed' })
     expect(useInboxStore.getState().composing?.status).toBe('done')
     expect($('[data-testid="inbox-request"]')).toBeNull()
     expect($('[data-testid="automation-draft-card"]')?.hasAttribute('data-fresh')).toBe(true)
+    expect(localStorage.getItem('mousse.automations.request.default')).toBeNull()
   })
 
-  it('shows an error the turn ended with, and Retry sends the same words again', async () => {
-    const { mousse, settle } = await mountComposer()
-    const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
-    await typeIn(input, 'Rotate the staging keys every Monday')
-    await enter(input)
-    // The window's send answers with an error instead of throwing.
-    await settle({ message: '', actions: [], requestAcknowledged: false, error: { code: 'provider_not_configured', message: 'No model is set up.' } })
+  it('says the manager replied without a draft when its turn ends with none', async () => {
+    const { emit, create } = await mountComposer()
+    await create('What can you automate?')
+    await emit({ turnId: RUN_ID, phase: 'completed' })
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('done')
+  })
+
+  it('shows the error a failed turn event carries, and Retry sends the same words again', async () => {
+    const { mousse, emit, create } = await mountComposer()
+    await create('Rotate the staging keys every Monday')
+    await emit({ turnId: RUN_ID, phase: 'failed', error: 'No model is set up.' })
     expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('failed')
     expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('No model is set up.')
     expect($('[data-testid="inbox-drafts-row"]')?.dataset.state).toBe('failed')
@@ -366,19 +399,51 @@ describe('creating an automation', () => {
     expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
   })
 
-  it('keeps the words and shows the error with Retry when they could not be sent', async () => {
-    const { mousse } = await mountComposer()
-    const request = mousse.platformRequest.request.getMockImplementation()!
-    mousse.platformRequest.request.mockImplementation(async (method: string, params?: unknown) => {
-      if (method === 'automations.manager.thread') throw new Error('The service is not running.')
-      return request(method, params)
-    })
-    const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
-    await typeIn(input, 'Nightly review')
-    await enter(input)
+  it('does not lose an outcome that came before it subscribed: it reads the run when the watch starts', async () => {
+    const { turn, create } = await mountComposer()
+    // The turn failed before it showed any phase: no event comes, the run says so.
+    turn.value = { status: 'failed', error: 'The provider refused the request.' }
+    await create('Nightly review')
+    await act(async () => {})
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('failed')
+    expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('The provider refused the request.')
+  })
+
+  it('picks a working request up again after a reload and settles it from its run', async () => {
+    const { turn, items } = await mountComposer()
+    localStorage.setItem('mousse.automations.request.default', JSON.stringify({ at: Date.now() - 5_000, threadId: 'manager', runId: RUN_ID, text: 'Nightly review', status: 'working', known: [] }))
+    act(() => { useInboxStore.setState({ composing: null }) })
+    items.push(draft)
+    turn.value = { status: 'completed' }
+    const { restoreRequest } = await import('../../src/renderer/components/automations/inbox/inboxStore')
+    await act(async () => { restoreRequest('default') })
+    await act(async () => {})
+    expect(useInboxStore.getState().composing).toMatchObject({ status: 'done', runId: RUN_ID })
+  })
+
+  it('keeps a Stop a Stop, and only the newest of two sends counts', async () => {
+    const { mousse, emit, create } = await mountComposer()
+    await create('First')
+    await create('Second')
+    const second = useInboxStore.getState().composing!
+    expect(second.text).toBe('Second')
+    expect(second.runId).not.toBe(RUN_ID)
+    // The first turn ending does not settle the second.
+    await emit({ turnId: RUN_ID, phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('working')
+    await click($('[data-testid="inbox-request-stop"]'))
+    expect(mousse.orchestrator.abort).toHaveBeenCalledWith('manager')
+    await emit({ turnId: second.runId, phase: 'completed' })
+    expect(useInboxStore.getState().composing?.status).toBe('stopped')
+  })
+
+  it('keeps the words and shows the error with Retry when the send was refused', async () => {
+    const { mousse, create } = await mountComposer()
+    mousse.orchestrator.sendToThread.mockImplementationOnce(async () => ({ message: '', actions: [], requestAcknowledged: false, error: { code: 'thread_busy', message: 'The service is not running.' } }))
+    const input = await create('Nightly review')
     expect(input.value).toBe('Nightly review')
     expect($('[data-testid="inbox-composer-error"]')?.textContent).toContain('The service is not running.')
-    expect(mousse.orchestrator.sendToThread).not.toHaveBeenCalled()
+    expect(useInboxStore.getState().composing).toBeNull()
   })
 })
 

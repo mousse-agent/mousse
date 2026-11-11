@@ -261,6 +261,7 @@ export class MousseMainService extends MmsProfileServices {
           nextWho: (botId, who) => services.automationDrafts.nextWho(botId ? { botId } : {}, who)
         },
         managerThread: (projectId) => services.automationManagerThread(projectId),
+        managerTurn: (runId) => services.automationManagerTurn(runId),
         inbox: {
           list: () => services.automationInbox(),
           counts: () => services.automationInboxCounts(),
