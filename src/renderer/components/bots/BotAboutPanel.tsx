@@ -103,16 +103,16 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
       </div>)
       : <p className="bot-about-empty">{detail ? 'Nothing yet. It asks in the chat the first time it needs something.' : 'Loading…'}</p>}
     <h3>RUNS</h3>
+    {detail?.reminders?.map((reminder) => <div className="bot-about-row" key={reminder.id} data-testid="bot-about-reminder">
+      <Bell size={14} aria-hidden /><span title={reminder.text}><span className="bot-about-clamp">{reminder.text}</span><small className="bot-about-next">{reminder.work ? 'Starts' : 'Reminds'}: {reminderWhenText(reminder.dueAt)}</small></span>
+      <button type="button" aria-label={`Cancel reminder: ${reminder.text}`} onClick={() => void store().cancelReminder(bot.id, reminder.id)}>Cancel</button>
+    </div>)}
     {detail?.runs.length
       ? detail.runs.map((run) => <div className="bot-about-row" key={run.id}>
         <Clock size={14} aria-hidden /><span>{run.label.charAt(0).toUpperCase() + run.label.slice(1)}{run.nextAt && <small className="bot-about-next">Next: {nextRunText(run.nextAt)}</small>}</span>
         <button type="button" aria-label={`Remove ${run.label}`} onClick={() => void store().removeSchedule(bot.id, run.id)}>Remove</button>
       </div>)
       : null}
-    {detail?.reminders?.map((reminder) => <div className="bot-about-row" key={reminder.id} data-testid="bot-about-reminder">
-      <Bell size={14} aria-hidden /><span title={reminder.text}><span className="bot-about-clamp">{reminder.text}</span><small className="bot-about-next">{reminder.work ? 'Starts' : 'Reminds'}: {reminderWhenText(reminder.dueAt)}</small></span>
-      <button type="button" aria-label={`Cancel reminder: ${reminder.text}`} onClick={() => void store().cancelReminder(bot.id, reminder.id)}>Cancel</button>
-    </div>)}
     {detail && !detail.runs.length && !detail.reminders?.length
       ? <p className="bot-about-empty">Only when you message it. Ask it to run on a schedule.</p>
       : null}
