@@ -174,7 +174,9 @@ export interface MemoryThresholds {
   serviceBaselineFactor: number
   /** ...but never below this. */
   serviceBaselineFloorMb: number
-  /** Sustained above this, the breach is marked severe. */
+  /** The baseline itself is capped, so a heavy start cannot raise the limit far. */
+  serviceBaselineCapMb: number
+  /** Sustained above this, busy or idle, it is a breach, marked severe. */
   serviceSevereMb: number
   /** Growth of the service's memory over the last `growthWindowHours`, in one run of the service. */
   growthMbPerHour: number
@@ -202,6 +204,7 @@ export const DEFAULT_MEMORY_THRESHOLDS: MemoryThresholds = {
   serviceSustainMinutes: 15,
   serviceBaselineFactor: 2.5,
   serviceBaselineFloorMb: 250,
+  serviceBaselineCapMb: 400,
   serviceSevereMb: 800,
   growthMbPerHour: 20,
   growthWindowHours: 3,
@@ -319,13 +322,23 @@ export function runOf(sample: MemorySample): string {
   return sample.run ?? `start-${Math.round((sample.t - sample.up * 1000) / 10_000)}`
 }
 
-/** The service's memory soon after it started: the median of minutes 5 to 15 of the latest sample's run. */
-export function serviceBaselineMb(history: MemorySample[]): number | null {
+/** The baseline is read from these minutes after the service started. */
+export const BASELINE_FROM_S = 300
+export const BASELINE_TO_S = 900
+
+/**
+ * The service's memory soon after it started: the median of minutes 5 to 15 of the latest sample's run, from idle
+ * samples only (a heavy early turn does not count), capped at `serviceBaselineCapMb`. Null without 3 idle samples.
+ * Keep it once the run is past minute 15: the history held does not reach back that far for long.
+ */
+export function serviceBaselineMb(history: MemorySample[], thresholds: MemoryThresholds = DEFAULT_MEMORY_THRESHOLDS): number | null {
   const latest = history[history.length - 1]
   if (!latest) return null
   const run = runOf(latest)
-  const early = history.filter((s) => runOf(s) === run && s.up >= 300 && s.up <= 900).map(serviceMb)
-  return early.length >= 3 ? round1(median(early)) : null
+  const early = history
+    .filter((s) => runOf(s) === run && s.up >= BASELINE_FROM_S && s.up <= BASELINE_TO_S && (s.counts.activeTurns ?? 0) === 0)
+    .map(serviceMb)
+  return early.length >= 3 ? Math.min(thresholds.serviceBaselineCapMb, round1(median(early))) : null
 }
 
 /**
@@ -376,8 +389,11 @@ const COUNT_LABELS: Record<CountName, string> = {
   providerProcesses: 'provider processes'
 }
 
-/** Every limit the history breaks now. History is oldest first; `now` is the latest sample's time or later. */
-export function detectBreaches(history: MemorySample[], thresholds: MemoryThresholds, now: number): MemoryBreach[] {
+/**
+ * Every limit the history breaks now. History is oldest first; `now` is the latest sample's time or later.
+ * `baselineMb` is the run's baseline when the caller kept it; otherwise it is read from the history.
+ */
+export function detectBreaches(history: MemorySample[], thresholds: MemoryThresholds, now: number, options: { baselineMb?: number | null } = {}): MemoryBreach[] {
   const breaches: MemoryBreach[] = []
   const latest = history[history.length - 1]
   if (!latest) return breaches
@@ -386,18 +402,21 @@ export function detectBreaches(history: MemorySample[], thresholds: MemoryThresh
   const minutes = thresholds.serviceSustainMinutes
   const now_ = Math.round(serviceMb(latest))
   const idle = sustained(history, minutes, interval, now, (s) => serviceMb(s) > thresholds.servicePrivateMb && (s.counts.activeTurns ?? 0) === 0)
-  const baseline = serviceBaselineMb(history)
+  const baseline = options.baselineMb !== undefined ? options.baselineMb : serviceBaselineMb(history, thresholds)
   const baselineLimit = baseline === null ? null : Math.max(thresholds.serviceBaselineFloorMb, baseline * thresholds.serviceBaselineFactor)
   // The baseline rule starts once the baseline is known; samples before minute 15 are not judged against it.
-  const grown = baselineLimit === null ? null : sustained(history, minutes, interval, now, (s) => s.up > 900 && serviceMb(s) > baselineLimit)
-  const high = idle ?? grown
+  const grown = baselineLimit === null ? null : sustained(history, minutes, interval, now, (s) => s.up > BASELINE_TO_S && serviceMb(s) > baselineLimit)
+  // Above the severe limit it is a breach whether a turn runs or not: a hung turn must not hide a leak.
+  const severe = sustained(history, minutes, interval, now, (s) => serviceMb(s) > thresholds.serviceSevereMb)
+  const high = idle ?? grown ?? severe
   if (high) {
-    const severe = high.every((s) => serviceMb(s) > thresholds.serviceSevereMb)
     breaches.push({
       kind: 'service-high',
       summary: idle
         ? `Service ${now_} MB while idle, above ${thresholds.servicePrivateMb} MB for ${minutes} min`
-        : `Service ${now_} MB, above ${thresholds.serviceBaselineFactor}x its start (${Math.round(baseline!)} MB) for ${minutes} min`,
+        : grown
+          ? `Service ${now_} MB, above ${thresholds.serviceBaselineFactor}x its start (${Math.round(baseline!)} MB) for ${minutes} min`
+          : `Service ${now_} MB, above ${thresholds.serviceSevereMb} MB for ${minutes} min`,
       ...(severe ? { severe: true } : {})
     })
   }
@@ -468,6 +487,8 @@ export interface MemoryReportInput {
   history: MemorySample[]
   breaches: MemoryBreach[]
   thresholds: MemoryThresholds
+  /** The run's baseline when the caller kept it. */
+  baselineMb?: number | null
 }
 
 /** Only characters a version or OS release uses; anything else becomes `?`. */
@@ -583,8 +604,8 @@ export function memoryIssueText(input: MemoryReportInput): { title: string; body
   const growth = serviceGrowthMbPerHour(input.history, thresholds, sample.t)
   if (growth !== null) lines.push(`**Growth:** ${growth} MB/h over ${thresholds.growthWindowHours} h`)
   const per = thresholds.processPrivateMb
-  const baseline = serviceBaselineMb(input.history)
-  if (baseline !== null) lines.push(`**Service at start (minutes 5 to 15):** ${baseline} MB`)
+  const baseline = input.baselineMb !== undefined ? input.baselineMb : serviceBaselineMb(input.history, thresholds)
+  if (baseline !== null) lines.push(`**Service at start (idle, minutes 5 to 15):** ${baseline} MB`)
   lines.push('', `_Limits: service ${thresholds.servicePrivateMb} MB idle or ${thresholds.serviceBaselineFactor}x its start for ${thresholds.serviceSustainMinutes} min, growth ${thresholds.growthMbPerHour} MB/h, GPU ${per.gpu}, window ${per.renderer}, main ${per.main}, utility ${per.utility}, app ${thresholds.appPrivateMb} MB. Numbers only: no paths, names or thread content._`)
   return { title: title.slice(0, 200), body: lines.join('\n') }
 }

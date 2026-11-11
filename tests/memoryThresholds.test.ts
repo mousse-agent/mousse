@@ -64,17 +64,47 @@ describe('service limits', () => {
   })
 
   it('a busy service is judged against 2.5 times its start, never below 250 MB', () => {
-    // Started at 150 MB (minutes 5 to 15), busy at 600 MB for the last 15 minutes: above 375 MB.
-    const grown = series(40, (i) => (i <= 10 ? 150 : 600), () => ({ activeTurns: 2 }), 300)
+    // Idle at 150 MB in minutes 5 to 15, then busy at 600 MB for the last 15 minutes: above 375 MB.
+    const busyAfter = (i: number) => (i <= 10 ? {} : { activeTurns: 2 })
+    const grown = series(40, (i) => (i <= 10 ? 150 : 600), busyAfter, 300)
     expect(serviceBaselineMb(grown)).toBe(150)
     expect(detectBreaches(grown, DEFAULT_MEMORY_THRESHOLDS, last(grown))).toEqual([
       { kind: 'service-high', summary: 'Service 600 MB, above 2.5x its start (150 MB) for 15 min' }
     ])
     // Busy at 330 MB: within 2.5 times 150.
-    expect(kinds(series(40, (i) => (i <= 10 ? 150 : 330), () => ({ activeTurns: 1 }), 300))).toEqual([])
+    expect(kinds(series(40, (i) => (i <= 10 ? 150 : 330), busyAfter, 300))).toEqual([])
     // A tiny start: the limit is 250 MB, not 2.5 times 60.
-    expect(kinds(series(40, (i) => (i <= 10 ? 60 : 200), () => ({ activeTurns: 1 }), 300))).toEqual([])
-    expect(kinds(series(40, (i) => (i <= 10 ? 60 : 260), () => ({ activeTurns: 1 }), 300))).toEqual(['service-high'])
+    expect(kinds(series(40, (i) => (i <= 10 ? 60 : 200), busyAfter, 300))).toEqual([])
+    expect(kinds(series(40, (i) => (i <= 10 ? 60 : 260), busyAfter, 300))).toEqual(['service-high'])
+  })
+
+  it('reads the baseline from idle samples only, and caps it at 400 MB', () => {
+    // A heavy turn in minutes 5 to 10 at 700 MB, idle at 150 MB in minutes 11 to 15.
+    const heavyStart = series(40, (i) => (i <= 5 ? 700 : 150), (i) => (i <= 5 ? { activeTurns: 1 } : {}), 300)
+    expect(serviceBaselineMb(heavyStart)).toBe(150)
+    // An idle start at 700 MB counts only as 400 MB, so the limit is 1,000 MB, not 1,750.
+    const bigStart = series(40, () => 700, () => ({}), 300)
+    expect(serviceBaselineMb(bigStart)).toBe(400)
+    // All busy: no baseline, so only the idle and severe limits apply.
+    expect(serviceBaselineMb(series(40, () => 150, () => ({ activeTurns: 1 }), 300))).toBeNull()
+  })
+
+  it('uses the baseline the caller kept when the history no longer reaches back to the start', () => {
+    // Six hours of a busy service at 600 MB, starting at minute 20 of the run: no early samples left.
+    const late = series(360, () => 600, () => ({ activeTurns: 1 }), 20 * 60)
+    expect(serviceBaselineMb(late)).toBeNull()
+    expect(detectBreaches(late, DEFAULT_MEMORY_THRESHOLDS, last(late))).toEqual([])
+    expect(detectBreaches(late, DEFAULT_MEMORY_THRESHOLDS, last(late), { baselineMb: 150 }).map((b) => b.kind)).toEqual(['service-high'])
+  })
+
+  it('a hung turn does not hide a leak: 800 MB for 15 minutes is a breach while a turn runs', () => {
+    // Four hours with a turn running the whole time, at 900 MB and no baseline.
+    const hung = series(240, () => 900, () => ({ activeTurns: 1 }), 0)
+    expect(detectBreaches(hung, DEFAULT_MEMORY_THRESHOLDS, last(hung))).toEqual([
+      { kind: 'service-high', summary: 'Service 900 MB, above 800 MB for 15 min', severe: true }
+    ])
+    // At 700 MB with a turn running and no baseline, nothing.
+    expect(kinds(series(240, () => 700, () => ({ activeTurns: 1 }), 0))).toEqual([])
   })
 
   it('a restart in the window starts the count again', () => {
@@ -212,7 +242,7 @@ describe('memory issue text', () => {
     expect(issue.body).toContain('| Provider: other | - | 10 |')
     expect(issue.body).toContain('| Main | 160 | 210 | 1.5 | 40 | 60 |')
     expect(issue.body).toContain('| GPU | 334 | 420 |')
-    expect(issue.body).toContain('**Service at start (minutes 5 to 15):** 700 MB')
+    expect(issue.body).toContain('**Service at start (idle, minutes 5 to 15):** 400 MB')
     expect(issue.body).toContain('applet views 2')
     expect(`${issue.title}\n${issue.body}\n${decodeURIComponent(issue.url)}`).not.toMatch(/alice|Users|home\/|\\/)
   })

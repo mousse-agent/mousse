@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -215,6 +215,33 @@ describe('memory monitor', () => {
     expect(new Set(monitor.status().trend.length ? [monitor.status().sample!.run] : []).size).toBe(1)
   })
 
+  it('keeps the run baseline after the 6 hours of history no longer reach back to it', async () => {
+    const dir = home()
+    const now = { t: T0 }
+    let busy = 0
+    const monitor = new MemoryMonitor({
+      homeDir: dir,
+      version: '0.1.3',
+      readCounts: async () => ({ ...READING, counts: { ...READING.counts, activeTurns: busy } }),
+      now: () => now.t,
+      uptime: () => (now.t - T0) / 1000,
+      sampleProcess: async () => (busy ? { rss: 640, private: 600 } : { rss: 190, private: 150 }),
+      readDetail: () => ({ heapSpaces: {}, heap: { totalHeapSize: 80, usedHeapSize: 60, heapSizeLimit: 4096, mallocedMemory: 1, externalMemory: 4, nativeContexts: 1, detachedContexts: 0 } }),
+      readChildren: async () => [],
+      childCount: () => 0,
+      log: new MemoryLog(dir, { flushIntervalMs: 1 })
+    })
+    // Idle at 150 MB for 20 minutes, then a turn that keeps it at 600 MB (above 2.5 x 150) until 6 h 20 min.
+    await run(monitor, now, 20)
+    busy = 1
+    await run(monitor, now, 360)
+    // The history held starts well after minute 15 of the run.
+    expect(monitor.status().trend[0].t).toBeGreaterThan(T0 + 15 * MIN)
+    expect(monitor.status().baselineMb).toBe(150)
+    expect(monitor.status().breaches.map((b) => b.summary)).toEqual(['Service 600 MB, above 2.5x its start (150 MB) for 15 min'])
+    monitor.stop()
+  })
+
   it('writes a heap snapshot only when asked, confirmed and idle, outside the numbers-only log', async () => {
     const dir = home()
     const now = { t: T0 }
@@ -235,6 +262,11 @@ describe('memory monitor', () => {
     const written = await registry.dispatch(ctx('cli'), 'diagnostics.memory.heapSnapshot', { confirm: true }) as { file: string; mb: number }
     expect(written.file).toMatch(new RegExp(`^${HEAP_SNAPSHOT_RELATIVE_DIR}/heap-.*\\.heapsnapshot$`))
     expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toHaveLength(1)
+    // Only this user may read it (POSIX modes; Windows has no such bits).
+    if (process.platform !== 'win32') {
+      expect(statSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR)).mode & 0o777).toBe(0o700)
+      expect(statSync(join(dir, written.file)).mode & 0o777).toBe(0o600)
+    }
     // Only two are kept.
     for (let i = 1; i <= 3; i++) { now.t += 1_000; await registry.dispatch(ctx('cli'), 'diagnostics.memory.heapSnapshot', { confirm: true }) }
     expect(readdirSync(join(dir, HEAP_SNAPSHOT_RELATIVE_DIR))).toHaveLength(2)

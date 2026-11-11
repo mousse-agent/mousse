@@ -3,7 +3,7 @@
  * snapshot --yes`). It is not part of the numbers-only memory log: it holds everything the service has in memory, so
  * it goes to a folder of its own and is never attached to anything.
  */
-import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import v8 from 'node:v8'
 import { toMb } from '../../shared/diagnostics/memory'
@@ -26,9 +26,12 @@ export function writeHeapSnapshotFile(
   write: (file: string) => string = (file) => v8.writeHeapSnapshot(file)
 ): { file: string; mb: number } {
   const dir = join(homeDir, HEAP_SNAPSHOT_RELATIVE_DIR)
-  mkdirSync(dir, { recursive: true })
+  // Only this user may read it, as with stored credentials: it holds tokens and thread text.
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  chmodSync(dir, 0o700)
   const name = `heap-${new Date(now).toISOString().replace(/[:.]/g, '-')}.heapsnapshot`
   const written = write(join(dir, name))
+  chmodSync(written, 0o600)
   const mb = toMb(statSync(written).size)
   const snapshots = readdirSync(dir).filter((entry) => /^heap-.*\.heapsnapshot$/.test(entry)).sort()
   for (const old of snapshots.slice(0, Math.max(0, snapshots.length - HEAP_SNAPSHOT_KEEP))) rmSync(join(dir, old), { force: true })

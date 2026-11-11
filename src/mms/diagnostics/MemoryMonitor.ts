@@ -17,6 +17,7 @@ import {
   memoryIssue,
   memoryTrend,
   noticeDue,
+  BASELINE_TO_S,
   serviceBaselineMb,
   serviceGrowthMbPerHour,
   toMb,
@@ -104,6 +105,8 @@ export class MemoryMonitor {
   private readonly uptime: () => number
   private readonly runId: string
   private loggedHints: { json: string; at: number } | null = null
+  /** This run's baseline, kept once minutes 5 to 15 are over: the 6 hours of history do not reach back that far for long. */
+  private baseline: { run: string; mb: number | null } | null = null
 
   constructor(private readonly options: MemoryMonitorOptions) {
     this.thresholds = options.thresholds ?? DEFAULT_MEMORY_THRESHOLDS
@@ -229,8 +232,16 @@ export class MemoryMonitor {
     return { processes, ...(hints ? { hints } : {}) }
   }
 
+  /** The run's baseline: read from the history until minute 15 is over, then kept. */
+  private baselineMb(sample: MemorySample): number | null {
+    if (this.baseline?.run === this.runId) return this.baseline.mb
+    const mb = serviceBaselineMb(this.history, this.thresholds)
+    if (sample.up > BASELINE_TO_S) this.baseline = { run: this.runId, mb }
+    return mb
+  }
+
   private async check(sample: MemorySample): Promise<void> {
-    const breaches = detectBreaches(this.history, this.thresholds, sample.t)
+    const breaches = detectBreaches(this.history, this.thresholds, sample.t, { baselineMb: this.baselineMb(sample) })
     const kinds = new Set(breaches.map((breach) => breach.kind))
     for (const kind of [...this.active.keys()]) if (!kinds.has(kind)) this.active.delete(kind)
     if (!breaches.length) return
@@ -283,7 +294,7 @@ export class MemoryMonitor {
       detail: this.detail,
       trend: memoryTrend(this.history, trendStep(this.history, this.thresholds.sampleIntervalMs)),
       growthMbPerHour: sample ? serviceGrowthMbPerHour(this.history, this.thresholds, sample.t) : null,
-      baselineMb: serviceBaselineMb(this.history),
+      baselineMb: this.baseline?.run === this.runId ? this.baseline.mb : serviceBaselineMb(this.history, this.thresholds),
       breaches: [...this.active.values()].map((entry) => entry.breach),
       notice: this.pendingNotice(),
       logFile: MEMORY_LOG_RELATIVE_PATH
@@ -302,7 +313,8 @@ export class MemoryMonitor {
       detail: this.detail,
       history: this.history,
       breaches: [...this.active.values()].map((entry) => entry.breach),
-      thresholds: this.thresholds
+      thresholds: this.thresholds,
+      ...(this.baseline?.run === this.runId ? { baselineMb: this.baseline.mb } : {})
     })
   }
 
