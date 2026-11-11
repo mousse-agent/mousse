@@ -125,6 +125,10 @@ describe('deleting a thread while its turn runs', () => {
         expect(p.f.services.runEngine.getActiveRun(target.id)).toBeNull()
         // One Stop: before the delete was admitted, not again inside it.
         expect(stops).toHaveBeenCalledTimes(1)
+        // A window asking for it hears it is gone for good, so it leaves it (`watchDeletedShownThread`).
+        const asked = await client.request('threads.get', { threadId: target.id }).then(() => undefined, (error: { code?: string; details?: { deleting?: boolean } }) => error)
+        expect(asked?.code).toBe('thread_not_found')
+        expect(asked?.details?.deleting).toBeUndefined()
         await new Promise((resolve) => setTimeout(resolve, 200))
         expect(p.adapter.live()).toBe(0)
       } finally {

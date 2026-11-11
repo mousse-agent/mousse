@@ -1826,6 +1826,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
   }
   if (isObject(params) && typeof params.threadId === 'string' &&
       !['threads.delete', 'threads.inventory', 'threads.focus',
+        // Answers "not found" for a thread being deleted, so a window that shows it knows to leave it.
+        'threads.get',
         // These name the thread only so a router can find its computer; they worked for a thread being trashed before.
         'orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'runs.get', 'runs.resumeNow', 'runs.cancelPause',
         'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'].includes(method) &&
@@ -2026,12 +2028,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.get': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
+      // A thread being deleted is not found; until its delete is done (purged), that delete may still put it back (`deleting`).
+      const state = ctx.mms.threads.lifecycleStore.get(threadId)?.state
+      if (state && state !== 'active') throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId, ...(state !== 'purged' ? { deleting: true } : {}) })
       const thread = ctx.mms.threads.getThread(threadId)
-      if (!thread) {
-        // In the trash, its delete is still under way and may yet put it back (`deleting`).
-        const state = ctx.mms.threads.lifecycleStore.get(threadId)?.state
-        throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId, ...(state === 'trashed' || state === 'purge-started' ? { deleting: true } : {}) })
-      }
+      if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       return { thread }
     }
     case 'threads.create': {
