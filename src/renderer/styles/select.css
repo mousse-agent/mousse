@@ -39,7 +39,8 @@
 
 /* Keyboard focus gets the quiet ring; an open list is its own indicator. */
 .ui-select:focus-visible:not(.open) {
-  box-shadow: var(--ui-focus-ring);
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-select:disabled {
@@ -54,7 +55,8 @@
 }
 
 .ui-combobox:focus-within:not(.open) {
-  box-shadow: var(--ui-focus-ring);
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-combobox.invalid {
@@ -231,7 +233,7 @@
 /* variant="menu": the app's main dropdown (the new-thread chip and the workspace menu in composer-workspace.css).
    Only what a listbox needs on top: the keyboard's row lights like a hovered one, the chosen row like a checked one. */
 .ui-select-chip .ui-select-value { flex: 0 1 auto; }
-.ui-select-chip:focus-visible:not(.open) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ui-select-chip:focus-visible:not(.open) { outline: none; background-image: var(--ui-focus-layer); }
 .ui-select-chip.open:focus-visible { outline: none; }
 .ui-select-menu { width: auto; min-width: 160px; max-width: min(320px, calc(100vw - 16px)); outline: none; }
 html .ui-select-menu .composer-workspace-menu-item.active { background: var(--ui-hover); }

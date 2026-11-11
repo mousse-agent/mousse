@@ -79,7 +79,7 @@
 
 .thread-computer-bar-retry:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 /* Above the transcript of a long thread of another computer. */

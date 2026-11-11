@@ -22,8 +22,8 @@ button.mousse-applet-name:hover:not(:disabled) {
   color: var(--text-secondary, #b1b1ba);
 }
 button.mousse-applet-name:focus-visible {
-  outline: 2px solid var(--accent, #ac86ce);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 .mousse-applet-preview {
   position: relative;
@@ -50,8 +50,8 @@ button.mousse-applet-name:focus-visible {
   color: var(--text-muted, #8b8b94);
 }
 .mousse-applet-offline:focus-visible {
-  outline: 2px solid var(--accent, #ac86ce);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 .mousse-applet-source {
   flex: 1;

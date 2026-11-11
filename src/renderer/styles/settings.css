@@ -43,7 +43,8 @@
        Switches are the exception: a 28x16 track centred in the row.
     9. Selection is a filled background only (--ui-selected-fill plus the
        shared specular top light). No side or edge bars, no outlines, no
-       gradients, no coloured glows.
+       gradients, no coloured glows. Keyboard focus is a fill too
+       (--ui-focus-layer), never an outline or ring.
    10. One readable column (--settings-content-w, 720px); left edges of text
        and right edges of controls line up down the page. Only Providers,
        a list beside an editor, takes --settings-content-wide-w.
@@ -97,10 +98,9 @@
   /* Providers pairs a list with an editor and needs the room. */
   --settings-content-wide-w: 950px;
   --settings-control-h: 28px;
-  /* Faint text and focus outlines must stay readable here (4.5:1 on the page
-     and on group surfaces), so they use the secondary text colour. */
+  /* Faint text must stay readable here (4.5:1 on the page and on group
+     surfaces), so it uses the secondary text colour. */
   --ui-faint: var(--text-secondary);
-  --settings-focus: var(--text-secondary);
 
   --settings-fs-title: 17px;
   --settings-fs-heading: 16px;
@@ -589,8 +589,8 @@ html[data-theme='high-contrast'] .settings-group-icon {
 }
 
 .settings-title-icon-btn:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 html[data-theme='high-contrast'] .settings-title-icon-btn {
@@ -718,8 +718,8 @@ html[data-theme='high-contrast'] .settings-title-icon-btn {
 }
 
 .settings-icon-btn:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .settings-icon-btn:disabled {
@@ -827,8 +827,8 @@ html[data-theme='high-contrast'] .settings-icon-btn.primary {
 }
 
 .settings-seg button:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 html[data-theme='high-contrast'] .settings-seg button.on {
@@ -878,9 +878,9 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 }
 
 .settings-more-btn:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 2px;
+  outline: none;
   border-radius: 2px;
+  background-image: var(--ui-focus-layer);
 }
 
 .settings-more-body {
@@ -960,8 +960,8 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 }
 
 .theme-card:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .theme-preview {
@@ -1099,12 +1099,13 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   cursor: grab;
 }
 
+/* The thumb is a white dot, so keyboard focus grows it rather than ringing it. */
 .acrylic-intensity-dial:focus-visible::-webkit-slider-thumb {
-  outline: 2px solid var(--settings-focus);
+  transform: scale(1.25);
 }
 
 .acrylic-intensity-dial:focus-visible::-moz-range-thumb {
-  outline: 2px solid var(--settings-focus);
+  transform: scale(1.25);
 }
 
 .acrylic-intensity-dial:disabled {
@@ -1178,7 +1179,8 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 }
 
 .settings-select:focus-visible {
-  box-shadow: 0 0 0 1px var(--settings-focus);
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* Switch: a light 28x16 track (Fluent 2 small, macOS mini scale). Off is a
@@ -1249,8 +1251,8 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 }
 
 .toggle-switch:focus-visible {
-  outline: 2px solid var(--settings-focus);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .toggle-switch:disabled {
@@ -1497,8 +1499,8 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
 }
 
 .shortcut-recorder:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .shortcut-badge {
@@ -1613,8 +1615,8 @@ html[data-theme='high-contrast'] .notification-channel.on {
 }
 
 .notification-channel:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* The column labels, on the heading line, over their columns (the rows' inset is --space-16). */
@@ -1648,9 +1650,9 @@ html[data-theme='high-contrast'] .notification-channel.on {
 }
 
 .notification-try:focus-visible {
+  outline: none;
   opacity: 1;
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
+  background-image: var(--ui-focus-layer);
 }
 
 /* Agent access: the limits on automations agents add ("At most [10] active"). */

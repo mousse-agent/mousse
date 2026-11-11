@@ -205,7 +205,7 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-open:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-openable {
@@ -262,7 +262,7 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-text[role='button']:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-expandable:not(.ui-toast-openable):hover {
@@ -333,7 +333,7 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-copy:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-copied {
@@ -379,7 +379,7 @@ html[data-theme='light'] .ui-toaster {
 .ui-toast-close:focus-visible,
 .ui-toaster-clear:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .ui-toast-close {

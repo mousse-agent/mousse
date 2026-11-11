@@ -69,7 +69,11 @@
   --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.035) 34%, transparent 64%);
   --ui-sheen-accent: linear-gradient(180deg, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0.08) 24%, transparent 52%);
   --ui-raised-shadow: var(--ui-specular), 0 10px 32px rgba(0, 0, 0, 0.32);
-  --ui-focus-ring: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+  /* Keyboard focus is a fill, never a ring or border: a step firmer than hover,
+     laid over whatever background the control already has (rest, hover or
+     selected), so a focused selected row reads a little stronger still. */
+  --ui-focus-fill: var(--ui-pressed);
+  --ui-focus-layer: linear-gradient(var(--ui-focus-fill), var(--ui-focus-fill));
   --ui-aura-strength: 0.12;
   --ui-on-accent: #15121b;
 
@@ -288,7 +292,7 @@ html[data-theme='high-contrast'] {
 
 .app .threads-sidebar-tab.active {
   background: var(--ui-raised);
-  box-shadow: inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .app .threads-sidebar-tab.active svg {
@@ -780,19 +784,21 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
 }
 
 /* The send slot (Send, Queue, Stop, Stop recording), the Stop beside Queue and the mic are circles of
-   the same 30px, and their focus ring is drawn as a shadow so it follows the circle. A filled Send
-   keeps its own light and glow under the ring. */
+   the same 30px. Keyboard focus is the shared focus fill over the circle; a filled Send keeps its own
+   light and glow under it. */
 .app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn) {
   border-radius: 50%;
 }
 
 .app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn):focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .app .chat-input-area .composer-action-btn-active:focus-visible {
-  box-shadow: var(--ui-specular-accent), 0 2px 10px rgba(var(--accent-rgb), 0.3), var(--ui-focus-ring);
+  outline: none;
+  box-shadow: var(--ui-specular-accent), 0 2px 10px rgba(var(--accent-rgb), 0.3);
+  background-image: var(--ui-focus-layer);
 }
 
 /* ---------- Agent chat workspace ---------- */
@@ -903,11 +909,6 @@ html .settings-nav-item.active {
 }
 
 /* ---------- Inputs ---------- */
-input:focus,
-textarea:focus {
-  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.55), var(--ui-focus-ring);
-}
-
 /* Composer fields draw focus on their card, not on the bare field. */
 .composer textarea:focus,
 .agent-chat-composer textarea:focus,
@@ -956,7 +957,7 @@ html .composer-workspace-menu {
 }
 
 .app .threads-sidebar-tab.active {
-  box-shadow: var(--ui-specular), inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--ui-specular), 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .app .navigation-rail-button.active {
@@ -1211,9 +1212,9 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 }
 
 .chat-jump:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
   color: var(--text-primary);
+  background-image: var(--ui-focus-layer);
 }
 
 .chat-jump[data-hidden] {
@@ -1272,4 +1273,19 @@ html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
+}
+
+/* ---------- Keyboard focus ---------- */
+/* Focus is shown as a fill, never an outline, ring or border. No control draws
+   the browser's focus ring; a control without a focus rule of its own still
+   gets the focus fill over its background. Text fields keep their own focus
+   look (global.css). */
+:focus-visible {
+  outline: none;
+}
+
+:is(button, a[href], summary, [role='button'], [role='link'], [role='menuitem'], [role='menuitemradio'],
+  [role='menuitemcheckbox'], [role='option'], [role='tab'], [role='treeitem'], [role='row'],
+  [role='gridcell'], [role='switch'], [role='checkbox'], [role='radio'], [role='listitem']):focus-visible {
+  background-image: var(--ui-focus-layer);
 }

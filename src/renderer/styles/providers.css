@@ -196,7 +196,7 @@
 
 .prov-item-hit:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .prov-item-text {
@@ -468,8 +468,8 @@
 }
 
 .prov-editor .settings-advanced > summary:focus-visible {
-  outline: 1px solid var(--ui-line-strong);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 /* Advanced opens on what can be changed: one compact list of rows, no section headings. */
@@ -516,8 +516,8 @@
 }
 
 .prov-info-toggle:focus-visible {
-  outline: 1px solid var(--ui-line-strong);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .prov-info-chevron {
@@ -668,8 +668,8 @@
 }
 
 .prov-models-hidden-toggle:focus-visible {
-  outline: 1px solid var(--ui-line-strong);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .prov-models-hidden-chevron {
@@ -699,8 +699,8 @@
 }
 
 .prov-text-btn:focus-visible {
-  outline: 1px solid var(--ui-line-strong);
-  outline-offset: 0;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .prov-models-empty {
@@ -1154,7 +1154,7 @@
 
 .prov-choice:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .prov-choice-label {

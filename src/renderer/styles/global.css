@@ -410,7 +410,6 @@ input:focus,
 textarea:focus {
   outline: none;
   background: rgba(var(--surface-elevated-rgb), 0.65);
-  box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), 0.25);
 }
 
 ::-webkit-scrollbar {

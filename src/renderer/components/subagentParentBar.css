@@ -40,7 +40,7 @@
 
 .subagent-breadcrumb-parent:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .subagent-breadcrumb-name,

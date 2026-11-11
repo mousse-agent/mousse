@@ -170,9 +170,6 @@ function settingsText(p: Palette, name: string, fallback: string | undefined): R
 /** Faint text (nav group labels, search placeholder and icon) inside Settings. */
 const faint = (p: Palette) => settingsText(p, '--ui-faint', token(polishCss, ':root', '--ui-faint'))
 
-/** Keyboard focus outlines on Settings controls. */
-const focus = (p: Palette) => settingsText(p, '--settings-focus', undefined)
-
 /**
  * The selection fill (--ui-selected-fill) as painted on the page: an accent
  * share over the raised material or over the page shaded by the text colour,
@@ -265,16 +262,13 @@ describe('settings contrast', () => {
     }
   })
 
-  it('keyboard focus outlines reach 3:1 on the page and on group surfaces', () => {
+  it('keyboard focus is a fill, never an outline or ring', () => {
     const focusRules = [...settingsCss.matchAll(/([^{}]+:focus-visible[^{}]*)\{([^{}]*)\}/g)]
     expect(focusRules.length).toBeGreaterThan(0)
     for (const [, selector, body] of focusRules) {
-      expect(body, selector!.trim()).toMatch(/var\(--settings-focus\)/)
-    }
-    for (const p of palettes) {
-      expect(contrast(focus(p), p.page), label(p)).toBeGreaterThanOrEqual(3)
-      expect(contrast(focus(p), groupSurface(p)), label(p)).toBeGreaterThanOrEqual(3)
-      expect(contrast(focus(p), selectedFill(p)), label(p)).toBeGreaterThanOrEqual(3)
+      expect(body, selector!.trim()).not.toMatch(/outline\s*:(?!\s*none)|outline-offset|box-shadow\s*:[^;]*0 0 0/)
+      // A fill over the control, or (the slider's white thumb) a slightly larger thumb.
+      expect(body, selector!.trim()).toMatch(/background(-image)?\s*:|transform:\s*scale/)
     }
   })
 

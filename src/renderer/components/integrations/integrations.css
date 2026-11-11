@@ -50,11 +50,11 @@
 .integration-form { padding: var(--space-12, 12px) var(--space-16, 16px) var(--space-16, 16px); display: grid; gap: var(--space-12, 12px); }
 .integration-field { display: grid; gap: var(--space-4, 4px); align-content: start; }
 .integration-field > span { font-size: var(--settings-fs-small, 12.5px); color: var(--int-muted); }
-/* The shared settings input: one control height, hairline border, no fill, quiet focus ring only. */
+/* The shared settings input: one control height, hairline border, no fill, the focus fill only. */
 .integration-field input, .integration-field select, .integration-field textarea, .integration-form input, .integration-form select, .integration-form textarea { height: var(--settings-control-h, 28px); border: 1px solid var(--ui-line-strong); border-radius: var(--ui-control-radius); background: transparent; color: var(--int-fg); padding: 0 var(--space-8, 8px); min-width: 0; font: inherit; font-size: var(--settings-fs-small, 12.5px); }
 .integration-form textarea { height: auto; padding: var(--space-4, 4px) var(--space-8, 8px); line-height: 1.5; resize: vertical; }
 .integration-modal :is(input, textarea, select):focus { outline: none; box-shadow: none; }
-.integration-modal :is(input, textarea, select):focus-visible { box-shadow: var(--ui-focus-ring); }
+.integration-modal :is(input, textarea, select):focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .integration-field .ui-select { width: 100%; height: var(--settings-control-h, 28px); min-height: 0; padding: 0 var(--space-8, 8px); border-color: var(--ui-line-strong); border-radius: var(--ui-control-radius); background: transparent; color: var(--int-fg); font-size: var(--settings-fs-small, 12.5px); }
 .integration-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-12, 12px); }
 .integration-help { color: var(--int-muted); margin: 0; font-size: 12px; }
@@ -70,7 +70,7 @@
 .integration-disclosure > summary { display: inline-flex; align-items: center; gap: var(--space-4, 4px); color: var(--int-muted); font-size: var(--settings-fs-small, 12.5px); cursor: pointer; list-style: none; border-radius: var(--ui-control-radius); }
 .integration-disclosure > summary::-webkit-details-marker { display: none; }
 .integration-disclosure > summary:hover { color: var(--int-fg); }
-.integration-disclosure > summary:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
+.integration-disclosure > summary:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .integration-disclosure-chevron { transition: transform 180ms var(--ui-collapse-ease-close); }
 .integration-disclosure[open] .integration-disclosure-chevron { transform: rotate(90deg); transition-duration: 160ms; transition-timing-function: var(--ui-collapse-ease); }
 .integration-disclosure-body { padding-top: var(--space-8, 8px); }
@@ -82,7 +82,7 @@
 .integration-option > strong { font-size: 13px; font-weight: 500; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .integration-option > span { grid-column: 2; color: var(--int-muted); font-size: 12px; line-height: 1.4; }
 .integration-option:hover:not(:disabled) { background: var(--ui-hover); }
-.integration-option:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
+.integration-option:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .integration-option:disabled { cursor: default; }
 .integration-option[aria-checked='true'] { background: var(--ui-pressed); box-shadow: var(--ui-specular); }
 .integration-option[aria-checked='true'] > svg { color: var(--int-fg); }

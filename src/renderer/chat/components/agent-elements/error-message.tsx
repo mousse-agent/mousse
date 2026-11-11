@@ -33,7 +33,7 @@ export const ErrorMessage = memo(function ErrorMessage({
               onClick={onRetry}
               aria-label={retryTitle}
               title={retryTitle}
-              className="ml-1 -my-1 inline-flex h-6 items-center rounded-md px-2 align-middle text-an-foreground hover:bg-an-foreground/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color"
+              className="ml-1 -my-1 inline-flex h-6 items-center rounded-md px-2 align-middle text-an-foreground hover:bg-an-foreground/10 focus-visible:outline-none focus-visible:bg-an-foreground/10"
             >
               Retry
             </button>

@@ -26,7 +26,7 @@
 .files-header.searching .files-header-search { opacity: 1; transform: none; visibility: visible; transition-delay: 0s; }
 
 /* ONE field: a rounded box with the icon inside at the left and a bare input filling the rest. Focus shows on the
-   box only, as a slightly stronger hairline; the app's input rules (border, fill, focus ring) are taken off the input. */
+   box only, as a slightly stronger hairline; the app's input rules (border, focus fill) are taken off the input. */
 .files-search-field {
   display: flex;
   flex: 1 1 auto;
@@ -154,7 +154,7 @@
 .file-tree-more:hover { color: var(--text-primary); background: var(--ui-hover); }
 /* Closing the last file puts focus on its tree row or on the empty editor: both show it, like a tab does. */
 .file-tree-row:focus-visible,
-.files-editor-empty:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.6); outline-offset: -2px; }
+.files-editor-empty:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .file-tree-loader { display: flex; padding: 4px 16px; justify-content: flex-start; }
 /* The tree draws only the rows on screen: the list keeps the full height, and its top padding stands in for the rows above. */
 .file-tree { position: relative; }
@@ -191,7 +191,7 @@
 .files-panel .files-icon-btn svg { display: block; width: 14px; height: 14px; flex: none; }
 .files-panel .files-icon-btn:hover:not(:disabled),
 .files-panel .files-icon-btn:active:not(:disabled) { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.14); }
-.files-panel .files-icon-btn:focus-visible { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.14); outline: 2px solid rgba(var(--accent-rgb), 0.5); outline-offset: -2px; }
+.files-panel .files-icon-btn:focus-visible { outline: none; color: var(--text-primary); background: rgba(var(--accent-rgb), 0.14); }
 .files-panel .files-icon-btn:disabled { opacity: 0.4; cursor: default; }
 
 /* The folder the tree shows, as a path to click through. The current folder and an open menu only get a background. */
@@ -233,7 +233,7 @@
 .files-path-crumb.root { font-weight: 600; }
 .files-path-crumb:disabled { cursor: default; }
 .files-path-crumb.static { cursor: default; }
-.files-path-crumb:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.6); outline-offset: -2px; }
+.files-path-crumb:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 .files-path-input {
   flex: 1 1 auto;
   min-width: 0;

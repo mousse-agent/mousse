@@ -41,7 +41,7 @@
 
 .subagent-card:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .subagent-card-body {
@@ -149,7 +149,7 @@
 
 .subagent-group-head:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .subagent-group-stack {
@@ -304,7 +304,7 @@ button.subagent-notice-row:hover {
 
 button.subagent-notice-row:focus-visible {
   outline: none;
-  box-shadow: var(--ui-focus-ring);
+  background-image: var(--ui-focus-layer);
 }
 
 .subagent-notice-name {

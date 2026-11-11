@@ -133,7 +133,7 @@
 .bot-empty-actions { display: flex; gap: 8px; justify-content: center; margin-top: 22px; }
 .bot-empty-actions .chat-primary-button { min-height: 38px; }
 
-.bot-conversation button:focus-visible, .bot-about button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bot-conversation button:focus-visible, .bot-about button:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 
 /* Work beside the chat (docs/plans/bot-always-free.md): one quiet line each above the composer, with Stop. */
 .bot-work { list-style: none; display: flex; flex-direction: column; gap: 2px; margin: 0 4px 6px; padding: 4px; border-radius: 10px; background: color-mix(in srgb, var(--text-secondary) 6%, transparent); }

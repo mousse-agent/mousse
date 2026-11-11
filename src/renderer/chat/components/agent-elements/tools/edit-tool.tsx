@@ -250,7 +250,7 @@ function rowLabel(verb: FileVerb, status: RowStatus): string {
 
 // 28px targets that overhang the 22px line (negative margin), so showing them does not make the row taller.
 const ROW_ICON_BUTTON =
-  "inline-flex items-center justify-center size-7 -my-[3px] shrink-0 rounded-md text-muted-foreground hover:text-an-foreground hover:bg-an-background-secondary focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color";
+  "inline-flex items-center justify-center size-7 -my-[3px] shrink-0 rounded-md text-muted-foreground hover:text-an-foreground hover:bg-an-background-secondary focus-visible:outline-none focus-visible:bg-an-background-secondary";
 
 /**
  * The quiet line a tool row draws: an icon, the verb, the file name in the foreground colour (mono, 500), the line
@@ -310,7 +310,7 @@ function EditLine({
           type="button"
           className={cn(
             "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-[15px] leading-[22px] text-muted-foreground rounded-sm",
-            "focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color",
+            "focus-visible:outline-none focus-visible:bg-an-foreground/10",
             canOpen ? "cursor-pointer" : "cursor-default",
           )}
           aria-expanded={canOpen ? open : undefined}

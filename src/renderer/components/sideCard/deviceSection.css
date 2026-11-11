@@ -34,8 +34,8 @@
 
 .side-card-device-button:focus-visible,
 .side-card-device-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-device-button svg {
@@ -197,8 +197,8 @@
 
 .side-card-open-editor-main:focus-visible,
 .side-card-open-editor-chevron:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .side-card-open-editor-main svg,
@@ -437,6 +437,6 @@
 }
 
 .side-card-open-editor-files:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
