@@ -949,11 +949,16 @@ const QUEUED_ROW_RELEASE_RETRY_MS = 2_000
 const QUEUE_REPAIR_ATTEMPTS = 6
 /** How often a message queued behind the thread lease looks whether another process released it. */
 const LEASE_WAIT_POLL_MS = 500
+/**
+ * The longest a lease wait goes between looks while a turn of the thread is only admitted (it may wait minutes for its
+ * folders or an unplugged drive): from LEASE_WAIT_POLL_MS the interval doubles up to this.
+ */
+const LEASE_WAIT_ADMITTED_POLL_MAX_MS = 4_000
 /** How many deleted threads remember what their lease wait waited for, for a restore; the oldest is forgotten first. */
 const LEASE_WAITS_OF_DELETED_MAX = 256
 
 /** Messages queued behind the thread's execution lease, waiting for it to be free (`waitForThreadLease`). */
-type LeaseWait = { threadDir: string; itemIds: Set<string>; poll: NodeJS.Timeout | null; wakeQueued: boolean }
+type LeaseWait = { threadDir: string; itemIds: Set<string>; poll: NodeJS.Timeout | null; pollMs: number; wakeQueued: boolean }
 
 /** None of the messages a lease wait woke for is still waiting by the time the queue lock is held. */
 class LeaseWaitGone extends Error {}
@@ -7301,7 +7306,7 @@ export class OrchestratorService extends EventEmitter {
     let wait = this.leaseWaits.get(threadId)
     const started = !wait
     if (!wait) {
-      wait = { threadDir: resolve(threadDir), itemIds: new Set(), poll: null, wakeQueued: false }
+      wait = { threadDir: resolve(threadDir), itemIds: new Set(), poll: null, pollMs: LEASE_WAIT_POLL_MS, wakeQueued: false }
       this.leaseWaits.set(threadId, wait)
     }
     wait.itemIds.add(itemId)
@@ -7326,10 +7331,12 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  /** Poll the wait: what it waits for fires nothing in this process. */
-  private startLeasePoll(threadId: string, wait: LeaseWait): void {
-    if (wait.poll) return
-    wait.poll = setInterval(() => this.wakeLeaseWait(threadId), LEASE_WAIT_POLL_MS)
+  /** Poll the wait every `ms`: what it waits for fires nothing in this process. */
+  private startLeasePoll(threadId: string, wait: LeaseWait, ms = LEASE_WAIT_POLL_MS): void {
+    if (wait.poll && wait.pollMs === ms) return
+    if (wait.poll) clearInterval(wait.poll)
+    wait.pollMs = ms
+    wait.poll = setInterval(() => this.wakeLeaseWait(threadId), ms)
     wait.poll.unref?.()
   }
 
@@ -7417,7 +7424,9 @@ export class OrchestratorService extends EventEmitter {
     // wait again all the same, for a turn that drains nothing after it. One that ends before it takes the lease (it
     // failed while it was set up) releases nothing, so the wait polls until the lease is taken or the turn is gone.
     if (session.isTurnRunning() || session.turnAdmitted) {
-      this.startLeasePoll(threadId, wait)
+      // A turn only admitted may wait long for its folders or drive before it takes the lease: look less often meanwhile.
+      const admittedOnly = session.turnAdmitted && session.activeTurn === null
+      this.startLeasePoll(threadId, wait, admittedOnly && wait.poll ? Math.min(wait.pollMs * 2, LEASE_WAIT_ADMITTED_POLL_MAX_MS) : LEASE_WAIT_POLL_MS)
       return
     }
     this.refreshSessionQueueFromDisk(session)
@@ -13040,15 +13049,12 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Another process holds the thread's lease as this one starts (a git operation, a terminal, a turn): what waits in
-   * the queue, other than what a Stop held, waits for the lease to be free, as it did in the process that queued it.
+   * What waits in the queue as this process starts, other than what a Stop held, waits for the lease to be free, as it
+   * did in the process that queued it: another process holds the lease (a git operation, a terminal, a turn), or a Stop
+   * holds the rest of the queue, so the lease wait's drain puts these first and lifts the hold once their turn starts.
    */
   private waitForLeaseAtStartup(threadId: string, session: ThreadSession): void {
-    try {
-      this.refreshSessionQueueFromDisk(session)
-    } catch {
-      return
-    }
+    this.refreshSessionQueueFromDisk(session)
     for (const item of listPendingQueue(session.queue)) {
       if (item.intent === 'normal' && item.state === 'pending' && !item.heldAfterStop) this.waitForThreadLease(threadId, item.id)
     }
@@ -13071,9 +13077,15 @@ export class OrchestratorService extends EventEmitter {
         (item) => item.intent === 'normal' && item.state === 'pending'
       )
       // A compaction another live process runs holds the queue; one a restart cut short holds nothing (its row was
-      // settled as interrupted when the session loaded, and its saved hold is removed here). A queue a Stop held
-      // waits for the person, as it did before the restart (`heldAfterStop`).
-      if (!hasPendingNormal || isQueueHeldByStop(session.queue) || this.pausedHoldsQueue(threadId, session.queue) || this.compactionHoldsQueue(threadId)) return
+      // settled as interrupted when the session loaded, and its saved hold is removed here).
+      if (!hasPendingNormal || this.pausedHoldsQueue(threadId, session.queue) || this.compactionHoldsQueue(threadId)) return
+      // A queue a Stop held waits for the person, as it did before the restart (`heldAfterStop`). A message that only
+      // waited for the lease (held then by work in the process that stopped) was never held: it runs first, as it
+      // would have once the lease was free, through the lease wait; a peer holding the lease at restart does the same.
+      if (isQueueHeldByStop(session.queue)) {
+        this.waitForLeaseAtStartup(threadId, session)
+        return
+      }
       this.startupDrainScheduled.add(threadId)
       this.startupDrainPending.push(threadId)
     } catch (err) {

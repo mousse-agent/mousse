@@ -24,7 +24,8 @@ describe('a send that lost the race for the thread lease', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-lease-race-'))
-    store = new ThreadDataStore(new ProjectManager())
+    // Each test's threads live in its own home: a restart recovers only this test's queues.
+    store = new ThreadDataStore(new ProjectManager(), home)
     adapter = piAdapter(() => 'ok')
     orch = createOrchestrator(home, store, [adapter])
     orch.setPersistCallback((threadId) => {
@@ -298,6 +299,79 @@ describe('a send that lost the race for the thread lease', () => {
     expect(prompts().map((prompt) => (prompt.includes('LEASE-B') ? 'B' : 'OLD'))).toEqual(['B', 'OLD'])
   })
 
+  it('runs a message that waited for the lease first after a restart that finds the lease free, in a queue a Stop holds', async () => {
+    const thread = store.createThread('Lease free at restart')
+    orch.enqueueForThread(thread.id, 'HELD-OLD queued before the Stop')
+    mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+    // A git operation in the old process holds the lease when the message is sent.
+    const leasePath = getExecutionLeasePath(store.getThreadDir(thread.id))
+    const now = new Date().toISOString()
+    writeFileSync(leasePath, JSON.stringify({ pid: process.ppid, token: 'old-token', processInstanceId: 'old-instance', acquiredAt: now, heartbeatAt: now, source: 'git-operation' }))
+    const result = await orch.send('LEASE-FR before the restart', false, { threadId: thread.id })
+    expect(result.queued).toBe(true)
+    expect(result.queueItem?.heldAfterStop).toBeUndefined()
+
+    // The old process dies holding it: the new one finds a dead owner's lease, reclaims it, and the lease is free.
+    await orch.shutdown(5_000)
+    writeFileSync(leasePath, JSON.stringify({ pid: 2_147_000_123, token: 'old-token', processInstanceId: 'old-instance', acquiredAt: now, heartbeatAt: now, source: 'git-operation' }))
+    orch = createOrchestrator(home, store, [adapter])
+    orch.recoverAndDrainPendingQueues()
+    orch.scheduleStartupQueueRecovery()
+
+    await waitFor(() => ran('LEASE-FR') === 1, 'the message to run without Send now', 3_000)
+    // Its turn lifts the Stop's hold, as it does when the lease is let go without a restart.
+    await waitFor(() => ran('HELD-OLD') === 1, 'the held message to run after it', 3_000)
+    await settle(200)
+    expect(prompts().map((prompt) => (prompt.includes('LEASE-FR') ? 'B' : 'OLD'))).toEqual(['B', 'OLD'])
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  })
+
+  it('runs nothing a Stop held after a restart that finds the lease free and nothing that waited for it', async () => {
+    const thread = store.createThread('Only held at restart')
+    orch.enqueueForThread(thread.id, 'HELD-ONLY queued before the Stop')
+    mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+
+    await orch.shutdown(5_000)
+    orch = createOrchestrator(home, store, [adapter])
+    orch.recoverAndDrainPendingQueues()
+    orch.scheduleStartupQueueRecovery()
+    await settle(400)
+
+    expect(adapter.turns).toHaveLength(0)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+    const pending = listPendingQueue(store.loadMessageQueue(thread.id))
+    expect(pending.map((item) => [item.content, item.heldAfterStop])).toEqual([['HELD-ONLY queued before the Stop', true]])
+  })
+
+  it('waits for the lease when another process takes it between the startup look and the startup drain', async () => {
+    const thread = store.createThread('Lease taken before the startup drain')
+    orch.enqueueForThread(thread.id, 'LEASE-PU queued before the restart')
+
+    await orch.shutdown(5_000)
+    orch = createOrchestrator(home, store, [adapter])
+    // The startup look finds the lease free and schedules the drain; a peer takes the lease before the drain runs.
+    type Internals = { considerStartupDrain: (threadId: string) => void }
+    const internals = orch as unknown as Internals
+    const consider = internals.considerStartupDrain.bind(orch)
+    let leasePath = ''
+    vi.spyOn(internals, 'considerStartupDrain').mockImplementation((threadId) => {
+      consider(threadId)
+      if (threadId === thread.id) leasePath = holdAsPeer(thread.id)
+    })
+    orch.recoverAndDrainPendingQueues()
+    expect(leasePath).not.toBe('')
+    await settle(800)
+    expect(adapter.turns).toHaveLength(0)
+    expect(leaseWaits().get(thread.id)?.poll).not.toBeNull()
+
+    unlinkSync(leasePath)
+    await waitFor(() => ran('LEASE-PU') === 1, 'the message to run once the peer released the lease', 3_000)
+    await settle(300)
+    expect(ran('LEASE-PU')).toBe(1)
+    expect(listPendingQueue(store.loadMessageQueue(thread.id))).toHaveLength(0)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  })
+
   it('stops polling once the lease passes from another process to this one', async () => {
     const thread = store.createThread('Lease wait passes to this process')
     const leasePath = holdAsPeer(thread.id)
@@ -353,6 +427,54 @@ describe('a send that lost the race for the thread lease', () => {
     expect(ran('LEASE-AD')).toBe(1)
     expect(leaseWaits().has(thread.id)).toBe(false)
   })
+
+  it('looks less often while a turn of the thread is only admitted, and ends once it takes the lease', async () => {
+    const thread = store.createThread('Lease wait backs off while admitted')
+    const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'git-operation' })!
+    await orch.send('LEASE-BO while a turn waits on its folders', false, { threadId: thread.id })
+
+    // A turn of the thread is admitted and waits for its folders (a drive unplugged) when the lease is released.
+    const session = orch.getOrCreateSession(thread.id)
+    session.turnAdmitted = true
+    const wake = vi.spyOn(orch as unknown as { wakeLeaseWait: (threadId: string) => void }, 'wakeLeaseWait')
+    releaseExecutionLeaseHandle(lease)
+    await settle(4_000)
+    // 500 ms, then 1 s, 2 s and 4 s apart: a look every 500 ms would be eight.
+    expect(wake.mock.calls.length).toBeLessThanOrEqual(4)
+    expect(adapter.turns).toHaveLength(0)
+    expect(leaseWaits().get(thread.id)?.poll).not.toBeNull()
+
+    // The turn takes the lease: the wait stops polling, and the turn's end drains the queue.
+    const turnLease = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'cli-turn' })!
+    await waitFor(() => leaseWaits().get(thread.id)?.poll === null, 'the poll to stop once the turn holds the lease', 6_000)
+    session.turnAdmitted = false
+    releaseExecutionLeaseHandle(turnLease)
+    await waitFor(() => ran('LEASE-BO') === 1, 'the message to run after the lease is let go', 2_000)
+    await settle(100)
+    expect(ran('LEASE-BO')).toBe(1)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  }, 20_000)
+
+  it('looks every 500 ms again once a peer holds the lease after an admitted turn', async () => {
+    const thread = store.createThread('Lease wait back to the short poll')
+    const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'git-operation' })!
+    await orch.send('LEASE-SP short poll again', false, { threadId: thread.id })
+    const session = orch.getOrCreateSession(thread.id)
+    session.turnAdmitted = true
+    releaseExecutionLeaseHandle(lease)
+    await settle(2_000)
+    type Timed = { pollMs?: number }
+    expect((leaseWaits().get(thread.id) as Timed | undefined)?.pollMs).toBeGreaterThan(500)
+
+    // The admitted turn fails, and a peer takes the lease before the wait looks again.
+    session.turnAdmitted = false
+    const leasePath = holdAsPeer(thread.id)
+    await waitFor(() => (leaseWaits().get(thread.id) as Timed | undefined)?.pollMs === 500, 'the short poll', 6_000)
+    unlinkSync(leasePath)
+    await waitFor(() => ran('LEASE-SP') === 1, 'the message to run once the peer released the lease', 2_000)
+    await settle(100)
+    expect(ran('LEASE-SP')).toBe(1)
+  }, 20_000)
 
   it('forgets what a deleted thread waited for once it is deleted for good, and keeps only the latest deletes', async () => {
     type Internals = { leaseWaitsOfDeleted: Map<string, Set<string>>; endLeaseWait: (threadId: string, opts?: { deleted?: boolean }) => void }
