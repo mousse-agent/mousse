@@ -472,10 +472,18 @@ export class LiveRun {
   /** Pushed message ids no result has echoed yet. */
   readonly owned = new Set<string>()
   /**
-   * Pushed ids Claude Code has read: its `command_lifecycle` frame said `started` (or `completed`), or a frame or result
-   * named the id. Kept after the run is cancelled, since a Stop's interrupt can race a read.
+   * Pushed ids Claude Code has taken: its `command_lifecycle` frame said `started` (or `completed`), or a frame or result
+   * named the id. Kept after the run is cancelled, since a Stop's interrupt can race a read. Taken is not answered:
+   * `started` comes about 200 ms before the request that carries the message goes out (`answered`).
    */
   readonly read = new Set<string>()
+  /**
+   * Pushed ids the model answered: model output that names the id (a streamed event, or a message that is not one
+   * Claude Code made up itself), a `completed` lifecycle, or a successful result that names it. Only these are reads
+   * when a Stop, an interrupt, a close or the process's death ends the run; a message only taken (`read`) is handed
+   * back then, because the request that would carry it may never have gone out (#928).
+   */
+  readonly answered = new Set<string>()
   /** Pushed ids Claude Code dropped unread (a cancel took them from its queue): it will never run them. */
   readonly dropped = new Set<string>()
   /**
@@ -511,7 +519,7 @@ export class LiveRun {
   lateTimer: ReturnType<typeof setTimeout> | undefined
   /** Claude Code is being asked to drop the late steers (`LiveSession.askLateSteers`); `unreadFate` waits for its answer. */
   lateAsk: Promise<void> | undefined
-  /** Told, at once, each time Claude Code reads a pushed id of this run for the first time. Must not throw. */
+  /** Told, at once, the first time the model answers a pushed id of this run (`answered`). Must not throw. */
   onRead: ((id: string) => void) | undefined
   /** The ids of the steers this run pushed (`LiveSession.steer`). */
   readonly steerIds = new Set<string>()
@@ -612,6 +620,16 @@ function lifecycleOf(message: SDKMessage): { id: string; state: string } | undef
   const frame = message as { type?: unknown; command_uuid?: unknown; state?: unknown }
   if (frame.type !== 'command_lifecycle' || typeof frame.command_uuid !== 'string' || typeof frame.state !== 'string') return undefined
   return { id: frame.command_uuid, state: frame.state }
+}
+
+/**
+ * A frame the model wrote: a streamed event, or a message that is not one Claude Code made up itself (`<synthetic>`,
+ * such as an API error or "No response requested."). One that names a pushed message shows the model answered it.
+ */
+function modelOutput(message: SDKMessage): boolean {
+  if (message.type === 'stream_event') return true
+  if (message.type !== 'assistant') return false
+  return (message as { message?: { model?: unknown } }).message?.model !== '<synthetic>'
 }
 
 function echoedIds(message: SDKMessage): string[] {
@@ -948,7 +966,9 @@ export class LiveSession<Turn = unknown> {
       // A steer Claude Code has not read is handed back to Mousse when the turn ends: Claude Code must not run it too.
       // A plain interrupt leaves it queued, and Claude Code starts it at once as a new turn (spike S1), before a second
       // cancel could land, so the queue is swept in the same round trip.
-      const unreadSteer = [...run.steerIds].some((id) => run.owned.has(id) && !run.read.has(id))
+      // A steer Claude Code took for its next request but the model has not answered counts as unread: the sweep also
+      // cancels one taken for a request not yet sent (it then says `cancelled`).
+      const unreadSteer = [...run.steerIds].some((id) => run.owned.has(id) && !run.answered.has(id))
       void this.interruptFor(run, query, unreadSteer)
     }
     // A run that was never answered keeps owning its ids until each has its result or was cancelled; a
@@ -1075,7 +1095,7 @@ export class LiveSession<Turn = unknown> {
    */
   private cancelUnconfirmed(run: LiveRun, stillQueued: readonly string[] | undefined): void {
     const listed = Array.isArray(stillQueued) ? new Set(stillQueued) : undefined
-    const atRisk = [...run.owned].filter((id) => !run.read.has(id) && !run.dropped.has(id) && (!listed || listed.has(id)))
+    const atRisk = [...run.owned].filter((id) => !run.answered.has(id) && !run.dropped.has(id) && (!listed || listed.has(id)))
     if (atRisk.length === 0) return
     for (const id of atRisk) run.mayRunTwice.add(id)
     const steers = atRisk.filter((id) => run.steerIds.has(id))
@@ -1119,7 +1139,8 @@ export class LiveSession<Turn = unknown> {
   private cancelId(id: string): void {
     const owner = this.ownerOf([id])
     if (!owner) return
-    if (!owner.read.has(id)) owner.dropped.add(id)
+    // Also one Claude Code had taken for a request it had not sent yet: the cancel took it back unanswered.
+    if (!owner.answered.has(id)) owner.dropped.add(id)
     owner.owned.delete(id)
     if (owner.abandoned) {
       if (owner.owned.size === 0) this.finishCancelled(owner)
@@ -1138,9 +1159,12 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * What became of `id`, a message `run` pushed that Claude Code had not read when the run ended:
-   * - `read`: Claude Code read it after all (a Stop's interrupt can race the read): a `started` or `completed`
-   *   lifecycle, or a frame or result that named it. Nothing else counts as a read;
+   * What became of `id`, a message `run` pushed that the model had not answered when the run ended:
+   * - `read`: the model answered it after all (a Stop's interrupt can race the answer): model output that named it, a
+   *   `completed` lifecycle, or a successful result that named it. A message Claude Code only took for its next request
+   *   (`started`) is read only when the turn ended `normally` (with its result, not cancelled): that request goes out.
+   *   After a Stop, an interrupt, a close or the process's death it may never have, so it is not a read then (#928).
+   *   Nothing else counts as a read;
    * - `dropped`: Claude Code removed it from its queue unread (a cancel's receipt, `cancelAsyncMessage` here, or a
    *   `cancelled` lifecycle), so it never runs there; or `cancelAsyncMessage` could not drop it (false, `taken`) and
    *   nothing showed it read, however the run ended (the wait ran out, `endTaken`; a Stop; a fresh ask here), so it is
@@ -1155,10 +1179,11 @@ export class LiveSession<Turn = unknown> {
    * Only a run that ended with its result asks Claude Code (`cancelAsyncMessage`, which drops a message still queued
    * and leaves one a turn already took). Never throws.
    */
-  async unreadFate(run: LiveRun, id: string): Promise<'read' | 'dropped' | 'gone' | 'cut' | 'unknown'> {
+  async unreadFate(run: LiveRun, id: string, normally = false): Promise<'read' | 'dropped' | 'gone' | 'cut' | 'unknown'> {
     // Only a read signal is a read. `taken` (`cancelAsyncMessage` said false) only says no queue held it when Claude Code
     // was asked: it may have dropped it, and says so only when its next turn commits.
-    const known = (): 'read' | 'dropped' | undefined => (run.read.has(id) ? 'read' : run.dropped.has(id) ? 'dropped' : undefined)
+    const known = (): 'read' | 'dropped' | undefined =>
+      run.answered.has(id) ? 'read' : run.dropped.has(id) ? 'dropped' : run.read.has(id) && normally && !run.abandoned ? 'read' : undefined
     if (known()) return known()!
     // Claude Code is still answering whether it could drop the steer (a Stop came during the ask): wait for its answer.
     if (run.lateAsk) await run.lateAsk
@@ -1228,7 +1253,7 @@ export class LiveSession<Turn = unknown> {
    */
   private lateSteerCancelled(id: string): void {
     const owner = this.ownerOf([id])
-    if (!owner || owner.read.has(id) || !owner.owned.has(id)) return
+    if (!owner || owner.answered.has(id) || !owner.owned.has(id)) return
     if (!owner.lateSteers.has(id) && !owner.taken.has(id) && !owner.handedBackBy) return
     this.cancelId(id)
   }
@@ -1251,20 +1276,29 @@ export class LiveSession<Turn = unknown> {
     })
   }
 
-  /** Claude Code read `ids` of the runs that pushed them. */
-  private markRead(ids: readonly string[]): void {
+  /**
+   * Claude Code took `ids` of the runs that pushed them (`read`), and, when `answered`, the model answered them
+   * (`LiveRun.answered`, which alone tells `onRead`).
+   */
+  private markRead(ids: readonly string[], answered: boolean): void {
     for (const run of this.ownersOf(ids)) {
       for (const id of ids) {
-        if (!run.ids.has(id) || run.read.has(id)) continue
-        run.read.add(id)
-        if (run.handedBackBy) this.readAfterHandBack(run, id)
-        try {
-          run.onRead?.(id)
-        } catch (error) {
-          console.warn('[claude-live] a read message could not be reported', error instanceof Error ? error.message : String(error))
+        if (!run.ids.has(id)) continue
+        const taken = !run.read.has(id)
+        if (taken) {
+          run.read.add(id)
+          if (run.handedBackBy) this.readAfterHandBack(run, id)
+        }
+        if (answered && !run.answered.has(id)) {
+          run.answered.add(id)
+          try {
+            run.onRead?.(id)
+          } catch (error) {
+            console.warn('[claude-live] a read message could not be reported', error instanceof Error ? error.message : String(error))
+          }
         }
         // A steer that was unread at the run's result runs now, as a turn of its own: the run goes on to its result.
-        if (run.lateSteers.has(id) && !run.settled && !run.abandoned) this.resume(run)
+        if (taken && run.lateSteers.has(id) && !run.settled && !run.abandoned) this.resume(run)
       }
     }
   }
@@ -1353,8 +1387,9 @@ export class LiveSession<Turn = unknown> {
     }
     const lifecycle = lifecycleOf(message)
     if (lifecycle) {
-      // `started`: a turn took the message, so the model reads it. Only the read is taken from this frame.
-      if (lifecycle.state === 'started' || lifecycle.state === 'completed') this.markRead([lifecycle.id])
+      // `started`: Claude Code took the message for its next request, which has not gone out yet; `completed`: answered.
+      // Only the read is taken from this frame.
+      if (lifecycle.state === 'started' || lifecycle.state === 'completed') this.markRead([lifecycle.id], lifecycle.state === 'completed')
       else if (lifecycle.state === 'cancelled') this.lateSteerCancelled(lifecycle.id)
       return
     }
@@ -1369,7 +1404,7 @@ export class LiveSession<Turn = unknown> {
       return
     }
     // Read before the frame reaches its run, so a steer is in place before what the model says after it.
-    if (echoed.length) this.markRead(echoed)
+    if (echoed.length) this.markRead(echoed, modelOutput(message))
     if (owner) {
       this.strayTurn = false
       this.passOver(owner, echoed)
@@ -1644,8 +1679,9 @@ export class LiveSession<Turn = unknown> {
     if (stray && echoed.length === 0) return
     let target: LiveRun | undefined
     if (echoed.length) {
-      // A result that names a message answered it: Claude Code read it.
-      this.markRead(echoed)
+      // A result that names a message took it; a successful one answered it. An interrupted turn's error result names
+      // the message that started it too, though the model may never have had it.
+      this.markRead(echoed, message.subtype === 'success' && message.is_error !== true)
       target = this.ownerOf(echoed)
       if (!target) return
       this.passOver(target, echoed)

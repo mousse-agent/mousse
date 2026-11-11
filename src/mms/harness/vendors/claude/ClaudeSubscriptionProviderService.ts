@@ -2443,12 +2443,13 @@ export class ClaudeSubscriptionProviderService {
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let interruptRequested = false
     /**
-     * Steers pushed into the live turn, by message id. Pushed is not read: a steer is accepted only once Claude Code
-     * reads it (`LiveRun.onRead`), never because a message started or the turn ended. One it has not read when the turn
-     * ends is settled by `settleUnreadSteers`.
+     * Steers pushed into the live turn, by message id. Pushed is not read: a steer is accepted only once the model
+     * answers it (`LiveRun.onRead`), never because a message started or Claude Code took it for its next request (a
+     * `started` lifecycle comes before that request goes out). One it has not answered when the turn ends is settled by
+     * `settleUnreadSteers`.
      */
     const pushedSteers = new Map<string, { text: string; token?: string; steered: () => void; settled: boolean; placed: boolean }>()
-    /** Claude Code read the steer pushed as `id`: it is accepted, and the reply goes on below it. */
+    /** The model answered the steer pushed as `id`: it is accepted, and the reply goes on below it. */
     const steerRead = (id: string): void => {
       const entry = pushedSteers.get(id)
       if (!entry || entry.settled) return
@@ -2478,13 +2479,15 @@ export class ClaudeSubscriptionProviderService {
      * - at a result, Claude Code is asked to drop it (`cancelAsyncMessage`, `LiveSession.endAtResult`): dropped, it is
      *   handed back; not dropped, the run stays open for a read signal. Read, the run goes on to the steer's answer;
      *   with no read signal in time, it is handed back.
-     * When Claude Code cannot say, it is still handed back: at least once, never lost. Never throws.
+     * When Claude Code cannot say, it is still handed back: at least once, never lost. A steer Claude Code only took for
+     * its next request counts as read only when the turn finished (`success`): after a Stop, an interrupt or a failure
+     * that request may never have gone out, so it is handed back (#928). Never throws.
      */
     const settleUnreadSteers = async (): Promise<void> => {
       if (!live || !liveRun) return
       for (const [id, entry] of pushedSteers) {
         if (entry.settled) continue
-        const fate = await live.unreadFate(liveRun, id)
+        const fate = await live.unreadFate(liveRun, id, success)
         if (entry.settled) continue
         if (fate === 'read') {
           steerRead(id)
