@@ -14,7 +14,7 @@ import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
-import { botFullTime, botGroupTime, placeMessages } from './messageGroups'
+import { botFullTime, botGroupTime, botMessageLabel, placeMessages } from './messageGroups'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
@@ -193,13 +193,15 @@ interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(a
 const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, starts, onReply }: BotMessageProps) {
   const store = useBotsStore.getState
   const quoted = quote && message.replyTo
+  const label = botMessageLabel(message)
   return <article className={`chat-participant-message from-agent${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}`} data-message-id={message.id} title={botFullTime(message.at)}>
     {/* Transcript faces are still: one baked pose per look, shared by every message. */}
     {starts
       ? <BotFace look={bot.look} state="idle" size={40} view="head" className="bot-message-face" still />
       : <div className="bot-message-gutter"><ReplyButton onReply={() => onReply(message)} /></div>}
     <div className="chat-participant-message-body">
-      {starts && <div className="chat-message-meta"><strong>{bot.name}</strong><ReplyButton onReply={() => onReply(message)} /></div>}
+      {starts && <div className="chat-message-meta"><strong>{bot.name}</strong>{label && <span className="bot-message-label">{label}</span>}<ReplyButton onReply={() => onReply(message)} /></div>}
+      {!starts && label && <span className="bot-message-label is-own-line">{label}</span>}
       {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
       {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" />}
       <BotChips chips={message.chips} />
@@ -220,6 +222,7 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
  */
 export function BotChatView({ bot }: { bot: BotSummary }) {
   const chat = useBotsStore((s) => s.chats[bot.id])
+  const load = useBotsStore((s) => s.chatLoad[bot.id])
   const pending = useBotsStore((s) => s.pending[bot.id] ?? EMPTY)
   const live = useBotsStore((s) => s.live[bot.id])
   const happy = useBotsStore((s) => s.happy[bot.id])
@@ -329,6 +332,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         measure()
         if (element.scrollTop < 60 && chat?.hasMore) void store().loadOlder(bot.id)
       }}>
+        {!chat && load === 'loading' && <div className="bot-load-state" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />Loading messages…</div>}
+        {!chat && load === 'failed' && <div className="bot-load-state is-failed" role="status">
+          <span>Couldn’t load messages.</span>
+          <button type="button" onClick={() => void store().loadChat(bot.id)}>Retry</button>
+        </div>}
         {chat?.loadingOlder && <p className="chat-empty-hint bot-loading-older">Loading earlier messages…</p>}
         {shown.map((message, index) => {
           const place = places[index]!
