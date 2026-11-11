@@ -191,7 +191,8 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
       await later(30)
       await w.steer('after the subagent')
       await waitFor(() => w.held() !== undefined, 'held for the subagent')
-      expect(w.held()?.waitsFor).toBe('Agent')
+      // The progress line's word for it ("Running subagent…").
+      expect(w.held()?.waitsFor).toBe('subagent')
       const row = w.d.orch.getOrCreateSession(w.thread.id).messages.find((message) => message.activity?.callId === 'agent-1')
       expect(row?.activity?.notMovable).toBe(true)
       await later(350)
@@ -342,7 +343,7 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     await later(30)
     await w.steer('waits')
     await waitFor(() => w.held() !== undefined, 'held: no question is pending yet')
-    expect(w.held()?.waitsFor).toBe('ask_user')
+    expect(w.held()?.waitsFor).toBe('Ask User')
   })
 
   it.each([

@@ -7,6 +7,7 @@ import {
   applyToolResult,
   capRecord,
   mergeActivityPatch,
+  normalizeToolName,
   type ActivityInterruptedBy,
   type ActivityPatch,
   type ActivityStatus,
@@ -91,11 +92,40 @@ function toolNameOf(message: ChatMessage): string {
   return message.activity?.toolName ?? message.toolCall?.toolName ?? message.toolCall?.title ?? ''
 }
 
-/** `mcp__server__tool` reads as `tool`; any other name as it is. */
-function displayToolName(name: string): string {
-  if (!name.startsWith('mcp__')) return name || 'tool'
-  const parts = name.split('__')
-  return parts[parts.length - 1] || 'tool'
+/** An MCP tool's own name as a window shows it: `create_issue` reads "Create Issue". */
+function mcpDisplayName(tool: string): string {
+  return tool.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim() || 'tool'
+}
+
+/**
+ * The name a window's progress line gives a call ("Running Bash…", from the row's card type), so the Steer block's
+ * "Waits for …" names the same call the same way, whatever the provider calls the tool (Codex's `shell` is a command,
+ * so "Bash"). Kept in step with `activityPart`/`toolPart` (`mousseToUI.ts`) and `toolProgress` (`turn-progress.tsx`).
+ */
+function shownToolName(message: ChatMessage): string {
+  const activity = message.activity
+  switch (activity?.kind) {
+    case 'command':
+      return 'Bash'
+    case 'file_change':
+      return activity.changes.length > 0 && activity.changes.every((change) => change.change === 'add') ? 'Write' : 'Edit'
+    case 'search':
+      return activity.scope === 'code' ? 'Grep' : 'Glob'
+    case 'web_search':
+      return 'WebSearch'
+    case 'subagent':
+      // The line reads "Running subagent…".
+      return 'subagent'
+  }
+  const raw = toolNameOf(message)
+  const mcp = raw.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
+  if (mcp) return mcpDisplayName(mcp[2]!)
+  // A provider that names the server apart (Codex): `server` with the tool's own name.
+  if (activity?.kind === 'generic' && activity.server) return mcpDisplayName(raw)
+  if (!raw) return 'tool'
+  if (subagentToolName(raw)) return 'subagent'
+  const name = normalizeToolName(raw)
+  return name === 'Generic' || name === 'Mcp' ? 'tool' : name
 }
 
 /** A subagent call (Claude's Task or Agent, Mousse's subagent tools) or a call that runs in the background. */
@@ -692,7 +722,7 @@ export class TranscriptAssembler {
       const toolName = toolNameOf(message)
       if (asksPerson?.(toolName)) continue
       const detail = activityDetail(message.activity)
-      tools.push({ callId, toolName: displayToolName(toolName), ...(detail ? { detail } : {}) })
+      tools.push({ callId, toolName: shownToolName(message), ...(detail ? { detail } : {}) })
     }
     return tools
   }

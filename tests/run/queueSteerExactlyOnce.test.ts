@@ -1466,6 +1466,37 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     expect(w.inContext('strictly after')).toBe(1)
   })
 
+  it('start, strict release: the reply the agent writes while the steer waits reads above the Steer block, and stays there once the steer goes in', async () => {
+    const w = await world('start', { strict: true })
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('b1')
+    const item = await w.steer('after your reply')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    w.adapter.writes('Here is what I found.')
+    // In the order a window shows them: by timestamp, the service's own order for ties (a stable sort, as the app
+    // store's `sortMessagesDeterministic` does).
+    const shown = () => [...w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => !message.hidden)]
+      .sort((a, b) => (a.timestamp === b.timestamp ? 0 : a.timestamp < b.timestamp ? -1 : 1))
+    const order = () => {
+      const messages = shown()
+      return {
+        steer: messages.findIndex((message) => message.steered && message.steerItemId === item),
+        reply: messages.findIndex((message) => message.role === 'assistant' && message.content.includes('Here is what I found.')),
+        last: messages.length - 1
+      }
+    }
+    // While held: the Steer block stays after the newest row.
+    await waitFor(() => order().reply >= 0 && order().steer === order().last, 'the Steer block after the reply while held')
+    expect(w.held()).toBeDefined()
+    w.adapter.boundary()
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    // Where it went in: below the reply written before it.
+    expect(order().steer).toBeGreaterThan(order().reply)
+    await w.finish()
+    expect(order().steer).toBeGreaterThan(order().reply)
+  })
+
   it('start, best effort: with no output after the command, the steer goes in after the window (a late start can still be cut)', async () => {
     const w = await world('start')
     w.adapter.toolStart('b1')

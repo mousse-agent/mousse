@@ -8387,6 +8387,33 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A held steer's transcript copies stay after the newest row of the turn (docs/design/steer-and-interruptions.md
+   * §2.10): the reply the agent writes while the steer waits (a strict release's text, a tool row) reads above the
+   * Steer block, and the block sits where the steer went in once it does. Rows that only grow in place (the reply being
+   * streamed when the steer was sent) stay above it. The copies keep their order; nothing moves while they are already
+   * last.
+   */
+  private keepHeldEchoesLast(session: ThreadSession, entries: readonly SteerEntry[]): void {
+    const echoIds = new Set(entries.flatMap((entry) => (entry.echoId ? [entry.echoId] : [])))
+    const itemIds = new Set(entries.flatMap((entry) => (entry.itemId ? [entry.itemId] : [])))
+    if (!echoIds.size && !itemIds.size) return
+    const isEcho = (message: ChatMessage): boolean =>
+      message.role === 'user' && message.steered === true && !message.hidden && (echoIds.has(message.id) || (message.steerItemId !== undefined && itemIds.has(message.steerItemId)))
+    const echoes = session.messages.filter(isEcho)
+    if (!echoes.length) return
+    // Already last (hidden rows aside): nothing to move.
+    const shown = session.messages.filter((message) => !message.hidden)
+    if (shown.slice(-echoes.length).every((message, index) => message === echoes[index])) return
+    // Windows order rows by their timestamp: the copies take times after the newest row's, in their order.
+    const rest = session.messages.filter((message) => !isEcho(message))
+    const newest = rest.reduce((latest, message) => Math.max(latest, Date.parse(message.timestamp) || 0), 0)
+    const base = Math.max(Date.now(), newest + 1)
+    session.messages = [...rest, ...echoes.map((message, index) => ({ ...message, timestamp: new Date(base + index).toISOString() }))]
+    this.sessionAls.run(session, () => this.persist(true))
+    this.emitThreadMessages(session.threadId, session.messages, true)
+  }
+
+  /**
    * Queued messages handed to a turn that was stopped before it read them: their copies in the turn go, and they are
    * back first in the queue at once, pending and shown there, in the order they were sent. Nothing runs them until the
    * person sends or sends now again. Best-effort: a Stop must not fail.
@@ -11836,6 +11863,8 @@ export class OrchestratorService extends EventEmitter {
         if (!key) steerKeys.set(entry, (key = `entry:${++steerKeySeq}`))
         return key
       }
+      /** The entries the last peek saw, for the transcript copies of a held batch (`keepHeldEchoesLast`). */
+      let pendingEntries: SteerEntry[] = []
       /** What a drain now would take, without taking it: a remote turn's steers, then the thread's own. */
       const pendingFacts = (): PendingSteerFacts | undefined => {
         const raw = opts?.externalPeekSteer?.()
@@ -11847,6 +11876,7 @@ export class OrchestratorService extends EventEmitter {
           ...external.map((entry, index) => ({ entry, key: entry.itemId ?? `remote:${index}:${entry.text.trim()}` })),
           ...own.map((entry) => ({ entry, key: keyOf(entry) }))
         ].filter(({ entry }) => entry.text.trim())
+        pendingEntries = entries.map(({ entry }) => entry)
         if (entries.length === 0) return undefined
         return {
           person: entries.some(({ entry }) => !entry.origin && !entry.byAgent && !notices.has(entry.text.trim())),
@@ -11872,6 +11902,9 @@ export class OrchestratorService extends EventEmitter {
           if (decision.delivery === 'hold') {
             const shown = hold.hold(facts, decision.tools, engineRunId)
             this.setHeldSteer(session.threadId, facts.person ? shown : undefined)
+            // What the agent writes while the steer waits reads above it: the Steer block stays after the newest row,
+            // so it sits where the steer went in once it does.
+            this.keepHeldEchoesLast(session, pendingEntries)
           }
           this.collectSteerNow(session, engineRunId, hold)
           const settled = hold.settleForces(facts.person)
@@ -12034,6 +12067,8 @@ export class OrchestratorService extends EventEmitter {
         // A person's message must reach the model now; subagent results and an agent's steer may wait for its next step.
         const notices = new Set((own?.carried ?? []).map((entry) => entry.text.trim()))
         const cut = entries.some((steer) => !steer.origin && !steer.byAgent && !notices.has(steer.text.trim()))
+        // A held batch goes in here: its Steer block moves after what the agent wrote while it waited (since the last poll).
+        if (hold.holdGeneration !== undefined) this.keepHeldEchoesLast(session, entries)
         // The hold is over; the same steers handed back resume it in the same generation.
         hold.drained(token, forced)
         this.setHeldSteer(session.threadId, undefined)

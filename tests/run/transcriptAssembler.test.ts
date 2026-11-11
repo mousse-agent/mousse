@@ -716,13 +716,26 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
     assembler.tool(agent('a1'))
     assembler.tool(start('child', 'Bash', undefined, 'a1'))
     assembler.tool({ kind: 'mcp_tool_call', phase: 'update', callId: 'a1', title: 'Agent', summary: '', details: [], activity: { notMovable: true } })
-    expect(assembler.foregroundTools()).toEqual([{ callId: 'a1', toolName: 'Agent', detail: 'look around' }])
+    // Named as the progress line names it ("Running subagent…").
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'a1', toolName: 'subagent', detail: 'look around' }])
   })
 
-  it('names an MCP tool by its own name', () => {
+  it('names an MCP tool by its own name, as a window shows it', () => {
     const { assembler } = harness()
     assembler.tool(start('m1', 'mcp__github__create_issue', { toolName: 'mcp__github__create_issue', kind: 'generic' }))
-    expect(assembler.foregroundTools()).toEqual([{ callId: 'm1', toolName: 'create_issue' }])
+    expect(assembler.foregroundTools()).toEqual([{ callId: 'm1', toolName: 'Create Issue' }])
+  })
+
+  it('names each call the way the progress line does, whatever the provider calls the tool', () => {
+    const { assembler } = harness()
+    // Codex's command tool is `shell`; the progress line reads "Running Bash…".
+    assembler.tool(start('c1', 'shell', { toolName: 'shell', kind: 'command', command: 'npm test' }))
+    // A provider that names the MCP server apart (Codex): the tool's own name, title-cased.
+    assembler.tool(start('m1', 'create_issue', { toolName: 'create_issue', kind: 'generic', server: 'github' }))
+    assembler.tool(start('e1', 'apply_patch', { toolName: 'apply_patch', kind: 'file_change', changes: [{ path: 'a.ts', change: 'update' }] }))
+    assembler.tool(start('e2', 'apply_patch', { toolName: 'apply_patch', kind: 'file_change', changes: [{ path: 'b.ts', change: 'add' }] }))
+    assembler.tool(start('g1', 'grep', { toolName: 'grep', kind: 'search', scope: 'code', query: 'TODO' }))
+    expect(assembler.foregroundTools().map((tool) => tool.toolName)).toEqual(['Bash', 'Create Issue', 'Edit', 'Write', 'Grep'])
   })
 
   it('Mousse\'s thread_wait only waits: it never holds, by its own name or as the Mousse server\'s tool', () => {
