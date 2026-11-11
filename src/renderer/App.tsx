@@ -34,6 +34,7 @@ import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore, withNewerTimes } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
+import { applyStreamedUpdates } from './stores/liveTextStore'
 import { useViewSwap } from './lib/motion'
 import { useMemoryNotices } from './hooks/useMemoryNotices'
 import { useWindowCounters } from './lib/windowCounters'
@@ -302,7 +303,11 @@ export default function App() {
     // Anything else that changes the transcript applies the held updates first, so order is kept.
     // The Usage page covers the workspace: the transcript catches up in one write when it closes.
     const messageUpdates = createMessageUpdateBatcher({
-      apply: (_threadId, messages) => useAppStore.getState().updateMessages(messages),
+      // Text added to a reply on screen goes to its live text (see liveTextStore); the rest to the store.
+      apply: (_threadId, messages) => {
+        const state = useAppStore.getState()
+        applyStreamedUpdates(messages, state.messages, state.updateMessages)
+      },
       isCurrent: isSelectedThread,
       held: () => useAppStore.getState().usageOpen
     })

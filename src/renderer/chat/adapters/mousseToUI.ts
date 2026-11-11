@@ -341,6 +341,11 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
 /** Who sent a turn: a person on another of the user's computers. Keyed by run id, which is the `turnId` of the turn's messages. */
 export type TurnSenders = Readonly<Record<string, { name: string }>>
 
+/** A reply's text as the transcript shows it: without the "(Stopped)" line a stopped reply ends with. */
+export function assistantDisplayText(content: string): string {
+  return content.replace(/(?:[ \t]*\r?\n)*[ \t]*\(Stopped\)\s*$/u, '')
+}
+
 export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSenders): UIMessage[] {
   const out: UIMessage[] = []
   // Typed items: each item's parent, and the message a subagent's nested work belongs to.
@@ -513,7 +518,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // raw — images already render as previews via msg.images, other files
     // become file pills below.
     const text = msg.content ?? ''
-    let displayText = msg.role === 'assistant' ? text.replace(/(?:[ \t]*\r?\n)*[ \t]*\(Stopped\)\s*$/u, '') : text
+    let displayText = msg.role === 'assistant' ? assistantDisplayText(text) : text
     let extraFileNames: string[] = []
     let references: ReturnType<typeof parseUserMessageContent>['references'] = []
     if (msg.role === 'user' && text.includes('[')) {

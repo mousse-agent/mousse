@@ -19,8 +19,8 @@ import { modelLabel } from "../../../../shared/modelChoice";
 
 import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
-import { PacedMarkdown } from "./paced-markdown";
 import { holdReplyPacing } from "../../../lib/replyPacingSetting";
+import { LiveMarkdown } from "./live-markdown";
 import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
@@ -2621,7 +2621,8 @@ const AssistantParts = memo(function AssistantParts({
               data-message-id={msg.id}
               data-part-index={i}
             >
-              <PacedMarkdown
+              <LiveMarkdown
+                messageId={msg.id}
                 content={text}
                 className="leading-relaxed [&_p]:leading-relaxed"
                 streaming={isLast && isStreaming}

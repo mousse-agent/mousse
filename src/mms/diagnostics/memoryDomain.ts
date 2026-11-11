@@ -76,7 +76,7 @@ function count(value: unknown, name: string): number {
 }
 
 function validateHints(value: unknown): AppHints {
-  const raw = domainObject(value, ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb'])
+  const raw = domainObject(value, ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb', 'markdownCacheMb', 'codeCacheMb'])
   if (!Array.isArray(raw.windows) || raw.windows.length > MAX_WINDOWS) throw new DomainRpcError('invalid_params', 'windows must be a list of at most 32')
   const windows = raw.windows.map((entry) => {
     const w = domainObject(entry, ['w', 'h', 'scale', 'visible'])
@@ -87,6 +87,8 @@ function validateHints(value: unknown): AppHints {
   const views = domainObject(raw.views, ['applet', 'browser', 'devtools'])
   if (typeof raw.acrylic !== 'boolean') throw new DomainRpcError('invalid_params', 'acrylic must be a boolean')
   const imagesMb = mb(raw.imagesMb, false)
+  const markdownCacheMb = mb(raw.markdownCacheMb, false)
+  const codeCacheMb = mb(raw.codeCacheMb, false)
   return {
     windows,
     surfaceMb: mb(raw.surfaceMb, true)!,
@@ -94,7 +96,9 @@ function validateHints(value: unknown): AppHints {
     views: { applet: count(views.applet, 'applet'), browser: count(views.browser, 'browser'), devtools: count(views.devtools, 'devtools') },
     webglContexts: count(raw.webglContexts, 'webglContexts'),
     canvases: count(raw.canvases, 'canvases'),
-    ...(imagesMb !== undefined ? { imagesMb } : {})
+    ...(imagesMb !== undefined ? { imagesMb } : {}),
+    ...(markdownCacheMb !== undefined ? { markdownCacheMb } : {}),
+    ...(codeCacheMb !== undefined ? { codeCacheMb } : {})
   }
 }
 

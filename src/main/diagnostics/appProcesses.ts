@@ -28,6 +28,9 @@ export interface WindowReport {
   imagesKb?: number
   canvases?: number
   webglContexts?: number
+  /** The chat's parsed-Markdown and highlighted-code caches. */
+  markdownCacheKb?: number
+  codeCacheKb?: number
   at: number
 }
 
@@ -118,11 +121,15 @@ export function appHints(input: {
   let webglContexts = 0
   let canvases = 0
   let imagesKb: number | undefined
+  let markdownCacheKb: number | undefined
+  let codeCacheKb: number | undefined
   for (const report of input.reports) {
     if (input.now - report.at >= input.freshMs) continue
     webglContexts += report.webglContexts ?? 0
     canvases += report.canvases ?? 0
     if (report.imagesKb !== undefined) imagesKb = (imagesKb ?? 0) + report.imagesKb
+    if (report.markdownCacheKb !== undefined) markdownCacheKb = (markdownCacheKb ?? 0) + report.markdownCacheKb
+    if (report.codeCacheKb !== undefined) codeCacheKb = (codeCacheKb ?? 0) + report.codeCacheKb
   }
   const count = (role: ContentsLike['role']) => input.contents.filter((entry) => entry.role === role).length
   return {
@@ -132,6 +139,8 @@ export function appHints(input: {
     views: { applet: count('applet'), browser: count('browser'), devtools: count('devtools') },
     webglContexts,
     canvases,
-    ...(imagesKb !== undefined ? { imagesMb: kb(imagesKb) } : {})
+    ...(imagesKb !== undefined ? { imagesMb: kb(imagesKb) } : {}),
+    ...(markdownCacheKb !== undefined ? { markdownCacheMb: kb(markdownCacheKb) } : {}),
+    ...(codeCacheKb !== undefined ? { codeCacheMb: kb(codeCacheKb) } : {})
   }
 }

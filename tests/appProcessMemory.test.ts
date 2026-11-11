@@ -56,14 +56,14 @@ describe('app process rows', () => {
 })
 
 describe('GPU hints', () => {
-  it('adds up what the shown windows draw, the views, WebGL contexts, canvases and images', () => {
+  it('adds up what the shown windows draw, the views, WebGL contexts, canvases, images and chat caches', () => {
     const hints = appHints({
       windows: [{ w: 1600, h: 1000, scale: 1.5, visible: true }, { w: 800, h: 600, scale: 1, visible: false }],
       acrylic: true,
       contents: [{ pid: 1, role: 'window' }, { pid: 2, role: 'applet' }, { pid: 2, role: 'applet' }, { pid: 3, role: 'devtools' }],
       reports: [
-        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 2, canvases: 3, imagesKb: 2_048, at: NOW },
-        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 5, canvases: 5, imagesKb: 9_000, at: NOW - 600_000 }
+        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 2, canvases: 3, imagesKb: 2_048, markdownCacheKb: 1_536, codeCacheKb: 10_240, at: NOW },
+        { usedHeapKb: 1, totalHeapKb: 1, webglContexts: 5, canvases: 5, imagesKb: 9_000, markdownCacheKb: 9_000, at: NOW - 600_000 }
       ],
       now: NOW,
       freshMs: 180_000
@@ -76,7 +76,9 @@ describe('GPU hints', () => {
       views: { applet: 2, browser: 0, devtools: 1 },
       webglContexts: 2,
       canvases: 3,
-      imagesMb: 2
+      imagesMb: 2,
+      markdownCacheMb: 1.5,
+      codeCacheMb: 10
     })
   })
 

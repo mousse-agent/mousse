@@ -59,6 +59,9 @@ export interface AppHints {
   canvases: number
   /** Decoded images the windows hold (Blink's image cache), MB. */
   imagesMb?: number
+  /** The chat's parsed-Markdown and highlighted-code caches in the windows, MB (estimates). */
+  markdownCacheMb?: number
+  codeCacheMb?: number
 }
 
 /** Counts read in the service. `null` when a count could not be read this time. */
@@ -573,7 +576,10 @@ export function appHintsLine(hints: AppHints): string {
   const sizes = hints.windows.map((w) => `${Math.round(w.w)}x${Math.round(w.h)} at ${round1(w.scale)}x${w.visible ? '' : ' hidden'}`).join(', ')
   const plural = hints.windows.length === 1 ? '' : 's'
   const images = hints.imagesMb !== undefined ? `, decoded images ${mb(hints.imagesMb)} MB` : ''
-  return `${hints.windows.length} window${plural} (${sizes || 'none'}; ${shown} shown, ${mb(hints.surfaceMb)} MB of pixels), acrylic ${hints.acrylic ? 'on' : 'off'}, WebGL contexts ${hints.webglContexts}, canvases ${hints.canvases}, applet views ${hints.views.applet}, in-app browser ${hints.views.browser}, DevTools ${hints.views.devtools}${images}`
+  const caches = hints.markdownCacheMb !== undefined || hints.codeCacheMb !== undefined
+    ? `, chat caches: Markdown ${mb(hints.markdownCacheMb ?? 0)} MB, code ${mb(hints.codeCacheMb ?? 0)} MB`
+    : ''
+  return `${hints.windows.length} window${plural} (${sizes || 'none'}; ${shown} shown, ${mb(hints.surfaceMb)} MB of pixels), acrylic ${hints.acrylic ? 'on' : 'off'}, WebGL contexts ${hints.webglContexts}, canvases ${hints.canvases}, applet views ${hints.views.applet}, in-app browser ${hints.views.browser}, DevTools ${hints.views.devtools}${images}${caches}`
 }
 
 /** The issue's title and body: numbers, fixed names, the version and the OS. Nothing a person typed or named. */
