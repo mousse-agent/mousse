@@ -299,6 +299,107 @@ describe('the inbox page', () => {
   })
 })
 
+describe('creating an automation', () => {
+  const typeIn = async (input: HTMLInputElement, text: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+  const enter = async (input: HTMLInputElement) => {
+    await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })) })
+    await act(async () => {})
+  }
+  const draft = automation({ id: 'd-new', name: 'Triage new issues', draft: { draftId: 'd-new', problems: [], prompt: 'Triage' } as AutomationItem['draft'] })
+
+  /** The manager's turn: it answers only when the test settles it, as a long turn does. */
+  async function mountComposer() {
+    const items: AutomationItem[] = []
+    const mousse = await mount([], items)
+    let settle: (result: unknown) => void = () => undefined
+    mousse.orchestrator.sendToThread.mockImplementation(() => new Promise((done) => { settle = done }))
+    const request = mousse.platformRequest.request.getMockImplementation()!
+    mousse.platformRequest.request.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'automations.manager.thread') return { threadId: 'manager' }
+      if (method === 'automations.drafts.nextWho') return {}
+      if (method === 'automations.list') return { items, computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }
+      return request(method, params)
+    })
+    return { mousse, items, settle: async (result: unknown) => { await act(async () => { settle(result) }); await act(async () => {}) } }
+  }
+
+  it('sends without waiting for the manager\'s turn, shows it working, then lights the draft it wrote', async () => {
+    const { mousse, items, settle } = await mountComposer()
+    const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
+    expect($<HTMLButtonElement>('[data-testid="inbox-composer-send"]')!.disabled).toBe(true)
+    await typeIn(input, 'Every weekday at 9, triage new issues')
+    expect($<HTMLButtonElement>('[data-testid="inbox-composer-send"]')!.disabled).toBe(false)
+    await enter(input)
+    // The turn has not ended, and still the composer is free and the Drafts pane says the manager is writing.
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('manager', expect.stringContaining('triage new issues'))
+    expect(input.value).toBe('')
+    expect(useInboxStore.getState()).toMatchObject({ pane: 'drafts', composing: { status: 'working', threadId: 'manager' } })
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
+    expect($('[data-testid="inbox-drafts-row"]')?.dataset.state).toBe('working')
+    // The manager saves a draft and its turn ends: the draft shows, lit, and the pending card goes.
+    items.push(draft)
+    await settle({ message: 'Drafted it.', actions: [] })
+    expect(useInboxStore.getState().composing?.status).toBe('done')
+    expect($('[data-testid="inbox-request"]')).toBeNull()
+    expect($('[data-testid="automation-draft-card"]')?.hasAttribute('data-fresh')).toBe(true)
+  })
+
+  it('shows an error the turn ended with, and Retry sends the same words again', async () => {
+    const { mousse, settle } = await mountComposer()
+    const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
+    await typeIn(input, 'Rotate the staging keys every Monday')
+    await enter(input)
+    // The window's send answers with an error instead of throwing.
+    await settle({ message: '', actions: [], requestAcknowledged: false, error: { code: 'provider_not_configured', message: 'No model is set up.' } })
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('failed')
+    expect($('[data-testid="inbox-request-error"]')?.textContent).toBe('No model is set up.')
+    expect($('[data-testid="inbox-drafts-row"]')?.dataset.state).toBe('failed')
+    await click($('[data-testid="inbox-request-retry"]'))
+    await act(async () => {})
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledTimes(2)
+    expect(mousse.orchestrator.sendToThread.mock.calls[1]![1]).toEqual(mousse.orchestrator.sendToThread.mock.calls[0]![1])
+    expect($('[data-testid="inbox-request"]')?.dataset.state).toBe('working')
+  })
+
+  it('keeps the words and shows the error with Retry when they could not be sent', async () => {
+    const { mousse } = await mountComposer()
+    const request = mousse.platformRequest.request.getMockImplementation()!
+    mousse.platformRequest.request.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'automations.manager.thread') throw new Error('The service is not running.')
+      return request(method, params)
+    })
+    const input = $<HTMLInputElement>('[data-testid="inbox-composer"]')!
+    await typeIn(input, 'Nightly review')
+    await enter(input)
+    expect(input.value).toBe('Nightly review')
+    expect($('[data-testid="inbox-composer-error"]')?.textContent).toContain('The service is not running.')
+    expect(mousse.orchestrator.sendToThread).not.toHaveBeenCalled()
+  })
+})
+
+describe('Manage switches', () => {
+  it('show the asked state as Pausing… and wait for the change before another', async () => {
+    const mousse = await mount(RUNS, AUTOMATIONS.slice(0, 1))
+    let done: () => void = () => undefined
+    mousse.scheduled.pause.mockImplementation(() => new Promise((resolve) => { done = () => resolve(null) }))
+    await click($('[data-testid="inbox-manage-btn"]'))
+    const row = () => $('[data-testid="inbox-manage-row"]')!
+    await click(row().querySelector('[role="switch"]'))
+    expect(row().querySelector('.inbox-cell.is-pending')?.textContent).toBe('Pausing…')
+    expect(row().querySelector<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(true)
+    expect(row().querySelector('[role="switch"]')!.getAttribute('aria-checked')).toBe('false')
+    await act(async () => { done() })
+    await act(async () => {})
+    expect(row().querySelector('.inbox-cell.is-pending')).toBeNull()
+    expect(mousse.scheduled.pause).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('the run strip', () => {
   it('shows the level, the PR with Open PR and Merge, the usage, calibration and Resolve', async () => {
     const mousse = await mount()

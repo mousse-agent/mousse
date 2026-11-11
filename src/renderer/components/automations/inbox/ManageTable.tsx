@@ -4,7 +4,7 @@ import { Fragment } from 'react'
 import type { AutomationInbox } from '../../../../shared/automationInbox'
 import type { AutomationItem } from '../../../../shared/automations'
 import { describeSchedule } from '../../../../shared/scheduleLabel'
-import { Bell, Bot, ChevronRight, Clock, Coins, Repeat, User, VolumeHigh, X } from '../../../lib/icons'
+import { Bell, Bot, ChevronRight, CircleX, Loader2, Monitor, Pause, VolumeHigh, X } from '../../../lib/icons'
 import { RowMenu } from '../../integrations/RowMenu'
 import { Switch } from '../../settings/SettingsRow'
 import { ownedWhenText } from '../automationTime'
@@ -25,26 +25,51 @@ export function monthColumn(month: AutomationInbox['month'] | undefined, jobId: 
   return { text: tokensText(usage.tokens), title: `Tokens this month; no cost is known for them (a subscription) · ${month!.label}` }
 }
 
-export function ManageTable({ automations, inbox, expanded, now, viewerZone, onToggle, onDelete }: {
+/** What an automation is doing now, for the glyph before its name: its newest run, or paused, or its computer offline. */
+export function automationState(item: AutomationItem, runs: AutomationInbox['runs'] | undefined): { tone: 'running' | 'failed' | 'paused' | 'offline' | 'idle'; title: string } {
+  if (item.computer.offline) return { tone: 'offline', title: `${item.computer.name} is offline` }
+  const newest = runs?.find((run) => run.jobId === item.id)
+  if (newest?.state === 'running' || newest?.state === 'queued') return { tone: 'running', title: 'Running now' }
+  if (item.paused) return { tone: 'paused', title: 'Paused' }
+  if (newest?.state === 'failed') return { tone: 'failed', title: `Last run failed${newest.error ? `: ${newest.error}` : ''}` }
+  return { tone: 'idle', title: newest ? 'Last run done' : 'No runs yet' }
+}
+
+function StateGlyph({ tone, title }: ReturnType<typeof automationState>) {
+  return (
+    <span className="inbox-state" data-tone={tone} title={title} role="img" aria-label={title}>
+      {tone === 'running' ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" />
+        : tone === 'failed' ? <CircleX size={13} strokeWidth={1.9} />
+          : tone === 'paused' ? <Pause size={13} strokeWidth={1.9} />
+            : tone === 'offline' ? <Monitor size={13} strokeWidth={1.9} />
+              : <span className="inbox-state-dot" />}
+    </span>
+  )
+}
+
+export function ManageTable({ automations, inbox, expanded, now, viewerZone, toggling = {}, onToggle, onDelete }: {
   automations: AutomationItem[]
   inbox: AutomationInbox | null
   expanded: string | null
   now: Date
   viewerZone: string
+  /** Switches whose change is on its way, with the state they were asked for. */
+  toggling?: Record<string, boolean>
   /** On: resume; off: pause until the person resumes it. */
   onToggle: (item: AutomationItem, on: boolean) => void
   onDelete: (item: AutomationItem) => void
 }) {
   const tuning = inbox?.tuning ?? []
+  const pausedCount = automations.filter((item) => item.paused).length
   return (
     <div className="inbox-manage" data-testid="inbox-manage">
       <div className="inbox-manage-head">
         <span className="inbox-manage-title">Automations</span>
-        <span className="inbox-group-count">{automations.length}</span>
+        <span className="inbox-manage-sub">{automations.length - pausedCount} on{pausedCount ? ` · ${pausedCount} paused` : ''}</span>
         <span className="inbox-strip-spacer" />
         <button type="button" className="inbox-icon-btn small" title="Close · Esc" aria-label="Close" onClick={closePane}><X size={14} strokeWidth={1.8} /></button>
       </div>
-      {automations.length === 0 ? <p className="inbox-manage-none">Nothing runs on its own yet.</p> : (
+      {automations.length === 0 ? <p className="inbox-manage-none">No automations yet.</p> : (
         <table className="inbox-table">
           <colgroup>
             <col className="c-expand" /><col className="c-name" /><col className="c-when" /><col className="c-who" /><col className="c-next" /><col className="c-cost" /><col className="c-on" /><col className="c-menu" />
@@ -52,12 +77,12 @@ export function ManageTable({ automations, inbox, expanded, now, viewerZone, onT
           <thead>
             <tr>
               <th aria-label="Tuning" />
-              <th aria-label="Name" />
-              <th title="When"><Repeat size={13} strokeWidth={1.8} aria-label="When" /></th>
-              <th title="Who"><User size={13} strokeWidth={1.8} aria-label="Who" /></th>
-              <th title="Next run"><Clock size={13} strokeWidth={1.8} aria-label="Next run" /></th>
-              <th title={`This month · ${inbox?.month.label ?? ''}`} className="num"><Coins size={13} strokeWidth={1.8} aria-label="This month" /></th>
-              <th aria-label="On" />
+              <th>Name</th>
+              <th>When</th>
+              <th>Who</th>
+              <th>Next run</th>
+              <th title={`This month · ${inbox?.month.label ?? ''}`} className="num">Month</th>
+              <th className="c-on-head">On</th>
               <th aria-label="More" />
             </tr>
           </thead>
@@ -65,13 +90,15 @@ export function ManageTable({ automations, inbox, expanded, now, viewerZone, onT
             {automations.map((item) => {
               const open = expanded === item.id
               const notes = tuning.filter((note) => note.jobId === item.id)
-              const on = !item.paused
+              const pending = toggling[item.id]
+              const on = pending ?? !item.paused
               const when = whenColumn(item, now)
               const month = monthColumn(inbox?.month, item.id)
               const offline = Boolean(item.computer.offline)
+              const state = automationState(item, inbox?.runs)
               return (
                 <Fragment key={item.key}>
-                  <tr className="inbox-table-row" data-open={open || undefined} data-off={!on || undefined} data-testid="inbox-manage-row" data-automation={item.id}>
+                  <tr className="inbox-table-row" data-open={open || undefined} data-off={!on || undefined} data-state={state.tone} data-testid="inbox-manage-row" data-automation={item.id}>
                     <td>
                       <button type="button" className="inbox-tuning-toggle" data-testid="inbox-tuning-toggle" aria-expanded={open} title={notes.length ? `Tuning · ${notes.length} note${notes.length === 1 ? '' : 's'}` : 'Tuning'} aria-label={`Tuning for ${item.name}`} onClick={() => toggleTuning(item.id)}>
                         <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
@@ -79,16 +106,24 @@ export function ManageTable({ automations, inbox, expanded, now, viewerZone, onT
                       </button>
                     </td>
                     <td>
-                      <button type="button" className="inbox-table-name" title={`Only ${item.name}'s runs`} onClick={() => setInboxFilter({ automationId: item.id })}>{item.name}</button>
-                      {item.where ? <span className="inbox-table-project">{item.where.name}</span> : null}
+                      <span className="inbox-table-namecell">
+                        <StateGlyph {...state} />
+                        <button type="button" className="inbox-table-name" title={`Only ${item.name}'s runs`} onClick={() => setInboxFilter({ automationId: item.id })}>{item.name}</button>
+                        {item.where ? <span className="inbox-table-project">{item.where.name}</span> : null}
+                      </span>
                     </td>
                     <td><span className="inbox-cell" title={when}>{when}</span></td>
                     <td><span className="inbox-cell" title={item.who.name}>{item.who.kind === 'bot' ? <Bot size={12} strokeWidth={1.8} aria-hidden="true" /> : null}{item.who.kind === 'bot' ? item.who.name : 'Default'}</span></td>
-                    <td><span className="inbox-cell muted">{on && item.next ? ownedWhenText(item.next.at, now, item.computer, viewerZone) : '—'}</span></td>
+                    <td>
+                      {pending !== undefined ? <span className="inbox-cell is-pending" role="status">{pending ? 'Resuming…' : 'Pausing…'}</span>
+                        : offline ? <span className="inbox-cell is-offline" title={`${item.computer.name} is offline: it runs when that computer is back`}>Offline</span>
+                        : !on ? <span className="inbox-cell is-paused">Paused</span>
+                          : <span className="inbox-cell">{item.next ? ownedWhenText(item.next.at, now, item.computer, viewerZone) : '—'}</span>}
+                    </td>
                     <td className="num"><span className="inbox-cell" title={month.title}>{month.text}</span></td>
                     <td>
-                      <span title={offline ? `${item.computer.name} is offline` : on ? 'Pause' : 'Resume'}>
-                        <Switch checked={on} disabled={offline} label={on ? `Pause ${item.name}` : `Resume ${item.name}`} onChange={(next) => onToggle(item, next)} />
+                      <span className="inbox-switch" data-pending={pending !== undefined || undefined} title={offline ? `Can't change: ${item.computer.name} is offline` : pending !== undefined ? (pending ? 'Resuming…' : 'Pausing…') : on ? 'On · click to pause' : 'Paused · click to resume'}>
+                        <Switch checked={on} disabled={offline || pending !== undefined} label={on ? `Pause ${item.name}` : `Resume ${item.name}`} onChange={(next) => onToggle(item, next)} />
                       </span>
                     </td>
                     <td>
@@ -96,7 +131,7 @@ export function ManageTable({ automations, inbox, expanded, now, viewerZone, onT
                         label={`More actions for ${item.name}`}
                         buttonClassName="inbox-icon-btn small"
                         items={[
-                          { label: 'Edit', testId: 'inbox-manage-edit', disabled: offline, onSelect: () => openEdit(item.id) },
+                          { label: 'Edit details', testId: 'inbox-manage-edit', disabled: offline, onSelect: () => openEdit(item.id) },
                           { label: 'Delete', testId: 'inbox-manage-delete', danger: true, disabled: offline, onSelect: () => onDelete(item) }
                         ]}
                       />

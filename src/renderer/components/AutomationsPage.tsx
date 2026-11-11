@@ -2,6 +2,9 @@ import { useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { AutomationsInbox } from './automations/inbox/AutomationsInbox'
 import { inboxPageClosed, inboxPageOpened, useInboxShowsThread, useInboxStore } from './automations/inbox/inboxStore'
+// The page's switches and buttons are Settings' (.toggle-switch, .settings-btn): their CSS loads with the page, not only
+// once the Settings chunk has.
+import '../styles/settings.css'
 import '../styles/automations-page.css'
 
 /**

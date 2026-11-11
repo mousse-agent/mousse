@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { openForPerson, type InboxRun } from '../../../../shared/automationInbox'
 import type { AutomationItem } from '../../../../shared/automations'
 import { useCommand } from '../../../commands/commandRegistry'
-import { Bot, ChevronRight, Clock, Coins, FileText, Folder, LayoutGrid, Play, Repeat, Search, Settings, Undo2, User, X } from '../../../lib/icons'
+import { Bot, ChevronRight, CircleAlert, Clock, Coins, FileText, Folder, LayoutGrid, Loader2, Play, Repeat, Search, Settings, Sparkles, Undo2, User, X } from '../../../lib/icons'
 import { useAppStore } from '../../../stores/appStore'
 import { answerAttention } from '../../../services/automationsClient'
 import { createPersonalBotsClient } from '../../../services/personalBotsClient'
@@ -14,7 +14,7 @@ import { DeleteConfirm } from '../AutomationDialogs'
 import { useAutomationLibrary } from '../WhoDoPickers'
 import { DraftsPane } from './DraftsPane'
 import { EditDetailsPane } from './EditDetailsPane'
-import { InboxComposer, newKey, type InboxComposerHandle } from './InboxComposer'
+import { InboxComposer, newKey, useManagerWorking, type InboxComposerHandle } from './InboxComposer'
 import {
   automationsById, groupOf, inboxGroups, LEVEL_KEYS, moveCursor, noReport, resolvable, rowKey, runLine, runName, runTime,
   costText, tokensText, type ListRow
@@ -62,6 +62,8 @@ export function AutomationsInbox({ active }: { active: boolean }) {
   const folds = useInboxStore((s) => s.folds)
   const manageExpanded = useInboxStore((s) => s.manageExpanded)
   const editJobId = useInboxStore((s) => s.editJobId)
+  const request = useInboxStore((s) => s.composing)
+  const managerWorking = useManagerWorking()
   const showsThread = useInboxShowsThread()
   const profileId = useAppStore((s) => s.profileId)
   const { library, reload: reloadLibrary } = useAutomationLibrary(profileId)
@@ -69,6 +71,8 @@ export function AutomationsInbox({ active }: { active: boolean }) {
   const [keysOpen, setKeysOpen] = useState(false)
   const [searching, setSearching] = useState(false)
   const [deleting, setDeleting] = useState<AutomationItem | null>(null)
+  /** Switches whose pause or resume is on its way: they show the asked state, and wait. */
+  const [toggling, setToggling] = useState<Record<string, boolean>>({})
   const composerRef = useRef<InboxComposerHandle>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -158,18 +162,25 @@ export function AutomationsInbox({ active }: { active: boolean }) {
   }
 
   const toggleAutomation = (item: AutomationItem, on: boolean) => {
+    if (item.id in toggling) return
+    setToggling((current) => ({ ...current, [item.id]: on }))
     const work = async () => {
       if (on && item.pausedBy === 'bot' && item.link.kind === 'job' && item.link.botId) await createPersonalBotsClient(window.mousse.platformRequest).resume(item.link.botId)
       else if (on) await window.mousse.scheduled.resume(item.id)
       else await window.mousse.scheduled.pause(item.id)
     }
-    void work().catch((cause) => useInboxStore.setState({ actionError: cause instanceof Error ? cause.message : String(cause) })).finally(() => void refreshInbox())
+    void work()
+      .catch((cause) => useInboxStore.setState({ actionError: cause instanceof Error ? cause.message : String(cause) }))
+      .then(() => refreshInbox())
+      .finally(() => setToggling((current) => { const next = { ...current }; delete next[item.id]; return next }))
   }
 
   const editItem = editJobId ? jobs.find((item) => item.id === editJobId) ?? drafts.find((item) => item.id === editJobId) : undefined
   const empty = Boolean(inbox && index) && runs.length === 0
   const lastResolved = inbox?.undo
   const needsCount = groups.find((group) => group.key === 'needs_you')?.count ?? 0
+  // The Drafts row shows while there are drafts, or while the person's words to the manager are pending or failed.
+  const requestShows = Boolean(request && !request.draftId && request.status !== 'done')
 
   return (
     <div className="inbox" data-testid="automations-inbox" data-thread={showsThread || undefined}>
@@ -201,9 +212,14 @@ export function AutomationsInbox({ active }: { active: boolean }) {
         {actionError ? <p className="inbox-note" role="alert">{actionError}</p> : null}
 
         <div className="inbox-scroll" ref={listRef} role="listbox" aria-label="Runs" data-testid="inbox-runs">
-          {drafts.length && !filter.automationId ? (
-            <button type="button" className="inbox-fold inbox-drafts-row" data-testid="inbox-drafts-row" aria-pressed={pane === 'drafts'} onClick={() => (pane === 'drafts' ? closePane() : openDrafts())}>
-              <FileText size={13} strokeWidth={1.8} aria-hidden="true" /><span>Drafts · {drafts.length}</span>
+          {(drafts.length || requestShows) && !filter.automationId ? (
+            <button type="button" className="inbox-fold inbox-drafts-row" data-testid="inbox-drafts-row" data-state={managerWorking ? 'working' : request?.status === 'failed' ? 'failed' : undefined} aria-pressed={pane === 'drafts'} title={managerWorking ? 'Writing a draft…' : request?.status === 'failed' ? 'The last draft failed' : 'Drafts'} onClick={() => (pane === 'drafts' ? closePane() : openDrafts())}>
+              {managerWorking ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" />
+                : request?.status === 'failed' ? <CircleAlert size={13} strokeWidth={2} aria-hidden="true" />
+                  : <FileText size={13} strokeWidth={1.8} aria-hidden="true" />}
+              <span>Drafts</span>
+              {drafts.length ? <span className="inbox-group-count">{drafts.length}</span> : null}
+              {managerWorking ? <span className="inbox-drafts-row-note">Writing…</span> : request?.status === 'failed' ? <span className="inbox-drafts-row-note">Failed</span> : null}
             </button>
           ) : null}
           {asks.length && !filter.automationId ? (
@@ -237,13 +253,13 @@ export function AutomationsInbox({ active }: { active: boolean }) {
       {!showsThread ? (
         <section className="inbox-pane" aria-label={pane === 'manage' ? 'Manage automations' : pane === 'drafts' ? 'Drafts' : pane === 'edit' ? 'Edit details' : 'Run'}>
           {pane === 'manage' ? (
-            <ManageTable automations={jobs} inbox={inbox} expanded={manageExpanded} now={now} viewerZone={viewerZone} onToggle={toggleAutomation} onDelete={setDeleting} />
+            <ManageTable automations={jobs} inbox={inbox} expanded={manageExpanded} now={now} viewerZone={viewerZone} toggling={toggling} onToggle={toggleAutomation} onDelete={setDeleting} />
           ) : pane === 'drafts' ? (
             <DraftsPane drafts={drafts} meta={metaOf} bots={library.bots} onBotMade={reloadLibrary} />
           ) : pane === 'edit' && editItem ? (
             <EditDetailsPane key={editItem.id} item={editItem} onDelete={setDeleting} />
           ) : empty ? (
-            <EmptyState automations={jobs} now={now} viewerZone={viewerZone} />
+            <EmptyState automations={jobs} now={now} viewerZone={viewerZone} onCompose={() => composerRef.current?.focus()} />
           ) : openRunRecord ? (
             <RunWithoutThread run={openRunRecord} automation={automations.get(openRunRecord.jobId)} />
           ) : null}
@@ -404,45 +420,85 @@ function KeysPopover({ onClose }: { onClose: () => void }) {
   )
 }
 
-/** No runs yet: the automations there are, each with its next run, Run now and Edit; none: one line. */
-function EmptyState({ automations, now, viewerZone }: { automations: AutomationItem[]; now: Date; viewerZone: string }) {
+/** No runs yet: the automations there are, each with its next run, Run now and Edit; none: one line and New. */
+function EmptyState({ automations, now, viewerZone, onCompose }: { automations: AutomationItem[]; now: Date; viewerZone: string; onCompose: () => void }) {
   if (!automations.length) {
     return (
       <div className="inbox-empty" data-testid="inbox-empty">
-        <p className="inbox-empty-none">Nothing runs on its own yet. Describe an automation above.</p>
+        <span className="inbox-empty-mark" aria-hidden="true"><Sparkles size={20} strokeWidth={1.7} /></span>
+        <h2 className="inbox-empty-title">No automations yet</h2>
+        <p className="inbox-empty-none">Describe one and the Automation manager drafts it.</p>
+        <button type="button" className="inbox-primary-btn" title={`New automation · ${newKey()}`} onClick={onCompose}>New automation</button>
       </div>
     )
   }
   return (
     <div className="inbox-empty" data-testid="inbox-empty">
-      {automations.slice(0, 3).map((automation) => (
-        <div key={automation.key} className="inbox-empty-card" data-testid="inbox-empty-card">
-          <span className="inbox-empty-icon"><TriggerIcon trigger={automation.trigger} size={18} /></span>
-          <div className="inbox-empty-text">
-            <strong>{automation.name}</strong>
-            <span title={whenColumn(automation, now)}>{automation.paused ? 'Paused' : automation.next ? `Next run · ${ownedWhenText(automation.next.at, now, automation.computer, viewerZone)}` : whenColumn(automation, now)}</span>
-          </div>
-          <button type="button" className="inbox-text-btn" title="Edit details" onClick={() => openEdit(automation.id)}>Edit</button>
-          <button type="button" className="inbox-primary-btn" data-testid="inbox-run-now" title="Run it once now" disabled={Boolean(automation.computer.offline)} onClick={() => void runAutomationNow(automation.id)}><Play size={13} strokeWidth={2} aria-hidden="true" />Run now</button>
-        </div>
-      ))}
+      <h2 className="inbox-empty-title">No runs yet</h2>
+      <div className="inbox-empty-cards">
+        {automations.slice(0, 3).map((automation) => <EmptyCard key={automation.key} automation={automation} now={now} viewerZone={viewerZone} />)}
+      </div>
+    </div>
+  )
+}
+
+function EmptyCard({ automation, now, viewerZone }: { automation: AutomationItem; now: Date; viewerZone: string }) {
+  const [starting, setStarting] = useState(false)
+  const offline = Boolean(automation.computer.offline)
+  const start = () => {
+    setStarting(true)
+    void runAutomationNow(automation.id).finally(() => setStarting(false))
+  }
+  return (
+    <div className="inbox-empty-card" data-testid="inbox-empty-card" data-paused={automation.paused || undefined}>
+      <span className="inbox-empty-icon"><TriggerIcon trigger={automation.trigger} size={16} /></span>
+      <div className="inbox-empty-text">
+        <strong>{automation.name}</strong>
+        <span title={whenColumn(automation, now)}>{automation.paused ? 'Paused' : automation.next ? `Next run · ${ownedWhenText(automation.next.at, now, automation.computer, viewerZone)}` : whenColumn(automation, now)}</span>
+      </div>
+      <button type="button" className="inbox-text-btn" title="Edit details" onClick={() => openEdit(automation.id)}>Edit</button>
+      <button
+        type="button"
+        className="inbox-primary-btn"
+        data-testid="inbox-run-now"
+        title={offline ? `${automation.computer.name} is offline` : starting ? 'Starting…' : 'Run it once now'}
+        disabled={offline || starting}
+        aria-busy={starting || undefined}
+        onClick={start}
+      >
+        {starting ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : <Play size={13} strokeWidth={2} aria-hidden="true" />}
+        {starting ? 'Starting…' : 'Run now'}
+      </button>
     </div>
   )
 }
 
 /** A run with no thread (it stopped before its turn): what happened, and Resolve. */
 function RunWithoutThread({ run, automation }: { run: InboxRun; automation: AutomationItem | undefined }) {
+  const [resolving, setResolving] = useState(false)
   const now = new Date()
   const level = run.level ? LEVEL_VIEW[run.level] : undefined
+  const resolve = () => {
+    setResolving(true)
+    void resolveRun(run.id).finally(() => setResolving(false))
+  }
   return (
-    <div className="inbox-run-card" data-testid="inbox-run-card">
+    <div className="inbox-run-card" data-testid="inbox-run-card" data-state={run.state}>
       <div className="inbox-run-card-head">
         <RunIcon run={run} automation={automation} />
         <strong>{automation?.name ?? run.jobName}</strong>
         <span className="inbox-row-time">{runTime(run.startedAt, now)}</span>
       </div>
       <p className="inbox-run-card-line">{level ? `${level.label}: ` : ''}{runLine(run, now)}</p>
-      {openForPerson(run) ? <button type="button" className="inbox-primary-btn" data-testid="inbox-resolve" onClick={() => void resolveRun(run.id)}>Resolve</button> : null}
+      <div className="inbox-run-card-actions">
+        {openForPerson(run) ? (
+          <button type="button" className="inbox-primary-btn" data-testid="inbox-resolve" disabled={resolving} aria-busy={resolving || undefined} title="Resolve · e" onClick={resolve}>
+            {resolving ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : null}
+            {resolving ? 'Resolving…' : 'Resolve'}
+          </button>
+        ) : null}
+        {automation ? <button type="button" className="inbox-text-btn" onClick={() => openEdit(automation.id)}>Edit details</button> : null}
+      </div>
     </div>
   )
 }

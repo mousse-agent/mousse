@@ -79,7 +79,7 @@ export function ChatDraftCard({ input, output, status }: CustomToolRendererProps
         onProject={(projectId) => setDraftProject(item.id, projectId)}
         onTurnOn={() => turnOnDraft(item.id)}
         onEditDetails={() => editDetails(item.id)}
-        onDiscard={() => void discardDraft(item.id)}
+        onDiscard={() => discardDraft(item.id)}
       />
       {newBot ? (
         <NewBotDialog

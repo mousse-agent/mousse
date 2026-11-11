@@ -33,8 +33,30 @@ interface InboxState {
   editJobId: string | null
   folds: { bots: boolean; quiet: boolean }
   actionError: string | null
-  /** The composer's words went to a manager: when, and the manager's hidden thread (absent for a bot). */
-  composing: { at: number; threadId?: string } | null
+  /** The person's last words to a manager, and how its answer is going (the Drafts pane shows it). */
+  composing: ManagerRequest | null
+}
+
+/**
+ * Words sent to a manager (the Automation manager, or a bot). The manager's turn can take minutes, so the send is
+ * watched here instead of awaited by the composer: `working` until the turn ends, then `done`, `failed` or `stopped`.
+ */
+export interface ManagerRequest {
+  at: number
+  /** The manager's hidden thread; absent for a bot. */
+  threadId?: string
+  botId?: string
+  /** What was sent, for Retry and Edit. */
+  text: string
+  projectId?: string
+  projectName?: string
+  who?: string
+  /** The draft the words were about (an answer to its question): no new draft is expected. */
+  draftId?: string
+  status: 'working' | 'done' | 'failed' | 'stopped'
+  error?: string
+  /** The drafts there were when the words went out; any other draft is the one this request made. */
+  known: string[]
 }
 
 export const useInboxStore = create<InboxState>(() => ({
@@ -64,7 +86,11 @@ export function setInboxClient(next: AutomationsClient | null): void {
   client = next
 }
 
-const errorText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+export const errorText = (cause: unknown): string => {
+  if (cause instanceof Error) return cause.message
+  if (cause && typeof cause === 'object' && typeof (cause as { message?: unknown }).message === 'string') return (cause as { message: string }).message
+  return String(cause)
+}
 
 let reading: Promise<void> | null = null
 
@@ -75,6 +101,9 @@ export function refreshInbox(): Promise<void> {
   reading = Promise.all([api.list(), api.inbox(), api.counts()])
     .then(([index, inbox, counts]) => {
       useInboxStore.setState({ index, inbox, counts, loadError: null, loadedAt: Date.now() })
+      // A bot answers in its own chat, with no turn to watch here: its request is done once its draft shows.
+      const request = useInboxStore.getState().composing
+      if (request?.status === 'working' && request.botId && newDrafts(request, index).length) updateRequest(request.at, { status: 'done' })
     })
     .catch((cause) => {
       useInboxStore.setState({ loadError: errorText(cause) })
@@ -107,6 +136,42 @@ async function act(work: (api: AutomationsClient) => Promise<unknown>): Promise<
     useInboxStore.setState({ actionError: errorText(cause) })
   }
   await refreshInbox()
+}
+
+/** The drafts a request made: the drafts now that were not there when its words went out. */
+export function newDrafts(request: Pick<ManagerRequest, 'known'> | null, index: AutomationIndex | null): string[] {
+  if (!request || !index) return []
+  return index.items.filter((item) => item.kind === 'job' && item.draft && !request.known.includes(item.id)).map((item) => item.id)
+}
+
+/** Changes the request sent at `at`, unless newer words replaced it. */
+export function updateRequest(at: number, patch: Partial<ManagerRequest>): void {
+  useInboxStore.setState((state) => (state.composing?.at === at ? { composing: { ...state.composing, ...patch } } : {}))
+}
+
+/**
+ * The manager's turn ended: with an error (refused before it started, or failed), or done. The list is read first, so
+ * the new draft is there when the pending line goes. A Stop the person pressed stays a Stop.
+ */
+export async function settleRequest(at: number, error?: string): Promise<void> {
+  if (!error) await refreshInbox()
+  const request = useInboxStore.getState().composing
+  if (request?.at !== at || request.status !== 'working') return
+  if (error) updateRequest(at, { status: 'failed', error })
+  else if (request.draftId) useInboxStore.setState({ composing: null })
+  else updateRequest(at, { status: 'done' })
+}
+
+/** Stop: the manager's turn is aborted, and the request says so. */
+export function stopRequest(): void {
+  const request = useInboxStore.getState().composing
+  if (!request || request.status !== 'working') return
+  updateRequest(request.at, { status: 'stopped' })
+  if (request.threadId) void window.mousse.orchestrator.abort(request.threadId).catch(() => undefined)
+}
+
+export function dismissRequest(): void {
+  useInboxStore.setState({ composing: null })
 }
 
 export function setInboxFilter(filter: InboxFilter): void {

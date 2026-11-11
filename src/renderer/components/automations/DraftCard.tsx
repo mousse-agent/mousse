@@ -6,7 +6,7 @@ import type { AutomationItem } from '../../../shared/automations'
 import { describeSchedule } from '../../../shared/scheduleLabel'
 import { describePermissionMode } from '../../../shared/permissionMode'
 import type { JobSchedule, Project } from '../../../shared/types'
-import { CircleCheck, Clock, Folder, MessageSquare, Pause, Pencil, Repeat, Shield, User } from '../../lib/icons'
+import { CircleCheck, Clock, Folder, Loader2, MessageSquare, Pause, Pencil, Repeat, Shield, User } from '../../lib/icons'
 import { Select, type SelectOption } from '../ui/Select'
 import { ownedWhenText } from './automationTime'
 import type { BotChoice } from './whoDo'
@@ -73,15 +73,19 @@ export interface DraftCardProps {
   onProject?: (projectId: string) => Promise<void>
   onTurnOn?: () => Promise<void>
   onEditDetails?: () => void
-  onDiscard?: () => void
+  onDiscard?: () => void | Promise<void>
   /** A quick answer to the manager's question. */
   onAnswer?: (answer: string) => void
   onOpenConversation?: () => void
+  /** Just written for the person's words: lit until they send again. */
+  fresh?: boolean
   testIdPrefix?: string
 }
 
-export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, onProject, onTurnOn, onEditDetails, onDiscard, onAnswer, onOpenConversation, testIdPrefix = 'automation-draft' }: DraftCardProps) {
+export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, onProject, onTurnOn, onEditDetails, onDiscard, onAnswer, onOpenConversation, fresh, testIdPrefix = 'automation-draft' }: DraftCardProps) {
   const [busy, setBusy] = useState(false)
+  /** Which action is on its way, so its own button says so. */
+  const [doing, setDoing] = useState<'on' | 'discard' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const draft = item.draft
   const problems = draft?.problems ?? []
@@ -104,11 +108,11 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
     ...(item.where && !projects.some((project) => project.id === item.where!.projectId) ? [{ value: item.where.projectId, label: item.where.name }] : [])
   ]
   return (
-    <section className="inbox-draft" data-testid={`${testIdPrefix}-card`} data-key={item.key} aria-label={`Draft: ${item.name}`}>
+    <section className="inbox-draft" data-testid={`${testIdPrefix}-card`} data-key={item.key} data-fresh={fresh || undefined} aria-label={`Draft: ${item.name}`}>
       <div className="inbox-draft-head">
         <Repeat size={14} strokeWidth={1.8} aria-hidden="true" />
         <strong>{item.name}</strong>
-        <span className="inbox-draft-tag">Draft</span>
+        <span className="inbox-draft-tag">{fresh ? 'New draft' : 'Draft'}</span>
         <span className="inbox-strip-spacer" />
         {onOpenConversation ? <button type="button" className="inbox-text-btn muted" onClick={onOpenConversation}>Open conversation</button> : null}
       </div>
@@ -160,12 +164,24 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
             className="inbox-primary-btn"
             data-testid={`${testIdPrefix}-turn-on`}
             disabled={busy || problems.length > 0}
-            title={problems.length ? problems.join(' ') : 'Nothing runs until you turn it on'}
-            onClick={() => void run(onTurnOn)}
-          >Turn on</button>
+            aria-busy={doing === 'on' || undefined}
+            title={problems.length ? `Can't turn on yet: ${problems.join(' ')}` : 'Nothing runs until you turn it on'}
+            onClick={() => { setDoing('on'); void run(onTurnOn).finally(() => setDoing(null)) }}
+          >
+            {doing === 'on' ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : null}
+            {doing === 'on' ? 'Turning on…' : 'Turn on'}
+          </button>
         ) : null}
-        {onEditDetails ? <button type="button" className="inbox-text-btn" data-testid={`${testIdPrefix}-edit`} title="Edit details" onClick={onEditDetails}><Pencil size={12} strokeWidth={1.8} aria-hidden="true" />Edit details</button> : null}
-        {onDiscard ? <button type="button" className="inbox-text-btn muted" data-testid={`${testIdPrefix}-discard`} onClick={onDiscard}>Discard</button> : null}
+        {onEditDetails ? <button type="button" className="inbox-text-btn" data-testid={`${testIdPrefix}-edit`} title="Edit details" disabled={busy} onClick={onEditDetails}><Pencil size={12} strokeWidth={1.8} aria-hidden="true" />Edit details</button> : null}
+        {onDiscard ? (
+          <button
+            type="button"
+            className="inbox-text-btn muted"
+            data-testid={`${testIdPrefix}-discard`}
+            disabled={busy}
+            onClick={() => { setDoing('discard'); void run(async () => { await onDiscard() }).finally(() => setDoing(null)) }}
+          >{doing === 'discard' ? 'Discarding…' : 'Discard'}</button>
+        ) : null}
       </div>
       {error ? <p className="inbox-draft-problem" role="alert">{error}</p> : null}
     </section>
