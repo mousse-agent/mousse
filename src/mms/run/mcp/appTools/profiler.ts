@@ -23,7 +23,7 @@ import {
 import type { AgentAccessLevel } from '../../../../shared/settings'
 import type { Thread } from '../../../../shared/types'
 import type { AppToolHost } from './host'
-import { agentThreadView, threadVisibleToAgent } from './thread'
+import { agentThreadView, isBotThread, threadVisibleToAgent } from './thread'
 import { json, levelAtLeast, type JsonSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /** What the profiler tools read, at every call: the profile's switches (Settings → Labs) and the service's profiler. */
@@ -53,22 +53,32 @@ function delegationChain(host: AppToolHost, threadId: string): string[] {
 
 /**
  * The caller's profile's threads held to what `thread_list` shows the calling agent: a thread that is private (unless
- * the caller's is), a bot's, or outside the allowed projects (unless the caller launched it) counts only in a total,
- * as does a cache entry no thread of the profile owns, which cannot be checked.
+ * the caller's is), a bot's or below a bot's, the Automation manager's, or outside the allowed projects (unless the
+ * caller launched it) counts only in a total, as does a cache entry no thread of the profile owns, which cannot be
+ * checked.
  */
 function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThreadId: string, level: AgentAccessLevel): ThreadMemory {
   const view = agentThreadView(host, callerThreadId)
   const byId = new Map(view.all.map((thread) => [thread.id, thread]))
   const chain = new Set(delegationChain(host, callerThreadId))
-  // Below `read`, `thread_list` refuses: only the caller, the threads that delegated to it and the threads it
-  // launched are named. Below `manage`, other threads' subagents stay folded, as `thread_list` folds them.
-  const related = (thread: Thread) => chain.has(thread.id) || thread.createdByThreadId === callerThreadId
+  // Below `read`, `thread_list` refuses: only the caller, the threads that delegated to it, its own subagents (which
+  // `thread_read` reaches as descendants) and the threads it launched are named. Below `manage`, other threads'
+  // subagents stay folded, as `thread_list` folds them.
+  const related = (thread: Thread) =>
+    chain.has(thread.id) || thread.lineage?.parentThreadId === callerThreadId || thread.createdByThreadId === callerThreadId
+  // `thread_list` never lists the Automation manager's thread; it is opened from Automations.
   const named = (thread: Thread) =>
-    related(thread) || (levelAtLeast(level, 'read') && (levelAtLeast(level, 'manage') || !thread.lineage?.parentThreadId))
+    related(thread) ||
+    (!thread.automationManager && levelAtLeast(level, 'read') && (levelAtLeast(level, 'manage') || !thread.lineage?.parentThreadId))
+  // A bot thread's subagent inherits its private flag but not `botOwned`, so its lineage root is checked too.
+  const belowBot = (thread: Thread) => {
+    const rootId = thread.lineage?.rootThreadId
+    return Boolean(rootId && rootId !== thread.id && isBotThread(host, rootId, byId.get(rootId)))
+  }
   const hidden = { threads: 0, cachedBytes: 0 }
   const own = threads.own.filter((entry) => {
     const thread = entry.threadId ? byId.get(entry.threadId) : undefined
-    if (thread && named(thread) && threadVisibleToAgent(host, thread, view)) return true
+    if (thread && named(thread) && threadVisibleToAgent(host, thread, view) && !belowBot(thread)) return true
     hidden.threads += 1
     hidden.cachedBytes += entry.cachedBytes ?? 0
     return false
@@ -76,8 +86,11 @@ function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThr
   return { own, others: threads.others, hidden }
 }
 
-/** Error classes an unexpected error may be reported as; nothing else of it reaches the agent. */
-const KNOWN_ERROR_CLASSES = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'AbortError', 'HeapSummaryError'])
+/**
+ * Error classes an unexpected error may be reported as; nothing else of it reaches the agent. A `HeapSummaryError`
+ * is not one: its fixed text is returned before this is checked.
+ */
+const KNOWN_ERROR_CLASSES = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'AbortError'])
 
 /** The error's class, when it is one of the known ones; otherwise `Error`. */
 function errorClass(caught: unknown): string {

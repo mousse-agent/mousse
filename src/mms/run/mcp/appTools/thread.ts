@@ -298,7 +298,7 @@ function assertOwnSubagentsOnly(engine: RunEngine, caller: McpCaller, threadId: 
  * does, and its runs end by the engine's own rules. No agent sends to it, steers it or stops it from another thread.
  */
 /** Whether `threadId` is a personal bot's: marked so (`Thread.botOwned`), or registered as one of its threads. */
-function isBotThread(host: AppToolHost, threadId: string, meta: Pick<Thread, 'botOwned'> | undefined = host.threadMeta?.(threadId)): boolean {
+export function isBotThread(host: AppToolHost, threadId: string, meta: Pick<Thread, 'botOwned'> | undefined = host.threadMeta?.(threadId)): boolean {
   if (meta?.botOwned) return true
   try {
     return Boolean(host.botRole?.(threadId))

@@ -137,4 +137,15 @@ describe('sending the report to a service from before the window caches had size
     // Without the sizes there is nothing to drop: the refusal stands.
     await expect(sendAppReport(async () => { throw refusal('unknown_field') }, { processes: [], windows: [{ ...counters, caches: {} }] })).rejects.toMatchObject({ code: 'unknown_field' })
   })
+
+  it('retries once only, and passes the refusal on when the report without sizes is refused too', async () => {
+    let calls = 0
+    const second = refusal('unknown_field')
+    const failing = sendAppReport(async () => {
+      calls += 1
+      throw calls === 1 ? refusal('unknown_field') : second
+    }, { processes: [], windows: [sized] })
+    await expect(failing).rejects.toBe(second)
+    expect(calls).toBe(2)
+  })
 })
