@@ -74,7 +74,7 @@ describe('Go to latest', () => {
     expect(opaque).toBeLessThanOrEqual(16)
     expect(clear).toBe(0)
     // At the end of the transcript, the last line ends above the fade, and not much higher.
-    const padding = offset(rule(polish, '.chat:not(.chat--empty) .an-message-list > div'))
+    const padding = offset(rule(polish, '.chat:not(.chat--empty) .an-message-list > div:not([data-pin-reserve])'))
     expect(padding).toBeGreaterThanOrEqual(opaque)
     expect(padding).toBeLessThanOrEqual(opaque + 8)
   })
