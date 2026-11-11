@@ -89,7 +89,16 @@ export interface PermissionPrompter {
    * `approval` says what kind of action is asked about, so who may answer is decided by
    * `canAnswerApproval` (the options are all once-only: `allow_once` allows, `reject_once` rejects).
    */
-  choose(request: { threadId: string; title: string; options: ClassifiedOption[]; approval: Pick<ApprovalTag, 'action' | 'permissionKey' | 'tool' | 'reason'> }): Promise<string | undefined>
+  choose(
+    request: { threadId: string; title: string; options: ClassifiedOption[]; approval: Pick<ApprovalTag, 'action' | 'permissionKey' | 'tool' | 'reason'> },
+    /** `signal`: the caller stopped waiting (its turn was cut or stopped); the request is withdrawn. */
+    options?: { signal?: AbortSignal }
+  ): Promise<string | undefined>
+  /**
+   * Answers every request pending on the thread as the person, with its rejection (`autoRejectPendingForThread`): a
+   * person's steer that cuts in answers what the turn asks them (docs/design/steer-and-interruptions.md §2.1).
+   */
+  rejectPending?(threadId: string): void
 }
 
 export { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../shared/harness/types'
@@ -101,7 +110,10 @@ export function refusingPrompter(): PermissionPrompter {
 
 export function questionsPrompter(questions: UserQuestionService): PermissionPrompter {
   return {
-    async choose({ threadId, title, options, approval }) {
+    rejectPending(threadId) {
+      questions.autoRejectPendingForThread(threadId)
+    },
+    async choose({ threadId, title, options, approval }, wait) {
       const answers = await questions.requestAnswers([{
         id: 'permission', prompt: title,
         options: options.map((option) => ({ id: option.optionId, label: option.label }))
@@ -113,7 +125,8 @@ export function questionsPrompter(questions: UserQuestionService): PermissionPro
             decision: option.kind === 'allow_once' ? 'allow' : 'reject',
             ...(option.kind === 'allow_once' ? { scope: 'once' as const } : {})
           }))
-        }
+        },
+        ...(wait?.signal ? { signal: wait.signal } : {})
       })
       const answer = answers.permission
       return typeof answer === 'string' ? answer : undefined

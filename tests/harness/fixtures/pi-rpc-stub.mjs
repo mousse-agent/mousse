@@ -3,11 +3,15 @@
 // `pi-stub.json` in its working directory says (stall, crash with a helper, settle, fail).
 // It makes no network request but to the engine's own bridge on 127.0.0.1.
 //
-// `onPrompt: 'script'` behaves as Pi 1.4.0 did in spike S3 (docs/design/steer-and-interruptions.md): replies stream,
-// a native `steer` is queued and read only at a step boundary (right after `turn_end`, one user message per steer),
-// `clear_queue` empties that queue, `abort` ends the running prompt with `agent_settled` (`aborted: true`) before its
-// own response and leaves the queue as it is, retries emit an `agent_end` per failed attempt and one `agent_settled`,
-// and a prompt sent while one runs is refused. Everything it reads and settles is appended to `log.jsonl`.
+// `onPrompt: 'script'` behaves as Pi 1.4.0 did in spike S3 (docs/design/steer-and-interruptions.md) and as its agent
+// loop reads (`pi-agent-core` `agent-loop.js`): replies stream; a native `steer` is queued, and Pi takes one steer
+// from its queue per step (`one-at-a-time`) right after `turn_end`, prepares the next step (a moment, or a compaction),
+// then starts it (`turn_start`) and shows the steer as a user message. Until it shows it, Pi keeps the steer's text,
+// and `clear_queue` returns it. `abort` ends the running prompt with `agent_settled` (`aborted: true`) before its own
+// response and leaves the queue as it is; it stops a compaction; during a tool batch Pi starts no further call of it
+// (the ones not started get no event at all), and the call at Mousse's gate ends only once the gate answers. Retries
+// emit an `agent_end` per failed attempt and one `agent_settled`, and a prompt sent while one runs is refused.
+// Everything it reads and settles is appended to `log.jsonl`.
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
@@ -24,7 +28,7 @@ const log = (entry) => {
 const track = (value) => {
   if (value.type === 'agent_start') running = true
   if (value.type === 'agent_settled') running = false
-  if (['agent_end', 'agent_settled', 'turn_end', 'auto_retry_start', 'compaction_start', 'compaction_end'].includes(value.type)) log({ event: value.type, ...(value.aborted ? { aborted: true } : {}) })
+  if (['agent_end', 'agent_settled', 'turn_start', 'turn_end', 'auto_retry_start', 'compaction_start', 'compaction_end', 'tool_execution_start', 'tool_execution_end'].includes(value.type)) log({ event: value.type, ...(value.aborted ? { aborted: true } : {}), ...(value.toolCallId ? { call: value.toolCallId } : {}) })
   if (value.type === 'message_start' && value.message?.role === 'user') log({ read: value.message.content?.[0]?.text })
 }
 const write = (value) => {
@@ -90,13 +94,22 @@ function handle(command) {
     case 'get_state': return respond(command, { sessionId: `stub-${process.pid}` })
     case 'get_session_stats': return respond(command, {})
     case 'clear_queue': {
-      const steering = [...(config.queued ?? []), ...queuedSteers.splice(0)]
-      log({ cleared: steering })
-      return respond(command, { steering, followUp: [] })
+      const clear = () => {
+        // Pi returns every text it keeps, a steer it took out of its queue for the next step and has not shown included.
+        const steering = [...(config.queued ?? []), ...queuedSteers.splice(0), ...steeringTexts.splice(0)]
+        agentQueue.splice(0)
+        log({ cleared: steering })
+        respond(command, { steering, followUp: [] })
+      }
+      // `clearDelayMs`: Pi reads the command a moment later (it serves its input between the steps of its loop).
+      if (config.clearDelayMs) return void setTimeout(clear, config.clearDelayMs)
+      return clear()
     }
     case 'abort':
       // `abort: 'never'`: Pi neither answers nor settles (the engine's deadline must end the cut).
       if (config.abort === 'never') return
+      // `abort: 'crash'`: Pi dies as the abort arrives.
+      if (config.abort === 'crash') return void process.exit(3)
       if (scripted && checking) checking.aborted = true
       if (scripted && current) return current.abort(command)
       // As Pi: the running prompt settles first, then the abort is answered; an idle Pi only answers.
@@ -190,32 +203,31 @@ function handle(command) {
 //
 // `config.runs[i]` lists the steps of the i-th prompt (the last list repeats). A step is one model request:
 // - `{ text: 'a b c', deltaMs }`: the reply streams word by word and ends (`forever: true` streams until `abort`);
-// - `tools: [{ name, args, runMs }]`: the reply ends with those calls, which then run together;
+// - `tools: [{ name, args, runMs, gate }]`: the reply ends with those calls. Pi starts them one after another, each
+//   through Mousse's gate when `gate` is set (the engine's real `/pi/gate`, as the extension's `beforeToolCall`), then
+//   runs the allowed ones together. After an abort it starts none of the rest;
 // - `fail: true, delayMs`: the request fails and Pi retries after `delayMs` (an `agent_end` per failed attempt);
-// - `compactMs`: Pi compacts its context for that long before the request (an abort does not stop it);
+// - `prepareMs`: Pi prepares this step that long after the previous step's end (by default at once), with the steer
+//   it took out of its queue not shown yet; `compactMs`: then it compacts for that long (an abort stops it);
+// - `holdMs`: the reply starts and writes nothing for that long; `compactionLost`: a compaction starts while Pi
+//   prepares the step and its end event never comes;
 // - `waitSteer: 'readFirst' | 'okThenStart' | 'startThenOk'`: the request waits for the next native steer and then
 //   reads it before answering it, or answers it in the same stdout chunk as the reply's start, in either order.
-// Steers left in the queue after the last step are read as one more step (`config.steerReply`, default 'answered').
+// Steers left in the queue after the last step are read as one more step each (`config.steerReply`, default
+// 'answered'). `config.compactAfterMs`: Pi compacts after the prompt's `agent_end`, before `agent_settled`;
+// `config.settleDelayMs`: its before-settle step then takes that long.
 // `config.steerDelayMs` answers a native steer late (it is queued at once); `config.abortSettleDelayMs` delays the
 // aborted prompt's `agent_settled` after its `agent_end`.
 
 /** The prompt running now. */
 let current
 let promptCount = 0
+/** The texts of the steers Pi was sent and has not shown (Pi's `_steeringMessages`): `clear_queue` returns them. */
+const steeringTexts = []
+/** Pi's steering queue: a step's end takes one (`one-at-a-time`); its text stays in `steeringTexts` until shown. */
+const agentQueue = []
 
 function scriptSteer(command) {
-  // `steerAnswer`: Pi takes the steer out of its queue at once and shows it `readAfterMs` later; it answers after
-  // `delayMs` (a read that crosses its answer or a `clear_queue`, spike S3 items 4–5).
-  if (config.steerAnswer) {
-    const { delayMs = 0, readAfterMs = delayMs } = config.steerAnswer
-    const user = { role: 'user', content: [{ type: 'text', text: command.message }] }
-    setTimeout(() => respond(command), delayMs)
-    setTimeout(() => {
-      write({ type: 'message_start', message: user })
-      write({ type: 'message_end', message: user })
-    }, readAfterMs)
-    return
-  }
   // The next step waits for this steer (`waitSteer`).
   if (current?.wantSteer) {
     current.wantSteer = false
@@ -224,9 +236,20 @@ function scriptSteer(command) {
     current.steerWaiter = undefined
     return wake(command)
   }
-  queuedSteers.push(command.message)
+  // As Pi's `steer`: a leading `/` names a skill or prompt template, which Pi expands before it queues the text.
+  const text = command.message.startsWith('/') ? `Expanded ${command.message.slice(1)}` : command.message
+  steeringTexts.push(text)
+  agentQueue.push(text)
   if (config.steerDelayMs) return void setTimeout(() => respond(command), config.steerDelayMs)
   respond(command)
+}
+
+/** Pi shows a steer it took out of its queue: a user message, and its text is no longer kept. */
+function show(text) {
+  const index = steeringTexts.indexOf(text)
+  if (index >= 0) steeringTexts.splice(index, 1)
+  write({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } })
+  write({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text }] } })
 }
 
 /** A later prompt Pi is still checking (`continuationDelayMs`): an abort meanwhile means it runs no request. */
@@ -273,14 +296,16 @@ function startRun(command) {
   log({ prompt: command.message })
   respond(command)
   write({ type: 'agent_start' })
+  write({ type: 'turn_start' })
   // The prompt's own user message, as Pi records it.
   write({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: command.message }] } })
   write({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: command.message }] } })
   void execute(run)
 }
 
-/** Waits `ms`; false when an abort cut it short. A compaction passes `abortable: false`. */
+/** Waits `ms`; false when an abort cut it short (or had already come). `abortable: false`: Pi does not stop for it. */
 function wait(run, ms, abortable = true) {
+  if (abortable && run.aborted) return Promise.resolve(false)
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       run.cancel = undefined
@@ -297,29 +322,51 @@ function wait(run, ms, abortable = true) {
 
 const assistant = (content, stopReason) => ({ role: 'assistant', content, stopReason, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } })
 
+/** Mousse's gate for a call (the extension's `beforeToolCall`): Pi waits for its answer whatever an abort says. */
+async function gate(run, tool) {
+  run.token ??= (await post('turn', {})).attemptToken
+  return post('gate', { attemptToken: run.token, toolCallId: tool.id, toolName: tool.name, input: tool.args ?? {} })
+}
+
+/** Pi compacts its context (`compaction_start` .. `compaction_end`); an abort stops it. */
+async function compact(run, ms) {
+  write({ type: 'compaction_start', reason: 'threshold' })
+  const done = await wait(run, ms)
+  write({ type: 'compaction_end', reason: 'threshold', ...(done ? { result: { summary: 'compacted' } } : {}), aborted: !done, willRetry: false })
+}
+
 async function execute(run) {
+  /** The steer Pi took out of its queue for the next step (one at a time), not shown yet. */
   let pending = []
   let attempt = 0
   let index = 0
   let calls = 0
   let afterTools = false
+  /** The step starts a prompt or a retry (`turn_start` is out already, or comes with no preparation). */
+  let fresh = true
   for (;;) {
-    // After tool results Pi always asks the model again; queued steers are read as a step of their own.
+    // After tool results Pi always asks the model again; a steer it took is read in a step of its own.
     const step = run.steps[index] ?? (pending.length ? { text: config.steerReply ?? 'answered' } : afterTools ? { text: 'done' } : undefined)
     if (!step) break
     index += 1
     afterTools = false
-    write({ type: 'turn_start' })
-    for (const text of pending.splice(0)) {
-      write({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } })
-      write({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text }] } })
-    }
-    if (step.compactMs) {
-      write({ type: 'compaction_start', reason: 'threshold' })
-      await wait(run, step.compactMs, false)
-      write({ type: 'compaction_end', reason: 'threshold', result: { summary: 'compacted' }, aborted: false, willRetry: false })
-      if (run.aborted) return finishAborted(run, undefined)
-    }
+    if (!fresh) {
+      // Pi prepares the next step (`prepareNextTurn`): the steer it took stays unshown meanwhile. Usually that takes a
+      // millisecond or two, and a steer sent in reply to `turn_end` misses the next request (spike S3 item 11).
+      if (step.prepareMs || step.compactMs || step.compactionLost) {
+        if (step.prepareMs) await wait(run, step.prepareMs, false)
+        if (step.compactMs && !run.aborted) await compact(run, step.compactMs)
+        // `compactionLost`: a compaction whose end event never comes.
+        if (step.compactionLost) write({ type: 'compaction_start', reason: 'threshold' })
+        // A long preparation: Pi polls its queue again, only if it took nothing at the step's end.
+        if (!pending.length && agentQueue.length) pending = [agentQueue.shift()]
+      }
+      write({ type: 'turn_start' })
+    } else if (attempt) write({ type: 'turn_start' })
+    fresh = false
+    for (const text of pending.splice(0)) show(text)
+    // An aborted signal ends the request at once.
+    if (run.aborted) return finishAborted(run, undefined)
     if (step.fail) {
       attempt += 1
       write({ type: 'message_start', message: assistant([], 'error') })
@@ -333,6 +380,7 @@ async function execute(run) {
         return finishSettled(run)
       }
       write({ type: 'agent_start' })
+      fresh = true
       continue
     }
     let opened = false
@@ -360,20 +408,23 @@ async function execute(run) {
         open()
       } else {
         // Pi checked its queue before the steer came: it waits for the next step.
-        queuedSteers.push(steer.message)
+        steeringTexts.push(steer.message)
+        agentQueue.push(steer.message)
         opened = true
         const start = { type: 'message_start', message: assistant([], 'stop') }
         writeTogether(step.waitSteer === 'okThenStart' ? [response(steer), start] : [start, response(steer)])
       }
     }
     open()
+    // `holdMs`: the reply starts and writes nothing for that long.
+    if (step.holdMs && !(await wait(run, step.holdMs))) return finishAborted(run, undefined, true)
     let text = ''
     const words = String(step.text ?? '').split(' ').filter(Boolean)
     for (let word = 0; step.forever || word < words.length; word += 1) {
       const delta = `${text ? ' ' : ''}${step.forever ? `word${word}` : words[word]}`
       text += delta
       write({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta } })
-      if (!(await wait(run, step.deltaMs ?? 20))) return finishAborted(run, text)
+      if (!(await wait(run, step.deltaMs ?? 20))) return finishAborted(run, text, true)
     }
     const tools = (step.tools ?? []).map((tool) => ({ ...tool, id: `call_${(calls += 1)}` }))
     const content = [...(text ? [{ type: 'text', text }] : []), ...tools.map((tool) => ({ type: 'toolCall', id: tool.id, name: tool.name, arguments: tool.args ?? {} }))]
@@ -383,36 +434,45 @@ async function execute(run) {
       attempt = 0
     }
     if (tools.length) {
-      for (const tool of tools) write({ type: 'tool_execution_start', toolCallId: tool.id, toolName: tool.name, args: tool.args ?? {} })
-      const finished = await wait(run, Math.max(...tools.map((tool) => tool.runMs ?? 20)))
+      const end = (tool, isError, result) => write({ type: 'tool_execution_end', toolCallId: tool.id, toolName: tool.name, isError, result: { content: [{ type: 'text', text: result }] } })
+      // Pi starts the calls one after another, each through the gate; after an abort it starts none of the rest.
+      const runnable = []
       for (const tool of tools) {
-        write({ type: 'tool_execution_end', toolCallId: tool.id, toolName: tool.name, isError: !finished, result: { content: [{ type: 'text', text: finished ? 'done' : 'Operation aborted' }] } })
+        write({ type: 'tool_execution_start', toolCallId: tool.id, toolName: tool.name, args: tool.args ?? {} })
+        const verdict = tool.gate ? await gate(run, tool) : { allow: true }
+        if (run.aborted) {
+          end(tool, true, 'Operation aborted')
+          break
+        }
+        if (!verdict.allow) end(tool, true, verdict.reason ?? 'Tool execution was blocked')
+        else runnable.push(tool)
       }
-      if (!finished) {
-        write({ type: 'turn_end' })
-        return finishAborted(run, undefined, true)
-      }
+      const finished = runnable.length ? await wait(run, Math.max(...runnable.map((tool) => tool.runMs ?? 20))) : !run.aborted
+      for (const tool of runnable) end(tool, !finished, finished ? 'done' : 'Operation aborted')
       afterTools = true
     }
     write({ type: 'turn_end' })
-    // Pi reads its steering queue right after `turn_end`: a steer sent in reply to it is too late for this step.
-    pending = queuedSteers.splice(0)
+    // Pi takes one steer from its queue right after `turn_end`: a steer sent in reply to it is too late for this step.
+    if (agentQueue.length) pending = [agentQueue.shift()]
     if (!tools.length && !pending.length && index >= run.steps.length) break
     // The next request waits for the native steer the engine sends in reply to this `turn_end`.
     if (run.steps[index]?.waitSteer) run.wantSteer = true
-    // The next request goes out a moment later.
-    if (!(await wait(run, 2))) return finishAborted(run, undefined, true)
   }
   write({ type: 'agent_end', messages: [] })
+  // A compaction after the prompt's end, before it settles (an abort stops it).
+  if (config.compactAfterMs && !run.aborted) await compact(run, config.compactAfterMs)
+  // `settleDelayMs`: Pi's before-settle step (extensions' `agent_before_settle`) takes that long.
+  if (config.settleDelayMs) await new Promise((resolve) => setTimeout(resolve, config.settleDelayMs))
   return finishSettled(run)
 }
 
-/** An abort ended the prompt: its reply as written so far, then `agent_end`, `agent_settled` and the abort's answer. */
-async function finishAborted(run, partial, ended = false) {
-  if (!ended) {
-    write({ type: 'message_end', message: assistant(partial ? [{ type: 'text', text: partial }] : [], 'aborted') })
-    write({ type: 'turn_end' })
-  }
+/** An abort ended the request: its reply as written so far, then `turn_end`, `agent_end`, `agent_settled` and the abort's answer. */
+async function finishAborted(run, partial, opened = false) {
+  if (!opened) write({ type: 'message_start', message: assistant([], 'aborted') })
+  // `abortedText`: the aborted message carries words Pi received but never streamed.
+  const words = `${partial ?? ''}${config.abortedText ?? ''}`
+  write({ type: 'message_end', message: assistant(words ? [{ type: 'text', text: words }] : [], 'aborted') })
+  write({ type: 'turn_end' })
   write({ type: 'agent_end', messages: [] })
   if (config.abortSettleDelayMs) await new Promise((resolve) => setTimeout(resolve, config.abortSettleDelayMs))
   return finishSettled(run)

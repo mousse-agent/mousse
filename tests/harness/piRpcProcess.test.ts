@@ -182,6 +182,39 @@ describe('Pi RPC engine with the real Pi child', () => {
     expect(recorder.connections()).toBe(0)
   }, 60_000)
 
+  it('#368: a steer sent at the turn’s last step is taken once, never both read by Pi and run as the next turn', async () => {
+    const { engine, recorder, commands, project } = await setup()
+    recorder.respond(script([{ text: 'First answer.' }, { text: 'Second answer.' }, { text: 'Third answer.' }]))
+    const turn = harness(project)
+    // Pending when the last step ends: the engine sends it as Pi's native steer at that `turn_end`, and Pi has
+    // already looked at its queue for the step after it (spike S3 item 11).
+    let pending: Array<{ text: string; token: string }> = [{ text: 'late note', token: 'drain-1' }]
+    const returned: string[] = []
+    const accepted: string[] = []
+    const order: string[] = []
+    turn.ctl.drainSteerEntry = () => pending.shift()
+    turn.ctl.returnSteer = (text) => {
+      order.push(`returned:${commands.length}`)
+      returned.push(text)
+    }
+    turn.sink.steerAccepted = (text) => void accepted.push(text)
+    const first = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(first.aborted).toBe(false)
+    // Exactly once: Pi read it in this turn, or it came back, after Pi's queue was emptied, before the turn settled.
+    expect(accepted.length + returned.length).toBe(1)
+    if (returned.length) {
+      expect(commands.slice(commands.indexOf('steer'))).toContain('clear_queue')
+      expect(commands.indexOf('clear_queue')).toBeGreaterThan(commands.indexOf('steer'))
+      expect(Number(order[0].split(':')[1])).toBeGreaterThan(commands.indexOf('clear_queue'))
+      // The orchestrator runs it as the next turn: the model reads it once, there.
+      pending = []
+      const next = harness(project, { prompt: 'late note' })
+      expect((await engine.startTurn(next.input, next.sink, next.ctl, next.host)).aborted).toBe(false)
+    }
+    const reads = recorder.requests.map((request) => (JSON.parse(request.body) as { messages: Array<{ role: string; content: unknown }> }).messages.filter((message) => message.role === 'user' && JSON.stringify(message.content).includes('late note')).length)
+    expect(reads.at(-1)).toBe(1)
+  }, 90_000)
+
   it('stop() kills a warm process and settles only after it exited (the state dir can then be deleted)', async () => {
     const { engine, recorder, project, stateDir } = await setup()
     recorder.respond(script([{ text: 'warm' }]))
