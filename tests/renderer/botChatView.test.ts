@@ -512,3 +512,93 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(transcript().querySelector('[data-message-id^="sent:"] .bot-reply-quote')!.textContent).toBe('Inbox helperOn it.')
   })
 })
+
+describe('pinned above the composer, and New message', () => {
+  const pins = () => [...host.querySelectorAll<HTMLButtonElement>('.bot-pins .bot-pinned')]
+  const fileAsk = { askId: 'k1', title: 'use files on this computer', note: 'Any file or folder.', status: 'open' as const }
+
+  it('pins the open ask and the current error, shows the full message on click, and drops each once it is answered or cleared', async () => {
+    const shown = vi.spyOn(Element.prototype, 'scrollIntoView')
+    const stuck = { ...inbox, state: 'stuck' as const, error: { text: 'Set up a provider so I can work.', action: { kind: 'open_providers' as const, label: 'Set up' } } }
+    fake.chats.inbox = [
+      message(1, { id: 'e0', kind: 'error', text: 'Old.', error: { text: 'An old error.' } }),
+      message(2, { id: 'a1', text: 'I need one thing.', ask: fileAsk }),
+      message(3, { id: 'e1', kind: 'error', text: 'I couldn’t check.', error: stuck.error }),
+      ...Array.from({ length: 10 }, (_, index) => message(index + 4))
+    ]
+    await open(stuck)
+    expect(pins().map((pin) => [pin.dataset.kind, pin.textContent])).toEqual([['ask', 'Inbox helper wants to use files on this computer'], ['error', 'Set up a provider so I can work.']])
+
+    await click(pins()[1])
+    expect(shown.mock.contexts.at(-1)).toBe(transcript().querySelector('[data-message-id="e1"]'))
+    await click(pins()[0])
+    expect(shown.mock.contexts.at(-1)).toBe(transcript().querySelector('[data-message-id="a1"]'))
+
+    // While the full error is on screen its pinned line hides; scrolled away, it is back.
+    const rect = (top: number, bottom: number) => ({ top, bottom, left: 0, right: 0, width: 0, height: bottom - top, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    const errorRow = transcript().querySelector<HTMLElement>('[data-message-id="e1"]')!
+    transcript().getBoundingClientRect = () => rect(0, 800)
+    errorRow.getBoundingClientRect = () => rect(300, 400)
+    await act(async () => { transcript().dispatchEvent(new Event('scroll')) })
+    expect(pins().map((pin) => pin.dataset.kind)).toEqual(['ask'])
+    errorRow.getBoundingClientRect = () => rect(-400, -300)
+    await act(async () => { transcript().dispatchEvent(new Event('scroll')) })
+    expect(pins().map((pin) => pin.dataset.kind)).toEqual(['ask', 'error'])
+
+    await click(button('Allow', transcript().querySelector('[data-message-id="a1"]')!))
+    await settle()
+    expect(pins().map((pin) => pin.dataset.kind)).toEqual(['error'])
+    fake.bots = [inbox]
+    await act(async () => fake.emit.changed('inbox'))
+    await settle()
+    expect(host.querySelector('.bot-pins')).toBeNull()
+    shown.mockRestore()
+  })
+
+  it('pins nothing for answered asks and past errors', async () => {
+    fake.chats.inbox = [message(1, { ask: { ...fileAsk, status: 'allowed' } }), message(2, { kind: 'error', error: { text: 'Gone now.' } })]
+    await open()
+    expect(host.querySelector('.bot-pins')).toBeNull()
+  })
+
+  it('offers New message when a reply arrives while scrolled up, and goes to the end on click', async () => {
+    fake.chats.inbox = Array.from({ length: 20 }, (_, index) => message(index + 1))
+    await open()
+    const log = transcript()
+    let height = 2000
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, get: () => height })
+    Object.defineProperty(log, 'clientHeight', { configurable: true, value: 500 })
+    // Scrolled up right after opening: the first reply offers New message.
+    log.scrollTop = 300
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    await act(async () => { height = 2100; fake.emit.message('inbox', message(21)) })
+    expect(log.scrollTop).toBe(300)
+    expect(button('New message')).toBeDefined()
+    // At the end, a new reply just shows.
+    log.scrollTop = 1600
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    expect(button('New message')).toBeUndefined()
+    await act(async () => { height = 2150; fake.emit.message('inbox', message(22)) })
+    expect(button('New message')).toBeUndefined()
+    // Scrolled up: the reader stays put, the owner's own message offers nothing, the bot's offers New message.
+    log.scrollTop = 300
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    await act(async () => { height = 2200; fake.emit.message('inbox', message(23, { author: 'owner' })) })
+    expect(button('New message')).toBeUndefined()
+    await act(async () => { height = 2300; fake.emit.message('inbox', message(24)) })
+    expect(log.scrollTop).toBe(300)
+    expect(button('New message')).toBeDefined()
+    await click(button('New message'))
+    expect(log.scrollTop).toBe(2300)
+    expect(button('New message')).toBeUndefined()
+
+    // Scrolling down to the end by hand dismisses it too.
+    log.scrollTop = 300
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    await act(async () => { height = 2400; fake.emit.message('inbox', message(25)) })
+    expect(button('New message')).toBeDefined()
+    log.scrollTop = 1900
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    expect(button('New message')).toBeUndefined()
+  })
+})
