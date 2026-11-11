@@ -165,6 +165,12 @@ function stripInlineMarkdown(line: string): string {
     .trim();
 }
 
+/** How many a code or file search found (`numFiles` on its output), or undefined when it does not say. */
+export function searchResultCount(output: unknown): number | undefined {
+  const value = output && typeof output === "object" ? (output as { numFiles?: unknown }).numFiles : undefined;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 /**
  * Labels for a SearchTool row. Always names the tool and query — a bare
  * "Found 0 results" doesn't say what ran.

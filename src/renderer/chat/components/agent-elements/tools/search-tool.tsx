@@ -9,7 +9,7 @@ import {
   mapToolInvocationToStep,
   mapToolStateToStepState,
 } from "../utils/tool-adapters";
-import { formatSearchRowLabels } from "../utils/format-tool";
+import { formatSearchRowLabels, searchResultCount } from "../utils/format-tool";
 import { cn } from "../utils/cn";
 
 export type SearchResult = { source: SourceType; title: string; date: string };
@@ -19,6 +19,8 @@ export type SearchGroupRichProps = {
   stepStates: Record<string, StepState>;
   onStepComplete: (id: string) => void;
   results?: SearchResult[];
+  /** How many a code or file search found, when it has no result list to show. */
+  resultCount?: number;
   defaultOpen?: boolean;
 };
 
@@ -27,12 +29,13 @@ export function SearchGroupRich({
   stepStates,
   onStepComplete,
   results = [],
+  resultCount,
   defaultOpen,
 }: SearchGroupRichProps) {
   const anyAnimating = toolSteps.some((s) => stepStates[s.id] === "animating");
   const rawQuery = toolSteps.find((s) => s.searchQuery)?.searchQuery;
   const searchQuery = rawQuery ?? "searching...";
-  const totalResults = results.length;
+  const totalResults = results.length > 0 ? results.length : (resultCount ?? 0);
   const toolLabel = toolSteps.find((s) => s.toolName)?.toolName;
   const { completeLabel, detail } = formatSearchRowLabels(
     toolLabel,
@@ -43,7 +46,7 @@ export function SearchGroupRich({
   // While the search is still streaming we have no results yet and the panel
   // header is just "Searched for <same query>" — redundant with the row
   // label. Once results arrive the panel becomes meaningful.
-  const hasExpandableContent = totalResults > 0;
+  const hasExpandableContent = results.length > 0;
 
   function CompleteTracker({
     step,
@@ -175,6 +178,7 @@ export const SearchTool = memo(function SearchTool({
         normalizeResults(part.output?.results) ??
         normalizeResults(part.result?.results)
       }
+      resultCount={searchResultCount(part.output ?? part.result)}
       defaultOpen={defaultOpen}
     />
   );

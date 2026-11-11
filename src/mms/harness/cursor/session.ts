@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import type { ActivityPatch } from '../../../shared/agentActivity'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
 import type { CursorAgentSetup, CursorHostMethods, CursorUsage } from '../hosts/cursorProtocol'
@@ -37,6 +38,8 @@ export interface CursorToolEvent {
   callId: string
   title: string
   toolName?: string
+  /** The typed fields Cursor's call carries (a search's pattern, and on completion its result count). */
+  activity?: ActivityPatch
   /** On completion: `unfinished` when the run ended before the tool reported its own end. */
   status?: 'completed' | 'unfinished'
 }
@@ -123,7 +126,8 @@ export function cursorToolTitle(toolCall: unknown, label = 'Cursor'): string {
   const call = toolCall && typeof toolCall === 'object' ? (toolCall as { type?: unknown; args?: unknown }) : {}
   const type = str(call.type) ?? 'tool'
   const args = call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
-  const subject = str(args.command) ?? str(args.path) ?? str(args.pattern) ?? str(args.globPattern) ?? str(args.description) ?? str(args.toolName) ?? str(args.name)
+  // A search is named by what it looks for, not the folder it looks in.
+  const subject = str(args.command) ?? str(args.pattern) ?? str(args.globPattern) ?? str(args.path) ?? str(args.description) ?? str(args.toolName) ?? str(args.name)
   const name = type.charAt(0).toUpperCase() + type.slice(1)
   if (!subject) return `${label} ${type}`
   const short = subject.length > 80 ? `${subject.slice(0, 77)}…` : subject
@@ -177,6 +181,87 @@ export function cursorToolName(toolCall: unknown): string | undefined {
   if (Object.prototype.hasOwnProperty.call(CURSOR_TOOL_NAMES, type)) return CURSOR_TOOL_NAMES[type]
   // A type added after this list: snake case keeps it a plain row named after it.
   return `cursor_${type.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()}`
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(record).filter((item): item is Record<string, unknown> => Boolean(item)) : []
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+interface SearchFound {
+  count: number
+  lines: string[]
+}
+
+/** One folder's grep result, in any of its output modes: matching lines, files, or counts per file. */
+function grepFound(value: unknown): SearchFound | undefined {
+  const result = record(value)
+  const output = record(result?.output)
+  if (!result || !output) return undefined
+  switch (result.type) {
+    case 'content': {
+      const matches = records(output.matches)
+      const lines = matches.map((match) => {
+        const line = typeof match.lineNumber === 'number' ? `:${match.lineNumber}` : ''
+        return `${str(match.file) ?? ''}${line}:${typeof match.line === 'string' ? match.line : ''}`
+      })
+      return { count: count(output.totalMatches) ?? matches.length, lines }
+    }
+    case 'files': {
+      const files = strings(output.files)
+      return { count: count(output.count) ?? files.length, lines: files }
+    }
+    case 'count': {
+      const counts = records(output.counts)
+      const total = counts.reduce((sum, entry) => sum + (count(entry.count) ?? 0), 0)
+      return { count: count(output.total) ?? total, lines: counts.map((entry) => `${str(entry.file) ?? ''}:${count(entry.count) ?? 0}`) }
+    }
+    default:
+      return undefined
+  }
+}
+
+/** What a finished Cursor search found: a grep's results across its folders, or a glob's files. */
+function searchFound(type: 'grep' | 'glob', value: Record<string, unknown>): SearchFound | undefined {
+  if (type === 'glob') {
+    const files = strings(value.files)
+    return { count: count(value.totalFiles) ?? files.length, lines: files }
+  }
+  const folders = Object.values(record(value.workspaceResults) ?? {}).map(grepFound).filter((found): found is SearchFound => Boolean(found))
+  const found = folders.length > 0 ? folders : [grepFound(value.activeEditorResult)].filter((one): one is SearchFound => Boolean(one))
+  if (found.length === 0) return undefined
+  return { count: found.reduce((sum, one) => sum + one.count, 0), lines: found.flatMap((one) => one.lines) }
+}
+
+/**
+ * A Cursor grep or glob call's search fields: what it searched for and where, and once it has a result, how many it
+ * found and what. Undefined for any other call, or a search without a pattern.
+ */
+export function cursorToolActivity(toolCall: unknown): ActivityPatch | undefined {
+  const call = record(toolCall)
+  const type = str(call?.type)
+  if (type !== 'grep' && type !== 'glob') return undefined
+  const args = record(call?.args) ?? {}
+  const query = type === 'grep' ? str(args.pattern) : str(args.globPattern)
+  if (!query) return undefined
+  const path = type === 'grep' ? str(args.path) : str(args.targetDirectory)
+  const patch = { kind: 'search', scope: type === 'grep' ? 'code' : 'files', query, ...(path ? { path } : {}) } as ActivityPatch
+  const result = record(call?.result)
+  if (result?.status === 'error') return { ...patch, status: 'failed' }
+  const value = record(result?.value)
+  const found = result?.status === 'success' && value ? searchFound(type, value) : undefined
+  return found ? { ...patch, resultCount: found.count, output: found.lines.join('\n') } as ActivityPatch : patch
 }
 
 /** Raised inside a turn when its Stop arrives before the work it waits for. */
@@ -555,13 +640,21 @@ export class CursorSessions {
               const title = cursorToolTitle(update.toolCall, label)
               tools.set(callId, title)
               const toolName = cursorToolName(update.toolCall)
-              input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}) })
+              const activity = cursorToolActivity(update.toolCall)
+              input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}), ...(activity ? { activity } : {}) })
               return
             }
             case 'tool-call-completed': {
               const callId = str(update.callId)
               if (!callId) return
-              input.onTool?.({ phase: 'complete', callId, title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label), status: 'completed' })
+              const activity = cursorToolActivity(update.toolCall)
+              input.onTool?.({
+                phase: 'complete',
+                callId,
+                title: tools.get(callId) ?? cursorToolTitle(update.toolCall, label),
+                status: 'completed',
+                ...(activity ? { activity } : {})
+              })
               tools.delete(callId)
               return
             }
