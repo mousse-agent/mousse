@@ -50,17 +50,25 @@ export interface ThreadDeleteDeps {
   isRunning?(threadIds: readonly string[]): boolean
   /**
    * Refuses, before anything stops, what would refuse the trash anyway: the profile shutting down, an open terminal, a
-   * pending question, a running agent, chat or workflow in these threads, or another thread's turn. Their own turns
-   * are not refused here: `stopRuns` ends them.
+   * pending question, a running agent, chat or workflow in these threads, a thread they launched still running, or
+   * other work the delete touches (`MmsProfileServices.deleteGuard`). Their own turns are not refused here: `stopRuns`
+   * ends them. `keepWork`: the delete keeps the worktrees and Git refs (every delete but an expiry).
    */
-  assertCanStop?(threadIds: readonly string[]): void
+  assertCanStop?(threadIds: readonly string[], options: { keepWork: boolean }): void
+  /**
+   * Before the Stop: waits briefly for the requests the delete would be refused for, other than these threads' own
+   * (which end with the Stop, or are waited for after it), and refuses while one is still open. A request that names a
+   * project, a folder or a repository may touch the threads' files; a delete refused for it stops nothing.
+   */
+  assertRequestsSettled?(threadIds: readonly string[], options: { keepWork: boolean }): Promise<void>
   /** What would refuse a delete that keeps the work, read before anything stops (`ResourcePurgeService.deletePrecheck`). */
   precheck?(threadId: string, options: { soleCopies: boolean }): Promise<{ blockers: string[]; soleCopies: string[] }>
   /**
-   * Waits up to `budgetMs` for the profile's other requests to settle. The trash and the purge each refuse while one
-   * is in flight, and a window still shows the thread for a moment, so its reads of it keep arriving meanwhile.
+   * Waits up to `budgetMs` for the requests this delete of `threadId` touches to settle: the profile's, and those of the
+   * threads it touches (another thread's requests go on). The trash and the purge each refuse while one is in flight,
+   * and a window still shows the thread for a moment, so its reads of it keep arriving meanwhile.
    */
-  settle?(budgetMs: number): Promise<void>
+  settle?(threadId: string, budgetMs: number, options: { keepWork: boolean }): Promise<void>
 }
 
 /** How long a step refused for a passing reason is tried again; a refusal still there after it is reported. */
@@ -113,10 +121,10 @@ export class ThreadDeleter {
    * belonged to its first try (the caller's operation id, which the refusal used up). Any other refusal, and a passing
    * one past the budget, is the step's own error.
    */
-  private async whenSettled<T>(step: (attempt: number) => Promise<T>): Promise<T> {
+  private async whenSettled<T>(threadId: string, intent: DeleteIntent, step: (attempt: number) => Promise<T>): Promise<T> {
     const until = Date.now() + this.busyRetryMs
     for (let attempt = 0; ; attempt++) {
-      await this.deps.settle?.(Math.max(1, Math.min(2_000, until - Date.now())))
+      await this.deps.settle?.(threadId, Math.max(1, Math.min(2_000, until - Date.now())), { keepWork: keepsWork(intent) })
       try {
         return await step(attempt)
       } catch (error) {
@@ -138,7 +146,12 @@ export class ThreadDeleter {
   private async checkThenStop(members: readonly string[], intent: DeleteIntent): Promise<void> {
     // With nothing running there is nothing to stop, and the trash and the preview check everything as before.
     if (!members.length || (this.deps.isRunning && !this.deps.isRunning(members))) return
-    this.deps.assertCanStop?.(members)
+    // Work that refuses it at once is found first; requests that may still settle are waited for, then all is checked again.
+    this.deps.assertCanStop?.(members, { keepWork: keepsWork(intent) })
+    if (this.deps.assertRequestsSettled) {
+      await this.deps.assertRequestsSettled(members, { keepWork: keepsWork(intent) })
+      this.deps.assertCanStop?.(members, { keepWork: keepsWork(intent) })
+    }
     // An expiry takes the thread's files with it as asked; a delete that keeps the work checks what would refuse it.
     if (!intent.expiry && this.deps.precheck) {
       const precheck = this.deps.precheck
@@ -287,7 +300,7 @@ export class ThreadDeleter {
         if (current?.state === 'purge-started' || current?.state === 'purged') continue
         this.setIntent(id, intent)
         if (!current || current.state === 'active') {
-          await this.whenSettled((attempt) => {
+          await this.whenSettled(id, intent, (attempt) => {
             // Unarchived while the delete waited: the thread is in use again, and stays.
             if (id === threadId && listed && !options.expiry && !this.isArchived(this.deps.getThread(threadId) ?? { id: threadId }))
               throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
@@ -295,7 +308,7 @@ export class ThreadDeleter {
           })
           trashedHere.push(id)
         }
-        await this.whenSettled(() => this.check(id, intent))
+        await this.whenSettled(id, intent, () => this.check(id, intent))
       }
     } catch (error) {
       // Only what this delete trashed goes back, and the thread itself when it was left by an earlier one: a member
@@ -329,9 +342,9 @@ export class ThreadDeleter {
     if (!record || record.state === 'purged') { this.setIntent(taskId, undefined); return }
     if (record.state === 'purge-started' && record.purge) {
       const purge = record.purge
-      await this.whenSettled(() => this.deps.purge.purge({ taskId, operationId: purge.operationId, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) }))
+      await this.whenSettled(taskId, intent, () => this.deps.purge.purge({ taskId, operationId: purge.operationId, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) }))
     } else {
-      await this.whenSettled(async () => {
+      await this.whenSettled(taskId, intent, async () => {
         const preview = await this.check(taskId, intent)
         await this.deps.purge.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: intent.discard, human: intent.human, keepWork: keepsWork(intent), ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
       })

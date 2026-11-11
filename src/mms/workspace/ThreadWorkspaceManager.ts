@@ -246,6 +246,19 @@ export function isProjectFolderWorkspace(metadata: Pick<ThreadWorkspaceMetadata,
   return metadata?.kind === 'project-folder'
 }
 
+/** A thread's workspace record (see `ThreadWorkspaceManager.workspacePath`), read without anything else; undefined when absent or unreadable. */
+export function readThreadWorkspaceRecord(threadDirectory: string): ThreadWorkspaceMetadata | undefined {
+  try {
+    const folder = join(threadDirectory, PROJECT_FOLDER_RECORD)
+    const path = existsSync(folder) ? folder : join(threadDirectory, 'workspace.json')
+    if (!existsSync(path)) return undefined
+    const value = JSON.parse(readFileSync(path, 'utf8')) as ThreadWorkspaceMetadata
+    return value && typeof value.worktreePath === 'string' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export class ThreadWorkspaceManager {
   readonly journal: ThreadJournal
   /**

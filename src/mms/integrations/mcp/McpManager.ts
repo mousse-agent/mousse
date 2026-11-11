@@ -1,4 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { OwnedWorkEntry } from '../../execution/OwnedWorkBarrier'
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -153,6 +154,11 @@ export class McpManager {
 
   getActiveCount(): number {
     return this.owned.count
+  }
+
+  /** The work `getActiveCount` counts, each with the threads it belongs to (`OwnedWorkEntry.scope`). */
+  getActiveWork(): OwnedWorkEntry[] {
+    return this.owned.entries()
   }
 
   snapshotOwnedWork(): Record<string, number> {
@@ -423,7 +429,7 @@ export class McpManager {
   }
 
   async revokeServer(serverId: string, projectPath?: string): Promise<void> {
-    return this.owned.run('mcp-oauth-revoke', () => this.revokeServerOwned(serverId, projectPath))
+    return this.owned.run('mcp-oauth-revoke', () => this.revokeServerOwned(serverId, projectPath), null)
   }
 
   private async revokeServerOwned(serverId: string, projectPath?: string): Promise<void> {
@@ -753,6 +759,7 @@ export class McpManager {
     run: (signal: AbortSignal) => Promise<T>
   ): Promise<T> {
     const combined = this.operationSignal(signal)
+    // A call or a listing is the work of the turn that makes it (its thread, `currentWorkScope`); a connection is the profile's.
     return this.owned.run(label, async () => {
       return withAbortTimeout(
         (callSignal) => {
@@ -850,7 +857,8 @@ export class McpManager {
     if (inflight) return inflight
 
     const attempt = observePromise(
-      this.owned.run('mcp-connect', () => this.connectWithBackoff(server, key, signal))
+      // A connection is shared by every thread: the profile's work, whichever turn asked for it first.
+      this.owned.run('mcp-connect', () => this.connectWithBackoff(server, key, signal), null)
     )
     this.connecting.set(key, attempt)
     try {

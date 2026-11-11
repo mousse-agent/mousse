@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { OwnedWorkBarrier } from '../../execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from '../../execution/OwnedWorkBarrier'
 import type {
   ChatResourceContext, ChatResourceControl, ChatResourceCursor, ChatResourceEvent,
   ChatResourceParticipant, ChatResourcePresence, ChatResourceSnapshot, ChatResourceTarget,
@@ -353,6 +353,8 @@ export class ChatResourceService {
   prune(): void { for (const group of this.groups.values()) this.pruneGroup(group) }
 
   getActiveCount(): number { return this.lifecycle.count }
+  /** The work `getActiveCount` counts, each with the threads it belongs to. */
+  getActiveWork(): OwnedWorkEntry[] { return this.lifecycle.entries() }
 
   beginShutdown(): void {
     this.stopped = true

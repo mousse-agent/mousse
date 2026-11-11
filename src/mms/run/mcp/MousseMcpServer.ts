@@ -1,3 +1,4 @@
+import { runInWorkScope } from '../../execution/workScope'
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
@@ -96,6 +97,13 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 
   async start(): Promise<void> {
+    if (this.http) return
+    // Started as the profile's work: a server first started inside a turn would otherwise hand that turn's thread
+    // (`currentWorkScope`) to every request it ever serves.
+    return runInWorkScope(null, () => this.startOwned())
+  }
+
+  private async startOwned(): Promise<void> {
     if (this.http) return
     const http = createServer((req, res) => {
       void this.handle(req, res).catch((error) => {

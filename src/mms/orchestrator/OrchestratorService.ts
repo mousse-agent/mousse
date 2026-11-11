@@ -33,7 +33,8 @@ import { piInstanceId, piProviderIdOf, PROVIDER_INSTANCE_ERROR_CODES, type Model
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
-import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
+import { threadScope } from '../execution/workScope'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
 import {
@@ -1015,6 +1016,11 @@ export class OrchestratorService extends EventEmitter {
     return this.lifecycle.snapshot()
   }
 
+  /** The work `getOwnedActivity` counts, each with the threads it belongs to (`OwnedWorkEntry.scope`). */
+  getOwnedWork(): OwnedWorkEntry[] {
+    return this.lifecycle.entries()
+  }
+
   /**
    * The first step of a profile stop, before the effect worker stops (which aborts the live turns): from
    * here a provider's stop handling cannot withdraw a saved approval request, so each stays pending for the
@@ -1177,7 +1183,7 @@ export class OrchestratorService extends EventEmitter {
         // lent its lease does this after it releases the lease.
         if (host?.lease?.kind !== 'borrowed') this.resumeThreadQueue(request.threadId)
       })
-    })
+    }, threadScope(request.threadId))
   }
 
   /**
@@ -9939,7 +9945,9 @@ export class OrchestratorService extends EventEmitter {
     const threadId = opts?.threadId ?? this.getBoundThreadId() ?? '__unbound__'
     this.sendsInFlight.set(threadId, (this.sendsInFlight.get(threadId) ?? 0) + 1)
     try {
-      return await this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
+      // Counted under its thread, so a delete of another thread neither waits for it nor is refused by it. A send with no
+      // thread yet (`__unbound__`) is the profile's (`null`), never the scope of the work that called it.
+      return await this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts), threadScope(threadId))
     } finally {
       const left = (this.sendsInFlight.get(threadId) ?? 1) - 1
       if (left > 0) this.sendsInFlight.set(threadId, left)
@@ -10522,11 +10530,12 @@ export class OrchestratorService extends EventEmitter {
     // While a scheduled occurrence's turn runs, its thread's end-of-work notice is the automation's to give (Tell me).
     if (opts?.schedule) this.scheduledTurnThreads.add(session.threadId)
     try {
-      // A bot's turn is named by its thread, so a trash of that thread can tell it from other work.
+      // A bot's turn is named by its thread, so a trash of that thread can tell it from other work. Every turn is
+      // counted under its thread, and so is the work it starts (an MCP call, a chat run).
       turnResponse = await this.lifecycle.run(opts?.bot ? `bot-turn:${session.threadId}` : 'turn', () => this.sessionAls
         .run(session, () =>
           this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
-        ))
+        ), threadScope(session.threadId))
       return turnResponse
     } catch (error) {
       // A Stop ended the turn's setup (its waits for the repository or the worktree): nothing of the turn runs.
@@ -13685,7 +13694,7 @@ export class OrchestratorService extends EventEmitter {
     threadStore: ThreadDataStore,
     opts?: RemoteTurnOptions
   ): Promise<BackgroundWorkflowTurnResult> {
-    return this.lifecycle.run('remote-turn', () => this.runRemoteTurnOwned(threadId, content, threadStore, opts))
+    return this.lifecycle.run('remote-turn', () => this.runRemoteTurnOwned(threadId, content, threadStore, opts), threadScope(threadId))
   }
 
   private async runRemoteTurnOwned(

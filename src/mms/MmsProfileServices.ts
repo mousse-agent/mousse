@@ -114,7 +114,10 @@ import type { EditorAsksPort } from './protocol/editorAsksPort'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
-import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
+import { OwnedWorkBarrier, type OwnedWorkEntry } from './execution/OwnedWorkBarrier'
+import { threadScope, type WorkScope } from './execution/workScope'
+import { canonicalPathSync, pathsOverlap } from './lifecycle/canonicalPath'
+import { readThreadWorkspaceRecord } from './workspace/ThreadWorkspaceManager'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
 import { returnTrashedThreadsToArchive } from './lifecycle/trashToArchive'
@@ -125,7 +128,7 @@ import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
 import { threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
@@ -176,6 +179,66 @@ function containsProfileBusy(error: unknown): boolean {
   )
     return true
   return error instanceof AggregateError && error.errors.some(containsProfileBusy)
+}
+
+/** Why a piece of work keeps a delete from going ahead (`MmsProfileServices.deleteGuard`). */
+type DeleteBlock = 'thread' | 'launched' | 'worktree' | 'repository' | 'profile'
+
+const DELETE_BLOCK_REASONS: Record<DeleteBlock, string> = {
+  thread: 'work in this thread or its subagent threads is still active',
+  launched: 'a thread it launched is still running',
+  worktree: 'another thread is working in its worktree',
+  repository: "another thread is working in the same repository, and this delete removes the thread's worktree and Git refs",
+  profile: 'profile execution is still active'
+}
+
+/** The refusal for the first piece of work that keeps a trash or purge from going ahead. */
+function deleteBusy(blocked: Array<{ label: string; why: DeleteBlock }>): ResourceLifecycleError {
+  const order: DeleteBlock[] = ['thread', 'launched', 'worktree', 'repository', 'profile']
+  const why = order.find((reason) => blocked.some((entry) => entry.why === reason))!
+  // The profile's own refusal reads as it always did.
+  if (why === 'profile') return new ResourceLifecycleError('busy', 'Cannot trash thread: profile execution is still active')
+  const labels = [...new Set(blocked.filter((entry) => entry.why === why).map((entry) => entry.label))]
+  return new ResourceLifecycleError('busy', `Cannot trash thread: ${DELETE_BLOCK_REASONS[why]} (${labels.join(', ')})`)
+}
+
+/**
+ * The refusal while requests a delete touches are in flight. It names why they count when that is not the profile's
+ * own work, and always says "requests are still active", so the delete tries again once they settle (`isPassingBusy`).
+ */
+function requestsBusy(prefix: string, active: Array<{ label: string; why: DeleteBlock }>): string {
+  const counts = new Map<string, number>()
+  for (const { label } of active) counts.set(label, (counts.get(label) ?? 0) + 1)
+  const list = [...counts].map(([key, count]) => `${key}=${count}`).join(', ')
+  const order: DeleteBlock[] = ['thread', 'launched', 'worktree', 'repository', 'profile']
+  const why = order.find((reason) => active.some((entry) => entry.why === reason))
+  if (!why || why === 'profile') return `${prefix}: profile requests are still active (${list})`
+  return `${prefix}: ${DELETE_BLOCK_REASONS[why]}; its requests are still active (${list})`
+}
+
+/** A thread's facts a delete compares (`MmsProfileServices.threadWorkspaceFacts`). */
+interface ThreadWorkspaceFacts {
+  location?: string
+  worktree?: string
+  /** The worktree is the thread's own (its workspace record), not its parent's folder it shares. */
+  ownWorktree: boolean
+  projectFolder: boolean
+  repositoryId?: string
+  projectId?: string
+}
+/** What a thread's `meta.json` says of where it works. */
+type ThreadFacts = Pick<Thread, 'projectId' | 'lineage' | 'workspaceBinding'>
+
+/** The facts of a thread from its `meta.json` in `location` (a thread in the trash is not listed); undefined when unreadable. */
+function readThreadFacts(location: string, threadId: string): ThreadFacts | undefined {
+  try {
+    const path = join(location, 'meta.json')
+    if (statSync(path).size > 1024 * 1024) return undefined
+    const meta = JSON.parse(readFileSync(path, 'utf8')) as Partial<Thread>
+    return meta && meta.id === threadId ? meta : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export class MmsProfileServices {
@@ -641,9 +704,9 @@ export class MmsProfileServices {
       // A deleted bot's home thread: like the lifecycle RPCs, wait briefly for other requests to
       // finish, and retry a busy refusal a few times before reporting it.
       trashThread: async (threadId) => {
-        const include = (active: string) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
         for (let attempt = 0; ; attempt += 1) {
-          await this.requests.waitForIdle(2_000, include).catch(() => {})
+          // Only requests the delete touches are waited for (`deleteGuard`).
+          await this.waitForDeleteRequests(threadId, 2_000, { keepWork: true }).catch(() => {})
           try {
             // Through the one delete: it is archived, then deleted for good; with unpublished work it stays in Archived.
             return await this.deleteThreadForGood(threadId, { human: false, discard: false, internal: true })
@@ -1058,17 +1121,19 @@ export class MmsProfileServices {
       archive: (threadId) => this.archiveIfStartedByPerson(threadId),
       stopRuns: (threadIds) => this.stopRunsForDelete(threadIds),
       isRunning: (threadIds) => this.runningForDelete(threadIds).length > 0,
-      assertCanStop: (threadIds) => this.assertCanStopForDelete(threadIds),
+      assertCanStop: (threadIds, options) => this.assertCanStopForDelete(threadIds, options),
+      assertRequestsSettled: (threadIds, options) => this.assertRequestsSettledBeforeStop(threadIds, options),
       precheck: (threadId, options) => {
         // A thread never moved has no lifecycle record yet; the trash would make the same one.
         if (!this.threads.lifecycleStore.get(threadId)) this.threads.getThreadDir(threadId)
         return this.lifecycle.cleanup.deletePrecheck(threadId, options)
       },
-      // The delete's own request, and the other lifecycle calls, are not waited for (as at its admission).
-      settle: (budgetMs) => this.requests.waitForIdle(budgetMs, (active) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))).catch(() => undefined)
+      // The delete's own request, and the other lifecycle calls, are not waited for (as at its admission); nor are
+      // requests of threads the delete does not touch (`deleteGuard`).
+      settle: (threadId, budgetMs, options) => this.waitForDeleteRequests(threadId, budgetMs, options).catch(() => undefined)
     })
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
-      assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
+      assertCanTrash: (record, options) => this.assertLifecycleIdle(record.taskId, options),
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
         const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
@@ -1246,39 +1311,26 @@ export class MmsProfileServices {
     void opts?.headless
   }
 
-  private assertLifecycleIdle(taskId: string): void {
+  /**
+   * The trash's admission and the purge's idle check (`ResourceLifecycleHooks.assertCanTrash`): nothing of these threads
+   * runs, and no other work the delete touches (`deleteGuard`) is in flight. Work of unrelated threads goes on.
+   */
+  private assertLifecycleIdle(taskId: string, options: { keepWork?: boolean } = {}): void {
     const owned = this.lifecycleOwnedTasks(taskId)
     // A bot's turns on these threads are not other work: the accepted trash stops them in its drain.
     const botThreads = new Set(this.personalBots?.botThreadsAmong(owned.map((task) => task.taskId)) ?? [])
     for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId, { ignoreTurn: botThreads.has(task.taskId) })
     this.platform.chats.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
     this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
-    const turns = Object.fromEntries(Object.entries(this.orchestrator.getOwnedActivity()).filter(([label]) => !(label.startsWith('bot-turn:') && botThreads.has(label.slice('bot-turn:'.length)))))
-    const activity = {
-      ...turns,
-      platform: this.platform.getActiveCount(),
-      scheduled: this.scheduled.getActiveCount(),
-      // Headless CLI agents are retired; the key stays for protocol stability.
-      headless: 0,
-      mcp: this.mcpManager.getActiveCount()
-    }
-    const activeExecution = Object.entries(activity).filter(([, count]) => count > 0)
-    if (activeExecution.length)
-      throw new ResourceLifecycleError(
-        'busy',
-        'Cannot trash thread: profile execution is still active'
-      )
-    const requests = this.requests.snapshot()
-    const activeRequests = Object.entries(requests).filter(
-      ([key, count]) =>
-        count > 0 && !LIFECYCLE_EXEMPT_METHODS.has(key.replace(/^rpc:/, ''))
-    )
-    if (activeRequests.length) {
-      throw new ResourceLifecycleError(
-        'busy',
-        `Cannot trash thread: profile requests are still active (${activeRequests.map(([key, count]) => `${key}=${count}`).join(', ')})`
-      )
-    }
+    const blocks = this.deleteGuard([taskId, ...owned.map((task) => task.taskId)], { removesWork: options.keepWork !== true })
+    const execution = this.lifecycleExecution().filter(({ label }) => !(label.startsWith('bot-turn:') && botThreads.has(label.slice('bot-turn:'.length))))
+    const blocked = execution.flatMap((entry) => { const why = blocks(entry.scope); return why ? [{ label: entry.label, why }] : [] })
+    if (blocked.length) throw deleteBusy(blocked)
+    const activeRequests = this.requests.entries().flatMap((entry) => {
+      const why = LIFECYCLE_EXEMPT_METHODS.has(entry.label.replace(/^rpc:/, '')) ? undefined : blocks(entry.scope)
+      return why ? [{ label: entry.label, why }] : []
+    })
+    if (activeRequests.length) throw new ResourceLifecycleError('busy', requestsBusy('Cannot trash thread', activeRequests))
     const root = this.threads.lifecycleStore.require(taskId)
     const settle = () => {
       for (const task of owned) {
@@ -1312,6 +1364,109 @@ export class MmsProfileServices {
       },
       threadId
     )
+  }
+
+  /** The profile's execution a delete looks at: turns and sends, agent and chat runs, automations, MCP work. */
+  private lifecycleExecution(): OwnedWorkEntry[] {
+    return [
+      ...this.orchestrator.getOwnedWork(),
+      ...this.platform.getActiveWork(),
+      ...this.scheduled.getActiveWork(),
+      ...this.mcpManager.getActiveWork()
+    ]
+  }
+
+  /**
+   * Which work keeps a delete of `threadIds` from going ahead, and why (`DeleteBlock`); undefined for work it does not
+   * touch. Counted: work of the profile or of unknown reach (`scope: null`); work of these threads and their subagent
+   * threads; work of a thread they launched (or its subagents); and work of a thread whose folder is inside one of their
+   * own worktrees or thread folders. A delete that removes the work (`removesWork`: an expiry takes the worktree and
+   * Git refs) also counts work of a thread in the same repository or project. A person's delete keeps the worktree,
+   * branch and refs (#812/#817), so another thread's work in the same repository is not touched by it and goes on.
+   */
+  private deleteGuard(threadIds: readonly string[], options: { removesWork: boolean }): (scope: WorkScope | null) => DeleteBlock | undefined {
+    const family = new Set<string>()
+    for (const id of threadIds) {
+      family.add(id)
+      for (const subagent of this.threadDeletes.subagentsOf(id)) family.add(subagent)
+      // A thread waiting for recovery is refused by the trash on its own; its owned children are then left out here.
+      if (this.threads.lifecycleStore.get(id)) { try { for (const task of this.lifecycleOwnedTasks(id)) family.add(task.taskId) } catch { /* see above */ } }
+    }
+    // Threads they launched (`createdByThreadId`), and those threads' own subagents and launches.
+    const related = new Set(family)
+    const listed = this.threads.listAllThreads()
+    for (let grew = true; grew;) {
+      grew = false
+      for (const thread of listed) {
+        if (related.has(thread.id)) continue
+        const parent = thread.lineage?.parentThreadId
+        if ((thread.createdByThreadId && related.has(thread.createdByThreadId)) || (parent && related.has(parent))) { related.add(thread.id); grew = true }
+      }
+    }
+    const facts = new Map<string, ReturnType<MmsProfileServices['threadWorkspaceFacts']>>()
+    const factsOf = (id: string) => {
+      if (!facts.has(id)) facts.set(id, this.threadWorkspaceFacts(id))
+      return facts.get(id)
+    }
+    // Folders of the family no other thread may work in: their own worktrees (never a project's own folder, which is the
+    // person's and which no delete touches) and their thread folders. A shared subagent's folder is its parent's: its
+    // delete removes nothing there (its inventory has no worktree), so its parent's work there does not count.
+    const owned: string[] = [], repositories = new Set<string>(), projects = new Set<string>()
+    for (const id of family) {
+      const own = factsOf(id)
+      if (!own) continue
+      if (own.location) owned.push(own.location)
+      if (own.worktree && own.ownWorktree && !own.projectFolder) owned.push(own.worktree)
+      if (own.repositoryId) repositories.add(own.repositoryId)
+      if (own.projectId) projects.add(own.projectId)
+    }
+    return (scope) => {
+      if (!scope || !scope.threadIds.length) return 'profile'
+      for (const id of scope.threadIds) {
+        if (family.has(id)) return 'thread'
+        if (related.has(id)) return 'launched'
+        const other = factsOf(id)
+        // A thread not known here (another computer's, one already gone) is work of unknown reach.
+        if (!other) return 'profile'
+        if (other.worktree && owned.some((folder) => pathsOverlap(canonicalPathSync(other.worktree!), canonicalPathSync(folder)))) return 'worktree'
+        if (options.removesWork && ((other.repositoryId && repositories.has(other.repositoryId)) || (other.projectId && projects.has(other.projectId)))) return 'repository'
+      }
+      return undefined
+    }
+  }
+
+  /**
+   * Where a thread keeps its data and works: its folder, its worktree (or project folder) and repository, its project.
+   * Read only: from the list caches (`ThreadDataStore.peekThread`), else from the thread's lifecycle record and the
+   * `meta.json` and `workspace.json` in its folder. No project is scanned, and no thread folder is resolved, registered
+   * or migrated. A thread in the trash is read the same way. A subagent with no workspace record of its own works in its
+   * parent's (a `shared` one in the parent's folder, `workspaceBinding.sharedPath`), so it has its parent's facts.
+   */
+  private threadWorkspaceFacts(threadId: string, seen = new Set<string>()): ThreadWorkspaceFacts | undefined {
+    const record = this.threads.lifecycleStore.get(threadId)
+    // The list caches, then the lifecycle record's `meta.json`: never `getThread`, which may scan every project and
+    // migrate and register what it finds. A thread found in neither is of unknown reach (undefined).
+    const meta: ThreadFacts | undefined = this.threads.peekThread(threadId) ?? (record ? readThreadFacts(record.location, threadId) : undefined)
+    if (!meta && !record) return undefined
+    const location = record?.location
+    const workspace = location ? readThreadWorkspaceRecord(location) : undefined
+    const facts: ThreadWorkspaceFacts = { location, worktree: workspace?.worktreePath, ownWorktree: Boolean(workspace?.worktreePath), projectFolder: workspace?.kind === 'project-folder', repositoryId: workspace?.repositoryId, projectId: meta?.projectId }
+    const parent = meta?.lineage?.parentThreadId
+    if (workspace || !parent || parent === threadId || seen.has(parent)) return facts
+    seen.add(threadId)
+    const up = this.threadWorkspaceFacts(parent, seen)
+    if (!up) return facts
+    // The shared path is the parent's own folder: a project's own folder stays one. It is not this thread's own.
+    return { ...facts, worktree: meta?.workspaceBinding?.sharedPath ?? up.worktree, ownWorktree: false, projectFolder: up.projectFolder, repositoryId: up.repositoryId, projectId: facts.projectId ?? up.projectId }
+  }
+
+  /**
+   * Waits up to `budgetMs` for the requests a delete of `threadId` would be refused for (`deleteGuard`): requests of the
+   * profile or of unknown reach, and requests of the threads it touches. Lifecycle calls are not waited for.
+   */
+  private waitForDeleteRequests(threadId: string, budgetMs: number, options: { keepWork?: boolean } = {}): Promise<void> {
+    const blocks = this.deleteGuard([threadId], { removesWork: options.keepWork === false })
+    return this.requests.waitForIdle(Math.max(1, Math.round(budgetMs)), (label, scope) => !LIFECYCLE_EXEMPT_METHODS.has(label.replace(/^rpc:/, '')) && blocks(scope) !== undefined)
   }
 
   private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
@@ -1438,13 +1593,29 @@ export class MmsProfileServices {
    */
   private deleteStopWaitMs = 20_000
 
+  /** `ThreadDeleteDeps.assertRequestsSettled`: the requests that would refuse the delete after its Stop, checked before it. */
+  private async assertRequestsSettledBeforeStop(threadIds: readonly string[], options: { keepWork?: boolean } = {}): Promise<void> {
+    const family = new Set(threadIds)
+    const blocks = this.deleteGuard(threadIds, { removesWork: options.keepWork === false })
+    // The threads' own requests (the send waiting for a turn, a window's read) end with the Stop or are waited for after it.
+    const why = (label: string, scope: WorkScope | null): DeleteBlock | undefined =>
+      LIFECYCLE_EXEMPT_METHODS.has(label.replace(/^rpc:/, '')) || (scope?.threadIds.length && scope.threadIds.every((id) => family.has(id))) ? undefined : blocks(scope)
+    try {
+      await this.requests.waitForIdle(2_000, (label, scope) => why(label, scope) !== undefined)
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy') throw error
+      const active = this.requests.entries().flatMap((entry) => { const reason = why(entry.label, entry.scope); return reason ? [{ label: entry.label, why: reason }] : [] })
+      throw new ResourceLifecycleError('busy', requestsBusy('Cannot trash thread', active))
+    }
+  }
+
   /**
    * What refuses a delete's trash, checked before its Stop (`ThreadDeleteDeps.assertCanStop`): shutdown, the threads'
-   * own terminals, questions, agents, chats and workflows, and any other execution of the profile, another thread's
-   * send still being set up among it (the trash counts every send). Their own turns, the questions those turns asked
-   * and the sends waiting for them end with the Stop; requests that come and go are waited for by the delete.
+   * own terminals, questions, agents, chats and workflows, and other execution the delete touches (`deleteGuard`): a
+   * thread they launched, another thread in their worktree, the profile's own work. Their own turns, the questions
+   * those turns asked and the sends waiting for them end with the Stop; requests are checked by `assertRequestsSettledBeforeStop`.
    */
-  private assertCanStopForDelete(threadIds: readonly string[]): void {
+  private assertCanStopForDelete(threadIds: readonly string[], options: { keepWork?: boolean } = {}): void {
     this.requests.assertAccepting()
     const owned = [...new Set(threadIds.flatMap((id) => this.threads.lifecycleStore.get(id) ? this.lifecycleOwnedTasks(id).map((task) => task.taskId) : [id]))]
     const family = new Set([...owned, ...threadIds])
@@ -1452,11 +1623,22 @@ export class MmsProfileServices {
     for (const id of family) this.threadRuntimes.assertDeletable(id, { ignoreTurn: true, ignoreQuestions: stopping.has(id) })
     this.platform.chats.assertLifecycleIdle(family)
     this.platform.workflowRuns.assertLifecycleIdle(family)
-    const others = [...this.orchestrator.activeTurnThreadIds(), ...this.orchestrator.sendingThreadIds()].filter((id) => !family.has(id))
-    const otherWork = Object.entries(this.orchestrator.getOwnedActivity()).filter(([label, count]) =>
-      count > 0 && label !== 'turn' && label !== 'send' && !(label.startsWith('bot-turn:') && family.has(label.slice('bot-turn:'.length))))
-    if (others.length || otherWork.length || this.platform.getActiveCount() || this.scheduled.getActiveCount() || this.mcpManager.getActiveCount())
-      throw new ResourceLifecycleError('busy', 'Cannot trash thread: profile execution is still active')
+    const blocks = this.deleteGuard([...family], { removesWork: options.keepWork === false })
+    const ownWork = (scope: WorkScope | null): boolean => Boolean(scope?.threadIds.length && scope.threadIds.every((id) => family.has(id)))
+    // What the Stop ends is left out: the threads' turns and the sends waiting for them, the MCP calls those turns make,
+    // and a bot's turns there (the trash's drain ends those). Everything else the delete touches refuses it here.
+    const blocked = this.lifecycleExecution().flatMap((entry) => {
+      if (ownWork(entry.scope) && (entry.label === 'turn' || entry.label === 'send' || entry.label.startsWith('bot-turn:') || entry.label.startsWith('mcp-'))) return []
+      const why = blocks(entry.scope)
+      return why ? [{ label: entry.label, why }] : []
+    })
+    // A turn or send counted nowhere else (a send that named no thread is the profile's).
+    for (const id of [...this.orchestrator.activeTurnThreadIds(), ...this.orchestrator.sendingThreadIds()]) {
+      if (family.has(id)) continue
+      const why = blocks(threadScope(id))
+      if (why) blocked.push({ label: 'turn', why })
+    }
+    if (blocked.length) throw deleteBusy(blocked)
   }
 
   /**
@@ -1715,7 +1897,11 @@ export class MmsProfileServices {
     return this.requests.signal
   }
 
-  async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
+  /**
+   * `scope`: the threads the request names, when it names nothing beyond them (`requestWorkScope`); `null` or left out,
+   * it may reach anything of the profile. A delete waits only for requests it touches (`deleteGuard`).
+   */
+  async runOwnedRequest<T>(method: string, work: () => T | Promise<T>, scope: WorkScope | null = null): Promise<T> {
     const label = `rpc:${method}`
     // An idle window's wait holds no profile state and ends when the relay closes, so it must not
     // make storage changes or shutdown wait for it. It is still refused once the profile drains.
@@ -1731,22 +1917,27 @@ export class MmsProfileServices {
         // unchanged synchronous idle check and durable task fence below authorize
         // the move; this wait alone never does. Exclude lifecycle calls consistently
         // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
-        const include = (active: string) =>
-          !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))
+        // Requests of threads the delete does not touch (another thread's send, open
+        // for its whole turn) are not waited for (`deleteGuard`), as at that idle check.
+        // Every thread the request names is the delete's; one that names none waits for every request.
+        const targets = scope?.threadIds ?? []
+        const blocks = targets.length ? this.deleteGuard(targets, { removesWork: false }) : () => 'profile' as const
+        const include = (active: string, activeScope: WorkScope | null) =>
+          !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, '')) && blocks(activeScope) !== undefined
         try {
           await this.requests.waitForIdle(2_000, include)
         } catch (error) {
           if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy')
             throw error
-          const remaining = Object.entries(this.requests.snapshot()).filter(([key]) => include(key))
-          throw new DomainRpcError(
-            'profile_busy',
-            `Cannot change task storage: profile requests are still active (${remaining.map(([key, count]) => `${key}=${count}`).join(', ')})`
-          )
+          const remaining = this.requests.entries().flatMap((entry) => {
+            const why = include(entry.label, entry.scope) ? blocks(entry.scope) : undefined
+            return why ? [{ label: entry.label, why }] : []
+          })
+          throw new DomainRpcError('profile_busy', requestsBusy('Cannot change task storage', remaining))
         }
         this.requests.assertAccepting()
         return await work()
-      })
+      }, scope)
     } catch (error) {
       if (
         error instanceof Error &&

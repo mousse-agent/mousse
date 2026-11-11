@@ -1,7 +1,15 @@
+import { currentWorkScope, runInWorkScope, type WorkScope } from './workScope'
+
+/** One piece of owned work in flight: its label, and the threads it belongs to (`null`: the profile's, or unknown). */
+export interface OwnedWorkEntry {
+  label: string
+  scope: WorkScope | null
+}
+
 /** Tracks actual promise settlement separately from an abort request or a UI running flag. */
 export class OwnedWorkBarrier {
   private readonly controller = new AbortController()
-  private readonly active = new Map<symbol, string>()
+  private readonly active = new Map<symbol, OwnedWorkEntry>()
   private readonly idleListeners = new Set<() => void>()
 
   get signal(): AbortSignal { return this.controller.signal }
@@ -9,23 +17,33 @@ export class OwnedWorkBarrier {
   get count(): number { return this.active.size }
   snapshot(): Record<string, number> {
     const result: Record<string, number> = Object.create(null)
-    for (const label of this.active.values()) result[label] = (result[label] ?? 0) + 1
+    for (const { label } of this.active.values()) result[label] = (result[label] ?? 0) + 1
     return result
+  }
+
+  /** The work in flight, each with the threads it belongs to. */
+  entries(): OwnedWorkEntry[] {
+    return [...this.active.values()]
   }
 
   assertAccepting(): void {
     if (this.stopping) throw Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' })
   }
 
-  run<T>(label: string, work: () => T | Promise<T>): Promise<T> {
+  /**
+   * `scope`: the threads the work belongs to; work it starts belongs to them too. Left out, the work belongs to the
+   * work that started it (`currentWorkScope`). `null` counts it as the profile's.
+   */
+  run<T>(label: string, work: () => T | Promise<T>, scope?: WorkScope | null): Promise<T> {
     this.assertAccepting()
     const identity = Symbol(label)
-    this.active.set(identity, label)
+    const owner = scope === undefined ? currentWorkScope() : scope
+    this.active.set(identity, { label, scope: owner })
     const release = (): void => {
       this.active.delete(identity)
       for (const listener of [...this.idleListeners]) listener()
     }
-    try { return Promise.resolve(work()).finally(release) }
+    try { return Promise.resolve(runInWorkScope(owner, work)).finally(release) }
     catch (error) { release(); return Promise.reject(error) }
   }
 
@@ -34,9 +52,9 @@ export class OwnedWorkBarrier {
   }
 
   /** A timeout never clears ownership or permits an archive/removal to proceed. */
-  waitForIdle(timeoutMs = 30_000, include: (label: string) => boolean = () => true): Promise<void> {
+  waitForIdle(timeoutMs = 30_000, include: (label: string, scope: WorkScope | null) => boolean = () => true): Promise<void> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return Promise.reject(new Error('Invalid shutdown timeout'))
-    const hasWork = () => [...this.active.values()].some(include)
+    const hasWork = () => [...this.active.values()].some((entry) => include(entry.label, entry.scope))
     if (!hasWork()) return Promise.resolve()
     return new Promise<void>((resolve, reject) => {
       const idle = (): void => { if (!hasWork()) { clearTimeout(timer); this.idleListeners.delete(idle); resolve() } }

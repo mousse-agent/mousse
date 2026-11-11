@@ -2,6 +2,7 @@ import type { ToolCall } from '@earendil-works/pi-ai'
 import { APPROVALS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import { DEFAULT_PERMISSION_MODE, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import type { McpManager } from '../../../integrations/mcp/McpManager'
+import { runInWorkScope, threadScope } from '../../../execution/workScope'
 import { redactSensitiveText } from '../../../integrations/secrets'
 import { RELAY_CALL_TIMEOUT_MS } from '../attachment'
 import { userMcpOutcome, type McpCallRequest, type ToolRegistryOptions } from '../appTools/registry'
@@ -95,7 +96,9 @@ export class RelayHandler {
     const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: args } as ToolCall)
     let outcome: ToolOutcome
     try {
-      const result = await this.host.manager.callTool(tool.providerName, args, turn.projectPath, request.signal, turn.actor, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS })
+      // The call is the work of the caller's thread (`OwnedWorkBarrier` scopes): a delete of another thread neither
+      // waits for it nor is refused by it, while a delete of this thread still is.
+      const result = await runInWorkScope(threadScope(threadId), () => this.host.manager.callTool(tool.providerName, args, turn.projectPath, request.signal, turn.actor, undefined, { timeoutMs: RELAY_CALL_TIMEOUT_MS }))
       outcome = capped(userMcpOutcome(result))
     } catch (error) {
       if (ledgerId) ledger?.failed(ledgerId)
