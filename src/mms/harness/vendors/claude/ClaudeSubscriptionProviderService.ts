@@ -2475,8 +2475,8 @@ export class ClaudeSubscriptionProviderService {
      * that came first) is accepted if Claude Code read it after all, and otherwise handed back by its token, so it
      * comes back as queued, and Claude Code must not run it as well (`LiveSession.unreadFate`):
      * - a cancelled turn's interrupt sweeps Claude Code's queue, and a Stop closes the process;
-     * - after a result, Claude Code is asked to drop it (`cancelAsyncMessage`): dropped, it is handed back; already
-     *   taken by a turn, it is read.
+     * - at a result, Claude Code is asked to drop it (`cancelAsyncMessage`, `LiveSession.endAtResult`): dropped, it is
+     *   handed back; taken by a turn, the run stays open for that turn, and the steer is read.
      * When Claude Code cannot say, it is still handed back: at least once, never lost. Never throws.
      */
     const settleUnreadSteers = async (): Promise<void> => {
