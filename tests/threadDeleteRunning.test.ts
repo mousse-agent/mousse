@@ -25,6 +25,8 @@ vi.setConfig({ testTimeout: 60_000 })
 /** A provider whose turns stream until each is stopped, as long turns do. Each turn reports its thread as its session. */
 class SlowAdapter implements ProviderAdapter {
   private readonly running = new Map<string, Set<() => void>>()
+  /** Asks the person a question from a turn whose prompt says `@@ASK`; the turn's end (its abort) withdraws it. */
+  ask?: (threadId: string, signal: AbortSignal) => void
   constructor(readonly driver: ProviderDriverKind, readonly capabilities: ProviderCapabilities) {}
   configured(): boolean { return true }
   live(threadId?: string): number {
@@ -41,6 +43,7 @@ class SlowAdapter implements ProviderAdapter {
     set.add(stop)
     try {
       sink.text({ phase: 'delta', content: 'working', contentIndex: 0 })
+      if (input.prompt.includes('@@ASK')) this.ask?.(input.threadId, input.signal)
       await stopped
       return { text: '', aborted: true, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'scripted', nativeMessages: [], providerRef }
     } finally {
@@ -65,9 +68,12 @@ async function profile() {
   f.services.orchestrator.setHarness(testHarness({ profileHome: f.services.getProfileHomeDir(), adapters: [adapter] }))
   const sends: Promise<unknown>[] = []
   const pending = (threadId: string) => readDurableQueue(f.services.threads, threadId).filter((item) => item.state === 'pending').length
+  adapter.ask = (threadId, signal) => {
+    void f.services.questions.requestAnswers([{ id: 'layout', prompt: 'Which layout?', options: [{ id: 'table', label: 'Table' }, { id: 'list', label: 'List' }] }] as never, threadId, { signal }).catch(() => undefined)
+  }
   /** Starts a long turn in `threadId`, and queues a second message behind it unless `queue` is false. */
-  const run = async (threadId: string, queue = true) => {
-    sends.push(f.rpc.request('orchestrator.send', { threadId, content: 'take your time' }).catch(() => undefined))
+  const run = async (threadId: string, queue = true, content = 'take your time') => {
+    sends.push(f.rpc.request('orchestrator.send', { threadId, content }).catch(() => undefined))
     await waitFor(() => adapter.live(threadId) === 1, 'the turn to reach the provider')
     if (!queue) return
     sends.push(f.rpc.request('orchestrator.send', { threadId, content: 'and then this' }).catch(() => undefined))
@@ -75,15 +81,20 @@ async function profile() {
   }
   const thread = async (name: string) => (await f.rpc.request<{ thread: Thread }>('threads.create', { name })).thread
   const close = async () => {
-    await adapter.interrupt()
-    await Promise.all(sends)
+    // A turn that starts after one interrupt (a queued message, a held send let go) is stopped by the next.
+    let settled = false
+    const all = Promise.all(sends).then(() => { settled = true })
+    while (!settled) {
+      await adapter.interrupt()
+      await Promise.race([all, new Promise((resolve) => setTimeout(resolve, 200))])
+    }
     // The thread's last save sends its search index notice a second later. In tests the index runs in this process on
     // one shared engine that outlives the daemon, so it is closed here, or its file stays open and the folder cannot go.
     await new Promise((resolve) => setTimeout(resolve, 1_200))
     await sharedThreadDbClient().call('closeEverything')
     await f.close()
   }
-  return { f, adapter, run, pending, thread, close }
+  return { f, adapter, run, pending, thread, close, sends }
 }
 
 const stopsFor = (services: MmsProfileServices) => vi.spyOn(services as unknown as { stopRunsForDelete: (ids: readonly string[]) => Promise<void> }, 'stopRunsForDelete')
@@ -150,6 +161,23 @@ describe('deleting a thread while its turn runs', () => {
       expect(p.f.services.threads.getThread(child.id)).toBeUndefined()
       expect(p.adapter.live(child.id)).toBe(0)
       expect(p.adapter.live(parent.id)).toBe(0)
+    } finally {
+      await p.close()
+    }
+  })
+
+  it('ends a question its running turn asked, which the Stop withdraws, instead of refusing the delete', async () => {
+    const p = await profile()
+    try {
+      const target = await p.thread('asks a question')
+      // No queued message here: a message sent to a thread that waits for an answer answers the question for it.
+      await p.run(target.id, false, 'take your time @@ASK')
+      await waitFor(() => p.f.services.questions.listPendingForThread(target.id).length === 1, 'the question to be pending')
+      archived(p.f.services.threads, target.id)
+      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: target.id })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(p.f.services.questions.listPendingForThread(target.id)).toEqual([])
+      expect(p.adapter.live(target.id)).toBe(0)
     } finally {
       await p.close()
     }
@@ -241,6 +269,39 @@ describe('a delete that will be refused stops nothing', () => {
       untouched(p, target.id)
       expect(p.adapter.live(other.id)).toBe(1)
     } finally {
+      await p.close()
+    }
+  })
+
+  it('while another thread\'s send is still being set up (no turn yet): the turn keeps running and its queue stays', async () => {
+    const p = await profile()
+    let release = () => {}
+    try {
+      const target = await p.thread('to delete')
+      const other = await p.thread('starting')
+      await p.run(target.id)
+      // The other thread's send waits for its repository or a folder prompt: it is being handled, with no turn yet.
+      const orchestrator = p.f.services.orchestrator as unknown as { sendOwned: (...args: unknown[]) => Promise<unknown> }
+      const sendOwned = orchestrator.sendOwned.bind(p.f.services.orchestrator)
+      const hold = new Promise<void>((resolve) => { release = resolve })
+      vi.spyOn(orchestrator, 'sendOwned').mockImplementation(async (...args: unknown[]) => {
+        if ((args[2] as { threadId?: string } | undefined)?.threadId === other.id) await hold
+        return sendOwned(...args)
+      })
+      p.sends.push(p.f.rpc.request('orchestrator.send', { threadId: other.id, content: 'hello' }).catch(() => undefined))
+      // Two sends are handled: the target's, open for its turn, and the other thread's, held before any turn.
+      await waitFor(() => p.f.services.orchestrator.getOwnedActivity().send === 2, 'the other send to be handled')
+      expect(p.f.services.orchestrator.isTurnActive(other.id)).toBe(false)
+      archived(p.f.services.threads, target.id)
+      const stops = stopsFor(p.f.services)
+      const refused = await p.f.rpc.request('threads.delete', { threadId: target.id }).then(() => undefined, (error: unknown) => error)
+      // Nothing was stopped, and the reason is the trash's own.
+      expect(stops).not.toHaveBeenCalled()
+      untouched(p, target.id)
+      expect(String(refused)).toMatch(/profile execution is still active/)
+    } finally {
+      release()
+      vi.restoreAllMocks()
       await p.close()
     }
   })

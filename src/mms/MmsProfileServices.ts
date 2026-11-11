@@ -1059,10 +1059,10 @@ export class MmsProfileServices {
       stopRuns: (threadIds) => this.stopRunsForDelete(threadIds),
       isRunning: (threadIds) => this.runningForDelete(threadIds).length > 0,
       assertCanStop: (threadIds) => this.assertCanStopForDelete(threadIds),
-      precheck: (threadId) => {
+      precheck: (threadId, options) => {
         // A thread never moved has no lifecycle record yet; the trash would make the same one.
         if (!this.threads.lifecycleStore.get(threadId)) this.threads.getThreadDir(threadId)
-        return this.lifecycle.cleanup.deletePrecheck(threadId)
+        return this.lifecycle.cleanup.deletePrecheck(threadId, options)
       },
       // The delete's own request, and the other lifecycle calls, are not waited for (as at its admission).
       settle: (budgetMs) => this.requests.waitForIdle(budgetMs, (active) => !LIFECYCLE_EXEMPT_METHODS.has(active.replace(/^rpc:/, ''))).catch(() => undefined)
@@ -1440,17 +1440,19 @@ export class MmsProfileServices {
 
   /**
    * What refuses a delete's trash, checked before its Stop (`ThreadDeleteDeps.assertCanStop`): shutdown, the threads'
-   * own terminals, questions, agents, chats and workflows, and any other execution of the profile. Their own turns, and
-   * the sends waiting for them, end with the Stop; requests that come and go are waited for by the delete.
+   * own terminals, questions, agents, chats and workflows, and any other execution of the profile, another thread's
+   * send still being set up among it (the trash counts every send). Their own turns, the questions those turns asked
+   * and the sends waiting for them end with the Stop; requests that come and go are waited for by the delete.
    */
   private assertCanStopForDelete(threadIds: readonly string[]): void {
     this.requests.assertAccepting()
     const owned = [...new Set(threadIds.flatMap((id) => this.threads.lifecycleStore.get(id) ? this.lifecycleOwnedTasks(id).map((task) => task.taskId) : [id]))]
     const family = new Set([...owned, ...threadIds])
-    for (const id of family) this.threadRuntimes.assertDeletable(id, { ignoreTurn: true })
+    const stopping = new Set(this.runningForDelete([...family]))
+    for (const id of family) this.threadRuntimes.assertDeletable(id, { ignoreTurn: true, ignoreQuestions: stopping.has(id) })
     this.platform.chats.assertLifecycleIdle(family)
     this.platform.workflowRuns.assertLifecycleIdle(family)
-    const others = this.orchestrator.activeTurnThreadIds().filter((id) => !family.has(id))
+    const others = [...this.orchestrator.activeTurnThreadIds(), ...this.orchestrator.sendingThreadIds()].filter((id) => !family.has(id))
     const otherWork = Object.entries(this.orchestrator.getOwnedActivity()).filter(([label, count]) =>
       count > 0 && label !== 'turn' && label !== 'send' && !(label.startsWith('bot-turn:') && family.has(label.slice('bot-turn:'.length))))
     if (others.length || otherWork.length || this.platform.getActiveCount() || this.scheduled.getActiveCount() || this.mcpManager.getActiveCount())

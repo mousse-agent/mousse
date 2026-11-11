@@ -55,7 +55,7 @@ export interface ThreadDeleteDeps {
    */
   assertCanStop?(threadIds: readonly string[]): void
   /** What would refuse a delete that keeps the work, read before anything stops (`ResourcePurgeService.deletePrecheck`). */
-  precheck?(threadId: string): Promise<{ blockers: string[]; soleCopies: string[] }>
+  precheck?(threadId: string, options: { soleCopies: boolean }): Promise<{ blockers: string[]; soleCopies: string[] }>
   /**
    * Waits up to `budgetMs` for the profile's other requests to settle. The trash and the purge each refuse while one
    * is in flight, and a window still shows the thread for a moment, so its reads of it keep arriving meanwhile.
@@ -142,7 +142,9 @@ export class ThreadDeleter {
     // An expiry takes the thread's files with it as asked; a delete that keeps the work checks what would refuse it.
     if (!intent.expiry && this.deps.precheck) {
       const precheck = this.deps.precheck
-      const found = await Promise.all(members.map(async (id) => ({ id, ...await precheck(id) })))
+      // Files that may be the only copy refuse only a delete that may not discard them.
+      const soleCopies = !(intent.human && intent.discard)
+      const found = await Promise.all(members.map(async (id) => ({ id, ...await precheck(id, { soleCopies }) })))
       for (const member of found) this.refuseFor(member.id, member.blockers, member.soleCopies.length > 0, intent)
     }
     await this.deps.stopRuns?.(members)

@@ -31,6 +31,29 @@ const within = (root: string, path: string): boolean => { const rel = relative(r
 const active = new Set<string>()
 /** Whether `path` is there, as `existsSync` answers; a checkout is read without blocking the daemon. */
 const present = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
+
+/** Mousse's refs outside `refs/heads/` are named by ids, so the same name is the same ref whatever repository a record gives. */
+const idNamed = (identity: string): boolean => identity.startsWith('refs/') && !identity.startsWith('refs/heads/')
+
+/**
+ * Whether another task or profile also claims this resource, so a purge leaves it: the same identity (in the same
+ * repository, or named by ids), or a path that overlaps a peer's claim. Shared by the preview and `deletePrecheck`.
+ */
+function sharedWithPeer(peers: ReadonlyArray<Parameters<typeof claimOverlapsPath>[0] & { identity: string; repositoryId?: string }>, identity: string, repositoryId: string | undefined, real: string | undefined): boolean {
+  return peers.some((peer) => peer.identity === identity && (!repositoryId || !peer.repositoryId || peer.repositoryId === repositoryId || idNamed(identity)) || real !== undefined && claimOverlapsPath(peer, real))
+}
+
+/** True once `root` holds anything but folders; stops at the first such entry (a symbolic link counts, as in a walk). */
+async function holdsAnyFile(root: string): Promise<boolean> {
+  const pending = [root]
+  for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) return true
+      pending.push(join(dir, entry.name))
+    }
+  }
+  return false
+}
 const rootIdentity = (stat: { dev: number; ino: number; birthtimeMs: number }) => digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs })
 /**
  * Whether `stat` is the folder `recorded` identifies: the same device and inode, and the same creation time where the
@@ -367,22 +390,32 @@ export class ResourcePurgeService {
    * inventory's blockers, and files that may be the only copy (which need a person's Discard). Read-only; the trash and
    * the preview still check everything again.
    */
-  async deletePrecheck(taskId: string): Promise<{ blockers: string[]; soleCopies: string[] }> {
+  async deletePrecheck(taskId: string, options: { soleCopies: boolean } = { soleCopies: true }): Promise<{ blockers: string[]; soleCopies: string[] }> {
     const record = this.store.require(taskId)
     const ownedIds = new Set(this.owned(taskId).map((task) => task.taskId))
+    let peers: Awaited<ReturnType<ResourcePurgeService['peers']>>
+    try { peers = await this.peers(ownedIds) } catch (error) { return { blockers: [(error as Error).message], soleCopies: [] } }
     const inventory = await buildResourceInventory(this.store, record, { keepWork: true })
-    const soleCopies: string[] = []
+    const blockers = [...inventory.blockers]
+    // As the preview: unverified sources decide nothing here, and a delete that may discard needs no files listed.
+    if (blockers.length || inventory.sources.some((source) => source.status !== 'verified') || !options.soleCopies) return { blockers, soleCopies: [] }
     for (const resource of inventory.resources) {
+      // The preview's exceptions, in its order: not this thread's, kept with the work, another's too, or held back by
+      // an owner that cannot be verified; the record's own tombstone and configuration rows are no files.
       if (!ownedIds.has(resource.ownerTaskId) || ['worktree', 'agent-session', 'artifact', 'git-ref'].includes(resource.kind)) continue
-      if (resource.identity.includes('#') || !isAbsolute(resource.identity) || !within(this.store.profileHome, resource.identity)) continue
+      if (resource.identity.includes('#') || resource.identity === this.store.recordPath(resource.ownerTaskId)) continue
+      if (!isAbsolute(resource.identity) || !within(this.store.profileHome, resource.identity)) continue
       try {
+        const real = await canonicalPathAsync(resource.identity)
+        if (sharedWithPeer(peers, resource.identity, resource.repositoryId, real) || unverifiedOwnerOver(peers, { path: real })) continue
         if (!this.soleCopyReason(inventory, resource) || !await present(resource.identity)) continue
-        if ((await walkOwnedContentAsync(resource.identity)).some((entry) => entry.kind !== 'directory')) soleCopies.push(resource.identity)
+        // One file is enough to need a person's Discard.
+        if (await holdsAnyFile(resource.identity)) return { blockers, soleCopies: [resource.identity] }
       } catch {
         // Unreadable now: the preview after the trash judges it.
       }
     }
-    return { blockers: [...inventory.blockers], soleCopies }
+    return { blockers, soleCopies: [] }
   }
 
   /** `taskId` and the threads it owns; one trashed on its own keeps its own choice, and one deleted for good is gone. */
@@ -479,10 +512,9 @@ export class ResourcePurgeService {
       held.add(identity)
       return true
     }
-    // Mousse's refs outside `refs/heads/` are named by ids, so the same name is the same ref whatever repository a record
-    // gives: one written before the repository moved names it by its old id. A branch name is shared within a repository.
-    const idNamed = (identity: string): boolean => identity.startsWith('refs/') && !identity.startsWith('refs/heads/')
-    const shared = (identity: string, repositoryId: string | undefined, real: string | undefined): boolean => peers.some((peer) => peer.identity === identity && (!repositoryId || !peer.repositoryId || peer.repositoryId === repositoryId || idNamed(identity)) || real !== undefined && claimOverlapsPath(peer, real))
+    // A ref named by ids is the same ref in any repository a record gives (one written before the repository moved names
+    // it by its old id); a branch name is shared within a repository (`sharedWithPeer`).
+    const shared = (identity: string, repositoryId: string | undefined, real: string | undefined): boolean => sharedWithPeer(peers, identity, repositoryId, real)
     // A delete that keeps the work never reads, pins or removes a worktree, nor any Git ref below: they stay as they are.
     for (const resource of keepWork ? [] : inventory.resources.filter((item) => item.kind === 'worktree' && ownedIds.has(item.ownerTaskId))) {
       // On a drive that is not connected: there, out of reach, and kept; never taken for already deleted.
