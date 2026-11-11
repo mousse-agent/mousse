@@ -11496,7 +11496,15 @@ export class OrchestratorService extends EventEmitter {
           // The drain is found whether or not the provider reported it taken (`steerTaken` moves it to `takenDrains`).
           const entry = token === undefined ? undefined : drained.get(token) ?? takenDrains.get(token)
           if (token !== undefined && !entry) {
-            logDebug('OrchestratorService', 'steer acceptance for an unknown drain ignored', undefined, { threadId: session.threadId, token })
+            // A provider bug if it happens: worth seeing without debug logging. Ids and counts only, never the text.
+            logWarn('OrchestratorService', 'steer acceptance for an unknown or already settled drain ignored', undefined, {
+              threadId: session.threadId,
+              ...(engineRunId ? { runId: engineRunId } : {}),
+              // The drain token is a counter (`drain-N`), not a credential; a key named `token` would be redacted.
+              drain: token,
+              outstandingDrains: drained.size,
+              drainsMade: drains
+            })
             return
           }
           // Without a token, every drained item is accepted (correct only while one drain is outstanding).
