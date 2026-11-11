@@ -383,8 +383,8 @@ function startGuiApp(): void {
               await freeInstallFolder({
                 selfPid: process.pid,
                 list: () => listInstallFolderProcesses(dirname(process.execPath)),
-                stopService: async (otherHome) => {
-                  await stopRunningDaemon(canonicalizeHome(otherHome), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS })
+                stopService: async (otherHome, timeoutMs) => {
+                  await stopRunningDaemon(canonicalizeHome(otherHome), { reason: 'update', timeoutMs })
                 },
                 kill: (pid) => process.kill(pid)
               })

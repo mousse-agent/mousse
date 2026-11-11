@@ -6,6 +6,7 @@ import { channelForVersion, UPDATE_IPC, type UpdateChannel, type UpdateState } f
 import { getAppIconPath } from '../appIcon'
 import { installAppImage, startAfterExit } from './appImageInstall'
 import { DesktopUpdater, type UpdaterBackend } from './DesktopUpdater'
+import { isDownloadCached, reportInstallerLaunch } from './electronUpdaterAdapters'
 import { LAUNCHER_ICON_SIZES, launcherIconName, syncLinuxLauncher, type LauncherIcon } from './linuxLauncher'
 import { updaterRecordFile } from './updaterRecord'
 
@@ -40,7 +41,10 @@ async function loadElectronUpdater(): Promise<UpdaterBackend> {
     }
   }
   if (process.platform === 'linux' && process.env.APPIMAGE) replaceAppImageInstall(autoUpdater)
-  return autoUpdater as unknown as UpdaterBackend
+  else reportInstallerLaunch(autoUpdater)
+  const backend = autoUpdater as unknown as UpdaterBackend
+  backend.isDownloadCached = (version) => isDownloadCached(autoUpdater, version)
+  return backend
 }
 
 /**
@@ -63,9 +67,10 @@ function replaceAppImageInstall(autoUpdater: import('electron-updater').AppUpdat
       if (isForceRunAfter) startAfterExit(process.pid, destination, process.argv.slice(1), process.env)
     } catch (error) {
       autoUpdater.emit('error', error instanceof Error ? error : new Error(String(error)))
-      return
+      return false
     }
     setImmediate(() => app.quit())
+    return true
   }
 }
 
