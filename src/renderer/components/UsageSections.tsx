@@ -1,6 +1,7 @@
 import { createContext, memo, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ChevronDown } from '../lib/icons'
 import { attentionReason, otherUsageFigure, usageInstanceId } from '../lib/usageSections'
+import { usageLevel } from '../lib/subscriptionUsage'
 import type { ProviderUsage } from '../../shared/providerAuth'
 import { Collapse, COLLAPSE_OPEN_MS, COLLAPSE_STAGGER_ITEMS, COLLAPSE_STAGGER_MS } from './ui/Collapse'
 import { UsageBar } from './UsageBar'
@@ -55,7 +56,7 @@ export function OtherUsageRow({ provider, computerName, menu }: { provider: Prov
     <span className="usage-slim-name">{provider.label}{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
     <span className="usage-slim-figure">
       {figure.remaining !== undefined && <span className="usage-slim-bar"><UsageBar remaining={figure.remaining} label={provider.label} size="cell" /></span>}
-      <span className={figure.muted ? 'settings-muted' : undefined} title={figure.muted ? provider.message : undefined}>{figure.text}</span>
+      <span className={figure.muted ? 'settings-muted' : figure.remaining !== undefined ? 'usage-level-text' : undefined} data-usage-level={figure.remaining !== undefined ? usageLevel(figure.remaining) : undefined} title={figure.muted ? provider.message : undefined}>{figure.text}</span>
       {menu}
     </span>
   </div>

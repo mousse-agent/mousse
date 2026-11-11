@@ -124,33 +124,65 @@ html[data-acrylic='true'] .app .usage-rail-page {
   font-variant-numeric: tabular-nums;
 }
 
-/* The bar: a rounded track in the secondary surface, filled to the share used. */
+/* Levels (lib/subscriptionUsage.ts usageLevel): plenty above 50% left, getting low to 25%, low under 25%,
+   critical under 10%. Each bar and figure carries its step in `data-usage-level` and takes its colour
+   from it: one calm traffic scale whatever the accent (sage green, soft yellow, amber, red), tuned for
+   dark surfaces; on light surfaces they are darkened to read on white. */
+:root {
+  --usage-plenty: oklch(0.76 0.11 155);
+  --usage-getting-low: oklch(0.84 0.115 95);
+  --usage-low: oklch(0.76 0.135 58);
+  --usage-critical: oklch(0.66 0.17 23);
+}
+
+[data-usage-level] {
+  --usage-level: var(--usage-plenty);
+}
+
+[data-usage-level='getting-low'] { --usage-level: var(--usage-getting-low); }
+[data-usage-level='low'] { --usage-level: var(--usage-low); }
+[data-usage-level='critical'] { --usage-level: var(--usage-critical); }
+
+html[data-theme='light'] [data-usage-level] {
+  --usage-level-ink: oklch(from var(--usage-level) min(l, 0.6) c h);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] [data-usage-level] {
+    --usage-level-ink: oklch(from var(--usage-level) min(l, 0.6) c h);
+  }
+}
+
+/* The bar: a rounded track, filled to the share left. The track is a quiet wash of the text colour with a
+   little of the level's colour, so the full length (and how much is gone) reads on the card and on the
+   summary panel alike, well under the fill. */
 .usage-bar {
   position: relative;
   height: 8px;
   border-radius: 999px;
-  background: var(--bg-secondary);
-  box-shadow: inset 0 0 0 1px var(--ui-line);
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
   overflow: hidden;
 }
 
+.usage-bar[data-usage-level] {
+  background: color-mix(in srgb, var(--usage-level-ink, var(--usage-level)) 16%, color-mix(in srgb, var(--text-primary) 8%, transparent));
+}
+
 .usage-bar-fill {
-  /* The accent while plenty is left; toward empty it takes on some of the theme's red (`--usage-red`,
-     set per bar: none above 35% left, rising smoothly to about half near 0%). */
-  --usage-bar-color: color-mix(in srgb, var(--danger) var(--usage-red, 0%), var(--accent));
+  --usage-bar-color: var(--usage-level-ink, var(--usage-level));
   position: absolute;
   inset: 0 auto 0 0;
   min-width: 8px;
   border-radius: inherit;
   background-color: var(--usage-bar-color);
-  /* Slow diagonal stripes, white at about a fifth: they drift by one tile per loop. */
+  /* Slow diagonal stripes, faint enough that the level's colour leads: they drift by one tile per loop. */
   background-image: linear-gradient(
     -45deg,
-    rgba(255, 255, 255, 0.2) 25%,
+    rgba(255, 255, 255, 0.12) 25%,
     transparent 25%,
     transparent 50%,
-    rgba(255, 255, 255, 0.2) 50%,
-    rgba(255, 255, 255, 0.2) 75%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(255, 255, 255, 0.12) 75%,
     transparent 75%,
     transparent
   );
@@ -175,7 +207,7 @@ html[data-acrylic='true'] .app .usage-rail-page {
 .usage-bar-fill::before {
   inset: 0;
   background: var(--ui-sheen-accent);
-  opacity: 0.45;
+  opacity: 0.3;
 }
 
 .usage-bar-fill::after {
@@ -205,7 +237,6 @@ html[data-acrylic='true'] .app .usage-rail-page {
 }
 
 html[data-theme='high-contrast'] .usage-bar-fill {
-  --usage-bar-color: var(--text-primary);
   background-image: none;
   box-shadow: none;
 }
@@ -922,16 +953,15 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   background-image: var(--ui-focus-layer);
 }
 
-/* A window with nothing left reads as empty, not missing: a faint red track and its share in red. */
-.usage-window-used.is-empty {
-  color: var(--danger);
+/* A share left in figures takes a little of its level's colour, more as it runs out; plenty stays plain. */
+.usage-level-text[data-usage-level='getting-low'] {
+  color: color-mix(in oklab, var(--usage-level-ink, var(--usage-level)) 30%, var(--text-primary));
 }
 
-.usage-window-used.is-empty .settings-muted {
-  color: inherit;
-  opacity: 0.8;
+.usage-level-text[data-usage-level='low'] {
+  color: color-mix(in oklab, var(--usage-level-ink, var(--usage-level)) 65%, var(--text-primary));
 }
 
-.usage-window-head:has(.usage-window-used.is-empty) + .usage-bar {
-  background: color-mix(in srgb, var(--danger) 16%, var(--bg-secondary));
+.usage-level-text[data-usage-level='critical'] {
+  color: color-mix(in oklab, var(--usage-level-ink, var(--usage-level)) 80%, var(--text-primary));
 }

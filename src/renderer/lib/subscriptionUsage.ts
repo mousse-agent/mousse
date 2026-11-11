@@ -17,14 +17,28 @@ export function remainingNow(window: Pick<ProviderUsageWindow, 'remainingPercent
   return remainingPercent(window)
 }
 
-/** Below this share left, the bar starts to take on the theme's red; at nothing left it has this much. */
-export const USAGE_RED_FROM = 35
-export const USAGE_RED_MAX = 55
+/**
+ * How much is left, in steps the eye can sort at a glance: plenty above half, getting low from half
+ * down to a quarter, low under a quarter, critical under a tenth. Every usage bar and figure takes its
+ * colour from its step (`data-usage-level`, usage.css).
+ */
+export type UsageLevel = 'plenty' | 'getting-low' | 'low' | 'critical'
 
-/** How much red (percent, for `color-mix`) the bar takes at this share left: none while plenty remains. */
-export function usageRedMix(remaining: number): number {
-  if (remaining >= USAGE_RED_FROM) return 0
-  return Math.round(((USAGE_RED_FROM - Math.max(0, remaining)) / USAGE_RED_FROM) * USAGE_RED_MAX)
+/** At or below this share left a limit is getting low; below the next, low; below the last, critical. */
+export const USAGE_GETTING_LOW_AT = 50
+export const USAGE_LOW_UNDER = 25
+export const USAGE_CRITICAL_UNDER = 10
+
+export function usageLevel(remaining: number): UsageLevel {
+  if (remaining < USAGE_CRITICAL_UNDER) return 'critical'
+  if (remaining < USAGE_LOW_UNDER) return 'low'
+  if (remaining <= USAGE_GETTING_LOW_AT) return 'getting-low'
+  return 'plenty'
+}
+
+/** Whether a share left is under a quarter (low or critical). */
+export function usageRunningLow(remaining: number): boolean {
+  return remaining < USAGE_LOW_UNDER
 }
 
 /**

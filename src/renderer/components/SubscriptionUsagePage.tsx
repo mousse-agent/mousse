@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, ExternalLink, RefreshCw } from '../lib/icons'
 import { useComputers } from '../lib/computers'
 import {
   ALL_COMPUTERS, THIS_COMPUTER, resetsLabel, totalResets, formatResetLine, orderUsageWindows, remainingNow, rememberedUsageComputer, rememberUsageComputer, resetTooltip, shortUsageNote,
-  usageReadAtLabel, usageReadingTime, usageRows, usageSelection, type ComputerUsage, resetEffect, resetOutcomeText
+  usageLevel, usageReadAtLabel, usageReadingTime, usageRows, usageRunningLow, usageSelection, type ComputerUsage, resetEffect, resetOutcomeText
 } from '../lib/subscriptionUsage'
 import { useAppStore } from '../stores/appStore'
 import { localDeviceName } from './sideCard/deviceMenu'
@@ -35,7 +35,7 @@ export const USAGE_REFRESH_MS = 5 * 60_000
 
 /**
  * One limit window: its label and the share left on one line, a bar filled to what is left (it drains
- * as the limit is used, and takes on a little red as it nears empty), and when it resets under the
+ * as the limit is used; it and the share take their level's colour), and when it resets under the
  * bar. An unknown share leaves the bar empty; a reset that has passed reads as 100% left.
  */
 function UsageBarRow({ entry, now }: { entry: ProviderUsageWindow; now: number }) {
@@ -45,7 +45,7 @@ function UsageBarRow({ entry, now }: { entry: ProviderUsageWindow; now: number }
   return <div className="usage-window" data-testid="usage-window" data-remaining={remaining ?? 'unknown'}>
     <div className="usage-window-head">
       <span className="usage-window-label">{entry.label}</span>
-      <span className={`usage-window-used${remaining === 0 ? ' is-empty' : ''}`}>{remaining === undefined ? <span className="settings-muted">Unknown</span> : <>{remaining}% <span className="settings-muted">left</span></>}</span>
+      <span className="usage-window-used usage-level-text" {...(remaining === undefined ? {} : { 'data-usage-level': usageLevel(remaining) })}>{remaining === undefined ? <span className="settings-muted">Unknown</span> : <>{remaining}% <span className="settings-muted">left</span></>}</span>
     </div>
     <UsageBar remaining={remaining} label={entry.label} />
     {reset && <div className="usage-window-reset settings-muted" title={resetTooltip(entry.resetsAt, now)}>{reset}</div>}
@@ -105,7 +105,7 @@ const UsageProviderCard = memo(function UsageProviderCard({ provider, computerNa
           {!multi && <UsageResetsChip resets={provider.resets} now={now} />}
           {!multi && canReset && <UsageResetButton
             resets={provider.resets}
-            hint={provider.windows.some((window) => (remainingNow(window, now) ?? 100) < 20)}
+            hint={provider.windows.some((window) => usageRunningLow(remainingNow(window, now) ?? 100))}
             onStart={() => onStartReset(provider.id)}
           />}
           {provider.proxy && onSaveProxyKey && onClearProxyKey && local && <UsageSettingsButton provider={provider} onSave={onSaveProxyKey} onClear={onClearProxyKey} onSaved={onRefresh} />}
