@@ -15,6 +15,11 @@ export const QUEUE_LOAD_RETRY_CAP_MS = 5000
  * is still being set up). Past this it shows again, first in the queue, so it is never hidden for good.
  */
 export const SENT_NOW_HIDE_MS = 15_000
+/**
+ * How long the first queued message stays in the list after the daemon takes it for its turn, waiting for its
+ * prompt to show in the transcript. Its turn takes well under a second to show; past this it goes anyway.
+ */
+export const STARTING_ITEM_HOLD_MS = 2500
 
 /** The composer's notice when an unsaved edit of a queued message went to the composer. */
 export const QUEUE_DRAFT_MOVED_NOTICE = 'Your edit is in the composer: the message had already started.'
@@ -37,6 +42,12 @@ export interface UseThreadQueueOptions {
    * and references. The thread may not be the one shown.
    */
   onDraftToComposer?: (threadId: string, recovered: RecoveredQueueDraft) => void
+  /**
+   * The transcript's last prompt: its id, and the queued message it came from. The first queued message stays in
+   * the list until its turn's prompt shows, so it moves from the queue to the transcript in one step.
+   */
+  lastPromptId?: string | null
+  lastPromptQueueItemId?: string | null
 }
 
 /** An unsaved edit whose message left the queue, as the composer takes it. */
@@ -107,11 +118,30 @@ export function reorderByIds(items: QueuedMessage[], orderedIds: string[]): Queu
 }
 
 /**
+ * The message the daemon just took from the front of the queue for its turn: the first waiting message, when it
+ * is the only one that left the list. Not one removed or sent now here (`skip`), nor a list cleared at once.
+ */
+export function startingItem(previous: QueuedMessage[], next: QueuedMessage[], skip: (id: string) => boolean): QueuedMessage | null {
+  const shown = previous.filter((item) => !item.internal)
+  const head = shown.find((item) => item.state === 'pending' && item.intent === 'normal')
+  if (!head || skip(head.id) || next.some((item) => item.id === head.id)) return null
+  return shown.every((item) => item === head || next.some((entry) => entry.id === item.id)) ? head : null
+}
+
+/**
  * Loads the thread's queue, keeps it in step with `queue:updated`, and wraps the queue's changes
  * (send now, remove, reorder, edit) with busy marks and error text.
  */
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer }: UseThreadQueueOptions): ThreadQueue {
+export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null }: UseThreadQueueOptions): ThreadQueue {
   const [items, setItems] = useState<QueuedMessage[]>([])
+  // The first queued message, just taken by the daemon for its turn, kept in the list until that turn's prompt shows
+  // (the transcript's last prompt is no longer `promptId`, or is this message's).
+  const [starting, setStarting] = useState<{ item: QueuedMessage; promptId: string | null } | null>(null)
+  const lastPromptIdRef = useRef(lastPromptId)
+  lastPromptIdRef.current = lastPromptId
+  // Removed here: it leaves the list at once.
+  const removing = useRef(new Set<string>())
+  const sentNowRef = useRef<Readonly<Record<string, true>>>({})
   // The thread `items` were read for; null until the shown thread's list arrives.
   const [itemsThread, setItemsThread] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -222,6 +252,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
 
   useEffect(() => {
     setItems([])
+    setStarting(null)
+    removing.current.clear()
     setItemsThread(null)
     setError(null)
     setNotice(null)
@@ -237,6 +269,11 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       }
       settled = true
       loadGeneration.current += 1
+      // Rendered with the new list, so the message is never missing from both the queue and the transcript.
+      const left = itemsThreadRef.current === updatedId
+        ? startingItem(itemsRef.current, next, (id) => removing.current.has(id) || Boolean(sentNowRef.current[id]))
+        : null
+      if (left) setStarting({ item: left, promptId: lastPromptIdRef.current })
       setItems(next)
       setItemsThread(updatedId)
     })
@@ -302,11 +339,14 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     if (!threadId) return
     const live = changeScope(threadId)
     markBusy(itemId, true)
+    removing.current.add(itemId)
     try {
       await window.mousse.queue.remove(threadId, itemId)
       if (!live()) return
       setError(null)
     } catch (err) {
+      // Still listed: if it leaves later, that is not this remove.
+      removing.current.delete(itemId)
       if (!live()) return
       setError(readableError(err, 'Could not remove the queued message.'))
       void loadQueue(threadId)
@@ -321,6 +361,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // Messages sent now leave the list at the click: the transcript shows them as sent. One that is refused comes
   // back; one the daemon still lists as waiting (its turn is still being set up) comes back after a while.
   const [sentNow, setSentNow] = useState<Readonly<Record<string, true>>>({})
+  sentNowRef.current = sentNow
   const sentNowTimers = useRef(new Map<string, number>())
   const unsend = useCallback((itemId: string) => {
     const timer = sentNowTimers.current.get(itemId)
@@ -445,14 +486,29 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     if (thread && open) store.updateQueueEditDraft(thread, open.itemId, () => null)
   }, [])
 
-  // A message sent now (`steering`, or just clicked) shows in the transcript, in the reply it joined, not here.
+  // The message taken for its turn stays first until its turn's prompt shows in the transcript.
+  const startingShown = starting && starting.item.threadId === threadId && lastPromptId === starting.promptId &&
+    lastPromptQueueItemId !== starting.item.id && !items.some((item) => item.id === starting.item.id)
+    ? starting.item
+    : null
+  useEffect(() => {
+    if (!starting) return
+    if (!startingShown) { setStarting(null); return }
+    const timer = window.setTimeout(() => setStarting(null), STARTING_ITEM_HOLD_MS)
+    return () => window.clearTimeout(timer)
+  }, [starting, startingShown])
+  // A message sent now (`steering`, or just clicked) shows in the transcript, in the reply it joined, not here; so does
+  // one whose turn's prompt is in the transcript.
   const shown = useMemo(() => [
+    ...(startingShown ? [startingShown] : []),
     ...items,
     ...optimisticItems.filter((optimistic) => optimistic.threadId === threadId && !items.some((item) => item.id === optimistic.id))
-  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id]), [items, optimisticItems, threadId, sentNow])
+  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id] && item.id !== lastPromptQueueItemId), [startingShown, items, optimisticItems, threadId, sentNow, lastPromptQueueItemId])
+  // The message on its way into its turn takes no change.
+  const busy = useMemo(() => (startingShown ? { ...busyIds, [startingShown.id]: true } : busyIds), [busyIds, startingShown])
 
   return useMemo(
-    () => ({ threadId, items: shown, busyIds, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit }),
-    [threadId, shown, busyIds, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit]
+    () => ({ threadId, items: shown, busyIds: busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit }),
+    [threadId, shown, busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit]
   )
 }

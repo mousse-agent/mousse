@@ -386,12 +386,19 @@ export function OrchestratorChat() {
   const onQueueDraftToComposer = useCallback((threadId: string, recovered: RecoveredQueueDraft) => {
     restoreQueuedDraft(threadId, recovered, addComposerFiles)
   }, [addComposerFiles])
+  // The transcript's last prompt: the queue keeps a message that starts its turn until that turn's prompt shows.
+  let lastUserMessage: (typeof messages)[number] | undefined
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]!.role === 'user') { lastUserMessage = messages[index]; break }
+  }
   const queue = useThreadQueue({
     threadId: activeThreadId,
     optimisticItems: optimisticQueueItems,
     onOptimisticItemReconciled: onOptimisticQueueItemReconciled,
     hold: queueHold,
-    onDraftToComposer: onQueueDraftToComposer
+    onDraftToComposer: onQueueDraftToComposer,
+    lastPromptId: lastUserMessage?.id ?? null,
+    lastPromptQueueItemId: lastUserMessage?.queueItemId ?? null
   })
   // The notice about the moved edit goes once the composer is empty again (sent or cleared).
   const { draftMoved: queueDraftMoved, dismissDraftMoved } = queue

@@ -23,7 +23,8 @@ import type { FollowMode } from "./follow-mode";
  * - **Hold:** while a turn runs, something near the end that goes away (a queued message sent into
  *   the reply, a line replaced) leaves its space under the content until the reply grows into it,
  *   so the view does not drop and come back a frame later. When a turn ends with messages still
- *   queued, the end is held the same way until the next turn starts and is pinned: one move.
+ *   queued, the queue is held where it was painted until the next turn starts and is pinned: one
+ *   move. The turn's work folding away above it moves only what is above it, and leaves no space.
  * - **Close:** a space that no longer holds a pinned prompt never stays. While the reader follows
  *   the end (the turn ended, they came back down, they asked for the latest), the part they do not
  *   see is dropped and the rest closes over a quarter of a second, so the reply settles onto the
@@ -35,6 +36,8 @@ export type EndFollower = ReturnType<typeof createEndFollower>;
 export function createEndFollower(options: {
   container: () => HTMLElement | null;
   rows: () => HTMLElement | null;
+  /** What is drawn after the turns (the queued messages); null or empty when nothing is queued. */
+  after?: () => HTMLElement | null;
   mode: () => FollowMode;
   onProgrammaticScroll: () => void;
 }) {
@@ -49,6 +52,10 @@ export function createEndFollower(options: {
   let holdTimer: ReturnType<typeof setTimeout> | null = null;
   /** The content's height the last time the space was sized: a smaller one means something left. */
   let lastContent = 0;
+  /** From the top of the queue to the end of the transcript (content and space), as last sized. */
+  let lastQueueTail: number | null = null;
+  /** While a turn that ended with messages queued waits for the next: the queue's tail held. */
+  let queueTail: number | null = null;
   let collapseFrame = 0;
 
   const setReserve = (px: number) => {
@@ -87,6 +94,13 @@ export function createEndFollower(options: {
     if (holdTimer !== null) clearTimeout(holdTimer);
     holdTimer = null;
     holdTotal = null;
+    queueTail = null;
+  };
+
+  /** The top of the queue in scroll space; null when nothing is queued. */
+  const queueTop = (container: HTMLElement): number | null => {
+    const after = options.after?.();
+    return after && after.childElementCount > 0 ? offsetIn(container, after) : null;
   };
 
   const held = (container: HTMLElement) =>
@@ -144,10 +158,13 @@ export function createEndFollower(options: {
       holdTotal = total;
     }
     if (holdTotal !== null) {
+      // Waiting for the queue's next turn: the queue keeps its place, whatever changes above it.
+      const top = queueTail !== null ? queueTop(container) : null;
+      if (top !== null) holdTotal = Math.max(content, top + queueTail!);
       const next = heldTotalReserve({ total: holdTotal, contentHeight: content });
       setReserve(next);
       // The content grew back into it; a hold waiting for the next turn keeps its timer.
-      if (next === 0 && holdTimer === null) holdTotal = null;
+      if (next === 0 && holdTimer === null) releaseHold();
       return;
     }
     if (reserve === 0 || collapseFrame) return;
@@ -159,6 +176,8 @@ export function createEndFollower(options: {
     const content = contentHeight(container);
     sizeReserve(container, content);
     lastContent = content;
+    const top = queueTop(container);
+    lastQueueTail = top === null ? null : content + reserve - top;
   };
 
   return {
@@ -217,13 +236,19 @@ export function createEndFollower(options: {
       if (nextQueued && options.mode() === "following-end") {
         stopCollapse();
         const content = contentHeight(container);
-        // At the end as last painted: what leaves with the turn in this commit (its live line) is
-        // held too, so the end does not drop before the next turn's pin.
-        holdTotal = Math.max(content, lastContent) + reserve;
+        const top = queueTop(container);
+        if (top !== null && lastQueueTail !== null) {
+          // The queue stays where it was painted. The turn's work folding away and its live line
+          // leaving, above it, in this commit, move only what is above it: no space opens under it.
+          queueTail = lastQueueTail;
+          holdTotal = Math.max(content, top + queueTail);
+        } else {
+          // At the end as last painted: what leaves with the turn in this commit is held too.
+          holdTotal = Math.max(content, lastContent) + reserve;
+        }
         lastContent = content;
         holdTimer = setTimeout(() => {
-          holdTimer = null;
-          holdTotal = null;
+          releaseHold();
           const current = options.container();
           if (current) updateReserve(current);
         }, QUEUED_TURN_HOLD_MS);

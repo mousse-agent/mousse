@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages, queuedContentWithText, splitQueuedContent } from '../../src/renderer/components/QueuedMessages'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
-import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, STARTING_ITEM_HOLD_MS, startingItem, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { QueuedMessage, Thread } from '../../src/shared/types'
 
@@ -24,8 +24,8 @@ let api: { list: ReturnType<typeof vi.fn>; edit: ReturnType<typeof vi.fn>; reord
 let toComposer: ReturnType<typeof vi.fn>
 
 /** The queue as the chat renders it: in the conversation, with its errors and notes in the composer's notice slot. */
-function Chat({ hold = null }: { hold?: QueueHold | null }) {
-  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer })
+function Chat({ hold = null, lastPromptId = null, lastPromptQueueItemId = null }: { hold?: QueueHold | null; lastPromptId?: string | null; lastPromptQueueItemId?: string | null }) {
+  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer, lastPromptId, lastPromptQueueItemId })
   return createElement(Fragment, null,
     createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
     createElement(ComposerNoticeSource, { notice: thread.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, onDismiss: thread.dismissDraftMoved } : null }),
@@ -466,6 +466,73 @@ describe('queued messages in the conversation', () => {
   it('leaves internal items out', async () => {
     await show([queued('a', 'one'), queued('i', 'wake up', { internal: true })])
     expect(rows().map((entry) => entry.dataset.queuedId)).toEqual(['a'])
+  })
+})
+
+describe('the first queued message when its turn starts', () => {
+  /** The chat with the transcript's last prompt: `p1` until the next turn's prompt shows. */
+  const render = (prompt: { id: string; queueItemId?: string }) =>
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat, { lastPromptId: prompt.id, lastPromptQueueItemId: prompt.queueItemId ?? null }))))
+  const start = async (items: QueuedMessage[]) => {
+    listed = items
+    render({ id: 'p1' })
+    await act(async () => { push!({ threadId: 't1', items }) })
+  }
+  const ids = () => rows().map((item) => item.dataset.queuedId)
+
+  it('stays first in the queue after the daemon takes it, and leaves as its prompt shows', async () => {
+    await start([queued('a', 'one'), queued('b', 'two')])
+    // The daemon took A for its turn; its prompt is not in the transcript yet.
+    await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+    expect(ids()).toEqual(['a', 'b'])
+    // It takes no change on its way.
+    expect(button('a', 'Send')!.disabled).toBe(true)
+    // Its prompt shows: it leaves the queue in the same render.
+    render({ id: 'p2', queueItemId: 'a' })
+    expect(ids()).toEqual(['b'])
+  })
+
+  it('leaves when another prompt shows, or after a while when none does', async () => {
+    vi.useFakeTimers()
+    try {
+      await start([queued('a', 'one'), queued('b', 'two')])
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      render({ id: 'p2' })
+      expect(ids()).toEqual(['b'])
+      await act(async () => { push!({ threadId: 't1', items: [] }) })
+      expect(ids()).toEqual(['b'])
+      await act(async () => { vi.advanceTimersByTime(STARTING_ITEM_HOLD_MS) })
+      expect(ids()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves at once when it is removed here, or when the whole queue is cleared', async () => {
+    await start([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
+    // The list without it arrives after the remove answered.
+    await click(button('a', 'Remove'))
+    await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('c', 'three')] }) })
+    expect(ids()).toEqual(['b', 'c'])
+    await act(async () => { push!({ threadId: 't1', items: [] }) })
+    expect(ids()).toEqual([])
+  })
+
+  it('shows a message whose prompt is already in the transcript only there', async () => {
+    listed = [queued('a', 'one'), queued('b', 'two')]
+    render({ id: 'p2', queueItemId: 'a' })
+    await act(async () => { push!({ threadId: 't1', items: listed }) })
+    expect(ids()).toEqual(['b'])
+  })
+
+  it('names the message taken: the first waiting one, only when it alone left', () => {
+    const a = queued('a', 'one'), b = queued('b', 'two')
+    expect(startingItem([a, b], [b], () => false)).toBe(a)
+    expect(startingItem([a, b], [], () => false)).toBeNull()
+    expect(startingItem([a, b], [a], () => false)).toBeNull()
+    expect(startingItem([a, b], [b], (id) => id === 'a')).toBeNull()
+    const steering = queued('s', 'steer', { state: 'steering', intent: 'steer' })
+    expect(startingItem([steering, a, b], [steering, b], () => false)).toBe(a)
   })
 })
 
