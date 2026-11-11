@@ -81,6 +81,62 @@ export function sameMessageSnapshot(a: ChatMessage[], b: ChatMessage[]): boolean
   return true
 }
 
+/** Plain data (what a push carries: strings, numbers, arrays, objects) equal by value. */
+export function samePlainData(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  const keysA = Object.keys(a)
+  if (keysA.length !== Object.keys(b).length) return false
+  return keysA.every((key) => Object.prototype.hasOwnProperty.call(b, key) &&
+    samePlainData((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]))
+}
+
+/**
+ * `next`, keeping each entry of `held` it repeats as the same object, or `held` itself when `next` says nothing new.
+ * Pushes carry whole maps of fresh objects (every thread's activity, every thread's turn); kept this way, what reads
+ * one thread's entry renders only when that entry changes.
+ */
+export function sharedEntries<T>(held: Record<string, T>, next: Record<string, T>): Record<string, T> {
+  if (held === next) return held
+  const keys = Object.keys(next)
+  let same = keys.length === Object.keys(held).length
+  const out: Record<string, T> = {}
+  for (const key of keys) {
+    const value = next[key] as T
+    const kept = Object.prototype.hasOwnProperty.call(held, key) ? held[key] : undefined
+    if (kept !== undefined && samePlainData(kept, value)) out[key] = kept
+    else {
+      out[key] = value
+      same = false
+    }
+  }
+  return same ? held : out
+}
+
+/** `activity` without its idle threads: idle and not listed are the same state. */
+function withoutIdleThreads(activity: ThreadActivitySnapshot): ThreadActivitySnapshot {
+  if (!Object.values(activity).includes('idle')) return activity
+  return Object.fromEntries(Object.entries(activity).filter(([, state]) => state !== 'idle'))
+}
+
+/** `next`, keeping each message of `held` it repeats as the same object, or `held` itself when nothing changed. */
+function sharedMessages(held: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
+  if (held === next) return held
+  const byId = new Map(held.map((message) => [message.id, message]))
+  let same = held.length === next.length
+  const out = next.map((message, index) => {
+    const kept = byId.get(message.id)
+    if (kept && samePlainData(kept, message)) {
+      if (held[index] !== kept) same = false
+      return kept
+    }
+    same = false
+    return message
+  })
+  return same ? held : out
+}
+
 /**
  * A whole thread list with each row's time no older than the one this window holds for it. Touches
  * (`threads.touched`) move times without a new list version, so a list read or pushed before a touch can land
@@ -659,9 +715,10 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
         if (snapshot.replace) rememberMessages(snapshot.threadId, sortMessagesDeterministic(snapshot.messages))
         return s
       }
-      const messages = snapshot.replace
+      // A snapshot that repeats the transcript (a hydration or resync while a reply streams) keeps it as it is.
+      const messages = sharedMessages(s.messages, snapshot.replace
         ? sortMessagesDeterministic(snapshot.messages)
-        : reconcileMessageSnapshot(s.messages, snapshot.messages)
+        : reconcileMessageSnapshot(s.messages, snapshot.messages))
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       // A replacement is the whole transcript: nothing earlier is left to load.
       if (snapshot.replace && s.activeThreadId && s.earlierByThread[s.activeThreadId]) {
@@ -669,6 +726,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
         delete earlierByThread[s.activeThreadId]
         return { messages, earlierByThread, transcriptPending: false }
       }
+      if (messages === s.messages && !s.transcriptPending) return s
       return { messages, transcriptPending: false }
     }),
   addMessage: (message) =>
@@ -692,8 +750,9 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
     }),
-  setAgents: (agents) => set({ agents }),
-  setTasks: (tasks) => set({ tasks }),
+  // Pushed again with each change of the thread's run, mostly as they were: a repeat changes nothing.
+  setAgents: (agents) => set((s) => (samePlainData(s.agents, agents) ? s : { agents })),
+  setTasks: (tasks) => set((s) => (samePlainData(s.tasks, tasks) ? s : { tasks })),
   setMainAreaWidth: (width) => set({ mainAreaWidth: savedMainAreaWidth(width) }),
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
   setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, usageOpen: false } : { settingsOpen }),
@@ -708,7 +767,12 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
   setSideCardSectionCollapsed: (key, collapsed) => set((s) => ({ sideCardCollapsed: { ...s.sideCardCollapsed, [key]: collapsed } })),
   setTurnState: (state) => set((s) => {
     const request = s.stopRequests[state.threadId]
-    if (!request) return { turnStates: { ...s.turnStates, [state.threadId]: state } }
+    if (!request) {
+      // The same state again (it also comes with each whole-map push): nothing that reads it renders.
+      const held = s.turnStates[state.threadId]
+      if (held && samePlainData(held, state)) return s
+      return { turnStates: { ...s.turnStates, [state.threadId]: state } }
+    }
     const next = applyDaemonTurnState(request, state)
     const stopRequests = { ...s.stopRequests }
     if (next.request) stopRequests[state.threadId] = next.request
@@ -727,7 +791,11 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
         turnStates[threadId] = s.turnStates[threadId] ?? state
       }
     }
-    return { turnStates, stopRequests }
+    // Each push is every thread's turn: threads whose turn did not change keep their state object.
+    const sharedTurns = sharedEntries(s.turnStates, turnStates)
+    const sharedStops = sharedEntries(s.stopRequests, stopRequests)
+    if (sharedTurns === s.turnStates && sharedStops === s.stopRequests) return s
+    return { turnStates: sharedTurns, stopRequests: sharedStops }
   }),
   markStopRequested: (threadId) => {
     const current = get().turnStates[threadId]
@@ -774,8 +842,8 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       const reconciled = reconcileMessageSnapshot(s.messages, view.messages)
       rememberMessages(view.threadId, reconciled)
       const messagesUnchanged = sameMessageSnapshot(s.messages, reconciled)
-      const agents = view.agents ?? s.agents
-      const tasks = view.tasks ?? s.tasks
+      const agents = view.agents && !samePlainData(view.agents, s.agents) ? view.agents : s.agents
+      const tasks = view.tasks && !samePlainData(view.tasks, s.tasks) ? view.tasks : s.tasks
       // A view with older messages left out says so; one without them has the whole transcript.
       const had = s.earlierByThread[view.threadId]
       // Older messages this window already loaded stay: a view that stops at the same boundary again
@@ -822,7 +890,13 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       }
       return threads ? { threads } : s
     }),
-  setThreadActivity: (threadActivity) => set({ threadActivity }),
+  // Each push is every thread's activity: one that repeats the map held changes nothing. An idle thread and one not
+  // listed read the same everywhere, and the window gets both forms of each change (its own tracker's map, which
+  // leaves idle threads out, then the service's, which lists them), so idle threads are left out here too.
+  setThreadActivity: (activity) => set((s) => {
+    const threadActivity = sharedEntries(s.threadActivity, withoutIdleThreads(activity))
+    return threadActivity === s.threadActivity ? s : { threadActivity }
+  }),
   setMainView: (mainView) => set({ mainView, sidebarMode: 'projects' }),
   addProjectTerminalTab: (ownerThreadId) => {
     const id = crypto.randomUUID()

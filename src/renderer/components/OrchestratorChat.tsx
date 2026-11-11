@@ -23,7 +23,7 @@ import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, permissionCeilingOf, 
 import { removeInlineSkillToken } from '../../shared/composerCommands'
 import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
-import { isTurnActivePhase, isTurnStoppable } from '../../shared/types'
+import { isThreadActivityActive, isTurnActivePhase, isTurnStoppable, type TurnPhase } from '../../shared/types'
 import { deletedThreadIds, useAppStore } from '../stores/appStore'
 import { useCommand } from '../commands/commandRegistry'
 import {
@@ -47,6 +47,7 @@ import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
+import { countRender } from '../chat/components/agent-elements/render-counts'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -150,6 +151,14 @@ function keepCatalog(current: LlmProviderOption[], next: LlmProviderOption[]): L
   return JSON.stringify(current) === JSON.stringify(next) ? current : next
 }
 
+/**
+ * A turn's phase as the chat reads it: thinking, a tool and finalizing are the same running reply as streaming (the
+ * same chat status, active and stoppable alike). Only the line under Working tells them apart.
+ */
+function chatTurnPhase(phase: TurnPhase | undefined): TurnPhase | undefined {
+  return phase === 'thinking' || phase === 'tool_running' || phase === 'finalizing' ? 'streaming' : phase
+}
+
 /** The thread's model is exactly the wanted one: the same account, model and reasoning level. */
 function sameModel(
   has: { instanceId?: string; llmProvider: string; model: string; effort?: string } | undefined,
@@ -163,6 +172,7 @@ function sameModel(
 }
 
 export function OrchestratorChat() {
+  countRender('OrchestratorChat')
   const messages = useAppStore((s) => s.messages)
   const loading = useAppStore((s) => s.loading)
   const transcriptPending = useAppStore((s) => s.transcriptPending)
@@ -173,14 +183,23 @@ export function OrchestratorChat() {
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
   const workspaceReady = useAppStore((s) => s.workspaceReady)
-  const turnState = useAppStore((s) =>
-    s.activeThreadId ? s.turnStates[s.activeThreadId] : undefined
+  // The turn as the chat reads it: its phase, with the running ones as one (`chatTurnPhase`), and its run. Its step,
+  // times and the running phase change all through a reply; only the line under Working shows them
+  // (MousseAgentChatShell's progress provider), so they do not render the chat.
+  const turnPhase = useAppStore((s) => (s.activeThreadId ? chatTurnPhase(s.turnStates[s.activeThreadId]?.phase) : undefined))
+  const turnRunId = useAppStore((s) => (s.activeThreadId ? s.turnStates[s.activeThreadId]?.turnId : undefined))
+  const turnState = useMemo(
+    () => (turnPhase === undefined ? undefined : { phase: turnPhase, turnId: turnRunId ?? null }),
+    [turnPhase, turnRunId]
   )
   // Subscribe only to the selected thread's activity — the full map used to
-  // re-render the chat on every background thread's activity tick.
-  const activeThreadActivity = useAppStore((s) =>
-    s.activeThreadId ? s.threadActivity[s.activeThreadId] : undefined
-  )
+  // re-render the chat on every background thread's activity tick. With a turn state, the chat reads only whether
+  // it is active, so Working and Waiting are one.
+  const activeThreadActivity = useAppStore((s) => {
+    if (!s.activeThreadId) return undefined
+    const activity = s.threadActivity[s.activeThreadId]
+    return s.turnStates[s.activeThreadId] && isThreadActivityActive(activity) ? 'processing' : activity
+  })
   const activeThreadModelOverride = useAppStore((s) =>
     s.threads.find((thread) => thread.id === s.activeThreadId)?.modelOverride
   )
