@@ -182,6 +182,37 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(second.store.listEvents('u').filter((event) => event.type === 'restart.note')).toEqual([])
   })
 
+  describe('a send the previous daemon had begun but not started (its turn.start claimed, its run still queued)', () => {
+    const claimed = async (first: ReturnType<typeof daemon>, threadId: string, key: string, payload: Record<string, unknown> = {}) => {
+      const sent = await first.engine.dispatch({ kind: 'send', threadId, clientRequestId: key, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      first.engine.outbox.enqueue({ threadId, runId: sent.runId, kind: 'turn.start', payload: { runId: sent.runId, threadId, input: 'hello', ...payload } })
+      const effect = first.engine.outbox.claimNext(first.engine.leaseOwner, '2026-10-13T00:00:00.000Z')
+      if (effect?.runId !== sent.runId) throw new Error('not claimed')
+      return sent.runId
+    }
+
+    it('is interrupted by the restart and noted as cut off, not left queued for rule 5 to send again', async () => {
+      const first = daemon(10)
+      const runId = await claimed(first, 't', 'req-1')
+      // Left to others: a send whose turn.start was never claimed (rule 5), and a queue item's (the message queue).
+      const pending = await first.engine.dispatch({ kind: 'send', threadId: 'p', clientRequestId: 'req-p', source: 'gui' })
+      if (pending.status !== 'accepted') throw new Error('send rejected')
+      const item = await claimed(first, 'q', 'req-q', { queueItemId: 'item-1' })
+      first.engine.outbox.enqueue({ threadId: 'p', runId: pending.runId, kind: 'turn.start', payload: { runId: pending.runId, threadId: 'p', input: 'later' } })
+      // Crash.
+
+      const second = daemon(20)
+      expect(second.boot.interrupted).toEqual([runId])
+      expect(second.store.getRun(runId)).toMatchObject({ status: 'interrupted', startedAt: null, outcome: { interruptedBy: 'daemon_restart' } })
+      const notes = second.store.listEvents('t').filter((event) => event.type === 'restart.note')
+      expect(notes.map((event) => event.payload)).toEqual([{ epoch: 2, runIds: [runId], uncertainRunIds: [], cutOffTools: [] }])
+      expect(second.boot.strandedQueued).toEqual([pending.runId])
+      expect(second.store.getRun(pending.runId)!.status).toBe('queued')
+      expect(second.store.getRun(item)!.status).toBe('queued')
+    })
+  })
+
   it('cancels a queued integration run whose turn.start died, and leaves queued runs of other sources alone', async () => {
     const first = daemon(10)
     const integration = await first.engine.dispatch({ kind: 'send', threadId: 'p', clientRequestId: 'req-int', source: 'integration' })

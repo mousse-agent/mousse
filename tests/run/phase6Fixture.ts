@@ -26,7 +26,7 @@ import type {
 } from '../../src/mms/harness/adapter'
 import { ProfileDatabase, type ProfileDatabaseFault } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
-import { RunEngine } from '../../src/mms/run/RunEngine'
+import { RunEngine, type BootReport } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { ProviderRef } from '../../src/mms/run/types'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
@@ -152,7 +152,7 @@ export function createOrchestrator(home: string, store: ThreadDataStore, adapter
 }
 
 /** One daemon over `home`: orchestrator, engine and effect worker with the given adapters. */
-export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService; drivers?: HarnessDriver[]; runs?: Partial<RunSettings>; fault?: ProfileDatabaseFault } = {}) {
+export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService; drivers?: HarnessDriver[]; runs?: Partial<RunSettings>; fault?: ProfileDatabaseFault; orchestratorBoot?: boolean } = {}) {
   const projects = new ProjectManager()
   const store = new ThreadDataStore(projects)
   // The returned `settings` is the daemon's live settings object: a test may change it while the daemon runs.
@@ -169,7 +169,13 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
   orch.setHarness(testHarness({ adapters, ...(options.drivers ? { drivers: options.drivers } : {}), ...(options.instances ? { instances: options.instances } : {}), profileHome: home }))
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home, ...(options.fault ? { fault: options.fault } : {}) })), pid: options.pid ?? 1 })
   orch.setRunEngine(engine)
-  const boot = engine.reconcileOnBoot()
+  // `orchestratorBoot`: recover as the profile does (`recoverRunEngineOnBoot`, the engine's boot plus the orchestrator's).
+  let boot!: BootReport
+  if (options.orchestratorBoot) {
+    const reconcile = engine.reconcileOnBoot.bind(engine)
+    engine.reconcileOnBoot = (...args) => (boot = reconcile(...args))
+    orch.recoverRunEngineOnBoot()
+  } else boot = engine.reconcileOnBoot()
   const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
   worker.start()
   orch.attachEffectWorker(worker)

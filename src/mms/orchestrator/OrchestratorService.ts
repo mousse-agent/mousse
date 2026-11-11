@@ -95,7 +95,7 @@ import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
-import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow } from '../run/restartNote'
+import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow, RESTART_INTERRUPTED_TEXT } from '../run/restartNote'
 import { ThreadResidency } from './ThreadResidency'
 import { isDeepStrictEqual } from 'node:util'
 import type { ContinuationInfo, OneShotTask, ProviderTaskEnd } from '../harness/driver'
@@ -384,6 +384,11 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
     images: request.images?.filter((img) => img.data && img.mimeType),
     ...(request.conversationBranchId ? { conversationBranchId: request.conversationBranchId } : {})
   }
+}
+
+/** A shown copy of a message sent with Steer into a running turn (`steerThread`). */
+function isSteerEcho(message: ChatMessage, text: string): boolean {
+  return message.role === 'user' && message.steered === true && !message.hidden && message.content === text
 }
 
 /** The conversation branch a send names (an edited prompt's), if any. */
@@ -2562,7 +2567,9 @@ export class OrchestratorService extends EventEmitter {
   recoverRunEngineOnBoot(): string[] {
     const engine = this.runEngine
     if (!engine) return []
-    const { interrupted } = engine.reconcileOnBoot()
+    const report = engine.reconcileOnBoot()
+    const { interrupted } = report
+    this.noteCutOffTurnsOnBoot([...interrupted, ...report.uncertain])
     for (const runId of interrupted) {
       this.emit('run-interrupted-on-boot', { threadId: engine.getRun(runId)?.threadId, runId })
     }
@@ -2573,6 +2580,66 @@ export class OrchestratorService extends EventEmitter {
     // After the runs of the earlier daemon are settled: an agent's queue command that never finished is finished now.
     this.recoverQueueCommandsOnBoot()
     return interrupted
+  }
+
+  /**
+   * Boot: the transcript of each thread whose turn the restart cut off says so, as a turn that a clean shutdown
+   * interrupts does (`RESTART_INTERRUPTED_TEXT`), so it never reads as still working. A reply left streaming is
+   * closed as incomplete. A send whose turn never started (`RunEngine.reconcileOnBoot` step 4) never reached the
+   * transcript: its message is added first, from the send its `turn.start` stored, so it is not lost (images are not
+   * stored). Written to the saved thread under its write lock; a thread another live process holds is left alone,
+   * and a line already there is not written twice. Best-effort: a boot must not fail on it.
+   */
+  private noteCutOffTurnsOnBoot(runIds: readonly string[]): void {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store) return
+    const byThread = new Map<string, RunRecord[]>()
+    for (const runId of runIds) {
+      const run = engine.getRun(runId)
+      // A run boot interrupted for another reason (a retired route that never ran here) was not cut off by it.
+      if (!run || (run.status !== 'uncertain' && run.outcome?.interruptedBy !== 'daemon_restart')) continue
+      byThread.set(run.threadId, [...(byThread.get(run.threadId) ?? []), run])
+    }
+    for (const [threadId, runs] of byThread) {
+      try {
+        if (!store.getThread(threadId)) continue
+        const threadDir = store.getThreadDir(threadId)
+        if (isLeaseHeldByLivePeer(threadDir).held) continue
+        const unsent = runs.filter((run) => !run.startedAt).flatMap((run) => {
+          const payload = engine.outbox.listForRun(run.runId).filter((effect) => effect.kind === 'turn.start').at(-1)?.payload as Partial<TurnStartPayload> | undefined
+          if (!payload?.input || payload.displayUserMessage === false) return []
+          const request = normalizeSendRequest(payload.input)
+          return request.content.trim() ? [request] : []
+        })
+        const saved = store.mutateThreadData(threadId, (current) => {
+          if (isLeaseHeldByLivePeer(threadDir).held) throw new StaleActivitySkipped()
+          const timestamp = new Date().toISOString()
+          const messages = current.messages.map((message) => (message.role === 'assistant' && message.streaming ? { ...message, streaming: false, incomplete: true } : message))
+          let llmContext = current.llmContext
+          const lastUser = [...messages].reverse().find((message) => message.role === 'user' && !message.hidden)
+          for (const request of unsent) {
+            // Already taken in: the kill came between the transcript write and the run's start.
+            if (lastUser?.content === request.content && messages.at(-1) === lastUser) continue
+            messages.push({ id: uuidv4(), role: 'user', content: request.content, timestamp, mode: request.mode })
+            if (llmContext) llmContext = appendNativeMessage(llmContext, userMessage(request.content))
+          }
+          if (messages.at(-1)?.content !== RESTART_INTERRUPTED_TEXT)
+            messages.push({ id: uuidv4(), role: 'system', content: RESTART_INTERRUPTED_TEXT, timestamp })
+          return { messages, ...(llmContext ? { llmContext } : {}) }
+        })
+        const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+        if (session && !session.isTurnRunning()) {
+          session.messages = saved.messages
+          if (saved.llmContext) session.nativeContext = normalizeNativeContext(saved.llmContext)
+        }
+        // As after a Stop: the thread shows its last turn stopped, with Continue, until another turn runs.
+        this.setTurnPhase(threadId, 'stopped', { turnId: runs.at(-1)!.runId })
+      } catch (error) {
+        if (error instanceof StaleActivitySkipped) continue
+        console.warn('the transcript could not say that a restart cut its turn off', { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
   }
 
   /**
@@ -11615,7 +11682,7 @@ export class OrchestratorService extends EventEmitter {
       const restart = this.isShutdownAbort(turn.abort.signal.reason)
       // A bot's dispatch that ended at a wall waits for its owner; it was not stopped by a person.
       const wall = !restart && Boolean(opts?.bot) && isBotWallAbort(turn.abort.signal.reason)
-      this.addSystemMessage(restart ? 'Turn interrupted by a Mousse restart.' : wall ? 'Paused: waiting for the owner.' : 'Turn stopped.')
+      this.addSystemMessage(restart ? RESTART_INTERRUPTED_TEXT : wall ? 'Paused: waiting for the owner.' : 'Turn stopped.')
       const response: OrchestratorResponse = { message: partial, actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
@@ -12338,7 +12405,8 @@ export class OrchestratorService extends EventEmitter {
 
   private hasPendingNormalQueueItem(threadId: string): boolean {
     try {
-      return listPendingQueue(this.threadStore?.loadMessageQueue(threadId) ?? []).some((item) => item.intent === 'normal' && item.state === 'pending')
+      // A message sent with Steer into a turn of the previous daemon that never read it is still `steering`: it runs too.
+      return listPendingQueue(this.threadStore?.loadMessageQueue(threadId) ?? []).some((item) => (item.intent === 'normal' && item.state === 'pending') || item.state === 'steering')
     } catch {
       // An unreadable queue is left to the session load, which reports it.
       return true
@@ -12386,6 +12454,32 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Startup: messages sent with Steer into a turn the previous daemon ran, which that turn never read, are still
+   * `steering` on disk, and no turn here will read them. They go back first in the queue, in the order they were
+   * steered, as a Stop hands them back (`returnUnreadSteerItems`), and the startup drain runs them once, as turns of
+   * their own, before what was queued behind them. The copy each left inside the cut-off turn is hidden, so the
+   * message shows once, as its own turn's prompt. Called only while no turn of the thread runs here or elsewhere.
+   */
+  private returnOrphanedSteers(session: ThreadSession): void {
+    const steering = session.queue.filter((item) => item.state === 'steering')
+    if (!steering.length || session.isTurnRunning()) return
+    const ids = steering.map((item) => item.id)
+    const demote = (items: QueuedMessage[]): QueuedMessage[] => demoteSteerItems(items, ids, { toFront: true })
+    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, demote) : demote(session.queue)
+    let hidden = false
+    for (const item of steering) {
+      const text = item.content.trim()
+      let index = session.messages.length - 1
+      while (index >= 0 && !isSteerEcho(session.messages[index], text)) index -= 1
+      if (index < 0) continue
+      session.messages[index] = { ...session.messages[index], hidden: true }
+      hidden = true
+    }
+    if (hidden) this.sessionAls.run(session, () => this.persist(true))
+    this.emitQueueUpdated(session.threadId, session.queue)
+  }
+
   /** Loads one thread's session and schedules its drain when it still has pending normal work. */
   private considerStartupDrain(threadId: string): void {
     try {
@@ -12395,6 +12489,7 @@ export class OrchestratorService extends EventEmitter {
       if (this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)) return
       // Only enqueue threads that still have pending normal work after reclaim.
       this.refreshSessionQueueFromDisk(session)
+      this.returnOrphanedSteers(session)
       const hasPendingNormal = listPendingQueue(session.queue).some(
         (item) => item.intent === 'normal' && item.state === 'pending'
       )

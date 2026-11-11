@@ -27,6 +27,7 @@ import { ToolInvocations } from './ToolInvocations'
 import {
   TERMINAL_EFFECT_STATUSES,
   TERMINAL_RUN_STATUSES,
+  isSendTurnPayload,
   leaseOwner,
   type AgentActor,
   type AttemptRecord,
@@ -791,6 +792,11 @@ export class RunEngine extends EventEmitter {
     return undefined
   }
 
+  /** Whether the run's binding was made on the retired bare pi route. */
+  private onRetiredRoute(runId: string): boolean {
+    return onRetiredBareRoute(this.bindingForRun(runId)?.instanceId)
+  }
+
   /**
    * Boot recovery (SPEC §12.5 steps 1-5), one transaction:
    * 1. open a daemon epoch and learn whether the previous daemon crashed;
@@ -798,7 +804,10 @@ export class RunEngine extends EventEmitter {
    * 3. re-queue running replay-safe effects; revoke every live Mousse MCP credential row (the
    *    tokens existed only in the previous daemon's memory, SPEC §15.1);
    * 4. every active run becomes `uncertain` when the previous daemon crashed while one of the
-   *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`;
+   *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`. So does
+   *    a send the previous daemon had begun: its `turn.start` was claimed (`running`), but the run
+   *    was still `queued` (the turn was being set up and never reached its provider). It is not
+   *    started again (`cutOffStart`);
    * 5. one `restart.note` event per affected thread. Nothing auto-resumes. A note also covers runs
    *    the previous daemon's clean shutdown interrupted (`interruptedBy: 'daemon_restart'`, completed
    *    since that epoch started, not noted yet, no later run started on the thread) and lists
@@ -809,11 +818,6 @@ export class RunEngine extends EventEmitter {
    *    uncertain child runs publish through the terminal write's publication gate.
    * Step 6 (heartbeat and reconciler) belongs to the profile that owns the worker (Phase 2b).
    */
-  /** Whether the run's binding was made on the retired bare pi route. */
-  private onRetiredRoute(runId: string): boolean {
-    return onRetiredBareRoute(this.bindingForRun(runId)?.instanceId)
-  }
-
   reconcileOnBoot(): BootReport {
     this.epochs.clear()
     const report = this.store.db.transaction((): BootReport => {
@@ -822,6 +826,8 @@ export class RunEngine extends EventEmitter {
       const active = this.store
         .listNonTerminalRuns()
         .filter((run) => ACTIVE_STATUSES.has(run.status))
+      // The turns the previous daemon had begun: read before step 2 cancels their effects.
+      const claimedStarts = this.outbox.listRunning().filter((effect) => effect.kind === 'turn.start')
       this.outbox.cancelProcessBound('daemon_restart', now)
       this.outbox.requeueRunningReplaySafe(now)
       // SPEC §15.1: MCP tokens live only in the previous daemon's memory; their rows are dead.
@@ -880,6 +886,14 @@ export class RunEngine extends EventEmitter {
       }
       const orphanedChildren = this.settleOrphanedChildren()
       const recoveredWakes = recoverWakesOnBoot(this.store, this.outbox, now)
+      // After children and wakes are settled their own way: what is still queued with a claimed send was cut off.
+      for (const effect of claimedStarts) {
+        const run = effect.runId ? this.store.getRun(effect.runId) : null
+        if (!run || !cutOffStart(run, effect.payload)) continue
+        this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
+        interrupted.push(run.runId)
+        noteFor(run.threadId).runIds.push(run.runId)
+      }
       const strandedQueued: string[] = []
       for (const { run } of strandedQueuedRuns(this.store, this.outbox)) {
         const note = noteFor(run.threadId)
@@ -2133,6 +2147,17 @@ export class RunEngine extends EventEmitter {
     }
     return settled
   }
+}
+
+/**
+ * Boot: a send the previous daemon had begun and never started. Its `turn.start` was claimed, but the run is still
+ * `queued`: the turn was being set up (workspace, start snapshot) and never marked its run starting, so its provider
+ * never had it. Payloads with a `kind` (wakes, bots, integrations, provider continuations) are settled by their own
+ * recovery, and a queue item's send by the message queue's: its claim is handed back and the item runs in its turn.
+ */
+function cutOffStart(run: RunRecord, payload: unknown): boolean {
+  if (run.status !== 'queued' || !isSendTurnPayload(payload) || payload.queueItemId !== undefined) return false
+  return typeof (payload as { kind?: unknown }).kind !== 'string'
 }
 
 function requireStatus(run: RunRecord, allowed: RunStatus[]): void {

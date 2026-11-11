@@ -12,7 +12,7 @@ import { ThreadSession } from '../../src/mms/orchestrator/ThreadSession'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import type { AgentActivityItem } from '../../src/shared/agentActivity'
 import type { ChatMessage } from '../../src/shared/types'
-import { formatRestartNote } from '../../src/mms/run/restartNote'
+import { formatRestartNote, RESTART_INTERRUPTED_TEXT } from '../../src/mms/run/restartNote'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 describe('continue after restart (SPEC §16.4)', () => {
@@ -495,6 +495,105 @@ describe('continue after restart (SPEC §16.4)', () => {
       expect(text).toContain('\n- subagent: Audit the schema (id task-9)')
       expect(text).toContain('\n- ExitPlanMode')
       expect(text).not.toContain('SECRET')
+    })
+  })
+
+  describe('a turn a crash cut off (no clean shutdown) is recorded at boot', () => {
+    const rows = (d: Phase6Daemon, threadId: string) =>
+      d.store.loadThreadData(threadId).messages.map((message) => [message.role, message.content, ...(message.hidden ? ['hidden'] : []), ...(message.streaming ? ['streaming'] : []), ...(message.incomplete ? ['incomplete'] : [])])
+
+    it('a running turn: the transcript says the restart ended it, its reply is closed, and a later boot adds nothing', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Cut')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const sent = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'cut-1', source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      first.engine.markStarting(sent.runId)
+      first.engine.markRunning(sent.runId)
+      const at = new Date().toISOString()
+      first.store.mutateThreadData(thread.id, () => ({
+        messages: [
+          { id: 'u1', role: 'user', content: 'Build it', timestamp: at },
+          { id: 'a1', role: 'assistant', content: 'Half a rep', timestamp: at, streaming: true }
+        ] as ChatMessage[]
+      }))
+      await first.crash()
+
+      const second = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      expect(second.boot.interrupted).toEqual([sent.runId])
+      const expected = [['user', 'Build it'], ['assistant', 'Half a rep', 'incomplete'], ['system', RESTART_INTERRUPTED_TEXT]]
+      expect(rows(second, thread.id)).toEqual(expected)
+      // As after a Stop: the last turn shows stopped (Run interrupted, with Continue), not Working.
+      expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'stopped', turnId: sent.runId })
+      await second.crash()
+
+      const third = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 3, orchestratorBoot: true })
+      daemons.push(third)
+      expect(rows(third, thread.id)).toEqual(expected)
+    })
+
+    it('a send whose turn was being set up: interrupted, its message kept in the transcript, and never sent', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Setup')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      await first.worker.stop()
+      const sent = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'setup-1', source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      first.engine.outbox.enqueue({
+        threadId: thread.id,
+        runId: sent.runId,
+        kind: 'turn.start',
+        payload: { runId: sent.runId, threadId: thread.id, input: { content: 'Set it up', mode: 'agent' }, reuseLastUser: false, displayUserMessage: true, source: 'gui' }
+      })
+      // The worker claims it, and the daemon dies while the turn is set up.
+      expect(first.engine.outbox.claimNext(first.engine.leaseOwner, new Date().toISOString())?.runId).toBe(sent.runId)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      expect(second.boot.interrupted).toEqual([sent.runId])
+      expect(second.engine.getRun(sent.runId)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'daemon_restart' } })
+      expect(rows(second, thread.id)).toEqual([['user', 'Set it up'], ['system', RESTART_INTERRUPTED_TEXT]])
+      expect(second.orch.getMessages(thread.id).map((message) => message.content)).toEqual(['Set it up', RESTART_INTERRUPTED_TEXT])
+      // Rule 5 has nothing to start again, and the provider never gets it.
+      expect(new Reconciler({ store: second.engine.store, outbox: second.engine.outbox, tools: second.engine.tools }).runOnce().queuedStarts).toEqual([])
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(pi.turns).toEqual([])
+    })
+
+    it('a message steered into the cut-off turn and never read runs once after the restart, shown once', async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      const thread = first.store.createThread('Steer')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const at = new Date().toISOString()
+      first.store.mutateThreadData(thread.id, () => ({
+        messages: [
+          { id: 'u1', role: 'user', content: 'Build it', timestamp: at },
+          { id: 'echo', role: 'user', content: 'Look at B', timestamp: at, steered: true }
+        ] as ChatMessage[]
+      }))
+      first.store.saveMessageQueue(thread.id, [
+        { id: 'steer-1', threadId: thread.id, content: 'Look at B', enqueuedAt: at, order: 1, intent: 'steer', state: 'steering', steerRunId: 'run:gone' },
+        { id: 'next-1', threadId: thread.id, content: 'Then C', enqueuedAt: at, order: 2, intent: 'normal', state: 'pending' }
+      ] as never)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      second.orch.recoverAndDrainPendingQueues()
+      await waitFor(() => pi.turns.length === 2 && second.engine.getActiveRun(thread.id) === null && !second.orch.isActiveTurnRunning(thread.id), 'both messages run')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Look at B', 'Then C'])
+      expect(second.store.loadMessageQueue(thread.id)).toEqual([])
+      const shown = second.orch.getMessages(thread.id).filter((message) => !message.hidden).map((message) => `${message.role}:${message.content}`)
+      expect(shown.filter((row) => row === 'user:Look at B')).toHaveLength(1)
+      expect(shown.at(-1)).toBe('assistant:reply to Then C')
     })
   })
 })
