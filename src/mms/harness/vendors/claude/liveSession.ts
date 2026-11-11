@@ -970,7 +970,11 @@ export class LiveSession<Turn = unknown> {
       }
       if (this.dead) return
       if (!receipt) {
-        if (run.kind === 'prompt' && !run.started && !run.settled && run.owned.size > 0 && this.obligations.size === 0) this.close('closed')
+        if (run.kind === 'prompt' && !run.started && !run.settled && run.owned.size > 0 && this.obligations.size === 0) {
+          // Ended with SIGTERM: a closed input alone would leave it running for seconds, and the prompt could start.
+          this.abrupt = true
+          this.close('closed')
+        }
         return
       }
       const queued = (receipt.still_queued ?? []).filter((id) => run.owned.has(id))
@@ -990,6 +994,8 @@ export class LiveSession<Turn = unknown> {
       // is still queued and would run unseen, beside a steer handed back. Closing the process drops it (a resumed
       // session does not run a message that was queued when its process ended, spike S1).
       if (this.obligations.size === 0) {
+        // Ended with SIGTERM: a closed input alone would leave it running for seconds, long enough to start what is queued.
+        this.abrupt = true
         this.close('closed')
         return
       }

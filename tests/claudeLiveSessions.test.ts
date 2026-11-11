@@ -2683,6 +2683,26 @@ describe('a steer Claude Code has not read when the turn ends', () => {
     }
   )
 
+  it('a Claude Code that ignored the queue cancel and runs on after its input closes gets SIGTERM at once, so B never runs there', async () => {
+    const cli = new FakeClaudeCli()
+    cli.lingersAfterClose = true
+    cli.pid = 4343
+    const reap = vi.fn(async () => 'ended' as const)
+    const f = fixture({}, cli, undefined, { reap })
+    const { process, abort, turn, onSteer, returnSteer, steer } = await steeredDuringCommand(f)
+    process.ignoresCancelQueued = true
+    abort.abort()
+    await expect(turn).rejects.toThrow()
+    expect(returnSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1')
+    await vi.waitFor(() => expect(process.signals).toEqual(['SIGTERM']), { timeout: 200, interval: 5 })
+    expect(reap).toHaveBeenCalledExactlyOnceWith(4343, expect.objectContaining({ exited: expect.any(Function) }))
+    process.emit(toolResult('bash-call'), resultFrame({ uuids: [process.uuid(0)], text: 'done' }))
+    await later(30)
+    expect(process.ranAfterClose).not.toContain(steer)
+    expect(onSteer).not.toHaveBeenCalled()
+    f.service.stopThread('thread')
+  })
+
   it('a Claude Code whose init says it cannot cancel the queue is closed without an interrupt, so B never starts there', async () => {
     const f = fixture()
     const { process, abort, turn, returnSteer, steer } = await steeredDuringCommand(f)
