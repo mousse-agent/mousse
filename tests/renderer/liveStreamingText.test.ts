@@ -13,6 +13,7 @@ import { countRender, startRenderCounts, stopRenderCounts } from '../../src/rend
 import { mousseToUIMessages, reuseUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { applyStreamedUpdates, clearAllLiveText, isLiveTextUpdate, liveTextOver } from '../../src/renderer/stores/liveTextStore'
+import { searchableParts } from '../../src/renderer/chat/components/agent-elements/find/find-index'
 import type { ChatMessage } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -37,7 +38,7 @@ afterEach(() => {
   globalThis.ResizeObserver = realResizeObserver
   stopRenderCounts()
   clearAllLiveText()
-  useAppStore.setState({ messages: [], activeThreadId: null })
+  useAppStore.setState({ messages: [], activeThreadId: null, profileId: 'default' })
   vi.useRealTimers()
 })
 
@@ -186,5 +187,61 @@ describe('the progress and thought lines while text streams', () => {
     expect(host.textContent).toContain('Checking the tests')
     stream(thinking('th', 8, 'Checking the tests and the build output', 'processing'))
     expect(host.textContent).toContain('the build output')
+  })
+})
+
+describe('a reply that ends without its last update', () => {
+  /** A snapshot of the thread from the service (after a restart, or the thread opened again). */
+  const snapshot = (messages: ChatMessage[]) =>
+    act(() => useAppStore.getState().applyThreadMessages({ threadId: 'thread-1', messages }, useAppStore.getState().profileId))
+
+  it('a snapshot that brings the finished reply shows its stored text and drops the live text', () => {
+    mount(thread(3, 'One'))
+    stream(assistant('reply', 7, 'One two three', { streaming: true }))
+    expect(replyText()).toContain('One two three')
+    snapshot([assistant('reply', 7, 'One two three four. Done.', { streaming: false })])
+    expect(replyText()).toContain('One two three four. Done.')
+    expect(liveTextOver('reply', 'One')).toBe('One')
+  })
+
+  it('a finished reply shorter than the live text (a lagging snapshot) shows the stored text, as Copy and the model read it', () => {
+    mount(thread(3, 'One'))
+    stream(assistant('reply', 7, 'One two three four', { streaming: true }))
+    snapshot([assistant('reply', 7, 'One two', { streaming: false })])
+    expect(replyText()).toContain('One two')
+    expect(replyText()).not.toContain('three')
+    // A later update for the same reply (still in flight) does not bring the live text back.
+    stream(assistant('reply', 7, 'One two three four five', { streaming: true }))
+    expect(replyText()).not.toContain('five')
+  })
+
+  it('opening another thread mid-stream drops the live text; coming back shows what the transcript holds', () => {
+    mount(thread(3, 'One'))
+    stream(assistant('reply', 7, 'One two three', { streaming: true }))
+    act(() => useAppStore.getState().switchToThread('thread-2'))
+    expect(liveTextOver('reply', 'One')).toBe('One')
+    act(() => useAppStore.getState().switchToThread('thread-1'))
+    // The reply ended while away: the thread's view brings it finished.
+    act(() => useAppStore.getState().applyThreadView({ threadId: 'thread-1', messages: [...thread(3, 'One').slice(0, -1), assistant('reply', 7, 'One two three four.', { streaming: false })] } as never))
+    expect(replyText()).toContain('One two three four.')
+    expect(liveTextOver('reply', 'One two three four.')).toBe('One two three four.')
+  })
+
+  it('a profile change drops every live text', () => {
+    mount(thread(2, 'One'))
+    stream(assistant('reply', 5, 'One two', { streaming: true }))
+    expect(liveTextOver('reply', 'One')).toBe('One two')
+    act(() => useAppStore.setState({ profileId: 'other' }))
+    expect(liveTextOver('reply', 'One')).toBe('One')
+  })
+})
+
+describe('find while a reply streams', () => {
+  it('searches the live text of the reply', () => {
+    mount(thread(2, 'Alpha'))
+    stream(assistant('reply', 5, 'Alpha bravo charlie', { streaming: true }))
+    const reply = { id: 'reply', role: 'assistant', parts: [{ type: 'text', text: 'Alpha' }] } as unknown as UIMessage
+    const text = searchableParts(reply).flatMap((part) => part.blocks).join(' ')
+    expect(text).toContain('charlie')
   })
 })

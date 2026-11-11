@@ -47,6 +47,25 @@ const UTILITY_ROLES: Array<[RegExp, AppProcessRole]> = [
 /** When one renderer hosts several contents, the one that names it best. */
 const RENDERER_ORDER: ContentsLike['role'][] = ['window', 'applet', 'browser', 'devtools', 'renderer']
 
+/** Hint fields an older service does not know: it refuses a report that has any field it does not know. */
+const NEWER_HINT_FIELDS = ['markdownCacheMb', 'codeCacheMb'] as const
+
+/**
+ * Sends the app's memory report. A service older than these fields refuses the whole report as having a field
+ * it does not know (`unknown_field`): the report goes again without them. Any other refusal is thrown.
+ */
+export async function sendAppReport<R extends { hints?: AppHints }>(request: (report: R) => Promise<unknown>, report: R): Promise<void> {
+  try {
+    await request(report)
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code
+    if (code !== 'unknown_field' || !report.hints || !NEWER_HINT_FIELDS.some((field) => field in report.hints!)) throw error
+    const hints = { ...report.hints }
+    for (const field of NEWER_HINT_FIELDS) delete hints[field]
+    await request({ ...report, hints })
+  }
+}
+
 export function kb(value: number | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? Math.round((value / 1024) * 10) / 10 : undefined
 }

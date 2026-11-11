@@ -13,11 +13,39 @@ import { countRender } from "./render-counts";
  * estimate of the bytes they hold.
  */
 export const MARKDOWN_CACHE_BYTES = 10 * 1024 * 1024;
-/** About what one character of Markdown costs once parsed: its text, the syntax tree and the elements. */
-const PARSED_BYTES_PER_CHAR = 20;
+/**
+ * What a parsed block holds, fitted to the heap it retains for dense lists with inline code and links,
+ * prose, tables and code fences (within 3% for the first three; code is overestimated about 1.5x).
+ * Each element is a React element with its props and the syntax-tree node Streamdown keeps on it,
+ * with its position and properties; each piece of text is a text node with its position; each block
+ * has its tree's root and the parse's own objects. Text and keys count at 2 bytes a character.
+ */
+const BYTES_PER_ELEMENT = 1100;
+const BYTES_PER_TEXT_NODE = 450;
+const BYTES_PER_BLOCK = 4000;
 /** A split holds its blocks' text (UTF-16) and the list. */
 const SPLIT_BYTES_PER_CHAR = 2;
 const SPLIT_BYTES_PER_BLOCK = 64;
+
+/** The elements, pieces of text and characters of text in a parsed tree. */
+export function parsedTreeShape(node: ReactNode, shape = { elements: 0, texts: 0, chars: 0 }): { elements: number; texts: number; chars: number } {
+  if (Array.isArray(node)) {
+    for (const child of node) parsedTreeShape(child, shape);
+  } else if (typeof node === "string") {
+    shape.texts += 1;
+    shape.chars += node.length;
+  } else if (isValidElement<{ children?: ReactNode }>(node)) {
+    shape.elements += 1;
+    parsedTreeShape(node.props.children, shape);
+  }
+  return shape;
+}
+
+/** The estimated bytes of a parsed tree kept under `key`. */
+export function parsedTreeBytes(tree: ReactNode, key: string): number {
+  const shape = parsedTreeShape(tree);
+  return BYTES_PER_BLOCK + shape.elements * BYTES_PER_ELEMENT + shape.texts * BYTES_PER_TEXT_NODE + shape.chars * 2 + key.length * 2;
+}
 
 const cache = new ByteLruCache<string, ReactNode | string[]>(MARKDOWN_CACHE_BYTES, (bytes) => noteRenderCacheBytes("markdown", bytes));
 
@@ -37,7 +65,7 @@ export function cachedSplit(setup: string, split: (text: string) => string[]): (
     const held = cache.get(key) as string[] | undefined;
     if (held) return held;
     const blocks = split(text);
-    cache.set(key, blocks, text.length * SPLIT_BYTES_PER_CHAR + blocks.length * SPLIT_BYTES_PER_BLOCK);
+    cache.set(key, blocks, key.length * 2 + text.length * SPLIT_BYTES_PER_CHAR + blocks.length * SPLIT_BYTES_PER_BLOCK);
     return blocks;
   };
 }
@@ -85,7 +113,7 @@ function CachedBlockView(props: BlockProps) {
     countRender("blockParse");
     tree = found.parse.type(found.parse.props);
     if (inserted.current !== null && inserted.current !== key) cache.delete(inserted.current);
-    cache.set(key, tree, text.length * PARSED_BYTES_PER_CHAR);
+    cache.set(key, tree, parsedTreeBytes(tree, key));
     inserted.current = key;
   }
   return found.replace(tree);

@@ -353,7 +353,9 @@ describe('memory monitor', () => {
     expect(() => validateAppReport({ processes: [], hints: { ...hints, codeCacheMb: -1 } })).toThrow()
     expect(appHintsLine(withCaches)).toMatch(/, chat caches: Markdown 1\.5 MB, code 12\.3 MB$/)
     expect(appHintsLine(hints)).not.toContain('chat caches')
-    expect(() => validateAppReport({ processes: [], hints: { ...hints, title: 'x' } })).toThrow(/Unexpected field/)
+    // A hint this service does not know (a newer app's) is dropped, never kept; the rest of the report stays.
+    expect(validateAppReport({ processes: [], hints: { ...hints, title: 'x', futureMb: 3 } }).hints).toEqual(hints)
+    expect(validateAppReport({ processes: [], hints: JSON.parse(JSON.stringify({ ...hints }).replace('{', '{"__proto__":{"x":1},')) }).hints).toEqual(hints)
     expect(() => validateAppReport({ processes: [], hints: { ...hints, windows: [{ w: 1, h: 1, scale: 1, visible: true, url: 'x' }] } })).toThrow(/Unexpected field/)
   })
 })

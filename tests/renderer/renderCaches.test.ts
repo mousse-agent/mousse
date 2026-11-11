@@ -8,7 +8,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ByteLruCache } from '../../src/renderer/lib/byteLruCache'
 import { Markdown } from '../../src/renderer/chat/components/agent-elements/markdown'
-import { markdownCache, MARKDOWN_CACHE_BYTES } from '../../src/renderer/chat/components/agent-elements/markdown-cache'
+import { markdownCache, MARKDOWN_CACHE_BYTES, parsedTreeBytes, parsedTreeShape } from '../../src/renderer/chat/components/agent-elements/markdown-cache'
 import {
   codeHighlighter,
   highlightCache,
@@ -125,6 +125,24 @@ describe('parsed Markdown', () => {
     expect(host.innerHTML).not.toContain('E = mc^2</span>')
   })
 
+  it('weighs a block by its elements and pieces of text, so a dense list weighs more than prose of the same length', () => {
+    const denseList = Array.from({ length: 12 }, (_, k) => `- item ${k} uses \`fn${k}()\` and [docs](https://example.com/${k}) with **bold**`).join('\n')
+    const prose = 'The renderer keeps a bounded window of rows and recycles their nodes as the list scrolls. '.repeat(Math.ceil(denseList.length / 90)).slice(0, denseList.length)
+    const weigh = (content: string) => {
+      markdownCache.clear()
+      mountMarkdown(content)
+      unmountMarkdown()
+      return markdownCache.bytes
+    }
+    const dense = weigh(denseList)
+    const plain = weigh(prose)
+    expect(dense).toBeGreaterThan(plain * 3)
+    // The estimate counts each element, each piece of text, the text and the key.
+    const tree = createElement('ul', null, createElement('li', null, 'one ', createElement('code', null, 'x')), createElement('li', null, 'two'))
+    expect(parsedTreeShape(tree)).toEqual({ elements: 4, texts: 3, chars: 8 })
+    expect(parsedTreeBytes(tree, 'key')).toBeGreaterThan(parsedTreeBytes(createElement('p', null, 'one x two'), 'key'))
+  })
+
   it('keeps only the text a streaming reply ends with, not each step on the way', () => {
     const counts = startRenderCounts()
     for (let end = 10; end < heavyReply.length + 10; end += 10) mountMarkdown(heavyReply.slice(0, end), true)
@@ -175,6 +193,11 @@ describe('highlighted code', () => {
     const long = await highlight('a = 1\n'.repeat(50), 'python')
     expect(highlightResultBytes(long)).toBeGreaterThan(highlightResultBytes(short) * 10)
     expect(highlightCache.bytes).toBeGreaterThan(0)
+    // The key, which holds the code, is counted too: an entry weighs at least its key.
+    const before = highlightCache.bytes
+    const code = '# a comment that is long enough to see\n'.repeat(20)
+    const tokens = await highlight(code, 'python')
+    expect(highlightCache.bytes - before).toBeGreaterThanOrEqual(highlightResultBytes(tokens) + code.length * 2)
   })
 
   it('is drawn from the cache when a code block mounts again, without tokenising', async () => {

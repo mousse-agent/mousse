@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { appHints, appProcessRows, utilityRole, type MetricLike, type WindowReport } from '../src/main/diagnostics/appProcesses'
+import { appHints, appProcessRows, sendAppReport, utilityRole, type MetricLike, type WindowReport } from '../src/main/diagnostics/appProcesses'
 import { appProcessLabels, memoryTable, type MemorySample } from '../src/shared/diagnostics/memory'
 import { liveWebGlContexts, noteWebGlContext } from '../src/renderer/lib/webglCount'
 
@@ -112,5 +112,30 @@ describe('per-process table', () => {
       ['Network', 13, 30, 'app'],
       ['App total', 717, null, 'total']
     ])
+  })
+})
+
+describe('sending the report to an older service', () => {
+  const hints = { windows: [], surfaceMb: 0, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0, imagesMb: 1, markdownCacheMb: 2, codeCacheMb: 3 }
+  const refusal = (code: string) => Object.assign(new Error('refused'), { code })
+
+  it('sends again without the chat cache sizes when the service refuses a field it does not know', async () => {
+    const sent: unknown[] = []
+    await sendAppReport(async (report) => {
+      sent.push(report)
+      if (sent.length === 1) throw refusal('unknown_field')
+    }, { processes: [], hints })
+    expect(sent).toHaveLength(2)
+    expect((sent[1] as { hints: Record<string, unknown> }).hints).toEqual({ windows: [], surfaceMb: 0, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0, imagesMb: 1 })
+  })
+
+  it('sends once when the service takes it, and passes any other refusal on', async () => {
+    let calls = 0
+    await sendAppReport(async () => { calls += 1 }, { processes: [], hints })
+    expect(calls).toBe(1)
+    await expect(sendAppReport(async () => { throw refusal('unavailable') }, { processes: [], hints })).rejects.toMatchObject({ code: 'unavailable' })
+    // Without the new fields there is nothing to drop: the refusal stands.
+    const { markdownCacheMb: _m, codeCacheMb: _c, ...older } = hints
+    await expect(sendAppReport(async () => { throw refusal('unknown_field') }, { processes: [], hints: older })).rejects.toMatchObject({ code: 'unknown_field' })
   })
 })

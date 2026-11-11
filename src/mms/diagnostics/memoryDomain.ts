@@ -75,8 +75,17 @@ function count(value: unknown, name: string): number {
   return value
 }
 
+const HINT_FIELDS = ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb', 'markdownCacheMb', 'codeCacheMb']
+
+/**
+ * The hints, with fields this service does not know dropped: a newer app may add optional hints. Dropped fields
+ * are never kept or logged, so nothing unknown reaches a sample.
+ */
 function validateHints(value: unknown): AppHints {
-  const raw = domainObject(value, ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb', 'markdownCacheMb', 'codeCacheMb'])
+  const known = value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).filter(([key]) => HINT_FIELDS.includes(key)))
+    : value
+  const raw = domainObject(known, HINT_FIELDS)
   if (!Array.isArray(raw.windows) || raw.windows.length > MAX_WINDOWS) throw new DomainRpcError('invalid_params', 'windows must be a list of at most 32')
   const windows = raw.windows.map((entry) => {
     const w = domainObject(entry, ['w', 'h', 'scale', 'visible'])

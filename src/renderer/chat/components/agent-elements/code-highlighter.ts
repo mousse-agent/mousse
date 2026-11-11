@@ -134,7 +134,8 @@ export function highlightCacheKey(language: string, themes: readonly [string, st
 registerWindowCache("codeHighlight", () => ({ entries: resultCache.size }));
 
 function cacheResult(key: string, result: HighlightResult): void {
-  resultCache.set(key, result, highlightResultBytes(result));
+  // The key holds the code too.
+  resultCache.set(key, result, key.length * 2 + highlightResultBytes(result));
 }
 
 type Tokenized = { code: string; result: HighlightResult };

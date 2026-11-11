@@ -1,6 +1,7 @@
 import { useCallback, useSyncExternalStore } from 'react'
 import type { ChatMessage } from '../../shared/types'
 import { assistantDisplayText } from '../chat/adapters/mousseToUI'
+import { useAppStore } from './appStore'
 
 /**
  * The text of replies still streaming in, kept apart from the transcript. A streamed update that
@@ -8,6 +9,12 @@ import { assistantDisplayText } from '../chat/adapters/mousseToUI'
  * reads it, so the transcript, its other turns and everything else that reads the thread's messages
  * stay as they are. Any other change (a new message, a tool's state, the reply's end) goes to the
  * main store as before, and the reply's final text replaces its live text there once.
+ *
+ * A live text exists only while the transcript holds its reply as still streaming: when the reply
+ * arrives finished by any path (its last update, a snapshot after a restart, the thread opened
+ * again after it ended elsewhere), leaves the transcript (another thread opened) or the profile
+ * changes, its live text is dropped and the transcript's text is shown, the same text Copy, Find
+ * and the model read.
  */
 interface LiveText {
   /** The reply's text as it streams in, as the transcript shows it. */
@@ -40,7 +47,7 @@ function clearLiveText(id: string): void {
   if (entries.delete(id)) notify(id)
 }
 
-/** Drops every live text (tests, a profile switch). */
+/** Drops every live text: the profile changed (see the store subscription below), and tests. */
 export function clearAllLiveText(): void {
   const ids = [...entries.keys()]
   entries.clear()
@@ -54,7 +61,8 @@ export function liveTextOver(id: string, shown: string): string {
 
 function pickText(entry: LiveText | undefined, shown: string): string {
   if (!entry) return shown
-  // The transcript text it was drawn over, or older text it extends (a snapshot that lagged behind).
+  // The transcript text it was drawn over, or older text it extends: a snapshot of the reply, still
+  // streaming, that lagged behind. A live text never outlives the stored reply's streaming (below).
   if (entry.over === shown || (entry.text.length > shown.length && entry.text.startsWith(shown))) return entry.text
   return shown
 }
@@ -128,3 +136,19 @@ export function applyStreamedUpdates(
   if (toStore.length > 0) write(toStore)
   for (const id of handedOver) clearLiveText(id)
 }
+
+/**
+ * Drops the live text of every reply the transcript `messages` no longer holds as streaming: it
+ * ended (by any path), or it is not there (another thread or profile is shown).
+ */
+export function dropSettledLiveText(messages: readonly ChatMessage[]): void {
+  for (const id of [...entries.keys()]) {
+    if (findFromEnd(messages, id)?.streaming !== true) clearLiveText(id)
+  }
+}
+
+// Runs inside each store write, before React renders it: the transcript and the live text change together.
+useAppStore.subscribe((state, previous) => {
+  if (state.profileId !== previous.profileId) clearAllLiveText()
+  else if (state.messages !== previous.messages && entries.size > 0) dropSettledLiveText(state.messages)
+})

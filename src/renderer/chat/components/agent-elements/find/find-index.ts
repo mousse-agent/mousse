@@ -2,6 +2,7 @@ import type { UIMessage } from "ai";
 import { readSubagentNotice } from "../../../adapters/subagentNotice";
 import { isTextPart } from "../utils/assistant-blocks";
 import { markdownToSearchBlocks, plainTextToSearchBlocks } from "./search-text";
+import { liveTextOver } from "../../../../stores/liveTextStore";
 
 /** A turn as the list groups it, with the key its row is mounted under. */
 export type FindTurn = {
@@ -101,8 +102,13 @@ function sourceOf(message: UIMessage): unknown[] {
     Boolean(metadata?.contextHandoff || metadata?.compaction || metadata?.contextCleared),
     message.role === "user" && readSubagentNotice(message) !== null,
   ];
-  for (const part of message.parts ?? []) source.push(isTextPart(part) ? part.text : null);
+  for (const part of message.parts ?? []) source.push(isTextPart(part) ? replyText(message, part.text) : null);
   return source;
+}
+
+/** A reply's text as shown: its live text while it streams in (see liveTextStore). */
+function replyText(message: UIMessage, text: string): string {
+  return message.role === "assistant" ? liveTextOver(message.id, text) : text;
 }
 
 function sameSource(a: readonly unknown[], b: readonly unknown[]): boolean {
@@ -285,7 +291,7 @@ function readParts(message: UIMessage, math: boolean): SearchablePart[] {
   const result: SearchablePart[] = [];
   parts.forEach((part, partIndex) => {
     if (!isTextPart(part) || !part.text) return;
-    const blocks = markdownToSearchBlocks(part.text, { math });
+    const blocks = markdownToSearchBlocks(replyText(message, part.text), { math });
     if (blocks.length > 0) result.push({ partIndex, blocks });
   });
   return result;
