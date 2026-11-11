@@ -110,7 +110,8 @@ describe('threads.delete', () => {
       const inventory = await f.rpc.request<{ lifecycles: Array<{ taskId: string; state: string }> }>('threads.inventory', {})
       expect(inventory.lifecycles.filter((record) => record.state === 'trashed')).toEqual([])
     } finally { await f.close() }
-  })
+    // A real service purges three threads: about 5 s alone, past 20 s in a loaded full run.
+  }, 60_000)
 
   it('replies without the folder file ids of its purge, which the network refuses above 2^53, and keeps them in the stored record', async () => {
     const f = await lifecycleHarness()

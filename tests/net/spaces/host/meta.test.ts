@@ -49,7 +49,8 @@ describe('signed materialization of frozen meta oracles', () => {
     expect(replica.store.cursor(space.meta).seq).toBe(0)
     expect(replica.projection.state(space.space)).toBeUndefined()
     stage.abort()
-  })
+    // 256 really signed meta events: about 7 s alone, past 20 s in a loaded full run.
+  }, 60_000)
   it('retains original descriptor verification after the host renews its delegation at the same key epoch', async () => {
     const source = await profile(),
       replica = await profile(source.clock, 'Replica'),
