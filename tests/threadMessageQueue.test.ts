@@ -493,6 +493,23 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
       expect(promoteQueuedMessageToSteer(items, first.id).item.steerRunId).toBeUndefined()
     })
 
+    it('marks an item this build promotes, keeps the mark on disk, and reads an older file\'s item as unmarked', () => {
+      const { items, first } = seed()
+      // Every promotion of a pending item is marked, bound to a run or not: copies this build writes name the item.
+      const promoted = promoteQueuedMessageToSteer(items, first.id, { steerRunId: 'run-a' }).item
+      expect(promoted.promotedWithCopyId).toBe(true)
+      expect(promoteQueuedMessageToSteer(items, first.id).item.promotedWithCopyId).toBe(true)
+      expect(normalizeQueuedMessages(JSON.parse(JSON.stringify([promoted])), 't1')[0].promotedWithCopyId).toBe(true)
+      // An item an older build promoted has no mark, and promoting it again leaves it unmarked.
+      const { promotedWithCopyId: _mark, ...older } = promoted
+      const [loadedOlder] = normalizeQueuedMessages(JSON.parse(JSON.stringify([older])), 't1')
+      expect(loadedOlder.promotedWithCopyId).toBeUndefined()
+      expect(promoteQueuedMessageToSteer([loadedOlder], first.id, { steerRunId: 'run-a' }).item.promotedWithCopyId).toBeUndefined()
+      // Only a steering item carries the mark; a demoted one loses it with its run.
+      expect(normalizeQueuedMessages([{ ...promoted, state: 'pending', intent: 'normal' }], 't1')[0].promotedWithCopyId).toBeUndefined()
+      expect(demoteSteerItems([promoted])[0].promotedWithCopyId).toBeUndefined()
+    })
+
     it('demotes the named items only, clears the bound run, and keeps origin and mode limit', () => {
       const { items, first, second } = seed()
       const edited = editQueuedMessage(items, first.id, { origin: agent, permissionMode: 'ask' }).items

@@ -12686,8 +12686,12 @@ export class OrchestratorService extends EventEmitter {
       hidden = true
     })
     // A copy written before copies named their queue item (a daemon that crashed, then was updated) has no
-    // `steerItemId`, and is hidden only where it can be nothing else (`olderBuildSteerCopies`).
-    for (const index of this.olderBuildSteerCopies(session.messages, returned.filter((item) => !copied.has(item.id)))) {
+    // `steerItemId`, and is hidden only where it can be nothing else (`olderBuildSteerCopies`). Only an item an older
+    // build promoted can have such a copy: one this build promoted (`promotedWithCopyId`) and left with no named copy
+    // has none at all (another process promoted it, or the turn ended first), and a steered message with no item
+    // named is another steer (typed into the turn, sent by an agent) that must stay.
+    const olderBuild = returned.filter((item) => !copied.has(item.id) && !item.promotedWithCopyId)
+    for (const index of this.olderBuildSteerCopies(session.messages, olderBuild)) {
       session.messages[index] = { ...session.messages[index], hidden: true }
       hidden = true
     }
@@ -12700,8 +12704,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * The indexes of the shown copies an older build wrote (no `steerItemId`) for `returned` steers whose own copy
-   * carries no id. A copy counts only inside the run the steer was bound to (`steerRunId`), written no earlier than
+   * The indexes of the shown copies an older build wrote (no `steerItemId`) for `returned` steers an older build
+   * promoted (no `promotedWithCopyId`) and whose own copy carries no id. A copy counts only inside the run the steer was bound to (`steerRunId`), written no earlier than
    * that run started and the steer was queued, with the steer's words. Every steer of the run with those words is
    * matched against every such copy at once, and the copies are hidden only when there are no more of them than
    * steers: one more is a message this method cannot tell apart (an earlier turn's steer, or one steered by hand), and

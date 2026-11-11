@@ -1163,6 +1163,12 @@ export interface QueuedMessage {
    */
   steerRunId?: string
   /**
+   * Set on a `steering` item this build promoted: every copy it writes of the steer into the turn names the item
+   * (`ChatMessage.steerItemId`), so a steered message with no item named is never this item's copy. Absent on an
+   * item an older build promoted, whose copy may carry no name; only those are matched to such copies by their words.
+   */
+  promotedWithCopyId?: true
+  /**
    * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
    * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
    * the turn so its end completes the occurrence. `agent`: a message another thread's agent sent; it
