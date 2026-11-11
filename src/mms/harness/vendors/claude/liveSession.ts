@@ -73,6 +73,8 @@ export function noteClaudeQuerySpawn(query: object, spawned: () => { pid: number
 export interface ClaudeProcess {
   pid: number
   root: SpawnedRoot
+  /** Sends SIGTERM through Mousse's handle; false when it could not be sent. Absent without a handle that can signal. */
+  terminate?: () => boolean
 }
 
 /** The SDK's process of a query (a `ChildProcess`, or the SDK's wrapper of one, which has no pid). */
@@ -94,6 +96,7 @@ export function claudeQueryProcess(query: unknown): ClaudeProcess | undefined {
   const knowsExit = handle !== undefined && 'exitCode' in handle && 'signalCode' in handle
   return {
     pid,
+    ...(typeof handle?.kill === 'function' ? { terminate: () => { try { handle.kill!('SIGTERM'); return true } catch { return false } } } : {}),
     root: {
       ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt } : {}),
       exited: () => (knowsExit ? handle!.exitCode !== null || handle!.signalCode !== null : undefined),
@@ -547,6 +550,11 @@ export interface LiveSessionHooks {
   notice?(text: string): void
   /** The process ended or was released. */
   ended(reason: 'closed' | 'idle' | 'idle-cap' | 'died'): void
+  /**
+   * The session sent the process SIGTERM itself (`terminate`): the owner kills it with everything it started if it is
+   * still running after the grace, as after Stop.
+   */
+  reap?(target: ClaudeProcess): void
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
@@ -622,6 +630,10 @@ export class LiveSession<Turn = unknown> {
    * `system/init` frame lists). Unknown until an init frame lists capabilities; the interrupt's receipt then decides.
    */
   private cancelQueuedSupported: boolean | undefined
+  /** The next close ends the process with SIGTERM rather than by closing its input (`terminate`). */
+  private abrupt = false
+  /** The session signalled its process and handed it to `hooks.reap`; the owner does not reap it again. */
+  reaped = false
   private cancelWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
   private readonly noticeTimers = new Set<ReturnType<typeof setTimeout>>()
   private idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -918,8 +930,11 @@ export class LiveSession<Turn = unknown> {
    *
    * `sweep`: the run owns a steer Claude Code has not read, which is handed back to Mousse. The queue is cancelled in
    * the interrupt itself, with no plain interrupt first, so Claude Code cannot start the steer in between. A Claude Code
-   * whose init said it cannot cancel the queue is closed at once when nothing keeps it, not interrupted first: after an
-   * interrupt the steer starts at once as a new turn (spike S1), and its tools would run before the close.
+   * whose init said it cannot cancel the queue is ended at once when nothing keeps it, not interrupted first: after an
+   * interrupt the steer starts at once as a new turn (spike S1), and its tools would run before the close. It is sent
+   * SIGTERM, also when a Stop closes it first: a closed input alone leaves it running for seconds (the SDK signals it
+   * only after a delay), so the running turn and its tools would go on, and a turn that ends meanwhile would start the
+   * steer. Its tree is killed after the grace, as after Stop (`hooks.reap`).
    */
   private async interruptFor(run: LiveRun, query: Query, sweep = false): Promise<void> {
     this.cancelling++
@@ -934,6 +949,8 @@ export class LiveSession<Turn = unknown> {
     type Receipt = { still_queued?: string[]; cancelled?: string[] } | undefined
     const target = query as { interrupt(options?: { cancelQueued?: boolean }): Promise<Receipt> }
     if (sweep && this.cancelQueuedSupported === false && this.obligations.size === 0) {
+      // Set inside `abandon`, so a Stop that closes the process before the step below also ends it with SIGTERM.
+      this.abrupt = true
       // After `abandon` has returned, not inside it. Nothing is sent to Claude Code meanwhile.
       await Promise.resolve()
       if (this.dead) return
@@ -941,6 +958,7 @@ export class LiveSession<Turn = unknown> {
         this.close('closed')
         return
       }
+      this.abrupt = false
     }
     if (!sweep) {
       let receipt: Receipt
@@ -1668,6 +1686,8 @@ export class LiveSession<Turn = unknown> {
     this.cancelWaiters = []
     this.cancelling = 0
     for (const waiter of waiters) waiter.reject(error)
+    // Before the input closes: the SDK's own close (and the lifetime's abort) only ends it, and signals much later.
+    if (this.abrupt) this.terminate()
     this.queue.close()
     this.lifetime.abort()
     try {
@@ -1687,5 +1707,25 @@ export class LiveSession<Turn = unknown> {
       this.hooks.backgroundWork(false)
     }
     this.hooks.ended(reason)
+  }
+
+  /**
+   * Sends the process SIGTERM through Mousse's handle and hands it to `hooks.reap`, which kills its tree if it outlives
+   * the grace. One that cannot be reached is left to the SDK's close (its input ends, and the SDK signals it later), with
+   * a warning: a queued message may start before it exits. Ids only.
+   */
+  private terminate(): void {
+    const target = this.query ? claudeQueryProcess(this.query) : undefined
+    if (target?.terminate?.()) {
+      if (this.hooks.reap) {
+        this.reaped = true
+        this.hooks.reap(target)
+      }
+      return
+    }
+    console.warn('[claude-live] could not signal Claude Code; its input is closed instead, and a queued message may start before it exits', {
+      threadId: this.threadId,
+      ...(target ? { pid: target.pid } : {})
+    })
   }
 }

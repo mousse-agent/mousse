@@ -2698,6 +2698,42 @@ describe('a steer Claude Code has not read when the turn ends', () => {
     expect(process.ranAfterInterrupt).not.toContain(steer)
   })
 
+  it.each(['cancel', 'stop'])(
+    'a Claude Code that cannot cancel the queue and runs on after its input closes gets SIGTERM at once and its tree reaped, so B never runs there (%s)',
+    async (how) => {
+      const cli = new FakeClaudeCli()
+      cli.lingersAfterClose = true
+      cli.pid = 4242
+      const reap = vi.fn(async () => 'ended' as const)
+      const f = fixture({}, cli, undefined, { reap })
+      const { process, abort, turn, onSteer, returnSteer, steer } = await steeredDuringCommand(f)
+      process.emit({ type: 'system', subtype: 'init', session_id: SESSION, capabilities: ['interrupt_receipt_v1'] })
+      await later(10)
+      abort.abort()
+      if (how === 'stop') expect(f.service.stopThread('thread')).toBe('stopped')
+      await expect(turn).rejects.toThrow()
+      expect(returnSteer).toHaveBeenCalledExactlyOnceWith('B', 'drain-1')
+      // Signalled at once, not after the SDK's delay, and its tree goes to the reap Stop uses, once.
+      await vi.waitFor(() => expect(process.signals).toEqual(['SIGTERM']), { timeout: 200, interval: 5 })
+      expect(process.interrupts).toBe(0)
+      expect(reap).toHaveBeenCalledExactlyOnceWith(4242, expect.objectContaining({ exited: expect.any(Function) }))
+      // The command finishes: a process still running would end the turn and start B now.
+      process.emit(toolResult('bash-call'), resultFrame({ uuids: [process.uuid(0)], text: 'done' }))
+      await later(30)
+      expect(process.ranAfterClose).not.toContain(steer)
+      expect(onSteer).not.toHaveBeenCalled()
+      expect(returnSteer).toHaveBeenCalledOnce()
+      // The session is gone: the next turn starts a fresh process.
+      expect(f.service.hasLiveProcess('thread')).toBe(false)
+      f.cli.reply = (message, next) => {
+        if (message.priority !== 'now') next.answer(String(message.uuid), 'fresh')
+      }
+      expect(await f.chat({ history: '' })).toBe('fresh')
+      expect(f.cli.processes).toHaveLength(2)
+      f.service.stopThread('thread')
+    }
+  )
+
   it('a turn that ends with B still unread hands it back once, after Claude Code dropped it from its queue', async () => {
     const f = fixture()
     const { process, turn, onSteer, returnSteer, steer } = await steeredDuringCommand(f)

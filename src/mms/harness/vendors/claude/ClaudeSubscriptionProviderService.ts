@@ -1859,14 +1859,18 @@ export class ClaudeSubscriptionProviderService {
     const target = live.process()
     live.close('closed')
     this.live.delete(threadId)
-    this.reapClosed(threadId, target)
+    // A session that ended its process with SIGTERM itself has handed it to `reapClosed` already.
+    if (!live.reaped) this.reapClosed(threadId, target)
     return 'stopped'
   }
   /**
-   * Issue #417: a closed Claude Code process normally exits at once, ending the commands it runs
-   * (the Stop's interrupt already ended the one in the foreground). One that is still running after
-   * `CLAUDE_STOP_GRACE_MS` is killed with every process below it, so no command outlives the Stop; one
-   * that cannot be killed is said in the thread, so it does not look stopped while it still runs.
+   * Issue #417: a closed Claude Code process normally exits at once, ending the commands it runs. The
+   * one in the foreground was ended by the Stop's interrupt, unless the process was closed without one
+   * (a cancel that must drop a steer it cannot cancel, which sends SIGTERM instead, `hooks.reap`); a
+   * foreground command that outlives the process is then killed here with the rest. A process that
+   * is still running after `CLAUDE_STOP_GRACE_MS`, or one that left commands running, is killed with
+   * every process below it, so no command outlives the Stop or cancel; one that cannot be killed is
+   * said in the thread, so it does not look stopped while it still runs.
    */
   private reapClosed(threadId: string, target: ClaudeProcess | undefined): void {
     if (target === undefined) return
@@ -1984,7 +1988,8 @@ export class ClaudeSubscriptionProviderService {
         taskEnded: (info) => this.notifyHost(() => this.liveHost?.taskEnded?.(threadId, info)),
         ended: () => {
           if (this.live.get(threadId) === created) this.live.delete(threadId)
-        }
+        },
+        reap: (target) => this.reapClosed(threadId, target)
       },
       timings
     )

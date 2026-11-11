@@ -114,6 +114,18 @@ export class FakeClaudeProcess {
   ignoresCancelQueued = false
   /** The ids an interrupt left queued that the process then ran as turns of their own (`ignoresCancelQueued`). */
   readonly ranAfterInterrupt: string[] = []
+  /**
+   * Like the real Claude Code, the process keeps running for a while after its input closes (the SDK's close only ends
+   * its stdin and signals it seconds later): the turn it runs goes on, and when that turn's result is written it starts
+   * what is still queued as turns of their own (`ranAfterClose`). Only a signal (`signals`) ends it.
+   */
+  lingersAfterClose = false
+  /** The ids the process ran after its input closed (`lingersAfterClose`). */
+  readonly ranAfterClose: string[] = []
+  /** The pid its process transport shows, as the Agent SDK's does; without one the query has no transport. */
+  pid: number | undefined
+  /** The signals sent through the process transport's handle, in order. */
+  readonly signals: string[] = []
   /** While set, `setPermissionMode` and `backgroundTasks` wait for it. */
   permissionGate: Promise<unknown> | undefined
   /** While set, `interrupt()` waits for it before it answers (a slow receipt). */
@@ -152,7 +164,7 @@ export class FakeClaudeProcess {
     }
     this.inputEnded = true
     // Like the real process: with its input closed it finishes what it was asked and exits.
-    this.end()
+    if (!this.lingersAfterClose) this.end()
   }
 
   /** The text of the n-th message the process read. */
@@ -180,6 +192,9 @@ export class FakeClaudeProcess {
         this.waiting = undefined
         resolve({ value: frame as unknown as SDKMessage, done: false })
       } else this.frames.push(frame)
+      // A turn ended while the process lingers with its input closed: it starts what is still queued.
+      if (frame.type === 'result' && this.lingersAfterClose && (this.closed || this.inputEnded))
+        setTimeout(() => this.runQueued(this.ranAfterClose), 0)
     }
   }
 
@@ -228,10 +243,10 @@ export class FakeClaudeProcess {
   }
 
   /** Each message still queued starts as a turn of its own and runs to its result, as after an interrupt (spike S1). */
-  private runQueued(): void {
+  private runQueued(ran: string[] = this.ranAfterInterrupt): void {
     for (const id of this.queued) {
       if (this.ended) return
-      this.ranAfterInterrupt.push(id)
+      ran.push(id)
       this.emit(lifecycle(id, 'started'))
       this.answer(id, 'ran after the interrupt')
     }
@@ -270,7 +285,19 @@ export class FakeClaudeProcess {
       },
       [Symbol.asyncDispose]: async () => undefined
     } as AsyncGenerator<SDKMessage>
-    return Object.assign(iterator, {
+    // The SDK's process handle: a signal ends the process at once.
+    const handle = {
+      pid: this.pid,
+      exitCode: null as number | null,
+      signalCode: null as string | null,
+      kill: (signal: string = 'SIGTERM') => {
+        this.signals.push(signal)
+        handle.signalCode = signal
+        this.end()
+        return true
+      }
+    }
+    return Object.assign(iterator, this.pid === undefined ? {} : { transport: { process: handle } }, {
       interrupt: async (options?: { cancelQueued?: boolean }) => {
         this.interrupts++
         this.interruptOptions.push(options)
@@ -302,7 +329,7 @@ export class FakeClaudeProcess {
       },
       close: () => {
         this.closed = true
-        this.end()
+        if (!this.lingersAfterClose) this.end()
       },
       setPermissionMode: async (mode: string) => {
         await this.permissionGate
@@ -327,8 +354,15 @@ export class FakeClaudeCli {
     process.answer(String(message.uuid), `reply to ${process.inputs.length}`)
   }
 
+  /** Each new process lingers after its input closes (`FakeClaudeProcess.lingersAfterClose`). */
+  lingersAfterClose = false
+  /** The pid each new process's transport shows (`FakeClaudeProcess.pid`); none by default. */
+  pid: number | undefined
+
   readonly query = ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }): Query => {
     const process = new FakeClaudeProcess(prompt, options, () => this.reply)
+    process.lingersAfterClose = this.lingersAfterClose
+    process.pid = this.pid
     this.processes.push(process)
     return process.asQuery()
   }
