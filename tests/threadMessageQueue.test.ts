@@ -11,6 +11,8 @@ import {
   editQueuedMessage,
   dropSteerItems,
   enqueueMessage,
+  holdQueueAfterStop,
+  isQueueHeldByStop,
   listClaimedQueue,
   listPendingQueue,
   normalizeQueuedMessages,
@@ -20,6 +22,7 @@ import {
   QueueValidationError,
   reclaimAbandonedClaims,
   releaseClaim,
+  releaseStopHold,
   removeQueuedMessage,
   reorderQueuedMessages
 } from '../src/mms/queue/ThreadMessageQueue'
@@ -482,6 +485,29 @@ describe('editing, the queue revision and a promotion bound to a run', () => {
       const [loaded] = normalizeQueuedMessages(JSON.parse(JSON.stringify([steering])), 't1')
       expect(loaded).toMatchObject({ steerRunId: 'run-a', origin: agent, permissionMode: 'ask' })
       expect(normalizeQueuedMessages([{ ...steering, state: 'pending', intent: 'normal' }], 't1')[0].steerRunId).toBeUndefined()
+    })
+  })
+
+  describe('the hold a Stop saves on the queue (#917)', () => {
+    it('marks what waits, steering items included, survives the queue file, and goes once the queue goes on', () => {
+      const { items, first } = seed()
+      const steering = promoteQueuedMessageToSteer(items, first.id, { steerRunId: 'run-a' }).items
+      const held = holdQueueAfterStop(steering)
+      expect(listPendingQueue(held).map((item) => item.heldAfterStop)).toEqual([true, true])
+      expect(isQueueHeldByStop(held)).toBe(true)
+      // Nothing else changes, so a client's revision still matches.
+      expect(queueRevision(held)).toBe(queueRevision(steering))
+      const loaded = normalizeQueuedMessages(JSON.parse(JSON.stringify(held)), 't1')
+      expect(isQueueHeldByStop(loaded)).toBe(true)
+      // A steer the Stop hands back stays held.
+      expect(isQueueHeldByStop(demoteSteerItems(loaded, [first.id], { toFront: true }))).toBe(true)
+      const released = releaseStopHold(loaded)
+      expect(isQueueHeldByStop(released)).toBe(false)
+      expect(released.some((item) => 'heldAfterStop' in item)).toBe(false)
+      expect(isQueueHeldByStop(normalizeQueuedMessages(JSON.parse(JSON.stringify(steering)), 't1'))).toBe(false)
+      // Unchanged queues are returned as they are.
+      expect(holdQueueAfterStop(held)).toBe(held)
+      expect(releaseStopHold(steering)).toBe(steering)
     })
   })
 

@@ -1152,6 +1152,12 @@ export interface QueuedMessage {
    * run. Absent for what a person queued, which a Stop never fences.
    */
   stopGeneration?: number
+  /**
+   * A Stop left this item waiting: it runs when the person sends it (Send now) or the thread runs a turn again,
+   * never on its own. Saved so that a restart holds it too (startup recovery skips a held queue). Cleared from
+   * every item of the queue when the next turn of the thread starts.
+   */
+  heldAfterStop?: true
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /** The other computer of the user this message was sent or last edited from (a routed call); absent for this computer's own. */

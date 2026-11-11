@@ -980,12 +980,15 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       await s.d.orch.stopThread(s.parentId, 'user')
       expect(ids()).toEqual([typed.queueItem!.id, internal.id, nameless.id, external.id].sort())
       expect(s.run(typed.runId!).status).toBe('queued')
-      // It runs once the stopped task is over.
+      // The Stop ended the subagent's turn, so the message waits for the person, through startup recovery too (#917),
+      // and runs when they send it.
       await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
-      await waitFor(() => {
-        s.d.orch.recoverAndDrainPendingQueues()
-        return s.run(typed.runId!).status === 'completed'
-      }, 'the person\'s message to run', 15_000)
+      await waitFor(() => !s.d.orch.isActiveTurnRunning(s.childThreadId), 'the stopped turn to end')
+      s.d.orch.recoverAndDrainPendingQueues()
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(s.run(typed.runId!).status).toBe('queued')
+      expect(s.d.orch.promoteQueueItem(s.childThreadId, typed.queueItem!.id)).toEqual({ ok: true })
+      await waitFor(() => s.run(typed.runId!).status === 'completed', 'the person\'s message to run', 15_000)
       expect(s.childTurns().some((prompt) => prompt.includes('typed to the worker'))).toBe(true)
     })
   })

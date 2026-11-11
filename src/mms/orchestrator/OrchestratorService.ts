@@ -279,6 +279,8 @@ import {
   editQueuedMessage,
   editRefusal,
   enqueueMessage,
+  holdQueueAfterStop,
+  isQueueHeldByStop,
   listClaimedQueue,
   listPendingQueue,
   promoteQueuedMessageToSteer,
@@ -288,6 +290,7 @@ import {
   QueueValidationError,
   reclaimAbandonedClaims,
   releaseClaim,
+  releaseStopHold,
   removeQueuedMessage,
   reorderQueuedMessages,
   type QueuedMessagePatch
@@ -8118,7 +8121,9 @@ export class OrchestratorService extends EventEmitter {
     const order = (items: QueuedMessage[]): QueuedMessage[] => {
       const pending = listPendingQueue(items).filter((entry) => !entry.internal).map((entry) => entry.id)
       const first = session.sentAfterStop.filter((id) => pending.includes(id))
-      return reorderQueuedMessages(items, [...first, ...pending.filter((id) => !first.includes(id))])
+      // The queue drains once the stopped turn has ended, so nothing in it is held for the person any more, nor
+      // after a restart that comes first.
+      return releaseStopHold(reorderQueuedMessages(items, [...first, ...pending.filter((id) => !first.includes(id))]))
     }
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, order) : order(session.queue)
     this.emitQueueUpdated(session.threadId, session.queue)
@@ -9499,12 +9504,14 @@ export class OrchestratorService extends EventEmitter {
     let stopped = id ? this.stopDefinitionRuns(id, opts?.runId) : false
     // The session's admission held by a definition run for its whole execution is not an ordinary turn's.
     const fencedByDefinition = Boolean(id && [...(this.definitionStops.get(id) ?? [])].some((entry) => entry.admitted))
+    let turnStopped = false
     if (!active && session.turnAdmitted && !fencedByDefinition && !session.abortRequested) {
       // Admitted but still in recovery/workspace setup: abort as soon as the turn starts. A turn that has
       // not marked its run starting yet is a queued run, which a Stop cancels by id instead.
       if (!(opts?.runId && id && this.runEngine?.getActiveRun(id)?.runId !== opts.runId)) {
         session.abortRequested = true
         stopped = true
+        turnStopped = true
       }
     } else if (active && !active.abort.signal.aborted && !(opts?.runId && active.runId && active.runId !== opts.runId)) {
       // Queued messages sent now that the turn never read go back first in the queue; their copies in it go.
@@ -9512,7 +9519,10 @@ export class OrchestratorService extends EventEmitter {
       active.pendingSteer = []
       active.abort.abort()
       stopped = true
+      turnStopped = true
     }
+    // A stopped turn starts nothing after it: what waits in the queue waits for the person, across a restart too.
+    if (turnStopped) this.holdQueueAfterStop(session)
     if (!stopped) return false
     if (opts?.clearQueue && id) {
       let clearedRunIds: Array<string | undefined> = []
@@ -9543,6 +9553,33 @@ export class OrchestratorService extends EventEmitter {
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
     return true
+  }
+
+  /**
+   * A Stop ended the thread's turn, so nothing drains its queue after it (#873): what waits there runs when the person
+   * sends it (Send now) or the thread runs a turn again. The hold is saved on the items (`heldAfterStop`), so startup
+   * recovery leaves them waiting too. Best effort: a queue that cannot be saved stays held in this process only.
+   */
+  private holdQueueAfterStop(session: ThreadSession): void {
+    if (session.threadId === '__unbound__') return
+    try {
+      session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, holdQueueAfterStop) : holdQueueAfterStop(session.queue)
+    } catch (error) {
+      console.warn('the queue a Stop held could not be saved as held', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * A turn of the thread starts: the queue goes on after it, as it does after any turn that ends, so the hold a Stop
+   * saved on its items is lifted.
+   */
+  private releaseStopHold(session: ThreadSession): void {
+    if (!session.queue.some((item) => item.heldAfterStop)) return
+    try {
+      session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, releaseStopHold) : releaseStopHold(session.queue)
+    } catch (error) {
+      console.warn('the hold a Stop saved on the queue could not be lifted', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   isConversationHistoryBusy(threadId: string): boolean {
@@ -11216,6 +11253,8 @@ export class OrchestratorService extends EventEmitter {
     // From here a Stop aborts the turn itself.
     session.setupStop = null
     this.applyRequestedAbort(session, turn)
+    // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
+    if (!turn.abort.signal.aborted) this.releaseStopHold(session)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
     if (session.steerOnStart.length) this.deliverSteersOnStart(session)
@@ -12705,8 +12744,9 @@ export class OrchestratorService extends EventEmitter {
         (item) => item.intent === 'normal' && item.state === 'pending'
       )
       // A compaction another live process runs holds the queue; one a restart cut short holds nothing (its row was
-      // settled as interrupted when the session loaded, and its saved hold is removed here).
-      if (!hasPendingNormal || this.pausedHoldsQueue(threadId, session.queue) || this.compactionHoldsQueue(threadId)) return
+      // settled as interrupted when the session loaded, and its saved hold is removed here). A queue a Stop held
+      // waits for the person, as it did before the restart (`heldAfterStop`).
+      if (!hasPendingNormal || isQueueHeldByStop(session.queue) || this.pausedHoldsQueue(threadId, session.queue) || this.compactionHoldsQueue(threadId)) return
       this.startupDrainScheduled.add(threadId)
       this.startupDrainPending.push(threadId)
     } catch (err) {

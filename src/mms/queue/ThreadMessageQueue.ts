@@ -228,6 +228,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
+      ...(item.heldAfterStop === true ? { heldAfterStop: true as const } : {}),
       ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {}),
       ...(typeof item.sentFrom?.node === 'string' && item.sentFrom.node ? { sentFrom: { node: item.sentFrom.node } } : {}),
       // Only a steering item is bound to a run.
@@ -674,6 +675,30 @@ export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]
   const slots = pending.map((item) => item.order)
   const placed = new Map(sequence.map((item, index) => [item.id, { ...item, order: slots[index]! }]))
   return sortQueue(demoted.map((item) => placed.get(item.id) ?? item))
+}
+
+/**
+ * A Stop holds the queue: every item still waiting (pending, or steering into the stopped turn and about to be
+ * handed back) is marked `heldAfterStop`, so a restart leaves them for the person too.
+ */
+export function holdQueueAfterStop(items: QueuedMessage[]): QueuedMessage[] {
+  if (!items.some((item) => (item.state === 'pending' || item.state === 'steering') && !item.heldAfterStop)) return items
+  return items.map((item) => ((item.state === 'pending' || item.state === 'steering') && !item.heldAfterStop ? { ...item, heldAfterStop: true as const } : item))
+}
+
+/** The queue goes on (a turn of the thread starts): no item is held by a Stop any more. */
+export function releaseStopHold(items: QueuedMessage[]): QueuedMessage[] {
+  if (!items.some((item) => item.heldAfterStop)) return items
+  return items.map((item) => {
+    if (!item.heldAfterStop) return item
+    const { heldAfterStop: _held, ...rest } = item
+    return rest
+  })
+}
+
+/** Whether a Stop holds the queue: some waiting item is still marked `heldAfterStop`. */
+export function isQueueHeldByStop(items: QueuedMessage[]): boolean {
+  return listPendingQueue(items).some((item) => item.heldAfterStop === true)
 }
 
 /**
