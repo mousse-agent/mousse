@@ -427,32 +427,6 @@ html[data-theme='high-contrast'] .automations-page {
 /* A row's bot face opens the bot. */
 .automation-bot-face[role='link'] { cursor: pointer; }
 
-/* ---- the card: When → Agent → Result --------------------------------------- */
-
-/* A chip: one part of the sentence, in a soft fill. */
-.automation-chip {
-  display: inline-flex;
-  align-items: center;
-  height: 24px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: var(--ui-control-radius);
-  background: var(--ui-hover);
-  box-shadow: var(--ui-specular);
-  color: var(--text-primary);
-  font: inherit;
-  font-size: var(--settings-fs-small);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.automation-chip.readonly { cursor: default; color: var(--text-secondary); }
-.automation-chip:hover:not(.readonly) { background: var(--ui-pressed); }
-
-.automation-chip-select { width: auto; min-width: 0; }
-.automation-chip-select.unresolved { color: var(--warning); }
-.automation-inline-select { width: auto; min-width: 0; }
-
 /* ---- groups and rows --------------------------------------------------- */
 
 .automation-row {
@@ -538,7 +512,7 @@ html[data-theme='high-contrast'] .automations-page {
 .automation-row-seg.tone-warn { color: var(--warning); }
 
 .automation-bot-face { display: inline-flex; flex: none; width: 16px; height: 16px; }
-.automation-chip .automation-bot-face { margin-right: 5px; }
+.automation-form-value .automation-bot-face { margin-right: 6px; }
 
 .automation-primary { flex: none; }
 .automation-row .settings-btn { height: 24px; padding: 0 10px; }
@@ -607,29 +581,70 @@ html[data-theme='high-contrast'] .automations-page {
 
 .automations-back:hover { background: var(--ui-hover); color: var(--text-primary); }
 
-/* The words between the chips keep their own spaces, so a comma sits right after its chip. */
-.automation-sentence {
-  display: block;
-  margin: 0;
-  line-height: 30px;
-  font-size: var(--settings-fs-row);
-  color: var(--text-secondary);
-}
-.automation-sentence .automation-chip,
-.automation-sentence .ui-select { vertical-align: middle; }
-/* A chip and the punctuation after it stay together: "9:00," and "mousse." never break or gain a space. */
-.automation-sentence-glue { display: inline-flex; align-items: center; white-space: nowrap; vertical-align: middle; }
+/* Edit details: label-and-control rows with hairlines, like the Manage table. The label column is fixed so every
+   control, the More toggle, Save and the Why? panel start on the same line. */
+.automation-detail { --automation-label-w: 112px; }
 
-.automation-detail-pair {
+.automation-form { display: flex; flex-direction: column; }
+
+.automation-form-row {
+  display: grid;
+  grid-template-columns: var(--automation-label-w) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-12);
+  min-height: 44px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ui-line);
+  box-sizing: border-box;
+}
+
+.automation-form-row:first-child { border-top: 1px solid var(--ui-line); }
+.automation-form-row.wide { align-items: start; }
+/* A wide row's label sits on the first line of its control (a 28px control, or the task's first line). */
+.automation-form-row.wide .automation-form-label { line-height: 28px; }
+
+.automation-form-label { font-size: 13px; color: var(--text-secondary); }
+
+.automation-form-control {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--space-8);
-  font-size: var(--settings-fs-small);
+  gap: 6px 10px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-primary);
 }
 
-.automation-detail-label { min-width: 52px; color: var(--text-secondary); }
-.automation-detail-value { color: var(--text-primary); }
+.automation-form-row.wide .automation-form-control { display: block; }
+
+.automation-form-extra {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 8px;
+}
+
+.automation-form-extra:empty { display: none; }
+
+.automation-form-value { display: inline-flex; align-items: center; min-width: 0; color: var(--text-primary); }
+.automation-form-note { font-size: 12.5px; color: var(--text-secondary); }
+.automation-detail .automation-form-link { color: var(--text-secondary); font-size: 12.5px; }
+.automation-detail .automation-form-link:hover { color: var(--text-primary); }
+
+/* Every select and field in the form has one width, so the rows read as a column. */
+.automation-form .automation-field-select { width: 260px; max-width: 100%; }
+.automation-form .scheduled-input.automation-field-select { font-size: 13px; background: color-mix(in srgb, var(--text-primary) 3%, transparent); }
+.automation-form .scheduled-prompt { display: block; }
+
+.automation-form-more,
+.automation-form-save,
+.automation-detail > .automation-why { margin-left: calc(var(--automation-label-w) + var(--space-12)); }
+
+.automation-form-save { display: flex; align-items: center; gap: 10px; }
+/* The runs start on the labels' line, like the rows above them. */
+.automation-detail .automation-run { padding-left: 0; padding-right: 0; }
 
 .automation-why {
   padding: 8px var(--space-12);
