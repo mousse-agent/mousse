@@ -14,7 +14,7 @@ import { answerDraft, discardDraft, editDetails, setDraftProject, setDraftWhen, 
 import { useManagerWorking } from './InboxComposer'
 import { retryRequest } from './draftActions'
 import { closePane, dismissRequest, newDrafts, stopRequest, useInboxStore, type ManagerRequest } from './inboxStore'
-import { CircleAlert, Loader2, MessageSquare, RotateCcw, X } from '../../../lib/icons'
+import { CircleAlert, Loader2, X } from '../../../lib/icons'
 
 export function DraftsPane({ drafts, meta, bots, onBotMade }: { drafts: AutomationItem[]; meta: (jobId: string) => InboxAutomationMeta | undefined; bots: BotChoice[]; onBotMade: () => void }) {
   const projects = useAppStore((s) => s.projects).filter((project) => !project.node)
@@ -59,7 +59,7 @@ export function DraftsPane({ drafts, meta, bots, onBotMade }: { drafts: Automati
       {composing && (!composing.draftId || composing.status === 'failed') && !fresh.size ? (
         <RequestCard request={composing} working={working} onOpenChat={() => openManagerChat(composing)} />
       ) : null}
-      {!drafts.length && !composing ? <p className="inbox-manage-none">No drafts yet. Describe an automation to get one.</p> : null}
+      {!drafts.length && !composing ? <p className="inbox-manage-none">No drafts.</p> : null}
       <div className="inbox-drafts-list" ref={listRef}>
         {drafts.map((item) => (
           <DraftCard
@@ -114,9 +114,11 @@ function RequestCard({ request, working, onOpenChat }: { request: ManagerRequest
   return (
     <section className="inbox-request" data-state={state} data-testid="inbox-request" role="status" aria-live="polite">
       <div className="inbox-request-head">
-        <span className="inbox-request-icon" aria-hidden="true">
-          {state === 'working' ? <Loader2 size={14} strokeWidth={2} className="inbox-spin" /> : state === 'failed' ? <CircleAlert size={14} strokeWidth={2} /> : <MessageSquare size={14} strokeWidth={1.8} />}
-        </span>
+        {state === 'working' || state === 'failed' ? (
+          <span className="inbox-request-icon" aria-hidden="true">
+            {state === 'working' ? <Loader2 size={14} strokeWidth={2} className="inbox-spin" /> : <CircleAlert size={14} strokeWidth={2} />}
+          </span>
+        ) : null}
         <strong className="inbox-request-title">
           {state === 'working' ? 'Writing a draft…' : state === 'failed' ? "Couldn't write the draft" : state === 'stopped' ? 'Stopped' : 'No draft yet: the manager replied in its chat'}
         </strong>
@@ -129,11 +131,11 @@ function RequestCard({ request, working, onOpenChat }: { request: ManagerRequest
       <div className="inbox-request-actions">
         {state === 'failed' || state === 'stopped' ? (
           <button type="button" className="inbox-primary-btn" data-testid="inbox-request-retry" disabled={retrying} aria-busy={retrying || undefined} onClick={retry}>
-            {retrying ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : <RotateCcw size={13} strokeWidth={2} aria-hidden="true" />}
+            {retrying ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : null}
             {retrying ? 'Retrying…' : 'Retry'}
           </button>
         ) : null}
-        {request.threadId || request.botId ? <button type="button" className="inbox-text-btn" title="The manager's chat" onClick={onOpenChat}><MessageSquare size={12} strokeWidth={1.8} aria-hidden="true" />Open chat</button> : null}
+        {request.threadId || request.botId ? <button type="button" className="inbox-text-btn" title="The manager's chat" onClick={onOpenChat}>Open chat</button> : null}
         {state === 'working' && request.threadId ? <button type="button" className="inbox-text-btn muted" data-testid="inbox-request-stop" onClick={stopRequest}>Stop</button> : null}
       </div>
     </section>

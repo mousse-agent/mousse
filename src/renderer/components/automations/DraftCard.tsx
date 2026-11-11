@@ -6,7 +6,7 @@ import type { AutomationItem } from '../../../shared/automations'
 import { describeSchedule } from '../../../shared/scheduleLabel'
 import { describePermissionMode } from '../../../shared/permissionMode'
 import type { JobSchedule, Project } from '../../../shared/types'
-import { CircleCheck, Clock, Folder, Loader2, MessageSquare, Pause, Pencil, Repeat, Shield, User } from '../../lib/icons'
+import { CircleCheck, Loader2, MessageSquare, Pause } from '../../lib/icons'
 import { Select, type SelectOption } from '../ui/Select'
 import { ownedWhenText } from './automationTime'
 import type { BotChoice } from './whoDo'
@@ -110,11 +110,10 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
   return (
     <section className="inbox-draft" data-testid={`${testIdPrefix}-card`} data-key={item.key} data-fresh={fresh || undefined} aria-label={`Draft: ${item.name}`}>
       <div className="inbox-draft-head">
-        <Repeat size={14} strokeWidth={1.8} aria-hidden="true" />
         <strong>{item.name}</strong>
-        <span className="inbox-draft-tag">{fresh ? 'New draft' : 'Draft'}</span>
+        {fresh ? <span className="inbox-draft-tag">New</span> : null}
         <span className="inbox-strip-spacer" />
-        {onOpenConversation ? <button type="button" className="inbox-text-btn muted" onClick={onOpenConversation}>Open conversation</button> : null}
+        {onOpenConversation ? <button type="button" className="inbox-text-btn muted" title="The chat it was written in" onClick={onOpenConversation}>Open chat</button> : null}
       </div>
       {context ? (
         <p className="inbox-draft-context" data-testid={`${testIdPrefix}-context`} title="What “this” means, taken from the chat. Every run gets it.">
@@ -125,7 +124,6 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
       {draft?.prompt ? <p className="inbox-draft-prompt" data-testid={`${testIdPrefix}-prompt`} title={draft.prompt}>{draft.prompt}</p> : null}
       <div className="inbox-draft-fields">
         <span className="inbox-draft-field" title="When">
-          <Clock size={13} strokeWidth={1.8} aria-hidden="true" />
           {fixedWhen || !onWhen ? <span className="inbox-draft-fixed">{fixedWhen ?? when[0]?.label ?? 'Choose when'}</span> : (
             <Select ariaLabel="When" size="small" value={scheduleKey(item.schedule)} options={when} disabled={busy} onChange={(key) => {
               const picked = when.find((option) => option.value === key)
@@ -133,17 +131,14 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
             }} />
           )}
         </span>
-        <span className="inbox-draft-field" title="Who">
-          <User size={13} strokeWidth={1.8} aria-hidden="true" />
+        <span className="inbox-draft-field" title="Who does it">
           {onWho ? <Select ariaLabel="Who" size="small" value={draft?.who ? `bot:${draft.who.botId}` : 'default'} options={whoChoices(bots)} disabled={busy} onChange={onWho} /> : <span className="inbox-draft-fixed">{item.who.name}</span>}
         </span>
         <span className="inbox-draft-field" title="Project">
-          <Folder size={13} strokeWidth={1.8} aria-hidden="true" />
           {onProject ? <Select ariaLabel="Project" size="small" value={item.where?.projectId ?? ''} options={projectOptions} disabled={busy} onChange={(projectId) => { if (projectId) void run(() => onProject(projectId)) }} /> : <span className="inbox-draft-fixed">{item.where?.name ?? 'No project'}</span>}
         </span>
         {item.may && !item.mayIsGrant ? (
           <span className="inbox-draft-field" title="May: how much each run may do without asking. Change it in Edit details." data-testid={`${testIdPrefix}-may`}>
-            <Shield size={13} strokeWidth={1.8} aria-hidden="true" />
             <span className="inbox-draft-fixed">{describePermissionMode(item.may)}</span>
           </span>
         ) : null}
@@ -172,7 +167,7 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
             {doing === 'on' ? 'Turning on…' : 'Turn on'}
           </button>
         ) : null}
-        {onEditDetails ? <button type="button" className="inbox-text-btn" data-testid={`${testIdPrefix}-edit`} title="Edit details" disabled={busy} onClick={onEditDetails}><Pencil size={12} strokeWidth={1.8} aria-hidden="true" />Edit details</button> : null}
+        {onEditDetails ? <button type="button" className="inbox-text-btn" data-testid={`${testIdPrefix}-edit`} title="Edit details" disabled={busy} onClick={onEditDetails}>Edit details</button> : null}
         {onDiscard ? (
           <button
             type="button"

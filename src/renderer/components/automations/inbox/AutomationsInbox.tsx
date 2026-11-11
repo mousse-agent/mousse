@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { openForPerson, type InboxRun } from '../../../../shared/automationInbox'
 import type { AutomationItem } from '../../../../shared/automations'
 import { useCommand } from '../../../commands/commandRegistry'
-import { Bot, ChevronRight, CircleAlert, Clock, Coins, FileText, Folder, LayoutGrid, Loader2, Play, Repeat, Search, Settings, Sparkles, Undo2, User, X } from '../../../lib/icons'
+import { ChevronRight, CircleAlert, LayoutGrid, Loader2, Search, Undo2, X } from '../../../lib/icons'
 import { useAppStore } from '../../../stores/appStore'
 import { answerAttention } from '../../../services/automationsClient'
 import { createPersonalBotsClient } from '../../../services/personalBotsClient'
@@ -17,10 +17,10 @@ import { EditDetailsPane } from './EditDetailsPane'
 import { InboxComposer, newKey, useManagerWorking, type InboxComposerHandle } from './InboxComposer'
 import {
   automationsById, groupOf, inboxGroups, LEVEL_KEYS, moveCursor, noReport, resolvable, rowKey, runLine, runName, runTime,
-  costText, tokensText, type ListRow
+  type ListRow
 } from './inboxModel'
-import { ManageTable, whenColumn } from './ManageTable'
-import { AssigneeChip, botNameOf, RunIcon, RunPrChip, TriggerIcon, LEVEL_VIEW } from './RunParts'
+import { ManageTable, rowSentence, whenColumn } from './ManageTable'
+import { AssigneeChip, botNameOf, RunIcon, RunPrChip, LEVEL_VIEW } from './RunParts'
 import {
   closePane, openManage, openRun, refreshInbox, resolveRun, runAutomationNow, setInboxFilter, toggleFold, undoResolve,
   useInboxShowsThread, useInboxStore, openEdit, openDrafts, type InboxFilter
@@ -190,10 +190,7 @@ export function AutomationsInbox({ active }: { active: boolean }) {
           <button type="button" className="inbox-icon-btn" data-testid="inbox-manage-btn" aria-pressed={pane === 'manage'} title="Manage automations" aria-label="Manage automations" onClick={() => (pane === 'manage' ? closePane() : openManage())}>
             <LayoutGrid size={15} strokeWidth={1.8} />
           </button>
-          <div className="inbox-keys-anchor">
-            <button type="button" className="inbox-icon-btn inbox-keys-btn" data-testid="inbox-keys-btn" aria-pressed={keysOpen} aria-label="Keyboard shortcuts" onClick={() => setKeysOpen((value) => !value)}>?</button>
-            {keysOpen && <KeysPopover onClose={() => setKeysOpen(false)} />}
-          </div>
+          {keysOpen ? <div className="inbox-keys-anchor"><KeysPopover onClose={() => setKeysOpen(false)} /></div> : null}
         </div>
 
         <FilterHeader filter={filter} automation={filter.automationId ? automations.get(filter.automationId) : undefined} now={now} viewerZone={viewerZone} />
@@ -214,12 +211,10 @@ export function AutomationsInbox({ active }: { active: boolean }) {
         <div className="inbox-scroll" ref={listRef} role="listbox" aria-label="Runs" data-testid="inbox-runs">
           {(drafts.length || requestShows) && !filter.automationId ? (
             <button type="button" className="inbox-fold inbox-drafts-row" data-testid="inbox-drafts-row" data-state={managerWorking ? 'working' : request?.status === 'failed' ? 'failed' : undefined} aria-pressed={pane === 'drafts'} title={managerWorking ? 'Writing a draft…' : request?.status === 'failed' ? 'The last draft failed' : 'Drafts'} onClick={() => (pane === 'drafts' ? closePane() : openDrafts())}>
-              {managerWorking ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" />
-                : request?.status === 'failed' ? <CircleAlert size={13} strokeWidth={2} aria-hidden="true" />
-                  : <FileText size={13} strokeWidth={1.8} aria-hidden="true" />}
               <span>Drafts</span>
               {drafts.length ? <span className="inbox-group-count">{drafts.length}</span> : null}
-              {managerWorking ? <span className="inbox-drafts-row-note">Writing…</span> : request?.status === 'failed' ? <span className="inbox-drafts-row-note">Failed</span> : null}
+              {managerWorking ? <span className="inbox-drafts-row-note"><Loader2 size={12} strokeWidth={2} className="inbox-spin" aria-hidden="true" />Writing…</span>
+                : request?.status === 'failed' ? <span className="inbox-drafts-row-note"><CircleAlert size={12} strokeWidth={2} aria-hidden="true" />Failed</span> : null}
             </button>
           ) : null}
           {asks.length && !filter.automationId ? (
@@ -253,7 +248,7 @@ export function AutomationsInbox({ active }: { active: boolean }) {
       {!showsThread ? (
         <section className="inbox-pane" aria-label={pane === 'manage' ? 'Manage automations' : pane === 'drafts' ? 'Drafts' : pane === 'edit' ? 'Edit details' : 'Run'}>
           {pane === 'manage' ? (
-            <ManageTable automations={jobs} inbox={inbox} expanded={manageExpanded} now={now} viewerZone={viewerZone} toggling={toggling} onToggle={toggleAutomation} onDelete={setDeleting} />
+            <ManageTable automations={jobs} inbox={inbox} expanded={manageExpanded} now={now} toggling={toggling} onToggle={toggleAutomation} onRunNow={(item) => void runAutomationNow(item.id)} onEdit={(item) => openEdit(item.id)} onDelete={setDeleting} />
           ) : pane === 'drafts' ? (
             <DraftsPane drafts={drafts} meta={metaOf} bots={library.bots} onBotMade={reloadLibrary} />
           ) : pane === 'edit' && editItem ? (
@@ -298,7 +293,7 @@ function InboxRow({ row, automation, automations, cursor, open, folds, now, onAc
     return (
       <div className="inbox-fold" role="option" aria-selected={cursor} aria-expanded={expanded} data-row-key={key} data-cursor={cursor || undefined} data-testid={`inbox-fold-${row.fold}`} onClick={onActivate}>
         <ChevronRight size={12} strokeWidth={2} className="inbox-fold-chevron" aria-hidden="true" />
-        {row.fold === 'bots' ? <><Bot size={13} strokeWidth={1.8} aria-hidden="true" /><span>Assigned to bots · {row.count}</span></> : <span>{row.count} quiet</span>}
+        {row.fold === 'bots' ? <span>Assigned to bots · {row.count}</span> : <span>{row.count} quiet</span>}
       </div>
     )
   }
@@ -307,7 +302,7 @@ function InboxRow({ row, automation, automations, cursor, open, folds, now, onAc
   if (row.group === 'quiet') {
     return (
       <div className="inbox-quiet-row" role="option" aria-selected={open} data-row-key={key} data-open={open || undefined} data-cursor={cursor || undefined} data-testid="inbox-run" data-run-id={run.id} onClick={onActivate}>
-        <span className="inbox-run-icon" data-tone="quiet" aria-hidden="true"><TriggerIcon trigger={automation?.trigger} size={13} /></span>
+        <span className="inbox-run-icon" aria-hidden="true" />
         <span className="inbox-quiet-name">{name}</span>
         <time>{runTime(run.startedAt, now)}</time>
       </div>
@@ -357,7 +352,6 @@ function AskRow({ item }: { item: AutomationItem }) {
   }
   return (
     <div className="inbox-ask-row" data-testid="inbox-ask">
-      <span className="inbox-run-icon" data-tone="trigger" aria-hidden="true"><User size={14} strokeWidth={1.8} /></span>
       <span className="inbox-row-summary" title={item.attention?.text}>{item.attention?.text ?? item.name}</span>
       <button type="button" className="inbox-text-btn" disabled={busy} onClick={() => answer(true)}>Allow</button>
       <button type="button" className="inbox-text-btn muted" disabled={busy} onClick={() => answer(false)}>Not now</button>
@@ -365,30 +359,24 @@ function AskRow({ item }: { item: AutomationItem }) {
   )
 }
 
-/** The list scoped to one automation (its identity, compact, with this month's cost) or to one project group. */
+/** The list scoped to one automation (its name and one line: when, next, where) or to one project group. */
 function FilterHeader({ filter, automation, now, viewerZone }: { filter: InboxFilter; automation: AutomationItem | undefined; now: Date; viewerZone: string }) {
-  const month = useInboxStore((s) => s.inbox?.month)
   const clear = () => setInboxFilter({ ...(filter.text ? { text: filter.text } : {}) })
   if (filter.automationId) {
-    const usage = month?.byJob[filter.automationId]
     const name = automation?.name ?? 'Deleted automation'
+    const next = automation && !automation.paused && automation.next ? `next ${ownedWhenText(automation.next.at, now, automation.computer, viewerZone)}` : undefined
     return (
       <div className="inbox-filter" data-testid="inbox-filter-automation">
         <div className="inbox-filter-top">
-          <span className="inbox-filter-icon"><TriggerIcon trigger={automation?.trigger} size={14} /></span>
           <strong className="inbox-filter-name" title={name}>{name}</strong>
-          {automation ? <button type="button" className="inbox-icon-btn small" title="Settings" aria-label={`Settings for ${name}`} onClick={() => openManage(automation.id)}><Settings size={13} strokeWidth={1.8} /></button> : null}
+          {automation ? <button type="button" className="inbox-text-btn muted" aria-label={`Edit ${name}`} onClick={() => openEdit(automation.id)}>Edit</button> : null}
           <button type="button" className="inbox-icon-btn small" title="All runs" aria-label="Show all runs" onClick={clear}><X size={13} strokeWidth={1.8} /></button>
         </div>
         {automation ? (
-          <div className="inbox-filter-meta">
-            <span title="When"><Repeat size={12} strokeWidth={1.8} aria-hidden="true" />{whenColumn(automation, now)}</span>
-            <span title="Next run"><Clock size={12} strokeWidth={1.8} aria-hidden="true" />{automation.paused ? 'Paused' : automation.next ? ownedWhenText(automation.next.at, now, automation.computer, viewerZone) : 'Not scheduled'}</span>
-            <span title={`Who: ${automation.who.name}`}>{automation.who.kind === 'bot' ? <Bot size={12} strokeWidth={1.8} aria-hidden="true" /> : <User size={12} strokeWidth={1.8} aria-hidden="true" />}{automation.who.kind === 'bot' ? automation.who.name : 'Default agent'}</span>
-            <span className="inbox-filter-cost" data-testid="inbox-filter-cost" title={`This month · ${month?.label ?? ''}. Cost counts only runs whose price is known (API keys); subscription runs count tokens.`}>
-              <Coins size={12} strokeWidth={1.8} aria-hidden="true" />{usage?.costUsd ? costText(usage.costUsd) : usage?.tokens ? `${tokensText(usage.tokens)} tokens` : 'Nothing used'}<small>{month?.label}</small>
-            </span>
-          </div>
+          <p className="inbox-filter-meta" data-testid="inbox-filter-meta">
+            {automation.paused ? <span className="is-paused">Paused</span> : null}
+            {[rowSentence(automation, now), next].filter(Boolean).join(', ')}
+          </p>
         ) : null}
       </div>
     )
@@ -396,7 +384,6 @@ function FilterHeader({ filter, automation, now, viewerZone }: { filter: InboxFi
   if (filter.project) {
     return (
       <div className="inbox-filter inbox-filter-project" data-testid="inbox-filter-project">
-        <span className="inbox-filter-icon"><Folder size={14} strokeWidth={1.8} aria-hidden="true" /></span>
         <strong className="inbox-filter-name">{filter.project.name}</strong>
         <button type="button" className="inbox-icon-btn small" title="All projects" aria-label="Show all projects" onClick={clear}><X size={13} strokeWidth={1.8} /></button>
       </div>
@@ -425,7 +412,6 @@ function EmptyState({ automations, now, viewerZone, onCompose }: { automations: 
   if (!automations.length) {
     return (
       <div className="inbox-empty" data-testid="inbox-empty">
-        <span className="inbox-empty-mark" aria-hidden="true"><Sparkles size={20} strokeWidth={1.7} /></span>
         <h2 className="inbox-empty-title">No automations yet</h2>
         <p className="inbox-empty-none">Describe one and the Automation manager drafts it.</p>
         <button type="button" className="inbox-primary-btn" title={`New automation · ${newKey()}`} onClick={onCompose}>New automation</button>
@@ -451,22 +437,21 @@ function EmptyCard({ automation, now, viewerZone }: { automation: AutomationItem
   }
   return (
     <div className="inbox-empty-card" data-testid="inbox-empty-card" data-paused={automation.paused || undefined}>
-      <span className="inbox-empty-icon"><TriggerIcon trigger={automation.trigger} size={16} /></span>
       <div className="inbox-empty-text">
         <strong>{automation.name}</strong>
-        <span title={whenColumn(automation, now)}>{automation.paused ? 'Paused' : automation.next ? `Next run · ${ownedWhenText(automation.next.at, now, automation.computer, viewerZone)}` : whenColumn(automation, now)}</span>
+        <span title={whenColumn(automation, now)}>{automation.paused ? 'Paused' : automation.next ? `Next run ${ownedWhenText(automation.next.at, now, automation.computer, viewerZone)}` : whenColumn(automation, now)}</span>
       </div>
-      <button type="button" className="inbox-text-btn" title="Edit details" onClick={() => openEdit(automation.id)}>Edit</button>
+      <button type="button" className="inbox-text-btn muted" title="Edit details" onClick={() => openEdit(automation.id)}>Edit</button>
       <button
         type="button"
-        className="inbox-primary-btn"
+        className="inbox-text-btn"
         data-testid="inbox-run-now"
         title={offline ? `${automation.computer.name} is offline` : starting ? 'Starting…' : 'Run it once now'}
         disabled={offline || starting}
         aria-busy={starting || undefined}
         onClick={start}
       >
-        {starting ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : <Play size={13} strokeWidth={2} aria-hidden="true" />}
+        {starting ? <Loader2 size={13} strokeWidth={2} className="inbox-spin" aria-hidden="true" /> : null}
         {starting ? 'Starting…' : 'Run now'}
       </button>
     </div>

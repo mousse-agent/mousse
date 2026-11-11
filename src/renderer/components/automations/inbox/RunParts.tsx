@@ -24,6 +24,7 @@ export function RunIcon({ run, automation, resolved }: { run: InboxRun; automati
               : run.state === 'failed' ? [<CircleX key="i" size={15} strokeWidth={1.8} />, 'Failed', 'failed']
                 : !run.level ? [<MessageQuestion key="i" size={15} strokeWidth={1.8} />, 'No report', 'none']
                   : [<TriggerIcon key="i" trigger={automation?.trigger} size={15} />, LEVEL_VIEW[run.level].label, run.level === 'quiet' ? 'quiet' : 'trigger']
+  if (tone === 'trigger' || tone === 'quiet' || tone === 'done') return <span className="inbox-run-icon" data-tone={tone} title={title} aria-label={title} role="img" />
   return <span className="inbox-run-icon" data-tone={tone} title={title} role="img" aria-label={title}>{icon}</span>
 }
 

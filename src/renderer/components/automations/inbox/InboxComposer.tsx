@@ -1,7 +1,7 @@
 // The inbox's composer: describe an automation and the Automation manager writes a draft (shown in the pane). While
 // composing, Project and Who show under it; Who is the person's pick, never the manager's.
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import { ArrowUp, Folder, Loader2, Sparkles, User } from '../../../lib/icons'
+import { ArrowUp, Loader2 } from '../../../lib/icons'
 import { useAppStore } from '../../../stores/appStore'
 import { takeAutomationCreate, useAutomationCreate } from '../../../stores/automationCreateStore'
 import { Select } from '../../ui/Select'
@@ -102,13 +102,12 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
   return (
     <div className="inbox-composer-box" ref={boxRef} data-open={open || undefined} data-busy={sending || undefined}>
       <div className="inbox-composer" onMouseDown={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); inputRef.current?.focus() } }}>
-        <Sparkles size={14} strokeWidth={1.8} aria-hidden="true" />
         <input
           ref={inputRef}
           data-testid="inbox-composer"
           placeholder="Describe an automation…"
           aria-label="Describe an automation"
-          title={`New automation · ${newKey()}`}
+          title={`New automation · ${newKey()} · ? for shortcuts`}
           value={text}
           readOnly={sending}
           onFocus={() => setOpen(true)}
@@ -134,11 +133,9 @@ export const InboxComposer = forwardRef<InboxComposerHandle, { bots: BotChoice[]
       {open ? (
         <div className="inbox-composer-chips" data-testid="inbox-composer-chips">
           <span className="inbox-draft-field" title="Project">
-            <Folder size={13} strokeWidth={1.8} aria-hidden="true" />
             <Select ariaLabel="Project" size="small" value={chosenProject} placeholder="Pick a project" disabled={sending} options={local.map((project) => ({ value: project.id, label: project.name }))} onChange={setProjectId} />
           </span>
           <span className="inbox-draft-field" title="Who does it">
-            <User size={13} strokeWidth={1.8} aria-hidden="true" />
             <Select ariaLabel="Who" size="small" value={who} disabled={sending} options={whoChoices(bots)} onChange={(key) => { if (key === NEW_BOT_KEY) setNewBot(true); else setWho(key) }} />
           </span>
         </div>

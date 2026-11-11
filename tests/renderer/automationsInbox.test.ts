@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AutomationIndex, AutomationItem } from '../../src/shared/automations'
 import type { AutomationInbox, InboxRun } from '../../src/shared/automationInbox'
 import {
-  groupOf, inboxGroups, moveCursor, projectDotCount, resolvable, rowKey, runLine, usageText, automationsById, dotLabel
+  groupOf, inboxGroups, moveCursor, projectDotCount, resolvable, rowKey, runLine, automationsById, dotLabel
 } from '../../src/renderer/components/automations/inbox/inboxModel'
 import { onLine, whenChoices } from '../../src/renderer/components/automations/DraftCard'
 import { draftIdOf } from '../../src/renderer/components/automations/inbox/ChatDraftCard'
@@ -101,14 +101,11 @@ describe('the Runs list as data', () => {
     expect(resolvable(rows, null, bot)).toBeUndefined()
   })
 
-  it('says what a run does, its usage (cost only when known), and the project dot', () => {
+  it('says what a run does, and the project dot', () => {
     expect(runLine(live, NOW)).toBe('Running')
     expect(runLine(failed, NOW)).toBe('Failed: No access')
     expect(runLine(noReport, NOW)).toBe('No report')
     expect(runLine(run({ jobId: 'x', state: 'paused_usage' }), NOW)).toBe('Paused for usage')
-    expect(usageText(fyi.usage)).toBe('claude-x 1.2k')
-    expect(usageText([{ model: 'gpt', input: 500, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.012 }])).toBe('gpt 500 · $0.012')
-    expect(usageText([])).toBeUndefined()
     expect(projectDotCount({ byProject: { p1: 2, p2: 1 }, total: 3 }, ['p1', 'p2'])).toBe(3)
     expect(projectDotCount(null, ['p1'])).toBe(0)
     expect(dotLabel(1)).toBe('1 run needs you')
@@ -252,40 +249,48 @@ describe('the inbox page', () => {
     expect($('[data-testid="inbox-search"]')).not.toBeNull()
   })
 
-  it('filters to an automation by its name, with When, Who and this month\'s cost labelled API keys', async () => {
+  it('filters to an automation by its name, with one line of when and where, and no spend', async () => {
     await mount()
     await click($(`[data-run-id="${needs.id}"] .inbox-row-name`))
     expect($('[data-testid="inbox-filter-automation"]')?.textContent).toContain('Nightly review')
-    expect($('[data-testid="inbox-filter-cost"]')?.textContent).toBe('$0.42API keys · Nov')
+    expect($('[data-testid="inbox-filter-meta"]')?.textContent).toMatch(/^Daily at 9:00.*, in mousse$/)
+    expect($('[data-testid="inbox-filter-automation"]')?.textContent).not.toMatch(/\$|tokens/)
     expect($$('[data-testid="inbox-run"]').every((row) => [live.id, needs.id, noReport.id, resolved.id, quiet1.id].includes(row.dataset.runId!))).toBe(true)
     await click($('[aria-label="Show all runs"]'))
-    // A subscription's automation shows tokens, not a cost.
-    await click($(`[data-run-id="${fyi.id}"] .inbox-row-name`))
-    expect($('[data-testid="inbox-filter-cost"]')?.textContent).toBe('1.2k tokensAPI keys · Nov')
+    expect($('[data-testid="inbox-filter-automation"]')).toBeNull()
   })
 
-  it('shows Manage: the switch pauses and resumes, Edit opens Edit details, Delete asks first, and a Tuning note is removed', async () => {
+  it('shows Manage as a list: Pause and Resume, Run now, Edit details, Delete and Tuning in each row\'s menu', async () => {
     const mousse = await mount(RUNS, [...AUTOMATIONS.slice(0, 2), automation({ id: 'off', name: 'Deploy preview', paused: true })], {
       tuning: [{ id: 'tune_00000000-0000-0000-0000-000000000001', jobId: 'nightly', kind: 'noisy', runNumber: 14, text: 'Too noisy: “Main is green” was reported as FYI', createdAt: ago(60) }]
     })
     await click($('[data-testid="inbox-manage-btn"]'))
     const rows = $$('[data-testid="inbox-manage-row"]')
     expect(rows.map((row) => row.dataset.automation)).toEqual(['nightly', 'deps', 'off'])
-    await click(rows[0]!.querySelector('[role="switch"]'))
+    // A row reads as a sentence; state shows only when it needs a look, or when it is paused. No spend, no switches.
+    expect(rows[1]!.querySelector('.inbox-manage-when')?.textContent).toMatch(/^Daily at 9:00.*, in mousse-plus$/)
+    expect(rows.map((row) => row.querySelector('[data-testid="inbox-manage-state"]')?.textContent)).toEqual(['Running', 'Failed', 'Paused'])
+    expect($('[data-testid="inbox-manage"] [role="switch"]')).toBeNull()
+    expect($('[data-testid="inbox-manage"]')?.textContent).not.toMatch(/\$0|12k|1\.2k/)
+    const choose = async (name: string, testId: string) => {
+      await click($(`[aria-label="More actions for ${name}"]`))
+      await click($(`[data-testid="${testId}"]`))
+    }
+    await choose('Nightly review', 'inbox-manage-toggle')
     expect(mousse.scheduled.pause).toHaveBeenCalledWith('nightly')
-    await click(rows[2]!.querySelector('[role="switch"]'))
+    await choose('Deploy preview', 'inbox-manage-toggle')
     expect(mousse.scheduled.resume).toHaveBeenCalledWith('off')
-    await click(rows[0]!.querySelector('[data-testid="inbox-tuning-toggle"]'))
+    await choose('Deps bump', 'inbox-manage-run')
+    expect(mousse.scheduled.run).toHaveBeenCalledWith('deps')
+    await choose('Nightly review', 'inbox-tuning-toggle')
     expect($('[data-testid="inbox-tuning-note"]')?.textContent).toContain('run 14')
     await click($('[data-testid="inbox-tuning-remove"]'))
     expect(calls(mousse, 'automations.tuning.remove')).toEqual([['automations.tuning.remove', { noteId: 'tune_00000000-0000-0000-0000-000000000001' }]])
-    await click(rows[1]!.querySelector('[aria-label="More actions for Deps bump"]'))
-    await click($('[data-testid="inbox-manage-delete"]'))
+    await choose('Deps bump', 'inbox-manage-delete')
     expect($('[role="dialog"]')?.textContent).toContain('Delete “Deps bump”?')
     await click($('[data-testid="automation-delete-confirm"]'))
     expect(mousse.scheduled.delete).toHaveBeenCalledWith('deps')
-    await click($('[aria-label="More actions for Nightly review"]'))
-    await click($('[data-testid="inbox-manage-edit"]'))
+    await choose('Nightly review', 'inbox-manage-edit')
     expect(useInboxStore.getState()).toMatchObject({ pane: 'edit', editJobId: 'nightly' })
   })
 
@@ -293,7 +298,7 @@ describe('the inbox page', () => {
     const next = new Date(NOW.getTime() + 3_600_000).toISOString()
     const mousse = await mount([], [automation({ id: 'nightly', name: 'Nightly review', next: { at: next, timeZone: ZONE } })])
     expect($('[data-testid="inbox-empty-card"]')?.textContent).toContain('Nightly review')
-    expect($('[data-testid="inbox-empty-card"]')?.textContent).toContain('Next run ·')
+    expect($('[data-testid="inbox-empty-card"]')?.textContent).toContain('Next run ')
     await click($('[data-testid="inbox-run-now"]'))
     expect(mousse.scheduled.run).toHaveBeenCalledWith('nightly')
   })
@@ -448,26 +453,28 @@ describe('creating an automation', () => {
   })
 })
 
-describe('Manage switches', () => {
-  it('show the asked state as Pausing… and wait for the change before another', async () => {
-    const mousse = await mount(RUNS, AUTOMATIONS.slice(0, 1))
+describe('Pause in Manage', () => {
+  it('shows Pausing… and the row paused until the change lands, and offers no second change meanwhile', async () => {
+    const mousse = await mount(RUNS, AUTOMATIONS.slice(1, 2))
     let done: () => void = () => undefined
     mousse.scheduled.pause.mockImplementation(() => new Promise((resolve) => { done = () => resolve(null) }))
     await click($('[data-testid="inbox-manage-btn"]'))
     const row = () => $('[data-testid="inbox-manage-row"]')!
-    await click(row().querySelector('[role="switch"]'))
-    expect(row().querySelector('.inbox-cell.is-pending')?.textContent).toBe('Pausing…')
-    expect(row().querySelector<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(true)
-    expect(row().querySelector('[role="switch"]')!.getAttribute('aria-checked')).toBe('false')
+    await click($('[aria-label="More actions for Deps bump"]'))
+    await click($('[data-testid="inbox-manage-toggle"]'))
+    expect(row().querySelector('[data-testid="inbox-manage-state"]')?.textContent).toBe('Pausing…')
+    expect(row().hasAttribute('data-paused')).toBe(true)
+    await click($('[aria-label="More actions for Deps bump"]'))
+    expect($<HTMLButtonElement>('[data-testid="inbox-manage-toggle"]')!.disabled).toBe(true)
     await act(async () => { done() })
     await act(async () => {})
-    expect(row().querySelector('.inbox-cell.is-pending')).toBeNull()
+    expect(row().querySelector('[data-testid="inbox-manage-state"]')?.textContent).not.toBe('Pausing…')
     expect(mousse.scheduled.pause).toHaveBeenCalledTimes(1)
   })
 })
 
 describe('the run strip', () => {
-  it('shows the level, the PR with Open PR and Merge, the usage, calibration and Resolve', async () => {
+  it('shows the level, the PR with Open PR and Merge, calibration and Resolve, and no usage', async () => {
     const mousse = await mount()
     const { RunStrip } = await import('../../src/renderer/components/automations/inbox/RunStrip')
     const stripHost = document.createElement('div')
@@ -489,7 +496,7 @@ describe('the run strip', () => {
     expect(useAppStore.getState()).toMatchObject({ mainView: 'pullRequest', mainAreaOpen: true })
     act(() => openRun(fyi))
     await act(async () => {})
-    expect($('[data-testid="inbox-strip-usage"]')?.textContent).toBe('claude-x 1.2k')
+    expect($('[data-testid="inbox-strip"]')?.textContent).not.toContain('1.2k')
     act(() => stripRoot.unmount())
     stripHost.remove()
   })
