@@ -253,11 +253,20 @@ describe('ThreadExecutionLease', () => {
       rmSync(lockPath)
       expect(releaseExecutionLease(dir, 'gone')).toBe(false)
       expect(heard).toHaveLength(4)
+
+      // Another owner took the lease from this holder: its release leaves that owner's lease and still lets a waiter look.
+      tryAcquireExecutionLease(dir, { token: 'taken' })
+      const other: ThreadLeaseOwner = { pid: process.pid, token: 'other-owner', processInstanceId: 'other-instance', acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() }
+      writeFileSync(lockPath, JSON.stringify(other), 'utf-8')
+      expect(releaseExecutionLease(dir, 'taken')).toBe(false)
+      expect(heard).toHaveLength(5)
+      expect(JSON.parse(readFileSync(lockPath, 'utf-8')).token).toBe('other-owner')
+      rmSync(lockPath)
     } finally {
       stop()
     }
     releaseExecutionLeaseHandle(tryAcquireExecutionLease(dir, { token: 'after-stop' })!)
-    expect(heard).toHaveLength(4)
+    expect(heard).toHaveLength(5)
   })
 
 })
