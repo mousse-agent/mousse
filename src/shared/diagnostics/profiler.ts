@@ -105,7 +105,7 @@ export interface WindowCounters {
   browserTabs: number
   jsHeapUsedMb: number
   jsHeapTotalMb: number
-  /** Named caches of the window's code, by entries (and their limit when there is one). */
+  /** Named caches of the window's code, each with its entries and, when it has them, its limit, `kbEstimated` and `limitKb` (see `WindowCacheSize`). */
   caches: Record<string, WindowCacheSize>
 }
 

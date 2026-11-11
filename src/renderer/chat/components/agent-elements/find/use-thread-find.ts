@@ -164,8 +164,9 @@ export function useThreadFind(options: Options): ThreadFind {
   // Follows index.revision, so the results catch up as the build reads more of the thread.
   const [indexRevision, setIndexRevision] = useState(0);
   // Text streamed into a reply goes to its live text, not `turns`: while the bar is open over a
-  // stream, its version is followed too (and only then, so a delta renders nothing here otherwise).
-  const liveVersion = useLiveTextVersion(searching && isStreaming);
+  // stream, its version is followed too (and only then, so a delta renders nothing here otherwise),
+  // at most once per reindex interval rather than once per delta.
+  const liveVersion = useLiveTextVersion(searching && isStreaming, STREAMING_REINDEX_MS);
   const searchedInput = useMemo(() => ({ turns, liveVersion }), [turns, liveVersion]);
   const { turns: searchedTurns, liveVersion: searchedLiveVersion } = useThrottled(
     searchedInput,

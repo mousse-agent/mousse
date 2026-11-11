@@ -242,7 +242,7 @@ function profilerFixture(dir: string, options: { activeTurns?: number; heap?: ()
       { kind: 'renderer', role: 'window', rss: 400, private: 320, heapUsed: 90, heapTotal: 120 },
       { kind: 'gpu', role: 'gpu', rss: 380, private: 334, cpu: 3 }
     ], { windows: [{ w: 1400, h: 900, scale: 1.5, visible: true }], surfaceMb: 10.8, acrylic: true, views: { applet: 1, browser: 0, devtools: 0 }, webglContexts: 1, canvases: 2, imagesMb: 4 },
-    windows ? { windows: [{ w: 1400, h: 900, scale: 1.5, visible: true, domNodes: 5200, mountedTurns: 8, mountedRows: 40, images: 3, imagesDecodedMbEstimated: 2.4, imageCacheMb: 4, canvases: 2, canvasMbEstimated: 1.1, webglContexts: 1, browserTabs: 1, jsHeapUsedMb: 90, jsHeapTotalMb: 120, caches: { codeHighlight: { entries: 30, limit: 100 } } }], views: [{ role: 'applet', w: 640, h: 480, visible: true }] } : undefined)
+    windows ? { windows: [{ w: 1400, h: 900, scale: 1.5, visible: true, domNodes: 5200, mountedTurns: 8, mountedRows: 40, images: 3, imagesDecodedMbEstimated: 2.4, imageCacheMb: 4, canvases: 2, canvasMbEstimated: 1.1, webglContexts: 1, browserTabs: 1, jsHeapUsedMb: 90, jsHeapTotalMb: 120, caches: { codeHighlight: { entries: 30, kbEstimated: 2_048, limitKb: 51_200 }, markdown: { entries: 12, kbEstimated: 640, limitKb: 10_240 } } }], views: [{ role: 'applet', w: 640, h: 480, visible: true }] } : undefined)
     return true
   })
   const service: ProfilerService = {
@@ -448,6 +448,49 @@ describe('the profiler tools', () => {
     }
   })
 
+  it('profiler_service_breakdown names the caller\'s own subagents at every level', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    const entry = (threadId: string): ThreadMemoryEntry => ({ threadId, loaded: true, cached: true, turnRunning: false, cachedBytes: 1048576, idleSeconds: 60 })
+    service.threads = () => ({ own: [entry('own-1'), entry('sub-1'), entry('other-sub-1')], others: { profiles: 0, loadedThreads: 0, cachedThreads: 0, cachedBytes: 0 } })
+    const extra = {
+      'own-1': { projectId: 'p1' },
+      'own-2': { projectId: 'p1' },
+      // A subagent of the caller has no createdByThreadId: only its lineage ties it to the caller.
+      'sub-1': { projectId: 'p1', lineage: { parentThreadId: 'own-1', rootThreadId: 'own-1', relationship: 'subagent' } },
+      'other-sub-1': { projectId: 'p1', lineage: { parentThreadId: 'own-2', rootThreadId: 'own-2', relationship: 'subagent' } }
+    }
+    for (const level of ['lineage', 'read'] as const) {
+      const { value } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, level))
+      expect(value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['own-1', 'sub-1'])
+      expect(value.hiddenThreads).toEqual({ threads: 1, cachedMb: 1 })
+    }
+  })
+
+  it('profiler_service_breakdown never names the Automation manager\'s thread or a bot thread\'s subagents', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    const entry = (threadId: string): ThreadMemoryEntry => ({ threadId, loaded: true, cached: true, turnRunning: false, cachedBytes: 1048576, idleSeconds: 60 })
+    service.threads = () => ({
+      own: [entry('own-1'), entry('automations-1'), entry('bot-1'), entry('bot-sub-1'), entry('bot-sub-sub-1')],
+      others: { profiles: 0, loadedThreads: 0, cachedThreads: 0, cachedBytes: 0 }
+    })
+    const extra = {
+      'own-1': { projectId: 'p1' },
+      'automations-1': { projectId: 'p1', automationManager: true },
+      'bot-1': { projectId: 'p1', botOwned: true },
+      // A bot thread's subagents inherit its private flag, not botOwned.
+      'bot-sub-1': { projectId: 'p1', lineage: { parentThreadId: 'bot-1', rootThreadId: 'bot-1', relationship: 'subagent' } },
+      'bot-sub-sub-1': { projectId: 'p1', lineage: { parentThreadId: 'bot-sub-1', rootThreadId: 'bot-1', relationship: 'subagent' } }
+    }
+    for (const level of ['read', 'manage'] as const) {
+      const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, level))
+      expect(value.threads.map((row: { threadId: string }) => row.threadId)).toEqual(['own-1'])
+      expect(value.hiddenThreads).toEqual({ threads: 4, cachedMb: 4 })
+      for (const id of ['automations-1', 'bot-']) expect(outcome.text).not.toContain(id)
+    }
+  })
+
   it('reports an unexpected error class only when it is a known one', async () => {
     const dir = home()
     const { service } = profilerFixture(dir)
@@ -503,7 +546,11 @@ describe('the profiler tools', () => {
     const { service, collect } = profilerFixture(dir)
     const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_window_breakdown')
     expect(collect).toHaveBeenCalledWith(true)
-    expect(value.windows).toEqual([{ window: 1, size: { w: 1400, h: 900, scale: 1.5, visible: true }, domNodes: 5200, mountedTurns: 8, mountedRows: 40, images: 3, imagesDecodedMbEstimated: 2.4, imageCacheMb: 4, canvases: 2, canvasMbEstimated: 1.1, webglContexts: 1, browserTabs: 1, jsHeapUsedMb: 90, jsHeapTotalMb: 120, caches: { codeHighlight: { entries: 30, limit: 100 } } }])
+    expect(value.windows).toEqual([{ window: 1, size: { w: 1400, h: 900, scale: 1.5, visible: true }, domNodes: 5200, mountedTurns: 8, mountedRows: 40, images: 3, imagesDecodedMbEstimated: 2.4, imageCacheMb: 4, canvases: 2, canvasMbEstimated: 1.1, webglContexts: 1, browserTabs: 1, jsHeapUsedMb: 90, jsHeapTotalMb: 120, caches: { codeHighlight: { entries: 30, kbEstimated: 2_048, limitKb: 51_200 }, markdown: { entries: 12, kbEstimated: 640, limitKb: 10_240 } } }])
+    // Each cache shows its entries, the KB they are estimated to hold and its budget.
+    for (const cache of Object.values(value.windows[0].caches as Record<string, object>))
+      expect(Object.keys(cache).sort()).toEqual(['entries', 'kbEstimated', 'limitKb'])
+    expect(value.estimates).toMatch(/kbEstimated.*limitKb/)
     expect(value.views).toEqual({ applet: [{ w: 640, h: 480, visible: true }], browser: [] })
     expect(value.windowProcessesMb).toEqual([320])
     expectNoPrivateData(outcome.text, dir)

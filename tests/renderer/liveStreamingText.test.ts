@@ -335,4 +335,32 @@ describe('find while a reply streams', () => {
     expect(out.find!.barProps!.hasMatches).toBe(true)
     expect(out.find!.barProps!.countLabel).toMatch(/1/)
   })
+
+  it('with find open, renders once per reindex interval however many deltas stream in, and still finds the last text', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const messages = thread(1, 'Alpha')
+    useAppStore.setState({ messages, activeThreadId: 'thread-1' })
+    const reply = { id: 'reply', role: 'assistant', parts: [{ type: 'text', text: 'Alpha' }] } as unknown as UIMessage
+    const prompt = { id: 'live', role: 'user', parts: [{ type: 'text', text: 'And now?' }] } as unknown as UIMessage
+    const turns: FindTurn[] = [{ key: 'live', userMsg: prompt, assistantMsgs: [reply] }]
+    const out: { find: ThreadFind | null } = { find: null }
+    act(() => root.render(createElement(FindHarness, { turns, out })))
+    act(() => out.find!.openFind!())
+    act(() => out.find!.barProps!.onQueryChange('zulu'))
+    act(() => { vi.advanceTimersByTime(STREAMING_REINDEX_MS * 2) })
+
+    // 20 deltas within one interval: the first renders, the rest wait for the interval's end.
+    const counts = startRenderCounts()
+    const words = ['Alpha']
+    for (let i = 0; i < 20; i += 1) {
+      words.push(i === 19 ? 'zulu' : `word${i}`)
+      stream(assistant('reply', 3, words.join(' '), { streaming: true }))
+      act(() => { vi.advanceTimersByTime(10) })
+    }
+    expect(counts.FindHarness).toBe(1)
+
+    act(() => { vi.advanceTimersByTime(STREAMING_REINDEX_MS * 2) })
+    expect(counts.FindHarness).toBeLessThanOrEqual(4)
+    expect(out.find!.barProps!.hasMatches).toBe(true)
+  })
 })
