@@ -1230,8 +1230,10 @@ export function registerGuiIpc(
     setThreadActivity(targetThreadId, 'processing')
     try {
       const body = normalizeSendContent(request)
-      // SPEC §16.4: a continuation of a run is `continue:<runId>`, so a second click replays the first.
-      const requestId = body.continuationOfRunId ? `continue:${body.continuationOfRunId}` : body.requestId ?? randomUUID()
+      const requestId = body.requestId ?? randomUUID()
+      // SPEC §16.4: a continuation of a run is `continue:<runId>`, so a second click replays the first. Only the
+      // receipt key: `requestId` stays the send's own (a slash workflow's receipt, 64 characters at most).
+      const clientRequestId = body.continuationOfRunId ? `continue:${body.continuationOfRunId}` : requestId
       const result = await guiMms.request<{ queued?: boolean; heldByPause?: boolean; message?: string }>(
         'orchestrator.send',
         {
@@ -1240,7 +1242,7 @@ export function registerGuiIpc(
           requestId,
           // The composer sends a message again with the same id only when it may have arrived, so the
           // service answers with the run it already has instead of running it twice.
-          clientRequestId: requestId,
+          clientRequestId,
           mode: body.mode,
           images: body.images,
           source: 'gui',
