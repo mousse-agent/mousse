@@ -1022,6 +1022,11 @@ export interface ChatMessage {
   /** A stopped stream retained as partial text; it has no response actions or metadata. */
   incomplete?: boolean
   streaming?: boolean
+  /**
+   * When an assistant reply stopped streaming (it finished, or a Stop cut it off). `timestamp` is when it started, so
+   * a turn's saved time runs to this instead. Replies saved before it existed have none and end at their `timestamp`.
+   */
+  completedAt?: string
 }
 
 export function isToolTimelineMessage(message: Pick<ChatMessage, 'kind'>): boolean {

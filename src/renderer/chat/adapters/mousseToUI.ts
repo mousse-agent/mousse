@@ -421,6 +421,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       createdAt: msg.timestamp,
       // The turn a user message started, for the row that opens that turn in Review.
       ...(msg.turnId ? { turnId: msg.turnId } : {}),
+      // When a reply stopped streaming: a finished turn's saved time runs to it (`createdAt` is when it started).
+      ...(msg.completedAt ? { completedAt: msg.completedAt } : {}),
       metadata: msg.responseMetadata ? { ...msg.responseMetadata } : undefined,
     } as unknown as UIMessage
 

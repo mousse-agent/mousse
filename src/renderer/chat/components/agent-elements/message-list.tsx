@@ -226,9 +226,17 @@ function ThreadNotice({ text }: { text: string }) {
   </div>;
 }
 
+/** When a reply stopped streaming (`completedAt`), or when it started for one saved without it. */
+function readEndedAt(message: UIMessage): number | null {
+  const raw = (message as { completedAt?: string }).completedAt;
+  const ms = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(ms) ? ms : readCreatedAt(message);
+}
+
 /**
- * A finished turn's time, from saved timestamps: its prompt to the last of its messages. A message's timestamp is when
- * it started, so a turn a Stop cut off runs to its Stop line instead (`end.endedAt`), written as the turn stopped.
+ * A finished turn's time, from saved timestamps: its prompt to where the last of its messages ended. A message's
+ * timestamp is when it started; a reply also saves when it ended (`completedAt`), older ones do not. A turn a Stop cut
+ * off runs to its Stop line too (`end.endedAt`), written as the turn stopped.
  */
 function turnDurationMs(
   user: UIMessage | undefined,
@@ -241,7 +249,7 @@ function turnDurationMs(
   for (const message of assistants) {
     // A compaction started after the turn (Compact now, hours later) is no part of its work.
     if (isThreadNotice(message) || isCompactionRow(message)) continue;
-    const at = readCreatedAt(message);
+    const at = readEndedAt(message);
     if (at != null && at > end) end = at;
   }
   if (turnEnd?.endedAt != null && turnEnd.endedAt > end) end = turnEnd.endedAt;

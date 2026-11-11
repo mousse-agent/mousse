@@ -194,3 +194,45 @@ describe('the time of a stopped turn', () => {
     expect(headers()).toEqual(['Worked for 12s'])
   })
 })
+
+describe('the time of a finished turn', () => {
+  /** A turn whose final reply started streaming at 3 s and finished at 20 s, as it is saved. */
+  const longReply = (completedAt: number | null = 20): ChatMessage[] => [
+    { id: 'u-r1', role: 'user', content: 'Prompt r1', timestamp: at(0), turnId: 'r1' },
+    { id: 't-r1', role: 'system', kind: 'thinking', content: '', timestamp: at(1), thinking: { content: 'Planning', status: 'complete' } } as ChatMessage,
+    { id: 'a-r1', role: 'assistant', content: 'A long reply', timestamp: at(3), ...(completedAt != null ? { completedAt: at(completedAt) } : {}) }
+  ]
+
+  it('a long final reply shows its full time while open and after a restart', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(start)
+      const live = longReply(null).map((message) => message.id === 'a-r1' ? { ...message, streaming: true } : message)
+      shown = reuseUIMessages(shown, mousseToUIMessages(live))
+      act(() => root.render(createElement(MessageList, { messages: shown, status: 'streaming' })))
+      // The reply finishes at 20 s.
+      vi.setSystemTime(start + 20_000)
+      show(longReply())
+      expect(headers()).toEqual(['Worked for 20s'])
+      // A restart: the window opens the thread again from what was saved.
+      act(() => root.unmount())
+      root = createRoot(host)
+      shown = []
+      vi.setSystemTime(start + 3_600_000)
+      show(longReply())
+      expect(headers()).toEqual(['Worked for 20s'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an earlier turn runs to where its last reply ended, not to where it started', () => {
+    show([...longReply(), ...turn('r2', 60, 4)])
+    expect(headers()).toEqual(['Worked for 20s', 'Worked for 4s'])
+  })
+
+  it('a reply saved before replies recorded their end keeps today\'s time', () => {
+    show(longReply(null))
+    expect(headers()).toEqual(['Worked for 3s'])
+  })
+})

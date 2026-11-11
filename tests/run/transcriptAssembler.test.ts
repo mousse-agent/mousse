@@ -257,6 +257,31 @@ describe('TranscriptAssembler', () => {
     expect(failed.messages[0]).toMatchObject({ content: '', streaming: false, incomplete: true })
   })
 
+  it('saves when a reply ended, not only when it started', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:00.000Z'))
+      const finished = harness()
+      finished.assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:05.000Z'))
+      finished.assembler.text({ phase: 'delta', content: 'Long', contentIndex: 0 })
+      expect(finished.messages[0]!.completedAt).toBeUndefined()
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:20.000Z'))
+      finished.assembler.text({ phase: 'complete', content: 'Long reply', contentIndex: 0 })
+      expect(finished.messages[0]).toMatchObject({ timestamp: '2026-11-12T10:00:00.000Z', completedAt: '2026-11-12T10:00:20.000Z' })
+
+      // A reply a Stop cut off ends where it was cut.
+      const stopped = harness()
+      stopped.assembler.text({ phase: 'start', content: '', contentIndex: 0 })
+      stopped.assembler.text({ phase: 'delta', content: 'partial', contentIndex: 0 })
+      vi.setSystemTime(Date.parse('2026-11-12T10:00:31.000Z'))
+      stopped.assembler.abandonAssistant('partial', true)
+      expect(stopped.messages[0]).toMatchObject({ incomplete: true, completedAt: '2026-11-12T10:00:31.000Z' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('forgets the previous turn on reset', () => {
     const { state, assembler } = harness()
     assembler.text({ phase: 'start', content: '', contentIndex: 0 })
