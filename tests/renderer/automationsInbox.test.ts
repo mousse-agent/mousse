@@ -260,31 +260,34 @@ describe('the inbox page', () => {
     expect($('[data-testid="inbox-filter-automation"]')).toBeNull()
   })
 
-  it('shows Manage as a list: Pause and Resume, Run now, Edit details, Delete and Tuning in each row\'s menu', async () => {
-    const mousse = await mount(RUNS, [...AUTOMATIONS.slice(0, 2), automation({ id: 'off', name: 'Deploy preview', paused: true })], {
+  it('shows Manage as a table with a switch per row: When, Who, Next run, Last run; no spend; the rest in the menu', async () => {
+    const next = new Date(NOW.getTime() + 3_600_000).toISOString()
+    const mousse = await mount(RUNS, [{ ...AUTOMATIONS[0]!, next: { at: next, timeZone: ZONE } }, AUTOMATIONS[1]!, automation({ id: 'off', name: 'Deploy preview', paused: true })], {
       tuning: [{ id: 'tune_00000000-0000-0000-0000-000000000001', jobId: 'nightly', kind: 'noisy', runNumber: 14, text: 'Too noisy: “Main is green” was reported as FYI', createdAt: ago(60) }]
     })
     await click($('[data-testid="inbox-manage-btn"]'))
     const rows = $$('[data-testid="inbox-manage-row"]')
     expect(rows.map((row) => row.dataset.automation)).toEqual(['nightly', 'deps', 'off'])
-    // A row reads as a sentence; state shows only when it needs a look, or when it is paused. No spend, no switches.
-    expect(rows[1]!.querySelector('.inbox-manage-when')?.textContent).toMatch(/^Daily at 9:00.*, in mousse-plus$/)
-    const stateOf = (row: HTMLElement) => { const el = row.querySelector('[data-testid="inbox-manage-state"] > :first-child'); return el?.querySelector('span')?.textContent ?? el?.textContent }
-    expect(rows.map(stateOf)).toEqual(['Running', 'Failed', 'Paused'])
-    // The menu is there at rest, not only on hover.
-    expect(rows.every((row) => row.querySelector('.inbox-manage-more'))).toBe(true)
-    expect($('[data-testid="inbox-manage"] [role="switch"]')).toBeNull()
-    expect($('[data-testid="inbox-manage"]')?.textContent).not.toMatch(/\$0|12k|1\.2k/)
+    expect($$('[data-testid="inbox-manage"] th').map((th) => th.textContent)).toEqual(['Name', 'When', 'Who', 'Next run', 'Last run', 'On', ''])
+    expect(rows[1]!.querySelector('.inbox-table-project')?.textContent).toBe('mousse-plus')
+    expect(rows.map((row) => row.querySelector('[data-testid="inbox-manage-last"]')?.textContent)).toEqual(['Running', 'Failed', '—'])
+    expect(rows[0]!.querySelector('[data-testid="inbox-manage-next"]')?.textContent).not.toBe('—')
+    expect(rows[2]!.querySelector('[data-testid="inbox-manage-next"]')?.textContent).toBe('Paused')
+    expect(rows[2]!.hasAttribute('data-off')).toBe(true)
+    // No spend, anywhere in Manage.
+    expect($('[data-testid="inbox-manage"]')?.textContent).not.toMatch(/\$0|12k|1\.2k|9k/)
+    // The switch pauses and resumes; the menu does not.
+    await click(rows[0]!.querySelector('[role="switch"]'))
+    expect(mousse.scheduled.pause).toHaveBeenCalledWith('nightly')
+    await click(rows[2]!.querySelector('[role="switch"]'))
+    expect(mousse.scheduled.resume).toHaveBeenCalledWith('off')
     const choose = async (name: string, testId: string) => {
       await click($(`[aria-label="More actions for ${name}"]`))
       await click($(`[data-testid="${testId}"]`))
     }
-    await choose('Nightly review', 'inbox-manage-toggle')
-    expect(mousse.scheduled.pause).toHaveBeenCalledWith('nightly')
-    // Paused is also Resume.
-    await click(rows[2]!.querySelector('[data-testid="inbox-manage-resume"]'))
-    expect(mousse.scheduled.resume).toHaveBeenCalledWith('off')
-    await choose('Deps bump', 'inbox-manage-run')
+    await click($('[aria-label="More actions for Deps bump"]'))
+    expect($('[data-testid="inbox-manage-toggle"]')).toBeNull()
+    await click($('[data-testid="inbox-manage-run"]'))
     expect(mousse.scheduled.run).toHaveBeenCalledWith('deps')
     await choose('Nightly review', 'inbox-tuning-toggle')
     expect($('[data-testid="inbox-tuning-note"]')?.textContent).toContain('run 14')
@@ -560,22 +563,22 @@ describe('creating an automation', () => {
   })
 })
 
-describe('Pause in Manage', () => {
-  it('shows Pausing… and the row paused until the change lands, and offers no second change meanwhile', async () => {
+describe('Manage switches', () => {
+  it('show the asked state with Pausing…, locked until the change lands', async () => {
     const mousse = await mount(RUNS, AUTOMATIONS.slice(1, 2))
     let done: () => void = () => undefined
     mousse.scheduled.pause.mockImplementation(() => new Promise((resolve) => { done = () => resolve(null) }))
     await click($('[data-testid="inbox-manage-btn"]'))
     const row = () => $('[data-testid="inbox-manage-row"]')!
-    await click($('[aria-label="More actions for Deps bump"]'))
-    await click($('[data-testid="inbox-manage-toggle"]'))
-    expect(row().querySelector('[data-testid="inbox-manage-state"]')?.textContent).toBe('Pausing…')
-    expect(row().hasAttribute('data-paused')).toBe(true)
-    await click($('[aria-label="More actions for Deps bump"]'))
-    expect($<HTMLButtonElement>('[data-testid="inbox-manage-toggle"]')!.disabled).toBe(true)
+    const toggle = () => row().querySelector<HTMLButtonElement>('[role="switch"]')!
+    await click(toggle())
+    expect(row().querySelector('[data-testid="inbox-manage-next"]')?.textContent).toBe('Pausing…')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+    expect(toggle().disabled).toBe(true)
+    expect(row().hasAttribute('data-off')).toBe(true)
     await act(async () => { done() })
     await act(async () => {})
-    expect(row().querySelector('[data-testid="inbox-manage-state"]')?.textContent).not.toBe('Pausing…')
+    expect(row().querySelector('[data-testid="inbox-manage-next"]')?.textContent).not.toBe('Pausing…')
     expect(mousse.scheduled.pause).toHaveBeenCalledTimes(1)
   })
 })

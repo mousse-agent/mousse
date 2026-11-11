@@ -539,100 +539,113 @@
 
 .inbox-manage-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 
-.inbox-manage-list { max-width: 720px; margin: 0; padding: 0; list-style: none; }
-
-.inbox-manage-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 52px;
-  padding: 0 6px 0 4px;
-  border-radius: 10px;
-  transition: background 0.12s;
+/* A calm table: quiet word headers, hairlines, a hovered row lit by a fill. */
+.inbox-table {
+  width: 100%;
+  max-width: 1040px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 13px;
 }
 
-/* A hairline between rows, inset from the ends; a hovered row and the one after it lose theirs. */
-.inbox-manage-row + .inbox-manage-row::before,
-.inbox-empty-card + .inbox-empty-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 12px;
-  right: 12px;
-  height: 1px;
-  background: var(--ui-line);
-}
+.inbox-table .c-when { width: 22%; }
+.inbox-table .c-who { width: 11%; }
+.inbox-table .c-next { width: 13%; }
+.inbox-table .c-last { width: 13%; }
+.inbox-table .c-on { width: 52px; }
+.inbox-table .c-menu { width: 40px; }
 
-.inbox-manage-row:hover,
-.inbox-manage-row[data-open] { background: var(--ui-hover); }
-.inbox-manage-row:hover::before,
-.inbox-manage-row:hover + .inbox-manage-row::before,
-.inbox-empty-card:hover::before,
-.inbox-empty-card:hover + .inbox-empty-card::before { content: none; }
-
-.inbox-manage-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px;
+.inbox-table th {
+  height: 30px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ui-line);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
   text-align: left;
-  border-radius: 8px;
 }
 
-.inbox-manage-name {
+.inbox-table th.c-on-head { text-align: center; }
+
+.inbox-table td {
+  height: 44px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ui-line);
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The switch and the menu are controls, not text: they never clip or take an ellipsis. */
+.inbox-table td:nth-last-child(-n + 2) { overflow: visible; text-overflow: clip; }
+.inbox-table td:last-child { text-align: right; }
+
+.inbox-table-row { transition: background 0.12s; }
+.inbox-table-row:hover,
+.inbox-table-row[data-open] { background: var(--ui-hover); }
+.inbox-table-row[data-open] td { border-bottom-color: transparent; }
+/* Off: the row fades; its switch stays clear. */
+.inbox-table-row[data-off] td:not(:nth-last-child(-n + 2)) { opacity: 0.55; }
+
+.inbox-table-name {
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
+  padding: 0;
   font-weight: 500;
   color: var(--text-primary);
+  text-align: left;
+  vertical-align: middle;
 }
 
-.inbox-manage-when {
+.inbox .inbox-table-name { color: var(--text-primary); }
+.inbox-table-name:hover { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
+.inbox-table-project { margin-left: 8px; font-size: 12px; color: var(--text-secondary); vertical-align: middle; }
+
+.inbox-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-secondary);
 }
 
-/* A paused one fades; its Paused stays readable. */
-.inbox-manage-row[data-paused] .inbox-manage-main { opacity: 0.55; }
+.inbox-cell.is-pending { color: var(--accent); }
+.inbox-cell[data-tone='failed'] { color: var(--danger); }
 
-.inbox-manage-state { flex-shrink: 0; font-size: 12px; }
-.inbox-manage-state > span { display: inline-flex; align-items: center; gap: 5px; }
-.inbox-manage-state .is-paused {
-  display: inline-grid;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 6px;
-  color: var(--text-secondary);
+/* The switch, lighter here: small and flat, a quiet track off, the accent on; no edge, shadow or glow. */
+.inbox-switch { display: flex; align-items: center; justify-content: center; }
+.inbox-table .toggle-switch {
+  --switch-w: 26px;
+  --switch-h: 15px;
+  background: var(--ui-pressed);
+  box-shadow: none;
 }
 
-/* Paused, and on hover or focus what a click does: Resume, in the accent. */
-.inbox-manage-state .is-paused > span { grid-area: 1 / 1; align-self: center; justify-self: center; }
-.inbox-manage-state .is-paused > span:last-child { visibility: hidden; }
-.inbox-manage-state .is-paused:is(:hover, :focus-visible) { background: rgba(var(--accent-rgb), 0.12); color: var(--accent); }
-.inbox-manage-state .is-paused:is(:hover, :focus-visible) > span:first-child { visibility: hidden; }
-.inbox-manage-state .is-paused:is(:hover, :focus-visible) > span:last-child { visibility: visible; }
-.inbox-manage-state .is-pending { color: var(--accent); }
-.inbox-manage-state .is-running { color: var(--text-secondary); }
-.inbox-manage-state .is-failed { color: var(--danger); }
-.inbox-manage-state .is-offline { color: var(--text-secondary); }
+.inbox-table .toggle-switch::after { background: #ffffff; box-shadow: none; }
+.inbox-table .toggle-switch:hover:not(:disabled) { background: color-mix(in srgb, var(--text-primary) 16%, transparent); }
+.inbox-table .toggle-switch.on,
+.inbox-table .toggle-switch.on:hover:not(:disabled) { background: var(--accent); box-shadow: none; }
+/* Pausing… or Resuming…: the switch shows the asked state, locked and dimmed until it lands. */
+.inbox-switch[data-pending] { cursor: progress; }
+.inbox-switch[data-pending] .toggle-switch:disabled { opacity: 0.55; cursor: progress; }
 
 /* The menu is always there, quietly; the row's hover or focus brings it up. */
 .inbox-manage-more { opacity: 0.45; transition: opacity 0.12s; }
-.inbox-manage-row:hover .inbox-manage-more,
-.inbox-manage-row:focus-within .inbox-manage-more,
+.inbox-table-row:hover .inbox-manage-more,
+.inbox-table-row:focus-within .inbox-manage-more,
 .inbox-manage-more[aria-expanded='true'] { opacity: 1; }
+
+.inbox-tuning-row td { height: auto; padding: 0; border-bottom: 1px solid var(--ui-line); background: var(--ui-hover); }
 
 .inbox-tuning {
   display: flex;
   flex-direction: column;
-  max-width: 720px;
   padding: 2px 12px 10px;
 }
 
@@ -675,6 +688,18 @@
 }
 
 .inbox-empty-card:hover { background: var(--ui-hover); }
+/* A hairline between rows, inset from the ends; a hovered row and the one after it lose theirs. */
+.inbox-empty-card + .inbox-empty-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 1px;
+  background: var(--ui-line);
+}
+.inbox-empty-card:hover::before,
+.inbox-empty-card:hover + .inbox-empty-card::before { content: none; }
 .inbox-empty-card[data-paused] .inbox-empty-text { opacity: 0.55; }
 
 .inbox-empty-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
