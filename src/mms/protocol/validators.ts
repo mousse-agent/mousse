@@ -1027,7 +1027,13 @@ function assertPermissionsPatch(value: unknown): void {
 function assertRunsPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.runs')
   for (const key of Object.keys(patch)) {
-    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry') throw new Error(`partial.runs.${key} is not allowed`)
+    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'steerRelease') throw new Error(`partial.runs.${key} is not allowed`)
+  }
+  // How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2).
+  if (patch.steerRelease !== undefined) {
+    const release = asPlainObject(patch.steerRelease, 'partial.runs.steerRelease')
+    for (const [instanceId, mode] of Object.entries(release))
+      if (mode !== 'best_effort' && mode !== 'strict') throw new Error(`partial.runs.steerRelease.${instanceId} must be best_effort or strict`)
   }
   if (patch.newThreadWorktree !== undefined && typeof patch.newThreadWorktree !== 'boolean')
     throw new Error('partial.runs.newThreadWorktree must be a boolean')
