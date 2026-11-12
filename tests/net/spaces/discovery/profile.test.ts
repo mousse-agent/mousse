@@ -336,9 +336,10 @@ it('rejects an authenticated Space member outside the private audience and rejec
   await expect(member.spaces.discover(space.space, created.descriptor.id)).rejects.toMatchObject({
     code: 'forbidden'
   })
-  // Local retained proof remains display history, while actual current source denies subscription/access.
+  // Local retained proof remains display history, while actual current source denies subscription/access: the owner
+  // refuses that stream with `forbidden`, as for a block, and keeps the connection up for everything else.
   await expect(member.spaces.client.subscribe(created.descriptor.id)).rejects.toMatchObject({
-    code: 'route_unreachable'
+    code: 'forbidden'
   })
   expect(oldProof.controllerEvents).toHaveLength(1)
 }, 20000)
