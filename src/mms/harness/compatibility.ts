@@ -51,10 +51,12 @@ export const COMPATIBILITY: Readonly<Record<CompatibilityKey, CompatibilityRow>>
     ]
   },
   codex: {
-    tested: { min: '0.100.0', max: '0.162.999' },
+    tested: { min: '0.100.0', max: '0.167.999' },
     evidence: [
       { version: '0.162.1', kind: 'smoke', ref: '#251' },
-      { version: '0.162.1', kind: 'fixture', ref: 'tests/run/fixtures/activity/codex.ndjson' }
+      { version: '0.162.1', kind: 'fixture', ref: 'tests/run/fixtures/activity/codex.ndjson' },
+      { version: '0.167.0', kind: 'smoke', ref: '#951' },
+      { version: '0.167.0', kind: 'fixture', ref: 'tests/run/fixtures/steer-during-command/codex.ndjson' }
     ]
   },
   antigravity: {
