@@ -8,6 +8,8 @@ import { describe, expect, it } from 'vitest'
 const SMOOTH_ALLOWED = [
   'ambient-glow-a', 'ambient-glow-b', 'ambient-glow-rim-a', 'ambient-glow-rim-b', // var(--ambient-glow-ease): a stepped linear()
   'empty-logo-wobble',
+  // Kept smooth on purpose (428f6e0be): a stepped turn read as laggy. It shows only while a model thinks.
+  'thinking-icon-turn',
   'composer-recording-pulse', 'composer-transcribing-spin', 'orb-liquid-drift',
   'threads-sidebar-skeleton-shimmer', 'usage-skeleton-pulse', 'usage-bar-stripes', 'ui-loader-breathe'
 ]
