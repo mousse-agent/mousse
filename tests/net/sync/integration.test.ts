@@ -551,6 +551,55 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
   })
+  it('resyncs a subscriber whose replay start is trimmed mid-replay instead of closing the link', async () => {
+    const p = await profiles()
+    for (const row of Array.from({ length: 3 }, (_, i) => p.record(i + 1)))
+      p.aStore.appendAsAuthority(p.stream.id, {
+        id: JSON.parse(Buffer.from(row.envelope).toString()).id,
+        envelope: row.envelope,
+        sig: row.sig,
+        recvTs: row.recvTs
+      })
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const sent: string[] = []
+    const send = (
+      connection.a as unknown as { send: (header: { t: string }) => Promise<void> }
+    ).send.bind(connection.a)
+    let trimmed = false
+    vi.spyOn(connection.a as never, 'send' as never).mockImplementation((async (
+      header: { t: string },
+      ...rest: unknown[]
+    ) => {
+      sent.push(header.t)
+      const result = await (send as (...args: unknown[]) => Promise<void>)(header, ...rest)
+      // A display snapshot refresh trims the history the replay was about to read.
+      if (header.t === 'subscribed' && !trimmed) {
+        trimmed = true
+        p.aStore.truncate(p.stream.id, 2, { forgetIds: true })
+      }
+      return result
+    }) as never)
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onSnapshotInstalled).toHaveBeenCalledOnce(), {
+      timeout: 10_000
+    })
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+    expect(trimmed).toBe(true)
+    // The trimmed replay ends in a resync request, never in a caughtUp of its own.
+    const resync = sent.indexOf('snapshotRequired')
+    expect(resync).toBeGreaterThan(sent.indexOf('subscribed'))
+    expect(sent.filter((t) => t === 'caughtUp')).toHaveLength(1)
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(3)
+    expect(h.onError).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
   it('fails the session when the resync request cannot be sent to a lagging subscriber', async () => {
     const p = await profiles(),
       connection = await sessions(p)
