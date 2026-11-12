@@ -2060,7 +2060,7 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * Switches a live process to `flags` before a turn is pushed: false when Claude Code refused, did not answer in time,
-   * or the process ended meanwhile. The model is always named: a `null` one would reset it to Claude Code's default,
+   * or the process ended meanwhile; after a failure the process's flags count as unknown. The model is always named: a `null` one would reset it to Claude Code's default,
    * not the thread's. A `null` effort is the model's default; Ultracode runs at it with `ultracode` on, and leaving
    * Ultracode turns it off, since only a change of level does that by itself.
    */
@@ -2069,7 +2069,8 @@ export class ClaudeSubscriptionProviderService {
     const settings: Parameters<Query['applyFlagSettings']>[0] = {
       model: flags.model,
       effortLevel: flags.effort as EffortLevel | null,
-      ...(flags.ultracode ? { ultracode: true } : previous?.ultracode ? { ultracode: false } : {})
+      // Off is said when it was on, or when what the process runs is unknown (an earlier switch failed).
+      ...(flags.ultracode ? { ultracode: true } : !previous || previous.ultracode ? { ultracode: false } : {})
     }
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
@@ -2081,6 +2082,9 @@ export class ClaudeSubscriptionProviderService {
         })
       ])
     } catch (error) {
+      // What the process runs is unknown now: a switch that timed out may still land. The next turn sends its own
+      // switch, which Claude Code applies after this one, rather than trust the flags the process was last known on.
+      live.meta.flags = undefined
       console.warn('[claude-subscription] switching the model or effort of a live process failed', {
         threadId: live.threadId,
         error: error instanceof Error ? error.message : String(error)

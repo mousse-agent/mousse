@@ -816,6 +816,24 @@ describe('a model or effort change (issue #359)', () => {
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
   })
 
+  it('after a switch that timed out, the next turn switches again even back to the model the process was on', async () => {
+    const f = fixture({}, undefined, undefined, { liveFlagsSwitchMs: 20 })
+    await withShell(f)
+    const process = f.cli.last
+    process.flagSettingsFail = 'hang'
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // The switch to Opus may still land after the refusal: what the process runs is unknown.
+    await expect(f.chat({ model: 'opus', history: 'h0' })).rejects.toMatchObject({ code: 'claude_background_work_blocks_change' })
+    warn.mockRestore()
+    process.flagSettingsFail = undefined
+    expect(await f.chat({ model: 'sonnet', history: 'h0' })).toBe('switched')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(process.flagSettings).toEqual([
+      { model: 'opus', effortLevel: null },
+      { model: 'sonnet', effortLevel: null, ultracode: false }
+    ])
+  })
+
   it('a new process after a model change resumes the session instead of replaying the history', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000 })
