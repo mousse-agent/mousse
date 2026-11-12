@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-// Mirrors Settings > Appearance > Composer > Context ring in composer, so the composer can read it without loading
+// Mirrors Settings > Appearance > Composer > Context ring, so the composer can read it without loading
 // settings. useTheme feeds it from the open profile's settings. It stays off, the default, until they load.
 let enabled = false
 const listeners = new Set<() => void>()

@@ -68,7 +68,7 @@ const tooltips = () => Array.from(host.querySelectorAll('[title]')).map((entry) 
 describe('Settings > General > Runs', () => {
   it('is off by default, as one select with no second row for the count', () => {
     show()
-    expect(host.textContent).toContain('Runs')
+    expect(host.textContent).toContain('Threads')
     expect(resume().textContent).toContain('Off')
     expect(host.querySelector('[role="switch"][aria-label="Resume after usage limits reset"]')).toBeNull()
     expect(host.textContent).not.toContain('Automatic resumes in a row')

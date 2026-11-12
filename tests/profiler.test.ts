@@ -316,7 +316,7 @@ describe('the profiler tools', () => {
     expect(registry.get('profiler_overview')!.available!(turn)).toMatch(/profiler is off/)
     settings = { ...settings, enabled: true }
     expect(listed()).toEqual([])
-    expect(registry.get('profiler_overview')!.available!(turn)).toMatch(/Agent access/)
+    expect(registry.get('profiler_overview')!.available!(turn)).toMatch(/Agents can read the profiler/)
     settings = { ...settings, agentAccess: true }
     const allButHeap = PROFILER_TOOL_NAMES.filter((name) => name !== 'profiler_heap_summary')
     expect(listed()).toEqual(allButHeap)
@@ -338,7 +338,7 @@ describe('the profiler tools', () => {
     const registry = toolsFor(() => settings, service)
     settings = { ...ON, agentAccess: false }
     const { outcome } = await call(registry, 'profiler_overview')
-    expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Agent access') })
+    expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Agents can read the profiler') })
   })
 
   it('are not listed in a service without a profiler', () => {

@@ -42,7 +42,7 @@ const SETTINGS_SECTIONS = [
   { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'App', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'math', 'latex', 'project colors', 'tint'] },
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'App', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'App', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
-  { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Agents', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
+  { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Agents', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login', 'sign in', 'account', 'cache', 'update', 'telemetry'] },
   { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Agents', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Agents', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },

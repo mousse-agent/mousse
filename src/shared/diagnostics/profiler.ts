@@ -71,7 +71,7 @@ export function profilerToolAllowed(settings: ProfilerSettings | undefined, name
 /** Why a tool is refused, for the agent. */
 export function profilerToolRefusal(settings: ProfilerSettings | undefined, name: string): string | undefined {
   if (!settings?.enabled) return 'The profiler is off. The person can turn it on in Settings → Labs.'
-  if (!settings.agentAccess) return 'Agents may not use the profiler. The person can turn on Agent access in Settings → Labs → Profiler.'
+  if (!settings.agentAccess) return 'Agents may not use the profiler. The person can turn on "Agents can read the profiler" in Settings → Labs → Profiler.'
   if (!profilerToolAllowed(settings, name)) return `${name} is turned off in Settings → Labs → Profiler.`
   return undefined
 }
