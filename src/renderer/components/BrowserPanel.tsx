@@ -426,8 +426,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       const revision = accessRevision.current
       try {
         const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
-        // The poll usually returns the same answer; keeping the old state skips a re-render of the whole panel.
-        if (!disposed && revision === accessRevision.current) setAccess((previous) => JSON.stringify(previous) === JSON.stringify(state) ? previous : state)
+        if (!disposed && revision === accessRevision.current) setAccess(state)
       } catch { /* Reconnect on the next poll. */ }
       if (!disposed) timer = setTimeout(() => void refresh(), 750)
     }
