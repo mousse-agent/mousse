@@ -176,6 +176,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     // Output, an accepted steer or a tool makes a replay after context overflow unsafe.
     let progressed = false
     let toolStarted = false
+    // The turn ended at Send now's cut (`onSendNowCut`): with no text, it has no reply to show.
+    let sendNowCut = false
     const progress = (): void => {
       progressed = true
       sink.progress()
@@ -183,6 +185,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     }
     const chatInput = (): ClaudeSubscriptionChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
+      onSendNowCut: () => {
+        sendNowCut = true
+      },
       // A bot turn asks about every call, whatever the thread's or the entry's default.
       permissionMode: locked ? 'ask' : input.permissionMode,
       child: input.child,
@@ -323,7 +328,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       contextSignature: contextKey,
       contextModelKey: contextKey,
       nativeMessages: [],
-      providerRef
+      providerRef,
+      ...(sendNowCut ? { noReply: true } : {})
     }
   }
 

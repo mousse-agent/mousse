@@ -218,6 +218,8 @@ export type ClaudeSubscriptionChatInput = {
   onSteer?: (text: string, token?: string) => void
   /** A drained steer could not be pushed because the turn's result had already arrived: it is the next turn. */
   returnSteer?: (text: string, token?: string) => void
+  /** The turn ended at the aborted result of Send now's interrupt (`LiveRun.sendNowAbort`): what it wrote is all it says. */
+  onSendNowCut?: () => void
   /** A drained steer was pushed to Claude: its token is spent. */
   steerTaken?: (token?: string) => void
   /**
@@ -2465,6 +2467,8 @@ export class ClaudeSubscriptionProviderService {
     // A Stop cancels the turn's controller: what its aborted result drops reads as stopped.
     frames.stopped = () => controller.signal.aborted
     let success = false
+    /** The turn ended at the aborted result of Send now's interrupt (`LiveRun.sendNowAbort`): not a failure, nor a finish. */
+    let sendNowCut = false
     /** The id of the prompt this turn pushed (none for a turn Claude started). */
     let promptId: string | undefined
     /** The turns of the session this turn ran on, before it: a cut's kept ones, the saved ones of the session it continued, none of a new one. */
@@ -2535,14 +2539,15 @@ export class ClaudeSubscriptionProviderService {
      *   handed back; not dropped, the run stays open for a read signal. Read, the run goes on to the steer's answer;
      *   with no read signal in time, it is handed back.
      * When Claude Code cannot say, it is still handed back: at least once, never lost. A steer Claude Code only took for
-     * its next request counts as read only when the turn finished (`success`): after a Stop, an interrupt or a failure
+     * its next request counts as read only when the turn finished (`success`, and not at Send now's cut): after a Stop, an interrupt or a failure
      * that request may never have gone out, so it is handed back (#928). Never throws.
      */
     const settleUnreadSteers = async (): Promise<void> => {
       if (!live || !liveRun) return
       for (const [id, entry] of pushedSteers) {
         if (entry.settled) continue
-        const fate = await live.unreadFate(liveRun, id, success)
+        // Send now's interrupt aborted the request that would have carried a steer only taken: it is handed back.
+        const fate = await live.unreadFate(liveRun, id, success && !sendNowCut)
         if (entry.settled) continue
         if (fate === 'read') {
           steerRead(id)
@@ -2870,8 +2875,12 @@ export class ClaudeSubscriptionProviderService {
         controller.signal.throwIfAborted()
         const result = outcome.result
         if (result) {
-          const failure = claudeResultFailure(result, liveRun.rateLimits)
+          // Send now's interrupt cut the steer's own request (it landed after Claude Code took the steer): the person
+          // asked for that, so the turn ends with what the model wrote, not as a failure. Only a usage limit still fails it.
+          sendNowCut = result === liveRun.sendNowAbort
+          const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits)
           if (failure) throw failure
+          if (sendNowCut) input.onSendNowCut?.()
           if (frames.segmentEmpty && 'result' in result) {
             frames.text += result.result
             input.onText(frames.text)

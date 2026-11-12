@@ -11676,6 +11676,8 @@ export class OrchestratorService extends EventEmitter {
     const stagedApplets: AppletSubmission[] = []
     let assistantText: string
     let aborted = false
+    /** The turn ended where the person cut it with Send now (`TurnResult.noReply`): no text means no reply row. */
+    let noReply = false
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     let executionFailed = false
@@ -12263,6 +12265,7 @@ export class OrchestratorService extends EventEmitter {
       handoffs?.settle(result.aborted || turn.abort.signal.aborted ? 'aborted' : 'completed')
       assistantText = result.text
       aborted = Boolean(result.aborted)
+      noReply = Boolean(result.noReply)
       responseMetadata = {
         modelName: result.modelName,
         totalResponseTimeMs: result.totalResponseTimeMs,
@@ -12496,7 +12499,11 @@ export class OrchestratorService extends EventEmitter {
       this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
     )
 
-    if (this.activeAssistantMessageId) {
+    // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
+    // again, comes next. "Done." would read as if the turn had finished with nothing to say.
+    if (noReply && !finalText) {
+      this.transcript.abandonAssistant('', true)
+    } else if (this.activeAssistantMessageId) {
       this.updateStreamingAssistantMessage(
         this.activeAssistantMessageId,
         finalText || 'Done.',
@@ -12522,7 +12529,8 @@ export class OrchestratorService extends EventEmitter {
       this.addMessage('assistant', finalText || 'Done.', undefined, responseMetadata)
     }
 
-    if (this.appletStore && !executionFailed) {
+    // No reply row (a Send now cut): an earlier turn's "Done." is not this turn's.
+    if (this.appletStore && !executionFailed && !(noReply && !finalText)) {
       const finalMessage = [...session.messages].reverse().find(message => message.role === 'assistant' && !message.kind && message.content === (finalText || 'Done.'))
       if (finalMessage) {
         finalMessage.turnId = turnId
