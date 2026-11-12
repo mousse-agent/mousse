@@ -4,6 +4,7 @@ import { useShortcutTitle } from '../commands/commandRegistry'
 import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
+import { TitleBarNav } from './TitleBarNav'
 import { IconButton } from './IconButton'
 import {
   applySideCardToggle,
@@ -107,6 +108,7 @@ export function TitleBar() {
             />
           </div>
         </div>
+        <TitleBarNav />
       </div>
       <div className="titlebar-controls">
         <div className="titlebar-app-actions">

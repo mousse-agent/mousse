@@ -1,0 +1,244 @@
+/* The title bar's thread navigation: ← → and the open thread's path. The bar around it stays a drag
+   area; only the buttons are no-drag. Active and hovered items are a background fill, never an edge. */
+
+.titlebar-nav {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  margin-left: 8px;
+  padding-right: 10px;
+}
+
+.titlebar-history {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-right: 8px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.titlebar-history .icon-btn-titlebar:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+.titlebar-history .icon-btn-titlebar.is-open {
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--text-primary);
+}
+
+/* What is left of the bar: the path, and empty space that still drags the window. */
+.titlebar-path-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.titlebar-path {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* A copy of the whole path at its natural width, never shown: what the fit is worked out from. */
+.titlebar-path-measure-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.titlebar-path-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 26px;
+  border-radius: 6px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.titlebar-path-seg {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  height: 26px;
+  padding: 0 5px 0 6px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ui-faint);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.titlebar-path-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-path-sep {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 11px;
+  height: 26px;
+  margin-right: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ui-faint);
+  opacity: 0.62;
+  cursor: default;
+}
+
+.titlebar-path-sep svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* An ancestor's "/" turns into a caret while it is hovered or its menu is open. */
+.titlebar-path-sep-button > * {
+  grid-area: 1 / 1;
+}
+
+.titlebar-path-sep-button svg,
+.titlebar-path-anchor:hover .titlebar-path-sep-button .titlebar-path-slash,
+.titlebar-path-anchor.is-open .titlebar-path-sep-button .titlebar-path-slash,
+.titlebar-path-sep-button:focus-visible .titlebar-path-slash {
+  visibility: hidden;
+}
+
+.titlebar-path-anchor:hover .titlebar-path-sep-button svg,
+.titlebar-path-anchor.is-open .titlebar-path-sep-button svg,
+.titlebar-path-sep-button:focus-visible svg {
+  visibility: visible;
+}
+
+.titlebar-path-anchor:hover,
+.titlebar-path-anchor.is-open {
+  background: var(--ui-hover);
+}
+
+.titlebar-path-anchor:hover .titlebar-path-seg,
+.titlebar-path-anchor.is-open .titlebar-path-seg {
+  color: var(--text-secondary);
+}
+
+.titlebar-path-anchor:hover .titlebar-path-sep,
+.titlebar-path-anchor.is-open .titlebar-path-sep {
+  opacity: 1;
+  color: var(--text-secondary);
+}
+
+.titlebar-path-seg:focus-visible,
+.titlebar-path-sep-button:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+  border-radius: 6px;
+}
+
+/* The thread the window is on: the brightest, kept whole until it is all that is left. */
+.titlebar-path-anchor.is-current {
+  flex-shrink: 0;
+}
+
+.titlebar-path-anchor.is-current .titlebar-path-seg {
+  padding-right: 0;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.titlebar-path-anchor.is-current .titlebar-path-sep {
+  margin-left: 6px;
+  margin-right: 3px;
+  opacity: 0.5;
+}
+
+.titlebar-path-anchor.is-current:hover .titlebar-path-sep,
+.titlebar-path-anchor.is-current.is-open .titlebar-path-sep {
+  opacity: 1;
+}
+
+.titlebar-path-anchor.is-current.is-squeezed {
+  flex-shrink: 1;
+}
+
+.titlebar-path-anchor.is-current.is-squeezed .titlebar-path-seg {
+  max-width: 100%;
+}
+
+.titlebar-path-more {
+  flex-shrink: 0;
+}
+
+.titlebar-path-more .titlebar-path-seg {
+  padding: 0 3px 0 7px;
+}
+
+.titlebar-path-more .titlebar-path-seg svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Menus under the path and the history buttons: the app's menu surface and rows. */
+.threads-context-menu.titlebar-nav-menu {
+  min-width: 250px;
+  max-width: min(420px, calc(100vw - 16px));
+  max-height: min(440px, calc(100vh - 72px));
+  overflow-y: auto;
+  font-weight: 400;
+}
+
+.titlebar-nav-menu .threads-context-menu-item {
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.titlebar-nav-menu-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.titlebar-nav-menu-meta {
+  flex-shrink: 0;
+  margin-left: 14px;
+  font-size: 12px;
+  color: var(--ui-faint);
+}
+
+.titlebar-nav-menu-meta svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+}
+
+.titlebar-nav-menu .threads-context-menu-item[aria-checked='true'] {
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+}
+
+.titlebar-nav-menu .threads-context-menu-item.titlebar-nav-menu-indent {
+  padding-left: calc(var(--ui-menu-row-x) + 14px);
+}

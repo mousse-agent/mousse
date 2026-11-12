@@ -60,6 +60,8 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** Tint each thread in the Threads tab with its project's color. */
   threadProjectColors: boolean
+  /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
+  threadPathInTitleBar: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
   animationSpeed: AnimationSpeed
   /** What a turn that changed files shows at its end. */
@@ -824,6 +826,7 @@ export function getDefaultSettings(): MousseSettings {
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: true,
+      threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
       frostedComposer: false,
@@ -955,6 +958,8 @@ export function normalizeAppearance(
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
       typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+    threadPathInTitleBar:
+      typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
     turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles),
     frostedComposer: typeof raw.frostedComposer === 'boolean' ? raw.frostedComposer : defaults.frostedComposer,

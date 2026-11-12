@@ -11,7 +11,7 @@ import {
 export const MENU_COMMANDS = {
   Thread: ['thread.new', 'thread.newPrivate', 'thread.next', 'thread.previous', 'threads.search', 'run.stop'],
   View: ['sideCard.toggle', 'terminal.open'],
-  Go: ['palette.open', 'composer.focus']
+  Go: ['thread.back', 'thread.forward', 'palette.open', 'composer.focus']
 } as const satisfies Record<string, readonly CommandId[]>
 
 export interface MenuTemplateOptions {

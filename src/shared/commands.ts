@@ -13,6 +13,8 @@ export type CommandId =
   | 'thread.newPrivate'
   | 'thread.next'
   | 'thread.previous'
+  | 'thread.back'
+  | 'thread.forward'
   | 'threads.search'
   | 'thread.rename'
   | 'thread.pin'
@@ -200,6 +202,30 @@ export const COMMANDS: readonly CommandDefinition[] = [
     textInput: 'allow',
     terminal: 'deny',
     guest: 'allow'
+  },
+  {
+    // The window's thread history, like a browser's. Never from a text field, where the chords move the
+    // caret or indent; the browser surface keeps them for its own page.
+    id: 'thread.back',
+    title: 'Back',
+    category: 'Go',
+    searchTerms: ['history', 'previous thread', 'last thread', 'navigate'],
+    defaultBinding: { mac: 'Cmd+[', other: 'Alt+Left' },
+    scope: 'global',
+    textInput: 'deny',
+    terminal: 'deny',
+    guest: 'deny'
+  },
+  {
+    id: 'thread.forward',
+    title: 'Forward',
+    category: 'Go',
+    searchTerms: ['history', 'next thread', 'navigate'],
+    defaultBinding: { mac: 'Cmd+]', other: 'Alt+Right' },
+    scope: 'global',
+    textInput: 'deny',
+    terminal: 'deny',
+    guest: 'deny'
   },
   {
     id: 'threads.search',
