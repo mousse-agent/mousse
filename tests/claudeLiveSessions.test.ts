@@ -226,7 +226,10 @@ describe('a live Claude query', () => {
 
     it('where the pipe cannot be used (a launch argument of the user\'s names --mcp-config), the user\'s servers are registered after Mousse\'s and the turn does not wait for them', async () => {
       const cli = new FakeClaudeCli()
-      const f = fixture({}, cli, undefined, { launchConfig: () => ({ args: ['--mcp-config', 'mine.json'] }) })
+      // The fixture's binary, not whatever `claude` is on PATH, with the user's own --mcp-config.
+      let home = ''
+      const f = fixture({}, cli, undefined, { launchConfig: () => ({ binaryPath: join(home, 'claude'), args: ['--mcp-config', 'mine.json'] }) })
+      home = f.home
       // Claude Code answers the second registration only once every server connected; the turn does not wait for it.
       let answer!: () => void
       cli.reply = (message, self) => {
