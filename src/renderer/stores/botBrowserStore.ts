@@ -10,6 +10,7 @@ import {
   type BotsBrowserMethod
 } from '../../shared/bots/personal/browser'
 import { errorText } from '../services/personalBotsClient'
+import { browserProblemForPerson, type BrowserProblem } from '../../shared/browser/navigation'
 
 /**
  * Each bot's own browser as its chat shows it: the live preview in its reply and the split view.
@@ -55,6 +56,8 @@ interface BotBrowserState {
   polling: boolean
   busy: boolean
   error: string | null
+  /** The error's details (Chromium's code for a page that failed), for its tooltip. */
+  errorDetail: string | null
   load(botId: string, frame: boolean): Promise<void>
   openPane(botId: string): void
   closePane(): void
@@ -92,12 +95,17 @@ const sameView = (a: BotBrowserView, b: BotBrowserView) =>
 
 export const useBotBrowserStore = create<BotBrowserState>((set, get) => {
   const act = async (botId: string, run: () => Promise<{ browser: BotBrowserView }>) => {
-    set({ busy: true, error: null })
+    set({ busy: true, error: null, errorDetail: null })
     try {
       put(botId, (await run()).browser)
       set({ busy: false })
     } catch (cause) {
-      set({ busy: false, error: errorText(cause) })
+      // A page that failed says so in the person's words; Chromium's own code goes in the tooltip.
+      const problem = (cause as { details?: { problem?: BrowserProblem } } | null)?.details?.problem
+      if (problem) {
+        const said = browserProblemForPerson(problem)
+        set({ busy: false, error: said.line, errorDetail: said.detail })
+      } else set({ busy: false, error: errorText(cause), errorDetail: null })
     }
   }
   return {
@@ -108,6 +116,7 @@ export const useBotBrowserStore = create<BotBrowserState>((set, get) => {
     polling: false,
     busy: false,
     error: null,
+    errorDetail: null,
     async load(botId, frame) {
       if (get().unavailable) return
       try {
@@ -118,8 +127,8 @@ export const useBotBrowserStore = create<BotBrowserState>((set, get) => {
         else if (frame || watches.has(botId)) setStream(botId, { live: false, since: lastGood.get(botId) ?? Date.now() })
       }
     },
-    openPane: (botId) => set({ paneBotId: botId, error: null }),
-    closePane: () => set({ paneBotId: null, error: null }),
+    openPane: (botId) => set({ paneBotId: botId, error: null, errorDetail: null }),
+    closePane: () => set({ paneBotId: null, error: null, errorDetail: null }),
     control: (botId, control) => act(botId, () => call('bots.browser.control', { botId, control })),
     input: (botId, input) => act(botId, () => call('bots.browser.input', { botId, input })),
     open: (botId, url) => act(botId, () => call('bots.browser.open', { botId, ...(url ? { url } : {}) }))
@@ -184,6 +193,10 @@ function onFrame(event: BotBrowserFrameEvent): void {
     else if (event.cursor) next.cursor = event.cursor
     if (event.behind === true) next.behind = true
     else if (event.behind === false) delete next.behind
+    if (event.loading === true) next.loading = true
+    else if (event.loading === false) delete next.loading
+    if (event.problem === null) delete next.problem
+    else if (event.problem) next.problem = event.problem
     return { views: { ...state.views, [event.botId]: next } }
   })
   if (event.stalled) setStream(event.botId, { live: false, since: lastGood.get(event.botId) ?? Date.now() })

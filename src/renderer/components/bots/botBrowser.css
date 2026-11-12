@@ -43,6 +43,21 @@
 .bot-browser-bar > .bot-browser-control { width: auto; padding: 0 11px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: rgba(var(--accent-rgb), .16); border: 1px solid rgba(var(--accent-rgb), .3); }
 .bot-browser-address { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; margin: 0 4px; padding: 0 10px; height: 30px; border-radius: 8px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 8%, transparent); }
 .bot-browser-address input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text-primary); font-size: 12px; outline: none; }
+/* The page is still loading: a quiet moving line under the address, in place of a wait. */
+.bot-browser-address { position: relative; overflow: hidden; }
+.bot-browser-address.is-loading::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 30%;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(var(--accent-rgb), .7);
+  animation: bot-browser-loading 1.1s ease-in-out infinite;
+}
+@keyframes bot-browser-loading { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .bot-browser-address.is-loading::after { animation: none; width: 100%; opacity: .5; } }
 .bot-browser-stage { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
 .bot-browser-stage .bot-browser-frame { box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), .16), 0 6px 24px rgba(0, 0, 0, .25); }
 .bot-browser-stage .bot-browser-frame[tabindex="0"] { cursor: default; }

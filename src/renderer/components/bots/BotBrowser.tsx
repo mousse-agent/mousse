@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type 
 import { ArrowLeft, ArrowRight, Globe, Maximize, RefreshCw, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_BROWSER_PANE_WATCH, BOT_BROWSER_PREVIEW_WATCH, type BotBrowserInput, type BotBrowserView } from '../../../shared/bots/personal/browser'
+import { browserProblemForPerson } from '../../../shared/browser/navigation'
 import { useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
 import { AgentCursor } from '../browser/AgentCursor'
 import './botBrowser.css'
@@ -39,7 +40,12 @@ interface BrowserStatus {
   detail?: string
   /** Pictures can arrive now. */
   live: boolean
+  /** Something the owner may want to look at (no new pictures, a page that failed or needs them). */
+  attention?: boolean
 }
+
+/** A page's problem in a word or two, for the preview's status. */
+const PROBLEM_WORD = { unreachable: 'Can\'t reach site', blocked: 'Blocked', 'needs-you': 'Needs you', 'cannot-start': 'Can\'t start' } as const
 
 /** What the view says of the bot's browser: "Live" only while pictures can arrive. */
 export function browserStatus(view: BotBrowserView, stream: BotBrowserStream | undefined, botName: string, now: number): BrowserStatus {
@@ -47,9 +53,14 @@ export function browserStatus(view: BotBrowserView, stream: BotBrowserStream | u
   if (!view.open) return { text: 'Closed', live: false }
   if (stream && !stream.live) {
     const since = sinceText(stream.since, now)
-    return { text: `Not updating · ${since}`, detail: `No new picture for ${since}. Mousse keeps trying.`, live: false }
+    return { text: `Not updating · ${since}`, detail: `No new picture for ${since}. Mousse keeps trying.`, live: false, attention: true }
+  }
+  if (view.problem) {
+    const said = browserProblemForPerson(view.problem)
+    return { text: PROBLEM_WORD[view.problem.kind], detail: `${said.line}. ${said.detail}`, live: Boolean(stream?.live), attention: true }
   }
   if (view.behind) return { text: 'On another tab', detail: `${botName} is using another of its tabs. This picture updates when it's back on this one.`, live: false }
+  if (view.loading) return { text: 'Loading', detail: 'The page is still loading.', live: Boolean(stream?.live) }
   if (view.control === 'owner') return { text: 'You have it', live: Boolean(stream?.live) }
   return stream?.live ? { text: 'Live', live: true } : { text: '', live: false }
 }
@@ -101,7 +112,7 @@ export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBro
   const stream = useBotBrowserStream(bot.id)
   const now = useNow(Boolean(view.open && stream && !stream.live))
   const status = browserStatus(view, stream, bot.name, now)
-  return <figure ref={figure} className={`bot-browser-preview${status.live ? ' is-live' : ''}${view.open && stream && !stream.live ? ' is-stale' : ''}`} aria-label={`${bot.name}'s browser`}>
+  return <figure ref={figure} className={`bot-browser-preview${status.live && !status.attention ? ' is-live' : ''}${view.open && status.attention ? ' is-stale' : ''}`} aria-label={`${bot.name}'s browser`}>
     <BrowserFrame bot={bot} view={view}>
       <button type="button" className="bot-browser-expand" aria-label={`Expand ${bot.name}'s browser`} title="Expand"
         onClick={() => useBotBrowserStore.getState().openPane(bot.id)}><Maximize size={14} /></button>
@@ -144,6 +155,7 @@ const KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp'
 export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
   const busy = useBotBrowserStore((state) => state.busy)
   const error = useBotBrowserStore((state) => state.error)
+  const errorDetail = useBotBrowserStore((state) => state.errorDetail)
   const store = useBotBrowserStore.getState
   const owner = view.open && view.control === 'owner'
   const url = view.tab?.url ?? ''
@@ -196,7 +208,8 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
       <button type="button" aria-label="Back" title="Back" disabled={!owner || busy} onClick={() => send({ kind: 'back' })}><ArrowLeft size={15} /></button>
       <button type="button" aria-label="Forward" title="Forward" disabled={!owner || busy} onClick={() => send({ kind: 'forward' })}><ArrowRight size={15} /></button>
       <button type="button" aria-label="Reload" title="Reload" disabled={!owner || busy} onClick={() => send({ kind: 'reload' })}><RefreshCw size={15} /></button>
-      <form className="bot-browser-address" onSubmit={(event) => { event.preventDefault(); go() }}>
+      <form className={`bot-browser-address${view.open && view.loading ? ' is-loading' : ''}`} onSubmit={(event) => { event.preventDefault(); go() }}
+        aria-busy={view.open && view.loading ? true : undefined}>
         <Globe size={13} aria-hidden />
         <input aria-label={`${bot.name}'s browser address`} value={address} readOnly={view.open && !owner} placeholder="Enter a web address"
           onFocus={() => { editing.current = true }} onBlur={() => { editing.current = false }} onChange={(event) => setAddress(event.target.value)} spellCheck={false} />
@@ -236,8 +249,9 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
         </div>}
       </BrowserFrame>
     </div>
-    <p className={`bot-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={quiet ? status.detail : undefined}>{error
+    <p className={`bot-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={error ? errorDetail ?? undefined : view.open && view.problem ? browserProblemForPerson(view.problem).detail : quiet ? status.detail : undefined}>{error
       ? error
+      : view.open && view.problem ? browserProblemForPerson(view.problem).line
       : quiet ? status.text
       : owner ? `You're using ${bot.name}'s browser. Sites you sign in to stay signed in for it. Give it back when you're done.`
       : view.open ? `${bot.name} is using its own browser, apart from your tabs. Take over to click or type in it.`
