@@ -965,7 +965,7 @@ type LeaseWait = {
   poll: NodeJS.Timeout | null
   pollMs: number
   wakeQueued: boolean
-  /** Started by startup recovery: its drain goes through the startup drain queue and its concurrency limit. */
+  /** Every message it waits for came from startup recovery: its drain goes through the startup drain queue and its concurrency limit. */
   startup: boolean
 }
 
@@ -7318,7 +7318,9 @@ export class OrchestratorService extends EventEmitter {
       wait = { threadDir: resolve(threadDir), itemIds: new Set(), poll: null, pollMs: LEASE_WAIT_POLL_MS, wakeQueued: false, startup: false }
       this.leaseWaits.set(threadId, wait)
     }
-    if (opts?.startup) wait.startup = true
+    // Only a wait for nothing but what startup recovery found drains through the startup drain queue. A message sent
+    // since joins it as the person's own and is not put behind other threads' startup turns.
+    wait.startup = opts?.startup === true && (started || wait.startup)
     wait.itemIds.add(itemId)
     this.stopLeaseReleaseWatch ??= onExecutionLeaseReleased((released) => {
       const dir = resolve(released)
