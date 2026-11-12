@@ -261,6 +261,8 @@ function RawSubagentRow({ part, chatStatus }: { part: any; chatStatus?: string }
 export const SubagentTool = memo(function SubagentTool({ part, chatStatus }: { part: any; chatStatus?: string }) {
   const card = useSubagentCard(part.toolCallId);
   if (!card) return <RawSubagentRow part={part} chatStatus={chatStatus} />;
+  // Still starting: the turn's progress line says so until the subagent has a name and a thread.
+  if (card.spawning) return null;
   return <LiveSubagentCard card={card} />;
 });
 

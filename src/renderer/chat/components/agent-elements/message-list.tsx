@@ -1402,6 +1402,11 @@ export const MessageList = memo(function MessageList({
     () => new Set(subagentCards.keys()),
     [subagentCards],
   );
+  // Cards still starting: not drawn yet, the turn's progress line stands for them.
+  const spawningCardIds = useMemo(
+    () => new Set([...subagentCards.values()].filter((card) => card.spawning).map((card) => card.toolCallId)),
+    [subagentCards],
+  );
   // Subagents (by task and by thread) whose state a card in the thread shows.
   const cardedSubagents = useMemo(() => {
     const ids = new Set<string>();
@@ -2074,6 +2079,7 @@ export const MessageList = memo(function MessageList({
                 suppressQuestionTool={suppressQuestionTool}
                 cardedSubagents={cardedSubagents}
                 subagentCardIds={subagentCardIds}
+                spawningCardIds={spawningCardIds}
               />
             );
           })}
@@ -2156,6 +2162,7 @@ type TurnRowProps = {
   suppressQuestionTool: boolean;
   cardedSubagents: Set<string>;
   subagentCardIds: Set<string>;
+  spawningCardIds: Set<string>;
 };
 
 /**
@@ -2188,6 +2195,7 @@ const TurnRow = memo(function TurnRow({
   suppressQuestionTool,
   cardedSubagents,
   subagentCardIds,
+  spawningCardIds,
 }: TurnRowProps) {
   countRender("TurnRow");
   const turnActionsForEdit = useTurnActions();
@@ -2382,9 +2390,11 @@ const TurnRow = memo(function TurnRow({
                   );
                   return segments.map((segment) => {
                     if (segment.kind === "cards") {
+                      // A card still starting is not drawn: the progress line says "Starting subagent…".
                       const cardParts = segment.msgIndices.flatMap(
                         (msgIndex) => analyses[msgIndex]!.cardParts,
-                      );
+                      ).filter((part) => !spawningCardIds.has(part.toolCallId!));
+                      if (cardParts.length === 0) return null;
                       const cardNested = new Map(
                         segment.msgIndices.flatMap((msgIndex) => [
                           ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),

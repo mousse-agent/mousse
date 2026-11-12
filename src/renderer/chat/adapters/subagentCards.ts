@@ -50,6 +50,11 @@ export interface SubagentCardModel {
   createdAt: number | null
   completedAt: number | null
   error?: string
+  /**
+   * The subagent is still being set up in the running turn: its call has no name yet, or no task or
+   * thread has started for it. Its row stays hidden and the turn's progress line says "Starting subagent…".
+   */
+  spawning?: boolean
   /** Set on a subagent the runtime started with its own tool (Claude Code's `Agent`): it has no thread to open. */
   native?: import('./nativeSubagents').NativeSubagentInfo
 }
@@ -155,7 +160,7 @@ function modelOf(call: SubagentCall, entry: TaskEntry, exact: boolean): Subagent
   }
 }
 
-function pendingModel(call: SubagentCall): SubagentCardModel {
+function pendingModel(call: SubagentCall, spawning: boolean): SubagentCardModel {
   return {
     toolCallId: call.toolCallId,
     pending: true,
@@ -170,7 +175,8 @@ function pendingModel(call: SubagentCall): SubagentCardModel {
     waitingOn: [],
     exact: false,
     createdAt: call.startedAt,
-    completedAt: null
+    completedAt: null,
+    ...(spawning ? { spawning: true } : {})
   }
 }
 
@@ -195,7 +201,8 @@ export interface JoinOptions {
  * follow-up addresses); else, only for rows that record neither (written before the daemon kept
  * them), by order and time, the earliest task no other call has taken. `delegate_task` starts a
  * subagent's first task and `continue_subagent` a later one. A call that errored or was refused
- * keeps its raw row; so does a finished call no task matches once the list has loaded.
+ * keeps its raw row; so does a finished call no task matches once the list has loaded. A call of the
+ * running turn that has not returned and matches no task yet is a spawning card (`spawning`), which is not drawn.
  */
 export function joinSubagentCards(calls: readonly SubagentCall[], subagents: readonly SubagentSummary[], options: JoinOptions): Map<string, SubagentCardModel> {
   const entries: TaskEntry[] = subagents
@@ -292,7 +299,8 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
     const kept = options.previous?.get(call.toolCallId)
     // A kept card never holds a task another call has claimed.
     if (kept && !kept.pending && kept.exact && !(kept.delegationId && claimed.has(kept.delegationId))) cards.set(call.toolCallId, kept)
-    else if (call.pending ? starting(call) : !options.loaded) cards.set(call.toolCallId, pendingModel(call))
+    // A call of the running turn that has not returned is still starting its subagent.
+    else if (call.pending ? starting(call) : !options.loaded) cards.set(call.toolCallId, pendingModel(call, call.pending))
   }
   return cards
 }
