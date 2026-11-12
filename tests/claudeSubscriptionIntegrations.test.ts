@@ -13,6 +13,7 @@ import {
   claudeMcpToolBlocked,
   claudeProxiedMcpServer
 } from '../src/mms/harness/vendors/claude/integrations'
+import { resolveEnvValue } from '../src/mms/integrations/secrets'
 
 const roots: string[] = []
 afterEach(() => {
@@ -83,6 +84,15 @@ describe('Claude Subscription integrations', () => {
     expect(JSON.stringify(result.mcpServers)).not.toContain('MOUSSE_MCP_VALUE')
     expect(result.warnings).toEqual([])
     expect(result.pluginPath).toBeUndefined()
+  })
+
+  it('reads a value once: a secret whose text holds `${NAME}`, and a `${NAME:-x}` Mousse does not resolve, stay as text (#358)', () => {
+    const secrets = { resolveEnv: (value: string) => value, resolveSecretRef: (ref: string) => (ref === 'KEY' ? 'pa$$-${HOME}-${ANTHROPIC_API_KEY}' : undefined) }
+    const env = { HOME: '/home/me', ANTHROPIC_API_KEY: 'sk-fake-358' }
+    expect(resolveEnvValue('${secret:KEY}', env, secrets)).toBe('pa$$-${HOME}-${ANTHROPIC_API_KEY}')
+    expect(resolveEnvValue('${ANTHROPIC_API_KEY:-x}', env, secrets)).toBe('${ANTHROPIC_API_KEY:-x}')
+    // The forms Mousse does read are read as before.
+    expect(resolveEnvValue('${HOME}|$HOME|%HOME%|${env:HOME}|${NOPE}|a$HOME', env)).toBe('/home/me|/home/me|/home/me|/home/me||a$HOME')
   })
 
   it('leaves out servers Claude cannot run and never takes the Mousse server name', async () => {

@@ -51,22 +51,23 @@ export function containsEnvReference(value: string): boolean {
   return extractEnvVariableReferences(value).length > 0 || extractSecretReferences(value).length > 0
 }
 
+/** Every reference form, in one pattern: a value is read once, so the text a reference stands for is never read again. */
+const ONE_PASS = /\$\{secret:([A-Za-z0-9_.-]+)}|\$\{env:([A-Za-z_][A-Za-z0-9_]*)}|\$\{([A-Za-z_][A-Za-z0-9_]*)}|(^|[^A-Za-z0-9_])\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%/g
+
+/**
+ * `value` with its references replaced, in one pass: a secret's or a variable's own text is kept as it is, so a secret
+ * holding `${HOME}` stays that text instead of taking a variable's value (#358).
+ */
 export function resolveEnvValue(
   value: string,
   env: NodeJS.ProcessEnv = process.env,
   secrets?: IntegrationSecretAdapter
 ): string {
-  let resolved = value.replace(SECRET_REF_PATTERN, (_match, name: string) => {
-    return secrets?.resolveSecretRef?.(name) ?? ''
+  return value.replace(ONE_PASS, (_match, secret?: string, envName?: string, braced?: string, prefix?: string, bare?: string, percent?: string) => {
+    if (secret !== undefined) return secrets?.resolveSecretRef?.(secret) ?? ''
+    if (bare !== undefined) return `${prefix ?? ''}${env[bare] ?? ''}`
+    return env[(envName ?? braced ?? percent)!] ?? ''
   })
-  resolved = resolved.replace(/\$\{env:([A-Za-z_][A-Za-z0-9_]*)}/g, (_match, name: string) => env[name] ?? '')
-  resolved = resolved.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)}/g, (_match, name: string) => env[name] ?? '')
-  resolved = resolved.replace(
-    /(^|[^A-Za-z0-9_])\$([A-Za-z_][A-Za-z0-9_]*)/g,
-    (_match, prefix: string, name: string) => `${prefix}${env[name] ?? ''}`
-  )
-  resolved = resolved.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (_match, name: string) => env[name] ?? '')
-  return resolved
 }
 
 export function resolveRecord(

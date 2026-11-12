@@ -352,6 +352,67 @@ describe('a live Claude query', () => {
       await vi.waitFor(() => expect(reap).toHaveBeenCalledExactlyOnceWith(4343, expect.anything()))
     })
 
+    /** Claude Code's words (2.1.291) when `disableSideloadFlags` refuses `--mcp-config` servers, and its exit. */
+    const SIDELOAD_REFUSAL = 'Error: --mcp-config is not allowed on this machine. Plugins, custom agents, and MCP servers can only be loaded from sources your administrator has approved. Ask your administrator to remove disableSideloadFlags from managed settings, or use an approved marketplace / settings file instead.\n'
+
+    it.each([['a live process', {}], ['a one-shot query', { live: false as const }]])('a Claude Code whose policy refuses the user\'s servers at its start: the turn starts again with Mousse\'s own only, the thread is told once, and later starts leave them out (%s)', async (_, extra) => {
+      const warn = warnings()
+      const cli = new FakeClaudeCli()
+      cli.startupRefusal = SIDELOAD_REFUSAL
+      const f = fixture({}, cli, undefined, extra)
+      expect(await f.chat({ ...mcp('mousse-token-one'), ...withUser })).toBe('reply to 1')
+      expect(cli.processes).toHaveLength(2)
+      // The refused process got the user's servers at its start and ended; the one that ran the turn has Mousse's own only.
+      expect(cli.processes[0]!.inputs).toHaveLength(0)
+      expect(cli.processes[1]!.options.extraArgs?.['mcp-config']).toBeUndefined()
+      expect(cli.processes[1]!.mcpRegistrations.map((servers) => Object.keys(servers))).toEqual([['mousse']])
+      expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', 'This computer\'s Claude Code policy does not allow added MCP servers, so Claude started without your servers: web, files. Mousse\'s own tools are attached.')
+      // Never around the policy by another way: a later start sends them neither at its start nor over its input.
+      f.service.stopThread('thread')
+      expect(await f.chat({ ...mcp('mousse-token-one'), ...withUser })).toBe('reply to 1')
+      expect(cli.last.options.extraArgs?.['mcp-config']).toBeUndefined()
+      expect(cli.last.mcpRegistrations.map((servers) => Object.keys(servers))).toEqual([['mousse']])
+      expect(f.host.notice).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify([f.host.notice.mock.calls, warn.mock.calls])).not.toMatch(/user-header-secret-358|user-env-secret-358|mousse-token-one/)
+      warn.mockRestore()
+    })
+
+    it('a policy Mousse can see before the start (the managed settings) leaves the user\'s servers out of every way, Windows\' included', async () => {
+      const cli = new FakeClaudeCli()
+      // The user's own --mcp-config: the user's servers would go over the input, which Claude Code does not check.
+      let home = ''
+      const f = fixture({}, cli, undefined, { mcpPolicy: () => true, launchConfig: () => ({ binaryPath: join(home, 'claude'), args: ['--mcp-config', 'mine.json'] }) })
+      home = f.home
+      expect(await f.turn({ ...mcp('mousse-token-one'), ...withUser })).toBe('reply to 1')
+      expect(cli.processes).toHaveLength(1)
+      expect(cli.last.mcpRegistrations.map((servers) => Object.keys(servers))).toEqual([['mousse']])
+      expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('policy does not allow added MCP servers'))
+    })
+
+    it('a start Claude Code ended because it could not read its servers says so, with what it wrote, redacted', async () => {
+      const warn = warnings()
+      const cli = new FakeClaudeCli()
+      cli.startupRefusal = 'Error: Invalid MCP configuration:\nmcpServers.web.headers.X-Api-Key: bad value user-header-secret-358\n'
+      const f = fixture({}, cli)
+      const error = await f.chat({ ...mcp('mousse-token-one'), ...withUser }).catch((caught: unknown) => caught)
+      expect(error).toMatchObject({ code: 'claude_mcp_unavailable', message: expect.stringContaining('Claude Code could not read the MCP servers Mousse gave it at its start, and ended. Claude Code said: Error: Invalid MCP configuration:') })
+      expect((error as Error).message).not.toMatch(/user-header-secret-358|try again/)
+      expect(cli.processes).toHaveLength(1)
+      warn.mockRestore()
+    })
+
+    it('a value holding `${` reaches Claude Code so that its expansion gives it back as Mousse resolved it, and the variable it uses is never in its environment', async () => {
+      let home = ''
+      const f = fixture({}, new FakeClaudeCli(), undefined, { launchConfig: () => ({ binaryPath: join(home, 'claude'), args: ['--mcp-config', 'mine.json'], env: { MOUSSE_LITERAL_DOLLAR: 'x' } }) })
+      home = f.home
+      const integrations = { ...withUser.integrations, mcpServers: { web: { type: 'http' as const, url: 'https://example.test/mcp', headers: { 'X-Api-Key': 'a-${ANTHROPIC_API_KEY}-b' } } } }
+      await f.turn({ ...mcp('mousse-token-one'), integrations })
+      const process = f.cli.last
+      // Over the input Claude Code expands a header once: the value is sent escaped once.
+      expect(process.mcpRegistrations[1]!.web).toEqual({ type: 'http', url: 'https://example.test/mcp', headers: { 'X-Api-Key': 'a-${MOUSSE_LITERAL_DOLLAR:-$}{ANTHROPIC_API_KEY}-b' } })
+      expect(process.options.env?.MOUSSE_LITERAL_DOLLAR).toBeUndefined()
+    })
+
     it('the user\'s servers a turn started without are named once in the thread, and the turn runs', async () => {
       const warn = warnings()
       const f = fixture()
@@ -361,7 +422,7 @@ describe('a live Claude query', () => {
         process.answer(String(message.uuid), 'ran')
       }
       expect(await f.turn({ ...mcp('mousse-token-one'), ...withUser })).toBe('ran')
-      expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', 'Claude started this turn without some MCP servers: files (still starting; its tools come in a later turn); web (could not connect).')
+      expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', 'Claude started this turn without some MCP servers: files (still starting; it is offered once it has connected); web (could not connect).')
       // The same process says it once; a new state is said again.
       expect(await f.turn({ ...mcp('mousse-token-one'), ...withUser })).toBe('ran')
       expect(f.host.notice).toHaveBeenCalledTimes(1)

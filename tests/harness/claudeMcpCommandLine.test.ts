@@ -9,12 +9,20 @@
  *
  * Where each check runs: everything runs on Linux and macOS. What Claude Code is started with is read at the SDK's
  * spawn seam on every platform, and from the running process as another local process reads it on Linux
- * (`/proc/<pid>/cmdline`, `environ`) and macOS (`ps`). Windows runs none of the startup-pipe checks (Windows registers
- * the user's servers over the input instead) and not the command a bot runs. Without the platform's binary every test
- * is skipped, with the reason in its name.
+ * (`/proc/<pid>/cmdline`, `environ`) and macOS (`ps`). The startup channel of each platform is used by default (the
+ * fourth stream on macOS, a named pipe on Linux); on macOS the person's-turn checks also run with the named pipe, so
+ * Linux's channel is exercised with the real CLI here too. Windows runs none of the startup-channel checks (Windows
+ * registers the user's servers over the input instead) and not the command a bot runs. Without the platform's binary
+ * every test is skipped, with the reason in its name.
+ *
+ * Not here: a start Claude Code refuses for its managed policy (`disableSideloadFlags`, `managed-mcp.json`). This
+ * Claude Code reads that policy only from a system folder (`/Library/Application Support/ClaudeCode`, `/etc/claude-code`)
+ * no variable moves, and neither the SDK's `managedSettings` nor `serverManagedSettings` makes it refuse (checked), so a
+ * test cannot set it without changing the machine; `tests/claudeLiveSessions.test.ts` covers Mousse's handling of the
+ * refusal with Claude Code's own words.
  */
 import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -26,6 +34,7 @@ import type { ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService, type ClaudeSubscriptionChatInput } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import type { ClaudeStartupChannel } from '../../src/mms/harness/vendors/claude/mcpRegistration'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 
 const PACKAGE = join(process.cwd(), 'node_modules', '@anthropic-ai')
@@ -38,6 +47,13 @@ const hasBinary = existsSync(BINARY)
 /** Said in every test's name when it is skipped, so a missing binary never passes as a run. */
 const NO_BINARY = hasBinary ? '' : ` [skipped: no Claude Code binary at ${BINARY}; install the SDK's platform package or set MOUSSE_CLAUDE_EVIDENCE_BINARY]`
 const POSIX = process.platform !== 'win32'
+/**
+ * The startup channel's path on Claude Code's command line: its fourth stream, or a named pipe in a folder of its own;
+ * or the user's own config file of a test that sends their servers over the input.
+ */
+const STARTUP_PATH = /^(\/dev\/fd\/3|.*\/mousse-mcp-[^/]+\/servers|.*\/own-mcp\.json)$/
+/** The named-pipe channel runs with the real CLI on macOS too (Linux's default), beside macOS's own. */
+const CHANNELS: ClaudeStartupChannel[] = process.platform === 'darwin' ? ['descriptor', 'fifo'] : process.platform === 'win32' ? [] : ['fifo']
 
 const TOKEN = 'fake-mousse-token-358-first-aaaaaaaaaaaa'
 const TOKEN_2 = 'fake-mousse-token-358-second-bbbbbbbbbbb'
@@ -47,6 +63,16 @@ const TOKEN_REFUSED = 'fake-mousse-token-358-refused-eeeeeeeeee'
 const TOKEN_UNANSWERED = 'fake-mousse-token-358-unanswered-ffffff'
 const USER_HEADER = 'fake-user-header-358-cccccccccccccccc'
 const USER_ENV = 'fake-user-env-358-dddddddddddddddddd'
+/**
+ * Values that still hold `${` after Mousse resolved them: Claude Code must not expand them against its environment, which
+ * holds the instance's (fake) API key and the user's home.
+ */
+const LITERAL = 'a-${ANTHROPIC_API_KEY}-${HOME:-x}-$${HOME}-b'
+const LITERAL_QUERY = '${HOME:-x}'
+const LITERAL_ARG = 'arg-${HOME:-x}-${ANTHROPIC_API_KEY}'
+const LITERAL_ENV = 'env-${ANTHROPIC_API_KEY}-${HOME}'
+/** The header of the n-th of many servers: about 2 KB of its own. */
+const bulkHeader = (index: number) => `bulk-${index}-`.padEnd(2048, 'b')
 /** What must never be on the command line, in the environment, in a file left behind, or in what a command prints. */
 const SECRETS = [TOKEN, TOKEN_2, TOKEN_REFUSED, TOKEN_UNANSWERED, USER_HEADER, USER_ENV]
 const MARKERS = [...SECRETS, 'MOUSSE_MCP_VALUE', 'Bearer ']
@@ -55,6 +81,30 @@ const found = (text: string) => MARKERS.filter((marker) => text.includes(marker)
 type Json = Record<string, unknown>
 /** A command that prints its environment and the command line of its parent (Claude Code). No loop or variable. */
 const PRINT_ENV = { name: 'Bash', input: { command: 'env; echo ---; ps -ww -o args= -p $PPID', description: 'Print the environment' } }
+
+/**
+ * Tries to read each path it is given, and every named pipe Mousse may have left in `--fifo-root <dir>`, without ever
+ * blocking (a pipe or socket is opened non-blocking), and prints per path the error or the number of bytes read, never
+ * the bytes.
+ */
+const READER = `const fs = require('fs'); const path = require('path')
+const args = process.argv.slice(2); const at = args.indexOf('--fifo-root'); const paths = args.filter((_, i) => i !== at && i !== at + 1)
+if (at >= 0) for (const dir of fs.readdirSync(args[at + 1]).filter((n) => n.startsWith('mousse-mcp-'))) paths.push(path.join(args[at + 1], dir), path.join(args[at + 1], dir, 'servers'))
+for (const p of paths) {
+  let said
+  try { const fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK); let n = 0; let servers = false; const b = Buffer.alloc(1 << 20)
+    try { for (;;) { const r = fs.readSync(fd, b); if (r === 0) break; n += r; if (b.subarray(0, r).includes('mcpServers')) servers = true } } catch (e) { if (e.code !== 'EAGAIN' && e.code !== 'EISDIR') throw e }
+    fs.closeSync(fd); said = n + ' bytes' + (servers ? ' HOLDING SERVERS' : '') } catch (e) { said = e.code || String(e) }
+  console.log('READ ' + p + ': ' + said)
+}`
+/** What a command Claude runs can read of the startup channel: its own fourth stream, Claude Code's (Linux), and the pipe. */
+const readsCommand = (reader: string, fifoRoot: string) => ({
+  name: 'Bash',
+  input: {
+    command: `if { true <&3; } 2>/dev/null; then echo "FD3 open, $(head -c 1048576 <&3 | wc -c | tr -d ' ') bytes"; else echo "FD3 not open"; fi; ${JSON.stringify(process.execPath)} ${JSON.stringify(reader)} /proc/$PPID/fd/3 --fifo-root ${JSON.stringify(fifoRoot)}`,
+    description: 'Try to read the startup channel'
+  }
+})
 
 /** The Messages API: a prompt naming `PLAN:<name>` runs that plan's tool calls, one per request, then says "done". */
 async function anthropicMock(plans: Record<string, Json[]>) {
@@ -148,9 +198,14 @@ async function mcpMock() {
       for await (const chunk of req) chunks.push(chunk as Buffer)
       const path = (req.url ?? '').split('?')[0]!
       const auth = String(req.headers.authorization ?? '')
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '')
       const credential = path === '/mcp'
         ? auth === `Bearer ${TOKEN}` ? 'first' : auth === `Bearer ${TOKEN_2}` ? 'second' : 'none'
-        : path === '/user' ? (req.headers['x-api-key'] === USER_HEADER ? 'user' : 'none') : 'none'
+        : path === '/user' ? (req.headers['x-api-key'] === USER_HEADER ? 'user' : 'none')
+          // A value holding `${`: the header and the address arrive exactly as sent, or the server says how they differ.
+          : path === '/literal' ? (req.headers['x-literal'] === LITERAL && query.get('q') === LITERAL_QUERY ? 'literal' : req.headers['x-literal'] === undefined ? 'none' : 'changed')
+            // One of many servers: its own long header, whole.
+            : path.startsWith('/bulk/') ? (req.headers['x-bulk'] === bulkHeader(Number(path.slice(6))) ? 'bulk' : 'none') : 'none'
       if (req.method !== 'POST') return void res.writeHead(405).end()
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: number; method: string; params?: { name?: string; protocolVersion?: string } }
       calls.push({ path, method: body.method, credential, ...(body.params?.name ? { tool: body.params.name } : {}) })
@@ -193,6 +248,30 @@ rl.on('line', (line) => {
   if (msg.method === 'initialize') return send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake-stdio', version: '1.0.0' } } })
   if (msg.method === 'tools/list') return send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'secret_seen', description: 'Says whether the server got its secret.', inputSchema: { type: 'object', properties: {} } }] } })
   if (msg.method === 'tools/call') return send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'secret seen: ' + (process.env.USER_ENV_SECRET === ${JSON.stringify(USER_ENV)}) }] } })
+  send({ jsonrpc: '2.0', id: msg.id, result: {} })
+})`
+/** A stdio MCP server whose one tool says whether its argument and its variable arrived exactly as sent (never them). */
+const LITERAL_SERVER = `const rl = require('readline').createInterface({ input: process.stdin })
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
+rl.on('line', (line) => {
+  const msg = JSON.parse(line)
+  if (msg.id === undefined) return
+  if (msg.method === 'initialize') return send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake-literal', version: '1.0.0' } } })
+  if (msg.method === 'tools/list') return send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'literal', description: 'Says whether its values arrived as sent.', inputSchema: { type: 'object', properties: {} } }] } })
+  if (msg.method === 'tools/call') return send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'arg literal: ' + (process.argv[2] === ${JSON.stringify(LITERAL_ARG)}) + ', env literal: ' + (process.env.LITERAL_ENV === ${JSON.stringify(LITERAL_ENV)}) }] } })
+  send({ jsonrpc: '2.0', id: msg.id, result: {} })
+})`
+/** A stdio MCP server that answers only after the delay it is given (ms): one Claude Code starts a turn without. */
+const SLOW_SERVER = `const rl = require('readline').createInterface({ input: process.stdin })
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
+const ready = new Promise((resolve) => setTimeout(resolve, Number(process.argv[2])))
+rl.on('line', async (line) => {
+  const msg = JSON.parse(line)
+  if (msg.id === undefined) return
+  await ready
+  if (msg.method === 'initialize') return send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake-slow', version: '1.0.0' } } })
+  if (msg.method === 'tools/list') return send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'late', description: 'Answers late.', inputSchema: { type: 'object', properties: {} } }] } })
+  if (msg.method === 'tools/call') return send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'late but here' }] } })
   send({ jsonrpc: '2.0', id: msg.id, result: {} })
 })`
 /** A stdio MCP server that never answers and outlives its input: it writes its pid to the file it is given. */
@@ -250,7 +329,13 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     for (const cleanup of cleanups.splice(0).reverse()) await Promise.resolve(cleanup()).catch(() => undefined)
   })
 
-  async function rig(plans: Record<string, Json[]>, options: { locked?: boolean; oneShot?: boolean; debug?: boolean } = {}) {
+  /**
+   * `channel`: the startup channel (default: the platform's). `viaInput`: the user's servers go over Claude Code's input,
+   * as on Windows (a launch argument of the user's names `--mcp-config`). `stderrFlood`: Claude Code is started through a
+   * wrapper that first writes 2 MB to the error stream, then becomes Claude Code (same process): a stream nobody reads
+   * stops it before it starts.
+   */
+  async function rig(plans: Record<string, Json[]>, options: { locked?: boolean; oneShot?: boolean; debug?: boolean; channel?: ClaudeStartupChannel; viaInput?: boolean; stderrFlood?: boolean } = {}) {
     const base = mkdtempSync(join(tmpdir(), 'mousse-claude-mcp-argv-'))
     cleanups.push(() => rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
     const dirs = { work: join(base, 'work'), files: join(base, 'files'), root: join(base, 'root'), scratch: join(base, 'scratch'), userHome: join(base, 'user-home'), instanceHome: join(base, 'instance-home'), pids: join(base, 'pids') }
@@ -260,6 +345,20 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     writeFileSync(stdioServer, STDIO_SERVER)
     const hungServer = join(base, 'hung-server.cjs')
     writeFileSync(hungServer, HUNG_SERVER)
+    const literalServer = join(base, 'literal-server.cjs')
+    writeFileSync(literalServer, LITERAL_SERVER)
+    const slowServer = join(base, 'slow-server.cjs')
+    writeFileSync(slowServer, SLOW_SERVER)
+    const reader = join(base, 'reader.cjs')
+    writeFileSync(reader, READER)
+    // The user's own (empty) --mcp-config, which sends their Mousse servers over the input.
+    const ownConfig = join(base, 'own-mcp.json')
+    writeFileSync(ownConfig, JSON.stringify({ mcpServers: {} }))
+    /** Bytes each process wrote to its error stream, by pid. */
+    const stderrBytes = new Map<number, number>()
+    const flood = join(base, 'claude-flood.sh')
+    writeFileSync(flood, `#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\0' x >&2\nexec ${JSON.stringify(BINARY)} "$@"\n`)
+    chmodSync(flood, 0o755)
     const debugFile = join(base, 'claude-debug.log')
     const anthropic = await anthropicMock(plans)
     cleanups.push(() => anthropic.close())
@@ -272,7 +371,8 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const service = new ClaudeSubscriptionProviderService(state, new UserQuestionService(), {
       probe: () => ({ kind: 'signed_in', account: { label: 'API key', credential: 'api_key' } }),
-      launchConfig: () => ({ binaryPath: BINARY }),
+      launchConfig: () => ({ binaryPath: options.stderrFlood ? flood : BINARY, ...(options.viaInput ? { args: ['--mcp-config', ownConfig] } : {}) }),
+      ...(options.channel ? { startupChannel: options.channel } : {}),
       baseEnv: () => ({ PATH: process.env.PATH, HOME: dirs.userHome, CLAUDE_CONFIG_DIR: dirs.instanceHome }),
       ...(options.locked
         ? { lockedEnv: (cwd: string) => lockedEnv({ platform: process.platform, base: { PATH: process.env.PATH, HOME: dirs.userHome }, driver: 'claude', credential: 'api_key', home: dirs.instanceHome, scratch: cwd }) }
@@ -301,6 +401,10 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
               ? given.spawnClaudeCodeProcess(spawned)
               : nodeSpawn(spawned.command, spawned.args, { cwd: spawned.cwd, env: spawned.env as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'], signal: spawned.signal, windowsHide: true }) as unknown as SpawnedProcess
             const pid = (child as { pid?: number }).pid
+            // Read here only for a process the SDK's way would start (the rig's spawn): Mousse's own spawn must read its
+            // error stream itself, and a second reader here would hide one that does not.
+            const stderr = (child as { stderr?: NodeJS.ReadableStream }).stderr
+            if (pid !== undefined && !given.spawnClaudeCodeProcess) stderr?.on('data', (chunk: Buffer) => stderrBytes.set(pid, (stderrBytes.get(pid) ?? 0) + chunk.length))
             started.push({ args: [...spawned.args], env: { ...spawned.env }, ...(pid !== undefined ? { pid } : {}), ...seenByOthers(pid) })
             return child
           }
@@ -322,7 +426,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     /** Every file Claude Code or the turn left where it could be read later: Claude's homes, the folders, the debug log. */
     const leftBehind = () => [dirs.instanceHome, dirs.userHome, dirs.work, dirs.files, dirs.scratch, state].flatMap(secretsUnder)
       .concat(existsSync(debugFile) && SECRETS.some((secret) => readFileSync(debugFile, 'utf8').includes(secret)) ? ['claude-debug.log'] : [])
-    return { dirs, stdioServer, hungServer, debugFile, anthropic, mcp, service, started, ledger, rows, notices, state, leftBehind }
+    return { dirs, stdioServer, hungServer, literalServer, slowServer, reader, debugFile, anthropic, mcp, service, started, ledger, rows, notices, state, leftBehind, stderrBytes }
   }
   type Rig = Awaited<ReturnType<typeof rig>>
 
@@ -340,35 +444,60 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
   /** Nothing of a credential where another process, or a command Claude runs, can read it. */
   const clean = (process: Started) => {
     expect(found(process.args.join('\n')), 'arguments at the spawn seam').toEqual([])
-    // The command line names at most the pipe the user's servers come through, never a server.
+    // The command line names at most the channel the user's servers come through, never a server.
     const config = process.args.indexOf('--mcp-config')
-    if (config >= 0) expect(process.args[config + 1], 'the only --mcp-config is the startup pipe').toBe('/dev/fd/3')
+    if (config >= 0) expect(process.args[config + 1], 'the only --mcp-config is the startup channel').toMatch(STARTUP_PATH)
     expect(process.args.filter((arg) => arg === '--mcp-config').length).toBeLessThanOrEqual(1)
     expect(found(Object.entries(process.env).map(([name, value]) => `${name}=${value}`).join('\n')), 'environment at the spawn seam').toEqual([])
     if (process.commandLine !== undefined) expect(found(process.commandLine), 'command line of the running process').toEqual([])
     if (process.environment !== undefined) expect(found(process.environment), 'environment of the running process').toEqual([])
   }
 
-  it.skipIf(!hasBinary)(`a person's turn: the servers work, none is on the command line or in the environment, a command reads none, no file keeps one, and a new token reaches the running process${NO_BINARY}`, async () => {
+  it.skipIf(!hasBinary || CHANNELS.length === 0).each(CHANNELS)(`a person's turn (startup channel: %s): the servers work, none is on the command line or in the environment, neither a command nor another process reads one, no file keeps one, and a new token reaches the running process${NO_BINARY}`, async (channel) => {
+    const fifoRoot = tmpdir()
     const plans = {
       first: [
         { name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping,mcp__web__ping,mcp__files__secret_seen', max_results: 5 } },
         { name: 'mcp__mousse__ping', input: {} },
         { name: 'mcp__web__ping', input: {} },
         { name: 'mcp__files__secret_seen', input: {} },
-        PRINT_ENV
+        PRINT_ENV,
+        // The reader's path is filled in below, once the rig has written it.
+        { name: 'Bash', input: { command: 'READS', description: 'Try to read the startup channel' } }
       ],
       second: [{ name: 'mcp__mousse__ping', input: {} }]
     }
-    const run = await rig(plans)
+    const run = await rig(plans, { channel })
+    plans.first[plans.first.length - 1] = readsCommand(run.reader, fifoRoot)
     const turn = async (prompt: string, token: string) => {
       const text = await personTurn(run, prompt, token)
       run.service.commitConversation('thread', '')
       return text
     }
+    // Another process of the same user, while the turn runs and Claude Code has read its servers: it tries Claude Code's
+    // fourth stream (Linux: `/proc/<pid>/fd/3`) and any named pipe Mousse made.
+    let other = ''
+    const watching = (async () => {
+      await vi.waitFor(() => expect(run.mcp.calls.some((call) => call.path === '/user')).toBe(true), { timeout: 60_000, interval: 50 })
+      other = execFileSync(process.execPath, [run.reader, `/proc/${run.started[0]!.pid}/fd/3`, '--fifo-root', fifoRoot], { encoding: 'utf8' })
+    })()
     expect(await turn('PLAN:first', TOKEN)).toContain('done')
+    await watching
     expect(run.started).toHaveLength(1)
     clean(run.started[0]!)
+    const config = run.started[0]!.args[run.started[0]!.args.indexOf('--mcp-config') + 1]!
+    expect(config).toMatch(channel === 'descriptor' ? /^\/dev\/fd\/3$/ : /\/mousse-mcp-[^/]+\/servers$/)
+    // What the command read: nothing of the channel. Its fourth stream, if it has one, holds no byte; Claude Code's own
+    // (Linux, `/proc/<pid>/fd/3`) holds no server; and the named pipe and its folder are gone.
+    const read = run.anthropic.results('first').join('\n')
+    expect(read).toMatch(/FD3 (not open|open, 0 bytes)/)
+    expect(read).toMatch(/READ \/proc\/\d+\/fd\/3: /)
+    for (const seen of [read, other]) {
+      expect(seen).not.toContain('HOLDING SERVERS')
+      expect(seen).not.toMatch(/READ .*mousse-mcp-/)
+    }
+    if (channel === 'fifo') expect(existsSync(config)).toBe(false)
+    console.info(`[#358 evidence] channel ${channel}: command: ${read.split('\n').filter((line) => /^(FD3|READ)/.test(line)).join(' | ')}; other process: ${other.trim().split('\n').join(' | ')}`)
     // Each server was reached with its own credential: Claude Code had them, over its input or through the pipe.
     expect(run.mcp.calls).toEqual(expect.arrayContaining([
       { path: '/mcp', method: 'tools/call', credential: 'first', tool: 'ping' },
@@ -417,15 +546,17 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     clean(run.started[1]!)
   }, 120_000)
 
-  it.skipIf(!hasBinary || !POSIX)(`a turn with four user stdio servers that hang starts at once with Mousse's tools, and the thread names the servers it started without${NO_BINARY}`, async () => {
-    const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping', max_results: 5 } }, { name: 'mcp__mousse__ping', input: {} }] })
+  it.skipIf(!hasBinary || CHANNELS.length === 0).each(CHANNELS)(`a turn with four user stdio servers that hang starts at once with Mousse's tools, and the thread names the servers it started without (%s)${NO_BINARY}`, async (channel) => {
+    const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping', max_results: 5 } }, { name: 'mcp__mousse__ping', input: {} }] }, { channel })
     const hung = Object.fromEntries(['h1', 'h2', 'h3', 'h4'].map((name) => [name, { type: 'stdio' as const, command: process.execPath, args: [run.hungServer, join(run.dirs.pids, name)] }]))
     const startedAt = Date.now()
     expect(await personTurn(run, 'PLAN:first', TOKEN, { integrations: { mcpServers: hung, proxiedServers: {}, toolRules: {}, warnings: [] } })).toContain('done')
+    const took = Date.now() - startedAt
+    console.info(`[#358 evidence] four hung servers through the ${channel} channel: the turn took ${took} ms`)
     // Not Claude Code's connect timeout (30 s each, three at a time): the start-up wait of a few seconds at most.
-    expect(Date.now() - startedAt).toBeLessThan(20_000)
+    expect(took).toBeLessThan(20_000)
     expect(run.anthropic.results('first').join('\n')).toContain('pong from /mcp')
-    expect(run.notices).toEqual(['Claude started this turn without some MCP servers: h1, h2, h3, h4 (still starting; their tools come in a later turn).'])
+    expect(run.notices).toEqual(['Claude started this turn without some MCP servers: h1, h2, h3, h4 (still starting; each is offered once it has connected).'])
     clean(run.started[0]!)
   }, 120_000)
 
@@ -582,5 +713,82 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(results).toContain('CLAUDE_CONFIG_DIR=')
     expect(found(results)).toEqual([])
     expect(run.leftBehind()).toEqual([])
+  }, 120_000)
+
+  /** Each way the user's servers reach Claude Code: a startup channel, or its input (Windows). */
+  const PATHS = [...CHANNELS.map((channel) => ({ name: channel, options: { channel } })), { name: 'input', options: { viaInput: true } }]
+
+  it.skipIf(!hasBinary || !POSIX).each(PATHS)(`a value that still holds \`\${\` reaches its server as Mousse resolved it, never expanded against Claude Code's environment (%s)${NO_BINARY}`, async ({ options }) => {
+    const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__lit__literal', max_results: 5 } }, { name: 'mcp__lit__literal', input: {} }] }, options)
+    const integrations = {
+      mcpServers: {
+        http: { type: 'http' as const, url: `${run.mcp.url}/literal?q=${LITERAL_QUERY}`, headers: { 'X-Literal': LITERAL } },
+        lit: { type: 'stdio' as const, command: process.execPath, args: [run.literalServer, LITERAL_ARG], env: { LITERAL_ENV } }
+      },
+      proxiedServers: {}, toolRules: {}, warnings: []
+    }
+    expect(await personTurn(run, 'PLAN:first', TOKEN, { integrations })).toContain('done')
+    // Claude Code's environment has the instance's (fake) key and a home; neither reached a server, and no value changed.
+    await vi.waitFor(() => expect(run.mcp.calls.filter((call) => call.path === '/literal').map((call) => call.credential)).toContain('literal'), { timeout: 30_000 })
+    expect(run.mcp.calls.filter((call) => call.path === '/literal' && call.credential !== 'literal')).toEqual([])
+    expect(run.anthropic.results('first').join('\n')).toContain('arg literal: true, env literal: true')
+    clean(run.started[0]!)
+  }, 120_000)
+
+  it.skipIf(!hasBinary || CHANNELS.length === 0).each(CHANNELS)(`a config of about 500 KB, far larger than a socket or pipe buffer, reaches Claude Code whole (%s)${NO_BINARY}`, async (channel) => {
+    const run = await rig({ first: [] }, { channel })
+    const count = 250
+    const mcpServers = Object.fromEntries(Array.from({ length: count }, (_, index) => [`bulk${index}`, { type: 'http' as const, url: `${run.mcp.url}/bulk/${index}`, headers: { 'X-Bulk': bulkHeader(index) } }]))
+    expect(JSON.stringify(mcpServers).length).toBeGreaterThan(500_000)
+    expect(await personTurn(run, 'PLAN:first', TOKEN, { integrations: { mcpServers, proxiedServers: {}, toolRules: {}, warnings: [] } })).toContain('done')
+    // Every server, the last included, was reached with its own whole header.
+    await vi.waitFor(() => expect(new Set(run.mcp.calls.filter((call) => call.path.startsWith('/bulk/') && call.method === 'initialize' && call.credential === 'bulk').map((call) => call.path)).size).toBe(count), { timeout: 60_000, interval: 200 })
+    clean(run.started[0]!)
+  }, 180_000)
+
+  it.skipIf(!hasBinary || !POSIX)(`a Claude Code that writes a lot to its error stream does not stall: Mousse reads it to the end${NO_BINARY}`, async () => {
+    const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping,mcp__web__ping', max_results: 5 } }, { name: 'mcp__mousse__ping', input: {} }, { name: 'mcp__web__ping', input: {} }] }, { stderrFlood: true })
+    expect(await personTurn(run, 'PLAN:first', TOKEN)).toContain('done')
+    // Mousse's own spawn ran it (the user's servers came through the startup channel), and nothing but Mousse read the
+    // 2 MB it wrote before it became Claude Code, which then had its servers.
+    expect(run.started[0]!.args).toContain('--mcp-config')
+    expect(run.stderrBytes.size).toBe(0)
+    expect(run.anthropic.results('first').join('\n')).toContain('pong from /user')
+  }, 120_000)
+
+  it.skipIf(!hasBinary || !POSIX)(`a server that connects after the turn started is offered to the model from the next request it makes, in the same turn${NO_BINARY}`, async () => {
+    // 6 s: past the 3 s Claude Code's first turn waits for the user's servers.
+    const run = await rig({
+      first: [{ name: 'Bash', input: { command: 'sleep 8', description: 'Wait' } }, { name: 'Bash', input: { command: 'echo after', description: 'After' } }],
+      second: [{ name: 'mcp__slow__late', input: {} }]
+    })
+    const integrations = { mcpServers: { slow: { type: 'stdio' as const, command: process.execPath, args: [run.slowServer, '6000'] } }, proxiedServers: {}, toolRules: {}, warnings: [] }
+    expect(await personTurn(run, 'PLAN:first', TOKEN, { integrations })).toContain('done')
+    run.service.commitConversation('thread', '')
+    const first = run.anthropic.requests.filter((request) => request.plan === 'first').map((request) => request.offered.includes('mcp__slow__late'))
+    console.info(`[#358 evidence] late server offered per request of the first turn: ${JSON.stringify(first)}; notices: ${JSON.stringify(run.notices)}`)
+    expect(run.notices).toEqual(['Claude started this turn without an MCP server: slow (still starting; it is offered once it has connected).'])
+    expect(first[0]).toBe(false)
+    expect(first.at(-1)).toBe(true)
+    expect(await personTurn(run, 'PLAN:second', TOKEN, { integrations })).toContain('done')
+    expect(run.anthropic.results('second').join('\n')).toContain('late but here')
+  }, 120_000)
+
+  it.skipIf(!hasBinary || !POSIX)(`over Claude Code's input (Windows), four user stdio servers that hang hold the turn about 10 s, not a minute${NO_BINARY}`, async () => {
+    const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping', max_results: 5 } }, { name: 'mcp__mousse__ping', input: {} }] }, { viaInput: true })
+    const hung = Object.fromEntries(['h1', 'h2', 'h3', 'h4'].map((name) => [name, { type: 'stdio' as const, command: process.execPath, args: [run.hungServer, join(run.dirs.pids, name)] }]))
+    const startedAt = Date.now()
+    expect(await personTurn(run, 'PLAN:first', TOKEN, { integrations: { mcpServers: hung, proxiedServers: {}, toolRules: {}, warnings: [] } })).toContain('done')
+    const took = Date.now() - startedAt
+    console.info(`[#358 evidence] four hung servers over the input held the turn ${took} ms`)
+    expect(took).toBeLessThan(20_000)
+    expect(run.started[0]!.env).toMatchObject({ MCP_TIMEOUT: '10000', MCP_SERVER_CONNECTION_BATCH_SIZE: '16' })
+    expect(run.anthropic.results('first').join('\n')).toContain('pong from /mcp')
+    // The hung servers are ended with Claude Code.
+    await run.service.stop()
+    for (const name of ['h1', 'h2', 'h3', 'h4']) {
+      const file = join(run.dirs.pids, name)
+      if (existsSync(file)) await vi.waitFor(() => expect(alive(Number(readFileSync(file, 'utf8')))).toBe(false), { timeout: 15_000, interval: 200 })
+    }
   }, 120_000)
 })

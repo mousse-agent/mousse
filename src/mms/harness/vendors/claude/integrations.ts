@@ -17,7 +17,7 @@ import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/m
 
 /**
  * A user MCP server in the Claude Agent SDK's server shape, its header and environment values resolved. It reaches
- * Claude Code only through a pipe it reads at its start, or over its input (`mcpRegistration`): never its command line
+ * Claude Code only through a channel it reads at its start, or over its input (`mcpRegistration`): never its command line
  * or its environment.
  */
 export type ClaudeUserMcpServer =
@@ -161,8 +161,9 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
   ): Promise<void> {
     // The names Mousse's own servers take: a user server never shadows one, nor is shadowed by one.
     const used = new Set<string>([MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME])
-    // Resolved here, sent as they are: the servers reach Claude Code through a pipe or its input, so a secret is neither on its
-    // command line nor in its environment, where the commands Claude runs could read it (#358).
+    // Resolved here, and sent so that Claude Code expands nothing in them again (`claudeLiteralServers`): the servers reach
+    // Claude Code through a channel it reads at its start or over its input, so a secret is neither on its command line nor
+    // in its environment, where the commands Claude runs could read it (#358).
     const resolveValues = (record: Record<string, string> | undefined): Record<string, string> | undefined => {
       const entries = Object.entries(record ?? {}).flatMap(([key, value]) => {
         const text = this.deps.secrets.resolveEnv(value)

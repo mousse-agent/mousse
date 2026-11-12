@@ -62,7 +62,11 @@ import { parseClaudeSubscriptionUsage } from './usage'
 import { checkProxyKey, listedProxySeats, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, readLocalProxySeats, type ProxyUsage, type ProxyUsageOptions } from './localProxyUsage'
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
-import { claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpRegistrationMs, claudeStartupMcpOptions, dropMousseServers, promptAfter, registerClaudeMcpServers, registerUserServersLater, type ClaudeMcpLeftOut, type ClaudeMcpServers } from './mcpRegistration'
+import {
+  CLAUDE_MCP_POLICY_CODE, claudeInputMcpEnv, claudeLiteralServers, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpPolicyForbidsAdded, claudeMcpPolicyText, claudeMcpRegistrationMs, claudeMcpStrings,
+  claudeStartupMcpOptions, ClaudeStderrTail, dropMousseServers, promptAfter, registerClaudeMcpServers, registerUserServersLater, withoutLiteralDollar,
+  type ClaudeMcpLeftOut, type ClaudeMcpServers, type ClaudeStartupChannel
+} from './mcpRegistration'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
@@ -107,18 +111,26 @@ interface RegisteredMcp {
 interface TurnMcp {
   /** Registered over its input once it starts, and waited for: Mousse's own, and the user's servers Mousse runs in process. */
   registered: ClaudeMcpServers
-  /** The user's other servers: through the pipe Claude Code reads at its start, or registered without waiting for them. */
+  /** The user's other servers: through the channel Claude Code reads at its start, or registered without waiting for them. */
   startup: ClaudeMcpServers
+}
+/** A turn's servers without the user's: Mousse's own only, for a computer whose Claude Code policy forbids added ones. */
+function mousseOnly(turn: TurnMcp): TurnMcp {
+  return { registered: Object.fromEntries(Object.entries(turn.registered).filter(([name]) => name === MOUSSE_MCP_SERVER_NAME || name === MOUSSE_RELAY_SERVER_NAME)), startup: {} }
+}
+/** The values of variables whose names say they hold a credential, for redacting what Claude Code writes. */
+function credentialValues(env: Record<string, string | undefined> | undefined): string[] {
+  return Object.entries(env ?? {}).flatMap(([name, value]) => value && /KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL/i.test(name) ? [value] : [])
 }
 /** How a turn starts Claude Code with its MCP servers (`launch`). */
 interface LaunchContext {
   threadId: string
   signal?: AbortSignal
   timeoutMs: number
-  /** A one-shot prompt is held until Mousse's servers are registered; a live process gets its prompt only after. */
-  holdPrompt: boolean
   /** The user's servers that were left out: their registration failed. */
   leftOut(names: string[]): void
+  /** The user's servers that were left out because this computer's Claude Code policy forbids added servers. */
+  policy(names: string[]): void
 }
 /**
  * The model and effort a live process runs a turn on. Ultracode is a level here: it runs at the model's default effort
@@ -415,6 +427,10 @@ type Dependencies = {
    * is not locked, and a locked turn is refused.
    */
   lockedEnv?: (scratch: string) => NodeJS.ProcessEnv
+  /** The channel the user's MCP servers reach Claude Code through at its start (default: the platform's; tests). */
+  startupChannel?: ClaudeStartupChannel
+  /** Whether this computer's Claude Code policy forbids added MCP servers (default `claudeMcpPolicyForbidsAdded`; tests). */
+  mcpPolicy?: (claudeHome: string | undefined) => boolean
 }
 /** How `claude auth status` names its sign-in methods, for display. */
 const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
@@ -918,6 +934,10 @@ export class ClaudeSubscriptionProviderService {
   private liveHost: ClaudeLiveHost | null = null
   /** The user's MCP servers each live process has said it started a turn without (`claudeMcpLeftOut`), so each is said once. */
   private readonly mcpNoted = new WeakMap<object, Set<string>>()
+  /** Claude Code refused to start with the user's MCP servers for its policy: later starts leave them out (#358). */
+  private mcpPolicyRefused = false
+  /** The threads told that the user's MCP servers were left out for that policy: each is told once. */
+  private readonly mcpPolicyNoted = new Set<string>()
   /** The run whose notifications commit with the conversation, by thread. */
   private readonly liveCommits = new Map<string, { live: LiveSession<TurnContext>; run: LiveRun }>()
   private readonly readyToCommit = new Set<string>()
@@ -1610,19 +1630,21 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /**
-   * `startup`: the user's servers Claude Code reads at its start through a pipe (`claudeStartupMcpOptions`, #358);
-   * `piped` says whether they went that way, which is not possible everywhere.
+   * `startup`: the user's servers Claude Code reads at its start through a channel (`claudeStartupMcpOptions`, #358);
+   * `piped` says whether they went that way, which is not possible everywhere; when they did not, the process gets the
+   * variables that bound how long they can hold its first prompt (`claudeInputMcpEnv`). `stderr` reads what the process
+   * writes to its error stream, whoever spawns it.
    */
   private async createQuery(
     prompt: string | AsyncIterable<SDKUserMessage>,
     options: Options,
-    startup?: { servers: ClaudeMcpServers; piped?: boolean }
+    startup?: { servers: ClaudeMcpServers; piped?: boolean; stderr?: ClaudeStderrTail }
   ): Promise<Query> {
     if (this.stopped) throw new Error('Claude provider is stopped')
     // The SDK wraps the process without its pid; it reports the pid when it starts it, so Stop can end the process
     // tree (`reapClosed`). When it was reported anchors the process's creation time, so a later kill never reaches
     // another program given the pid since. The callback is the SDK's own, not in its published types. Mousse's own
-    // spawn (the startup pipe) reports it the same way.
+    // spawn (the startup channel) reports it the same way.
     let spawned: { pid: number; spawnedAt: number } | undefined
     let created: Query | undefined
     const reported = (options as { onProcessSpawned?: (pid: number) => void }).onProcessSpawned
@@ -1635,11 +1657,20 @@ export class ClaudeSubscriptionProviderService {
     }
     let given = options
     if (startup && Object.keys(startup.servers).length > 0) {
-      const piped = claudeStartupMcpOptions(options, startup.servers, onSpawned)
+      const piped = await claudeStartupMcpOptions(options, startup.servers, onSpawned, {
+        ...(this.dependencies.startupChannel ? { channel: this.dependencies.startupChannel } : {}),
+        ...(startup.stderr ? { onStderr: startup.stderr } : {})
+      })
       if (piped) {
         given = piped
         startup.piped = true
-      }
+      } else given = { ...options, env: claudeInputMcpEnv(options.env ?? {}) }
+    }
+    // The SDK reads the error stream of a process it spawns itself and hands it on; Mousse's own spawn reads it above.
+    const tail = startup?.stderr
+    if (tail && !given.spawnClaudeCodeProcess) {
+      const own = given.stderr
+      given = { ...given, stderr: (data: string) => { tail.push(data); own?.(data) } }
     }
     if (this.dependencies.query) {
       created = await this.dependencies.query({ prompt, options: given })
@@ -1654,14 +1685,38 @@ export class ClaudeSubscriptionProviderService {
     return created
   }
   /**
-   * Starts Claude Code for a turn with its MCP servers (#358): the user's servers through the pipe it reads at its start
-   * (`mcp.startup`), then Mousse's own over its input (`mcp.registered`), waited for, so the turn never starts without
-   * Mousse's tools and never waits for a slow server of the user's. Where the pipe cannot be used the user's servers are
-   * registered after Mousse's, without waiting (`registerUserServersLater`). A one-shot prompt is held until then
-   * (`holdPrompt`). A start that fails or is stopped closes the process and ends everything it started (`reapClosed`),
-   * stdio servers it was connecting included. Returns the query and the set registered on it, which a renewal sends again.
+   * Starts Claude Code for a turn with its MCP servers (#358): the user's servers through the channel it reads at its
+   * start (`mcp.startup`), then Mousse's own over its input (`mcp.registered`), waited for, so the turn never starts
+   * without Mousse's tools and never waits for a slow server of the user's. Where no channel can be used the user's
+   * servers are registered after Mousse's, without waiting (`registerUserServersLater`). The prompt is held until then:
+   * Claude Code reads nothing before it has them. A start that fails or is stopped closes the process and ends everything
+   * it started (`reapClosed`), stdio servers it was connecting included, and its error says what Claude Code wrote, redacted.
+   * The user's servers are left out, and the thread told once, when this computer's Claude Code policy forbids added
+   * servers (`claudeMcpPolicyForbidsAdded`), or when Claude Code refuses to start with them for that reason: the turn then
+   * starts again with Mousse's own only. Returns the query and the set registered on it, which a renewal sends again.
    */
   private async launch(prompt: AsyncIterable<SDKUserMessage>, options: Options, mcp: TurnMcp, context: LaunchContext): Promise<{ query: Query; servers: ClaudeMcpServers }> {
+    // A literal `${` in a server's value is sent through this variable, which Claude Code must not have (#358).
+    const given = options.env ? { ...options, env: withoutLiteralDollar(options.env) } : options
+    const users = (turn: TurnMcp) => [...Object.keys(turn.startup), ...Object.keys(turn.registered).filter((name) => name !== MOUSSE_MCP_SERVER_NAME && name !== MOUSSE_RELAY_SERVER_NAME)]
+    let turn = mcp
+    if (users(turn).length > 0 && (this.mcpPolicyRefused || (this.dependencies.mcpPolicy ?? claudeMcpPolicyForbidsAdded)(claudeHomeOf((given.env ?? {}) as NodeJS.ProcessEnv)))) {
+      context.policy(users(turn))
+      turn = mousseOnly(turn)
+    }
+    try {
+      return await this.launchOnce(prompt, given, turn, context)
+    } catch (error) {
+      if (!(error instanceof AppError && error.code === CLAUDE_MCP_POLICY_CODE) || users(turn).length === 0) throw error
+      // Claude Code's policy refused the user's servers at its start: never around it, by another way. Remembered for
+      // this service's later starts, which leave them out without trying.
+      this.mcpPolicyRefused = true
+      console.warn('[claude-subscription] Claude Code\'s policy refused the user\'s MCP servers at its start; the turn starts with Mousse\'s own only', { threadId: context.threadId })
+      context.policy(users(turn))
+      return await this.launchOnce(prompt, given, mousseOnly(turn), context)
+    }
+  }
+  private async launchOnce(prompt: AsyncIterable<SDKUserMessage>, options: Options, mcp: TurnMcp, context: LaunchContext): Promise<{ query: Query; servers: ClaudeMcpServers }> {
     let registered!: () => void
     let refused!: (error: unknown) => void
     const ready = new Promise<void>((resolve, reject) => {
@@ -1669,12 +1724,15 @@ export class ClaudeSubscriptionProviderService {
       refused = reject
     })
     ready.catch(() => undefined)
-    const startup = { servers: mcp.startup, piped: false }
-    const query = await this.createQuery(context.holdPrompt ? promptAfter(ready, prompt) : prompt, options, startup)
+    const known = [...claudeMcpStrings(mcp.registered), ...claudeMcpStrings(mcp.startup), ...credentialValues(options.env)]
+    const stderr = new ClaudeStderrTail(() => known)
+    const startup = { servers: mcp.startup, piped: false, stderr }
+    // Held until the servers are registered: a start that fails leaves `prompt` unread, for the start that follows.
+    const query = await this.createQuery(promptAfter(ready, prompt), options, startup)
     try {
-      let servers = mcp.registered
+      let servers = claudeLiteralServers(mcp.registered, 'input')
       if (Object.keys(servers).length > 0) {
-        const { failed } = await registerClaudeMcpServers(query, servers, { timeoutMs: context.timeoutMs, ...(context.signal ? { signal: context.signal } : {}), threadId: context.threadId })
+        const { failed } = await registerClaudeMcpServers(query, servers, { timeoutMs: context.timeoutMs, ...(context.signal ? { signal: context.signal } : {}), threadId: context.threadId, explain: () => stderr.said(startup.piped ? 1_000 : 250) })
         if (failed.length > 0) context.leftOut(failed)
       }
       if (Object.keys(mcp.startup).length > 0 && !startup.piped) servers = registerUserServersLater(query, servers, mcp.startup, context.threadId, context.leftOut)
@@ -1753,7 +1811,7 @@ export class ClaudeSubscriptionProviderService {
       // Claude Code's own system prompt, as in a terminal; Mousse only appends to it.
       systemPrompt: { type: 'preset', preset: 'claude_code', ...(appendText ? { append: appendText } : {}) },
       // Never any here: the SDK writes these on Claude Code's command line, where any local process reads their
-      // credentials. A turn's servers reach it through a pipe it reads at its start or over its input (`launch`, #358).
+      // credentials. A turn's servers reach it through a channel it reads at its start or over its input (`launch`, #358).
       mcpServers: {},
       ...(this.dependencies.settingSources ? { settingSources: [...this.dependencies.settingSources] } : {}),
       ...(settings ? { settings } : {}),
@@ -2221,7 +2279,7 @@ export class ClaudeSubscriptionProviderService {
     key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options,
-    mcp: { servers: () => TurnMcp; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal; leftOut(names: string[]): void }
+    mcp: { servers: () => TurnMcp; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal; leftOut(names: string[]): void; policy(names: string[]): void }
   ): Promise<LiveSession<TurnContext> | undefined> {
     const timings = this.liveConfig
     if (!timings) return undefined
@@ -2316,8 +2374,8 @@ export class ClaudeSubscriptionProviderService {
         threadId,
         timeoutMs: mcp.timeoutMs,
         ...(mcp.signal ? { signal: mcp.signal } : {}),
-        holdPrompt: false,
-        leftOut: mcp.leftOut
+        leftOut: mcp.leftOut,
+        policy: mcp.policy
       })
       if (this.stopped || created.dead) {
         this.closeUnstarted(query, threadId)
@@ -2723,7 +2781,7 @@ export class ClaudeSubscriptionProviderService {
     // A locked turn takes none of the user's MCP servers or skills.
     const integrations = locked ? undefined : input.integrations
     // No MCP credential is in Claude Code's environment, which every command it runs inherits: the servers, their
-    // secrets resolved, go through a pipe it reads at its start or over its input (`launch`, #358).
+    // secrets resolved, go through a channel it reads at its start or over its input (`launch`, #358).
     // A locked turn's environment is built from nothing (`lockedEnv`), with the instance's key last.
     // The compaction threshold is set over both: Claude Code's own session holds the tool calls and
     // results that fill its context, so only its auto-compact can keep it under the threshold.
@@ -3107,6 +3165,12 @@ export class ClaudeSubscriptionProviderService {
         if (fresh.length > 0) this.notifyHost(() => this.liveHost?.notice?.(input.threadId, claudeMcpLeftOutText(fresh)))
       }
       const leftOut = (names: string[]): void => noteLeftOut(names.map((name) => ({ name, state: 'failed' as const })))
+      // Said once in the thread: the policy holds for every turn after, and repeating it would say nothing new.
+      const policy = (names: string[]): void => {
+        if (this.mcpPolicyNoted.has(input.threadId)) return
+        this.mcpPolicyNoted.add(input.threadId)
+        this.notifyHost(() => this.liveHost?.notice?.(input.threadId, claudeMcpPolicyText(names)))
+      }
       const observe = (message: SDKMessage): void => {
         if (userServers.size > 0) {
           const left = claudeMcpLeftOut(message, userServers)
@@ -3200,7 +3264,7 @@ export class ClaudeSubscriptionProviderService {
           live = locked ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
             return buildOptions(created.lifetime, () => created.current ?? turn, true)
-          }, { servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal, leftOut })
+          }, { servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal, leftOut, policy })
         } catch (error) {
           // A refused change started nothing: the conversation is as it was, so the next request can resume it.
           // Mousse keeps the refused message in the transcript, so the history the next request carries has
@@ -3347,8 +3411,8 @@ export class ClaudeSubscriptionProviderService {
             threadId: input.threadId,
             signal: controller.signal,
             timeoutMs: claudeMcpRegistrationMs(env),
-            holdPrompt: true,
-            leftOut
+            leftOut,
+            policy
           })).query
           this.queries.set(input.threadId, query)
           // A Stop while the query was being started found no query to end: it is ended now, before it reads anything.

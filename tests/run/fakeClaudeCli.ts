@@ -10,12 +10,17 @@ import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/c
 export type Frame = Record<string, unknown>
 type Handler = (message: SDKUserMessage, process: FakeClaudeProcess) => void
 
-/** What `FakeClaudeProcess.startup` reads: the `mcpServers` of the pipe Mousse's spawn hands its process. */
-async function readStartup(options: Options): Promise<Record<string, unknown> | undefined> {
-  if (options.extraArgs?.['mcp-config'] !== '/dev/fd/3' || !options.spawnClaudeCodeProcess) return undefined
+/**
+ * What `FakeClaudeProcess.startup` reads: the `mcpServers` of the channel Mousse's spawn hands its process, read by the
+ * path on its command line as Claude Code reads it (`/dev/fd/3`, or a named pipe).
+ */
+async function readStartup(options: Options, refusal?: string): Promise<Record<string, unknown> | undefined> {
+  const path = options.extraArgs?.['mcp-config']
+  if (typeof path !== 'string' || !options.spawnClaudeCodeProcess) return undefined
   const child = options.spawnClaudeCodeProcess({
     command: process.execPath,
-    args: ['-e', 'process.stdout.write(require("fs").readFileSync("/dev/fd/3"))'],
+    // A refusal: what Claude Code writes to its error stream when it will not start with these servers, and its exit.
+    args: ['-e', refusal === undefined ? `process.stdout.write(require("fs").readFileSync(${JSON.stringify(path)}))` : `require("fs").readFileSync(${JSON.stringify(path)}); process.stderr.write(${JSON.stringify(refusal)}); process.exit(1)`],
     env: { PATH: process.env.PATH },
     signal: new AbortController().signal
   }) as unknown as { stdout: NodeJS.ReadableStream }
@@ -228,9 +233,11 @@ export class FakeClaudeProcess {
   constructor(
     readonly prompt: string | AsyncIterable<SDKUserMessage>,
     readonly options: Options,
-    private readonly reply: () => Handler | undefined
+    private readonly reply: () => Handler | undefined,
+    /** Claude Code refuses to start with the servers of its startup channel, writing this (`FakeClaudeCli.startupRefusal`). */
+    readonly startupRefusal?: string
   ) {
-    this.startup = readStartup(options)
+    this.startup = readStartup(options, startupRefusal)
     this.startup.catch(() => undefined)
     if (typeof prompt !== 'string') void this.readPrompt(prompt)
   }
@@ -432,6 +439,12 @@ export class FakeClaudeProcess {
       setMcpServers: async (servers: Record<string, unknown>) => {
         const previous = this.mcpServers ?? {}
         this.mcpRegistrations.push(servers)
+        // A process that refused its startup servers has exited: the request fails.
+        if (this.startupRefusal !== undefined && this.options.extraArgs?.['mcp-config']) {
+          await this.startup.catch(() => undefined)
+          this.end()
+          throw new Error('ProcessTransport is not ready for writing')
+        }
         await this.mcpGate
         if (this.mcpFail === 'unsupported') throw new Error('Unsupported control request subtype: mcp_set_servers')
         if (this.mcpFail === 'throw') throw new Error('ProcessTransport is not ready for writing')
@@ -483,8 +496,11 @@ export class FakeClaudeCli {
   /** What each new process's `setMcpServers` waits for (`FakeClaudeProcess.mcpGate`). */
   mcpGate: Promise<unknown> | undefined
 
+  /** What each new process given servers through its startup channel writes as it refuses to start with them. */
+  startupRefusal: string | undefined
+
   readonly query = ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }): Query => {
-    const process = new FakeClaudeProcess(prompt, options, () => this.reply)
+    const process = new FakeClaudeProcess(prompt, options, () => this.reply, this.startupRefusal)
     process.lingersAfterClose = this.lingersAfterClose
     process.pid = this.pid
     process.mcpErrors = { ...this.mcpErrors }

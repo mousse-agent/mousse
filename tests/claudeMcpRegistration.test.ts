@@ -4,12 +4,18 @@
  * Mousse's own server must connect or the turn fails with an error that names the cause; a user server that does not
  * is left out and named; only server names are ever logged.
  */
-import type { McpSetServersResult, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import type { McpSetServersResult, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  CLAUDE_MCP_STARTUP_WAIT_MS, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpRegistrationMs, claudeStartupMcpOptions, dropMousseServers, promptAfter,
-  registerClaudeMcpServers, registerUserServersLater, type ClaudeMcpServers
+  CLAUDE_MCP_POLICY_CODE, CLAUDE_MCP_STARTUP_WAIT_MS, claudeInputMcpEnv, claudeLiteralServers, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpPolicyForbidsAdded, claudeMcpPolicyText,
+  claudeMcpRegistrationMs, claudeMcpStrings, claudeStartupChannel, claudeStartupMcpOptions, ClaudeStderrTail, dropMousseServers, promptAfter, redactClaudeOutput,
+  registerClaudeMcpServers, registerUserServersLater, withoutLiteralDollar, type ClaudeMcpServers
 } from '../src/mms/harness/vendors/claude/mcpRegistration'
+
+const POSIX = globalThis.process.platform !== 'win32'
 
 const SECRET = 'mousse-token-358'
 const servers: ClaudeMcpServers = {
@@ -73,7 +79,7 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     await expect(registerClaudeMcpServers(old, servers, { timeoutMs: 1_000 })).rejects.toMatchObject({ code: 'claude_mcp_unavailable', message: expect.stringContaining('update Claude Code') })
     await expect(registerClaudeMcpServers({}, servers, { timeoutMs: 1_000 })).rejects.toMatchObject({ code: 'claude_mcp_unavailable', message: expect.stringContaining('update Claude Code') })
     const ended = process(async () => { throw new Error(`write after end, Bearer ${SECRET}`) })
-    await expect(registerClaudeMcpServers(ended, servers, { timeoutMs: 1_000 })).rejects.toMatchObject({ message: 'Mousse\'s tools could not be attached to Claude Code, so this turn did not start. Claude Code ended before Mousse\'s MCP server was attached; try again.' })
+    await expect(registerClaudeMcpServers(ended, servers, { timeoutMs: 1_000 })).rejects.toMatchObject({ message: 'Mousse\'s tools could not be attached to Claude Code, so this turn did not start. Claude Code ended before Mousse\'s MCP server was attached, without saying why; try again.' })
     vi.useFakeTimers()
     const silent = process(() => new Promise<never>(() => undefined))
     const waiting = registerClaudeMcpServers(silent, servers, { timeoutMs: 60_000 })
@@ -108,32 +114,181 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     await vi.waitFor(() => expect(done).toHaveBeenCalledExactlyOnceWith(['web']))
   })
 
-  it('gives the user\'s servers through a pipe Claude Code reads at its start, never on its command line or in its environment', async () => {
+  /** Runs a real process through `options`' spawn that prints what it reads at `path`, and returns that and its pid. */
+  async function readThrough(options: Options, path: string, extra = ''): Promise<{ text: string; pid: number }> {
+    const child = options.spawnClaudeCodeProcess!({ command: globalThis.process.execPath, args: ['-e', `${extra}process.stdout.write(require("fs").readFileSync(${JSON.stringify(path)}))`], env: { PATH: globalThis.process.env.PATH }, signal: new AbortController().signal }) as unknown as { stdout: NodeJS.ReadableStream; pid: number }
+    let text = ''
+    for await (const chunk of child.stdout) text += String(chunk)
+    return { text, pid: child.pid }
+  }
+
+  it.skipIf(POSIX === false)('gives the user\'s servers through a channel Claude Code reads at its start, never on its command line or in its environment', async () => {
     const options = { env: { PATH: '/bin' }, extraArgs: { 'thinking-display': 'summarized' } }
     const user: ClaudeMcpServers = { web: servers.web!, files: { type: 'stdio', command: 'files-mcp', env: { KEY: 'user-env-secret-358' } } }
     const onSpawned = vi.fn()
-    const piped = claudeStartupMcpOptions(options, user, onSpawned, { platform: 'linux' })!
+    // macOS: the process's fourth stream, a socket it opens by `/dev/fd/3`.
+    const piped = (await claudeStartupMcpOptions(options, user, onSpawned, { platform: 'darwin' }))!
     expect(piped.extraArgs).toEqual({ 'thinking-display': 'summarized', 'mcp-config': '/dev/fd/3' })
     expect(piped.env).toEqual({ PATH: '/bin', CLAUDE_CODE_MCP_STARTUP_WAIT_MS: String(CLAUDE_MCP_STARTUP_WAIT_MS) })
     // The user's own wait is kept.
-    expect(claudeStartupMcpOptions({ env: { CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0' } }, user, onSpawned, { platform: 'linux' })!.env).toEqual({ CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0' })
-    // A real process reads the pipe; its command line and environment hold nothing of the servers.
-    const child = piped.spawnClaudeCodeProcess!({ command: globalThis.process.execPath, args: ['-e', 'process.stdout.write(require("fs").readFileSync("/dev/fd/3"))'], env: { PATH: globalThis.process.env.PATH }, signal: new AbortController().signal }) as unknown as { stdout: NodeJS.ReadableStream; pid: number }
-    let text = ''
-    for await (const chunk of child.stdout) text += String(chunk)
-    expect(JSON.parse(text)).toEqual({ mcpServers: user })
-    expect(onSpawned).toHaveBeenCalledExactlyOnceWith(child.pid)
+    expect((await claudeStartupMcpOptions({ env: { CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0' } }, user, onSpawned, { platform: 'darwin' }))!.env).toEqual({ CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0' })
+    if (globalThis.process.platform === 'darwin') {
+      const { text, pid } = await readThrough(piped, '/dev/fd/3')
+      expect(JSON.parse(text)).toEqual({ mcpServers: user })
+      expect(onSpawned).toHaveBeenCalledWith(pid)
+    }
     expect(JSON.stringify({ args: piped.extraArgs, env: piped.env })).not.toMatch(/user-secret-358|user-env-secret-358/)
-    // Not where the pipe cannot be used.
-    expect(claudeStartupMcpOptions(options, user, onSpawned, { platform: 'win32' })).toBeUndefined()
-    expect(claudeStartupMcpOptions({ extraArgs: { 'mcp-config': 'mine.json' } }, user, onSpawned, { platform: 'linux' })).toBeUndefined()
+    // Elsewhere: a named pipe in a folder of its own, gone once read.
+    const root = mkdtempSync(join(tmpdir(), 'mousse-fifo-test-'))
+    try {
+      const fifo = (await claudeStartupMcpOptions(options, user, onSpawned, { platform: 'linux', fifoRoot: root }))!
+      const path = String(fifo.extraArgs!['mcp-config'])
+      expect(path.startsWith(root)).toBe(true)
+      expect(statSync(path).isFIFO()).toBe(true)
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+      expect(statSync(dirname(path)).mode & 0o777).toBe(0o700)
+      const { text } = await readThrough(fifo, path)
+      expect(JSON.parse(text)).toEqual({ mcpServers: user })
+      expect(existsSync(path)).toBe(false)
+      expect(readdirSync(root)).toEqual([])
+      expect(JSON.stringify({ args: fifo.extraArgs, env: fifo.env })).not.toMatch(/user-secret-358|user-env-secret-358/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+    // Not where no channel can be used.
+    expect(await claudeStartupMcpOptions(options, user, onSpawned, { platform: 'win32' })).toBeUndefined()
+    expect(await claudeStartupMcpOptions({ extraArgs: { 'mcp-config': 'mine.json' } }, user, onSpawned, { platform: 'linux' })).toBeUndefined()
+    expect(claudeStartupChannel('linux')).toBe('fifo')
+    expect(claudeStartupChannel('darwin')).toBe('descriptor')
+  })
+
+  it.skipIf(POSIX === false)('a config far larger than a socket or pipe buffer arrives whole, on either channel', async () => {
+    // About 600 KB: 300 servers with a 2 KB header each.
+    const many: ClaudeMcpServers = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [`s${index}`, { type: 'http', url: `http://127.0.0.1:9/${index}`, headers: { 'X-Api-Key': `${index}-`.padEnd(2048, 'k') } }]))
+    expect(JSON.stringify(many).length).toBeGreaterThan(600_000)
+    const root = mkdtempSync(join(tmpdir(), 'mousse-fifo-test-'))
+    try {
+      const fifo = (await claudeStartupMcpOptions({}, many, () => undefined, { channel: 'fifo', fifoRoot: root }))!
+      // A slow reader: it starts reading a moment after it opened the pipe.
+      expect(JSON.parse((await readThrough(fifo, String(fifo.extraArgs!['mcp-config']))).text)).toEqual({ mcpServers: many })
+      if (globalThis.process.platform === 'darwin') {
+        const socket = (await claudeStartupMcpOptions({}, many, () => undefined, { channel: 'descriptor' }))!
+        expect(JSON.parse((await readThrough(socket, '/dev/fd/3')).text)).toEqual({ mcpServers: many })
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(POSIX === false)('a named pipe nobody opens is removed when the process ends, and one opened by another reader first is gone for everyone after', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-fifo-test-'))
+    try {
+      const fifo = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: 'fifo', fifoRoot: root }))!
+      const path = String(fifo.extraArgs!['mcp-config'])
+      // A process that exits without reading: the pipe and its folder go with it.
+      const child = fifo.spawnClaudeCodeProcess!({ command: globalThis.process.execPath, args: ['-e', ''], env: { PATH: globalThis.process.env.PATH }, signal: new AbortController().signal }) as unknown as { once(event: string, listener: () => void): void }
+      await new Promise<void>((resolve) => child.once('exit', resolve))
+      expect(existsSync(path)).toBe(false)
+      expect(readdirSync(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(POSIX === false)('reads the process\'s error stream to the end, so one that writes a lot of it does not stall, and keeps its redacted end', async () => {
+    const tail = new ClaudeStderrTail(() => ['user-secret-358'])
+    const started = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: globalThis.process.platform === 'darwin' ? 'descriptor' : 'fifo', onStderr: tail }))!
+    // 4 MB to its error stream (an unread pipe holds 64 KB), then the secret, then what it read.
+    const path = String(started.extraArgs!['mcp-config'])
+    const { text } = await readThrough(started, path, 'const b = Buffer.alloc(65536, 120); for (let i = 0; i < 64; i++) require("fs").writeSync(2, b); require("fs").writeSync(2, "\\nfailed for X-Api-Key: user-secret-358 and Authorization: Bearer abc\\n");')
+    expect(JSON.parse(text)).toEqual({ mcpServers: { web: servers.web } })
+    const said = await tail.said()
+    expect(said).toMatch(/failed for X-Api-Key\S* ?\[redacted\] and Authorization: \[redacted\]$/)
+    expect(said).not.toMatch(/user-secret-358|abc/)
+    expect(said.length).toBeLessThanOrEqual(601)
+  })
+
+  it('names why a start failed from what Claude Code wrote: its policy, servers it could not read, or what it said', async () => {
+    warned()
+    const ended = () => process(async () => { throw new Error('ProcessTransport is not ready for writing') })
+    const explain = (said: string) => ({ timeoutMs: 1_000, explain: async () => said })
+    await expect(registerClaudeMcpServers(ended(), servers, explain('Error: --mcp-config is not allowed on this machine. Ask your administrator to remove disableSideloadFlags from managed settings'))).rejects.toMatchObject({ code: CLAUDE_MCP_POLICY_CODE })
+    await expect(registerClaudeMcpServers(ended(), servers, explain('You cannot dynamically configure MCP servers when an enterprise MCP config is present'))).rejects.toMatchObject({ code: CLAUDE_MCP_POLICY_CODE })
+    await expect(registerClaudeMcpServers(ended(), servers, explain('Error: Invalid MCP configuration: MCP config file not found: /tmp/x'))).rejects.toMatchObject({
+      code: 'claude_mcp_unavailable',
+      message: 'Mousse\'s tools could not be attached to Claude Code, so this turn did not start. Claude Code could not read the MCP servers Mousse gave it at its start, and ended. Claude Code said: Error: Invalid MCP configuration: MCP config file not found: /tmp/x'
+    })
+    await expect(registerClaudeMcpServers(ended(), servers, explain('out of memory'))).rejects.toMatchObject({ message: expect.stringContaining('Claude Code ended before Mousse\'s MCP server was attached. Claude Code said: out of memory') })
+    expect(claudeMcpPolicyText(['web', 'files'])).toBe('This computer\'s Claude Code policy does not allow added MCP servers, so Claude started without your servers: web, files. Mousse\'s own tools are attached.')
+  })
+
+  it('removes every known value, and anything that looks like a credential or a header value, from what Claude Code wrote', () => {
+    const text = 'connect failed {"headers":{"X-Api-Key":"user-secret-358"}} env KEY=user-env-358 Authorization: Bearer sk-abc token=t0k3n sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    const out = redactClaudeOutput(text, ['user-env-358', 'user-secret-358', ...claudeMcpStrings(servers)])
+    expect(out).not.toMatch(/user-secret-358|user-env-358|sk-abc|t0k3n|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/)
+    expect(out).toContain('connect failed')
+    expect(claudeMcpStrings(servers)).toEqual(expect.arrayContaining(['user-secret-358', `Bearer ${SECRET}`, 'https://example.test/mcp']))
+  })
+
+  it('sends `${` so Claude Code\'s expansions give it back as it is: once for each time Claude Code expands that field on that path', () => {
+    const user: ClaudeMcpServers = {
+      web: { type: 'http', url: 'https://x.test/${A}', headers: { 'X-Key': 'k-${ANTHROPIC_API_KEY}-${HOME:-x}', Plain: 'no-dollar' } },
+      files: { type: 'stdio', command: '/bin/${B}', args: ['${C}', 'plain'], env: { V: '$${D}' } },
+      inproc: { type: 'sdk', name: 'inproc' } as unknown as ClaudeMcpServers[string]
+    }
+    const E = '${MOUSSE_LITERAL_DOLLAR:-$}{'
+    // Claude Code's own expansion: `${NAME}` and `${NAME:-default}`, once over the text, against an environment
+    // without the variable (`withoutLiteralDollar`).
+    const expand = (text: string) => text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, _name: string, fallback?: string) => fallback ?? '')
+    const startup = claudeLiteralServers(user, 'startup') as Record<string, Record<string, unknown>>
+    expect(startup.web!.url).toBe(`https://x.test/${E}A}`)
+    expect(expand(String(startup.web!.url))).toBe('https://x.test/${A}')
+    const header = (startup.web!.headers as Record<string, string>)['X-Key']!
+    expect(expand(expand(header))).toBe('k-${ANTHROPIC_API_KEY}-${HOME:-x}')
+    expect((startup.web!.headers as Record<string, string>).Plain).toBe('no-dollar')
+    expect(expand(String(startup.files!.command))).toBe('/bin/${B}')
+    expect((startup.files!.args as string[]).map(expand)).toEqual(['${C}', 'plain'])
+    expect(expand((startup.files!.env as Record<string, string>).V!)).toBe('$${D}')
+    expect(startup.inproc).toBe(user.inproc)
+    const input = claudeLiteralServers(user, 'input') as Record<string, Record<string, unknown>>
+    expect(input.web!.url).toBe('https://x.test/${A}')
+    expect(expand((input.web!.headers as Record<string, string>)['X-Key']!)).toBe('k-${ANTHROPIC_API_KEY}-${HOME:-x}')
+    expect(input.files).toEqual(user.files)
+    expect(withoutLiteralDollar({ A: '1', MOUSSE_LITERAL_DOLLAR: 'x' })).toEqual({ A: '1' })
+  })
+
+  it('sees a policy that forbids added servers in the managed settings, their drop-in folder, managed-mcp.json or the cached server settings', () => {
+    const managedDir = mkdtempSync(join(tmpdir(), 'mousse-managed-test-'))
+    const home = mkdtempSync(join(tmpdir(), 'mousse-claude-home-test-'))
+    try {
+      expect(claudeMcpPolicyForbidsAdded(home, { managedDir })).toBe(false)
+      writeFileSync(join(managedDir, 'managed-settings.json'), JSON.stringify({ disableSideloadFlags: false }))
+      expect(claudeMcpPolicyForbidsAdded(home, { managedDir })).toBe(false)
+      mkdirSync(join(managedDir, 'managed-settings.d'))
+      writeFileSync(join(managedDir, 'managed-settings.d', '10-lock.json'), JSON.stringify({ disableSideloadFlags: true }))
+      expect(claudeMcpPolicyForbidsAdded(home, { managedDir })).toBe(true)
+      rmSync(join(managedDir, 'managed-settings.d'), { recursive: true })
+      writeFileSync(join(home, 'remote-settings.json'), JSON.stringify({ disableSideloadFlags: true }))
+      expect(claudeMcpPolicyForbidsAdded(home, { managedDir })).toBe(true)
+      rmSync(join(home, 'remote-settings.json'))
+      writeFileSync(join(managedDir, 'managed-mcp.json'), JSON.stringify({ mcpServers: {} }))
+      expect(claudeMcpPolicyForbidsAdded(undefined, { managedDir })).toBe(true)
+    } finally {
+      rmSync(managedDir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('bounds how long the user\'s servers given over Claude Code\'s input can hold its first prompt, unless the user set it', () => {
+    expect(claudeInputMcpEnv({ PATH: '/bin' })).toEqual({ PATH: '/bin', MCP_TIMEOUT: '10000', MCP_SERVER_CONNECTION_BATCH_SIZE: '16' })
+    expect(claudeInputMcpEnv({ MCP_TIMEOUT: '60000' })).toEqual({ MCP_TIMEOUT: '60000', MCP_SERVER_CONNECTION_BATCH_SIZE: '16' })
   })
 
   it('reads the user\'s servers a turn started without from Claude Code\'s init frame, and says them by name', () => {
     const init = { type: 'system', subtype: 'init', mcp_servers: [{ name: 'web', status: 'pending' }, { name: 'files', status: 'failed' }, { name: 'gh', status: 'needs-auth' }, { name: 'ok', status: 'connected' }, { name: 'mousse', status: 'failed' }] } as unknown as SDKMessage
     const left = claudeMcpLeftOut(init, new Set(['web', 'files', 'gh', 'ok']))
     expect(left).toEqual([{ name: 'web', state: 'starting' }, { name: 'files', state: 'failed' }, { name: 'gh', state: 'needs-auth' }])
-    expect(claudeMcpLeftOutText(left!)).toBe('Claude started this turn without some MCP servers: web (still starting; its tools come in a later turn); files (could not connect); gh (needs you to sign in).')
+    expect(claudeMcpLeftOutText(left!)).toBe('Claude started this turn without some MCP servers: web (still starting; it is offered once it has connected); files (could not connect); gh (needs you to sign in).')
     expect(claudeMcpLeftOut({ type: 'assistant' } as unknown as SDKMessage, new Set(['web']))).toBeUndefined()
   })
 
