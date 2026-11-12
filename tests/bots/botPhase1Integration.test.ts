@@ -335,3 +335,87 @@ describe('Bot Phase 1, composed', () => {
     expect(String(stored?.chips_json)).not.toContain('blue door')
   })
 })
+
+describe('a saved preference reaches every turn', () => {
+  const WISH = 'The owner wants no em dashes in my messages.'
+  const followsCore = (prepared: PreparedBotTurn) => {
+    expect(prepared.preamble).toContain(`About the owner:\n[m1 · 7 Nov 2026] ${WISH}`)
+    expect(prepared.preamble).toContain('Core memory is what the owner told you and your own standing notes. Follow it in every message and report')
+    expect(prepared.instructions).toContain('Follow its core memory every time, in chat replies and in reports')
+  }
+
+  it('the next chat message, a reply, work, a work reminder and a schedule all carry it; a forget takes it out', async () => {
+    const { bot } = await w.engine.service.create({ look: { colour: 'teal', accessory: 'cap' }, description: 'Small errands.', clientRequestId: 'create-pref' })
+    const botId = bot.id
+    await dispatch(chatActivation(botId).id, () => {}, 'Hi, I can help with errands.')
+    // The owner corrects the bot; it saves the wish as an owner entry in that turn.
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'Please stop using em dashes.', clientRequestId: 'p1' })
+    await dispatch(chatActivation(botId).id, async ({ prepared, call }) => {
+      expect(prepared.instructions).toContain('or corrects you ("don\'t…", "stop…", "always…"), save it with memory_save as an owner entry in that same turn')
+      expect(await call('memory_save', { text: WISH, kind: 'owner' })).not.toHaveProperty('isError', true)
+    }, 'Got it.')
+    expect(w.memory.active(botId).map((entry) => entry.text)).toEqual([WISH])
+
+    // The next chat message.
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'Name a cat.', clientRequestId: 'p2' })
+    const next = await dispatch(chatActivation(botId).id, () => {}, 'Biscuit.')
+    followsCore(next)
+    expect(next.lane).toBe('chat')
+
+    // A reply to a quoted message.
+    w.clock.now += 60_000
+    const quoted = lastBot(botId)
+    await w.engine.service.chatSend({ botId, text: 'And a dog?', clientRequestId: 'p3', replyTo: quoted.id })
+    const reply = await dispatch(chatActivation(botId).id, () => {}, 'Rex.')
+    expect(reply.prompt).toContain('Biscuit.')
+    followsCore(reply)
+
+    // Work the chat hands off.
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'Check the weather.', clientRequestId: 'p4' })
+    await dispatch(chatActivation(botId).id, async ({ call }) => {
+      expect(JSON.parse((await call('work_start', { title: 'Weather', brief: 'Write a two-line weather note for London.' })).text)).toMatchObject({ status: 'started' })
+    }, 'On it.')
+    await flush()
+    const work = w.store.listActivations(botId).find((row) => row.lane === 'run' && row.trigger.kind === 'work')!
+    const workTurn = await dispatch(work.id, () => {}, 'Sunny, 12 degrees.')
+    expect(workTurn.lane).toBe('run')
+    followsCore(workTurn)
+    expect(workTurn.instructions).toContain('In a run you do the work')
+
+    // A reminder that starts work when it fires.
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'In 5 minutes, find me a stretch.', clientRequestId: 'p5' })
+    let dueAt = ''
+    await dispatch(chatActivation(botId).id, async ({ call }) => {
+      // `inMinutes` counts from the wall clock, not the test's.
+      dueAt = (JSON.parse((await call('remind', { text: 'Stretch time.', inMinutes: 5, work: { title: 'Stretch', brief: 'Pick one short stretch for the owner.' } })).text) as { dueAt: string }).dueAt
+    }, 'I will, at the time.')
+    await w.engine.deliverDueReminders(new Date(Date.parse(dueAt) + 1_000))
+    await flush()
+    const reminded = w.store.listActivations(botId).find((row) => row.lane === 'run' && row.trigger.kind === 'work' && row.id !== work.id)!
+    followsCore(await dispatch(reminded.id, () => {}, 'Neck rolls.'))
+
+    // A scheduled run.
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'Every hour, give me a tip.', clientRequestId: 'p6' })
+    await dispatch(chatActivation(botId).id, async ({ call }) => {
+      await call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'Give the owner one tip.' })
+    }, 'Every hour, then.')
+    await w.tick(new Date(w.clock.now))
+    w.clock.now += HOUR + 1_000
+    await w.tick(new Date(w.clock.now))
+    const scheduled = w.store.listActivations(botId).find((row) => row.lane === 'run' && row.trigger.kind === 'schedule')!
+    followsCore(await dispatch(scheduled.id, () => {}, 'Drink water.'))
+
+    // The owner removes it in About: the next request no longer carries it.
+    createBotMemoryAdmin({ store: w.memory }).forget(botId, 'm1')
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'Name a fish.', clientRequestId: 'p7' })
+    const after = await dispatch(chatActivation(botId).id, () => {}, 'Nemo.')
+    expect(after.preamble).not.toContain(WISH)
+    expect(after.preamble).toContain('About the owner:\n(nothing saved yet)')
+  })
+})

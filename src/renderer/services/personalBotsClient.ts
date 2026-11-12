@@ -1,5 +1,6 @@
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
+import type { BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { BotSchedule } from '../../shared/bots/personal/definition'
 import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
@@ -33,6 +34,10 @@ export interface PersonalBotsClient {
   /** Cancels a waiting reminder; it never fires. */
   cancelReminder(botId: string, reminderId: string): Promise<BotDetail>
   exportMemory(botId: string, dir: string): Promise<{ files: string[] }>
+  /** What the bot remembers: the entries every turn carries. */
+  memory(botId: string): Promise<BotMemoryListing>
+  /** Forgets one entry (`m12`): the next turn no longer carries it. */
+  forgetMemory(botId: string, id: string): Promise<void>
 }
 
 export function createPersonalBotsClient(transport: PlatformRequestApi): PersonalBotsClient {
@@ -60,7 +65,9 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     setModel: async (botId, model) => (await call('bots.model.set', { botId, model })).bot,
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
-    exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir })
+    exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir }),
+    memory: (botId) => call('bots.memory.list', { botId }),
+    forgetMemory: async (botId, id) => { await call('bots.memory.forget', { botId, id }) }
   }
 }
 

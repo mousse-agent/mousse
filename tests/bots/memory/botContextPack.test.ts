@@ -134,7 +134,7 @@ describe('the chat pack', () => {
     expect(fx.store.getState<{ lines: string[] }>('ada', 'chat_summary')!.lines.length).toBeGreaterThan(0)
   })
 
-  it('two dispatches with no new rows get byte-identical prefixes; one activation always gets the same pack', async () => {
+  it('two dispatches with no new rows get byte-identical prefixes; one activation keeps its pack until its memory changes', async () => {
     const fx = memoryFixture()
     const { packs } = provider(fx)
     chat(fx, 1)
@@ -143,9 +143,12 @@ describe('the chat pack', () => {
     const b = await packs.chatPreamble({ botId: 'ada', activationId: 'act-b' })
     expect(prefix(b)).toBe(prefix(a))
     expect(b).not.toBe(a)
+    // New chat rows leave a frozen pack as it is.
     chat(fx, 2)
-    fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Likes tea.' })
     expect(await packs.chatPreamble({ botId: 'ada', activationId: 'act-a' })).toBe(a)
+    // A saved entry reaches the activation's next dispatch.
+    fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Likes tea.' })
+    expect(await packs.chatPreamble({ botId: 'ada', activationId: 'act-a' })).toContain('Likes tea.')
   })
 
   it('leaves out the activation’s own new message, and holds back guarded rows', async () => {

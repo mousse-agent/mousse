@@ -646,6 +646,8 @@ export class BotMemoryStore {
         text: `remembered · ${text}`,
         json: { op: 'save', memId: id, version, kind, ...(replaced ? { replaces: memoryRef(replaced.id, replaced.version) } : {}) }
       }, at)
+      // The next dispatch of every activation, a resumed one too, carries the new entry.
+      this.dropPacks(botId)
       return { id, version, ref: memoryRef(id, version), gauge: this.gauge(botId, input.lane) }
     })
   }
@@ -783,6 +785,11 @@ export class BotMemoryStore {
       const folded = this.windowRows(botId, 0).filter((row) => row.seq <= summary.throughSeq)
       this.setState(botId, 'chat_summary', { ...foldChatSummary(folded, undefined, this.zone(), this.now()), throughSeq: summary.throughSeq })
     }
+    this.dropPacks(botId)
+  }
+
+  /** Drops every frozen pack of the bot: each activation's next dispatch builds its pack again. */
+  private dropPacks(botId: string): void {
     this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 5) = 'pack:'", botId)
   }
 

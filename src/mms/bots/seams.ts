@@ -114,7 +114,7 @@ export type BotDispatchEnd = 'settled' | 'wall' | 'reload' | 'stopped' | 'failed
 /**
  * The context packs (bot-context.md §5). WP6 implements; WP2's engine calls at each main dispatch.
  * Each pack is built once per activation and frozen: later dispatches of the same activation get the
- * same text, until a forget drops the frozen packs.
+ * same text, until a memory save or forget drops the frozen packs.
  */
 export interface BotContextProvider {
   /** The chat pack, placed in `turnPreamble` right after `clearConversationContext(homeThreadId)`. */
