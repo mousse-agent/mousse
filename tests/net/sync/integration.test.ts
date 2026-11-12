@@ -750,6 +750,46 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
   })
+  it('ends a lagging subscriber that lost its read right with forbidden, not a resync to the head', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => (release = resolve))
+    const send = vi
+      .spyOn(connection.a as unknown as { sendRecords: () => Promise<void> }, 'sendRecords')
+      .mockImplementationOnce(() => stalled)
+    const body = new Uint8Array(8 * 1024 * 1024)
+    const row = (seq: number): StoredRecord => ({ ...oversizedRecord(seq, 0), envelope: body })
+    const queued = Array.from({ length: 7 }, (_, i) =>
+      connection.a.publishRecord(p.stream.id, row(i + 1))
+    )
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce())
+    vi.spyOn(internals(connection.a).options.authority, 'canRead').mockReturnValue(false)
+    const received = vi.spyOn(
+      connection.b as unknown as { receive(message: { header: { t: string } }): Promise<void> },
+      'receive'
+    )
+    // The eighth record overflows the live queue while the reader may no longer read the stream.
+    await connection.a.publishRecord(p.stream.id, row(8))
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledWith('forbidden'))
+    release()
+    await Promise.allSettled(queued)
+    const types = received.mock.calls.map(([message]) => message.header.t)
+    expect(types).not.toContain('snapshotRequired')
+    expect(types.filter((t) => t === 'error')).toHaveLength(1)
+    expect(h.onError).toHaveBeenCalledOnce()
+    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
   it('fails the session when the resync request cannot be sent to a lagging subscriber', async () => {
     const p = await profiles(),
       connection = await sessions(p)
@@ -2020,6 +2060,41 @@ describe('a stream the peer loses the right to read while it is served', () => {
     })
     await send({ t: 'subscribe', stream: p.stream.id, after: { epoch: 1, seq: 0 } })
     await vi.waitFor(() => expect(replaced).toBe(true))
+    await expectEndedAlone()
+  })
+
+  it('ends a newer subscription whose snapshot request joined the transfer when access goes', async () => {
+    const { p, connection, log, loseAfter, expectEndedAlone } = await setup()
+    const reason = p.aStore.snapshotReason.bind(p.aStore)
+    vi.spyOn(p.aStore, 'snapshotReason').mockImplementation((stream, after) =>
+      stream === p.stream.id ? 'cursorTooOld' : reason(stream, after)
+    )
+    const serveSnapshot = vi.spyOn(connection.a as never, 'serveSnapshot' as never)
+    const send = (connection.b as unknown as { send(message: unknown): Promise<void> }).send.bind(
+      connection.b
+    )
+    let joined = false
+    log.after(async (frame) => {
+      // A's first chunk is out. The reader subscribes again without letting go (B), and B's snapshot
+      // request joins the transfer already under way.
+      if (frame.t !== 'snapshot.chunk' || joined) return
+      joined = true
+      await send({ t: 'subscribe', stream: p.stream.id, after: { epoch: 1, seq: 0 } })
+      await vi.waitFor(() =>
+        expect(log.sent.filter((sent) => sent.t === 'snapshotRequired')).toHaveLength(2)
+      )
+      await send({ t: 'snapshot.get', stream: p.stream.id })
+      await vi.waitFor(() => expect(serveSnapshot).toHaveBeenCalledTimes(2))
+      await (serveSnapshot.mock.results[1] as { value: Promise<void> }).value
+    })
+    loseAfter('snapshot.chunk')
+    await send({ t: 'subscribe', stream: p.stream.id, after: { epoch: 1, seq: 0 } })
+    await vi.waitFor(() =>
+      expect(log.sent.some((sent) => sent.t === 'snapshotRequired')).toBe(true)
+    )
+    await send({ t: 'snapshot.get', stream: p.stream.id })
+    await vi.waitFor(() => expect(joined).toBe(true))
+    // B gets one forbidden instead of waiting for chunks that never come.
     await expectEndedAlone()
   })
 })

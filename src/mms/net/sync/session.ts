@@ -803,7 +803,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       attempt.cancelled = true
       // A resync request refused by a full carrier is a carrier failure, so a supervised peer
       // reconnects; other errors keep their code.
-      return this.requireSnapshot(stream).catch((error) =>
+      return this.resyncLagging(stream).catch((error) =>
         this.fail(
           error instanceof NetError && error.code === 'rate_limited'
             ? new NetError('route_unreachable', 'Resync request rejected.', { cause: error })
@@ -871,6 +871,21 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   ): Promise<void> {
     const head = this.options.store.head(stream)
     await this.send({ t: 'snapshotRequired', stream, reason, head }, [], signal)
+  }
+
+  /**
+   * Sends a lagging live subscriber back to a snapshot, if it may still read the stream. One that lost
+   * the right ends with `forbidden` instead, and never learns the head.
+   */
+  private async resyncLagging(stream: StreamId): Promise<void> {
+    try {
+      this.authorizedRead(stream)
+    } catch (error) {
+      // A stream fenced or a session closing sends nothing; its own teardown ends the subscription.
+      if (this.readLost(error)) await this.failServingStream(stream, 'forbidden')
+      return
+    }
+    await this.requireSnapshot(stream)
   }
 
   /** Trusted authority failure: terminate only an already authorized serving subscription. */
@@ -1742,7 +1757,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       controller = new AbortController()
     const job = { reader, controller }
     this.snapshotJobs.set(stream, job)
-    // The subscription this transfer is for, if any; a newer one is left as it is.
+    // The subscription this transfer is for, if any.
     const attempt = this.serving.get(stream)
     const cancelled = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     try {
@@ -1767,12 +1782,12 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     } catch (error) {
       if (cancelled.aborted) return
       if (!this.readLost(error)) throw error
-      const current = this.serving.get(stream)
-      if (attempt && current === attempt) await this.failServingStream(stream, 'forbidden')
-      else if (!attempt && !current)
+      // Whatever subscription holds the stream now ends: the one this transfer was for, or a newer one
+      // whose own snapshot request joined this transfer and would otherwise wait for chunks forever.
+      // With none, the request alone is answered. Either way the reader gets one `forbidden`.
+      if (this.serving.has(stream)) await this.failServingStream(stream, 'forbidden')
+      else if (!attempt)
         await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
-      // A newer subscription, which may be caught up already, is checked now.
-      else await this.endIfReadLost(stream)
     } finally {
       if (this.snapshotJobs.get(stream) === job) {
         this.snapshotJobs.delete(stream)
