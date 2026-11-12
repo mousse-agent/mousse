@@ -13,6 +13,7 @@ import type {
   BrowserSessionRecord,
   BrowserTab,
   BrowserViewerFrame,
+  BrowserViewerUpdate,
   BrowserWaitCondition,
   BrowserWorkerRequest
 } from '../../shared/browser/types'
@@ -28,7 +29,7 @@ import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '.
 import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/ReferenceStore'
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
-import { SCREENCAST_MAX_HEIGHT, TabScreencast } from '../observation/screencast'
+import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
 import { dispatchAction, dispatchHumanInput, navigateAndWaitForLoad, waitForLoad } from '../action/dispatch'
 import { ScopedActionJournal } from '../action/journal'
@@ -132,10 +133,12 @@ export class ManagedSession {
   private downloadStates = new Map<string, 'inProgress' | 'completed' | 'canceled' | 'interrupted'>()
   /** Where the agent last acted (`agentCursor.ts`): held here, drawn by viewers over `frame()`, never in the page. */
   private cursor: BrowserAgentCursor | undefined
-  /** The tab last brought to the front (`toFront`). */
+  /** The tab last brought to the front (`toFront`), or opened: the one Chromium paints. */
   private frontTargetId = ''
-  /** The screencast of the tab a person watches (`frame()`), started on the first picture asked for. */
-  private screencast: TabScreencast | null = null
+  /** The pictures of the tabs people watch (`frame.next`, `frame`), created on the first one asked for. */
+  private viewers: ViewerCaptures | null = null
+  /** Each tab's title as its page last set it, by target id, for people watching. */
+  private readonly viewerTitles = new Map<string, string>()
   /** Pages and frames carrying the automation mark (`markAutomation`), by CDP session. */
   private readonly marked = new Map<string, MarkedTarget>()
   /**
@@ -284,10 +287,31 @@ export class ManagedSession {
       navigated.frameId = frame.id ?? navigated.frameId
       navigated.url = sanitizeUrl(frame.url ?? navigated.url)
       navigated.documentId = 'doc_' + randomUUID()
-      // Chromium sends no more screencast pictures once a new page commits: the next one restarts it.
-      this.screencast?.forget(navigated.cdpSessionId)
+      // Chromium may send no more screencast pictures once a new page commits: a watched tab's starts again.
+      this.viewers?.committed(navigated.cdpSessionId, navigated.url)
       this.refs.invalidateTab(navigated.publicId)
       this.touch()
+    })
+    // What a person watching sees of a tab: its title as the page sets it (kept apart from what agents are told), and its size.
+    this.chrome.cdp.on('Target.targetInfoChanged', (params: unknown) => {
+      if (this.closed || this.closing) return
+      const info = (params as { targetInfo?: { targetId?: string; title?: string } })?.targetInfo
+      const tab = info?.targetId ? [...this.tabs.values()].find((entry) => entry.targetId === info.targetId) : undefined
+      if (!tab || typeof info?.title !== 'string') return
+      const title = boundText(info.title, 512)
+      this.viewerTitles.set(tab.targetId, title)
+      this.viewers?.titled(tab.cdpSessionId, title)
+    })
+    this.chrome.cdp.on('Page.frameResized', (_params: unknown, sessionId?: string) => {
+      if (sessionId && !this.closed && !this.closing) this.viewers?.resized(sessionId)
+    })
+    // Chromium does not always report a page's own title as it changes: a watched page's is read once it has loaded.
+    this.chrome.cdp.on('Page.lifecycleEvent', (params: unknown, sessionId?: string) => {
+      if (!sessionId || this.closed || this.closing || !this.viewers?.watching(sessionId)) return
+      const name = (params as { name?: string } | undefined)?.name
+      if (name !== 'DOMContentLoaded' && name !== 'load') return
+      const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
+      if (tab) void this.refreshViewerTitle(tab)
     })
     this.chrome.cdp.on('Target.detachedFromTarget', (params: unknown) => {
       if (this.closed || this.closing) return
@@ -306,10 +330,11 @@ export class ManagedSession {
       }
       const detached = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
       if (detached) {
-        this.screencast?.forget(detached.cdpSessionId)
+        this.viewers?.forget(detached.cdpSessionId)
         this.refs.invalidateTab(detached.publicId)
         this.tabs.delete(detached.publicId)
         if (this.activeTabId === detached.publicId) this.activeTabId = this.tabs.keys().next().value ?? ''
+        this.viewers?.frontChanged()
       }
     })
     if (initialUrl) {
@@ -338,8 +363,8 @@ export class ManagedSession {
     }
     await Promise.allSettled([...this.ops])
     await Promise.allSettled([...this.frameEnables.values()])
-    this.screencast?.dispose()
-    this.screencast = null
+    this.viewers?.dispose()
+    this.viewers = null
     const chrome = this.chrome
     try {
       if (chrome) await chrome.stop()
@@ -424,6 +449,7 @@ export class ManagedSession {
       this.activeTabId = tabId
       // A new tab opens in front.
       this.frontTargetId = created.targetId
+      this.viewers?.frontChanged()
       this.touch()
       return { id: tabId, title: tab.title, url: tab.url }
     } catch (error) {
@@ -481,9 +507,10 @@ export class ManagedSession {
     this.throwIfUnavailable(signal)
     this.refs.invalidateTab(tabId)
     await chrome.cdp.send('Target.closeTarget', { targetId: tab.targetId }, { signal })
-    this.screencast?.forget(tab.cdpSessionId)
+    this.viewers?.forget(tab.cdpSessionId)
     this.tabs.delete(tabId)
     if (this.activeTabId === tabId) this.activeTabId = this.tabs.keys().next().value ?? ''
+    this.viewers?.frontChanged()
     this.touch()
   }
 
@@ -781,6 +808,8 @@ export class ManagedSession {
     const cursor = agentCursorFor(request.action, point, { width: viewport?.cssWidth ?? 1280, height: viewport?.cssHeight ?? 720 }, this.clock().getTime(), tab.publicId)
     if (!cursor) return
     this.cursor = cursor
+    // Watchers hear of it now, while it glides: it is drawn over their picture, not painted in the page.
+    this.viewers?.cursorMoved(tab.publicId)
     try {
       await sleep(AGENT_CURSOR_GLIDE_MS, signal)
     } catch {
@@ -789,8 +818,9 @@ export class ManagedSession {
   }
 
   /**
-   * A headless browser paints only its front tab: a tab in the back never settles for an action's
-   * stability checks and gives no picture. The tab acted on or watched comes to the front.
+   * A headless browser paints only its front tab: a tab behind is hidden, runs no animation frames,
+   * and its page may never settle for an action. The tab an action acts on comes to the front. A
+   * person watching never moves it: their view of a tab behind is a still (`ViewerCaptures`).
    */
   private async toFront(tab: TabState): Promise<void> {
     if (this.frontTargetId === tab.targetId || this.tabs.size < 2) {
@@ -799,44 +829,100 @@ export class ManagedSession {
     }
     await this.requireChrome().cdp.send('Target.activateTarget', { targetId: tab.targetId }, { timeoutMs: 5_000 })
     this.frontTargetId = tab.targetId
+    this.viewers?.frontChanged()
+  }
+
+  /** Whether a tab is not the one in front, so Chromium does not paint it. */
+  private behind(cdpSessionId: string): boolean {
+    if (this.tabs.size < 2) return false
+    const tabs = [...this.tabs.values()]
+    const tab = tabs.find((entry) => entry.cdpSessionId === cdpSessionId)
+    const front = tabs.find((entry) => entry.targetId === this.frontTargetId)
+    return Boolean(tab && front && front !== tab)
+  }
+
+  private viewerCaptures(): ViewerCaptures {
+    this.viewers ??= new ViewerCaptures(this.requireChrome().cdp, { behind: (cdpSessionId) => this.behind(cdpSessionId), now: () => this.clock().getTime() })
+    return this.viewers
+  }
+
+  /** Reads a tab's title as its page set it, for people watching. */
+  private async refreshViewerTitle(tab: TabState): Promise<void> {
+    try {
+      const { targetInfo } = await this.requireChrome().cdp.send<{ targetInfo?: { title?: string } }>('Target.getTargetInfo', { targetId: tab.targetId }, { timeoutMs: 5_000 })
+      if (typeof targetInfo?.title !== 'string') return
+      const title = boundText(targetInfo.title, 512)
+      this.viewerTitles.set(tab.targetId, title)
+      this.viewers?.titled(tab.cdpSessionId, title)
+    } catch {
+      // The tab closed meanwhile: its title no longer matters.
+    }
+  }
+
+  private viewerTab(tab: TabState): ViewerTabInfo {
+    return { cdpSessionId: tab.cdpSessionId, tabId: tab.publicId, url: tab.url, title: this.viewerTitles.get(tab.targetId) ?? boundText(tab.title, 512) }
+  }
+
+  private liveCursor(tab: TabState): BrowserAgentCursor | undefined {
+    return this.cursor?.tabId === tab.publicId && agentCursorLive(this.cursor, this.clock().getTime()) ? this.cursor : undefined
   }
 
   /**
-   * A live picture of a tab for a person watching (a bot's browser view): a JPEG of the visible
-   * viewport, and the agent cursor while it is recent. Not an observation: no refs, no artifact, and
-   * nothing a model reads. The tab's screencast keeps its latest painted picture, so a viewer asking
-   * often gets each change as soon as it is painted; until its first one, or when it is stale, a
-   * picture is taken here.
+   * A watcher's next picture of a tab (`frame.next`, a bot's browser view): a long-poll answered when
+   * the page paints (at most `maxFps` a second), when the tab's state or the agent cursor changes, or
+   * with `idle` after `waitMs`. Not an observation: no refs, no artifact, nothing a model reads. One
+   * capture per tab is shared by its watchers; it never brings the tab to the front.
+   */
+  async viewerNext(params: Record<string, unknown>, signal: AbortSignal): Promise<BrowserViewerUpdate> {
+    const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
+    const watchKey = requiredId(params.watchKey)
+    // A tab watched for the first time: its title as it is now.
+    if (!this.viewers?.watching(tab.cdpSessionId)) await this.refreshViewerTitle(tab)
+    const count = (value: unknown, min: number, max: number, fallback: number) => typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback
+    const update = await this.viewerCaptures().next(this.viewerTab(tab), {
+      watchKey,
+      maxWidth: count(params.maxWidth, 160, 1920, 960),
+      maxFps: count(params.maxFps, 1, 30, 15),
+      afterFrame: count(params.afterFrame, 0, Number.MAX_SAFE_INTEGER, 0),
+      afterState: count(params.afterState, 0, Number.MAX_SAFE_INTEGER, 0),
+      waitMs: count(params.waitMs, 0, MAX_WAIT_MS, 20_000),
+      signal
+    })
+    const cursor = this.tabs.has(tab.publicId) ? this.liveCursor(tab) : undefined
+    return { ...update, ...(cursor ? { cursor } : {}) }
+  }
+
+  /** A watcher stops (`frame.stop`): a tab nobody watches stops its screencast. */
+  viewerStop(params: Record<string, unknown>): { ok: true } {
+    this.viewers?.stop(requiredId(params.watchKey))
+    return { ok: true }
+  }
+
+  /**
+   * A live picture of a tab for a view that asks each time (`frame`, the bot browser view of an
+   * older app): a JPEG of the visible viewport, and the agent cursor while it is recent. It is the
+   * tab's latest painted picture, from the same capture as `frame.next`, so asking often costs a
+   * local read; only before the first one is a picture taken here. It never brings the tab to the front.
    */
   async frame(params: Record<string, unknown>): Promise<BrowserViewerFrame> {
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
     const cdp = this.requireChrome().cdp
-    await this.toFront(tab)
     const maxWidth = typeof params.maxWidth === 'number' && params.maxWidth >= 160 ? Math.min(params.maxWidth, 1920) : 960
-    this.screencast ??= new TabScreencast(cdp, { now: () => this.clock().getTime() })
-    const [painted, metrics] = await Promise.all([
-      this.screencast.watch(tab.cdpSessionId, maxWidth),
-      cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
-    ])
-    const visual = metrics.cssVisualViewport ?? {}
-    const width = visual.clientWidth && visual.clientWidth > 0 ? visual.clientWidth : 1280
-    const height = visual.clientHeight && visual.clientHeight > 0 ? visual.clientHeight : 720
-    const now = this.clock()
-    const cursor = this.cursor?.tabId === tab.publicId && agentCursorLive(this.cursor, now.getTime()) ? this.cursor : undefined
-    const picture = { tabId: tab.publicId, url: tab.url, title: boundText(tab.title, 512), mimeType: 'image/jpeg' as const, viewport: { width, height }, ...(cursor ? { cursor } : {}) }
-    if (painted) {
-      // The screencast fits the whole viewport (scrollbars overlay the page) in maxWidth × its height cap.
-      const scale = Math.min(1, maxWidth / width, SCREENCAST_MAX_HEIGHT / height)
-      return { ...picture, data: painted.data, width: Math.round(width * scale), height: Math.round(height * scale), capturedAt: new Date(painted.at).toISOString() }
-    }
-    const scale = Math.min(1, maxWidth / width)
+    const viewers = this.viewerCaptures()
+    const { picture: painted, viewport } = await viewers.latest(this.viewerTab(tab), maxWidth)
+    const cursor = this.liveCursor(tab)
+    const picture = { tabId: tab.publicId, url: tab.url, title: this.viewerTab(tab).title, mimeType: 'image/jpeg' as const, viewport, ...(cursor ? { cursor } : {}) }
+    if (painted) return { ...picture, data: painted.data, width: painted.width, height: painted.height, capturedAt: new Date(painted.at).toISOString() }
+    const metrics = await cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
+    const scale = Math.min(1, maxWidth / viewport.width, SCREENCAST_MAX_HEIGHT / viewport.height)
     // The clip is in page coordinates: the visible viewport starts at the scroll offset.
     const shot = await cdp.send<{ data: string }>('Page.captureScreenshot', {
       format: 'jpeg', quality: 60, fromSurface: true, captureBeyondViewport: false,
-      clip: { x: visual.pageX ?? 0, y: visual.pageY ?? 0, width, height, scale }
+      clip: { x: metrics.cssVisualViewport?.pageX ?? 0, y: metrics.cssVisualViewport?.pageY ?? 0, width: viewport.width, height: viewport.height, scale }
     }, { sessionId: tab.cdpSessionId, timeoutMs: 10_000 })
-    this.screencast.keep(tab.cdpSessionId, shot.data)
-    return { ...picture, data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), capturedAt: nowIso(this.clock) }
+    const taken = { data: shot.data, width: Math.round(viewport.width * scale), height: Math.round(viewport.height * scale), at: this.clock().getTime(), sharp: false }
+    viewers.keep(tab.cdpSessionId, taken)
+    return { ...picture, data: taken.data, width: taken.width, height: taken.height, capturedAt: nowIso(this.clock) }
   }
 
   /** A person's input while they hold the session (`control.take` as human): trusted input on the tab. */
@@ -873,6 +959,8 @@ export class ManagedSession {
         if (this.lifecycle !== 'human-controlled') fail('human_controlled', 'A human control lease is not active')
         return this.trackOp(signal, (opSignal) => this.act(params, opSignal, true))
       case 'frame': return this.trackOp(signal, () => this.frame(params))
+      case 'frame.next': return this.trackOp(signal, (opSignal) => this.viewerNext(params, opSignal))
+      case 'frame.stop': return this.viewerStop(params)
       case 'human.input': return this.trackOp(signal, (opSignal) => this.humanInput(params, opSignal))
       case 'control.take': {
         const owner = params.owner === 'human' ? 'human' : 'agent'

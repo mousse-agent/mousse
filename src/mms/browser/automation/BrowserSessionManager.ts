@@ -11,6 +11,7 @@ import type {
   BrowserHumanInput,
   BrowserTab,
   BrowserViewerFrame,
+  BrowserViewerUpdate,
   BrowserWaitCondition,
   BrowserWorkerResponse
 } from '../../../shared/browser/types'
@@ -288,6 +289,30 @@ export class BrowserSessionManager {
       sessionId: input.sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.maxWidth ? { maxWidth: input.maxWidth } : {})
     }, this.signal(context))
     return result as BrowserViewerFrame
+  }
+
+  /**
+   * A viewer's next update of a managed tab (`BrowserViewerUpdate`): a long-poll the worker answers
+   * when the page paints or the tab's state changes. Host-side only, like `frame`. It is ended early
+   * by `viewerStop` for the same watcher, never by aborting the call (an aborted call counts as a
+   * lost worker).
+   */
+  async viewerNext(context: BrowserToolContext, input: { sessionId: string; tabId?: string; watchKey: string; maxWidth: number; maxFps: number; afterFrame: number; afterState: number; waitMs: number }): Promise<BrowserViewerUpdate> {
+    this.authorize(context, undefined, 'browser.observe', 'read', input)
+    const entry = this.requireOwned(input.sessionId, context.execution)
+    if (entry.record.backend !== 'managed-chromium') throw new BrowserAutomationError({ code: 'unsupported', message: 'Only a managed browser session has viewer frames' })
+    const result = await this.call(context.execution.profileId, 'frame.next', {
+      sessionId: input.sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), watchKey: input.watchKey, maxWidth: input.maxWidth, maxFps: input.maxFps,
+      afterFrame: input.afterFrame, afterState: input.afterState, waitMs: input.waitMs
+    }, this.signal(context))
+    return result as BrowserViewerUpdate
+  }
+
+  /** A viewer stops: its waiting `viewerNext` is answered, and the worker stops a tab's screencast once nobody watches it. */
+  async viewerStop(context: BrowserToolContext, input: { sessionId: string; watchKey: string }): Promise<void> {
+    this.authorize(context, undefined, 'browser.observe', 'read', input)
+    this.requireOwned(input.sessionId, context.execution)
+    await this.call(context.execution.profileId, 'frame.stop', { sessionId: input.sessionId, watchKey: input.watchKey }, this.signal(context))
   }
 
   /** A person's input while they hold a managed session (`control` as human). */
