@@ -80,8 +80,11 @@ describe('turns from another computer', () => {
     expect(daemon!.orch.steerThreadOrEnqueueExternal(thread.id, 'device text', { source: 'gui', permissionMode: 'ask' })).toMatchObject({ steered: true })
     gate.resolve()
     await waitFor(() => followUps().some((run) => run.status === 'completed'), 'the follow-up turn to finish')
+    // A device's steer is saved as a queue item, so the turn that never read it hands it back to the queue, and it runs
+    // once from there, like a window's steer, as its own `steer` turn.
+    expect(followUps()).toHaveLength(1)
     const [followUp] = followUps()
-    expect(followUp.source).toBe('steer-followup')
+    expect(followUp.source).toBe('steer')
     expect(modeOf(followUp.runId)).toBe('ask')
   })
 
