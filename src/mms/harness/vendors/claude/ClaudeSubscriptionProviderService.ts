@@ -136,6 +136,8 @@ type Settings = {
   args?: string[]
   env?: Record<string, string>
   models?: LlmModelOption[]
+  /** The model each listed alias resolved to, without a `[…]` suffix (`opus` → `claude-opus-5-5`), by `models` id. */
+  modelRoutes?: Record<string, string>
   /** ISO time `models` was last listed by Claude Code (absent for the fallback aliases). */
   modelsRefreshedAt?: string
   /** What the older-model check found (`claudeOlderModelCheck`), for the key it ran under. */
@@ -623,8 +625,9 @@ export async function claudeOlderModelCheck(
 }
 
 /**
- * The older models the check found running, after the live ones, newest first: named by the catalog's
- * short name, with the catalog's levels that Claude Code takes and the default effort it reported.
+ * The catalog models the check found running, newest first: named by the catalog's short name, with
+ * the catalog's levels that Claude Code takes and the default effort it reported. Only the ones the
+ * catalog marks older carry `older`; a current one (a newer model Claude Code does not list yet) does not.
  */
 export function claudeOlderModelOptions(candidates: readonly ClaudeOlderCandidate[], results: Readonly<Record<string, OlderModelOutcome>>): LlmModelOption[] {
   const options: LlmModelOption[] = []
@@ -637,10 +640,49 @@ export function claudeOlderModelOptions(candidates: readonly ClaudeOlderCandidat
       label: candidate.short,
       ...(efforts?.length ? { efforts, thinkingOff: false as const } : {}),
       ...(result.defaultEffort && efforts?.includes(result.defaultEffort) ? { defaultEffort: result.defaultEffort } : {}),
-      older: true
+      ...(candidate.older ? { older: true as const } : {})
     })
   }
   return options
+}
+
+/**
+ * The Claude Code listing: the live models, then the ones the check found running. A current one
+ * (not `older` in the catalog) is not folded and takes the place of the first live model of its
+ * family. A live model the catalog marks `older` folds behind "Show more" once a current model of its
+ * family is offered. `routes` maps an alias to the model it resolved to.
+ */
+export function claudeModelListing(
+  live: readonly LlmModelOption[],
+  found: readonly LlmModelOption[],
+  catalog: ModelCatalog,
+  routes: Readonly<Record<string, string>>
+): LlmModelOption[] {
+  const entries = catalogModelsOnRoute(catalog, 'claude')
+  const entryOf = (id: string) => {
+    const routeId = bareModelId(routes[id] ?? id)
+    return entries.find((entry) => entry.route.id === routeId)
+  }
+  const current = found.filter((model) => !model.older)
+  const currentFamilies = new Set(
+    [...live, ...current].flatMap((model) => {
+      const entry = entryOf(model.id)
+      return entry?.family && !entry.older ? [entry.family] : []
+    })
+  )
+  const listing: LlmModelOption[] = []
+  const placed = new Set<string>()
+  for (const model of live) {
+    const entry = entryOf(model.id)
+    for (const next of current) {
+      if (entry?.family && !placed.has(next.id) && entryOf(next.id)?.family === entry.family) {
+        listing.push(next)
+        placed.add(next.id)
+      }
+    }
+    listing.push(entry?.older && entry.family && currentFamilies.has(entry.family) ? { ...model, older: true } : model)
+  }
+  return [...listing, ...current.filter((model) => !placed.has(model.id)), ...found.filter((model) => model.older)]
 }
 
 /** Variables a running Claude Code session sets for the commands it starts. */
@@ -1193,18 +1235,17 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /**
-   * The discovered models, then the older ones the check found running (`claudeOlderModelOptions`),
+   * The discovered models with the catalog models the check found running (`claudeModelListing`),
    * or the CLI aliases until discovery runs.
    */
   models(): LlmModelOption[] {
     const live = this.settings.models
     // Never listed: the CLI aliases. Listed but empty (every model needs a newer Mousse): older ones only.
     if (!live || !this.listedByClaude()) return FALLBACK_MODELS
-    const results = this.settings.olderModels?.results
-    if (!results || !Object.keys(results).length) return live
+    const results = this.settings.olderModels?.results ?? {}
     const listed = new Set(live.map((model) => model.id))
-    const older = claudeOlderModelOptions(claudeOlderCandidates(this.catalog(), listed), results).filter((model) => !listed.has(model.id))
-    return older.length ? [...live, ...older] : live
+    const found = claudeOlderModelOptions(claudeOlderCandidates(this.catalog(), listed), results).filter((model) => !listed.has(model.id))
+    return claudeModelListing(live, found, this.catalog(), this.settings.modelRoutes ?? {})
   }
   /** The model catalog; one that cannot be read offers no older models. */
   private catalog(): ModelCatalog {
@@ -1564,6 +1605,7 @@ export class ClaudeSubscriptionProviderService {
         const extras = models.length ? await claudeModelExtras(query, models, controller.signal) : {}
         controller.signal.throwIfAborted()
         this.settings.models = claudeModelOptions(models, extras)
+        this.settings.modelRoutes = Object.fromEntries(models.flatMap((model) => (model.resolvedModel ? [[model.value, bareModelId(model.resolvedModel)]] : [])))
         this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
         try {
