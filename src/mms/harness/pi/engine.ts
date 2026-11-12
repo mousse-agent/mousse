@@ -2324,7 +2324,8 @@ export class PiRpcEngine implements ProviderAdapter {
     if (turn.steers.length || turn.steerSends.size) {
       void this.returnUnreadAtEnd(thread, turn)
         .catch((error: unknown) => this.handBackFailed(thread, error))
-        .finally(() => this.endTurn(turn))
+        // A Stop that came meanwhile settles the turn itself, once it has handed back what the turn holds.
+        .finally(() => { if (!turn.stopping) this.endTurn(turn) })
       return
     }
     return this.endTurn(turn)

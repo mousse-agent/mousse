@@ -1255,6 +1255,25 @@ describe('Pi cuts in (stub Pi)', () => {
       expect(promptsIn(cwd)).toEqual(['hi', 'use pnpm'])
     }, 30_000)
 
+    it('Stop while the turn’s end waits for a native steer’s answer: the steer is back by the time the turn ends', async () => {
+      const { engine, project } = setup()
+      // The last step ends with an agent's note sent natively; Pi answers it 1.5 s later, and settles meanwhile without it.
+      const cwd = project('p', { onPrompt: 'script', steerDelayMs: 1500, runs: [[{ text: 'one two three four five six', deltaMs: 60 }]] })
+      const t = turn(cwd)
+      const h = onHold(t)
+      const pending = run(engine, t)
+      await vi.waitFor(() => expect(promptsIn(cwd)).toEqual(['hi']), { timeout: 10_000 })
+      h.steer('a note from an agent', false)
+      await vi.waitFor(() => expect(stubLog(cwd).some((entry) => entry.event === 'agent_settled')).toBe(true), { timeout: 10_000 })
+      expect(commandsIn(cwd)).toEqual(['prompt', 'steer'])
+      await sleep(300)
+      t.controller.abort()
+      const result = await pending
+      expect(result.aborted).toBe(true)
+      expect(h.record.returned).toEqual(['a note from an agent'])
+      expect(h.record.accepted).toEqual([])
+    }, 30_000)
+
     it('a person’s steer that cuts answers every question pending on the thread, Mousse’s own as well as Pi’s', async () => {
       const { engine, project } = setup()
       const cwd = project('p', { onPrompt: 'script', runs: [[{ forever: true }], [{ text: 'answered' }]] })
