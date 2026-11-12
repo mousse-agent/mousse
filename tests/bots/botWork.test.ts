@@ -780,6 +780,20 @@ describe('long work', () => {
       expect(f.store.dispatches(workId)).toHaveLength(1)
     })
 
+    it('the card says it carries the work on only when this answer really did', async () => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      // As an older build left it: the work failed with its limit ask still open.
+      f.store.moveActivation(workId, ['blocked'], 'failed', { endReason: 'budget_exhausted' })
+      expect(chatOf(f, botId).find((row) => row.ask?.askId === askId)!.ask!.carriesOn).toBeUndefined()
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.dispatches(workId)).toHaveLength(1)
+      const card = chatOf(f, botId).find((row) => row.ask?.askId === askId)!.ask!
+      expect(card).toMatchObject({ status: 'allowed' })
+      expect(card.carriesOn).toBeUndefined()
+    })
+
     it('a scheduled run that runs out of room ends as before: failed, with an ask for later runs', async () => {
       const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
       const { prepared } = await start(f, activation.id)

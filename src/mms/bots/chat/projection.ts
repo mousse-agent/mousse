@@ -42,11 +42,6 @@ function cardStatus(status: BotEscalationStatus): BotAskStatus {
   return 'withdrawn'
 }
 
-/** Whether a limit ask's activation is work the owner asked for that its Allow goes on with (not work they stopped). */
-function carriesOn(row: BotActivationRow | undefined): boolean {
-  return row?.trigger.kind === 'work' && row.status !== 'cancelled'
-}
-
 /** Whether a run activation still runs, waits at a wall, or waits to go on: whatever it was allowed reaches it. */
 function stillWorking(row: BotActivationRow): boolean {
   return row.status === 'running' || row.status === 'waiting_grant' || workWaits(row)
@@ -211,11 +206,45 @@ export class BotChatProjection {
       note: text.note,
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
-      // A limit that work the owner asked for waits on (it took the ask over): Allow carries that work on now, unless the
-      // owner stopped it meanwhile.
-      ...('budget' in escalation.permission && escalation.mode === 'ask' && carriesOn(this.store.activation(escalation.activationId)) ? { carriesOn: true as const } : {}),
+      ...this.limitOutcome(escalation),
       ...this.permissionOutcome(escalation)
     }
+  }
+
+  /**
+   * A limit that work the owner asked for waits on (its own ask, or a card its notice carries): open, Allow would carry
+   * that work on while some of it still waits; allowed, it says so only for work this answer really carried on (waiting
+   * its turn, or gone on since). Work that ended without going on, or failed before this build, carries nothing on.
+   */
+  private limitOutcome(escalation: BotEscalationRow): { carriesOn?: true } {
+    if (!('budget' in escalation.permission)) return {}
+    const linked = this.waitingOnAsk(escalation)
+    if (escalation.status === 'open') return linked.some(({ row }) => workWaits(row) && row.endReason === 'budget_exhausted') ? { carriesOn: true } : {}
+    if (escalation.status !== 'allowed_bot' && escalation.status !== 'allowed_once') return {}
+    const answered = Date.parse(escalation.answeredAt ?? this.store.now())
+    const carried = linked.filter(({ row, n }) => (row.endReason === 'room_allowed' && workWaits(row)) ||
+      this.store.dispatches(row.id).some((dispatch) => dispatch.kind === 'continue' && dispatch.n > n && (dispatch.startedAt === null || dispatch.startedAt >= answered)))
+    return carried.length ? { carriesOn: true } : {}
+  }
+
+  /**
+   * The work that waited on a limit ask, with the dispatch it ran out in: the work that owns it and every work whose
+   * notice carries its card.
+   */
+  private waitingOnAsk(escalation: BotEscalationRow): Array<{ row: BotActivationRow; n: number }> {
+    const found = new Map<string, number>()
+    const owner = this.store.activation(escalation.activationId)
+    if (owner?.lane === 'run' && owner.trigger.kind === 'work') found.set(owner.id, escalation.dispatchN)
+    for (const message of this.store.messagesForAsk(escalation.id)) {
+      const row = message.activationId ? this.store.activation(message.activationId) : undefined
+      if (row?.lane !== 'run' || row.trigger.kind !== 'work') continue
+      const n = Number(/_d(\d+)$/.exec(message.id)?.[1] ?? 0)
+      found.set(row.id, Math.max(found.get(row.id) ?? 0, n))
+    }
+    return [...found].flatMap(([id, n]) => {
+      const row = this.store.activation(id)
+      return row ? [{ row, n }] : []
+    })
   }
 
   /**
