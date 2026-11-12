@@ -9,6 +9,7 @@ import { getDefaultSettings, type MousseSettings, type SettingsOptions } from '.
 import { isIntegrationItemOn } from '../src/renderer/components/integrations/itemState'
 import { groupMcpServers, groupSkills, OtherAppsGroup } from '../src/renderer/components/integrations/otherAppsGroup'
 import { RelayAvailability, SkillsMcpSettings } from '../src/renderer/components/settings/SkillsMcpSettings'
+import { SETTINGS_SEARCH_INDEX, searchSettings } from '../src/renderer/lib/settingsSearch'
 import { IsolatedIntegrationPlatformClient } from './fixtures/agent-platform/integration-editor-client'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -31,7 +32,7 @@ function render(settings: MousseSettings) {
 describe('Skills & MCP settings', () => {
   it('shows one page without registry switches, config files or status dots', () => {
     const html = render(getDefaultSettings())
-    for (const text of ['Skills', 'MCP servers', 'Web search', 'Exa', 'Parallel', 'Advanced', 'Available to main agent', 'Available to agents', 'Project one']) expect(html).toContain(text)
+    for (const text of ['Skills', 'MCP servers', 'Web search', 'Exa', 'Parallel', 'Who can use them', 'Share MCP servers', 'Built-in tools', 'Project one']) expect(html).toContain(text)
     for (const text of ['MCP registry', 'Skills registry', 'Config files', 'Expose to orchestrator', 'integration-status-dot', 'integration-card']) expect(html).not.toContain(text)
   })
 
@@ -122,7 +123,7 @@ describe('Skills & MCP settings', () => {
 
   it('shares the MCP servers with every other runtime by default', () => {
     const html = render(getDefaultSettings())
-    expect(html).toContain('Let other agents use your MCP servers')
+    expect(html).toContain('Other agents reach the servers that are on through Mousse.')
     // Where the tools come from, and why they can show twice, is one Details away.
     expect(html).toMatch(/<button[^>]*class="settings-more-btn"[^>]*aria-expanded="false"[^>]*>Details<\/button><span[^>]*hidden=""[^>]*>[^<]*mousse-relay[^<]*appear twice/)
     for (const label of ['Claude Code', 'Codex', 'Cursor', 'ACP agents', 'Antigravity', 'Grok']) expect(html).toContain(`Share MCP servers with ${label}`)
@@ -168,8 +169,12 @@ describe('Skills & MCP settings', () => {
     const mcp = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="MCP servers available to Claude Code"]')!
     expect(skills.getAttribute('aria-checked')).toBe('true')
     expect(mcp.getAttribute('aria-checked')).toBe('false')
-    expect(host.querySelector(`label[for="${skills.id}"]`)?.textContent).toBe('Skills')
-    expect(host.querySelector(`label[for="${mcp.id}"]`)?.textContent).toBe('MCP servers')
+    // One row per agent: its name, then the two switches under the Skills and MCP column labels.
+    const row = skills.closest('.settings-item')!
+    expect(row.querySelector('.settings-item-title')?.textContent).toBe('Claude Code')
+    expect(mcp.closest('.settings-item')).toBe(row)
+    expect(host.querySelector('.skills-mcp-access-labels')?.textContent).toBe('SkillsMCP')
+    expect(host.querySelectorAll('.skills-mcp-access-group .settings-item')).toHaveLength(1 + options.agentTypes.length)
     expect(host.querySelector('[aria-pressed]')).toBeNull()
     await act(async () => { mcp.click() })
     expect(onUpdate).toHaveBeenCalledWith({ integrations: { mcp: { enableForAgents: { 'claude-code': true } } } })
@@ -187,5 +192,66 @@ describe('Skills & MCP settings', () => {
       expect(control).toContain('disabled=""')
       expect(control).toContain('aria-checked="false"')
     }
+  })
+
+  it('folds Advanced into three folds, with a count on each closed tool group and the web tools under Web search', () => {
+    const settings = getDefaultSettings()
+    settings.integrations.tools.enabled = true
+    settings.integrations.tools.enabledTools = ['read', 'bash']
+    const html = render(settings)
+    expect(html).not.toContain('>Advanced<')
+    const folds = [...html.matchAll(/<details class="settings-fold( sub)?[^"]*"><summary data-settings-anchor="([^"]+)"/g)].map((match) => match[2])
+    expect(folds.slice(0, 3)).toEqual(['integrations-access', 'integrations-share', 'integrations-tools'])
+    expect(folds).toContain('integrations-tools-project')
+    expect(folds).not.toContain('integrations-tools-web')
+    const total = MOUSSE_BUILTIN_TOOLS.filter((tool) => tool.group === 'project').length
+    expect(html).toContain(`<span class="settings-fold-count">2 of ${total} on</span>`)
+    // web_search and web_fetch sit in the Web search group, after the keys, and nowhere else.
+    const web = html.slice(html.indexOf('data-settings-anchor="integrations-web-search"'), html.indexOf('data-settings-anchor="integrations-access"'))
+    for (const id of ['web_search', 'web_fetch']) {
+      expect(web).toContain(`id="builtin-tool-${id}"`)
+      expect(html.match(new RegExp(`id="builtin-tool-${id}"`, 'g'))).toHaveLength(1)
+    }
+    expect(web.indexOf('web-search-key-parallel')).toBeLessThan(web.indexOf('builtin-tool-web_search'))
+  })
+
+  it('turns a web tool on from the Web search group and turns the tools gate back on', async () => {
+    const settings = getDefaultSettings()
+    settings.integrations.tools.enabled = false
+    settings.integrations.tools.enabledTools = ['read']
+    const onUpdate = vi.fn(async () => {})
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      webTools: { getCredentialStatus: async () => ({ exa: false, parallel: false }) },
+      settings: { get: async () => settings }
+    }
+    const host = document.createElement('div')
+    const root = createRoot(host)
+    await act(async () => {
+      root.render(createElement(SkillsMcpSettings, {
+        client: new IsolatedIntegrationPlatformClient(), profileId: 'profile-a', projects: [], onProjectChange: () => {}, settings, options, onUpdate
+      }))
+    })
+    const fetch = host.querySelector<HTMLButtonElement>('#builtin-tool-web_fetch')!
+    expect(fetch.getAttribute('aria-checked')).toBe('false')
+    await act(async () => { fetch.click() })
+    expect(onUpdate).toHaveBeenCalledWith({ integrations: { tools: { enabled: true, enabledTools: ['read', 'web_fetch'] } } })
+    act(() => root.unmount())
+  })
+
+  it('lands a search for a tool, a fold or a web search key on its place on the page', () => {
+    const html = render(getDefaultSettings())
+    for (const entry of SETTINGS_SEARCH_INDEX.filter((item) => item.section === 'integrations' && item.anchor !== 'integrations-skills' && item.anchor !== 'integrations-mcp')) {
+      expect(html, entry.anchor).toContain(`data-settings-anchor="${entry.anchor}"`)
+    }
+    const pages = [{ id: 'integrations' as const, label: 'Skills & MCP', keywords: [] }]
+    const first = (query: string) => searchSettings(query, pages)[0]?.anchor
+    expect(first('bash')).toBe('integrations-tools-project')
+    expect(first('edit')).toBe('integrations-tools-project')
+    expect(first('browser')).toBe('integrations-tools-browser')
+    expect(first('web fetch')).toBe('integrations-tool-web-fetch')
+    expect(first('exa')).toBe('integrations-web-exa')
+    expect(first('parallel')).toBe('integrations-web-parallel')
+    expect(first('who can use')).toBe('integrations-access')
+    expect(first('relay')).toBe('integrations-share')
   })
 })
