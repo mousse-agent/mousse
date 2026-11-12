@@ -157,3 +157,68 @@ describe('a command', () => {
     expect(text()).toContain('Approved')
   })
 })
+
+describe('a failure the agent got past', () => {
+  const failedCommand = { type: 'tool-Bash', toolCallId: 'b1', state: 'output-error', input: { command: 'ls build' }, output: { stdout: 'ls: build: No such file or directory', exitCode: 1 } }
+  const danger = () => host.querySelectorAll('.text-\\[var\\(--danger\\)\\]')
+
+  it('only dims its icon toward red and adds a small ×; the label stays grey, with no red exit code', () => {
+    render({ ...failedCommand, failureRecovered: true })
+    const toggle = host.querySelector('button[aria-expanded]')!
+    expect(rowIcon()!.getAttribute('data-state')).toBe('recovered')
+    expect(toggle.querySelector('.an-tool-failed-mark')?.textContent).toBe('×')
+    expect(toggle.textContent).toBe('Failedls build×')
+    expect(danger()).toHaveLength(0)
+    act(() => (toggle as HTMLButtonElement).click())
+    // Opened, the output still ends on its red exit line.
+    expect(host.querySelector('.an-bash-exit .text-\\[var\\(--danger\\)\\]')?.textContent).toBe('exit 1')
+  })
+
+  it('keeps any other tool quiet the same way', () => {
+    render({ type: 'tool-Read', toolCallId: 'r1', state: 'output-error', input: { file_path: 'config.json' }, failureRecovered: true })
+    expect(rowIcon()!.getAttribute('data-state')).toBe('recovered')
+    expect(text()).toContain('Failed Read')
+    expect(host.querySelector('.an-tool-failed-mark')).not.toBeNull()
+    expect(danger()).toHaveLength(0)
+  })
+
+  it('stays clearly red when the failure ended the turn', () => {
+    render(failedCommand)
+    expect(rowIcon()!.getAttribute('data-state')).toBe('failed')
+    expect(host.querySelector('.an-tool-failed-mark')).toBeNull()
+    expect([...danger()].map((node) => node.textContent)).toEqual(['Failed', 'exit 1'])
+  })
+
+  it('dims the icon in the danger colour, lighter than a failure that ended the turn', async () => {
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-icon.css', 'utf8')
+    expect(css).toMatch(/\.an-tool-icon\[data-state='recovered'\] \{\s*color: color-mix\(in srgb, var\(--danger\) 55%, transparent\);/)
+  })
+})
+
+describe('the time of a work row', () => {
+  const at = '2026-11-12T14:13:00'
+
+  it('is on the row, at its right edge, from the time the call started', () => {
+    render({ type: 'tool-Bash', toolCallId: 'b1', state: 'output-available', input: { command: 'npm test' }, output: { stdout: 'ok', exitCode: 0 }, createdAt: at })
+    const time = host.querySelector('button[aria-expanded] .an-tool-row-line > .an-tool-row-time')!
+    expect(time.textContent).toBe('2:13 PM')
+    expect(time.getAttribute('dateTime')).toBe(new Date(at).toISOString())
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click())
+    expect(host.querySelectorAll('.an-tool-row-time')).toHaveLength(1)
+  })
+
+  it('shows on any row kind, and not at all without a start time', () => {
+    render({ type: 'tool-Read', toolCallId: 'r1', state: 'output-available', input: { file_path: 'a.ts' }, createdAt: at })
+    expect(host.querySelector('.an-tool-row-time')?.textContent).toBe('2:13 PM')
+    render({ type: 'tool-Read', toolCallId: 'r1', state: 'output-available', input: { file_path: 'a.ts' } })
+    expect(host.querySelector('.an-tool-row-time')).toBeNull()
+  })
+
+  it('fades in on hover or keyboard focus, in quiet meta text', async () => {
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-icon.css', 'utf8')
+    expect(css).toMatch(/\.an-tool-row-time \{[^}]*margin-left: auto;[^}]*font-size: 12px;[^}]*opacity: 0;[^}]*transition: opacity/)
+    expect(css).toMatch(/\.an-tool-row-line:hover \.an-tool-row-time,\s*:focus-visible > \.an-tool-row-line \.an-tool-row-time/)
+  })
+})
