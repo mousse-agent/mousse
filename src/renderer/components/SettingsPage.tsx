@@ -338,12 +338,16 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   )
 
   const [navQuery, setNavQuery] = useState('')
+  /** A page's own filter, filled in by a search result for one of its rows (a shortcut); `seq` starts it afresh. */
+  const [pageFilter, setPageFilter] = useState<{ text: string; seq: number }>({ text: '', seq: 0 })
   const searchRef = useRef<HTMLInputElement>(null)
   /** Opens a page, then brings `anchor` (a search result's setting) into view and focuses it. */
-  const goToSection = (id: SettingsSectionId, anchor?: string) => {
+  const goToSection = (id: SettingsSectionId, anchor?: string, filter?: string) => {
     const arrive = () => {
       setActiveSection(id)
       setAnchorNote(null)
+      // A result for a filtered row fills the page's filter; any other arrival opens the page unfiltered.
+      setPageFilter((current) => (filter !== undefined ? { text: filter, seq: current.seq + 1 } : current.text ? { text: '', seq: current.seq + 1 } : current))
       if (anchor) setPendingAnchor({ anchor, seq: ++anchorSeq.current })
     }
     // Only the integrations editors hold unsaved drafts; ask before leaving that section.
@@ -353,7 +357,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     }
     void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) arrive() })
   }
-  const openResult = (result: SettingsSearchResult) => goToSection(result.section, result.anchor)
+  const openResult = (result: SettingsSearchResult) => goToSection(result.section, result.anchor, result.filter)
   const reviewPending = useStorageReviewPending()
   const searching = navQuery.trim() !== ''
   const results = useMemo(() => searchSettings(navQuery, searchPages(mousseId), searchIndex(mousseId)), [navQuery, mousseId])
@@ -532,7 +536,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         </section>
           )}
 
-          {activeSection === 'shortcuts' && <ShortcutsSettings settings={settings} onUpdate={updateSettings} />}
+          {activeSection === 'shortcuts' && <ShortcutsSettings key={pageFilter.seq} initialQuery={pageFilter.text} settings={settings} onUpdate={updateSettings} />}
 
           {activeSection === 'labs' && <LabsSettings settings={settings} onUpdate={updateSettings} />}
 

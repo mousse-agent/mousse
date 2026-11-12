@@ -186,6 +186,22 @@ describe('the list', () => {
     expect(groups.map((group) => group.category)).toEqual([...new Set(COMMANDS.map((command) => command.category))])
   })
 
+  it('lists Go, Threads and Composer first, with the composer keys together and Back and Forward after the palette', () => {
+    const groups = shortcutGroups('', {}, WIN)
+    expect(groups.map((group) => group.category)).toEqual(['Go', 'Threads', 'Composer', 'View', 'Surfaces', 'Model picker', 'Workflow editor', 'Editor'])
+    const rows = (category: string) => groups.find((group) => group.category === category)!.rows.map((row) => row.command.id)
+    expect(rows('Go').slice(0, 3)).toEqual(['palette.open', 'thread.back', 'thread.forward'])
+    expect(rows('Composer')).toEqual(['composer.focus', 'composer.steer', 'composer.switchSendMode', 'run.stop', 'approval.allow', 'approval.deny'])
+    expect(rows('Threads')).toHaveLength(10)
+  })
+
+  it('keeps who runs on a shared chord: the table order, not the listing order, decides', () => {
+    // Focus composer now lists before Open terminal, but a custom Ctrl+J kept with both still opens the terminal.
+    const overrides: ShortcutOverrides = { 'composer.focus': 'CommandOrControl+J' }
+    expect(shadowedBy(overrides, WIN).get('composer.focus')).toBe('terminal.open')
+    expect(COMMANDS.findIndex((command) => command.id === 'terminal.open')).toBeLessThan(COMMANDS.findIndex((command) => command.id === 'composer.focus'))
+  })
+
   it('formats the current binding and marks a custom one', () => {
     const rows = shortcutGroups('', { 'thread.new': 'CommandOrControl+Shift+X', 'thread.next': null }, WIN).flatMap((group) => group.rows)
     const byId = (id: string) => rows.find((row) => row.command.id === id)!
