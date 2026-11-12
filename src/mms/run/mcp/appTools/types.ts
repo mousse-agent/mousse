@@ -225,6 +225,12 @@ export interface MousseTool {
   /** Callable in process only and never listed (older names kept for replayed transcripts). */
   hidden?: boolean
   /**
+   * Listed fully loaded (`_meta['anthropic/alwaysLoad']`): Claude Code then sends its whole
+   * definition on every turn instead of deferring it behind tool search. Only for a tool the model
+   * must reach without searching (the bot's `memory_save`); every other tool stays deferred.
+   */
+  alwaysLoad?: true
+  /**
    * The call waits for the user: an approval (a quick action) or a question (`ask_user`). A run
    * whose approvals are `never` refuses it before the handler runs.
    */

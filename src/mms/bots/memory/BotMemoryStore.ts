@@ -397,6 +397,24 @@ export class BotMemoryStore {
     return this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'owner_msg' ORDER BY seq DESC LIMIT ?", botId, input.limit).map(journalRowOf)
   }
 
+  /**
+   * One activation's owner messages after `afterSeq`, oldest first, and whether that activation
+   * tried a `memory_save` or saved anything after it: what the missed-wish fallback reads.
+   */
+  activationSince(botId: string, activationId: string, afterSeq: number): { owner: BotJournalRow[]; saved: boolean } {
+    const owner = this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND activation_id = ? AND kind = 'owner_msg' AND seq > ? AND redacted_at IS NULL ORDER BY seq LIMIT 20",
+      botId, activationId, afterSeq).map(journalRowOf)
+    const saved = this.get(`SELECT 1 FROM bot_journal WHERE bot_id = ? AND activation_id = ? AND seq > ? AND (
+      (kind = 'tool_call' AND json_extract(json, '$.tool') = 'memory_save') OR (kind = 'memory_op' AND json_extract(json, '$.op') = 'save')) LIMIT 1`,
+    botId, activationId, afterSeq) !== undefined
+    return { owner, saved }
+  }
+
+  /** The bot's latest journal seq (0 without rows). */
+  lastSeq(botId: string): number {
+    return num(this.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM bot_journal WHERE bot_id = ?', botId)?.seq) ?? 0
+  }
+
   lastOfKind(botId: string, kind: BotJournalKind): BotJournalRow | undefined {
     const row = this.get('SELECT * FROM bot_journal WHERE bot_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1', botId, kind)
     return row ? journalRowOf(row) : undefined

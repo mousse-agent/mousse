@@ -7,6 +7,7 @@ import {
   estimateTokens
 } from '../../../shared/bots/personal/memory'
 import type { BotContextProvider, BotJournal } from '../seams'
+import { saveMissedWishes } from './standingWish'
 import { BotJournalError, type BotJournalRow, type BotMemoryStore } from './BotMemoryStore'
 import { guardPackText } from './guard'
 import { type ChatSummaryState, firstLine, foldChatSummary, packText, speaker, withinBudget } from './chatSummary'
@@ -202,6 +203,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     afterDispatch: async (e) => {
       await options.journal.syncThread({ botId: e.botId, threadId: e.threadId, lane: e.lane, activationId: e.activationId })
       guarded(() => {
+        // A standing wish the turn never saved is kept before the window moves past it.
+        if (e.lane === 'chat' && e.endedBy === 'settled') saveMissedWishes(store, e.botId, e.activationId)
         if (e.lane === 'chat') moveWindow(e.botId)
         store.expireMemories(e.botId)
       })
