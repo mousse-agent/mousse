@@ -24,6 +24,8 @@ type Send = {
   reject(error: Error): void
   signal?: AbortSignal
   abort?: () => void
+  stop?: AbortSignal
+  withdraw?: () => void
 }
 type Receive = { id: number; chunks: Buffer[]; size: number; timer?: Timer }
 type LaneState = {
@@ -91,6 +93,8 @@ export class StreamMux implements Mux {
       return Promise.reject(this.closeError ?? new NetError('route_unreachable', 'Mux is closed.'))
     if (signal?.aborted)
       return Promise.reject(new NetError('cancelled', undefined, { cause: signal.reason }))
+    if (options.stop?.aborted)
+      return Promise.reject(new NetError('cancelled', undefined, { cause: options.stop.reason }))
     if (!this.lanes[lane] || laneFor(message.header) !== lane)
       return Promise.reject(new NetError('bad_request', 'Message sent on wrong lane.'))
     let bytes: Uint8Array
@@ -109,42 +113,44 @@ export class StreamMux implements Mux {
     )
       return Promise.reject(new NetError('rate_limited', 'Mux waiting queue is full.'))
     return new Promise((resolve, reject) => {
-      const send: Send = { bytes, offset: 0, resolve, reject, signal }
-      const abort = () => {
-        if (state.active === send && send.offset > 0 && options.finishStarted) {
-          // The rest of a started message is written as it would have been; it was whole and checked
-          // when the caller built it. Nothing after it is affected, and the connection stays up.
-          send.abort = undefined
-          return
-        }
-        if (state.active === send && send.offset > 0) {
-          const cancelled = new NetError('cancelled', 'A fragmented send was cancelled.', {
-            cause: signal?.reason
-          })
-          state.active = undefined
-          this.finish(send, cancelled)
-          // The operation is cancelled; the unusable connection is a retryable interruption.
-          this.close(
-            new NetError('route_unreachable', 'Cancelled partial message requires reconnect.', {
-              cause: cancelled
-            })
-          )
-          return
-        }
+      const send: Send = { bytes, offset: 0, resolve, reject, signal, stop: options.stop }
+      /** Takes the message out before its first byte is written; false once it has started. */
+      const withdraw = (reason: unknown): boolean => {
         if (state.active === send) {
+          if (send.offset > 0) return false
           state.active = undefined
           this.promote(state)
         } else {
           const index = state.waiting.indexOf(send)
-          if (index < 0) return
+          // Already written in full.
+          if (index < 0) return true
           state.waiting.splice(index, 1)
           state.waitingBytes -= send.bytes.length
         }
-        this.finish(send, new NetError('cancelled', undefined, { cause: signal?.reason }))
+        this.finish(send, new NetError('cancelled', undefined, { cause: reason }))
         this.schedule()
+        return true
       }
+      const abort = () => {
+        if (withdraw(signal?.reason)) return
+        const cancelled = new NetError('cancelled', 'A fragmented send was cancelled.', {
+          cause: signal?.reason
+        })
+        state.active = undefined
+        this.finish(send, cancelled)
+        // The operation is cancelled; the unusable connection is a retryable interruption.
+        this.close(
+          new NetError('route_unreachable', 'Cancelled partial message requires reconnect.', {
+            cause: cancelled
+          })
+        )
+      }
+      // A started message finishes: its bytes were whole and checked when the caller built it.
+      const stop = () => void withdraw(options.stop?.reason)
       send.abort = abort
+      send.withdraw = stop
       signal?.addEventListener('abort', abort, { once: true })
+      options.stop?.addEventListener('abort', stop, { once: true })
       if (!state.active) state.active = send
       else {
         if (urgent) state.waiting.unshift(send)
@@ -204,6 +210,7 @@ export class StreamMux implements Mux {
   }
   private finish(send: Send, error?: Error): void {
     if (send.abort) send.signal?.removeEventListener('abort', send.abort)
+    if (send.withdraw) send.stop?.removeEventListener('abort', send.withdraw)
     error ? send.reject(error) : send.resolve()
   }
   private promote(state: LaneState): void {

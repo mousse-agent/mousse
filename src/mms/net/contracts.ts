@@ -673,20 +673,20 @@ export interface MuxMessage {
   parts: Uint8Array[]
 }
 
+export interface MuxSendOptions {
+  /**
+   * A softer cancel than `signal`. When it aborts, a message not yet started is withdrawn at once, and one
+   * whose first bytes are already written is finished, so the connection stays up. The caller checks it
+   * afterwards and starts nothing new. `signal` still closes the connection when it aborts a started
+   * message, since the peer cannot resynchronize after half a message.
+   */
+  stop?: AbortSignal
+}
+
 /**
  * Three lanes (control, bulk, tunnel) with independent credit windows. Control is always scheduled first;
  * bulk and tunnel take turns.
  */
-export interface MuxSendOptions {
-  /**
-   * What an abort does to a message whose first bytes are already written. By default the connection
-   * closes, since the peer cannot resynchronize after half a message. With `finishStarted` the rest of that
-   * message is written and the send resolves, so the connection stays up; a message not yet started is
-   * still withdrawn at once. The caller checks its own signal afterwards and starts nothing new.
-   */
-  finishStarted?: boolean
-}
-
 export interface Mux {
   send(
     lane: Lane,

@@ -237,8 +237,14 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   private livePublishing = new Map<StreamId, LiveQueue>()
   private snapshotJobs = new Map<
     StreamId,
-    { controller: AbortController; reader: SnapshotReader }
+    { controller: AbortController; reader: SnapshotReader; sending?: Promise<void> }
   >()
+  /**
+   * A snapshot chunk still being written after its transfer was stopped, per stream. A new subscription
+   * of the stream is answered only once it has gone out, so the reader never takes it for the start of
+   * the new transfer.
+   */
+  private finishing = new Map<StreamId, Promise<void>>()
   private sendingUploads = new Map<BlobId, { stream: StreamId; controller: AbortController }>()
   private blobJobs = new Map<BlobId, { stream: StreamId; controller: AbortController }>()
   private snapshotWaiting = new Set<StreamId>()
@@ -292,6 +298,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         ]
       )
     ].filter((cap) => cap !== 'presence.v1' || !!options.verifyPresence)
+    if (this.localCaps.includes('streams.v1')) this.localCaps.push('snapshot.stale.v1')
     this.opened = new Promise((resolve, reject) => {
       this.openResolve = resolve
       this.openReject = reject
@@ -721,7 +728,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       this.authorizedRead(stream)
     } catch (error) {
       if (!this.readLost(error)) throw error
-      void this.failServingStream(stream, 'forbidden').catch((cause) => this.fail(cause))
+      void this.failServingStream(stream, 'forbidden').catch((cause) => this.failCarrier(cause))
       return
     }
     // One delta per session is written at a time, so deltas never hold more than one message in
@@ -749,7 +756,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         this.authorizedRead(next.stream)
       } catch (error) {
         if (this.readLost(error))
-          void this.failServingStream(next.stream, 'forbidden').catch((cause) => this.fail(cause))
+          void this.failServingStream(next.stream, 'forbidden').catch((cause) =>
+            this.failCarrier(cause)
+          )
         continue
       }
       this.deltaSending = true
@@ -803,13 +812,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       attempt.cancelled = true
       // A resync request refused by a full carrier is a carrier failure, so a supervised peer
       // reconnects; other errors keep their code.
-      return this.resyncLagging(stream).catch((error) =>
-        this.fail(
-          error instanceof NetError && error.code === 'rate_limited'
-            ? new NetError('route_unreachable', 'Resync request rejected.', { cause: error })
-            : error
-        )
-      )
+      return this.resyncLagging(stream).catch((error) => this.failCarrier(error))
     }
     const controller = new AbortController()
     // One live record per stream at a time: a burst (a refreshed display snapshot is dozens of
@@ -874,6 +877,17 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   }
 
   /**
+   * A per-stream answer (a resync request, a `forbidden`) refused by a full carrier is a carrier failure,
+   * so a supervised peer reconnects; other errors keep their code.
+   */
+  private failCarrier(error: unknown): void {
+    this.fail(
+      error instanceof NetError && error.code === 'rate_limited'
+        ? new NetError('route_unreachable', 'Stream answer rejected.', { cause: error })
+        : error
+    )
+  }
+  /**
    * Sends a lagging live subscriber back to a snapshot, if it may still read the stream. One that lost
    * the right ends with `forbidden` instead, and never learns the head.
    */
@@ -898,6 +912,31 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     await this.send({ t: 'error', re: stream, error: wireError(new NetError(code)) })
   }
 
+  /**
+   * Waits for a stopped snapshot chunk of `stream` that is still being written, so everything that
+   * answers a new request for the stream goes out after it. False when the session closed meanwhile.
+   */
+  private async afterFinishing(stream: StreamId): Promise<boolean> {
+    const finishing = this.finishing.get(stream)
+    if (!finishing) return true
+    await finishing
+    return this.currentState === 'open'
+  }
+  /**
+   * Answers a request for a stream the peer may not read with `forbidden` on that stream, the same
+   * answer a block gets, and keeps the connection up. A subscription it still holds there ends with it.
+   */
+  private async refuseUnreadable(stream: StreamId): Promise<boolean> {
+    try {
+      this.authorizedRead(stream)
+      return false
+    } catch (error) {
+      if (!this.readLost(error)) throw error
+    }
+    if (this.serving.has(stream)) await this.failServingStream(stream, 'forbidden')
+    else await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
+    return true
+  }
   /** Answers a request for a stream the peer is blocked from with `forbidden`, on that stream only. */
   private async refuseBlocked(stream: StreamId): Promise<boolean> {
     if (!this.options.isStreamBlocked?.(stream, this.peer)) return false
@@ -1151,7 +1190,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         return // Hint only. Independently verified roster controls teardown.
       case 'subscribe':
         this.requireCap('streams.v1')
+        if (!(await this.afterFinishing(h.stream))) return
         if (await this.refuseBlocked(h.stream)) return
+        if (await this.refuseUnreadable(h.stream)) return
         await this.serve(h.stream, h.after, signal)
         return
       case 'unsubscribe':
@@ -1179,7 +1220,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         return
       case 'snapshot.get':
         this.requireCap('streams.v1')
+        if (!(await this.afterFinishing(h.stream))) return
         if (await this.refuseBlocked(h.stream)) return
+        if (await this.refuseUnreadable(h.stream)) return
         await this.serveSnapshot(h.stream, signal)
         return
       case 'snapshot.chunk':
@@ -1747,6 +1790,15 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     this.snapshotJobs.delete(stream)
     job.controller.abort()
     job.reader.close()
+    if (!job.sending) return
+    const settled = job.sending.then(
+      () => undefined,
+      () => undefined
+    )
+    this.finishing.set(stream, settled)
+    void settled.then(() => {
+      if (this.finishing.get(stream) === settled) this.finishing.delete(stream)
+    })
   }
   private async serveSnapshot(stream: StreamId, signal?: AbortSignal): Promise<void> {
     this.authorizedRead(stream)
@@ -1755,11 +1807,15 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     if (this.snapshotJobs.size >= 8) throw new NetError('rate_limited')
     const reader = this.options.store.openSnapshot(stream),
       controller = new AbortController()
-    const job = { reader, controller }
+    const job: { reader: SnapshotReader; controller: AbortController; sending?: Promise<void> } = {
+      reader,
+      controller
+    }
     this.snapshotJobs.set(stream, job)
     // The subscription this transfer is for, if any.
     const attempt = this.serving.get(stream)
     const cancelled = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    const finishes = this.negotiatedCaps.includes('snapshot.stale.v1')
     try {
       let done = false
       // Cancellation (an unsubscribe, a block, a lost read right) is checked before each chunk. A chunk
@@ -1771,13 +1827,19 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         const page = reader.next(512 * 1024, 499)
         done = page.done
         if (!done && !page.records.length) throw new NetError('storage_corrupt')
-        await this.sendRecords(
+        // Only this transfer's own stop lets a started chunk finish, and only for a reader that ignores
+        // the chunk once it has let go. An archive or a closing session (`signal`) still stops a chunk
+        // part way and closes the connection, and so does any stop for an older reader, which would
+        // take the rest of the chunk as the start of its next snapshot.
+        job.sending = this.sendRecords(
           stream,
           page.records,
           true,
           { target: reader.target, done },
-          cancelled
+          finishes ? signal : cancelled,
+          finishes ? controller.signal : undefined
         )
+        await job.sending
       }
     } catch (error) {
       if (cancelled.aborted) return
@@ -1800,11 +1862,12 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     records: StoredRecord[],
     replay: boolean,
     snapshot?: { target: StreamHead; done: boolean },
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    stop?: AbortSignal
   ): Promise<void> {
     // A snapshot transfer stopped part way (an unsubscribe, a block, a lost read right) lets the message
     // already being written finish rather than close the connection; `serveSnapshot` starts no other.
-    const sending = snapshot ? { finishStarted: true } : undefined
+    const sending = stop ? { stop } : undefined
     // A fresh subscriber needs the original signed lease before historical events.
     const evidence = new Map<string, Signed>()
     for (const record of records) {

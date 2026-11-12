@@ -259,25 +259,54 @@ describe('real duplex mux', () => {
       cause: { code: 'cancelled' }
     })
   })
-  it('finishes a started message on abort with finishStarted, and withdraws one not started', async () => {
+  it('finishes a started message when its stop signal aborts, and withdraws one not started', async () => {
     const { a, b, connection } = pair()
     const received: string[] = []
     b.onMessage((_lane, delivered) => received.push(delivered.header.t))
     connection.forward.stall()
     const started = new AbortController(),
-      pending = a.send('bulk', message('bulk', 3), started.signal, { finishStarted: true })
+      pending = a.send('bulk', message('bulk', 3), undefined, { stop: started.signal })
     const waiting = new AbortController(),
       queued = a
-        .send('bulk', message('bulk', 1), waiting.signal, { finishStarted: true })
+        .send('bulk', message('bulk', 1), undefined, { stop: waiting.signal })
         .catch((error) => error)
     await tick()
     started.abort()
     waiting.abort()
     expect(await queued).toMatchObject({ code: 'cancelled' })
+    await expect(
+      a.send('bulk', message('bulk', 1), undefined, { stop: waiting.signal })
+    ).rejects.toMatchObject({ code: 'cancelled' })
     connection.forward.resume()
     await expect(pending).resolves.toBeUndefined()
     await expect(a.send('control', ping)).resolves.toBeUndefined()
     await vi.waitFor(() => expect(received).toEqual(['events', 'ping']))
+  })
+  it('still closes when the hard signal aborts a started message that has a stop signal', async () => {
+    const { a, connection } = pair()
+    connection.forward.stall()
+    const hard = new AbortController(),
+      stop = new AbortController(),
+      pending = a
+        .send('bulk', message('bulk', 3), hard.signal, { stop: stop.signal })
+        .catch((error) => error)
+    await tick()
+    stop.abort()
+    hard.abort()
+    expect(await pending).toMatchObject({ code: 'cancelled' })
+    await expect(a.send('control', ping)).rejects.toMatchObject({ code: 'route_unreachable' })
+  })
+  it('rejects a message still finishing after its stop when the mux closes', async () => {
+    const { a, connection } = pair()
+    connection.forward.stall()
+    const stop = new AbortController(),
+      pending = a
+        .send('bulk', message('bulk', 3), undefined, { stop: stop.signal })
+        .catch((error) => error)
+    await tick()
+    stop.abort()
+    a.close(new NetError('route_unreachable', 'gone'))
+    expect(await pending).toMatchObject({ code: 'route_unreachable' })
   })
   it('expires only when fragmented byte progress stalls, including partial headers', async () => {
     const clock = new FakeClock(),

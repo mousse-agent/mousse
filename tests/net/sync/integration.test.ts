@@ -229,6 +229,7 @@ function internals(session: NetSyncSession) {
   return session as unknown as {
     mux: { send: MuxSend; lanes: { bulk: { active?: { offset: number } } } }
     snapshotJobs: Map<string, unknown>
+    negotiatedCaps: string[]
     options: { authority: NodeStreamAuthority }
   }
 }
@@ -670,22 +671,153 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
     expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
   })
-  it('ends a snapshot on a block without closing the link or starting another chunk', async () => {
+  it.each(['slowed', 'stalled'] as const)(
+    'ends a snapshot on a block without closing the link or starting another chunk (%s link)',
+    async (link) => {
+      const p = await profiles()
+      // About three 512 KiB chunks.
+      appendLarge(p, 30, 40 * 1024)
+      const other = { ...p.stream, id: newId('stream') }
+      p.aStore.createStream(other, 1)
+      p.bStore.createStream(other, 1)
+      const connection = await sessions(p)
+      await Promise.all([connection.a.opened, connection.b.opened])
+      const errors: unknown[] = []
+      connection.a.onClosed((error) => errors.push(error))
+      connection.b.onClosed((error) => errors.push(error))
+      const owner = internals(connection.a)
+      const sent = vi.spyOn(owner.mux, 'send')
+      const chunks = () =>
+        sent.mock.calls.filter(([, message]) => message.header.t === 'snapshot.chunk').length
+      connection.pair.backward.slow(4 * 1024)
+      vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
+      const h = handlers()
+      connection.b.subscribe(p.stream.id, h)
+      await vi.waitFor(() => expect(owner.mux.lanes.bulk.active?.offset ?? 0).toBeGreaterThan(0), {
+        interval: 1,
+        timeout: 10_000
+      })
+      expect(chunks()).toBe(1)
+      if (link === 'stalled') connection.pair.backward.stall()
+      // The `forbidden` it sends waits for the link like everything else.
+      const ended = connection.a.endServing('forbidden')
+      if (link === 'stalled') {
+        // A reader that reads nothing for a while still gets no new chunk once the block is in.
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        expect(chunks()).toBe(1)
+        connection.pair.backward.resume()
+      }
+      await ended
+      await vi.waitFor(() => expect(h.onError).toHaveBeenCalledWith('forbidden'), {
+        timeout: 10_000
+      })
+      await vi.waitFor(() => expect(owner.mux.lanes.bulk.active).toBeUndefined(), {
+        interval: 1,
+        timeout: 10_000
+      })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      // The chunk under way finished; no other started after the block.
+      expect(chunks()).toBe(1)
+      expect(owner.snapshotJobs.size).toBe(0)
+      expect(errors).toEqual([])
+      expect(connection.a.state()).toBe('open')
+      expect(connection.b.state()).toBe('open')
+      expect(h.onError).toHaveBeenCalledOnce()
+      expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+      const next = handlers()
+      connection.b.subscribe(other.id, next)
+      await vi.waitFor(() => expect(next.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+    }
+  )
+  it.each([
+    ['the last chunk', 2],
+    ['an earlier chunk', 1]
+  ] as const)(
+    'installs the whole snapshot when the reader resubscribes while %s is being written',
+    async (_, index) => {
+      // 20 records of 40 KiB make two chunks (12 and 8 records).
+      const p = await profiles()
+      appendLarge(p, 20, 40 * 1024)
+      const connection = await sessions(p)
+      await Promise.all([connection.a.opened, connection.b.opened])
+      const errors: unknown[] = []
+      connection.a.onClosed((error) => errors.push(error))
+      connection.b.onClosed((error) => errors.push(error))
+      const owner = internals(connection.a)
+      const sent = vi.spyOn(owner.mux, 'send')
+      const chunks = () =>
+        sent.mock.calls.filter(([, message]) => message.header.t === 'snapshot.chunk').length
+      connection.pair.backward.slow(4 * 1024)
+      vi.spyOn(p.aStore, 'snapshotReason')
+        .mockReturnValueOnce('cursorTooOld')
+        .mockReturnValueOnce('cursorTooOld')
+      const first = handlers(),
+        subscription = connection.b.subscribe(p.stream.id, first)
+      await vi.waitFor(
+        () => {
+          expect(chunks()).toBe(index)
+          expect(owner.mux.lanes.bulk.active?.offset ?? 0).toBeGreaterThan(0)
+        },
+        { interval: 1, timeout: 10_000 }
+      )
+      // Let go and subscribe again while that chunk is still being written.
+      subscription.close()
+      const h = handlers()
+      connection.b.subscribe(p.stream.id, h)
+      await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 20_000 })
+      expect(h.onSnapshotInstalled).toHaveBeenCalledOnce()
+      expect(
+        p.bStore
+          .read(p.stream.id, { epoch: 1, seq: 0 }, 20, 4 * 1024 * 1024)
+          .records.map((record) => record.seq)
+      ).toEqual(Array.from({ length: 20 }, (_, i) => i + 1))
+      expect(h.onError).not.toHaveBeenCalled()
+      expect(first.onSnapshotInstalled).not.toHaveBeenCalled()
+      expect(errors).toEqual([])
+      expect(connection.a.state()).toBe('open')
+      expect(connection.b.state()).toBe('open')
+    }
+  )
+  it('still closes the link as before when a reader without snapshot.stale.v1 lets go during a chunk', async () => {
     const p = await profiles()
-    // About three 512 KiB chunks.
-    appendLarge(p, 30, 40 * 1024)
-    const other = { ...p.stream, id: newId('stream') }
-    p.aStore.createStream(other, 1)
-    p.bStore.createStream(other, 1)
+    appendLarge(p, 20, 40 * 1024)
     const connection = await sessions(p)
     await Promise.all([connection.a.opened, connection.b.opened])
-    const errors: unknown[] = []
-    connection.a.onClosed((error) => errors.push(error))
-    connection.b.onClosed((error) => errors.push(error))
     const owner = internals(connection.a)
+    owner.negotiatedCaps = owner.negotiatedCaps.filter((cap) => cap !== 'snapshot.stale.v1')
+    const closed: unknown[] = []
+    connection.a.onClosed((error) => closed.push(error))
     const sent = vi.spyOn(owner.mux, 'send')
     const chunks = () =>
       sent.mock.calls.filter(([, message]) => message.header.t === 'snapshot.chunk').length
+    connection.pair.backward.slow(4 * 1024)
+    vi.spyOn(p.aStore, 'snapshotReason')
+      .mockReturnValueOnce('cursorTooOld')
+      .mockReturnValueOnce('cursorTooOld')
+    const subscription = connection.b.subscribe(p.stream.id, handlers())
+    await vi.waitFor(
+      () => {
+        expect(chunks()).toBe(2)
+        expect(owner.mux.lanes.bulk.active?.offset ?? 0).toBeGreaterThan(0)
+      },
+      { interval: 1, timeout: 10_000 }
+    )
+    // An older reader would take the rest of the chunk as the start of its next snapshot, so the chunk
+    // stops part way and the connection closes, retryably, as before. The reader's store is untouched.
+    subscription.close()
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'), { timeout: 10_000 })
+    expect(closed).toEqual([expect.objectContaining({ code: 'route_unreachable' })])
+    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
+  })
+  it('stops a chunk part way when its space is archived, so the archive drains and the reader is not left waiting', async () => {
+    const p = await profiles()
+    appendLarge(p, 20, 40 * 1024)
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const owner = internals(connection.a)
     connection.pair.backward.slow(4 * 1024)
     vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
     const h = handlers()
@@ -694,25 +826,82 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
       interval: 1,
       timeout: 10_000
     })
-    expect(chunks()).toBe(1)
-    await connection.a.endServing('forbidden')
-    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledWith('forbidden'), { timeout: 10_000 })
-    await vi.waitFor(() => expect(owner.mux.lanes.bulk.active).toBeUndefined(), {
+    // A member that stops reading cannot hold the archive up.
+    connection.pair.backward.stall()
+    const space = 'spc_archive' as never
+    connection.a.cancelSpaceStreams(space, [p.stream.id])
+    const drained = await Promise.race([
+      Promise.allSettled(connection.a.archiveTasks(space, [p.stream.id])).then(() => 'drained'),
+      new Promise((resolve) => setTimeout(() => resolve('stuck'), 2_000))
+    ])
+    expect(drained).toBe('drained')
+    // The reader learns at once: its staged snapshot is dropped and it can reconnect.
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledOnce())
+    expect(connection.b.state()).toBe('closed')
+    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
+  })
+  it('closes at once on revocation while a stopped chunk is still being written', async () => {
+    const p = await profiles()
+    appendLarge(p, 30, 40 * 1024)
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const owner = internals(connection.a)
+    const received = vi.spyOn(
+      connection.b as unknown as { receive(message: { header: { t: string } }): Promise<void> },
+      'receive'
+    )
+    // About half a second to write the 512 KiB chunk.
+    connection.pair.backward.slow(1024)
+    vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
+    const subscription = connection.b.subscribe(p.stream.id, handlers())
+    await vi.waitFor(() => expect(owner.mux.lanes.bulk.active?.offset ?? 0).toBeGreaterThan(0), {
       interval: 1,
       timeout: 10_000
     })
+    subscription.close()
+    await vi.waitFor(() => expect(owner.snapshotJobs.size).toBe(0), { interval: 1 })
+    expect(owner.mux.lanes.bulk.active).toBeDefined()
+    const revoked = Date.now()
+    p.aIdentity.revoke(p.bIdentity.self()!.node)
+    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'), { interval: 1 })
+    expect(Date.now() - revoked).toBeLessThan(300)
+    await vi.waitFor(() => expect(connection.b.state()).toBe('closed'))
+    // The rest of the chunk never reached the reader.
+    expect(received.mock.calls.map(([message]) => message.header.t)).not.toContain('snapshot.chunk')
+  })
+  it('answers a new subscription of a stream it may no longer read with forbidden on that stream alone', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    vi.spyOn(internals(connection.a).options.authority, 'canRead').mockReturnValue(false)
+    const row = p.record(1)
+    p.aStore.appendAsAuthority(p.stream.id, {
+      id: JSON.parse(Buffer.from(row.envelope).toString()).id,
+      envelope: row.envelope,
+      sig: row.sig,
+      recvTs: row.recvTs
+    })
+    await connection.a.publishRecord(p.stream.id, row)
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledWith('forbidden'))
+    // The consumer subscribes again, as a supervisor does on every reconnect.
+    const again = handlers()
+    connection.b.subscribe(p.stream.id, again)
+    await vi.waitFor(() => expect(again.onError).toHaveBeenCalledWith('forbidden'))
+    const send = (connection.b as unknown as { send(message: unknown): Promise<void> }).send.bind(
+      connection.b
+    )
+    await send({ t: 'snapshot.get', stream: p.stream.id })
     await new Promise((resolve) => setTimeout(resolve, 100))
-    // The chunk under way finished; no other started after the block.
-    expect(chunks()).toBe(1)
-    expect(owner.snapshotJobs.size).toBe(0)
     expect(errors).toEqual([])
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
-    expect(h.onError).toHaveBeenCalledOnce()
-    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
-    const next = handlers()
-    connection.b.subscribe(other.id, next)
-    await vi.waitFor(() => expect(next.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
   })
   it('ends a caught-up stream with forbidden when its read right is gone at the next record', async () => {
     const p = await profiles(),
