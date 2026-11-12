@@ -39,6 +39,7 @@ let browser: BotBrowserView
 let calls: Array<[BotsBrowserMethod, Record<string, unknown>]>
 let pushes: Set<(event: BotBrowserFrameEvent) => void>
 let refuseWatch: unknown
+let hangWatch: Promise<void> | undefined
 const chatsInitial = useChatsStore.getInitialState()
 const botsInitial = useBotsStore.getInitialState()
 const browserInitial = useBotBrowserStore.getInitialState()
@@ -80,6 +81,7 @@ beforeEach(() => {
   calls = []
   pushes = new Set()
   refuseWatch = undefined
+  hangWatch = undefined
   browser = {
     open: true, control: 'bot', tab: { url: 'https://bank.example.com/statements', title: 'Statements' }, activations: ['act1'], activationId: 'act1',
     frame: FRAME, cursor: { x: 640, y: 180, action: 'click', at: Date.now(), viewport: { width: 1280, height: 720 } }
@@ -87,6 +89,7 @@ beforeEach(() => {
   setBotBrowserTransport((async <M extends BotsBrowserMethod>(method: M, params: BotsBrowserApi[M]['params']) => {
     calls.push([method, params as Record<string, unknown>])
     if (method === 'bots.browser.watch' && refuseWatch) throw refuseWatch
+    if (method === 'bots.browser.watch' && hangWatch) await hangWatch
     if (method === 'bots.browser.unwatch') return { ok: true }
     if (method === 'bots.browser.control') browser = { ...browser, control: (params as { control: 'owner' | 'bot' }).control }
     return { browser }
@@ -187,6 +190,14 @@ describe('the pictures pushed to the view', () => {
       expect(status()?.textContent).toMatch(/^Not updating/)
       refuseWatch = undefined
       await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+      expect(status()?.textContent).toBe('Live')
+      // A service that hangs (the renewal never answers) is not updating either, and recovers when it answers.
+      let answer: (() => void) | undefined
+      hangWatch = new Promise<void>((resolve) => { answer = resolve })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000 + 5_000) })
+      expect(status()?.textContent).toMatch(/^Not updating/)
+      hangWatch = undefined
+      await act(async () => { answer!(); await vi.advanceTimersByTimeAsync(0) })
       expect(status()?.textContent).toBe('Live')
     } finally {
       vi.useRealTimers()

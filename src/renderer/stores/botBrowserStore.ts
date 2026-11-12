@@ -34,6 +34,8 @@ const STATE_POLL_MS = 3000
 const RETRY_MS = 2000
 /** How long a watch outlives the last view that showed it (one moving in the chat keeps it). */
 export const STOP_GRACE_MS = 1000
+/** A renewal not answered within this long counts as the stream stopping (a service that hangs). */
+const RENEW_ANSWER_MS = 5000
 
 /** Whether pictures can arrive: live, or not updating since a time (ms since the epoch). */
 export type BotBrowserStream = { live: true } | { live: false; since: number }
@@ -228,14 +230,20 @@ function syncWatch(botId: string): void {
 async function renew(botId: string, watch: Watch): Promise<void> {
   if (watch.renew) clearTimeout(watch.renew)
   watch.renew = undefined
+  // A service that does not answer (it hangs, rather than fails) is not updating either.
+  const unanswered = setTimeout(() => {
+    if (!watch.stopped) setStream(botId, { live: false, since: lastGood.get(botId) ?? Date.now() })
+  }, RENEW_ANSWER_MS)
   try {
     const { browser } = await call('bots.browser.watch', { botId, watchId: watch.watchId, width: watch.width, fps: watch.fps })
+    clearTimeout(unanswered)
     if (watch.stopped) return
     put(botId, browser)
     setStream(botId, { live: true })
     watch.retryMs = RETRY_MS
     watch.renew = setTimeout(() => { void renew(botId, watch) }, BOT_BROWSER_WATCH_RENEW_MS)
   } catch (cause) {
+    clearTimeout(unanswered)
     if (watch.stopped) return
     if (missingMethod(cause)) {
       // An older daemon: it answers a picture each time it is asked.
