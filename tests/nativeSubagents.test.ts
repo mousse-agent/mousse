@@ -162,6 +162,9 @@ describe('a thread whose agent starts background agents', () => {
     const done = [user('u1', 0, 'List the kinds'), backgroundAgent('a1', 13, 'List the progress kinds', { summary: report, durationMs: 9_000 })]
     expect(collectNativeSubagentCards(mousseToUIMessages(done), false).get('a1')?.native?.result).toBe(report)
     await show(done, false)
+    // A finished turn folds its work behind its Worked line.
+    const worked = host.querySelector<HTMLButtonElement>('.turn-work-toggle')
+    if (worked?.getAttribute('aria-expanded') === 'false') await act(async () => worked.click())
     const node = host.querySelector('[data-native-subagent="a1"]')!
     expect(node.querySelector('.subagent-card-result')?.textContent).toBe('Progress kinds tool_running streaming compacting That is all.')
     await act(async () => node.querySelector<HTMLButtonElement>('button.subagent-card')!.click())
