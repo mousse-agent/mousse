@@ -373,7 +373,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             saveLaunch: (patch: CliProviderConfigPatch) => live().saveLaunch(patch),
             // The entry's telemetry switch, from its newest revision.
             telemetryEnv: () => live().env.enforced,
-            // An API-key entry pays per token: its prompt cache is never kept for an hour.
+            // An API-key entry pays per token: its prompt cache stays at 5 minutes unless the user keeps it for an hour.
             ...(onKey ? { paysPerToken: true } : {}),
             signInCommand,
             ...(credential ? credential.serviceOptions : {})

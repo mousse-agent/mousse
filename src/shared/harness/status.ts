@@ -114,9 +114,11 @@ export type CredentialKind = 'api_key' | 'subscription' | 'ambient' | 'unknown'
  * Whether a Claude Code entry's turns keep the prompt cache for an hour (Claude Code's
  * `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`) instead of five minutes, and what that rests on:
  * - `subscription`: Mousse confirmed a subscription sign-in (Claude Code's own, or every seat a
- *   local proxy lists is an OAuth seat). Writing the cache for an hour costs it nothing extra.
- * - `per_token`: the entry pays per token (a Mousse API-key entry, an API-key sign-in, or a proxy
- *   whose seats are all API keys), where hour-long cache writes cost more. Never set.
+ *   local proxy lists is an OAuth seat). Writing the cache for an hour costs it nothing extra, so
+ *   it is always on and there is no choice to make: a stored choice is ignored.
+ * - `per_token`: the entry pays per token (a Mousse API-key entry, an API-key sign-in, a proxy
+ *   whose seats are all API keys, Bedrock, Vertex or Foundry), where hour-long cache writes can
+ *   cost more. Off unless the user turns it on.
  * - `unconfirmed`: anything else (a gateway, a proxy Mousse cannot list, mixed seats). Off unless
  *   the user turns it on.
  */
@@ -124,16 +126,19 @@ export interface PromptCacheHour {
   basis: 'subscription' | 'per_token' | 'unconfirmed'
   /** The user's own Claude Code settings or environment choose the cache lifetime: Mousse sets nothing. */
   userSetting?: true
-  /** The user's choice in Settings → Providers; absent: the automatic default (on only for `subscription`). */
+  /** The user's choice in Settings → Providers, off a confirmed subscription; absent: none made (off). */
   choice?: boolean
   /** What the entry's next turn does (`promptCacheHourOn`). */
   on: boolean
 }
 
-/** Whether an entry keeps the cache for an hour, given what it runs on and the user's choice (undefined: none made). */
+/**
+ * Whether an entry keeps the cache for an hour: always on a confirmed subscription, otherwise only
+ * when the user turned it on; never when their own Claude Code settings choose the lifetime.
+ */
 export function promptCacheHourOn(state: Pick<PromptCacheHour, 'basis' | 'userSetting'>, choice: boolean | undefined): boolean {
-  if (state.userSetting || state.basis === 'per_token') return false
-  return choice ?? state.basis === 'subscription'
+  if (state.userSetting) return false
+  return state.basis === 'subscription' || choice === true
 }
 
 /**

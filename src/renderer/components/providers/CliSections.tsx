@@ -396,24 +396,22 @@ export function TelemetryRow({ snapshot, onSave }: { snapshot: InstanceSnapshot;
   )
 }
 
-const PROMPT_CACHE_HOUR_HELP = 'Subscriptions only. Coming back within an hour reuses the cache.'
-
-/** The line under the prompt cache switch: the help, and why it is off or fixed when that is not the user's choice. */
-export function promptCacheHourNote(state: NonNullable<InstanceSnapshot['promptCacheHour']>): string {
-  if (state.userSetting) return `${PROMPT_CACHE_HOUR_HELP} Your Claude Code settings choose this.`
-  if (state.choice === undefined && state.basis === 'unconfirmed') return `${PROMPT_CACHE_HOUR_HELP} Off: couldn't confirm a subscription.`
-  return PROMPT_CACHE_HOUR_HELP
+/** The line under the prompt cache switch, when it needs one: why it is fixed, or that a subscription is unconfirmed. */
+export function promptCacheHourNote(state: NonNullable<InstanceSnapshot['promptCacheHour']>): string | undefined {
+  if (state.userSetting) return 'Your Claude Code settings choose this.'
+  if (state.basis === 'unconfirmed') return "Couldn't confirm a subscription."
+  return undefined
 }
 
 /**
- * Claude Code: keep the prompt cache for an hour instead of five minutes. On by default for a
- * confirmed subscription, off when Mousse could not confirm one; the user's choice wins. Not shown
- * for an entry paid per token, where hour-long cache writes cost more.
+ * Claude Code: keep the prompt cache for an hour instead of five minutes. Off by default, for an
+ * entry that pays per token or that Mousse could not confirm as a subscription. Not shown on a
+ * confirmed subscription, which always keeps it for an hour.
  */
 export function PromptCacheHourRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSave: (on: boolean) => Promise<void> }) {
   const { error, run } = useAsyncAction()
   const state = snapshot.promptCacheHour
-  if (!state || state.basis === 'per_token') return null
+  if (!state || state.basis === 'subscription') return null
   return (
     <SettingsRow
       title="Keep the prompt cache for 1 hour"

@@ -52,7 +52,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Token usage', section: 'activity', anchor: 'account-token-usage', keywords: ['tokens'] },
 
   { title: 'Telemetry', section: 'providers', anchor: 'providers-telemetry', keywords: ['privacy', 'tracking'] },
-  { title: 'Keep the prompt cache for 1 hour', section: 'providers', anchor: 'providers-prompt-cache-hour', keywords: ['cache', 'ttl', 'one hour', 'subscription', 'claude code', 'when the cache expires'] },
+  { title: 'Keep the prompt cache for 1 hour', section: 'providers', anchor: 'providers-prompt-cache-hour', keywords: ['cache', 'ttl', 'one hour', 'api key', 'claude code', 'when the cache expires'] },
   { title: 'API key', section: 'providers', anchor: 'providers-api-key', keywords: ['key'] },
   { title: 'Executable path', section: 'providers', anchor: 'providers-executable', keywords: ['binary', 'cli'] },
   { title: 'Launch arguments', section: 'providers', anchor: 'providers-arguments', keywords: ['flags', 'args'] },

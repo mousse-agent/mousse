@@ -363,7 +363,7 @@ type Dependencies = {
    * what the instance runs on, read without starting Claude Code.
    */
   probe?: (env: NodeJS.ProcessEnv) => AuthProbe
-  /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is never kept for an hour. */
+  /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is kept for an hour only by the user's choice. */
   paysPerToken?: boolean
   /** What a turn says when the instance is not signed in (default: run the sign-in command). */
   signedOutMessage?: () => string
@@ -1379,13 +1379,15 @@ export class ClaudeSubscriptionProviderService {
    *   subscription (only API keys: per token); any other address is unconfirmed;
    * - without one, Claude Code's own subscription sign-in (`claude auth status`) is a subscription,
    *   unless an `ANTHROPIC_AUTH_TOKEN` replaces it.
-   * `userSetting` when the user's own environment or Claude settings choose the lifetime.
+   * `userSetting` when the user's own environment or Claude settings choose the lifetime. A
+   * subscription is always on, so a choice stored for it (from when it had a switch) is ignored.
    */
   promptCacheHour(cwd?: string, env: NodeJS.ProcessEnv = this.environment(), choice?: boolean): PromptCacheHour {
     const options = cwd ? { cwd } : {}
     const basis = this.promptCacheBasis(env, options)
-    const userSetting = basis !== 'per_token' && claudeChoosesCacheTtl(env, options)
-    return { basis, ...(userSetting ? { userSetting: true as const } : {}), ...(choice !== undefined ? { choice } : {}), on: promptCacheHourOn({ basis, ...(userSetting ? { userSetting: true as const } : {}) }, choice) }
+    const userSetting = claudeChoosesCacheTtl(env, options) ? { userSetting: true as const } : {}
+    const chosen = basis !== 'subscription' && choice !== undefined ? { choice } : {}
+    return { basis, ...userSetting, ...chosen, on: promptCacheHourOn({ basis, ...userSetting }, chosen.choice) }
   }
   private promptCacheBasis(env: NodeJS.ProcessEnv, options: { cwd?: string }): PromptCacheHour['basis'] {
     if (this.dependencies.paysPerToken) return 'per_token'
