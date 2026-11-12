@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
@@ -222,8 +222,8 @@ describe('walls', () => {
     // Every later call waits, and asks nobody again.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
-    // Asks never expire: no expiry is armed (the only timer is the dispatch's deadline).
-    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000])
+    // Asks never expire: no expiry is armed (the only timers are the dispatch's deadline and its look).
+    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000, BOT_OFFLINE_WATCH_MS])
   })
 
   it('escalate asks for a structured permission; a malformed one is refused, and a chat turn finishes before it waits', async () => {
@@ -502,16 +502,50 @@ describe('startup pass', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', reason: 'This bot used up its work time.' } })
   })
 
-  it('a dispatch that made no call is charged nothing and carries on with all its time', async () => {
+  /** The live dispatch's look (`BOT_OFFLINE_WATCH_MS`) at `at`: it finds the dispatch working and records the moment. */
+  const lookAt = async (at: number) => {
+    clock = at
+    timers.filter((timer) => timer.ms === BOT_OFFLINE_WATCH_MS && !timer.cleared).at(-1)!.fn()
+    await tick()
+  }
+
+  it('a dispatch that made no call is charged up to its last look, and carries on with the rest of its time', async () => {
     const { activation, payload } = await running()
-    clock += 30_000
+    await lookAt(T0 + 20_000)
+    clock = T0 + 30_000
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     await crash()
-    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 0 })
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
     expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
   })
 
-  it('a clean quit charges a running dispatch up to its last call and never fails it; the next start carries it on', async () => {
+  it('a long call in flight when Mousse crashed is charged up to the last look, not only to when it was checked', async () => {
+    const { activation, payload, prepared } = await running()
+    // A 40-minute command is checked at 20 s; the dispatch is looked at every 20 s while it runs (no internet check
+    // runs without `connectivity`: it counts as working).
+    callAt(prepared, T0 + 20_000)
+    for (let at = T0 + 40_000; at <= T0 + 8 * 60_000; at += 20_000) await lookAt(at)
+    clock = T0 + 8 * 60_000 + 15_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 8 * 60_000 })
+  })
+
+  it('a call that finishes records the moment too', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    const attempt = runs.getRun(payload.runId)!.activeAttemptId!
+    runs.tools.start({ invocationId: 'long', runId: payload.runId, attemptId: attempt, tool: 'shell', argsDigest: 'd', now: 'n', idempotent: false })
+    clock = T0 + 50_000
+    runs.tools.commit('long', 'n2')
+    bots.toolCallEnded(payload.runId)
+    clock = T0 + 55_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 50_000 })
+  })
+
+  it('a clean quit charges a running dispatch up to the shutdown and never fails it; the next start carries it on', async () => {
     const { activation, payload, prepared } = await running()
     callAt(prepared, T0 + 20_000)
     clock = T0 + 30_000
@@ -519,12 +553,12 @@ describe('startup pass', () => {
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     bots.settle(payload, { text: 'Half way.' })
     await tick()
-    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 20_000 })
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 30_000 })
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'running' })
     bots.close()
     bots = makeEngine()
     await bots.reconcileOnStartup()
-    expect(store.counters(activation.id).activeMs).toBe(20_000)
+    expect(store.counters(activation.id).activeMs).toBe(30_000)
     expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
   })
 
@@ -541,18 +575,18 @@ describe('startup pass', () => {
     expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
   })
 
-  it('a close that comes before the turn has let go settles it up to its last call, once', async () => {
+  it('a close that comes before the turn has let go settles it up to the close, once', async () => {
     const { activation, payload, prepared } = await running()
     callAt(prepared, T0 + 20_000)
     clock = T0 + 30_000
     bots.close()
-    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 20_000 })
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 30_000 })
     // The turn's end, after the close, charges nothing more.
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     bots.settle(payload, {})
     bots = makeEngine()
     await bots.reconcileOnStartup()
-    expect(store.counters(activation.id).activeMs).toBe(20_000)
+    expect(store.counters(activation.id).activeMs).toBe(30_000)
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
 

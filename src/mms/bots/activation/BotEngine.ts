@@ -271,14 +271,17 @@ const SWEEP_EVERY_MS = 24 * 60 * 60_000
 export const BOT_OFFLINE_TEXT = 'Waiting for internet. I\'ll carry on when it\'s back.'
 /** How long a dispatch may go without a call before Mousse checks whether the internet is there. */
 export const BOT_OFFLINE_STALL_MS = 60_000
-/** How often a live dispatch is looked at for that. */
+/**
+ * How often a live dispatch is looked at: it is still working (its time so far is recorded, `checkpoint_at`), and, when
+ * it made no call for a while, whether the internet is there.
+ */
 export const BOT_OFFLINE_WATCH_MS = 20_000
 /** Failed checks in a row, one watch apart, that end a dispatch to wait for the internet. */
 const OFFLINE_CHECKS_TO_STOP = 2
 /** The first wait before a waiting activation checks the internet again; it doubles up to the maximum. */
 export const BOT_OFFLINE_POLL_MS = 15_000
 export const BOT_OFFLINE_POLL_MAX_MS = 60_000
-/** How often a live dispatch's last call is written to `bots.db` at most (`checkpoint_at`). */
+/** How often a live dispatch's last working moment is written to `bots.db` at most (`checkpoint_at`). */
 export const BOT_CHECKPOINT_EVERY_MS = 1_000
 
 /** What an answer to a limit ask did to the work that waited on it (`settleRoomInTx`). */
@@ -292,9 +295,9 @@ interface LiveDispatch {
   timer: { clear(): void } | undefined
   /** When the dispatch started, on the monotonic clock: what settlement measures from. */
   startedMono: number
-  /** When it started, on the wall clock (`bot_dispatches.started_at`): its recorded last call is measured from it. */
+  /** When it started, on the wall clock (`bot_dispatches.started_at`): its recorded working moments are measured from it. */
   startedAt: number
-  /** The last call written to `bots.db` (`checkpoint_at`), on the monotonic clock. */
+  /** The last working moment written to `bots.db` (`checkpoint_at`), on the monotonic clock. */
   checkpointMono: number
   /** The main dispatch's number; its consults attach to it. */
   n: number
@@ -307,6 +310,11 @@ interface LiveDispatch {
   dispatchId: string
   /** The last call of the dispatch (or its consults), on the monotonic clock: what "no progress" is measured from. */
   lastProgressMono: number
+  /**
+   * The last moment the dispatch is known to have been working, on the monotonic clock: a call checked or finished, or
+   * a look (`watchOffline`) that found it running with the internet there. A dispatch Mousse stops is charged up to it.
+   */
+  workedMono: number
   /** Failed internet checks in a row while the dispatch made no progress. */
   offlineChecks: number
   /** The watch for no progress (only with `connectivity`). */
@@ -343,6 +351,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * the work's notice (with the ask's card) is posted. After a restart that notice, or its own ask, says it.
    */
   private readonly roomKeys = new Map<string, BotBudgetWallKey>()
+  /** The runs of live dispatches (main and consult) by run id, with their activation: a finished call is their progress. */
+  private readonly liveRuns = new Map<string, string>()
   /**
    * `changed` with `{botId?, activationId?}` after every change (`bots.changed`), `message` with
    * `{botId, message}` for every new or changed chat row (`bots.message`), `activity` with
@@ -1585,7 +1595,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const spendLimited = spendLimits(effective)
     const spendScope = Object.keys(spendLimited).length ? this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId), row.id, dispatch.n) : null
     const startedMono = this.monotonic()
-    this.live.set(row.id, { controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId, lastProgressMono: startedMono, offlineChecks: 0 })
+    this.live.set(row.id, { controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId, lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0 })
+    this.liveRuns.set(payload.runId, row.id)
     this.watchOffline(row.id, dispatch.n)
     const authority = this.authorityFor({
       row, mainN: dispatch.n, role: 'activation', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
@@ -1708,6 +1719,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('the bot supervisor could not be armed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
     this.executing.add(`${row.id}:${dispatch.n}`)
+    this.liveRuns.set(payload.runId, row.id)
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'context', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
@@ -1985,32 +1997,58 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- No internet (docs/bots.md) ----------------------------------------------------------------
 
   /**
-   * The live dispatch did something (a call, a model request): it is making progress. The time of that call is kept in
-   * `bots.db` too (at most once a second), so a dispatch Mousse stops is charged up to it, never to its deadline.
+   * The live dispatch did something (a call checked or finished, a model request): it is making progress, and working.
    */
   private progress(activationId: string): void {
     const live = this.live.get(activationId)
     if (!live) return
     live.lastProgressMono = this.monotonic()
     live.offlineChecks = 0
-    if (live.lastProgressMono - live.checkpointMono < BOT_CHECKPOINT_EVERY_MS) return
-    live.checkpointMono = live.lastProgressMono
+    this.working(activationId, live)
+  }
+
+  /**
+   * The live dispatch is known to be working now. The moment is kept in `bots.db` too (`checkpoint_at`, at most once a
+   * second), so a dispatch a crash ends is charged up to it at the next start, never to its deadline, and at most one
+   * look (`BOT_OFFLINE_WATCH_MS`) short of its real work.
+   */
+  private working(activationId: string, live: LiveDispatch): void {
+    live.workedMono = this.monotonic()
+    if (live.workedMono - live.checkpointMono < BOT_CHECKPOINT_EVERY_MS) return
+    live.checkpointMono = live.workedMono
     try {
-      this.store.checkpointDispatch(activationId, live.n, live.startedAt + Math.ceil(live.lastProgressMono - live.startedMono))
+      this.store.checkpointDispatch(activationId, live.n, live.startedAt + Math.ceil(live.workedMono - live.startedMono))
     } catch (error) {
-      // A call never fails for its record: without it, a stopped Mousse charges up to the previous one.
-      console.warn('a bot dispatch\'s last call could not be recorded', { activationId, error: error instanceof Error ? error.message : String(error) })
+      // A call never fails for its record: without it, a crash charges up to the previous one.
+      console.warn('a bot dispatch\'s last working moment could not be recorded', { activationId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
   /**
-   * A dispatch Mousse stops while it runs (the profile closes) is charged up to its last call, as one the internet ended
-   * is and as the next start charges one a crash ended. Settled once: its run's end refunds nothing more.
+   * A call of a live dispatch's run (or a consult's) finished (`tool.status` in the run log): it was working until now.
+   */
+  toolCallEnded(runId: string): void {
+    const activationId = this.liveRuns.get(runId)
+    if (activationId) this.progress(activationId)
+  }
+
+  /**
+   * Until when a live dispatch was working, on the monotonic clock: its last known working moment, or, as Mousse stops
+   * (`shutdown`), now, unless it was waiting for the internet then (its calls stopped and a check found it gone).
+   */
+  private workedUntil(live: LiveDispatch, shutdown: boolean): number {
+    return shutdown && live.offlineChecks === 0 ? this.monotonic() : live.workedMono
+  }
+
+  /**
+   * A dispatch Mousse stops while it runs (the profile closes) is charged up to the shutdown, the last moment it is known
+   * to have worked (`workedUntil`), as the next start charges one a crash ended up to its last recorded moment. Settled
+   * once: its run's end refunds nothing more.
    */
   private chargeToLastCall(activationId: string, live: LiveDispatch): void {
     const dispatch = this.store.dispatch(activationId, live.n)
     if (!dispatch || dispatch.deadlineMs === null || dispatch.prepaidMs === null) return
-    const used = Math.max(0, Math.min(dispatch.deadlineMs, Math.ceil(live.lastProgressMono - live.startedMono)))
+    const used = Math.max(0, Math.min(dispatch.deadlineMs, Math.ceil(this.workedUntil(live, true) - live.startedMono)))
     this.store.db.transaction(() => {
       if (this.store.run("UPDATE bot_dispatches SET used_ms = ?, prepaid_ms = ?, settled_by = 'run' WHERE activation_id = ? AND n = ? AND settled_by IS NULL", used, used, activationId, live.n))
         this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', used - dispatch.prepaidMs!, activationId)
@@ -2028,10 +2066,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /** Looks at the live main dispatch `n` once a watch from now (only with `connectivity`). */
+  /** Looks at the live main dispatch `n` once a watch from now (`BOT_OFFLINE_WATCH_MS`), as long as it runs. */
   private watchOffline(activationId: string, n: number): void {
     const live = this.live.get(activationId)
-    if (!this.host.connectivity || !live || live.n !== n || live.controller.signal.aborted) return
+    if (!live || live.n !== n || live.controller.signal.aborted) return
     live.watch?.clear()
     live.watch = (this.host.setTimer ?? defaultTimer)(() => {
       void this.checkStalled(activationId, n).catch((error: unknown) => {
@@ -2041,22 +2079,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A dispatch that made no call for `BOT_OFFLINE_STALL_MS` is checked: two failed checks in a
-   * row end it to wait for the internet. Any call in between starts the count again.
+   * One look at a live dispatch. While it makes calls, or runs one long call with the internet there (a 40-minute
+   * command), it is working: the moment is recorded (`working`), so a crash under-charges it by one look at most. A
+   * dispatch that made no call for `BOT_OFFLINE_STALL_MS` is checked: two failed checks in a row end it to wait for the
+   * internet, and that time is not recorded as work. Any call in between starts the count again.
    */
   private async checkStalled(activationId: string, n: number): Promise<void> {
     const live = this.live.get(activationId)
     if (!live || live.n !== n || live.controller.signal.aborted) return
     if (this.monotonic() - live.lastProgressMono < BOT_OFFLINE_STALL_MS) {
       live.offlineChecks = 0
+      this.working(activationId, live)
       return this.watchOffline(activationId, n)
     }
     const row = this.store.activation(activationId)
     if (!row || row.status !== 'running') return
+    // Without `connectivity` the internet always counts as there.
     const online = await this.online(row)
     if (this.live.get(activationId) !== live || live.controller.signal.aborted) return
     if (online || this.monotonic() - live.lastProgressMono < BOT_OFFLINE_STALL_MS) {
       live.offlineChecks = 0
+      this.working(activationId, live)
       return this.watchOffline(activationId, n)
     }
     live.offlineChecks += 1
@@ -3712,6 +3755,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const live = this.live.get(row.id)?.n === dispatch.n ? this.live.get(row.id) : undefined
+    this.liveRuns.delete(payload.runId)
     if (live) {
       this.live.delete(row.id)
       live.timer?.clear()
@@ -3720,8 +3764,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // Measured on the monotonic clock of the process that ran the dispatch. Without that measure
     // (another process started it), nothing is refunded: the whole prepaid allowance stays charged.
-    // A dispatch ended to wait for the internet, or by Mousse stopping, is charged up to its last call only.
-    const measured = live ? live.offline?.chargeMs ?? (stoppedByMousse(run) ? live.lastProgressMono - live.startedMono : this.monotonic() - live.startedMono) : undefined
+    // A dispatch ended to wait for the internet is charged up to its last call only; one Mousse stopped, up to the last
+    // moment it was known to work (the shutdown itself, unless it was waiting for the internet then).
+    const measured = live ? live.offline?.chargeMs ?? (stoppedByMousse(run) ? this.workedUntil(live, true) - live.startedMono : this.monotonic() - live.startedMono) : undefined
     this.store.db.transaction(() => {
       // Time: the measured window, never above the deadline, applied once as a signed difference.
       // `exit_at` is the supervisor's evidence that the processes are gone, never written here.
@@ -3850,6 +3895,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private settleConsult(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, outcome: { text?: string }, fromExecutor: boolean): void {
     const key = `${row.id}:${dispatch.n}`
+    this.liveRuns.delete(run.runId)
     // The executor's settle carries the final message; the terminal event settles one it never ran.
     if (!fromExecutor && this.executing.has(key)) return
     this.executing.delete(key)
@@ -3886,8 +3932,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   settleRun(runId: string): void {
     const dispatch = this.store.dispatchByRun(runId)
     if (!dispatch || dispatch.endedAt !== null) return
-    // A run the last process left, ended by the boot, is the startup pass's: it charges the dispatch up to its last call
-    // and carries the activation on.
+    // A run the last process left, ended by the boot, is the startup pass's: it charges the dispatch up to its last
+    // recorded working moment and carries the activation on.
     const ended = this.host.runs()?.getRun(runId)
     if (ended && stoppedByMousse(ended) && this.live.get(dispatch.activationId)?.n !== dispatch.n) return
     if (dispatch.kind === 'consult') {
@@ -4144,9 +4190,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // P2: the supervisor's `reconcile` (above) killed the recorded process groups of unfinished
     // dispatches and wrote their `exit_at`.
-    // P3: main dispatches whose time window was never settled (Mousse stopped while they ran): charged up to their last
-    // recorded call (`checkpoint_at`, its consults' calls included), as a dispatch the internet ended is, never past
-    // their deadline. The time Mousse was down, and whatever ran after that call, is not the bot's work.
+    // P3: main dispatches whose time window was never settled (Mousse stopped while they ran): charged up to the last
+    // moment they were known to work (`checkpoint_at`: a call checked or finished, its consults' included, or a look
+    // every `BOT_OFFLINE_WATCH_MS` while it ran), never past their deadline. The time Mousse was down is not the bot's work.
     for (const row of this.store.all("SELECT activation_id, n FROM bot_dispatches WHERE kind IN ('start', 'continue') AND started_at IS NOT NULL AND settled_by IS NULL")) {
       const main = this.store.dispatch(row.activation_id as string, Number(row.n))!
       const deadline = main.deadlineMs ?? 0
@@ -4287,7 +4333,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         runs.outbox.enqueue({ threadId: main.threadId, runId: run.runId, kind: 'turn.start', payload: { kind: 'bot', runId: run.runId, threadId: main.threadId, activationId: row.id, dispatchN: main.n } satisfies BotTurnPayload })
         return
       }
-      // Its time window was already settled (up to its last call): too little left is a budget wall, as for an
+      // Its time window was already settled (up to its last working moment): too little left is a budget wall, as for an
       // interrupted run.
       const left = this.remainingMs(row)
       if (left !== undefined && left < ACTIVE_TIME_CHUNK_MS) {
@@ -4316,7 +4362,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     if (run.status !== 'interrupted') return
-    // Row 10: under 15 s of work time left after P3 (its last call came at its deadline): a budget wall, as at a
+    // Row 10: under 15 s of work time left after P3 (it worked up to its deadline): a budget wall, as at a
     // deadline (work the owner asked for waits for the answer with what it had).
     const remaining = this.remainingMs(row)
     if (remaining !== undefined && remaining < ACTIVE_TIME_CHUNK_MS) {
@@ -4995,7 +5041,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Stops the active-time timers (profile shutdown). A dispatch still running is charged up to its last call, so the
+   * Stops the active-time timers (profile shutdown). A dispatch still running is charged up to the shutdown, so the
    * next start carries its activation on with the time it really has left.
    */
   close(): void {
