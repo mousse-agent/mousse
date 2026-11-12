@@ -1072,11 +1072,22 @@ The trace panel shows observed URL/title, action and target, verified outcome, t
 
 ### 10.9 Recovery and limits
 
+**When a navigation is done** (managed browser, every caller: thread agents, group chats, bots; `navigateTab` and `navigateHistory` in `src/browser-worker/action/dispatch.ts`, classes in `src/shared/browser/navigation.ts`):
+
+- A navigation is done once its page has committed and its document is ready (`DOMContentLoaded` of that navigation's own loader). A page that has not loaded a moment later (1.5 s), a site that has not answered, or a document not ready by the ceiling is reported as `loading`: not a failure. The call answers and the page goes on loading; an observation of it carries the `page-still-loading` warning, and `browser_wait` with `document-ready` waits until it has loaded.
+- The ceiling scales with how slow this computer has been: four times the median of its last 20 navigations' time to a ready document, never under 10 s nor over 45 s, and 15 s until there are 5 to go by. An action's own `timeoutMs` can lower it. A person's own navigation, back, forward and reload return at the commit.
+- A failed or slow page never closes the browser session: `session.open` with a URL opens the session and answers how its first page went (`navigation`), so the caller can go on in the same session.
+- Failures come in four classes, each with what to do next: `site_unreachable` (no such name, no connection, refused, reset, timed out, a broken certificate or answer, too many redirects), `site_blocked` (Chromium's `ERR_BLOCKED_BY_*`, `ERR_UNSAFE_PORT` and other refusals for this browser), `needs_person` and `browser_cannot_start` (Chromium failed to launch or its profile is held, with the cause). Chromium's code (`net::ERR_…`) or the HTTP status is kept in the error's `details.problem` and the model's result, never in a person's main line. `net::ERR_ABORTED` (a download, a newer navigation) is no failure.
+- A page that opened may still need a person or refuse the browser: its HTTP status and a few marks read in an isolated world (401, a password field on a sign-in page, a Cloudflare, reCAPTCHA or hCaptcha check, a consent site or dialog; 403, 429, 451) come back as a `needs-you` or `blocked` problem on a navigation that succeeded. The tools' descriptions tell agents never to retry a blocked site or one that needs a person in a loop.
+- The in-app Browser panel (an attached tab) keeps its own wait for the page.
+
 | Failure | Behavior |
 |---|---|
 | Element rerendered/detached | Return stale-target result, refresh the relevant observation, and allow at most a bounded replan. |
 | Click intercepted by overlay | Report occluder; observe dialog/overlay rather than force-clicking through it. |
 | SPA never becomes network-idle | Use application/element/navigation postcondition with deadline. |
+| Page commits but never finishes loading | Done at a ready document; reported as still loading, never a failure; the session stays. |
+| Site can't be reached, refuses the browser, or needs a person | The class and what to do next; never retried in a loop; the session stays. |
 | Tab closes or popup opens | Update tab registry and require explicit target selection; do not execute in whichever tab is active. |
 | Browser/worker crashes | Fence actions, preserve intent journal, launch/reconnect only to owned processes, reobserve. |
 | Submission acknowledgment lost | Mark unknown effect; inspect resulting state before any repeated submission. |
