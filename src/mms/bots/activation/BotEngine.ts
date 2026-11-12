@@ -52,7 +52,7 @@ import {
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { botAllowedOf, type BotAllowed } from '../instructions'
-import { PROVIDER_TURN_CAP, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
+import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
@@ -261,8 +261,9 @@ export const MAX_ROOM_WAIT_MS = 24 * 60 * 60_000
 /** Work that waits to go on (for room or a usage limit) ends after this long, whatever it waits for (`maintain`). */
 export const MAX_WORK_WAIT_MS = 7 * 24 * 60 * 60_000
 /**
- * Continuations after a dispatch reached its runtime's cap on model turns, per activation. Each one worked up to the
- * cap (300 turns on Claude Code), so this only stops a runtime that reaches the cap at once, again and again.
+ * Continuations after a dispatch reached its runtime's cap on model turns, in total per activation (not in a row: a
+ * note or an Allow in between does not start the count again). Each one worked up to the cap (300 turns on Claude
+ * Code), so with the activation's own work time this only bounds a runtime that keeps reaching the cap.
  */
 export const MAX_TURN_CAP_CONTINUATIONS = 10
 /** How often deleted bots are swept for the 30-day purge. */
@@ -353,6 +354,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly roomKeys = new Map<string, BotBudgetWallKey>()
   /** The runs of live dispatches (main and consult) by run id, with their activation: a finished call is their progress. */
   private readonly liveRuns = new Map<string, string>()
+  /**
+   * What dispatches that reached their runtime's turn cap did, per activation, until its next message carries it: their
+   * chips, and their last words for a message that has none of its own (`continueAfterTurnCap`). Kept in memory.
+   */
+  private readonly carried = new Map<string, { chips: BotChip[]; text?: string }>()
   /**
    * `changed` with `{botId?, activationId?}` after every change (`bots.changed`), `message` with
    * `{botId, message}` for every new or changed chat row (`bots.message`), `activity` with
@@ -2332,7 +2338,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     live?.controller.abort(new BotWallAbort())
     if (ended) {
       if (waits) this.letGoOfBrowser(row)
-      else this.countFailure(row)
+      else {
+        this.countFailure(row)
+        this.carried.delete(row.id)
+      }
       this.packs.delete(row.id)
       this.changed({ botId: row.botId, activationId: row.id })
       this.pumpLater(row.botId)
@@ -2400,8 +2409,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private postRoom(row: BotActivationRow, dispatchN: number, body = ''): void {
     const ask = this.roomAskOf(row)
+    // A turn that reached the turn cap just before (its continuation ran out at once) gave its chips and words to this.
+    const carried = this.carried.get(row.id)
+    this.carried.delete(row.id)
     this.chat.post({
-      id: `bm_${row.id}_room_d${dispatchN}`, botId: row.botId, author: 'bot', kind: 'notice', text: roomText(body),
+      id: `bm_${row.id}_room_d${dispatchN}`, botId: row.botId, author: 'bot', kind: 'notice', text: roomText(body || carried?.text || ''),
+      ...(carried?.chips.length ? { chips: carried.chips } : {}),
       ...(ask ? { askId: ask.id } : {}),
       ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}),
       activationId: row.id, lane: 'run', ...(row.threadId ? { threadId: row.threadId } : {})
@@ -3158,7 +3171,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // Ended while the internet was gone: it waits and continues, never a failure.
           if ((row.offline || (run.status === 'failed' && isConnectionFailure(error))) && await this.offlineEnd(row, main)) return
           // The turn reached its runtime's cap on model turns: the turn ended, not the work, which goes on while it has room.
-          if (run.status === 'failed' && isTurnCap(error)) return this.continueAfterTurnCap(row, main)
+          if (run.status === 'failed' && isProviderTurnCap(error)) return this.continueAfterTurnCap(row, main, text)
           return this.failActivation(row, error ?? run.status)
         }
       }
@@ -3267,8 +3280,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.pendingReplies.get(key)?.timer.clear()
     this.pendingReplies.delete(key)
     this.lateTexts.delete(key)
-    const chips = this.drained.get(key) ?? []
+    // What turns that reached the turn cap did before this one: their chips first, and their words when it has none.
+    const carried = this.carried.get(row.id)
+    this.carried.delete(row.id)
+    const chips = [...(carried?.chips ?? []), ...(this.drained.get(key) ?? [])]
     this.drained.delete(key)
+    if (!text?.trim() && carried?.text) text = carried.text
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
       !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
@@ -3313,14 +3330,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A main dispatch that reached its runtime's cap on model turns (`provider_turn_cap`): the activation carries on in
    * the same thread, as after a restart, under its own limits. Its turn budget, when the grant has one, is checked
    * first, and `continueWith` checks its work time, so a used-up budget ends it as any limit does (a run's ask, a chat's
-   * wall), never as a failure. Each continuation is a dispatch that worked up to the cap, so only an endless repeat of
-   * them (a runtime that reaches the cap at once) is stopped.
+   * wall), never as a failure. What the capped turn did (its chips and last words) goes into the activation's next
+   * message, so a continuation that runs out at once still posts it. After `MAX_TURN_CAP_CONTINUATIONS` in total, work
+   * ends as out of room with what it had (`endAtTurnCap`); any other activation fails as before.
    */
-  private async continueAfterTurnCap(row: BotActivationRow, main: BotDispatchRow): Promise<void> {
-    // The ended turn's own message is not posted: its work goes on in the continuation, whose message follows.
-    this.drained.delete(`${row.id}:${main.n}`)
+  private async continueAfterTurnCap(row: BotActivationRow, main: BotDispatchRow, text?: string): Promise<void> {
+    // The ended turn's own message is not posted: its work goes on in the continuation, whose message carries it.
+    const key = `${row.id}:${main.n}`
+    const before = this.carried.get(row.id)
+    const words = text?.trim()
+    this.carried.set(row.id, { chips: [...(before?.chips ?? []), ...(this.drained.get(key) ?? [])], ...(words ? { text: words } : before?.text ? { text: before.text } : {}) })
+    this.drained.delete(key)
+    this.lateTexts.delete(key)
     if (this.store.dispatches(row.id).filter((dispatch) => dispatch.send.turnCap).length >= MAX_TURN_CAP_CONTINUATIONS)
-      return this.failActivation(row, 'turn_cap_repeated')
+      return row.lane === 'run' && row.trigger.kind === 'work' ? this.endAtTurnCap(row, main) : this.failActivation(row, 'turn_cap_repeated')
     const counters = this.store.counters(row.id)
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
@@ -3329,6 +3352,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const allowed = this.allowedSinceRefused(row)
     await this.continueWith(row.id, ['running'], { turnCap: true, ...(allowed.length ? { allowed } : {}) })
+  }
+
+  /**
+   * Work that kept reaching its runtime's turn cap ends as out of room, never as a failure: done, with its report saying
+   * it stopped short and what it had (the capped turns' words and chips), answering the message that asked for it.
+   */
+  private endAtTurnCap(row: BotActivationRow, main: BotDispatchRow): void {
+    const carried = this.carried.get(row.id)
+    const body = carried?.text ?? ''
+    const ended = this.recorded(row, () => {
+      if (!this.store.moveActivation(row.id, ['running'], 'done', { endReason: 'turn_cap_repeated', result: body })) return false
+      this.chat.post({
+        id: `bm_${row.id}_d${main.n}`, botId: row.botId, author: 'bot', kind: 'run_report', text: stoppedShortText(body), chips: carried?.chips ?? [],
+        ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}),
+        activationId: row.id, lane: 'run', threadId: main.threadId
+      })
+      this.journalEnd(row, 'turn_cap_repeated')
+      return true
+    }) ?? false
+    if (!ended) return
+    this.carried.delete(row.id)
+    this.afterEnd(this.store.activation(row.id) ?? row)
   }
 
   /** Every run of the activation (main and consult) has ended, so nothing of it is live. */
@@ -3740,11 +3785,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!row || !dispatch) return
     if (dispatch.kind === 'consult') return this.settleConsult(row, dispatch, run, outcome, true)
     const key = `${row.id}:${dispatch.n}`
-    // A failed turn's final message is the provider's error, never the bot's words: it is not a reply.
-    const text = run.status === 'failed' ? undefined : outcome.text
+    // A failed turn's final message is the provider's error, never the bot's words: it is not a reply. The exception is a
+    // turn that reached its runtime's turn cap: its work goes on, and what it said last is kept (`continueAfterTurnCap`).
+    const capped = run.status === 'failed' && isProviderTurnCap(run.outcome?.error)
+    const text = run.status === 'failed' && !capped ? undefined : outcome.text
     if (dispatch.endedAt !== null) {
+      // The capped turn's words arrive after its work went on: its next message carries them.
+      const carried = capped && text?.trim() ? this.carried.get(row.id) : undefined
+      if (carried && !carried.text) carried.text = text!.trim()
       // Settled from the run's terminal event first: the executor's final message still lands.
-      if (text !== undefined) {
+      if (text !== undefined && !capped) {
         this.store.run("UPDATE bot_activations SET result = ? WHERE id = ? AND status IN ('done', 'paused', 'waiting_grant', 'blocked') AND (result IS NULL OR result = '')", text, row.id)
         // Capture may still be running for this dispatch: its reply takes this text when it is written.
         if (!this.pendingReplies.has(key) && !this.store.message(`bm_${row.id}_d${dispatch.n}`)) this.lateTexts.set(key, text)
@@ -3954,6 +4004,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.refusedAsks.delete(row.id)
     this.roomKeys.delete(row.id)
+    this.carried.delete(row.id)
     // Its browser tabs close too, and the bot's browser once nothing else uses it.
     try {
       this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
@@ -5212,9 +5263,10 @@ function stoppedByMousse(run: Pick<RunRecord, 'status' | 'outcome'>): boolean {
   return run.status === 'interrupted' && run.outcome?.interruptedBy === 'daemon_restart'
 }
 
-/** A run's error that says its turn reached the runtime's cap on model turns (`[provider_turn_cap] …`). */
-function isTurnCap(error: string | undefined): boolean {
-  return typeof error === 'string' && error.startsWith(`[${PROVIDER_TURN_CAP}]`)
+/** What work that kept reaching its runtime's turn cap reports as it ends: it stopped short, then what it had. */
+export function stoppedShortText(body: string): string {
+  const lead = 'I ran out of room before finishing, so I stopped here.'
+  return body.trim() ? `${lead} Here is what I have so far:\n\n${body.trim()}` : lead
 }
 
 /** A journal that cannot be written (bot-context.md §4): capture's `bot_journal_failed`, or a full disk. */

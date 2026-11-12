@@ -28,7 +28,9 @@ import {
   type ClaudeLockedTurn
 } from '../../src/mms/harness/claude/locked'
 import { CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../../src/mms/harness/compatibility'
-import { PROVIDER_TURN_CAP } from '../../src/shared/harness/types'
+import { isProviderTurnCap, PROVIDER_TURN_CAP, providerFailureText } from '../../src/shared/harness/types'
+import { normalizeAppError, serializeAppError } from '../../src/shared/errors'
+import { botFixture, createBot, finish as botFinish, runDispatch, start as botStart } from '../bots/botFixture'
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type PolicyCommandRunner } from '../../src/mms/harness/claude/managedPolicy'
 import { checkPolicy } from '../../src/mms/harness/policy'
 import type { DriverContext, InstanceConfig } from '../../src/mms/harness/driver'
@@ -344,8 +346,31 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
     const scratch = temp('claude-locked-scratch-')
     const { service } = lockedService(async () => {}, { type: 'result', subtype: 'error_max_turns', is_error: true, errors: [], num_turns: CLAUDE_LOCKED_MAX_TURNS, session_id: 'locked-session' })
     const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root: scratch, scratch }), cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a bot.', ledger: fakeLedger().ledger }
-    await expect(service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked, onText: vi.fn() }))
-      .rejects.toMatchObject({ code: PROVIDER_TURN_CAP })
+    const failure = await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
+      .then(() => undefined, (error: unknown) => error)
+    expect(failure).toMatchObject({ code: PROVIDER_TURN_CAP })
+    // End to end: the orchestrator turns the provider's failure into the run's error as it does for every turn
+    // (`normalizeAppError`, `serializeAppError`, `providerFailureText`), and the bot engine reads that error as the turn
+    // cap: the work goes on in the same thread instead of failing.
+    const runError = providerFailureText(serializeAppError(normalizeAppError(failure, 'orchestrator_turn_failed')))
+    expect(isProviderTurnCap(runError)).toBe(true)
+    const f = botFixture()
+    try {
+      await f.bots.reconcileOnStartup()
+      const { botId } = await createBot(f, { name: 'Pip', reply: 'Hello.' })
+      await f.bots.service.chatSend({ botId, text: 'Compare vacuums', clientRequestId: 'm1' })
+      const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+      const { workId } = await f.bots.tools.work.start(botId, turn.id, { title: 'Vacuums', brief: 'Compare vacuums.', key: 'k1' })
+      await runDispatch(f, turn.id, 1, { text: 'On it.' })
+      const work = await botStart(f, workId)
+      f.clock.now += 60_000
+      work.prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })
+      await botFinish(f, work.payload, 'failed', { text: 'Two picks so far.', outcome: { error: runError } })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      expect(f.store.dispatch(workId, 2)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
+    } finally {
+      f.close()
+    }
   })
 
   it('a bot without a folder runs in an empty folder of Mousse\'s own, never the thread\'s project', async () => {

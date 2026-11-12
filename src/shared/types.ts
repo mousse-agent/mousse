@@ -1075,6 +1075,8 @@ export interface OrchestratorResponse {
   requestAcknowledged?: boolean
   error?: import('./errors').AppErrorShape
   message: string
+  /** With `error`, on a bot's turn whose work goes on (it reached its runtime's turn cap): the words it said last. */
+  partial?: string
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.

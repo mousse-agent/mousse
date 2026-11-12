@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
-import { BOT_FAILURE_PAUSE_STREAK, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_FAILURE_PAUSE_STREAK, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce, stoppedShortText } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
@@ -441,16 +441,59 @@ describe('long work', () => {
       expect(errors()).toEqual([])
     })
 
-    it('a runtime that reaches the cap again and again is stopped after a few continuations', async () => {
-      const { workId } = await asked()
-      for (let n = 1; n <= MAX_TURN_CAP_CONTINUATIONS + 1; n += 1) {
+    it('after the cap is reached 10 times in all (not in a row), work ends as out of room with what it had, never as a failure', async () => {
+      const { workId, message } = await asked()
+      let n = 1
+      // Eleven turns reach the cap (ten continue it, the eleventh ends it), and one completes in between.
+      const turns = MAX_TURN_CAP_CONTINUATIONS + 2
+      for (let step = 0; step < turns; step += 1) {
         const turn = await start(f, workId, n)
         f.clock.now += MIN
         turn.prepared.authority.check(call)
-        await finish(f, turn.payload, 'failed', { outcome: TURN_CAP })
+        f.chips.set(`${workId}:d${n}`, [{ icon: 'web', text: `Searched step ${step}` }])
+        if (step === 4) {
+          // Half way, a turn completes and the owner's note continues the work: the count goes on, it does not start again.
+          f.bots.tools.work.note(botId, workId, 'Cordless only.')
+          await finish(f, turn.payload, 'completed', { text: 'Five picks so far.' })
+          n += 1
+          continue
+        }
+        await finish(f, turn.payload, 'failed', { text: `Words of turn ${n}.`, outcome: TURN_CAP })
+        n += 1
       }
-      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'turn_cap_repeated' })
-      expect(errors().at(-1)).toMatchObject({ error: { text: 'I kept going without finishing, so I stopped here.' } })
+      expect(f.store.dispatches(workId).filter((dispatch) => dispatch.send.turnCap)).toHaveLength(MAX_TURN_CAP_CONTINUATIONS)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'done', endReason: 'turn_cap_repeated' })
+      expect(errors()).toEqual([])
+      const report = chatOf(f, botId).at(-1)!
+      expect(report).toMatchObject({ kind: 'run_report', text: stoppedShortText(`Words of turn ${n - 1}.`), replyTo: { id: message.id } })
+      expect(report.chips.map((chip) => chip.text)).toContain(`Searched step ${turns - 1}`)
+    })
+
+    it('a continuation that runs out at once still posts what the capped turn said and did', async () => {
+      const { workId } = await asked()
+      const first = await start(f, workId)
+      f.clock.now += 60 * MIN - 10_000
+      first.prepared.authority.check(call)
+      f.chips.set(`${workId}:d1`, [{ icon: 'web', text: 'Searched the web' }])
+      await finish(f, first.payload, 'failed', { text: 'Two picks so far: Roborock Q7 and Dyson V8.', outcome: TURN_CAP })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+      const notice = chatOf(f, botId).at(-1)!
+      expect(notice).toMatchObject({ kind: 'notice', text: roomText('Two picks so far: Roborock Q7 and Dyson V8.'), ask: { status: 'open' } })
+      expect(notice.chips.map((chip) => chip.text)).toEqual(['Searched the web'])
+    })
+
+    it('the capped turn\'s chips go into the report of the turn that finishes the work', async () => {
+      const { workId } = await asked()
+      const first = await start(f, workId)
+      f.clock.now += MIN
+      first.prepared.authority.check(call)
+      f.chips.set(`${workId}:d1`, [{ icon: 'web', text: 'Searched the web' }])
+      await finish(f, first.payload, 'failed', { text: 'Interim.', outcome: TURN_CAP })
+      f.chips.set(`${workId}:d2`, [{ icon: 'edit', text: 'Wrote notes.md' }])
+      await runDispatch(f, workId, 2, { text: 'The Q7.' })
+      const report = chatOf(f, botId).at(-1)!
+      expect(report).toMatchObject({ kind: 'run_report', text: 'The Q7.' })
+      expect(report.chips.map((chip) => chip.text)).toEqual(['Searched the web', 'Wrote notes.md'])
     })
   })
 

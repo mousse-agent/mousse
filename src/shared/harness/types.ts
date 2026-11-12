@@ -238,6 +238,16 @@ export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Cont
  */
 export const PROVIDER_TURN_CAP = 'provider_turn_cap'
 
+/** How a provider's failure reads as its turn's error (the transcript line and the run's `outcome.error`): `[code] message`. */
+export function providerFailureText(error: { code: string; message: string }): string {
+  return `[${error.code}] ${error.message}`
+}
+
+/** Whether a run's error says its turn reached the runtime's cap on model turns (`providerFailureText` of `PROVIDER_TURN_CAP`). */
+export function isProviderTurnCap(error: unknown): boolean {
+  return typeof error === 'string' && error.startsWith(`[${PROVIDER_TURN_CAP}]`)
+}
+
 /** Why the gateway could not serve a request. Typed so callers never parse messages. */
 export const HARNESS_ERROR_CODES = [
   'instance_unknown',
