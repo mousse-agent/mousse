@@ -1,5 +1,6 @@
 import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
-import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotSchedule } from '../../shared/bots/personal/definition'
+import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
+import { modelSlotsProblem } from '../../shared/bots/personal/modelSlots'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
@@ -18,7 +19,7 @@ type Params = Record<string, unknown>
 
 const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.personal.list': [],
-  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model'],
+  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots'],
   'bots.get': ['botId'],
   'bots.update': ['botId', 'name', 'look'],
   'bots.personal.pause': ['botId'],
@@ -37,6 +38,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.model.get': ['botId'],
   'bots.model.choices': [],
   'bots.model.set': ['botId', 'model'],
+  'bots.model.setSlots': ['botId', 'slots'],
   'bots.memory.list': ['botId', 'history'],
   'bots.memory.forget': ['botId', 'id'],
   'bots.memory.export': ['botId', 'dir']
@@ -61,6 +63,12 @@ function look(value: unknown): BotLook {
   return { colour: given.colour, accessory: given.accessory, ...(given.kind !== undefined ? { kind: given.kind } : {}), ...(given.eyes !== undefined ? { eyes: given.eyes } : {}) }
 }
 
+/** A bot's rows (#673): Talk, Light, Medium and Hard work, each a pick on an entry or null for Automatic. */
+function slots(value: unknown): void {
+  const problem = modelSlotsProblem(value)
+  if (problem) throw new DomainRpcError('invalid_params', problem)
+}
+
 function attachments(value: unknown): BotChatAttachment[] {
   if (!Array.isArray(value) || value.length > MAX_BOT_CHAT_ATTACHMENTS) throw new DomainRpcError('invalid_params', `Attach at most ${MAX_BOT_CHAT_ATTACHMENTS} files`)
   return value.map((entry) => {
@@ -82,6 +90,11 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (!text(p.description, MAX_BOT_DESCRIPTION_CHARS)) throw new DomainRpcError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters`)
       if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > MAX_BOT_NAME_CHARS)) throw new DomainRpcError('invalid_params', `A name is at most ${MAX_BOT_NAME_CHARS} characters`)
       if (p.model !== undefined && !text(p.model, 256)) throw new DomainRpcError('invalid_params', 'A model is a name of 1 to 256 characters; leave it out for by usage')
+      if (p.slots !== undefined) slots(p.slots)
+      if (p.slots !== undefined && p.model !== undefined) throw new DomainRpcError('invalid_params', 'Give the models as slots or as one model, not both')
+      break
+    case 'bots.model.setSlots':
+      slots(p.slots)
       break
     case 'bots.update':
       if (p.name === undefined && p.look === undefined) throw new DomainRpcError('invalid_params', 'Give a name or a look')
@@ -150,7 +163,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
   const botId = p.botId as string
   switch (method) {
     case 'bots.personal.list': return bots.list()
-    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}) })
+    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}) })
     case 'bots.get': return bots.get(botId)
     case 'bots.update': return bots.update(botId, { ...(p.name !== undefined ? { name: p.name as string } : {}), ...(p.look !== undefined ? { look: p.look as BotLook } : {}) })
     case 'bots.personal.pause': return bots.pause(botId)
@@ -168,6 +181,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.model.get': return bots.modelGet(botId)
     case 'bots.model.choices': return bots.modelChoices()
     case 'bots.model.set': return bots.modelSet(botId, typeof p.model === 'string' ? p.model.trim() : null)
+    case 'bots.model.setSlots': return bots.modelSlotsSet(botId, p.slots as BotModelSlots)
     case 'bots.schedules.remove': return bots.removeSchedule(botId, p.scheduleId as string)
     // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
     case 'bots.memory.list':

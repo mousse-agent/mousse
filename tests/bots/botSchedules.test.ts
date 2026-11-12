@@ -300,8 +300,8 @@ describe('bot schedules in the shared scheduler', () => {
     expect(of(byUsage.scheduleId).modelOverride).toBeNull()
   })
 
-  it('the owner picks the bot\'s model by hand in About, or by usage again, on this computer (#673)', async () => {
-    expect(await f.bots.service.modelGet(botId)).toMatchObject({ model: null, computer: 'this_computer', computers: [{ id: 'this_computer' }] })
+  it('the owner picks the bot\'s model by hand in About (the single picker before rows), or Automatic again, on this computer (#673)', async () => {
+    expect(await f.bots.service.modelGet(botId)).toMatchObject({ model: null, slots: { talk: null, light: null, medium: null, hard: null }, computer: 'this_computer', computers: [{ id: 'this_computer' }] })
     // The person's other computers are listed too, never pickable: a bot runs on the computer that holds it.
     ;(f.bots.service as unknown as { options: { otherComputers?: () => unknown[] } }).options.otherComputers = () => [{ node: 'nod_laptop', name: 'Laptop', online: true }, { node: 'nod_studio', name: 'Studio', online: false }]
     expect((await f.bots.service.modelGet(botId)).computers).toEqual([
@@ -311,12 +311,14 @@ describe('bot schedules in the shared scheduler', () => {
     ])
     delete (f.bots.service as unknown as { options: { otherComputers?: unknown } }).options.otherComputers
     const revision = f.store.registry(botId)!.revision
-    f.bots.service.modelSet(botId, 'sonnet')
-    expect(f.bots.ownerModel(botId)).toBe('sonnet')
+    // No choices are known here: the model is kept by name on every row, matched across entries as before.
+    await f.bots.service.modelSet(botId, 'sonnet')
+    expect((await f.bots.service.modelGet(botId)).model).toBe('sonnet')
+    expect(f.bots.ownerSlots(botId)).toEqual({ talk: { model: 'sonnet' }, light: { model: 'sonnet' }, medium: { model: 'sonnet' }, hard: { model: 'sonnet' } })
     expect(f.bots.definitionOf(botId).main.model).toEqual({ mode: 'named', model: 'sonnet', depth: 'normal' })
     // A new revision with the same grant: no approval.
     expect(f.store.registry(botId)!.revision).not.toBe(revision)
-    f.bots.service.modelSet(botId, null)
+    await f.bots.service.modelSet(botId, null)
     expect(f.bots.definitionOf(botId).main.model).toEqual({ mode: 'auto', depth: 'normal' })
   })
 

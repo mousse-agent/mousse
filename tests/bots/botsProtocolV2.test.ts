@@ -11,8 +11,13 @@ import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import type { BotChatMessage, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
-import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES } from '../../src/shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES, type BotModelOption } from '../../src/shared/bots/personal/methods'
+import { AUTOMATIC_SLOTS, slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
 import { botFixture, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
+
+/** Opus on a Claude subscription, and the same model through a paid API key. */
+const OPUS_SUB: BotModelOption = { instanceId: 'claude', entry: 'Claude Code', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
+const OPUS_KEY: BotModelOption = { instanceId: 'pi:key', entry: 'Anthropic API', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
 
 const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
 const LOOK = { colour: 'teal', accessory: 'cap' }
@@ -60,11 +65,36 @@ describe('validation', () => {
   })
 
   it('New bot\'s choices come without a bot, and Create bot carries a model picked from them (#673)', async () => {
-    ;(f.bots.service as unknown as { options: { modelChoices?: () => Promise<Array<{ model: string; label: string }>> } }).options.modelChoices = async () => [{ model: 'opus', label: 'Claude · opus' }]
-    expect(await call('bots.model.choices')).toMatchObject({ models: [{ model: 'opus' }], computer: 'this_computer' })
+    ;(f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    // Per entry for the rows, and one per name for an app from before rows.
+    expect(await call('bots.model.choices')).toMatchObject({ models: [{ model: 'opus' }], options: [OPUS_SUB, OPUS_KEY], computer: 'this_computer' })
+    // An app from before rows sends one model: by name on every row, since two entries offer it.
     const { bot } = await call<{ bot: BotSummary }>('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c9', model: ' opus ' })
-    expect(await call('bots.model.get', { botId: bot.id })).toMatchObject({ model: 'opus' })
+    expect(await call('bots.model.get', { botId: bot.id })).toMatchObject({ model: 'opus', slots: { talk: { model: 'opus' } } })
     await expect(call('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c10', model: 'sonnet' })).rejects.toMatchObject({ code: 'model_unavailable' })
+    // The rows: Talk on the subscription, Work on the API key at high.
+    const slots = { talk: { instanceId: 'claude', model: 'opus' }, light: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, medium: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, hard: { instanceId: 'pi:key', model: 'opus', effort: 'high' } }
+    const { bot: rows } = await call<{ bot: BotSummary }>('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c11', slots })
+    expect(await call('bots.model.get', { botId: rows.id })).toMatchObject({ model: 'opus', slots })
+  })
+
+  it('the rows are set in one call; a changed pick must be offered now, and an app from before rows still sets one model (#673)', async () => {
+    const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
+    options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    const botId = await created()
+    const hard = { instanceId: 'pi:key', model: 'opus', effort: 'high' }
+    await call('bots.model.setSlots', { botId, slots: { talk: null, light: null, medium: null, hard } })
+    expect(f.bots.ownerSlots(botId)).toEqual({ talk: null, light: null, medium: null, hard })
+    // The key is gone: a row left as it was still saves; a new pick on it is refused.
+    options.modelOptions = async () => [OPUS_SUB]
+    await call('bots.model.setSlots', { botId, slots: { talk: { instanceId: 'claude', model: 'opus' }, light: null, medium: null, hard } })
+    expect(f.bots.ownerSlots(botId).talk).toEqual({ instanceId: 'claude', model: 'opus' })
+    await expect(call('bots.model.setSlots', { botId, slots: { talk: null, light: hard, medium: null, hard } })).rejects.toMatchObject({ code: 'model_unavailable' })
+    // `bots.model.set` (the single picker): one model on every row, on the one entry that offers it now.
+    await call('bots.model.set', { botId, model: 'opus' })
+    expect(f.bots.ownerSlots(botId)).toEqual(slotsAllOn({ instanceId: 'claude', model: 'opus' }))
+    await call('bots.model.set', { botId, model: null })
+    expect(f.bots.ownerSlots(botId)).toEqual(AUTOMATIC_SLOTS)
   })
 
   it('refuses unknown keys and bad values', async () => {
@@ -79,6 +109,12 @@ describe('validation', () => {
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'has spaces' }],
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: '  ' }],
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: null }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', slots: { talk: null } }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: 'opus', slots: AUTOMATIC_SLOTS }],
+      ['bots.model.setSlots', { botId, slots: { ...AUTOMATIC_SLOTS, images: null } }],
+      ['bots.model.setSlots', { botId, slots: { ...AUTOMATIC_SLOTS, talk: { instanceId: 'claude', model: 'opus', speed: 'fast' } } }],
+      ['bots.model.setSlots', { botId, slots: { ...AUTOMATIC_SLOTS, talk: { instanceId: 'claude', model: '' } } }],
+      ['bots.model.setSlots', { botId }],
       ['bots.model.choices', { botId }],
       ['bots.get', { botId: 'Not An Id' }],
       ['bots.get', {}],

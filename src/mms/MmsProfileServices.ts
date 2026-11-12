@@ -758,16 +758,8 @@ export class MmsProfileServices {
           return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
         }
       }),
-      // By hand (#673): the ready models that can hold a bot here, named by their provider.
-      modelChoices: async () => {
-        const seen = new Set<string>()
-        return (await botModels.holdable()).flatMap(({ instanceId, model }) => {
-          if (seen.has(model)) return []
-          seen.add(model)
-          const family = this.botProviderLabel(instanceId)
-          return [{ model, label: family ? `${family} · ${model}` : model }]
-        })
-      },
+      // By hand (#673): each ready entry's models that can hold a bot here, named by the entry, with their reasoning levels.
+      modelOptions: () => botModels.pickable(),
       // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),

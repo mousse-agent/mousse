@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../shared/bots/personal/chat'
-import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotSchedule } from '../../../shared/bots/personal/definition'
+import { BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
-import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotRunsOnChoices } from '../../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotModelOption, type BotRunsOnChoices } from '../../../shared/bots/personal/methods'
+import { AUTOMATIC_SLOTS, samePick, slotsAllOn, withSlots } from '../../../shared/bots/personal/modelSlots'
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
@@ -13,7 +14,7 @@ import { grantedPermissions, permissionId, starterManifest, withoutPermission } 
 /**
  * The Bot UI's daemon side (Bot Phase 1 §5.3, §5.11): create a bot from a look and a sentence,
  * chat with it, answer its asks, and manage it from its menu and About. Every result is built from
- * `bots.db` by the projection, so no model or instance id reaches a client.
+ * `bots.db` by the projection, so no model or instance id reaches a client, apart from Runs on's (`bots.model.*`, #673).
  */
 
 export type BotAutomationRunStatus = 'queued' | 'running' | 'waiting_grant' | 'paused' | 'blocked' | 'done' | 'failed' | 'cancelled'
@@ -32,6 +33,18 @@ export interface BotAutomationFacts {
   runs: Array<{ id: string; status: BotAutomationRunStatus; at: string; endedAt?: string; endReason?: string; threadId?: string }>
   /** An open ask one of these runs raised; it is answered in the bot chat, or in place from Needs you (`askId`). */
   ask?: { text: string; activationId: string; askId?: string }
+}
+
+const MODEL_UNAVAILABLE_TEXT = 'The model you picked is not available now. Pick another one, or Automatic.'
+
+/**
+ * A model by name (an older bot's pick, or the single picker before rows) as a pick: on the entry that offers it when
+ * exactly one does, else by name, matched across entries at run time as before.
+ */
+export function pickByName(model: string, options: readonly BotModelOption[], effort?: string): BotModelPick {
+  const offering = options.filter((option) => option.model === model)
+  const only = offering.length === 1 ? offering[0]! : undefined
+  return { ...(only ? { instanceId: only.instanceId } : {}), model, ...(effort ? { effort } : {}) }
 }
 
 /** How long naming a new bot may take before the description names it (§5.3.1). */
@@ -104,8 +117,8 @@ export class BotChatService {
     store: BotStore
     memory?: BotMemoryAdmin
     now(): number
-    /** The models the owner may pick by hand (#673): ready, and able to hold a bot here. */
-    modelChoices?(): Promise<Array<{ model: string; label: string }>>
+    /** The models the owner may pick by hand (#673): each ready entry's models that can hold a bot here (`BotModelChooser.pickable`). */
+    modelOptions?(): Promise<BotModelOption[]>
     /** This computer's name, as the rest of the app shows it. */
     computerName?(): string
     /** The person's other computers, online or not. */
@@ -137,10 +150,10 @@ export class BotChatService {
    * `bots.create` (§5.3.1): validates, names the bot (or uses the given name), writes and approves
    * its starter grant, makes its home thread and files folder, and starts its first chat
    * activation, whose reply is its first message. A repeat of `clientRequestId` returns the same bot.
-   * A model picked by hand (#673) must be among the current choices: one that is not is refused in plain words, never
-   * swapped for another, and the bot's first message runs on the one picked.
+   * Models picked by hand (#673, `slots`, or `model` on Talk and Work both) must be among the current choices: one that
+   * is not is refused in plain words, never swapped for another, and the bot's first message runs on its Talk row.
    */
-  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string }): Promise<{ bot: BotSummary }> {
+  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots }): Promise<{ bot: BotSummary }> {
     const description = input.description.trim()
     if (!description || description.length > MAX_BOT_DESCRIPTION_CHARS) throw new BotEngineError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
     const given = input.name?.trim()
@@ -148,10 +161,13 @@ export class BotChatService {
     const key = `create:${input.clientRequestId}`
     const made = this.store.activationByKey(key)
     if (made) return { bot: this.summaryOf(made.botId) }
+    let slots: BotModelSlots = { ...AUTOMATIC_SLOTS }
     const picked = input.model?.trim() || undefined
-    if (picked) {
-      const models = await this.pickableModels().catch(() => [])
-      if (!models.some((choice) => choice.model === picked)) throw new BotEngineError('model_unavailable', 'The model you picked is not available now. Pick another one, or By usage.')
+    if (input.slots) slots = await this.checkedSlots(input.slots)
+    else if (picked) {
+      const options = await this.pickableOptions().catch(() => [])
+      if (!options.some((option) => option.model === picked)) throw new BotEngineError('model_unavailable', MODEL_UNAVAILABLE_TEXT)
+      slots = slotsAllOn(pickByName(picked, options))
     }
     const botId = `bot-${randomUUID().replaceAll('-', '').slice(0, 12)}`
     const named = given ? { name: given, chosen: true } : await this.nameFor(botId, description)
@@ -165,8 +181,8 @@ export class BotChatService {
       owner: { kind: 'person', id: 'self' },
       placement: { kind: 'this_computer' },
       role: description,
-      // By hand, as About's picker saves it (`setOwnerModel`): named, at the default depth.
-      main: { key: 'main', title: 'Main', agent: { instructions: '' }, model: picked ? { mode: 'named', model: picked, depth: DEFAULT_BOT_MODEL.depth } : { ...DEFAULT_BOT_MODEL } },
+      // The rows as About's picker saves them (`setOwnerSlots`), at the default depth: every row Automatic unless picked.
+      main: withSlots({ key: 'main', title: 'Main', agent: { instructions: '' }, model: { ...DEFAULT_BOT_MODEL } }, slots),
       context: [],
       permissions: starterManifest(),
       triggers: { manual: true }
@@ -390,14 +406,27 @@ export class BotChatService {
    * computers, the same list the Automations page's Computer chip offers; a bot runs on the computer that holds it, so
    * the others are listed but cannot be picked (`unavailable` says why), and an offline one says so.
    */
-  async modelGet(botId: string): Promise<{ model: string | null } & BotRunsOnChoices> {
+  async modelGet(botId: string): Promise<{ model: string | null; slots: BotModelSlots } & BotRunsOnChoices> {
     this.engine.definitionOf(botId)
-    return { model: this.engine.ownerModel(botId), ...await this.modelChoices() }
+    const slots = this.engine.ownerSlots(botId)
+    const choices = await this.modelChoices()
+    // A pick from an older bot names no entry: it shows on the one that offers it, when exactly one does.
+    const shown = (pick: BotModelPick | null) => pick && !pick.instanceId ? pickByName(pick.model, choices.options ?? [], pick.effort) : pick
+    return { model: slots.talk?.model ?? null, slots: { talk: shown(slots.talk), light: shown(slots.light), medium: shown(slots.medium), hard: shown(slots.hard) }, ...choices }
   }
 
-  /** `bots.model.choices`: what `bots.model.get` offers, before a bot exists (New bot's Runs on line). */
-  async modelChoices(): Promise<BotRunsOnChoices> {
-    const models = await this.pickableModels().catch(() => [])
+  /**
+   * `bots.model.choices`: what `bots.model.get` offers, before a bot exists (New bot's Runs on line). `options` are every
+   * entry's models for the rows; `models`, one per model name, serve an app from before rows.
+   */
+  async modelChoices(): Promise<BotRunsOnChoices & { options: BotModelOption[] }> {
+    const options = await this.pickableOptions().catch(() => [])
+    const seen = new Set<string>()
+    const models = options.flatMap((option) => {
+      if (seen.has(option.model)) return []
+      seen.add(option.model)
+      return [{ model: option.model, label: `${option.entry} · ${option.label}` }]
+    })
     const computer = this.options.computerName?.() || 'This computer'
     let others: Array<{ node: string; name: string; online: boolean }> = []
     try {
@@ -407,6 +436,7 @@ export class BotChatService {
     }
     return {
       models,
+      options,
       computer: 'this_computer',
       computers: [
         { id: 'this_computer', name: computer },
@@ -415,13 +445,40 @@ export class BotChatService {
     }
   }
 
-  private pickableModels(): Promise<Array<{ model: string; label: string }>> {
-    return this.options.modelChoices?.() ?? Promise.resolve([])
+  private pickableOptions(): Promise<BotModelOption[]> {
+    return this.options.modelOptions?.() ?? Promise.resolve([])
   }
 
-  /** `bots.model.set`: the owner picks a model by hand, or by usage again (`null`). */
-  modelSet(botId: string, model: string | null): { bot: BotSummary } {
-    this.engine.setOwnerModel(botId, model)
+  /**
+   * Picks checked against the current choices: each one that differs from `kept` (the rows saved now) must be an
+   * entry's model offered now, at a reasoning level it offers. A row left as it was may name one that can't run now.
+   */
+  private async checkedSlots(slots: BotModelSlots, kept?: BotModelSlots): Promise<BotModelSlots> {
+    const changed = BOT_MODEL_SLOT_KEYS.flatMap((key) => {
+      const pick = slots[key]
+      return pick && !samePick(pick, kept?.[key]) ? [pick] : []
+    })
+    if (!changed.length) return slots
+    const options = await this.pickableOptions().catch(() => [])
+    for (const pick of changed) {
+      const option = options.find((entry) => entry.instanceId === pick.instanceId && entry.model === pick.model)
+      if (!option || (pick.effort !== undefined && !option.efforts.includes(pick.effort))) throw new BotEngineError('model_unavailable', MODEL_UNAVAILABLE_TEXT)
+    }
+    return slots
+  }
+
+  /** `bots.model.set` (the single picker before rows): one model by name on Talk and Work both, or Automatic on every row (`null`). */
+  async modelSet(botId: string, model: string | null): Promise<{ bot: BotSummary }> {
+    this.engine.definitionOf(botId)
+    const options = model ? await this.pickableOptions().catch(() => []) : []
+    this.engine.setOwnerSlots(botId, slotsAllOn(model ? pickByName(model, options) : null))
+    return { bot: this.summaryOf(botId) }
+  }
+
+  /** `bots.model.setSlots` (#673): the bot's rows from About → Runs on. */
+  async modelSlotsSet(botId: string, slots: BotModelSlots): Promise<{ bot: BotSummary }> {
+    this.engine.definitionOf(botId)
+    this.engine.setOwnerSlots(botId, await this.checkedSlots(slots, this.engine.ownerSlots(botId)))
     return { bot: this.summaryOf(botId) }
   }
 
