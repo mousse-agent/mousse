@@ -1,14 +1,15 @@
 import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
-import { mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, unlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { zipSync } from 'fflate'
 import { createManagedBrowserInstaller, detectManagedBrowserPlatform } from '../src/mms/browser/install'
 import { stagingRoot } from '../src/mms/browser/install/paths'
 import { ensureOwnedDirectory } from '../src/mms/browser/install/fsSafety'
 import { extractChromeZip } from '../src/mms/browser/install/archive'
+import { canCreateSymlinks } from './fixtures/browser/rawZip'
 
 const VERSION_1 = '123.0.0.1'
 const VERSION_2 = '124.0.0.2'
@@ -280,11 +281,14 @@ function macArchive(frameworkVersion = '123.0.0.1', extra: Record<string, Uint8A
   })
 }
 
-async function macSetup(): Promise<{ root: string; fixture: FixtureServer; installer: ReturnType<typeof createManagedBrowserInstaller> }> {
+type Probe = Parameters<typeof createManagedBrowserInstaller>[1] & {}
+
+/** The platform is a parameter: a macOS installer runs on any host because the version probe is faked. */
+async function macSetup(probe?: Probe): Promise<{ root: string; fixture: FixtureServer; installer: ReturnType<typeof createManagedBrowserInstaller> }> {
   const context = await setup()
   context.fixture.setPlatform('mac-arm64')
   context.fixture.setArchive(macArchive())
-  const installer = createManagedBrowserInstaller(detectManagedBrowserPlatform('darwin', 'arm64'), async (_path, _signal, expectedVersion) => ({ version: `Chrome/${expectedVersion ?? VERSION_1}` }))
+  const installer = createManagedBrowserInstaller(detectManagedBrowserPlatform('darwin', 'arm64'), probe ?? (async (_path, _signal, expectedVersion) => ({ version: `Chrome/${expectedVersion ?? VERSION_1}` })))
   return { ...context, installer }
 }
 
@@ -296,7 +300,50 @@ async function treeLinks(directory: string): Promise<string[]> {
   return found
 }
 
-describe.skipIf(process.platform === 'win32')('managed browser installer with the macOS app bundle', () => {
+describe('managed browser installer refusing unsafe macOS archives (any platform)', () => {
+  const unsafe: Array<[string, Record<string, Uint8Array | [Uint8Array, { os: number; attrs: number }]>, RegExp]> = [
+    ['an absolute link target', { [`${MAC_APP}/Contents/escape`]: link('/etc') }, /absolute or not portable/],
+    ['a link target that climbs out with ..', { [`${MAC_APP}/Contents/escape`]: link('../../../../outside') }, /outside the extraction root/],
+    ['a chain whose second link climbs out through the first', {
+      // The first link already points at a folder above itself, which is refused.
+      [`${MAC_APP}/Contents/up`]: link('..'),
+      [`${MAC_APP}/Contents/escape`]: link('up/../../../escaped')
+    }, /own folder or a folder above it: .*Contents\/up/],
+    ['a name with an empty segment that re-enters through the staging folder name', {
+      [`${MAC_APP}/Contents//up`]: link('..'),
+      [`${MAC_APP}/Contents/E`]: link('up/../../extracted/chrome-mac-arm64/real'),
+      'chrome-mac-arm64/real': new Uint8Array([1]),
+      'chrome-mac-arm64/Google Chrome for Testing.app/extracted/chrome-mac-arm64/real': new Uint8Array([1])
+    }, /empty or "\." segment/],
+    ['a link to its own parent folder', { [`${MAC_APP}/Contents/loop`]: link('..') }, /own folder or a folder above it/],
+    ['a link later used as a directory to write through', {
+      [`${MAC_APP}/Contents/through`]: link('MacOS'),
+      [`${MAC_APP}/Contents/through/planted`]: new Uint8Array([1])
+    }, /written through a symlink entry/],
+    ['a dangling link', { [`${MAC_APP}/Contents/dangling`]: link('Missing/thing') }, /missing from the archive/],
+    ['a link loop', { [`${MAC_APP}/Contents/a`]: link('b'), [`${MAC_APP}/Contents/b`]: link('a') }, /too long or loops/],
+    ['a link to the extraction root', { [`${MAC_APP}/Contents/top`]: link('../../..') }, /extraction root/],
+    ['an entry path that escapes', { '../escape': new Uint8Array([1]) }, /escapes extraction root/],
+    ['a FIFO entry', { [`${MAC_APP}/Contents/fifo`]: [new Uint8Array(), { os: 3, attrs: S_IFIFO * 0x10000 }] }, /unsupported file type/]
+  ]
+  it.each(unsafe)('refuses %s before writing anything', async (_label, extra, error) => {
+    const { root, fixture, installer } = await macSetup()
+    fixture.setArchive(macArchive('123.0.0.1', extra))
+    await expect(installer.install(options(root, fixture))).rejects.toThrow(error)
+    expect((await installer.availability(root)).status).toBe('setup-required')
+    expect(await readdir(stagingRoot(root))).toEqual([])
+    expect(await readdir(join(root, 'versions')).catch(() => [])).toEqual([])
+  })
+
+  it('refuses the same archive shapes when symlinks are not allowed at all', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse-managed-browser-link-'))
+    roots.push(root)
+    await expect(extractChromeZip(macArchive(), join(root, 'out'), { maxEntries: 100, maxExtractedBytes: 1024 * 1024 })).rejects.toThrow(/Archive contains a symlink entry/)
+    expect(await readdir(root)).toEqual([])
+  })
+})
+
+describe.skipIf(!canCreateSymlinks())('managed browser installer with the macOS app bundle on disk', () => {
   it('installs a macOS archive whose framework links stay inside the bundle, then replaces and cleans it up', async () => {
     const { root, fixture, installer } = await macSetup()
     const first = await installer.install(options(root, fixture))
@@ -320,42 +367,65 @@ describe.skipIf(process.platform === 'win32')('managed browser installer with th
     expect(await readdir(stagingRoot(root))).toEqual([])
   })
 
-  const unsafe: Array<[string, Record<string, Uint8Array | [Uint8Array, { os: number; attrs: number }]>, RegExp]> = [
-    ['an absolute link target', { [`${MAC_APP}/Contents/escape`]: link('/etc') }, /absolute or not portable/],
-    ['a link target that climbs out with ..', { [`${MAC_APP}/Contents/escape`]: link('../../../../outside') }, /outside the extraction root/],
-    ['a chain whose second link climbs out through the first', {
-      [`${MAC_APP}/Contents/up`]: link('..'),
-      // Read as plain text this stays inside (chrome-mac-arm64/escaped); the
-      // filesystem follows `up` first and leaves the root.
-      [`${MAC_APP}/Contents/escape`]: link('up/../../../escaped')
-    }, /outside the extraction root/],
-    ['a link later used as a directory to write through', {
-      [`${MAC_APP}/Contents/through`]: link('MacOS'),
-      [`${MAC_APP}/Contents/through/planted`]: new Uint8Array([1])
-    }, /written through a symlink entry/],
-    ['a dangling link', { [`${MAC_APP}/Contents/dangling`]: link('Missing/thing') }, /missing from the archive/],
-    ['a link loop', { [`${MAC_APP}/Contents/a`]: link('b'), [`${MAC_APP}/Contents/b`]: link('a') }, /too long or loops/],
-    ['a link to the extraction root', { [`${MAC_APP}/Contents/top`]: link('../../..') }, /extraction root/],
-    ['an entry path that escapes', { '../escape': new Uint8Array([1]) }, /escapes extraction root/],
-    ['a FIFO entry', { [`${MAC_APP}/Contents/fifo`]: [new Uint8Array(), { os: 3, attrs: S_IFIFO * 0x10000 }] }, /unsupported file type/]
-  ]
-  it.each(unsafe)('refuses %s and leaves no link or install behind', async (_label, extra, error) => {
-    const { root, fixture, installer } = await macSetup()
-    fixture.setArchive(macArchive('123.0.0.1', extra))
-    await expect(installer.install(options(root, fixture))).rejects.toThrow(error)
-    expect((await installer.availability(root)).status).toBe('setup-required')
+  // A probe that plants a link while the tree is still in staging stands in
+  // for tampering between extraction and the move: the link resolves inside
+  // staging (it re-enters through the folder name `extracted`) but dangles once
+  // the tree is in versions/, so only the check after the move can catch it.
+  const reentryProbe = (plant: () => boolean): Probe => async (path, _signal, expectedVersion) => {
+    if (plant()) await symlink('../../../../extracted/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS', join(dirname(dirname(path)), 'reentry'))
+    return { version: `Chrome/${expectedVersion ?? VERSION_1}` }
+  }
+
+  it('checks a new version again in its final place and removes it when a link no longer resolves there', async () => {
+    let plant = false
+    const { root, fixture, installer } = await macSetup(reentryProbe(() => plant))
+    await installer.install(options(root, fixture))
+    plant = true
+    fixture.setVersion(VERSION_2)
+    fixture.setArchive(macArchive('124.0.0.2'))
+    await expect(installer.install(options(root, fixture))).rejects.toThrow(/dangling symlink/)
+    expect((await installer.availability(root))).toMatchObject({ status: 'ready', version: VERSION_1 })
+    expect(await readdir(join(root, 'versions'))).not.toContain(`mac-arm64-${VERSION_2}`)
     expect(await readdir(stagingRoot(root))).toEqual([])
-    expect(await treeLinks(root)).toEqual([])
   })
 
-  it('refuses the same archive shapes when symlinks are not allowed at all', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'mousse-managed-browser-link-'))
-    roots.push(root)
-    await expect(extractChromeZip(macArchive(), join(root, 'out'), { maxEntries: 100, maxExtractedBytes: 1024 * 1024 })).rejects.toThrow(/Archive contains a symlink entry/)
-    expect(await treeLinks(root)).toEqual([])
+  it('restores the previous files when a same-version replacement fails the check in its final place', async () => {
+    let plant = false
+    const { root, fixture, installer } = await macSetup(reentryProbe(() => plant))
+    await installer.install(options(root, fixture))
+    plant = true
+    await expect(installer.install(options(root, fixture, { expectedSha256: sha256(macArchive()) }))).rejects.toThrow(/dangling symlink/)
+    const active = await installer.availability(root)
+    expect(active).toMatchObject({ status: 'ready', version: VERSION_1 })
+    expect(await readFile(active.executablePath!, 'utf8')).toContain('mac fixture')
+    expect((await treeLinks(root)).filter((path) => path.endsWith('reentry'))).toEqual([])
   })
 
-  it('removes links it created when the on-disk check refuses the tree', async () => {
+  it('cleanup removes staging folders and old versions holding dangling or outward links without following them', async () => {
+    const { root, fixture, installer } = await macSetup()
+    await installer.install(options(root, fixture))
+    fixture.setVersion(VERSION_2)
+    fixture.setArchive(macArchive('124.0.0.2'))
+    await installer.install(options(root, fixture))
+    const outside = await mkdtemp(join(tmpdir(), 'mousse-managed-browser-outside-'))
+    roots.push(outside)
+    await writeFile(join(outside, 'canary.txt'), 'alive')
+    // What a crash between creating links and checking them can leave behind.
+    const stale = join(stagingRoot(root), 'mousse-stale', 'extracted', 'app')
+    await mkdir(stale, { recursive: true })
+    await symlink('missing', join(stale, 'dangling'))
+    await symlink(outside, join(stale, 'outward'), 'dir')
+    const oldVersion = join(root, 'versions', `mac-arm64-${VERSION_1}`)
+    await symlink(outside, join(oldVersion, 'outward'), 'dir')
+    await symlink('missing', join(oldVersion, 'dangling'))
+    const removed = await installer.cleanup(root, { keepVersions: 0 })
+    expect(removed).toEqual([join(stagingRoot(root), 'mousse-stale'), oldVersion])
+    expect(await readdir(stagingRoot(root))).toEqual([])
+    expect(await readFile(join(outside, 'canary.txt'), 'utf8')).toBe('alive')
+    expect((await installer.availability(root)).version).toBe(VERSION_2)
+  })
+
+  it('removes links it already created when creating a later link fails', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse-managed-browser-link-'))
     roots.push(root)
     const out = join(root, 'out')

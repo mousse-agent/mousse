@@ -89,6 +89,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
     const staging = join(stagingRoot(root), `mousse-${randomUUID()}`)
     let versionPath: string | undefined
     let backupPath: string | undefined
+    let placed = false
     try {
       await ensureOwnedDirectory(staging, root)
       options.onProgress?.({ phase: 'resolving', receivedBytes: 0 })
@@ -138,11 +139,15 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
         await assertOwnedPath(backupPath, root)
         await rename(versionPath, backupPath)
       } else {
-        await removeOwnedTree(versionPath, root, this.tree)
+        await removeOwnedTree(versionPath, root)
       }
       await assertSafeTree(extracted, root, this.tree)
       await assertOwnedPath(versionPath, root)
       await rename(extracted, versionPath)
+      placed = true
+      // Relative links resolve against where the tree now lives, so check it
+      // again in its final place; a failure removes it below.
+      await assertSafeTree(versionPath, root, this.tree)
       await assertOwnedPath(metadataPath(root, this.platformInfo.platform, version), root)
       await writeFile(metadataPath(root, this.platformInfo.platform, version), JSON.stringify(metadata, null, 2), { encoding: 'utf8', flag: 'wx' })
       options.onProgress?.({ phase: 'activating', receivedBytes: archive.bytes, totalBytes: archive.bytes, fraction: 1, version })
@@ -153,18 +158,18 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       let restoreError: unknown
       if (backupPath && versionPath) {
         try {
-          await removeOwnedTree(versionPath, root, this.tree)
+          await removeOwnedTree(versionPath, root)
           await assertSafeTree(backupPath, root, this.tree)
           await rename(backupPath, versionPath)
           backupPath = undefined
         } catch (caught) { restoreError = caught }
-      } else if (versionPath && !(await isActiveVersion(root, versionPath))) {
-        await removeOwnedTree(versionPath, root, this.tree).catch(() => undefined)
+      } else if (versionPath && (placed || !(await isActiveVersion(root, versionPath)))) {
+        await removeOwnedTree(versionPath, root).catch(() => undefined)
       }
       if (restoreError) throw new AggregateError([error, restoreError], 'Managed browser replacement failed and the active version could not be restored.')
       throw error
     } finally {
-      await removeOwnedTree(staging, root, this.tree).catch(() => undefined)
+      await removeOwnedTree(staging, root).catch(() => undefined)
       await release()
       this.installing.delete(root)
     }
@@ -230,7 +235,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       for (const entry of stagingEntries) {
         if (!entry.name.startsWith('mousse-') || !entry.isDirectory()) continue
         const path = join(stagingRoot(root), entry.name)
-        await removeOwnedTree(path, root, this.tree)
+        await removeOwnedTree(path, root)
         removed.push(path)
       }
       const active = await readActive(root)
@@ -248,7 +253,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       candidates.sort((a, b) => b.installedAt.localeCompare(a.installedAt))
       for (const candidate of candidates.slice(options.keepVersions ?? 1)) {
         const path = join(versionsRoot(root), candidate.name)
-        await removeOwnedTree(path, root, this.tree)
+        await removeOwnedTree(path, root)
         removed.push(path)
       }
       return removed

@@ -1,5 +1,5 @@
 import { lstat, mkdir, readdir, realpath, rm } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export function contained(root: string, target: string): boolean {
   const rel = relative(resolve(root), resolve(target))
@@ -50,9 +50,9 @@ export async function assertOwnedPath(target: string, root: string): Promise<voi
 export interface SafeTreeOptions {
   /**
    * Accept symlinks inside the tree when their real path stays inside the tree
-   * itself (the macOS Chrome app bundle's framework links). The tree's own
-   * path and its parents must still be real directories, and removal unlinks
-   * such links without following them.
+   * itself and is not the link's own folder or a folder above it (the macOS
+   * Chrome app bundle's framework links). The tree's own path and its parents
+   * must still be real directories.
    */
   allowContainedSymlinks?: boolean
 }
@@ -77,8 +77,8 @@ async function assertSafeChildren(directory: string, root: string, treeRoot: str
       if (!treeRoot) throw new Error(`Managed browser path contains a symlink: ${child}`)
       let resolved: string
       try { resolved = await realpath(child) } catch { throw new Error(`Managed browser path contains a dangling symlink: ${child}`) }
-      const rel = relative(treeRoot, resolved)
-      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Managed browser path contains a symlink that leaves its tree: ${child}`)
+      if (!isStrictlyInside(treeRoot, resolved)) throw new Error(`Managed browser path contains a symlink that leaves its tree: ${child}`)
+      if (isSameOrInside(resolved, await realpath(directory))) throw new Error(`Managed browser path contains a symlink to its own folder or a folder above it: ${child}`)
       continue
     }
     if (entry.isDirectory()) {
@@ -88,7 +88,24 @@ async function assertSafeChildren(directory: string, root: string, treeRoot: str
   }
 }
 
-export async function removeOwnedTree(target: string, root: string, options: SafeTreeOptions = {}): Promise<void> {
-  await assertSafeTree(target, root, options)
+function isSameOrInside(base: string, target: string): boolean {
+  const rel = relative(base, target)
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+}
+
+function isStrictlyInside(base: string, target: string): boolean {
+  return relative(base, target) !== '' && isSameOrInside(base, target)
+}
+
+/**
+ * Removes a tree inside the owned root. Only the path down to `target` is
+ * checked: it must stay inside the root with no link in it. Links inside the
+ * tree are unlinked and never followed, whatever they point at (Node's
+ * recursive `rm` lstats every entry and unlinks links, including links to
+ * directories), so a dangling or outward link left by an interrupted install
+ * never blocks cleanup.
+ */
+export async function removeOwnedTree(target: string, root: string): Promise<void> {
+  await assertOwnedPath(target, root)
   await rm(target, { recursive: true, force: true })
 }

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BrowserBroker } from '../../../../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../../../../src/mms/browser/defaultPorts'
@@ -55,7 +55,9 @@ export function removeOwnedTempRoot(root: string): void {
  * Copies an installed Chrome tree with hard links (plain copies on Windows or
  * across volumes). The macOS app bundle's framework uses relative links that
  * stay inside the bundle (Versions/Current and friends); those are recreated
- * as links, and any link that leaves the tree is refused.
+ * as links. Each link is resolved by the filesystem, through any other links,
+ * as the extractor does: a link that is absolute, dangles, leaves the tree, or
+ * points at its own folder or a folder above it is refused.
  */
 export function copyBrowserTreeAsHardlinks(sourceDirectory: string, targetDirectory: string): void {
   const sourceRoot = realpathSync.native(sourceDirectory)
@@ -63,8 +65,12 @@ export function copyBrowserTreeAsHardlinks(sourceDirectory: string, targetDirect
     const stat = lstatSync(source)
     if (stat.isSymbolicLink()) {
       const linkTarget = readlinkSync(source)
-      const rel = relative(sourceRoot, resolve(dirname(source), linkTarget))
-      if (isAbsolute(linkTarget) || rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+      let resolved: string
+      try { resolved = realpathSync.native(source) } catch { throw new Error(`Browser tree contains a dangling symlink: ${source}`) }
+      const rel = relative(sourceRoot, resolved)
+      const fromOwnFolder = relative(resolved, realpathSync.native(dirname(source)))
+      const ownFolderOrAbove = fromOwnFolder === '' || (fromOwnFolder !== '..' && !fromOwnFolder.startsWith(`..${sep}`) && !isAbsolute(fromOwnFolder))
+      if (isAbsolute(linkTarget) || rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) || ownFolderOrAbove) {
         throw new Error(`Browser tree contains a symlink that leaves it: ${source}`)
       }
       mkdirSync(dirname(target), { recursive: true })

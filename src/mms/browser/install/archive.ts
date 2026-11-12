@@ -1,6 +1,6 @@
 import { lstat, mkdir } from 'node:fs/promises'
 import { chmodSync, closeSync, constants, fsyncSync, lstatSync, openSync, realpathSync, symlinkSync, unlinkSync, writeSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Unzip, UnzipInflate, inflateSync } from 'fflate'
 
 export interface SafeExtractLimits {
@@ -27,7 +27,17 @@ const MODE_REGULAR = 0x8000
 const MODE_DIRECTORY = 0x4000
 const MODE_SYMLINK = 0xa000
 const MAX_LINK_TARGET_BYTES = 1024
-const MAX_LINK_HOPS = 40
+// macOS follows at most 32 links in one lookup (MAXSYMLINKS; Linux allows 40),
+// counting links in the install path itself, such as /var -> /private/var. 16
+// hops leaves room for those; the real framework links need one.
+const MAX_LINK_HOPS = 16
+// The real macOS archive has 5 links; the cap bounds the work of following them.
+const MAX_LINK_ENTRIES = 256
+// Names and link targets must be printable ASCII. For ASCII, the only names a
+// case-insensitive, normalising filesystem (APFS, NTFS) merges are those that
+// differ in A-Z case, so ASCII lowercasing compares names exactly as the disk
+// does. Real Chrome for Testing archives use only ASCII names.
+const PLAIN_NAME = /^[\x20-\x7e]+$/
 
 export async function extractChromeZip(archive: Uint8Array, destination: string, limits: SafeExtractLimits): Promise<{ entries: number; extractedBytes: number }> {
   const entries = inspectZip(archive, limits)
@@ -50,11 +60,13 @@ export async function extractChromeZip(archive: Uint8Array, destination: string,
 
 function inflateZipToDisk(archive: Uint8Array, entries: ZipEntry[], destinationRoot: string, limits: SafeExtractLimits): number {
   const expected = new Map(entries.map((entry) => [entry.name, entry]))
+  const emitted = new Set<string>()
   let inflated = 0
   const unzip = new Unzip((file) => {
     const name = file.name.replaceAll('\\', '/')
     const entry = expected.get(name)
-    if (!entry) throw new Error(`Archive emitted an unexpected entry: ${name}`)
+    if (!entry || emitted.has(name)) throw new Error(`Archive emitted an unexpected entry: ${name}`)
+    emitted.add(name)
     const target = resolve(destinationRoot, name)
     let handle = entry.kind === 'file' ? openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o755) : undefined
     const linkBytes: Uint8Array[] = []
@@ -93,6 +105,7 @@ function inflateZipToDisk(archive: Uint8Array, entries: ZipEntry[], destinationR
   })
   unzip.register(UnzipInflate)
   try { unzip.push(archive, true) } catch (error) { throw error instanceof Error ? error : new Error(String(error)) }
+  for (const name of expected.keys()) if (!emitted.has(name)) throw new Error(`Archive entry is missing from the archive data: ${name}`)
   return inflated
 }
 
@@ -115,6 +128,7 @@ function createContainedSymlinks(entries: ZipEntry[], destinationRoot: string, s
       try { resolvedPath = realpathSync.native(path) } catch { throw new Error(`Archive symlink does not resolve inside the extraction root: ${relative(destinationRoot, path)}`) }
       const rel = relative(canonicalRoot, resolvedPath)
       if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Archive symlink points outside the extraction root: ${relative(destinationRoot, path)}`)
+      if (isSameOrAncestor(resolvedPath, realpathSync.native(dirname(path)))) throw new Error(`Archive symlink points at its own folder or a folder above it: ${relative(destinationRoot, path)}`)
     }
   } catch (error) {
     // Unlink (never follow) what was created so the staging tree holds no links.
@@ -123,6 +137,12 @@ function createContainedSymlinks(entries: ZipEntry[], destinationRoot: string, s
     }
     throw error
   }
+}
+
+/** True when `candidate` is `directory` itself or one of its ancestors. */
+function isSameOrAncestor(candidate: string, directory: string): boolean {
+  const rel = relative(candidate, directory)
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
 }
 
 function writeAllSync(handle: number, data: Uint8Array): void {
@@ -146,6 +166,7 @@ function inspectZip(archive: Uint8Array, limits: SafeExtractLimits): ZipEntry[] 
   if (centralOffset + centralSize > archive.byteLength) throw new Error('Invalid Chrome archive: central directory is outside the archive.')
   const entries: ZipEntry[] = []
   const seen = new Set<string>()
+  let linkCount = 0
   let cursor = centralOffset
   let totalInflated = 0
   for (let index = 0; index < count; index += 1) {
@@ -173,15 +194,27 @@ function inspectZip(archive: Uint8Array, limits: SafeExtractLimits): ZipEntry[] 
     const modeType = (externalAttributes >>> 16) & MODE_TYPE_MASK
     const isSymlink = modeType === MODE_SYMLINK
     if (isSymlink && !limits.allowContainedSymlinks) throw new Error(`Archive contains a symlink entry: ${name}`)
+    if (isSymlink && ++linkCount > MAX_LINK_ENTRIES) throw new Error(`Archive contains too many symlink entries (more than ${MAX_LINK_ENTRIES}).`)
     // Device nodes, FIFOs and sockets have no place in a browser archive.
     if (!isSymlink && UNIX_HOSTS.has(madeByHost) && modeType !== 0 && modeType !== MODE_REGULAR && modeType !== MODE_DIRECTORY) {
       throw new Error(`Archive contains an unsupported file type: ${name}`)
     }
+    // The trailing slash alone decides whether an entry becomes a directory, so
+    // it must agree with the entry's mode and size.
+    if (!isSymlink && name.endsWith('/') && (uncompressedSize !== 0 || (UNIX_HOSTS.has(madeByHost) && modeType === MODE_REGULAR))) throw new Error(`Archive file entry is named as a directory: ${name}`)
+    if (!name.endsWith('/') && UNIX_HOSTS.has(madeByHost) && modeType === MODE_DIRECTORY) throw new Error(`Archive directory entry is named as a file: ${name}`)
     if (localOffset + 30 > archive.byteLength || view.getUint32(localOffset, true) !== LOCAL_SIGNATURE) throw new Error(`Invalid Chrome archive local entry: ${name}`)
     const localNameLength = view.getUint16(localOffset + 26, true)
     const localExtraLength = view.getUint16(localOffset + 28, true)
     const dataStart = localOffset + 30 + localNameLength + localExtraLength
     if (dataStart + compressedSize > archive.byteLength) throw new Error(`Invalid Chrome archive data range: ${name}`)
+    // The extractor streams local headers, so they must say what the central
+    // directory says.
+    const centralName = archive.subarray(nameStart, nameEnd)
+    const localName = archive.subarray(localOffset + 30, localOffset + 30 + localNameLength)
+    if (localNameLength !== nameLength || !localName.every((byte, offset) => byte === centralName[offset]) || view.getUint16(localOffset + 8, true) !== view.getUint16(cursor + 10, true)) {
+      throw new Error(`Archive central and local headers disagree: ${name}`)
+    }
     totalInflated += uncompressedSize
     if (totalInflated > limits.maxExtractedBytes) throw new Error('Archive declared size exceeds the configured limit.')
     if (flags & 0x0001) throw new Error(`Encrypted Chrome archive entries are not supported: ${name}`)
@@ -195,14 +228,14 @@ function inspectZip(archive: Uint8Array, limits: SafeExtractLimits): ZipEntry[] 
     }
     cursor = nameEnd + extraLength + commentLength
   }
-  assertContainedSymlinks(entries)
+  assertConsistentTree(entries)
   return entries
 }
 
 function entryKey(name: string): string {
-  // Case and Unicode-normalization insensitive, like the default macOS and
-  // Windows filesystems, so colliding names are refused rather than merged.
-  return name.normalize('NFC').toLocaleLowerCase('en-US').replace(/\/+$/, '')
+  // Names are plain ASCII (validateEntryName), so ASCII lowercasing merges
+  // exactly the names a case-insensitive filesystem merges.
+  return name.replace(/[A-Z]/g, (letter) => letter.toLowerCase()).replace(/\/$/, '')
 }
 
 function readLinkTarget(data: Uint8Array, method: number, uncompressedSize: number, name: string): string {
@@ -222,52 +255,78 @@ function decodeLinkTarget(bytes: Uint8Array, name: string): string {
   if (!target || target.includes('\u0000') || target.includes('\\') || target.includes(':') || target.startsWith('/') || isAbsolute(target)) {
     throw new Error(`Archive symlink target is absolute or not portable: ${name}`)
   }
+  // Plain targets only: no empty or `.` segments and no trailing slash, so the
+  // archive model below resolves them exactly as the filesystem will.
+  if (!PLAIN_NAME.test(target) || target.split('/').some((segment) => segment === '' || segment === '.')) {
+    throw new Error(`Archive symlink target is not a plain relative path: ${name}`)
+  }
   return target
 }
 
+interface TreeNode { path: string; kind: EntryKind; linkTarget?: string }
+
 /**
- * Resolves every symlink target against the archive's own tree, following
- * links inside the archive the way the filesystem will, and refuses any link
- * that would leave the tree, dangle, loop, or sit above another entry.
+ * Builds the tree the archive will produce and checks it is unambiguous: every
+ * path has one spelling and one kind, nothing sits below a file or a link, and
+ * every link resolves, following the archive's other links the way the
+ * filesystem will, to an existing entry inside the tree that is not the
+ * link's own folder or a folder above it, and not a folder holding links (so
+ * links can never form a directory cycle).
  */
-function assertContainedSymlinks(entries: ZipEntry[]): void {
-  const links = new Map<string, string>()
-  for (const entry of entries) if (entry.kind === 'symlink') links.set(entryKey(entry.name), entry.linkTarget!)
-  if (!links.size) return
-  const nodes = new Set<string>()
+function assertConsistentTree(entries: ZipEntry[]): void {
+  const nodes = new Map<string, TreeNode>()
   for (const entry of entries) {
     const parts = entry.name.split('/').filter(Boolean)
     for (let depth = 1; depth <= parts.length; depth += 1) {
-      const key = entryKey(parts.slice(0, depth).join('/'))
-      // A link may be the last segment of its own entry only; any entry below
-      // a link would be written through it.
-      if (depth < parts.length && links.has(key)) throw new Error(`Archive entry is written through a symlink entry: ${entry.name}`)
-      nodes.add(key)
+      const path = parts.slice(0, depth).join('/')
+      const kind: EntryKind = depth < parts.length ? 'directory' : entry.kind
+      const key = entryKey(path)
+      const existing = nodes.get(key)
+      if (!existing) { nodes.set(key, { path, kind, linkTarget: kind === 'symlink' ? entry.linkTarget : undefined }); continue }
+      if (existing.path !== path) throw new Error(`Archive contains duplicate or case-colliding entry: ${entry.name}`)
+      if (existing.kind !== kind) {
+        if (existing.kind === 'symlink' || kind === 'symlink') throw new Error(`Archive entry is written through a symlink entry: ${entry.name}`)
+        throw new Error(`Archive entry uses a file as a directory: ${entry.name}`)
+      }
     }
   }
-  for (const entry of entries) {
-    if (entry.kind !== 'symlink') continue
-    const resolved = entry.name.split('/').filter(Boolean)
-    resolved.pop()
-    const pending = entry.linkTarget!.split('/')
+  const links = entries.filter((entry) => entry.kind === 'symlink')
+  if (!links.length) return
+  const foldersHoldingLinks = new Set<string>()
+  for (const link of links) {
+    const parts = link.name.split('/')
+    for (let depth = 1; depth < parts.length; depth += 1) foldersHoldingLinks.add(entryKey(parts.slice(0, depth).join('/')))
+  }
+  for (const link of links) {
+    const ownFolder = link.name.split('/').slice(0, -1)
+    const resolved = [...ownFolder]
+    const pending = link.linkTarget!.split('/')
     let hops = 0
+    let node: TreeNode | undefined
     while (pending.length) {
       const part = pending.shift()!
-      if (part === '' || part === '.') continue
+      if (node?.kind === 'file') throw new Error(`Archive symlink goes through a file: ${link.name}`)
       if (part === '..') {
-        if (!resolved.length) throw new Error(`Archive symlink points outside the extraction root: ${entry.name}`)
+        if (!resolved.length) throw new Error(`Archive symlink points outside the extraction root: ${link.name}`)
         resolved.pop()
+        node = resolved.length ? nodes.get(entryKey(resolved.join('/'))) : undefined
         continue
       }
       resolved.push(part)
-      const next = links.get(entryKey(resolved.join('/')))
-      if (next === undefined) continue
-      if (++hops > MAX_LINK_HOPS) throw new Error(`Archive symlink chain is too long or loops: ${entry.name}`)
+      node = nodes.get(entryKey(resolved.join('/')))
+      if (!node) throw new Error(`Archive symlink target is missing from the archive: ${link.name}`)
+      if (node.path !== resolved.join('/')) throw new Error(`Archive symlink target differs in case from the archive entry: ${link.name}`)
+      if (node.kind !== 'symlink') continue
+      if (++hops > MAX_LINK_HOPS) throw new Error(`Archive symlink chain is too long or loops: ${link.name}`)
       resolved.pop()
-      pending.unshift(...next.split('/'))
+      pending.unshift(...node.linkTarget!.split('/'))
+      node = resolved.length ? nodes.get(entryKey(resolved.join('/'))) : undefined
     }
-    if (!resolved.length) throw new Error(`Archive symlink points at the extraction root: ${entry.name}`)
-    if (!nodes.has(entryKey(resolved.join('/')))) throw new Error(`Archive symlink target is missing from the archive: ${entry.name}`)
+    if (!resolved.length) throw new Error(`Archive symlink points at the extraction root: ${link.name}`)
+    if (resolved.length <= ownFolder.length && resolved.every((part, index) => part === ownFolder[index])) {
+      throw new Error(`Archive symlink points at its own folder or a folder above it: ${link.name}`)
+    }
+    if (foldersHoldingLinks.has(entryKey(resolved.join('/')))) throw new Error(`Archive symlink points at a folder that holds links: ${link.name}`)
   }
 }
 
@@ -291,7 +350,12 @@ function findEndRecord(archive: Uint8Array): number {
 
 function validateEntryName(name: string): void {
   if (!name || name.includes('\u0000') || name.includes('\\') || isAbsolute(name) || name.split('/').includes('..')) throw new Error(`Archive entry escapes extraction root: ${name}`)
-  for (const segment of name.split('/').filter(Boolean)) {
+  // Plain names only, so every name means one path both here and on disk: no
+  // empty or `.` segment, and a trailing slash only as a directory marker.
+  if (!PLAIN_NAME.test(name)) throw new Error(`Archive entry name is not plain ASCII: ${name}`)
+  const segments = name.replace(/\/$/, '').split('/')
+  if (segments.some((segment) => segment === '' || segment === '.')) throw new Error(`Archive entry name has an empty or "." segment: ${name}`)
+  for (const segment of segments) {
     if (segment === '__proto__' || segment === 'constructor' || segment === 'prototype') throw new Error(`Archive entry uses a reserved runtime name: ${name}`)
     if (segment.includes(':') || segment.endsWith(' ') || segment.endsWith('.')) throw new Error(`Archive entry is not portable: ${name}`)
     if (WINDOWS_RESERVED.test(segment)) throw new Error(`Archive entry uses a reserved device name: ${name}`)
