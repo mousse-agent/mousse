@@ -1,4 +1,4 @@
-import { AppError, createErrorProvider, normalizeAppError, serializeAppError } from '../../shared/errors'
+import { AppError, createErrorProvider, normalizeAppError, redactSecrets, serializeAppError } from '../../shared/errors'
 import { PROVIDER_LABELS } from '../../shared/pauseDisplay'
 
 export const providerErrors = createErrorProvider({
@@ -18,8 +18,43 @@ export const providerErrors = createErrorProvider({
   provider_timeout: { category: 'timeout', retryable: true, message: 'The provider response timed out. Please try again.' },
   provider_cancelled: { category: 'cancelled', retryable: false, message: 'The provider request was cancelled.' },
   provider_retry_exhausted: { category: 'unavailable', retryable: false, message: 'The provider is still unavailable after five retries. Please try again later.' },
-  provider_unknown: { category: 'internal', retryable: false, message: 'The provider request failed. Please try again or check your provider connection.' }
+  provider_unknown: { category: 'internal', retryable: false, message: 'The provider request failed. Please try again or check your provider connection.' },
+  provider_api_error: { category: 'unavailable', retryable: false, message: 'The provider returned an error.' }
 })
+
+/** How much of a provider's own error message is kept for the transcript. */
+export const PROVIDER_MESSAGE_CHARS = 500
+/** A runtime's report of a provider's refusal: `API Error: 400 <message or JSON body>` (Claude Code). */
+const API_ERROR = /^API Error:\s*([1-5]\d{2})\b\s*([\s\S]*)$/
+
+/**
+ * The provider's own refusal, as a runtime reported it (`API Error: 400 …`), as an error whose message is the status
+ * and the provider's message: trimmed, credentials removed, cut at `PROVIDER_MESSAGE_CHARS`. A JSON body gives its
+ * `error.message`. The runtime already retried, so it is not retryable here; `supportId` is the reference the
+ * transcript shows. Undefined for any other text.
+ */
+export function providerApiError(text: string, provider?: string): AppError | undefined {
+  const match = API_ERROR.exec(text.trim())
+  if (!match) return undefined
+  const status = Number(match[1])
+  let body = match[2]!.trim()
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown }; message?: unknown }
+    const message = parsed?.error?.message ?? parsed?.message
+    if (typeof message === 'string' && message.trim()) body = message.trim()
+  } catch {
+    // Not JSON: the text is the message.
+  }
+  body = redactSecrets(body).replace(/\s+/g, ' ').trim()
+  if (body.length > PROVIDER_MESSAGE_CHARS) body = `${body.slice(0, PROVIDER_MESSAGE_CHARS - 1).trimEnd()}…`
+  const category = status === 401 || status === 403 ? 'denied' : status === 408 ? 'timeout' : status === 429 || status >= 500 ? 'unavailable' : 'invalid'
+  return new AppError({
+    code: 'provider_api_error',
+    message: body ? `${status} · ${body}` : String(status),
+    errorInfo: { category, retryable: false },
+    details: { ...(provider ? { provider } : {}), status, supportId: globalThis.crypto.randomUUID() }
+  }, new Error(text))
+}
 
 export interface ProviderFailureResponse { status: number; retryAfter?: string }
 

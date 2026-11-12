@@ -66,7 +66,7 @@ import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './ch
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
-import { readUsageLimit } from '../../../orchestrator/providerErrors'
+import { providerApiError, readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
@@ -3440,5 +3440,6 @@ function resultFailure(message: SDKResultMessage): Error | undefined {
       errorInfo: { category: 'unavailable', retryable: true }
     })
   }
-  return new Error(failure)
+  // The provider refused the request (`API Error: 400 …`): the transcript shows its status and message.
+  return providerApiError(failure, 'claude') ?? new Error(failure)
 }

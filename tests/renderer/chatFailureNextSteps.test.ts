@@ -9,7 +9,7 @@ import { ToolCallsGroup } from '../../src/renderer/chat/components/agent-element
 import { BashToolRow } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { ErrorMessage } from '../../src/renderer/chat/components/agent-elements/error-message'
 import { createTurnActions, TurnActionsContext, type TurnActions } from '../../src/renderer/chat/components/agent-elements/turn-actions'
-import { chatStatusFromPhase, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
+import { chatStatusFromPhase, errorTitle, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import type { ChatImageAttachment, ChatMessage } from '../../src/shared/types'
 import { RunInterruptedNotice } from '../../src/renderer/chat/components/MousseAgentChatShell'
 import type { TimelineStep } from '../../src/renderer/chat/components/agent-elements/types/timeline'
@@ -196,9 +196,40 @@ describe('a failed turn', () => {
 
   it('shows its error in the transcript with Retry', () => {
     render(shown(failedThread, vi.fn()))
-    expect(text()).toContain('Request failed')
+    expect(text()).toContain('Provider error')
     expect(text()).toContain('The provider could not accept this request.')
     expect(button('Retry')?.disabled).toBe(false)
+  })
+
+  it('shows the provider\'s own status and message, with its reference and Retry on a quiet line under it', () => {
+    const refused: ChatMessage[] = [
+      failedThread[0],
+      {
+        id: 's1', role: 'system', timestamp: '2026-11-05T10:00:01.000Z',
+        content: '[provider_api_error] 400 · messages.3.content.0: tool_use ids were found without tool_result blocks',
+        error: { code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', details: { provider: 'claude', status: 400, supportId: '1ecec6b5-2610-41b1-80f9-099a6f0732cc' } }
+      }
+    ]
+    render(shown(refused, vi.fn()))
+    expect(text()).toContain('Provider error')
+    expect(host.querySelector('.an-error-text')!.textContent).toBe('400 · messages.3.content.0: tool_use ids were found without tool_result blocks')
+    const meta = host.querySelector('.an-error-meta')!
+    expect(meta.textContent).toBe('Reference 1ecec6b5-2610-41b1-80f9-099a6f0732cc' + 'Retry')
+    expect(meta.querySelector('button[aria-label="Retry"]')).not.toBeNull()
+    expect(text()).not.toContain('Something went wrong')
+  })
+
+  it('moves the reference of a generic failure under its message', () => {
+    render(createElement(ErrorMessage, { title: 'Request failed', message: 'Something went wrong. Please try again or report this error. Reference: 02fb3fb4-25fb', onRetry: vi.fn() }))
+    expect(host.querySelector('.an-error-text')!.textContent).toBe('Something went wrong. Please try again or report this error.')
+    expect(host.querySelector('.an-error-meta')!.textContent).toBe('Reference 02fb3fb4-25fbRetry')
+  })
+
+  it('titles a failure by what refused it', () => {
+    expect(errorTitle({ code: 'provider_api_error' })).toBe('Provider error')
+    expect(errorTitle({ code: 'provider_usage_limit' })).toBe('Usage limit reached')
+    expect(errorTitle({ code: 'orchestrator_turn_failed' })).toBe('Request failed')
+    expect(errorTitle(undefined)).toBe('Request failed')
   })
 
   it('sends the prompt again through the send path on Retry', () => {
