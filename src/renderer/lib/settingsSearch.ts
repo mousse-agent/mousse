@@ -1,4 +1,6 @@
 import { MOUSSE_BUILTIN_TOOL_GROUPS, MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
+import { COMMANDS_IN_DISPLAY_ORDER } from '../../shared/commands'
+import { shortcutAnchor, shortcutRowTitle } from '../commands/shortcutEditing'
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
@@ -21,6 +23,8 @@ export interface SettingsSearchEntry {
    * (where the search lands instead) and the line that says why the setting is not there.
    */
   needs?: { anchor: string; reason: string }
+  /** For a row in a page's own filtered list (a shortcut): the text to fill that page's filter with. */
+  filter?: string
 }
 
 /** Every setting the search finds. Rows that exist once per item (a provider, a shortcut, a device) are found by their page. */
@@ -145,9 +149,22 @@ function builtInToolEntries(): SettingsSearchEntry[] {
 /** Settings that exist only when this build has the Mousse ID service. */
 export const MOUSSE_ID_ANCHORS: readonly string[] = ['account-mousse-id', 'account-phones']
 
-/** The settings the search offers: Mousse ID rows only when this build has the service. */
+/**
+ * Every shortcut, built from the command table: found by its row name, its command's title and words,
+ * and its group. It lands on its row with the Shortcuts filter set to that name.
+ */
+export const SHORTCUT_SEARCH_INDEX: readonly SettingsSearchEntry[] = COMMANDS_IN_DISPLAY_ORDER.map((command) => ({
+  title: shortcutRowTitle(command.id),
+  section: 'shortcuts',
+  anchor: shortcutAnchor(command.id),
+  keywords: [command.title, command.category, ...(command.searchTerms ?? [])],
+  filter: shortcutRowTitle(command.id)
+}))
+
+/** The settings the search offers: Mousse ID rows only when this build has the service, then the shortcuts. */
 export function searchIndex(mousseIdAvailable: boolean): readonly SettingsSearchEntry[] {
-  return mousseIdAvailable ? SETTINGS_SEARCH_INDEX : SETTINGS_SEARCH_INDEX.filter((entry) => !MOUSSE_ID_ANCHORS.includes(entry.anchor))
+  const settings = mousseIdAvailable ? SETTINGS_SEARCH_INDEX : SETTINGS_SEARCH_INDEX.filter((entry) => !MOUSSE_ID_ANCHORS.includes(entry.anchor))
+  return [...settings, ...SHORTCUT_SEARCH_INDEX]
 }
 
 /**
@@ -164,7 +181,7 @@ export function currentSettingsAnchor(anchor: string, aliases: Readonly<Record<s
 /** The index entry for an anchor (old anchors included), if the search knows it. */
 export function settingsSearchEntry(anchor: string): SettingsSearchEntry | undefined {
   const current = currentSettingsAnchor(anchor)
-  return SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === current)
+  return SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === current) ?? SHORTCUT_SEARCH_INDEX.find((entry) => entry.anchor === current)
 }
 
 /** A page as the search sees it: its name and the words it is found by. */
@@ -179,6 +196,8 @@ export interface SettingsSearchResult {
   title: string
   section: SettingsSectionId
   anchor?: string
+  /** The page's own filter to fill in (`filter` on the entry). */
+  filter?: string
 }
 
 const WORD_CHAR = /[\p{L}\p{N}]/u
@@ -228,7 +247,7 @@ export function searchSettings(query: string, pages: readonly SettingsSearchPage
   index.forEach((entry, order) => {
     if (!pageLabel.has(entry.section)) return
     const match = score(entry.title, entry.keywords ?? [], pageLabel.get(entry.section) ?? '')
-    if (match) scored.push({ title: entry.title, section: entry.section, anchor: entry.anchor, whole: match.whole, score: match.value + 0.5, order })
+    if (match) scored.push({ title: entry.title, section: entry.section, anchor: entry.anchor, filter: entry.filter, whole: match.whole, score: match.value + 0.5, order })
   })
   pages.forEach((page, order) => {
     const match = score(page.label, page.keywords, '')
@@ -238,7 +257,7 @@ export function searchSettings(query: string, pages: readonly SettingsSearchPage
   return scored
     .filter((result) => result.whole || !anyWhole)
     .sort((a, b) => b.score - a.score || a.order - b.order)
-    .map(({ title, section, anchor }) => (anchor ? { title, section, anchor } : { title, section }))
+    .map(({ title, section, anchor, filter }) => (anchor ? { title, section, anchor, ...(filter ? { filter } : {}) } : { title, section }))
 }
 
 const FOCUSABLE = [
