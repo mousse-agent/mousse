@@ -860,6 +860,30 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   color: var(--text-primary);
 }
 
+/* Agents → Context → Cache time: each entry's time, then Change where it has a switch. */
+.agents-cache-times .agent-access-cap {
+  align-items: center;
+}
+
+.agents-cache-time {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-12);
+  flex-shrink: 0;
+}
+
+/* A quiet tag after a row title, e.g. "Experimental". */
+.settings-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-8);
+  border-radius: 9px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--ui-hover);
+}
+
 /* MoreDetails: a quiet text toggle after a description, and the rules it folds away. */
 .settings-more-btn {
   padding: 0;

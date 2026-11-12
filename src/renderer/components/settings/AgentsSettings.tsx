@@ -4,22 +4,73 @@ import type { IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, Setti
 import { normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import type { Project } from '../../../shared/types'
+import type { InstanceSnapshot } from '../../../shared/harness/status'
 import { AgentAccessSettings } from './AgentAccessSettings'
+import { AgentAutomationsSettings } from './AgentAutomationsSettings'
 import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
-import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
-import { openSettingsSection } from '../../lib/settingsNavigation'
+import { Brain, Layers, RotateCcw } from '../../lib/icons'
+import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
+import { DEVICE_SCOPE, useProviderSnapshots } from '../../lib/providerSnapshots'
 
 const IDLE_COMPACTION_OPTIONS: SelectOption<IdleCompactionSetting>[] = [
   { value: 'suggest', label: 'Suggest compacting' },
   { value: 'off', label: "Don't suggest" }
 ]
 
+/** How long one Claude Code entry keeps the prompt cache, as the Cache time row says it. */
+export function cacheTimeLabel(state: NonNullable<InstanceSnapshot['promptCacheHour']>): string {
+  if (state.userSetting) return 'Set in Claude Code'
+  return state.on ? '1 hour' : '5 minutes'
+}
+
 /**
- * Settings > Agents: the default model, thread title model and bots' model, plus context
- * compaction, how far agents may reach into other threads, and features still being tried out. Replaces the old Models, Context and
- * per-CLI Agents pages; their stored keys are left untouched.
+ * Read-only: how long each Claude Code entry on this device keeps the prompt cache. An entry that
+ * has the switch (it pays per token, or its subscription is unconfirmed) links to it in Providers.
+ */
+function CacheTimeRow() {
+  const { snapshots } = useProviderSnapshots(DEVICE_SCOPE)
+  const entries = (snapshots ?? []).filter((snapshot) => snapshot.promptCacheHour && snapshot.enabled.effective)
+  if (entries.length === 0) return null
+  return (
+    <SettingsRow
+      title="Cache time"
+      anchor="agents-cache-time"
+      description="How long each Claude Code provider keeps the prompt cache."
+    >
+      <ul className="agent-access-caps agents-cache-times" aria-label="Cache time">
+        {entries.map((snapshot) => {
+          const state = snapshot.promptCacheHour!
+          return (
+            <li key={snapshot.instanceId} className="agent-access-cap">
+              <span>{snapshot.displayName}</span>
+              <span className="agents-cache-time">
+                <span className="agent-access-cap-level">{cacheTimeLabel(state)}</span>
+                {state.basis !== 'subscription' && (
+                  <button
+                    type="button"
+                    className="settings-btn"
+                    aria-label={`Change ${snapshot.displayName} in Providers`}
+                    onClick={() => openProvider(snapshot.instanceId, 'providers-prompt-cache-hour')}
+                  >
+                    Change
+                  </button>
+                )}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </SettingsRow>
+  )
+}
+
+/**
+ * Settings > Agents, in five groups: Models (default, thread titles, bots), Context (compaction and
+ * the prompt cache), Access (how far agents may reach into other threads), Subagents, and the limits
+ * on Automations agents add. Replaces the old Models, Context and per-CLI Agents pages; their stored
+ * keys are left untouched.
  */
 export function AgentsSettings({
   settings,
@@ -66,7 +117,7 @@ export function AgentsSettings({
 
   return (
     <section id="agents" className="settings-section">
-      <SettingsGroup title="Models" icon={Brain}>
+      <SettingsGroup title="Models" icon={Brain} anchor="agents-models">
         <SettingsRow
           title="Default model"
           anchor="agents-default-model"
@@ -163,7 +214,7 @@ export function AgentsSettings({
         />
       </SettingsGroup>
 
-      <SettingsGroup title="Context" icon={Layers}>
+      <SettingsGroup title="Context" icon={Layers} anchor="agents-context">
         <SettingsRow
           title="Compact context"
           anchor="agents-context-compaction"
@@ -180,7 +231,7 @@ export function AgentsSettings({
         <SettingsRow
           title="When the cache expires"
           anchor="agents-idle-compaction"
-          description="After a pause, the next message re-reads the whole thread. Claude Code subscriptions keep the cache for an hour; other Claude Code providers can, in Providers."
+          description="After a pause, the next message re-reads the whole thread."
           control={
             <Select
               ariaLabel="When the cache expires"
@@ -190,26 +241,33 @@ export function AgentsSettings({
             />
           }
         />
+        <CacheTimeRow />
       </SettingsGroup>
 
-      <AgentAccessSettings settings={settings} projects={projects} updateSettings={updateSettings} />
+      <AgentAccessSettings
+        settings={settings}
+        projects={projects}
+        updateSettings={updateSettings}
+        subagentRows={
+          <SettingsRow
+            title="Worktree per subagent"
+            titleAction={<span className="settings-badge">Experimental</span>}
+            anchor="agents-subagent-worktrees"
+            htmlFor="agents-subagent-worktrees"
+            description="Each subagent starts on its own branch from the main agent's current commit. Off: the main agent decides."
+            control={
+              <Switch
+                id="agents-subagent-worktrees"
+                label="Worktree per subagent"
+                checked={experimental.subagentWorktrees}
+                onChange={(subagentWorktrees) => void updateSettings({ experimental: { ...experimental, subagentWorktrees } })}
+              />
+            }
+          />
+        }
+      />
 
-      <SettingsGroup title="Experimental" icon={FlaskConical}>
-        <SettingsRow
-          title="Give each subagent its own worktree"
-          anchor="agents-subagent-worktrees"
-          htmlFor="agents-subagent-worktrees"
-          description="Each subagent starts on its own branch from the main agent's current commit. Off: the main agent decides."
-          control={
-            <Switch
-              id="agents-subagent-worktrees"
-              label="Give each subagent its own worktree"
-              checked={experimental.subagentWorktrees}
-              onChange={(subagentWorktrees) => void updateSettings({ experimental: { ...experimental, subagentWorktrees } })}
-            />
-          }
-        />
-      </SettingsGroup>
+      <AgentAutomationsSettings />
     </section>
   )
 }

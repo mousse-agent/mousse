@@ -21,7 +21,7 @@ import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
 import { ActivitySection } from './ActivitySection'
-import { accountSection, takePendingSettingsSection } from '../lib/settingsNavigation'
+import { accountSection, takePendingSettingsAnchor, takePendingSettingsSection } from '../lib/settingsNavigation'
 import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
@@ -108,8 +108,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [initialRequest] = useState(() => window.location.hash === CONTEXT_COMPACTION_HASH ? 'context' : takePendingSettingsSection())
   const [selectedSection, setActiveSection] = useState<SettingsSectionId>(() => settingsSectionId(initialRequest) ?? 'general')
   const anchorSeq = useRef(0)
-  const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(() =>
-    initialRequest === 'context' ? { anchor: CONTEXT_COMPACTION_ANCHOR, seq: 0 } : null)
+  const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(() => {
+    const anchor = initialRequest === 'context' ? CONTEXT_COMPACTION_ANCHOR : takePendingSettingsAnchor()
+    return anchor ? { anchor, seq: 0 } : null
+  })
   /** Why a search result's setting is not on its page; `focus` when nothing else took focus. */
   const [anchorNote, setAnchorNote] = useState<{ text: string; focus: boolean } | null>(null)
   const activeSection: SettingsSectionId = selectedSection
@@ -120,9 +122,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       const section = settingsSectionId(requested)
       if (section) {
         takePendingSettingsSection()
+        const anchor = takePendingSettingsAnchor()
         setAnchorNote(null)
         if (requested === 'context' || window.location.hash === CONTEXT_COMPACTION_HASH) {
           setPendingAnchor({ anchor: CONTEXT_COMPACTION_ANCHOR, seq: ++anchorSeq.current })
+        } else if (anchor) {
+          setPendingAnchor({ anchor, seq: ++anchorSeq.current })
         }
         setActiveSection(section)
       }
