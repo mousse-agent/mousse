@@ -319,9 +319,9 @@ export const BOT_OFFLINE_REASON = 'waiting_for_internet'
  * Work the owner asked for that stopped short and goes on later in the same thread is `blocked` (it does not hold the
  * run lane) with one of these end reasons, like the internet wait, so an older build still reads `bots.db`:
  * `budget_exhausted` waits for the owner's answer to its limit ask, `room_allowed` was allowed more and goes on when
- * the run lane is free.
+ * the run lane is free, `usage_limit` goes on when the bot's usage pause ends.
  */
-export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed'])
+export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed', 'usage_limit'])
 
 /** Whether an activation is work that waits to go on (`BOT_WORK_WAIT_REASONS`). */
 export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'>): boolean {
