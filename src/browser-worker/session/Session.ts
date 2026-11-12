@@ -2,20 +2,28 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { ensureWindowsBrowserSandboxAccess } from '../../shared/browser/windowsSandboxPermissions.mjs'
-import type {
-  BrowserActionRequest,
-  BrowserAction,
-  BrowserTarget,
-  BrowserActionResult,
-  BrowserElement,
-  BrowserLifecycle,
-  BrowserObservation,
-  BrowserSessionRecord,
-  BrowserTab,
-  BrowserViewerFrame,
-  BrowserViewerUpdate,
-  BrowserWaitCondition,
-  BrowserWorkerRequest
+import {
+  BROWSER_MODIFIERS,
+  type BrowserActionRequest,
+  type BrowserAction,
+  type BrowserTarget,
+  type BrowserActionResult,
+  type BrowserElement,
+  type BrowserHumanInput,
+  type BrowserHumanInputResult,
+  type BrowserLifecycle,
+  type BrowserMouseButton,
+  type BrowserObservation,
+  type BrowserPageDialog,
+  type BrowserPictureSpot,
+  type BrowserSessionRecord,
+  type BrowserTab,
+  type BrowserTakeoverEffect,
+  type BrowserViewerFrame,
+  type BrowserViewerUpdate,
+  type BrowserWaitCondition,
+  type BrowserWorkerRequest,
+  browserTakeoverMessage
 } from '../../shared/browser/types'
 import { AGENT_CURSOR_GLIDE_MS, agentCursorFor, agentCursorLive, type BrowserAgentCursor } from '../../shared/browser/agentCursor'
 import { imagePointToViewport } from '../../shared/browser/geometry'
@@ -31,7 +39,7 @@ import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedO
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
-import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readPageSigns, type NavigationOptions } from '../action/dispatch'
+import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readPageSigns, readSelectedText, type DispatchedHumanInput, type NavigationOptions } from '../action/dispatch'
 import { BROWSER_PROBLEM_CODES, browserNoteForPerson, browserProblemMessage, classifyOpenedPage, hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
@@ -57,6 +65,11 @@ interface TabState {
   documentId: string
   loaderId: string
   frameId: string
+  /**
+   * The page the tab shows, renewed only when another page commits (an observation renews
+   * `documentId` each time): a person's input on a picture is checked against it.
+   */
+  page: string
 }
 
 interface AttachedFrameState {
@@ -166,6 +179,14 @@ export class ManagedSession {
   private readonly attachWaiters = new Map<string, Array<() => void>>()
   /** Tabs the agent is opening (`newTab`): a person taking over stops and closes them. */
   private readonly openingTabs = new Set<{ abort: AbortController; pageSessionId?: string }>()
+  /** Each tab's open dialog (alert, confirm, prompt, leave page), by CDP session: the page waits for its answer. */
+  private readonly tabDialogs = new Map<string, BrowserPageDialog>()
+  /** Each tab's file picker waiting for the person, by CDP session. */
+  private readonly tabChoosers = new Map<string, { mode: 'selectSingle' | 'selectMultiple'; backendNodeId: number }>()
+  /** A person's input waiting on a tab that may open a dialog (`untilDialog`), by CDP session. */
+  private readonly dialogWaiters = new Map<string, Set<() => void>>()
+  /** What the person holds down now, so it is let go of when they leave (`releaseHuman`). */
+  private humanPressed: { keys: Map<string, { key: string; code: string; keyCode: number }>; buttons: Set<BrowserMouseButton>; point?: { x: number; y: number }; composing: boolean; tabSessionId?: string } = { keys: new Map(), buttons: new Set(), composing: false }
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -271,6 +292,7 @@ export class ManagedSession {
       cdpSessionId: created.sessionId,
       url: 'about:blank',
       title: '',
+      page: 'doc_' + randomUUID(),
       documentId: 'doc_' + randomUUID(),
       loaderId: '',
       frameId: ''
@@ -306,6 +328,9 @@ export class ManagedSession {
       navigated.frameId = frame.id ?? navigated.frameId
       navigated.url = sanitizeUrl(frame.url ?? navigated.url)
       navigated.documentId = 'doc_' + randomUUID()
+      navigated.page = 'doc_' + randomUUID()
+      // A file picker of the page before is no longer waiting.
+      if (this.tabChoosers.has(navigated.cdpSessionId)) this.pageChooser(navigated.cdpSessionId, undefined)
       // Chromium may send no more screencast pictures once a new page commits: a watched tab's starts again.
       this.viewers?.committed(navigated.cdpSessionId, navigated.url)
       // A person watching sees a page that could not be loaded as such (Chromium's error page has no code to show).
@@ -349,6 +374,23 @@ export class ManagedSession {
     this.chrome.cdp.on('Page.frameResized', (_params: unknown, sessionId?: string) => {
       if (sessionId && !this.closed && !this.closing) this.viewers?.resized(sessionId)
     })
+    // A page's dialog (alert, confirm, prompt, leave page) stops it until it is answered: a person watching is shown it.
+    this.chrome.cdp.on('Page.javascriptDialogOpening', (params: unknown, sessionId?: string) => {
+      if (!sessionId || this.closed || this.closing || ![...this.tabs.values()].some((entry) => entry.cdpSessionId === sessionId)) return
+      const opened = params as { type?: string; message?: string; defaultPrompt?: string }
+      const type = opened.type === 'confirm' || opened.type === 'prompt' || opened.type === 'beforeunload' ? opened.type : 'alert'
+      this.pageDialog(sessionId, { type, message: boundText(String(opened.message ?? ''), 2_000), ...(type === 'prompt' ? { defaultPrompt: boundText(String(opened.defaultPrompt ?? ''), 2_000) } : {}) })
+    })
+    this.chrome.cdp.on('Page.javascriptDialogClosed', (_params: unknown, sessionId?: string) => {
+      if (sessionId && this.tabDialogs.has(sessionId)) this.pageDialog(sessionId, undefined)
+    })
+    // The page asks for files while a person holds the browser (`interceptChooser`): their view answers it.
+    this.chrome.cdp.on('Page.fileChooserOpened', (params: unknown, sessionId?: string) => {
+      if (!sessionId || this.closed || this.closing || this.controlOwner !== 'human') return
+      const opened = params as { mode?: string; backendNodeId?: number }
+      if (typeof opened.backendNodeId !== 'number') return
+      this.pageChooser(sessionId, { mode: opened.mode === 'selectMultiple' ? 'selectMultiple' : 'selectSingle', backendNodeId: opened.backendNodeId })
+    })
     // Chromium does not always report a page's own title as it changes: a watched page's is read once it has loaded.
     this.chrome.cdp.on('Page.lifecycleEvent', (params: unknown, sessionId?: string) => {
       if (!sessionId || this.closed || this.closing || !this.viewers?.watching(sessionId)) return
@@ -377,6 +419,8 @@ export class ManagedSession {
       if (detached) {
         this.loadingTabs.delete(detached.cdpSessionId)
         this.tabProblems.delete(detached.cdpSessionId)
+        this.tabDialogs.delete(detached.cdpSessionId)
+        this.tabChoosers.delete(detached.cdpSessionId)
         this.viewers?.forget(detached.cdpSessionId)
         this.refs.invalidateTab(detached.publicId)
         this.tabs.delete(detached.publicId)
@@ -418,6 +462,8 @@ export class ManagedSession {
     this.viewers = null
     this.loadingTabs.clear()
     this.tabProblems.clear()
+    this.tabDialogs.clear()
+    this.tabChoosers.clear()
     for (const timer of this.pageRechecks.values()) clearTimeout(timer)
     this.pageRechecks.clear()
     const chrome = this.chrome
@@ -492,6 +538,7 @@ export class ManagedSession {
         cdpSessionId: created.sessionId,
         url: url ?? 'about:blank',
         title: '',
+        page: 'doc_' + randomUUID(),
         documentId: 'doc_' + randomUUID(),
         loaderId: '',
         frameId: ''
@@ -762,6 +809,9 @@ export class ManagedSession {
     if (this.inFlight) fail('not_actionable', 'Another action is already in flight for this session')
     const tab = this.requireTab(request.tabId)
     await this.toFront(tab)
+    // A person took the browser over while its tab came forward: the action never ran.
+    if (!humanLease && this.controlOwner === 'human') return this.takenOver(request, false, 'not-applied')
+    if (request.generation !== this.generation) fail('stale_generation', 'Action generation is stale')
     const abort = new AbortController()
     const onAbort = () => abort.abort(signal?.reason)
     if (signal) {
@@ -769,6 +819,9 @@ export class ManagedSession {
       signal.addEventListener('abort', onAbort, { once: true })
     }
     this.inFlight = { requestId: request.requestId, dispatched: false, abort, tabSessionId: tab.cdpSessionId }
+    // How far it got, for an agent whose action a person's Take over cuts short.
+    let effect: BrowserTakeoverEffect = 'not-applied'
+    const pageBefore = tab.page
     this.clearDownloadQuarantine()
     this.downloadNames.clear()
     this.downloadStates.clear()
@@ -783,8 +836,10 @@ export class ManagedSession {
       const target = await this.resolveActionTarget(request, tab)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       if (!humanLease) await this.glideCursor(request, tab, target, abort.signal)
+      if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       this.inFlight.dispatched = true
       dispatched = true
+      effect = 'unknown'
       this.journal.append({
         at: nowIso(this.clock), profileId: this.profileId, sessionId: this.id, requestId: request.requestId,
         generation: this.generation, phase: 'dispatched', actionType: request.action.type, dispatched: true
@@ -802,6 +857,7 @@ export class ManagedSession {
       else if (request.action.type === 'reload' || request.action.type === 'back' || request.action.type === 'forward')
         navigation = await this.navigateHistoryOf(tab, request.action.type, { signal: abort.signal, ceilingMs })
       else await dispatchAction(this.requireChrome().cdp, actionSessionId, request.action, target, abort.signal)
+      effect = 'applied'
       const downloads = await this.publishCompletedDownloads(request.timeoutMs, abort.signal)
       if (navigation) this.refs.invalidateTab(tab.publicId)
       else this.recheckPage(tab)
@@ -850,6 +906,12 @@ export class ManagedSession {
         await new Promise((resolve) => setTimeout(resolve, 250))
         this.clearDownloadQuarantine()
       }
+      // A person took the browser over meanwhile: the agent is told so, and whether its action took
+      // effect (a navigation whose page committed did), so it does not blindly do it again.
+      if (!humanLease && abort.signal.reason === 'human_controlled') {
+        const navigates = ['navigate', 'reload', 'back', 'forward'].includes(request.action.type)
+        return this.takenOver(request, dispatched, effect === 'unknown' && navigates && tab.page !== pageBefore ? 'applied' : effect)
+      }
       const outcome = this.classifyActError(error, dispatched)
       this.journal.append({
         at: nowIso(this.clock), profileId: this.profileId, sessionId: this.id, requestId: request.requestId,
@@ -863,6 +925,15 @@ export class ManagedSession {
       signal?.removeEventListener('abort', onAbort)
       if (this.inFlight?.requestId === request.requestId) this.inFlight = null
     }
+  }
+
+  /** An agent's action a person's Take over cut short (or kept from running): blocked, with whether it took effect. */
+  private takenOver(request: BrowserActionRequest, dispatched: boolean, takeover: BrowserTakeoverEffect): BrowserActionResult {
+    this.journal.append({
+      at: nowIso(this.clock), profileId: this.profileId, sessionId: this.id, requestId: request.requestId,
+      generation: this.generation, phase: 'outcome', actionType: request.action.type, dispatched, outcome: 'blocked'
+    })
+    return { requestId: request.requestId, outcome: 'blocked', dispatched, takeover, code: 'human_controlled', message: browserTakeoverMessage(takeover), artifactIds: [] }
   }
 
   /**
@@ -939,6 +1010,12 @@ export class ManagedSession {
       behind: (cdpSessionId) => this.behind(cdpSessionId),
       loading: (cdpSessionId) => this.loadingTabs.has(cdpSessionId),
       problem: (cdpSessionId) => this.tabProblems.get(cdpSessionId),
+      document: (cdpSessionId) => [...this.tabs.values()].find((entry) => entry.cdpSessionId === cdpSessionId)?.page,
+      dialog: (cdpSessionId) => this.tabDialogs.get(cdpSessionId),
+      chooser: (cdpSessionId) => {
+        const chooser = this.tabChoosers.get(cdpSessionId)
+        return chooser ? { multiple: chooser.mode === 'selectMultiple' } : undefined
+      },
       now: () => this.clock().getTime()
     })
     return this.viewers
@@ -1010,7 +1087,7 @@ export class ManagedSession {
     const { picture: painted, viewport } = await viewers.latest(this.viewerTab(tab), maxWidth)
     const cursor = this.liveCursor(tab)
     const picture = { tabId: tab.publicId, url: tab.url, title: this.viewerTab(tab).title, mimeType: 'image/jpeg' as const, viewport, ...(cursor ? { cursor } : {}) }
-    if (painted) return { ...picture, data: painted.data, width: painted.width, height: painted.height, capturedAt: new Date(painted.at).toISOString() }
+    if (painted) return { ...picture, data: painted.data, width: painted.width, height: painted.height, capturedAt: new Date(painted.at).toISOString(), ...(painted.spot ? { spot: painted.spot } : {}) }
     const metrics = await cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
     const scale = Math.min(1, maxWidth / viewport.width, SCREENCAST_MAX_HEIGHT / viewport.height)
     // The clip is in page coordinates: the visible viewport starts at the scroll offset.
@@ -1018,34 +1095,227 @@ export class ManagedSession {
       format: 'jpeg', quality: 60, fromSurface: true, captureBeyondViewport: false,
       clip: { x: metrics.cssVisualViewport?.pageX ?? 0, y: metrics.cssVisualViewport?.pageY ?? 0, width: viewport.width, height: viewport.height, scale }
     }, { sessionId: tab.cdpSessionId, timeoutMs: 10_000 })
-    const taken = { data: shot.data, width: Math.round(viewport.width * scale), height: Math.round(viewport.height * scale), at: this.clock().getTime(), sharp: false }
+    const spot = { documentId: tab.page, scrollX: metrics.cssVisualViewport?.pageX ?? 0, scrollY: metrics.cssVisualViewport?.pageY ?? 0 }
+    const taken = { data: shot.data, width: Math.round(viewport.width * scale), height: Math.round(viewport.height * scale), at: this.clock().getTime(), sharp: false, spot }
     viewers.keep(tab.cdpSessionId, taken)
-    return { ...picture, data: taken.data, width: taken.width, height: taken.height, capturedAt: nowIso(this.clock) }
+    return { ...picture, data: taken.data, width: taken.width, height: taken.height, capturedAt: nowIso(this.clock), spot }
   }
 
-  /** A person's input while they hold the session (`control.take` as human): trusted input on the tab. */
-  async humanInput(params: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: true }> {
+  /**
+   * A person's input while they hold the session (`control.take` as human): trusted input on the tab.
+   * One input (`input`, answered as before) or several in order (`inputs`, each answered on its own in
+   * `results`). An input made on a picture (`spot`: its document and scroll) lands on what the person
+   * saw: on another document it is refused (`page_changed`); scrolled since, its point moves by the
+   * scroll, and is refused when that takes it out of view. While the page shows a dialog, only an
+   * answer to it is taken (the page takes no other input until then).
+   */
+  async humanInput(params: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: true; navigation?: BrowserNavigation; results?: BrowserHumanInputResult[] }> {
     if (this.lifecycle !== 'human-controlled') fail('human_controlled', 'A human control lease is not active')
     if (params.controlLeaseId !== this.controlLeaseId) fail('human_controlled', 'Control lease was replaced')
-    const input = validateBrowserHumanInput(params.input)
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
+    const batch = Array.isArray(params.inputs)
+    const entries = (batch ? params.inputs as unknown[] : [{ input: params.input }]).slice(0, 64).map((entry) => {
+      const record = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {}
+      return { input: validateBrowserHumanInput(record.input), spot: pictureSpot(record.spot) }
+    })
     // What the person's input changes reaches the view at once, even a picture the page showed before.
     this.viewers?.acted(tab.publicId)
-    const cdp = this.requireChrome().cdp
     // A tab in the back takes no input in a browser without a window (the event never completes): it comes forward first.
     await this.toFront(tab)
-    // The person's own navigation answers once the page has committed: their view shows it loading from there.
-    let navigation: BrowserNavigation | undefined
-    if (input.kind === 'navigate') navigation = await this.navigateTabOf(tab, input.url, { signal, untilCommit: true })
-    else if (input.kind === 'back' || input.kind === 'forward' || input.kind === 'reload') navigation = await this.navigateHistoryOf(tab, input.kind, { signal, untilCommit: true })
-    else await dispatchHumanInput(cdp, tab.cdpSessionId, input, signal)
-    // The page it committed, known now (Chromium's commit event may come a moment after the answer).
-    if (navigation && navigation.state !== 'failed') tab.url = sanitizeUrl(navigation.url)
+    const results: BrowserHumanInputResult[] = []
+    for (const entry of entries) results.push(await this.humanInputOne(tab, entry.input, entry.spot, signal))
     // What the person did may change the page under any ref the agent holds, and what it needs of them.
     this.refs.invalidateTab(tab.publicId)
-    if (!navigation) this.recheckPage(tab)
+    if (!results.some((result) => result.applied && result.navigation)) this.recheckPage(tab)
     this.touch()
-    return { ok: true, ...(navigation ? { navigation } : {}) }
+    if (batch) return { ok: true, results }
+    const only = results[0]!
+    // One input refused: an error, as before.
+    if (!only.applied) fail(only.code === 'page_changed' ? 'stale_observation' : 'not_actionable', only.message)
+    return { ok: true, ...(only.navigation ? { navigation: only.navigation } : {}) }
+  }
+
+  private async humanInputOne(tab: TabState, input: BrowserHumanInput, spot: BrowserPictureSpot | undefined, signal?: AbortSignal): Promise<BrowserHumanInputResult> {
+    const cdp = this.requireChrome().cdp
+    const pressed = this.humanPressed
+    const dialog = this.tabDialogs.get(tab.cdpSessionId)
+    if (input.kind === 'dialog') {
+      if (!dialog) return { applied: false, code: 'dialog_open', message: 'The page has no dialog open' }
+      await cdp.send('Page.handleJavaScriptDialog', { accept: input.accept, ...(input.text !== undefined && dialog.type === 'prompt' ? { promptText: input.text } : {}) }, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })
+      this.pageDialog(tab.cdpSessionId, undefined)
+      return { applied: true }
+    }
+    // The page waits for its dialog and takes nothing else meanwhile (an event sent now would never complete).
+    if (dialog && input.kind !== 'release') return { applied: false, code: 'dialog_open', message: 'Answer the page\'s dialog first' }
+    switch (input.kind) {
+      case 'navigate':
+      case 'back':
+      case 'forward':
+      case 'reload': {
+        // The person's own navigation answers once the page has committed: their view shows it loading from there.
+        // A page that asks first (leave this page?) waits for the person's answer: the navigation is under way.
+        const navigation = await this.untilDialog(tab, input.kind === 'navigate'
+          ? this.navigateTabOf(tab, input.url, { signal, untilCommit: true })
+          : this.navigateHistoryOf(tab, input.kind, { signal, untilCommit: true }))
+        if (!navigation) return { applied: true }
+        // The page it committed, known now (Chromium's commit event may come a moment after the answer).
+        if (navigation.state !== 'failed') tab.url = sanitizeUrl(navigation.url)
+        return { applied: true, navigation }
+      }
+      case 'release':
+        await this.releaseHuman(tab)
+        return { applied: true }
+      case 'files': {
+        const chooser = this.tabChoosers.get(tab.cdpSessionId)
+        if (!chooser) return { applied: false, code: 'no_chooser', message: 'The page is not asking for a file now' }
+        this.pageChooser(tab.cdpSessionId, undefined)
+        // None chosen: the picker was cancelled, and the page keeps what it had.
+        if (!input.paths.length) return { applied: true }
+        if (input.paths.length > 1 && chooser.mode !== 'selectMultiple') return { applied: false, code: 'too_large', message: 'The page takes one file here' }
+        await cdp.send('DOM.setFileInputFiles', { files: input.paths, backendNodeId: chooser.backendNodeId }, { sessionId: tab.cdpSessionId, signal, timeoutMs: 10_000 })
+        return { applied: true }
+      }
+      case 'copy': {
+        const frameId = tab.frameId || (await cdp.send<{ frameTree?: { frame?: { id?: string } } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })).frameTree?.frame?.id
+        const copied = frameId ? await readSelectedText(cdp, tab.cdpSessionId, frameId, signal) : ''
+        // The page's own copy or cut runs too (a page may listen for it); cut removes the selection.
+        const primary = process.platform === 'darwin' ? BROWSER_MODIFIERS.meta : BROWSER_MODIFIERS.ctrl
+        const key = input.cut ? { key: 'x', code: 'KeyX', keyCode: 88 } : { key: 'c', code: 'KeyC', keyCode: 67 }
+        await this.untilDialog(tab, (async () => {
+          await dispatchHumanInput(cdp, tab.cdpSessionId, { kind: 'keys', type: 'down', ...key, modifiers: primary, command: input.cut ? 'cut' : 'copy' }, signal)
+          await dispatchHumanInput(cdp, tab.cdpSessionId, { kind: 'keys', type: 'up', ...key, modifiers: primary }, signal)
+        })())
+        return { applied: true, copied }
+      }
+      default:
+        break
+    }
+    let sent: DispatchedHumanInput = input
+    let shifted: { x: number; y: number } | undefined
+    const located = 'x' in input && 'y' in input
+    if (located && spot) {
+      const fenced = await this.fencePoint(tab, input, spot, signal)
+      if (!fenced.ok) {
+        // A button or key the person holds is still let go of where it is: nothing is left pressed.
+        if (!(input.kind === 'pointer' && input.type === 'up' && pressed.buttons.has(input.button as BrowserMouseButton))) return { applied: false, code: 'page_changed', message: fenced.message }
+        const last = pressed.point ?? { x: input.x, y: input.y }
+        sent = { ...input, x: last.x, y: last.y }
+      } else if (fenced.dx || fenced.dy) {
+        shifted = { x: fenced.dx, y: fenced.dy }
+        sent = { ...input, x: input.x + fenced.dx, y: input.y + fenced.dy } as DispatchedHumanInput
+      }
+    }
+    // An input that opens a dialog (a click on a button that alerts) is done once the dialog is open:
+    // the page waits for its answer, which comes next.
+    await this.untilDialog(tab, dispatchHumanInput(cdp, tab.cdpSessionId, sent, signal))
+    this.notePressed(tab, sent)
+    return { applied: true, ...(shifted ? { shifted } : {}) }
+  }
+
+  /**
+   * Waits for input the page takes, or until the page opens a dialog because of it: the page then
+   * stops until the dialog is answered, so the input is under way (Chromium answers it after), and
+   * the answer must not wait behind it. Undefined when a dialog opened.
+   */
+  private async untilDialog<T>(tab: TabState, work: Promise<T>): Promise<T | undefined> {
+    const sessionId = tab.cdpSessionId
+    let wake!: () => void
+    const opened = new Promise<typeof DIALOG_OPENED>((resolve) => { wake = () => resolve(DIALOG_OPENED) })
+    const waiting = this.dialogWaiters.get(sessionId) ?? new Set<() => void>()
+    waiting.add(wake)
+    this.dialogWaiters.set(sessionId, waiting)
+    try {
+      const done = await Promise.race([work, opened])
+      if (done !== DIALOG_OPENED) return done as T
+      void work.catch(() => undefined)
+      return undefined
+    } finally {
+      waiting.delete(wake)
+      if (!waiting.size) this.dialogWaiters.delete(sessionId)
+    }
+  }
+
+  /**
+   * Checks a point the person picked on a picture against the page as it is now: the same document,
+   * and how far it has scrolled since (the point moves with it, so it lands on what they saw).
+   */
+  private async fencePoint(tab: TabState, input: { x: number; y: number }, spot: BrowserPictureSpot, signal?: AbortSignal): Promise<{ ok: true; dx: number; dy: number } | { ok: false; message: string }> {
+    if (spot.documentId !== tab.page) return { ok: false, message: 'The page changed since that picture' }
+    const metrics = await this.requireChrome().cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })
+    const visual = metrics.cssVisualViewport ?? {}
+    const dx = Math.round((spot.scrollX - (visual.pageX ?? 0)) * 100) / 100
+    const dy = Math.round((spot.scrollY - (visual.pageY ?? 0)) * 100) / 100
+    if (!dx && !dy) return { ok: true, dx: 0, dy: 0 }
+    const x = input.x + dx
+    const y = input.y + dy
+    if (x < 0 || y < 0 || x > (visual.clientWidth ?? Number.POSITIVE_INFINITY) || y > (visual.clientHeight ?? Number.POSITIVE_INFINITY)) {
+      return { ok: false, message: 'What that picture showed there has scrolled out of view' }
+    }
+    return { ok: true, dx, dy }
+  }
+
+  /** Keeps what the person holds down (keys, buttons, a composition), so it is let go of when they leave. */
+  private notePressed(tab: TabState, input: DispatchedHumanInput): void {
+    const pressed = this.humanPressed
+    pressed.tabSessionId = tab.cdpSessionId
+    if (input.kind === 'pointer') {
+      pressed.point = { x: input.x, y: input.y }
+      if (input.type === 'down' && input.button !== 'none') pressed.buttons.add(input.button)
+      if (input.type === 'up' && input.button !== 'none') pressed.buttons.delete(input.button)
+    } else if (input.kind === 'keys') {
+      if (input.type === 'down') pressed.keys.set(input.code || input.key, { key: input.key, code: input.code, keyCode: input.keyCode })
+      else pressed.keys.delete(input.code || input.key)
+    } else if (input.kind === 'compose') pressed.composing = input.text.length > 0
+    else if (input.kind === 'type' || input.kind === 'paste') pressed.composing = false
+  }
+
+  /**
+   * Lets go of everything the person left down: each key goes up, each button is released where the
+   * pointer was, and a composition under way is dropped. Bounded: a page that does not answer (a
+   * dialog) does not hold the browser up.
+   */
+  private async releaseHuman(tab?: TabState): Promise<void> {
+    const pressed = this.humanPressed
+    this.humanPressed = { keys: new Map(), buttons: new Set(), composing: false }
+    const sessionId = tab?.cdpSessionId ?? pressed.tabSessionId
+    const cdp = this.chrome?.cdp
+    if (!sessionId || !cdp || this.tabDialogs.has(sessionId)) return
+    if (!pressed.keys.size && !pressed.buttons.size && !pressed.composing) return
+    const send = (method: string, params: Record<string, unknown>) => cdp.send(method, params, { sessionId, timeoutMs: MARK_ANSWER_MS }).catch(() => undefined)
+    for (const key of pressed.keys.values()) await send('Input.dispatchKeyEvent', { type: 'keyUp', key: key.key, code: key.code, windowsVirtualKeyCode: key.keyCode, nativeVirtualKeyCode: key.keyCode })
+    const at = pressed.point ?? { x: 0, y: 0 }
+    for (const button of pressed.buttons) await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button, buttons: 0, clickCount: 1 })
+    if (pressed.composing) await send('Input.imeSetComposition', { text: '', selectionStart: 0, selectionEnd: 0 })
+  }
+
+  /** The page opened a dialog, or it was answered: kept per tab, for the person watching. */
+  private pageDialog(cdpSessionId: string, dialog: BrowserPageDialog | undefined): void {
+    if (dialog) this.tabDialogs.set(cdpSessionId, dialog)
+    else this.tabDialogs.delete(cdpSessionId)
+    this.viewers?.dialog(cdpSessionId, dialog)
+    if (dialog) for (const wake of [...this.dialogWaiters.get(cdpSessionId) ?? []]) wake()
+  }
+
+  /** The page asks for files (while a person holds the browser), or was answered. */
+  private pageChooser(cdpSessionId: string, chooser: { mode: 'selectSingle' | 'selectMultiple'; backendNodeId: number } | undefined): void {
+    if (chooser) this.tabChoosers.set(cdpSessionId, chooser)
+    else this.tabChoosers.delete(cdpSessionId)
+    this.viewers?.chooser(cdpSessionId, chooser ? { multiple: chooser.mode === 'selectMultiple' } : undefined)
+  }
+
+  /**
+   * While a person holds the browser, the tab they took answers its file picker through their view
+   * (`Page.fileChooserOpened`); otherwise a picker opens nothing, as a browser without a window has
+   * none to show.
+   */
+  private async interceptChooser(tab: TabState | undefined, enabled: boolean): Promise<void> {
+    const cdp = this.chrome?.cdp
+    if (!cdp) return
+    const tabs = tab ? [tab] : [...this.tabs.values()]
+    for (const entry of tabs) {
+      if (!enabled) this.pageChooser(entry.cdpSessionId, undefined)
+      await cdp.send('Page.setInterceptFileChooserDialog', { enabled }, { sessionId: entry.cdpSessionId, timeoutMs: MARK_ANSWER_MS }).catch(() => undefined)
+    }
   }
 
   /**
@@ -1133,16 +1403,25 @@ export class ManagedSession {
         const owner = params.owner === 'human' ? 'human' : 'agent'
         // A page the agent's action was still loading never commits for the person.
         const loadingForAgent = owner === 'human' && this.inFlight?.dispatched ? this.inFlight.tabSessionId : undefined
-        const taken = this.takeControl(owner)
-        // The tab a person takes comes to the front: Chromium paints only that one, so they see what they do.
-        const held = owner === 'human' && typeof params.tabId === 'string' ? this.tabs.get(params.tabId) : undefined
-        return this.afterControlMoved(loadingForAgent)
-          .then(() => held && this.tabs.has(held.publicId) ? this.toFront(held).catch(() => undefined) : undefined)
-          .then(() => taken)
+        // Given back: what the person left down is let go of first, while the page is still theirs.
+        const leaving = owner === 'agent' && this.controlOwner === 'human'
+        const released = leaving ? this.releaseHuman().then(() => this.interceptChooser(undefined, false)) : Promise.resolve()
+        return released.then(() => {
+          const taken = this.takeControl(owner)
+          // The tab a person takes comes to the front: Chromium paints only that one, so they see what they do.
+          const held = owner === 'human' && typeof params.tabId === 'string' ? this.tabs.get(params.tabId) : undefined
+          return this.afterControlMoved(loadingForAgent)
+            .then(() => held && this.tabs.has(held.publicId) ? this.toFront(held).catch(() => undefined) : undefined)
+            // Its file picker is answered in the person's view (`chooser`), when that view can.
+            .then(() => held && params.chooser === true ? this.interceptChooser(held, true) : undefined)
+            .then(() => taken)
+        })
       }
       case 'control.release':
-        this.releaseControl(requiredId(params.controlLeaseId))
-        return this.afterControlMoved().then(() => ({ ok: true, lifecycle: this.lifecycle }))
+        return this.releaseHuman().then(() => this.interceptChooser(undefined, false)).then(() => {
+          this.releaseControl(requiredId(params.controlLeaseId))
+          return this.afterControlMoved().then(() => ({ ok: true, lifecycle: this.lifecycle }))
+        })
       default:
         fail('unsupported', 'Unsupported method')
     }
@@ -1631,6 +1910,18 @@ function mediaTypeForName(name: string): string {
   if (lower.endsWith('.png')) return 'image/png'
   if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
   return 'application/octet-stream'
+}
+
+/** What `untilDialog` races the input against. */
+const DIALOG_OPENED = Symbol('dialog opened')
+
+/** The document and scroll of the picture a person acted on, when the daemon sent them. */
+function pictureSpot(value: unknown): BrowserPictureSpot | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const spot = value as Record<string, unknown>
+  const finite = (entry: unknown) => typeof entry === 'number' && Number.isFinite(entry) && Math.abs(entry) <= 10_000_000
+  if (typeof spot.documentId !== 'string' || !/^doc_[A-Za-z0-9-]{1,64}$/.test(spot.documentId) || !finite(spot.scrollX) || !finite(spot.scrollY)) return undefined
+  return { documentId: spot.documentId, scrollX: spot.scrollX as number, scrollY: spot.scrollY as number }
 }
 
 export function mapImagePoint(observation: BrowserObservation, point: { x: number; y: number }): { x: number; y: number } {

@@ -112,10 +112,23 @@ export interface BrowserActionRequest {
   expected?: BrowserWaitCondition
 }
 export type BrowserActionOutcome = 'verified' | 'unverified' | 'blocked' | 'failed' | 'unknown-effect'
+/** Whether an action a person's Take over cut short took effect: done, never sent, or can't be told. */
+export type BrowserTakeoverEffect = 'applied' | 'not-applied' | 'unknown'
+
+/** What an agent is told of its action when a person took the browser over while it ran (`who`: "A person", "Your owner"). */
+export function browserTakeoverMessage(effect: BrowserTakeoverEffect, who = 'A person'): string {
+  switch (effect) {
+    case 'applied': return `${who} took over the browser just after this action was done: it was applied. The page may have changed since. Observe it again once you have the browser back, and do not repeat this action.`
+    case 'not-applied': return `${who} took over the browser before this action ran: it was not applied. Once you have the browser back, observe the page again, then decide whether it is still needed.`
+    case 'unknown': return `${who} took over the browser while this action ran: it may or may not have been applied. Once you have the browser back, observe the page again to see whether it took effect before you repeat it.`
+  }
+}
 export interface BrowserActionResult {
   requestId: string
   outcome: BrowserActionOutcome
   dispatched: boolean
+  /** A person took the browser over while this action ran (`code` `human_controlled`): whether it took effect. */
+  takeover?: BrowserTakeoverEffect
   observation?: BrowserObservation
   code?: BrowserErrorCode
   message?: string
@@ -131,19 +144,79 @@ export interface BrowserResolvedArtifact {
   displayName: string
   mediaType?: string
 }
+/** A mouse button as CDP names it. */
+export type BrowserMouseButton = 'left' | 'middle' | 'right'
+/** Modifier keys held, as CDP counts them: Alt 1, Ctrl 2, Meta (Command) 4, Shift 8. */
+export const BROWSER_MODIFIERS = { alt: 1, ctrl: 2, meta: 4, shift: 8 } as const
+/** The editing commands a shortcut runs in the page (a browser without a window has no menu to run them). */
+export type BrowserEditCommand = 'selectAll' | 'copy' | 'cut' | 'undo' | 'redo'
+/** The most text one paste puts into a page. */
+export const MAX_BROWSER_PASTE_CHARS = 64_000
+
 /**
  * Input a person sends to a managed tab while they hold its control (a bot's browser view), at
  * viewport CSS pixels. Sent as trusted input; never a model's.
+ *
+ * - `click`, `scroll`, `type` and `key` are the plain forms (an older view sends them).
+ * - `pointer` is one mouse event: a button going down or up, or the pointer moving (with the buttons
+ *   held, so a move with a button down drags). `clicks` counts presses in a row (2 for a double click).
+ * - `keys` is one key going down or up, with the modifiers held, the key's code, and the text it types;
+ *   `command` runs the editing command its shortcut stands for.
+ * - `compose` is IME composition text (and a dead key's mark) as it stands; `type` commits text.
+ * - `paste` puts the person's clipboard text into the page; `copy` answers the page's selected text
+ *   (and `cut` removes it), for the person's clipboard only.
+ * - `dialog` answers the page's alert, confirm, prompt or leave-page question; `files` answers its
+ *   file picker with files the person chose (none: cancelled).
+ * - `release` lets go of every key and button the person left down, and any composition.
  */
 export type BrowserHumanInput =
   | { kind: 'click'; x: number; y: number }
-  | { kind: 'scroll'; x: number; y: number; deltaX: number; deltaY: number }
+  | { kind: 'scroll'; x: number; y: number; deltaX: number; deltaY: number; modifiers?: number }
   | { kind: 'type'; text: string }
   | { kind: 'key'; key: string }
+  | { kind: 'pointer'; type: 'down' | 'up' | 'move'; x: number; y: number; button: BrowserMouseButton | 'none'; buttons: number; clicks?: number; modifiers?: number }
+  | { kind: 'keys'; type: 'down' | 'up'; key: string; code: string; keyCode: number; modifiers: number; text?: string; repeat?: boolean; command?: BrowserEditCommand }
+  | { kind: 'compose'; text: string; selectionStart: number; selectionEnd: number }
+  | { kind: 'paste'; text: string }
+  | { kind: 'copy'; cut?: boolean }
+  | { kind: 'dialog'; accept: boolean; text?: string }
+  | { kind: 'files'; paths: string[] }
+  | { kind: 'release' }
   | { kind: 'navigate'; url: string }
   | { kind: 'back' }
   | { kind: 'forward' }
   | { kind: 'reload' }
+
+/** Where a picture the person acted on was taken: its document and scroll (`human.input`'s fence). */
+export interface BrowserPictureSpot {
+  documentId: string
+  scrollX: number
+  scrollY: number
+}
+
+/** A page's open alert, confirm, prompt or leave-page question, for the person watching. */
+export interface BrowserPageDialog {
+  type: 'alert' | 'confirm' | 'prompt' | 'beforeunload'
+  /** The page's words (untrusted, bounded). */
+  message: string
+  /** A prompt's text as the page filled it in. */
+  defaultPrompt?: string
+}
+
+/** A page's file picker waiting for the person (`Page.fileChooserOpened` while they hold the browser). */
+export interface BrowserFileChooser {
+  multiple: boolean
+}
+
+/**
+ * What became of one input in `human.input`: applied (with what a copy read, how far a point moved
+ * because the page scrolled since its picture, or how a navigation went), or refused with a code:
+ * `page_changed` (the picture was of another page, or of what has scrolled out of view), `dialog_open`
+ * (the page waits for its dialog), `not_pressed` (nothing to let go of), `no_chooser`, `too_large`.
+ */
+export type BrowserHumanInputResult =
+  | { applied: true; copied?: string; shifted?: { x: number; y: number }; navigation?: import('./navigation').BrowserNavigation }
+  | { applied: false; code: 'page_changed' | 'dialog_open' | 'no_chooser' | 'too_large'; message: string }
 
 /**
  * A live picture of a managed tab for a person watching (a bot's browser preview): not an
@@ -163,6 +236,8 @@ export interface BrowserViewerFrame {
   capturedAt: string
   /** Where the agent last acted in this tab, while it is recent. */
   cursor?: import('./agentCursor').BrowserAgentCursor
+  /** The document and scroll it shows (for a person's input on it). */
+  spot?: BrowserPictureSpot
 }
 
 /**
@@ -181,10 +256,17 @@ export interface BrowserViewerUpdate {
   loading?: boolean
   /** What the tab's last navigation ran into, or what its opened page needs (a sign-in, a human check). */
   problem?: import('./navigation').BrowserProblem
+  /** The page's open dialog, waiting for an answer. */
+  dialog?: BrowserPageDialog
+  /** The page's file picker, waiting for files (only while a person holds the browser). */
+  chooser?: BrowserFileChooser
   frameSeq: number
   stateSeq: number
-  /** A JPEG in base64; `sharp` when taken at full quality once the page was still. */
-  picture?: { data: string; width: number; height: number; at: number; sharp: boolean }
+  /**
+   * A JPEG in base64; `sharp` when taken at full quality once the page was still. `spot`: the
+   * document and scroll it shows, so a person's input on it lands on what they saw.
+   */
+  picture?: { data: string; width: number; height: number; at: number; sharp: boolean; spot?: BrowserPictureSpot }
   /** Where the agent last acted in this tab, while it is recent. */
   cursor?: import('./agentCursor').BrowserAgentCursor
   /** Nothing changed within the wait. */

@@ -9,6 +9,8 @@ import type {
   BrowserObservation,
   BrowserSessionRecord,
   BrowserHumanInput,
+  BrowserHumanInputResult,
+  BrowserPictureSpot,
   BrowserTab,
   BrowserViewerFrame,
   BrowserViewerUpdate,
@@ -327,13 +329,29 @@ export class BrowserSessionManager {
    * once the page has committed, with whether it is still loading.
    */
   async humanInput(context: BrowserToolContext, input: { sessionId: string; tabId?: string; input: BrowserHumanInput }): Promise<{ navigation?: BrowserNavigation }> {
-    this.authorize(context, undefined, 'browser.action', 'external', input)
+    // The policy hears which session and tab, and a navigation's address; never what the person types.
+    this.authorize(context, undefined, 'browser.action', 'external', { sessionId: input.sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.input.kind === 'navigate' ? { url: input.input.url } : {}) })
     const entry = this.requireOwned(input.sessionId, context.execution)
     if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })
     const result = await this.call(context.execution.profileId, 'human.input', {
       sessionId: input.sessionId, controlLeaseId: entry.record.controlLeaseId, input: input.input, ...(input.tabId ? { tabId: input.tabId } : {})
     }, this.signal(context)) as { navigation?: BrowserNavigation } | undefined
     return result?.navigation ? { navigation: result.navigation } : {}
+  }
+
+  /**
+   * A person's inputs in order, each answered on its own (`BrowserHumanInputResult`): one made on a
+   * picture names where that picture was taken (`spot`), or that it is no longer known (`stale`).
+   */
+  async humanInputs(context: BrowserToolContext, input: { sessionId: string; tabId: string; inputs: Array<{ input: BrowserHumanInput; spot?: BrowserPictureSpot; stale?: true }> }): Promise<BrowserHumanInputResult[]> {
+    this.authorize(context, undefined, 'browser.action', 'external', { sessionId: input.sessionId, tabId: input.tabId })
+    const entry = this.requireOwned(input.sessionId, context.execution)
+    if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })
+    const result = await this.call(context.execution.profileId, 'human.input', {
+      sessionId: input.sessionId, controlLeaseId: entry.record.controlLeaseId, tabId: input.tabId, inputs: input.inputs
+    }, this.signal(context)) as { results?: BrowserHumanInputResult[] } | undefined
+    if (!Array.isArray(result?.results) || result.results.length !== input.inputs.length) throw new BrowserAutomationError({ code: 'worker_disconnected', message: 'The browser did not answer each input' })
+    return result.results
   }
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
@@ -350,15 +368,18 @@ export class BrowserSessionManager {
     return { extraction: result }
   }
 
-  /** Who holds the session. A person taking it may name the tab they take (`tabId`): it comes to the front. */
-  async control(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human', options: { tabId?: string } = {}): Promise<BrowserToolOutput> {
+  /**
+   * Who holds the session. A person taking it may name the tab they take (`tabId`): it comes to the
+   * front; with `chooser`, that tab's file picker is answered through their view.
+   */
+  async control(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human', options: { tabId?: string; chooser?: boolean } = {}): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId, owner })
-    return this.changeControl(context, sessionId, owner, owner === 'human' ? options.tabId : undefined)
+    return this.changeControl(context, sessionId, owner, owner === 'human' ? options.tabId : undefined, owner === 'human' && options.chooser === true)
   }
 
-  private async changeControl(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human', tabId?: string): Promise<BrowserToolOutput> {
+  private async changeControl(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human', tabId?: string, chooser = false): Promise<BrowserToolOutput> {
     const entry = this.requireOwned(sessionId, context.execution)
-    const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner, ...(tabId ? { tabId } : {}) }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
+    const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner, ...(tabId ? { tabId } : {}), ...(chooser ? { chooser: true } : {}) }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
     entry.record = { ...entry.record, controlLeaseId: result.controlLeaseId, generation: result.generation ?? entry.record.generation, lifecycle: result.lifecycle ?? entry.record.lifecycle, updatedAt: new Date().toISOString() }
     if (owner === 'agent' && entry.record.humanHandoff) entry.record.humanHandoff = { ...entry.record.humanHandoff, state: 'resumed', updatedAt: new Date().toISOString() }
     this.observations.delete(sessionId)

@@ -1,4 +1,4 @@
-import type { BrowserAction, BrowserHumanInput } from '../../shared/browser/types'
+import { BROWSER_MODIFIERS, MAX_BROWSER_PASTE_CHARS, type BrowserAction, type BrowserHumanInput } from '../../shared/browser/types'
 import {
   BROWSER_PROBLEM_CODES,
   browserProblemMessage,
@@ -207,30 +207,105 @@ const HUMAN_KEYS: Record<string, { code: string; keyCode: number; text?: string 
   PageDown: { code: 'PageDown', keyCode: 34 }
 }
 
+/** The input `dispatchHumanInput` sends itself: pointer, wheel, keys and text (the session answers the rest). */
+export type DispatchedHumanInput = Extract<BrowserHumanInput, { kind: 'click' | 'scroll' | 'type' | 'key' | 'pointer' | 'keys' | 'compose' | 'paste' }>
+
+/** The text a key event types, as Chromium wants it (Enter types a carriage return). */
+function keyText(input: Extract<BrowserHumanInput, { kind: 'keys' }>): string | undefined {
+  if (input.type !== 'down') return undefined
+  // A shortcut types nothing: Ctrl, Alt or Command held (AltGr characters arrive as text with no shortcut).
+  if (input.modifiers & (BROWSER_MODIFIERS.ctrl | BROWSER_MODIFIERS.meta)) return undefined
+  if (input.text !== undefined) return input.text
+  return input.key === 'Enter' ? '\r' : undefined
+}
+
 /**
  * A person's pointer or keyboard input while they hold a managed tab (`BrowserHumanInput`), sent as
  * trusted input at viewport CSS pixels. Navigation is the session's: it waits for the page.
+ *
+ * Pointer events go as they came (a press, the moves with its button held, the release), so a drag,
+ * a text selection, a double click (`clicks: 2`) and a right click work as with a mouse. Keys go down
+ * and up with their modifiers, code and key code, so shortcuts reach the page's own handlers; a
+ * shortcut for an editing command (select all, copy, cut, undo, redo) also runs that command, since a
+ * browser without a window has no menu to run it. Composition text (an IME, a dead key's mark) is
+ * set as it stands, and committed as text.
  */
-export async function dispatchHumanInput(cdp: CdpTransport, cdpSessionId: string, input: Exclude<BrowserHumanInput, { kind: 'navigate' | 'back' | 'forward' | 'reload' }>, signal?: AbortSignal): Promise<void> {
+export async function dispatchHumanInput(cdp: CdpTransport, cdpSessionId: string, input: DispatchedHumanInput, signal?: AbortSignal): Promise<void> {
+  const send = (method: string, params: Record<string, unknown>) => cdp.send(method, params, { sessionId: cdpSessionId, signal })
   switch (input.kind) {
     case 'click':
       await mouseClick(cdp, cdpSessionId, input.x, input.y, 'left', 1, signal)
       return
     case 'scroll':
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: input.x, y: input.y, deltaX: input.deltaX, deltaY: input.deltaY }, { sessionId: cdpSessionId, signal })
+      await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: input.x, y: input.y, deltaX: input.deltaX, deltaY: input.deltaY, ...(input.modifiers ? { modifiers: input.modifiers } : {}) })
       return
     case 'type':
-      await cdp.send('Input.insertText', { text: input.text }, { sessionId: cdpSessionId, signal })
+    case 'paste':
+      await send('Input.insertText', { text: input.text })
       return
     case 'key': {
       const known = HUMAN_KEYS[input.key]
       const text = known?.text ?? (input.key.length === 1 ? input.key : undefined)
       const codes = known ? { code: known.code, windowsVirtualKeyCode: known.keyCode, nativeVirtualKeyCode: known.keyCode } : {}
-      await cdp.send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key: input.key, ...codes, ...(text ? { text } : {}) }, { sessionId: cdpSessionId, signal })
-      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: input.key, ...codes }, { sessionId: cdpSessionId, signal })
+      await send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key: input.key, ...codes, ...(text ? { text } : {}) })
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: input.key, ...codes })
       return
     }
+    case 'pointer': {
+      const type = input.type === 'down' ? 'mousePressed' : input.type === 'up' ? 'mouseReleased' : 'mouseMoved'
+      // A move with a button held names that button, as a mouse's does: Chromium drags only then.
+      const button = input.type === 'move' && input.button === 'none'
+        ? input.buttons & 1 ? 'left' : input.buttons & 2 ? 'right' : input.buttons & 4 ? 'middle' : 'none'
+        : input.button
+      await send('Input.dispatchMouseEvent', {
+        type, x: input.x, y: input.y, button, buttons: input.buttons,
+        ...(input.type !== 'move' ? { clickCount: input.clicks ?? 1 } : {}),
+        ...(input.modifiers ? { modifiers: input.modifiers } : {})
+      })
+      return
+    }
+    case 'keys': {
+      const text = keyText(input)
+      const known = HUMAN_KEYS[input.key]
+      const keyCode = input.keyCode || known?.keyCode || 0
+      await send('Input.dispatchKeyEvent', {
+        type: input.type === 'up' ? 'keyUp' : text ? 'keyDown' : 'rawKeyDown',
+        key: input.key,
+        code: input.code || known?.code || '',
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+        modifiers: input.modifiers,
+        ...(text ? { text, unmodifiedText: text } : {}),
+        ...(input.repeat ? { autoRepeat: true } : {}),
+        ...(input.type === 'down' && input.command ? { commands: [input.command] } : {})
+      })
+      return
+    }
+    case 'compose':
+      await send('Input.imeSetComposition', { text: input.text, selectionStart: input.selectionStart, selectionEnd: input.selectionEnd })
+      return
   }
+}
+
+/**
+ * The text a person selected on the page (in a field, or anywhere on it), read in an isolated world
+ * so the page's scripts never see it asked; bounded.
+ */
+export async function readSelectedText(cdp: CdpTransport, cdpSessionId: string, frameId: string, signal?: AbortSignal): Promise<string> {
+  const world = await cdp.send<{ executionContextId: number }>('Page.createIsolatedWorld', { frameId, worldName: 'mousse-selection', grantUniveralAccess: false }, { sessionId: cdpSessionId, signal })
+  const read = await cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+    contextId: world.executionContextId,
+    returnByValue: true,
+    expression: `(() => {
+      const field = document.activeElement
+      if (field && (field instanceof HTMLTextAreaElement || (field instanceof HTMLInputElement && /^(text|search|url|tel|email|number)$/i.test(field.type))) && field.selectionStart !== null && field.selectionEnd !== null) {
+        return field.value.slice(field.selectionStart, field.selectionEnd)
+      }
+      return String(document.getSelection() || '')
+    })()`
+  }, { sessionId: cdpSessionId, signal })
+  const value = read.result?.value
+  return typeof value === 'string' ? value.slice(0, MAX_BROWSER_PASTE_CHARS) : ''
 }
 
 /**

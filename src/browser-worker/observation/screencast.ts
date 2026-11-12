@@ -1,5 +1,6 @@
 import type { CdpEventListener, CdpTransport } from '../cdp/transport'
 import type { BrowserProblem } from '../../shared/browser/navigation'
+import type { BrowserFileChooser, BrowserPageDialog, BrowserPictureSpot } from '../../shared/browser/types'
 
 /**
  * The pictures of a managed tab a person watches (a bot's browser view), for every viewer at once.
@@ -79,6 +80,8 @@ export interface ViewerPicture {
   at: number
   /** The still picture, taken once the page was still (or of a tab behind), at the best quality that fits. */
   sharp: boolean
+  /** The document and scroll it shows: a person's input on it is checked against the page as it is then. */
+  spot?: BrowserPictureSpot
 }
 
 /** What a watcher's long-poll answers: the tab's state, and its latest picture when the watcher has not had it. */
@@ -93,6 +96,10 @@ export interface ViewerUpdate {
   loading: boolean
   /** What its last navigation ran into, or what the opened page needs. */
   problem?: BrowserProblem
+  /** The page's open dialog. */
+  dialog?: BrowserPageDialog
+  /** The page's file picker waiting for files. */
+  chooser?: BrowserFileChooser
   /** Pass back as `afterFrame` / `afterState`. */
   frameSeq: number
   stateSeq: number
@@ -118,6 +125,11 @@ export interface ViewerCapturesOptions {
   loading?(cdpSessionId: string): boolean
   /** What the tab's last navigation ran into when its capture starts. */
   problem?(cdpSessionId: string): BrowserProblem | undefined
+  /** The tab's document now (it changes with each page): each picture is marked with it. */
+  document?(cdpSessionId: string): string | undefined
+  /** The tab's open dialog and file picker when its capture starts. */
+  dialog?(cdpSessionId: string): BrowserPageDialog | undefined
+  chooser?(cdpSessionId: string): BrowserFileChooser | undefined
   now?: () => number
   settleMs?: number
   leaseMs?: number
@@ -126,6 +138,8 @@ export interface ViewerCapturesOptions {
 interface ScreencastFrameEvent {
   data?: string
   sessionId?: number
+  /** Where the page was scrolled when it painted, in CSS pixels. */
+  metadata?: { scrollOffsetX?: number; scrollOffsetY?: number }
 }
 
 interface Waiting {
@@ -182,6 +196,10 @@ interface TabCapture {
   loading: boolean
   /** What its last navigation ran into, or what the opened page needs. */
   problem?: BrowserProblem
+  dialog?: BrowserPageDialog
+  chooser?: BrowserFileChooser
+  /** The scroll a repeat waiting to go was painted at. */
+  repeatScroll?: { x: number; y: number }
   settle?: ReturnType<typeof setTimeout>
   settling?: Promise<void>
   /** A still was asked for while another was under way. */
@@ -417,6 +435,24 @@ export class ViewerCaptures {
     this.pump(capture)
   }
 
+  /** The page opened a dialog (or it was answered). */
+  dialog(cdpSessionId: string, dialog: BrowserPageDialog | undefined): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || JSON.stringify(capture.dialog) === JSON.stringify(dialog)) return
+    capture.dialog = dialog
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
+  /** The page asks for files (or was answered). */
+  chooser(cdpSessionId: string, chooser: BrowserFileChooser | undefined): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || JSON.stringify(capture.chooser) === JSON.stringify(chooser)) return
+    capture.chooser = chooser
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
   /** The tab's address and title as the session knows them (it follows every commit and title). */
   private describe(capture: TabCapture, info: ViewerTabInfo): void {
     if (capture.info.url === info.url && capture.info.title === info.title && capture.info.tabId === info.tabId) return
@@ -441,6 +477,10 @@ export class ViewerCaptures {
         }
         const problem = this.options.problem?.(info.cdpSessionId)
         if (problem) capture.problem = problem
+        const dialog = this.options.dialog?.(info.cdpSessionId)
+        if (dialog) capture.dialog = dialog
+        const chooser = this.options.chooser?.(info.cdpSessionId)
+        if (chooser) capture.chooser = chooser
         this.captures.set(info.cdpSessionId, capture)
       }
       watcher = { key, capture, maxWidth: 960, minIntervalMs: 0, lastPictureAt: 0, seenAt: this.now(), fresh: true }
@@ -542,6 +582,7 @@ export class ViewerCaptures {
       ack()
       return
     }
+    const scroll = { x: event.metadata?.scrollOffsetX ?? 0, y: event.metadata?.scrollOffsetY ?? 0 }
     // The same picture again (a paint that changed nothing visible): nothing to send.
     const data = event.data
     if (data === capture.lastCast) {
@@ -573,7 +614,7 @@ export class ViewerCaptures {
     // flip between two states): sent once, then at most one every growing gap.
     if (recent && now - capture.actedAt > ACTED_MS) {
       ack()
-      this.holdRepeat(capture, data)
+      this.holdRepeat(capture, data, scroll)
       return
     }
     capture.recent = [...capture.recent.filter((entry) => entry !== data), data].slice(-RECENT_PICTURES)
@@ -581,7 +622,7 @@ export class ViewerCaptures {
     capture.repeatTimer = undefined
     capture.repeat = undefined
     capture.repeatGapMs = 0
-    this.show(capture, data)
+    this.show(capture, data, scroll)
     // Held until a watcher takes a picture: Chromium paints no more for nobody.
     capture.held.push(event.sessionId)
     if (capture.settle) clearTimeout(capture.settle)
@@ -590,7 +631,7 @@ export class ViewerCaptures {
   }
 
   /** A screencast picture becomes the latest. A still it replaces soon after was not worth taking: the next one waits longer. */
-  private show(capture: TabCapture, data: string): void {
+  private show(capture: TabCapture, data: string, scroll: { x: number; y: number }): void {
     const now = this.now()
     if (capture.stillAt !== undefined) {
       capture.settleMs = now - capture.stillAt < STILL_STANDS_MS
@@ -599,7 +640,7 @@ export class ViewerCaptures {
       capture.stillAt = undefined
     }
     const scale = Math.min(1, capture.width / capture.viewport.width, SCREENCAST_MAX_HEIGHT / capture.viewport.height)
-    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false }
+    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false, ...this.spot(capture, scroll) }
     capture.shownCast = data
     capture.frameSeq = this.bump()
     capture.echoPending = undefined
@@ -611,8 +652,9 @@ export class ViewerCaptures {
    * then 10, 20, 40 and 60 s, each the latest repeat, and only when the view does not show it already.
    * No still picture follows one sent late.
    */
-  private holdRepeat(capture: TabCapture, data: string): void {
+  private holdRepeat(capture: TabCapture, data: string, scroll: { x: number; y: number }): void {
     capture.repeat = data
+    capture.repeatScroll = scroll
     if (capture.repeatTimer) return
     const send = () => {
       capture.repeatTimer = undefined
@@ -621,7 +663,7 @@ export class ViewerCaptures {
       if (!repeat || repeat === capture.shownCast || capture.behind || this.captures.get(capture.info.cdpSessionId) !== capture) return
       const late = capture.repeatGapMs > 0
       capture.repeatGapMs = late ? Math.min(MAX_REPEAT_GAP_MS, capture.repeatGapMs * 2) : REPEAT_GAP_MS
-      this.show(capture, repeat)
+      this.show(capture, repeat, capture.repeatScroll ?? { x: 0, y: 0 })
       if (late) capture.quietSeq = capture.frameSeq
       else if (capture.settle) {
         clearTimeout(capture.settle)
@@ -745,7 +787,7 @@ export class ViewerCaptures {
         if (viewportChanged) this.pump(capture)
         return
       }
-      capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true }
+      capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true, ...this.spot(capture, { x: visual.pageX ?? 0, y: visual.pageY ?? 0 }) }
       capture.lastStill = shot
       capture.shownCast = over
       capture.stillAt = capture.behind ? undefined : this.now()
@@ -795,6 +837,12 @@ export class ViewerCaptures {
     }
   }
 
+  /** The document a picture of the tab shows now, and the scroll it was painted at. */
+  private spot(capture: TabCapture, scroll: { x: number; y: number }): { spot?: BrowserPictureSpot } {
+    const documentId = this.options.document?.(capture.info.cdpSessionId)
+    return documentId ? { spot: { documentId, scrollX: scroll.x, scrollY: scroll.y } } : {}
+  }
+
   private async readViewport(capture: TabCapture): Promise<boolean> {
     try {
       const metrics = await this.cdp.send<LayoutMetrics>('Page.getLayoutMetrics', {}, { sessionId: capture.info.cdpSessionId, timeoutMs: 5_000 })
@@ -841,6 +889,8 @@ export class ViewerCaptures {
       behind: capture.behind,
       loading: capture.loading,
       ...(capture.problem ? { problem: capture.problem } : {}),
+      ...(capture.dialog ? { dialog: capture.dialog } : {}),
+      ...(capture.chooser ? { chooser: capture.chooser } : {}),
       frameSeq: picture ? capture.frameSeq : waiting.afterFrame,
       stateSeq: capture.stateSeq,
       ...(picture && capture.latest ? { picture: capture.latest } : {}),
