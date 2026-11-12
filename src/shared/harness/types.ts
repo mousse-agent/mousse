@@ -441,6 +441,8 @@ export interface InstanceConfigPatch {
   displayName?: string | null
   /** The entry's agent telemetry; refused for an agent that documents no switch. */
   telemetry?: TelemetrySetting
+  /** Claude Code: keep the prompt cache for an hour (true) or not (false); null returns to the automatic default. */
+  promptCacheHour?: boolean | null
   /** `default` = the user's own vendor home; `private` = a Mousse-owned home for this instance. */
   home?: 'default' | 'private'
   /** Explicit executable. When it cannot run, the instance reports "Override not found" (no PATH fallback). */

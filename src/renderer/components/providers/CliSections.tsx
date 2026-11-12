@@ -3,7 +3,7 @@ import type { InstanceSnapshot, StatusDescription } from '../../../shared/harnes
 import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
 import { Select } from '../ui/Select'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
-import { SettingsRow } from '../settings/SettingsRow'
+import { SettingsRow, Switch } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
   binaryOverrideOf,
@@ -392,6 +392,43 @@ export function TelemetryRow({ snapshot, onSave }: { snapshot: InstanceSnapshot;
             />
           </span>
         )}
+    />
+  )
+}
+
+const PROMPT_CACHE_HOUR_HELP = 'Subscriptions only. Coming back within an hour reuses the cache.'
+
+/** The line under the prompt cache switch: the help, and why it is off or fixed when that is not the user's choice. */
+export function promptCacheHourNote(state: NonNullable<InstanceSnapshot['promptCacheHour']>): string {
+  if (state.userSetting) return `${PROMPT_CACHE_HOUR_HELP} Your Claude Code settings choose this.`
+  if (state.choice === undefined && state.basis === 'unconfirmed') return `${PROMPT_CACHE_HOUR_HELP} Off: couldn't confirm a subscription.`
+  return PROMPT_CACHE_HOUR_HELP
+}
+
+/**
+ * Claude Code: keep the prompt cache for an hour instead of five minutes. On by default for a
+ * confirmed subscription, off when Mousse could not confirm one; the user's choice wins. Not shown
+ * for an entry paid per token, where hour-long cache writes cost more.
+ */
+export function PromptCacheHourRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSave: (on: boolean) => Promise<void> }) {
+  const { error, run } = useAsyncAction()
+  const state = snapshot.promptCacheHour
+  if (!state || state.basis === 'per_token') return null
+  return (
+    <SettingsRow
+      title="Keep the prompt cache for 1 hour"
+      anchor="providers-prompt-cache-hour"
+      htmlFor="providers-prompt-cache-hour"
+      description={withError(promptCacheHourNote(state), error)}
+      control={
+        <Switch
+          id="providers-prompt-cache-hour"
+          label="Keep the prompt cache for 1 hour"
+          checked={state.on}
+          disabled={state.userSetting === true}
+          onChange={(on) => void run('promptCacheHour', () => onSave(on))}
+        />
+      }
     />
   )
 }

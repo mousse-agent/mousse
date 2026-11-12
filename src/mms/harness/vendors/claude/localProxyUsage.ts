@@ -171,6 +171,8 @@ export interface ProxyClaudeAccount {
   label?: string
   /** `active`: its usage is read; `disabled` in the proxy, or an `api_key` with no plan limits: shown, not read. */
   state: 'active' | 'disabled' | 'api_key'
+  /** The proxy lists it as a Claude subscription sign-in (an OAuth seat), not only as not an API key. */
+  oauth?: true
   /** The limits Claude sent on the last reply this sign-in served through the proxy, when the proxy lists them. */
   observed?: ObservedLimits
 }
@@ -230,6 +232,9 @@ export function observedClaudeLimits(observed: ObservedLimits, now: number): Rec
   return Object.keys(limits).length ? limits : undefined
 }
 
+/** How a listing names a Claude subscription sign-in (`account_type`). */
+const OAUTH_SEAT = /^(oauth|claude[._-]?ai|subscription)$/i
+
 /**
  * Every Claude sign-in in the proxy's credential list (`{ files: [...] }`, `{ credentials: [...] }`
  * or a bare list): active, disabled or an API key, each once by its credential id. None is left out.
@@ -253,7 +258,8 @@ export function claudeProxyAccounts(value: unknown): ProxyClaudeAccount[] {
     const kind = [item.account_type, item.auth_type, item.accountType].find((entry): entry is string => typeof entry === 'string') ?? ''
     const state = item.disabled === true || item.status === 'disabled' ? 'disabled' : /api[_-]?key/i.test(kind) ? 'api_key' : 'active'
     const observed = observedLimits(item.quota)
-    accounts.push({ id: ownId, authIndex, state, ...(label ? { label: label.trim() } : {}), ...(observed ? { observed } : {}) })
+    const oauth = state === 'active' && OAUTH_SEAT.test(kind.trim())
+    accounts.push({ id: ownId, authIndex, state, ...(oauth ? { oauth: true as const } : {}), ...(label ? { label: label.trim() } : {}), ...(observed ? { observed } : {}) })
     if (accounts.length >= MAX_ACCOUNTS) break
   }
   return accounts
@@ -361,6 +367,8 @@ export function resetLocalProxyDetection(): void {
   detected.clear()
   listings.clear()
   accountReads.clear()
+  seatReadings.clear()
+  seatReads.clear()
 }
 
 async function isProxy(origin: string, options: ProxyUsageOptions, fetchImpl: ProxyFetch): Promise<boolean> {
@@ -427,12 +435,62 @@ async function openProxy(options: ProxyUsageOptions): Promise<ProxyReading | Pro
     if (listed.status === 401 || listed.status === 403) return unavailable(PROXY_LIMITS_UNAVAILABLE, 'rejected')
     if (listed.status !== 200) return unavailable()
     const accounts = claudeProxyAccounts(listed.body)
+    seatReadings.set(origin, { at: now, seats: proxySeats(accounts) })
     if (!accounts.length) return unavailable()
     listings.set(origin, { at: now, key, accounts })
     return { origin, key, proxy, fetchImpl, reads, callerSignal, accounts, now, unavailable }
   } catch {
     return unavailable(PROXY_LIMITS_UNAVAILABLE, 'unreachable')
   }
+}
+
+/**
+ * What the Claude sign-ins a proxy serves with are, from its listing: all subscription (OAuth)
+ * seats, all API keys, or a mix (with any seat the listing does not name as either). Disabled
+ * sign-ins serve nothing and do not count. Undefined when none is listed.
+ */
+export type ProxySeats = 'subscription' | 'api_key' | 'mixed'
+
+export function proxySeats(accounts: readonly ProxyClaudeAccount[]): ProxySeats | undefined {
+  const serving = accounts.filter((account) => account.state !== 'disabled')
+  if (!serving.length) return undefined
+  if (serving.every((account) => account.oauth)) return 'subscription'
+  if (serving.every((account) => account.state === 'api_key')) return 'api_key'
+  return 'mixed'
+}
+
+/** What each proxy origin's last listing said about its seats (any read: the usage page's or `readLocalProxySeats`). */
+const seatReadings = new Map<string, { at: number; seats: ProxySeats | undefined }>()
+const seatReads = new Map<string, Promise<void>>()
+
+/**
+ * The seats the last listing of the local proxy `baseUrl` points at showed, and when it was read;
+ * undefined when Mousse has not listed it (or the base URL is not a local proxy). Reads nothing.
+ */
+export function listedProxySeats(baseUrl: string | undefined): { at: number; seats: ProxySeats | undefined } | undefined {
+  const origin = localProxyOrigin(baseUrl)
+  return origin ? seatReadings.get(origin) : undefined
+}
+
+/**
+ * Lists the local proxy's Claude sign-ins (one management call, no Anthropic call), reusing a
+ * listing from the last few seconds, and returns `listedProxySeats` after it. Reads at the same time
+ * share one request. Nothing is sent unless the base URL is a CLIProxyAPI on this computer or the
+ * private network and a management key is set.
+ */
+export async function readLocalProxySeats(options: ProxyUsageOptions): Promise<{ at: number; seats: ProxySeats | undefined } | undefined> {
+  const origin = localProxyOrigin(options.baseUrl)
+  if (!origin) return undefined
+  let reading = seatReads.get(origin)
+  if (!reading) {
+    reading = openProxy({ ...options, reuseListing: true }).then(() => undefined, () => undefined)
+    seatReads.set(origin, reading)
+    void reading.finally(() => {
+      if (seatReads.get(origin) === reading) seatReads.delete(origin)
+    })
+  }
+  await reading
+  return seatReadings.get(origin)
 }
 
 /**

@@ -413,6 +413,31 @@ describe('Claude Code on an API key', () => {
     expect(offline.message).not.toContain(KEY)
   })
 
+  it('never keeps the prompt cache for an hour, even when the user chose it', async () => {
+    const { runtime, runtimeFor, seen } = fixture()
+    await runtime.adoptApiKey!(KEY)
+    expect(runtime.promptCacheHour!()).toEqual({ basis: 'per_token', on: false })
+    const chosen = runtimeFor({ promptCacheHour: true })
+    runtime.stop()
+    expect(chosen.promptCacheHour!()).toEqual({ basis: 'per_token', choice: true, on: false })
+    await turn(chosen, tempDir('mousse-cwd-'), 'cache')
+    expect(turnEnv(seen)?.ANTHROPIC_API_KEY).toBe(KEY)
+    expect(turnEnv(seen)).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL')
+  })
+
+  it('a subscription entry of the same driver keeps it for an hour, and its stored choice turns it off', async () => {
+    const { runtimeFor, seen } = fixture({ config: { loginMethod: undefined } })
+    const entry = runtimeFor()
+    await entry.auth({ force: true })
+    expect(entry.promptCacheHour!()).toEqual({ basis: 'subscription', on: true })
+    await turn(entry, tempDir('mousse-cwd-'), 'sub-on')
+    expect(turnEnv(seen)?.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('1h')
+    const off = runtimeFor({ promptCacheHour: false })
+    entry.stop()
+    await turn(off, tempDir('mousse-cwd-'), 'sub-off')
+    expect(turnEnv(seen)).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL')
+  })
+
   it('keeps one key store across config changes: a new key or a sign-out reaches the next turn', async () => {
     const { runtime, runtimeFor, seen } = fixture()
     await runtime.adoptApiKey!(KEY)
