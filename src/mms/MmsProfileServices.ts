@@ -1068,12 +1068,17 @@ export class MmsProfileServices {
       accepted: () => this.scheduled.wake()
     })
 
+    let netDomainClosed = false
     this.net = new NetService({
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
       hosted: mousseIdNetModule,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
+        // Net closed its earlier runtime without stopping (a removed computer's identity was set
+        // aside): chats over the network work again with the new one.
+        if (netDomainClosed) this.chatNetwork?.resume()
+        netDomainClosed = false
         this.bridgeService = new BridgeProfileService({
           services: this,
           runtime,
@@ -1092,8 +1097,10 @@ export class MmsProfileServices {
             this.chatNetwork?.beginShutdown()
             composition.beginDisable?.()
           },
-          close: () =>
-            Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined),
+          close: () => {
+            netDomainClosed = true
+            return Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined)
+          },
           activeCount: () =>
             (composition.activeCount?.() ?? 0) + (this.chatNetwork?.activeCount() ?? 0)
         }
