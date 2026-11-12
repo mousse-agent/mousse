@@ -11,7 +11,8 @@ import type { PlatformRequestApi } from '../../shared/platform'
  */
 export interface PersonalBotsClient {
   list(): Promise<BotSummary[]>
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string }): Promise<BotSummary>
+  /** `model`: one picked by hand on New bot; leave it out for by usage (an older service refuses the key). */
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<BotSummary>
   pause(botId: string): Promise<BotSummary>
@@ -30,6 +31,8 @@ export interface PersonalBotsClient {
   /** The bot's model by hand or by usage (null), and the computers it can run on (#673). */
   model(botId: string): Promise<BotsPersonalV2Result<'bots.model.get'>>
   setModel(botId: string, model: string | null): Promise<BotSummary>
+  /** What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. */
+  modelChoices(): Promise<BotsPersonalV2Result<'bots.model.choices'>>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
   /** Cancels a waiting reminder; it never fires. */
   cancelReminder(botId: string, reminderId: string): Promise<BotDetail>
@@ -45,8 +48,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     transport.request<BotsPersonalV2Result<M>>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
-    create: async ({ look, name, description, clientRequestId }) =>
-      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}) })).bot,
+    create: async ({ look, name, description, clientRequestId, model }) =>
+      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(model ? { model } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
     pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,
@@ -63,6 +66,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     addSchedule: (botId, when, prompt, model) => call('bots.schedules.add', { botId, when, prompt, ...(model ? { model } : {}) }),
     model: (botId) => call('bots.model.get', { botId }),
     setModel: async (botId, model) => (await call('bots.model.set', { botId, model })).bot,
+    modelChoices: () => call('bots.model.choices', {}),
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
     exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir }),

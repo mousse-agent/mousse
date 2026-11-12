@@ -92,6 +92,7 @@ import { AutomationDrafts } from './automations/AutomationDrafts'
 import { AutomationRuns } from './automations/AutomationRuns'
 import type { AutomationInbox, InboxCounts } from '../shared/automationInbox'
 import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY, automationManagerWorkspace } from './automations/automationManager'
+import { computerNameIfKnown } from './computerName'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -690,6 +691,8 @@ export class MmsProfileServices {
     })
     this.botBrowsers = botBrowsers
     this.platform.onDispose(() => botBrowsers.dispose())
+    // Looked up now, so a bot's Runs on has this computer's name when it is first opened.
+    computerNameIfKnown()
     const opened = openPersonalBots({
       profileHome: homeDir,
       threads: {
@@ -765,7 +768,9 @@ export class MmsProfileServices {
           return [{ model, label: family ? `${family} · ${model}` : model }]
         })
       },
-      computerName: () => hostname(),
+      // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
+      // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
+      computerName: () => computerNameIfKnown() || hostname(),
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),

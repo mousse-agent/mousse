@@ -11,7 +11,7 @@ import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import type { BotChatMessage, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
-import { BOTS_PERSONAL_V2_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES } from '../../src/shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES } from '../../src/shared/bots/personal/methods'
 import { botFixture, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
 
 const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
@@ -55,6 +55,16 @@ async function created(): Promise<string> {
 describe('validation', () => {
   it('registers exactly the v2 methods', () => {
     for (const method of BOTS_PERSONAL_V2_METHODS) expect(domains.has(method)).toBe(true)
+    // Added later: the app asks for them, and an older service without them is still compatible.
+    for (const method of BOTS_WORK_METHODS) expect(domains.has(method)).toBe(true)
+  })
+
+  it('New bot\'s choices come without a bot, and Create bot carries a model picked from them (#673)', async () => {
+    ;(f.bots.service as unknown as { options: { modelChoices?: () => Promise<Array<{ model: string; label: string }>> } }).options.modelChoices = async () => [{ model: 'opus', label: 'Claude · opus' }]
+    expect(await call('bots.model.choices')).toMatchObject({ models: [{ model: 'opus' }], computer: 'this_computer' })
+    const { bot } = await call<{ bot: BotSummary }>('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c9', model: ' opus ' })
+    expect(await call('bots.model.get', { botId: bot.id })).toMatchObject({ model: 'opus' })
+    await expect(call('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c10', model: 'sonnet' })).rejects.toMatchObject({ code: 'model_unavailable' })
   })
 
   it('refuses unknown keys and bad values', async () => {
@@ -67,6 +77,9 @@ describe('validation', () => {
       ['bots.create', { look: LOOK, description: 'x'.repeat(501), clientRequestId: 'c2' }],
       ['bots.create', { look: LOOK, name: 'n'.repeat(61), description: 'x', clientRequestId: 'c2' }],
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'has spaces' }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: '  ' }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: null }],
+      ['bots.model.choices', { botId }],
       ['bots.get', { botId: 'Not An Id' }],
       ['bots.get', {}],
       ['bots.update', { botId }],

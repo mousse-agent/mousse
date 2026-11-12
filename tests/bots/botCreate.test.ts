@@ -46,6 +46,36 @@ describe('bots.create', () => {
     expect(f.bots.service.list().bots).toHaveLength(1)
   })
 
+  it('a model picked by hand on New bot is the bot\'s from its first message; one no longer offered is refused, never swapped (#673)', async () => {
+    const options = (f.bots.service as unknown as { options: { modelChoices?: () => Promise<Array<{ model: string; label: string }>> } }).options
+    options.modelChoices = async () => [{ model: 'opus', label: 'Claude · opus' }]
+    // New bot's line reads the same choices as About, before any bot exists.
+    expect(await f.bots.service.modelChoices()).toMatchObject({ models: [{ model: 'opus', label: 'Claude · opus' }], computer: 'this_computer', computers: [{ id: 'this_computer' }] })
+    const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Penny', description: 'Track my spending.', clientRequestId: 'picked', model: 'opus' })
+    expect(f.bots.definitionOf(bot.id).main.model).toEqual({ mode: 'named', model: 'opus', depth: 'normal' })
+    expect(f.bots.ownerModel(bot.id)).toBe('opus')
+    const [first] = f.store.laneActivations(bot.id, 'chat', ['running'])
+    await runDispatch(f, first!.id, 1, { text: 'Hello.' })
+    expect(f.resolved[0]).toEqual({ choice: { mode: 'named', model: 'opus', depth: 'normal' } })
+    // The pick is gone between opening New bot and Create bot: no bot, and the owner is told in plain words.
+    await expect(f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId: 'gone', model: 'sonnet' }))
+      .rejects.toMatchObject({ code: 'model_unavailable', message: 'The model you picked is not available now. Pick another one, or By usage.' })
+    options.modelChoices = async () => { throw new Error('providers unreadable') }
+    await expect(f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId: 'gone2', model: 'opus' })).rejects.toMatchObject({ code: 'model_unavailable' })
+    expect(f.bots.service.list().bots.map((entry) => entry.name)).toEqual(['Penny'])
+    // By usage needs no choices at all.
+    const { bot: byUsage } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Auto', description: 'Track my spending.', clientRequestId: 'auto' })
+    expect(f.bots.definitionOf(byUsage.id).main.model).toEqual({ mode: 'auto', depth: 'normal' })
+  })
+
+  it('Runs on names this computer by the name it is given, and "This computer" without one', async () => {
+    const options = (f.bots.service as unknown as { options: { computerName?: () => string } }).options
+    options.computerName = () => 'Ada’s Mac mini'
+    expect((await f.bots.service.modelChoices()).computers[0]).toEqual({ id: 'this_computer', name: 'Ada’s Mac mini' })
+    options.computerName = () => ''
+    expect((await f.bots.service.modelChoices()).computers[0]).toEqual({ id: 'this_computer', name: 'This computer' })
+  })
+
   it('naming falls back to the description\'s first meaningful words on a failure or after 5 seconds', async () => {
     f.oneShot.fail = true
     const failed = await createBot(f, { description: 'Please summarise the AI news for me every day' })
