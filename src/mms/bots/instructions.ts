@@ -1,4 +1,5 @@
-import type { BotLane } from '../../shared/bots/personal/definition'
+import type { BotLane, BotManifest } from '../../shared/bots/personal/definition'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION } from '../../shared/bots/personal/manifest'
 
 /**
  * The system text every personal bot works under (Bot Phase 1 §5.10, bot-context.md §10): who it is, then the base
@@ -48,7 +49,8 @@ What you can't do yet
 export const BOT_CHAT_INSTRUCTIONS = `In the chat you are the front desk
 - The owner can write to you at any time, also while you work. Answer each message in a moment.
 - Anything that takes more than a moment goes to work_start: the web, the browser, commands, research, writing a document, or several steps. Call work_start first, with a brief that stands on its own, and write no text before that call; after it, your whole reply is one short line that you're on it. The work reports to them by itself when it's done, as a reply to their message; don't promise times you can't keep.
-- If the work needs a permission you don't have yet, ask with escalate first; hand the work off once the owner has answered.
+- Your work has every permission listed under "What your owner allows now". The chat itself never uses the web, the browser or commands: when a job needs one of them and the list says yes, hand it to work_start at once; never say you can't, and never ask for it again.
+- If the work needs a permission the list says no to, ask with escalate first; hand the work off once the owner has answered.
 - While work runs, keep talking: answer other questions, and when the owner adds to or changes running work, pass it on with work_note (or stop it with work_stop and start new work if the task changed). "How's it going?" is answered from your work list.
 - Quick answers you know, or that are in your memory or your files, need no work: just answer.`
 
@@ -58,12 +60,66 @@ export const BOT_RUN_INSTRUCTIONS = `In a run you do the work
 - Ask for nothing you can't do without. When something you need is refused, do what you can and say in your report what you skipped and how the owner can let you do it.`
 
 /**
- * A bot's whole system text: who it is, where its files folder is, `BOT_BASE_INSTRUCTIONS`, then what its lane asks of
- * it. Built at each dispatch, so a rename or a new description takes effect at the next turn.
+ * What a bot's owner allows it now, beyond what every bot has (its files folder, memory, schedules and own tools). Read
+ * from the permissions a dispatch runs with, so a change in About or an Allow shows at the next turn.
  */
-export function botInstructions(bot: { name: string; description: string; filesFolder?: string; lane?: BotLane }): string {
+export interface BotAllowed {
+  /** "Use files on this computer". */
+  files: boolean
+  /** "Run commands". */
+  shell: boolean
+  /** "Use the browser". */
+  browser: boolean
+  /** Searching the web and fetching pages. */
+  web: boolean
+  skills: string[]
+  /** The automation tools held (`BOT_AUTOMATION_APP_TOOLS`). */
+  automation: string[]
+}
+
+/** What `manifest` allows, as `BotAllowed`. */
+export function botAllowedOf(manifest: BotManifest): BotAllowed {
+  const has = (tool: string) => (manifest.tools as readonly string[]).includes(tool) || manifest.appTools.includes(tool)
+  return {
+    files: manifest.workspace !== null,
+    shell: has('shell'),
+    browser: manifest.appTools.includes(BOT_BROWSER_PERMISSION),
+    web: has('web_search') || has('web_fetch'),
+    skills: [...new Set(manifest.skills)].sort(),
+    automation: BOT_AUTOMATION_APP_TOOLS.filter((tool) => manifest.appTools.includes(tool))
+  }
+}
+
+/**
+ * The permissions section of a bot's system text: a short, factual list of what the owner allows now. A chat turn is
+ * told what its work holds (the chat itself hands those jobs off); a run is told what it holds itself. `browserOffline`:
+ * the browser is allowed but could not be offered to this turn.
+ */
+export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffline?: boolean): string {
+  const yes = (value: boolean) => (value ? 'yes' : 'no')
+  const lines = [
+    'What your owner allows now (current; it replaces anything said earlier in this chat)',
+    `- Search the web and read pages: ${yes(allowed.web)}`,
+    `- Use files on this computer: ${allowed.files ? "yes, any folder except Mousse's own data" : 'no, only your files folder'}`,
+    `- Run commands: ${yes(allowed.shell)}`,
+    `- Use the browser (your own): ${allowed.browser && browserOffline ? "yes, but it can't open on this run" : yes(allowed.browser)}`,
+    `- Skills: ${allowed.skills.length ? allowed.skills.join(', ') : 'none'}`,
+    `- Automation tools: ${allowed.automation.length ? allowed.automation.join(', ') : 'none'}`
+  ]
+  if (lane === 'chat') lines.push('In the chat, the web, the browser and commands are for your work: hand jobs that need them to work_start.')
+  else lines.push('Use what is allowed without asking. Ask with escalate only for something marked no.')
+  return lines.join('\n')
+}
+
+/**
+ * A bot's whole system text: who it is, where its files folder is, `BOT_BASE_INSTRUCTIONS`, then what its lane asks of
+ * it, then what its owner allows now (`allowed`). Built at each dispatch, so a rename, a new description or a changed
+ * permission takes effect at the next turn.
+ */
+export function botInstructions(bot: { name: string; description: string; filesFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean }): string {
   const who = [`Your name is ${bot.name.trim()}. Your owner described what you do as: "${bot.description.trim()}"`]
   if (bot.filesFolder) who.push(`Your files folder is ${bot.filesFolder}.`)
   const lane = bot.lane === 'run' ? BOT_RUN_INSTRUCTIONS : bot.lane === 'chat' ? BOT_CHAT_INSTRUCTIONS : undefined
-  return `${who.join('\n')}\n\n${BOT_BASE_INSTRUCTIONS}${lane ? `\n\n${lane}` : ''}`
+  const allowed = bot.allowed ? botAllowedText(bot.allowed, bot.lane, bot.browserOffline) : undefined
+  return `${who.join('\n')}\n\n${BOT_BASE_INSTRUCTIONS}${lane ? `\n\n${lane}` : ''}${allowed ? `\n\n${allowed}` : ''}`
 }

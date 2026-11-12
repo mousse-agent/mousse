@@ -68,6 +68,24 @@ export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_sa
  */
 export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS])
 
+/**
+ * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
+ * tools, the browser's tools in place of "browser", the skill tools, consult, and the front desk's work and reminder
+ * tools. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
+ */
+const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
+  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION),
+  ...BOT_BROWSER_TOOLS,
+  ...BOT_WORK_TOOLS,
+  ...BOT_MEMORY_TOOLS,
+  'list_skills', 'load_skill', 'escalate', 'consult'
+])
+
+/** Whether a bot's turn can ever be offered the Mousse app tool `name` (`BOT_OFFERABLE_APP_TOOLS`). */
+export function botMayBeOffered(name: string): boolean {
+  return BOT_OFFERABLE_APP_TOOLS.has(name)
+}
+
 const OWN_APP_TOOLS: ReadonlySet<string> = new Set(BOT_OWN_APP_TOOLS)
 const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 

@@ -211,11 +211,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
 
   /** One SDK server per request, bound to the credential the request's token resolved to. */
   private mcpServer(resolved: CredentialRecord, requestSignal: AbortSignal): Server {
+    const { registry, credentials } = this.options
+    // A bot's thread gets no orchestration guidance: it names delegation and thread tools no bot can hold.
     const server = new Server(
       { name: 'mousse', version: mousseVersion() },
-      { capabilities: { tools: {} }, instructions: mousseOrchestrationInstructions() }
+      { capabilities: { tools: {} }, ...(registry.isBotThread(resolved.threadId) ? {} : { instructions: mousseOrchestrationInstructions() }) }
     )
-    const { registry, credentials } = this.options
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       // For the thread's ceiling, not the turn's mode, and for the credential's agent access level as it
       // is now. A runtime that caches the list gets a new bearer when the level changes (the level is part
