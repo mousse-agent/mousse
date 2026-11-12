@@ -147,7 +147,8 @@ describe('Grok sessions', () => {
   it.each([
     [{ stopReason: 'refusal' }, /refused/],
     [{ stopReason: 'end_turn', error: { message: 'rate limit reached' } }, /rate limit reached/],
-    [{ stopReason: 'end_turn', agentResult: { error: 'quota exceeded' } }, /quota exceeded/]
+    [{ stopReason: 'end_turn', agentResult: { error: 'quota exceeded' } }, /quota exceeded/],
+    [{ stopReason: 'end_turn', error: { message: 'Model grok-x does not support image input. key xai-abcdefghijklmnopqrstuvwxyz0123456789abcdefg', status: 400 } }, /^400 · Model grok-x does not support image input\. key \[redacted\]$/]
   ])('keeps a failure the completion reports (%o)', async (completion, message) => {
     const agent = grokAgent(async (c) => {
       await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, ...completion })
@@ -155,6 +156,15 @@ describe('Grok sessions', () => {
     })
     const { sessions } = core(agent.connect)
     await expect(sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).rejects.toThrow(message)
+  })
+
+  it('shows the provider\'s error as a provider error, not a generic line', async () => {
+    const agent = grokAgent(async (c) => {
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, stopReason: 'end_turn', error: { message: '  Rate limit   reached for grok-4  ' } })
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    await expect(sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).rejects.toMatchObject({ code: 'provider_api_error', message: 'Rate limit reached for grok-4', details: { provider: 'grok' } })
   })
 
   describe.each([['the reply', false], ['the completion', true]])('a prompt that ends by %s with a limit or a cancel', (_name, byCompletion) => {
