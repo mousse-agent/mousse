@@ -202,10 +202,16 @@ export function turnAnswerText(messages: SettleTurnMessage[]): string {
  * Activity after the answer moves above it, and reply rows before it that hold only text (the
  * agent's notes before its tool calls) join the activity as note rows. Returns the order to draw
  * the messages in and each message's analysis; a turn with no reply text keeps its order.
+ *
+ * Moving activity above the last reply row is for a turn that ran to its end: there the last reply is
+ * the answer, written after the work even when an older turn saved it in a row that opened early. A
+ * turn cut off by a Stop or a restart (`cutOff`) has no answer, so when activity follows its last reply
+ * row, that row is a note written before the work and the turn keeps the order it ran in.
  */
 export function settleFinishedTurn(
   messages: SettleTurnMessage[],
   analyses: AssistantMessageAnalysis[],
+  cutOff = false,
 ): { order: number[]; analyses: AssistantMessageAnalysis[] } {
   const order = messages.map((_, index) => index);
   // Messages steered into the turn (a person's rows inside it) split it: what was written before the last of
@@ -225,6 +231,7 @@ export function settleFinishedTurn(
     }
   }
   if (answer === -1) return { order, analyses };
+  if (cutOff && order.some((index) => index > answer && analyses[index]!.toolsOnly)) return { order, analyses };
   const settled = analyses.map((analysis, index) => {
     const message = messages[index]!;
     const text = index < answer && index >= from ? replyText(message) : "";

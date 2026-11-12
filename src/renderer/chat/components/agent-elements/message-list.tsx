@@ -2375,10 +2375,12 @@ const TurnRow = memo(function TurnRow({
                     ),
                   );
                   // A finished turn ends on its answer: the notes and
-                  // activity that led to it collapse above it.
+                  // activity that led to it collapse above it. A cut-off
+                  // turn keeps the order it ran in when work followed its
+                  // last text.
                   const settled = isTurnStreaming
                     ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
-                    : settleFinishedTurn(turnMsgs, turnAnalyses);
+                    : settleFinishedTurn(turnMsgs, turnAnalyses, Boolean(turn.end));
                   const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
                   const analyses = settled.order.map((index) => settled.analyses[index]!);
                   const segments = partitionTurnSegments(
