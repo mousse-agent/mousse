@@ -317,7 +317,10 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     tools,
     disallowedTools,
     permissionMode: 'default',
-    systemPrompt: turn.systemPrompt,
+    // The bot's own system text, rendered as given on every request of the session (never kept from its first one): a
+    // turn after an Allow resumes the session with the wider permissions in it. It is the same text on every turn of an
+    // activation, so the prompt cache holds.
+    systemPrompt: { type: 'custom', prompt: turn.systemPrompt, snapshot: false },
     maxTurns: CLAUDE_LOCKED_MAX_TURNS,
     ...(shell ? { sandbox: claudeLockedSandbox({ workspace: turn.authority.workspace!, temps: turn.temps, ...(input.home ? { home: input.home } : {}), ...(turn.own ? { own: turn.own.folders } : {}) }) } : {}),
     ...(input.spawn ? { spawnClaudeCodeProcess: input.spawn } : {})

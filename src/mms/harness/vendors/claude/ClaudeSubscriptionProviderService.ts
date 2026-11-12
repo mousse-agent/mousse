@@ -226,6 +226,8 @@ export type ClaudeSubscriptionChatInput = {
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */
   onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  /** Claude Code compacts the session inside the turn (`TurnFrameSink.onCompaction`). */
+  onCompaction?: (phase: 'start' | 'complete') => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined

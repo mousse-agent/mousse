@@ -257,6 +257,13 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
         ctl.heartbeat()
         sink.retry(attempt, detail)
       },
+      // A bot's turn hears of a compaction inside it: its memory pack and job's brief go in again after it.
+      ...(host.bot ? {
+        onCompaction: (phase: 'start' | 'complete') => {
+          ctl.heartbeat()
+          sink.compaction(phase)
+        }
+      } : {}),
       onTool: (event) => {
         progress()
         // A thought or a note that came before this call keeps its own row, above it; the next one starts below.

@@ -344,3 +344,62 @@ describe('a note reaches running work while it works', () => {
     expect(f.bots.tools.work.reach!(botId, work.workId)).toBe('step_end')
   })
 })
+
+describe('the bot stays itself through a compaction', () => {
+  it('after a compaction its memory pack and brief go in again, once per compaction', async () => {
+    const { work } = await handOff(['Vacuums'], 'm1')
+    const live = await start(f, work[0]!.workId)
+    const steer = live.prepared.steer!
+    expect(steer.peek()).toBeUndefined()
+    steer.compacted()
+    const regive = steer.peek()!
+    expect(regive).toContain('Your context was just summarised')
+    expect(regive).toContain('<bot_memory>run pack manual</bot_memory>')
+    expect(regive).toContain('Do Vacuums.')
+    const taken = steer.take()!
+    expect(steer.peek()).toBeUndefined()
+    steer.accepted(taken.token)
+    expect(steer.peek()).toBeUndefined()
+    // Two compactions before it went in: given once.
+    steer.compacted()
+    steer.compacted()
+    steer.accepted(steer.take()!.token)
+    expect(steer.peek()).toBeUndefined()
+    // It counts against nothing: no chat row, no note, no extra dispatch.
+    const rows = chatOf(f, botId).length
+    await finish(f, live.payload, 'completed', { text: 'Done.' })
+    expect(f.store.dispatches(work[0]!.workId)).toHaveLength(1)
+    expect(chatOf(f, botId)).toHaveLength(rows + 1)
+  })
+
+  it('a re-give handed back waits; one the turn never read is dropped at its end (the next turn carries the pack)', async () => {
+    const { work } = await handOff(['Vacuums'], 'm1')
+    const live = await start(f, work[0]!.workId)
+    const steer = live.prepared.steer!
+    steer.compacted()
+    steer.handedBack(steer.take()!.token)
+    expect(steer.peek()).toContain('Your context was just summarised')
+    steer.take()
+    await finish(f, live.payload, 'completed', { text: 'Done.' })
+    expect(f.store.dispatches(work[0]!.workId)).toHaveLength(1)
+  })
+
+  it('the system text is the same on every turn of an activation, and holds no per-turn value', async () => {
+    f.host.instructions = botInstructions
+    const work = await (async () => {
+      const { work: started } = await handOff(['Vacuums'], 'm1')
+      return start(f, started[0]!.workId)
+    })()
+    const first: PreparedBotTurn = work.prepared
+    f.bots.tools.work.note(botId, first.activationId, 'Cordless only.')
+    f.clock.now += 7 * MIN
+    await finish(f, work.payload, 'completed', { text: 'Three picks.' })
+    const second = await start(f, first.activationId, 2)
+    expect(second.prepared.instructions).toBe(first.instructions)
+    expect(first.instructions).toContain('Your name is Pip.')
+    // The pack and the request stay out of it: they are in the turn's message.
+    expect(first.instructions).not.toContain('bot_memory')
+    expect(first.instructions).not.toContain('Do Vacuums.')
+    expect(first.instructions).not.toContain(new Date(f.clock.now).toISOString().slice(0, 10))
+  })
+})

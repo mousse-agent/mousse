@@ -55,11 +55,13 @@ function botTurn(scripts: Script[]) {
   writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
   const queries: FakeQuery[] = []
   const prompts: SDKUserMessage[] = []
-  const query = ({ prompt }: { prompt: AsyncIterable<SDKUserMessage> }): Query => {
+  const options: Array<Record<string, unknown>> = []
+  const query = ({ prompt, options: started }: { prompt: AsyncIterable<SDKUserMessage>; options?: Record<string, unknown> }): Query => {
     const script = scripts[queries.length]
     if (!script) throw new Error('no query left to start')
     const fake: FakeQuery = { close: vi.fn(), interrupt: vi.fn(async () => {}) }
     queries.push(fake)
+    options.push({ ...started })
     // The prompt is read once, here; the script gets it again as a one-message stream.
     const read = firstMessage(prompt).then((message) => {
       prompts.push(message)
@@ -95,9 +97,10 @@ function botTurn(scripts: Script[]) {
     cwd: root,
     shellContained: false,
     temps: [],
-    systemPrompt: '',
+    systemPrompt: 'Your name is Pip. You keep my day in order.',
     ledger: { start: () => 'row', commit: () => undefined, failed: () => undefined }
   }
+  const onCompaction = vi.fn()
   const stop = new AbortController()
   const events: string[] = []
   // Steers waiting to be drained, oldest first: one at the start, and a test may queue more while the turn runs.
@@ -120,9 +123,10 @@ function botTurn(scripts: Script[]) {
     locked,
     signal: stop.signal,
     onText: vi.fn(),
+    onCompaction,
     ...steer
   })
-  return { run, stop, steer, queries, prompts, events, pending }
+  return { run, stop, steer, queries, prompts, events, pending, options, onCompaction }
 }
 
 /** The first query: it waits for the steer's interrupt, then ends as an interrupted query does. */
@@ -259,6 +263,37 @@ describe('a steer into a bot\'s Claude Code turn (#920)', () => {
     await expect(turn.run()).rejects.toThrow()
     expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
     expect(turn.steer.returnSteer).not.toHaveBeenCalled()
+  })
+
+  it("a note into a bot's turn resumes the same session under the same lock and system text (it widens nothing)", async () => {
+    const turn = botTurn([
+      interruptedByTheSteer,
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield done
+      }
+    ])
+    expect(await turn.run()).toBe('done')
+    const [first, restarted] = turn.options
+    expect(restarted).toMatchObject({ resume: SESSION, permissionMode: 'default', settingSources: [], strictMcpConfig: true, plugins: [] })
+    for (const key of ['tools', 'disallowedTools', 'systemPrompt', 'maxTurns', 'canUseTool', 'hooks', 'cwd']) expect(restarted![key]).toEqual(first![key])
+    // The bot's own system text, rendered fresh on each request of the session: the same on both.
+    expect(first!.systemPrompt).toEqual({ type: 'custom', prompt: 'Your name is Pip. You keep my day in order.', snapshot: false })
+  })
+
+  it("a compaction inside a bot's turn is reported: Claude Code's compacting status, then its boundary", async () => {
+    const turn = botTurn([
+      async function* () {
+        yield init
+        yield { type: 'system', subtype: 'status', status: 'compacting', session_id: SESSION }
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 180_000 }, session_id: SESSION }
+        yield done
+      }
+    ])
+    turn.pending.splice(0)
+    expect(await turn.run()).toBe('done')
+    expect(turn.onCompaction.mock.calls).toEqual([['start'], ['complete']])
   })
 
   it('a failed result from the restarted query is not a read, and the steer is handed back', async () => {

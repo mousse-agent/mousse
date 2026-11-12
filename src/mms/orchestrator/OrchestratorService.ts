@@ -931,14 +931,13 @@ function isContinuationTurnPayload(payload: unknown): payload is ContinuationTur
 const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'continuation', 'bot']
 
 /**
- * A bot turn's preamble: the bot's role and instructions first, then its context pack (memory and
- * history, built by Mousse and frozen for the activation, Bot Phase 1 §5.3.2), then Mousse's own.
- * Bots that never ask anyone run their app tools with `approvals: 'never'`, so a tool that would
- * ask is refused.
+ * A bot turn's preamble: its context pack (memory and history, built by Mousse and frozen for the activation, Bot
+ * Phase 1 §5.3.2), then Mousse's own. The bot's role and instructions are its system text instead
+ * (`sessionInstructions`), where a compaction of the runtime's context cannot remove them. Bots that never ask anyone
+ * run their app tools with `approvals: 'never'`, so a tool that would ask is refused.
  */
-function withBotInstructions(instructions: string | undefined, preamble: string, pack?: string): string {
-  const parts = [instructions?.trim() ? `Your role and instructions:\n${instructions.trim()}` : '', pack?.trim() ?? '', preamble]
-  return parts.filter(Boolean).join('\n\n')
+function withBotPack(preamble: string, pack?: string): string {
+  return [pack?.trim() ?? '', preamble].filter(Boolean).join('\n\n')
 }
 
 /**
@@ -3702,8 +3701,11 @@ export class OrchestratorService extends EventEmitter {
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
     const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
-    // A bot's turn runs on its own instructions (`botInstructions`, in the preamble): Mousse's
-    // orchestration and applet guidance would point it at tools its grant never holds.
+    // A bot's turn runs on its own instructions (`botInstructions`) as its whole system text: Mousse's orchestration
+    // and applet guidance would point it at tools its grant never holds. Its runtime takes them as its system prompt
+    // (Claude Code's replaced one, Codex's developer instructions, added to Pi's), with none of the owner's own
+    // settings, plugins or servers; a compaction keeps it. The text is the same on every turn of the activation (no
+    // time or per-turn value in it), so the prompt cache holds across them.
     const appletCatalogue = this.appletStore && !turn.bot ? this.appletCatalogue() : undefined
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
@@ -3717,12 +3719,12 @@ export class OrchestratorService extends EventEmitter {
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: turn.bot ? '' : [
+        sessionInstructions: turn.bot ? input.botInstructions?.trim() ?? '' : [
           sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
           // The Automation manager's thread runs the default agent with its own brief (v4 Automations).
           ...(mcpAttached && this.threadStore?.getThread(turn.threadId)?.automationManager ? [AUTOMATION_MANAGER_INSTRUCTIONS] : [])
         ].filter(Boolean).join('\n\n'),
-        turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
+        turnPreamble: withBotPack(turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
           appletCatalogue,
@@ -12084,6 +12086,8 @@ export class OrchestratorService extends EventEmitter {
           // A person's steer waits for a compaction the provider runs inside the turn ("Waits for compaction").
           hold.compacting(phase === 'start')
           onCompaction(phase)
+          // A bot's turn gets its memory pack and its job's brief again right after (at the next safe point).
+          if (phase === 'complete') opts?.bot?.steer?.compacted()
         },
         // The line under Working says it; nothing is saved to the transcript.
         retry: (attempt, detail) => this.setTurnStep(session.threadId, {

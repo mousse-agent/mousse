@@ -31,7 +31,10 @@ export interface PreparedBotTurn {
   dispatchN: number
   /** The trigger's text, sent as the turn's user message. */
   prompt: string
-  /** The bot's instructions, appended to the runtime's own. */
+  /**
+   * The bot's system text (who it is, its lane's rules, what its owner allows now): the turn's system prompt, which a
+   * compaction keeps. Claude Code's is replaced by it; Codex takes it as developer instructions; Pi adds it to its own.
+   */
   instructions?: string
   selection: ProviderSelection
   /** The binding's policy (`bind(…, {policy})`). */
