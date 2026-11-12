@@ -594,7 +594,7 @@ export class ScheduledJobStore {
       createThread: input.createThread,
       selection: input.selection,
       ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
-      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.model ? { model: input.bot.model } : {}) } } : {}),
+      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
       mode: input.mode,
       workspace: input.workspace,
       permissionMode,

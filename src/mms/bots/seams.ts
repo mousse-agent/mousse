@@ -26,21 +26,26 @@ export interface BotProcessSupervision {
   reconcile(): Promise<Array<{ dispatchId: string; exitAt?: string }>>
 }
 
-/** Why no model could be chosen. Never shown as such: it becomes a `BotError` in plain words. */
-export type BotModelProblem = 'no_provider' | 'named_unavailable' | 'all_limited'
+/**
+ * Why no model could be chosen. Never shown as such: it becomes a `BotError` in plain words. `pick_unavailable`: a model
+ * the owner picked on an entry can't run there (#673), and nothing else is tried; `all_limited` also covers a pick at
+ * its usage limit.
+ */
+export type BotModelProblem = 'no_provider' | 'named_unavailable' | 'all_limited' | 'pick_unavailable'
 
-/** A pick that could not run (#673), and why: the chat says so once (`modelSlots.ts`). */
+/** A pick that can't run (#673), and why: the chat says so once, to the owner only (`modelSlots.ts`). */
 export type { BotPickMiss, BotPickReason } from '../../shared/bots/personal/modelSlots'
 
 export type BotModelResolution =
-  | { selection: ProviderSelection; missed?: BotPickMiss }
+  | { selection: ProviderSelection }
   | { problem: BotModelProblem; until?: string; instanceId?: string; missed?: BotPickMiss }
 
 /** The model choice (§5.6, #673). WP3 implements; WP2's engine calls at the first dispatch of each activation. */
 export interface BotModelResolver {
   /**
-   * A turn's model: `pick` on its entry, at its reasoning level (Default: the one `depth` gives), or, with no pick or
-   * one that can't run now, Automatic at `depth` (`missed` then says why the pick could not run).
+   * A turn's model. A pick on an entry runs there, at its reasoning level, or not at all: at its usage limit
+   * `all_limited` with the reset, otherwise `pick_unavailable` with `missed`. A pick by name from an older bot, and a row
+   * on which Mousse chooses (null), resolve as before picks: by name across entries, else by usage at `depth`.
    */
   resolve(input: { botId: string; pick: BotModelPick | null; depth: BotDepth; policy: RunPolicy }): Promise<BotModelResolution>
   /** A bot turn on `instanceId` hit its usage limit; skip it until `until`. */
@@ -71,9 +76,12 @@ export interface BotToolHost {
   /**
    * `set_depth` and `use_model` (#673). `now`: this activation only, by a reload; `always`: saved as a revision with no
    * re-approval. A depth is the activation's level (`now`) or the bot's standing level (`always`); a pick is one of the
-   * Runs on choices, on this chat (`now`) or on `rows` (`always`).
+   * Runs on choices, on this chat (`now`) or on `rows` (`always`). The answer says whether a depth changed what runs:
+   * a depth moves work between its rows, and changes nothing on a pick that keeps its model and reasoning level.
    */
-  setModel(botId: string, activationId: string, scope: 'now' | 'always', change: BotModelChange): void
+  setModel(botId: string, activationId: string, scope: 'now' | 'always', change: BotModelChange): { changed: boolean }
+  /** The owner's own words in a chat activation: its owner messages, oldest first (`use_model` checks them). */
+  ownerWords(botId: string, activationId: string): string
   /**
    * The chat's work (docs/plans/bot-always-free.md): runs beside the chat that report back. `from` is the chat
    * activation that hands it off; `key` makes a repeated call start nothing new; `level` is how hard the job is (#673).
@@ -94,7 +102,7 @@ export interface BotToolHost {
 }
 
 /** What `set_depth` (a depth) or `use_model` (a pick among the Runs on choices, and with `always` the rows it goes on) changes. */
-export type BotModelChange = { depth: BotDepth } | { pick: { instanceId: string; model: string }; rows?: BotModelRows }
+export type BotModelChange = { depth: BotDepth } | { pick: BotModelPick & { instanceId: string }; rows?: BotModelRows }
 
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {

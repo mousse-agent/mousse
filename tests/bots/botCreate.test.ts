@@ -10,14 +10,24 @@ import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { cleanBotName, fallbackBotName, firstMessagePrompt } from '../../src/mms/bots/chat/BotChatService'
 import { starterManifest } from '../../src/mms/bots/chat/projection'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
-import { AUTOMATIC_SLOTS, slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
+import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
+import type { LlmProviderOption } from '../../src/shared/settings'
 import { botFixture, chatOf, createBot, flush, runDispatch, type BotFixture } from './botFixture'
 
 let f: BotFixture
 
 /** Opus on a Claude subscription, and the same model through a paid API key. */
-const OPUS_SUB: BotModelOption = { instanceId: 'claude', entry: 'Claude Code', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
-const OPUS_KEY: BotModelOption = { instanceId: 'pi:key', entry: 'Anthropic API', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
+const OPUS_SUB: BotModelOption = { instanceId: 'claude', entry: 'Claude Code', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'], credential: 'subscription', account: 'acct-1' }
+const OPUS_KEY: BotModelOption = { instanceId: 'pi:key', entry: 'Anthropic API', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'], credential: 'api_key' }
+/** The app's listing of both entries, as the model picker takes it. */
+const CLAUDE_LISTING: LlmProviderOption = { id: 'claude', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }, { id: 'haiku', label: 'Haiku' }] }
+const KEY_LISTING: LlmProviderOption = { id: 'pi', instanceId: 'pi:key', label: 'Anthropic API', models: [{ id: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high', 'max'] }] }
+const TALK = { instanceId: 'claude', model: 'opus' }
+const WORK = { instanceId: 'pi:key', model: 'opus', effort: 'high' }
+const ROWS = { talk: TALK, light: WORK, medium: WORK, hard: WORK } as { talk: typeof TALK | null; light: typeof WORK | null; medium: typeof WORK | null; hard: typeof WORK | null }
+
+/** The service's choices, which a test sets as the daemon would. */
+const serviceOptions = () => (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]>; modelListing?: () => Promise<LlmProviderOption[]> } }).options
 
 beforeEach(() => {
   f = botFixture()
@@ -52,47 +62,64 @@ describe('bots.create', () => {
     expect(f.bots.service.list().bots).toHaveLength(1)
   })
 
-  it('a model picked by hand on New bot is the bot\'s from its first message; one no longer offered is refused, never swapped (#673)', async () => {
-    const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
+  it('New bot\'s choices are each entry\'s models for the app\'s picker, without Off, and the owner\'s last picks still offered (#673)', async () => {
+    const options = serviceOptions()
+    options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    options.modelListing = async () => [CLAUDE_LISTING, KEY_LISTING]
+    const choices = await f.bots.service.modelChoices()
+    // Only the models that can hold a bot, with the levels it may pick; the listing's other models and "Off" are gone.
+    expect(choices.providers).toEqual([
+      { ...CLAUDE_LISTING, models: [{ id: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium', thinkingOff: false }] },
+      { ...KEY_LISTING, models: [{ id: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'], thinkingOff: false }] }
+    ])
+    expect(choices).toMatchObject({ models: [{ model: 'opus', label: 'Claude Code · Opus' }], computer: 'this_computer', computers: [{ id: 'this_computer' }] })
+    // The first bot starts empty: no last picks.
+    expect(choices.last).toBeUndefined()
+    await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Rows', description: 'Track my spending.', clientRequestId: 'rows', slots: ROWS })
+    expect((await f.bots.service.modelChoices()).last).toEqual({ talk: TALK, light: WORK, medium: WORK, hard: WORK })
+    // A remembered pick no longer offered starts empty.
     options.modelOptions = async () => [OPUS_SUB]
-    // New bot's line reads the same choices as About, before any bot exists: per entry, and one per name for older apps.
-    expect(await f.bots.service.modelChoices()).toMatchObject({ options: [OPUS_SUB], models: [{ model: 'opus', label: 'Claude Code · Opus' }], computer: 'this_computer', computers: [{ id: 'this_computer' }] })
-    // The single picker's `model` (#996): Talk and Work both, on the one entry that offers it.
-    const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Penny', description: 'Track my spending.', clientRequestId: 'picked', model: 'opus' })
-    expect(f.bots.ownerSlots(bot.id)).toEqual(slotsAllOn({ instanceId: 'claude', model: 'opus' }))
-    expect(f.bots.definitionOf(bot.id).main.model).toEqual({ mode: 'named', model: 'opus', depth: 'normal' })
+    expect((await f.bots.service.modelChoices()).last).toEqual({ talk: TALK, light: null, medium: null, hard: null })
+  })
+
+  it('Create bot takes a pick on every row, saved with its entry\'s sign-in; one not offered is refused, never swapped (#673)', async () => {
+    const options = serviceOptions()
+    options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Rows', description: 'Track my spending.', clientRequestId: 'rows', slots: ROWS })
+    // The daemon stamps each pick with the entry's sign-in now; a client never sends it.
+    const talk = { ...TALK, credential: 'subscription', account: 'acct-1' }
+    const work = { ...WORK, credential: 'api_key' }
+    expect(f.bots.ownerSlots(bot.id)).toEqual({ talk, light: work, medium: work, hard: work })
+    // Older builds run every turn on the mirror: Talk's model, marked so their own later writes drop the rows.
+    expect(f.bots.definitionOf(bot.id).main.model).toEqual({ mode: 'named', model: 'opus ', depth: 'normal' })
     const [first] = f.store.laneActivations(bot.id, 'chat', ['running'])
     await runDispatch(f, first!.id, 1, { text: 'Hello.' })
-    expect(f.resolved[0]).toEqual({ pick: { instanceId: 'claude', model: 'opus' }, depth: 'normal' })
-    // The pick is gone between opening New bot and Create bot: no bot, and the owner is told in plain words.
-    await expect(f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId: 'gone', model: 'sonnet' }))
-      .rejects.toMatchObject({ code: 'model_unavailable', message: 'The model you picked is not available now. Pick another one, or Automatic.' })
-    await expect(f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId: 'gone1', slots: { ...AUTOMATIC_SLOTS, hard: { instanceId: 'pi:key', model: 'opus' } } }))
-      .rejects.toMatchObject({ code: 'model_unavailable' })
-    // A reasoning level the model does not offer is refused too.
-    await expect(f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId: 'gone3', slots: { ...AUTOMATIC_SLOTS, talk: { instanceId: 'claude', model: 'opus', effort: 'max' } } }))
-      .rejects.toMatchObject({ code: 'model_unavailable' })
+    expect(f.resolved.at(-1)).toEqual({ pick: talk, depth: 'normal' })
+    // Without a name the bot names itself on its Talk pick.
+    f.resolved.length = 0
+    await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, description: 'Track my spending.', clientRequestId: 'named', slots: ROWS })
+    expect(f.resolved[0]).toEqual({ pick: talk, depth: 'quick' })
+    const refused = (clientRequestId: string, slots: typeof ROWS) => f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId, slots })
+    // Gone between opening New bot and Create bot, or at a level the model doesn't offer: no bot, in plain words.
+    await expect(refused('gone1', { ...ROWS, hard: { instanceId: 'pi:other', model: 'opus' } })).rejects.toMatchObject({ code: 'model_unavailable', message: 'The model you picked is not available now. Pick another one.' })
+    await expect(refused('gone2', { ...ROWS, talk: { ...TALK, effort: 'max' } })).rejects.toMatchObject({ code: 'model_unavailable' })
+    // Every row needs a pick: Mousse never chooses for a new bot.
+    await expect(refused('gone3', { ...ROWS, light: null })).rejects.toMatchObject({ code: 'invalid_params', message: 'Pick a model for Talk and for Work.' })
     options.modelOptions = async () => { throw new Error('providers unreadable') }
-    await expect(f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId: 'gone2', model: 'opus' })).rejects.toMatchObject({ code: 'model_unavailable' })
-    expect(f.bots.service.list().bots.map((entry) => entry.name)).toEqual(['Penny'])
-    // Automatic needs no choices at all.
+    await expect(refused('gone4', ROWS)).rejects.toMatchObject({ code: 'model_unavailable' })
+    expect(f.bots.service.list().bots.map((entry) => entry.name)).not.toContain('Gone')
+  })
+
+  it('an app from before rows sends one model by name, put on every row on an entry; one from before picks sends none, by usage (#673)', async () => {
+    const options = serviceOptions()
+    options.modelOptions = async () => [OPUS_KEY, OPUS_SUB]
+    const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Name', description: 'Track my spending.', clientRequestId: 'name', model: 'opus' })
+    // Two entries offer it: the subscription, as `use_model` ranks.
+    expect(f.bots.ownerSlots(bot.id)).toEqual(slotsAllOn({ ...TALK, credential: 'subscription', account: 'acct-1' }))
+    await expect(f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Gone', description: 'Track my spending.', clientRequestId: 'gone', model: 'sonnet' })).rejects.toMatchObject({ code: 'model_unavailable' })
     const { bot: byUsage } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Auto', description: 'Track my spending.', clientRequestId: 'auto' })
     expect(f.bots.definitionOf(byUsage.id).main).toMatchObject({ model: { mode: 'auto', depth: 'normal' } })
     expect(f.bots.definitionOf(byUsage.id).main.slots).toBeUndefined()
-  })
-
-  it('New bot takes rows: Talk on one entry, Work on another at a reasoning level of its own (#673)', async () => {
-    const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
-    options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
-    const slots = { talk: { instanceId: 'claude', model: 'opus' }, light: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, medium: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, hard: { instanceId: 'pi:key', model: 'opus', effort: 'high' } }
-    const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Rows', description: 'Track my spending.', clientRequestId: 'rows', slots })
-    expect(f.bots.ownerSlots(bot.id)).toEqual(slots)
-    // Older builds read `model`: the Talk row by name.
-    expect(f.bots.definitionOf(bot.id).main.model).toEqual({ mode: 'named', model: 'opus', depth: 'normal' })
-    // With the same model on two entries, the single picker's `model` names no entry: matched by name as before.
-    const { bot: byName } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Name', description: 'Track my spending.', clientRequestId: 'name', model: 'opus' })
-    expect(f.bots.ownerSlots(byName.id)).toEqual(slotsAllOn({ model: 'opus' }))
-    expect(f.bots.definitionOf(byName.id).main.slots).toBeUndefined()
   })
 
   it('Runs on names this computer by the name it is given, and "This computer" without one', async () => {

@@ -51,7 +51,7 @@ export interface BotFixture {
   problem: { problem: BotModelProblem; until?: string; instanceId?: string } | undefined
   /** What each resolve was asked: the turn's pick (null: Automatic) and depth. */
   resolved: Array<{ pick: BotModelPick | null; depth: BotDepth }>
-  /** A pick that can't run, and why (the resolver then answers with Automatic and `missed`). */
+  /** A pick that can't run, and why (the resolver then answers `pick_unavailable` with `missed`). */
   pickMiss?: (pick: BotModelPick) => BotPickMiss | undefined
   journal: BotJournalInput[]
   /** Journal rows written outside a transaction (must stay empty). */
@@ -112,6 +112,15 @@ export function botFixture(): BotFixture {
       resolve: async (input) => {
         fixture.resolved.push({ pick: input.pick, depth: input.depth })
         if (fixture.problem) return fixture.problem
+        // A pick on its entry runs there or not at all, as `BotModelChooser` does: one that can't run is a problem, and
+        // one on a limited entry waits for its reset.
+        if (input.pick?.instanceId) {
+          const missed = fixture.pickMiss?.(input.pick)
+          if (missed) return { problem: 'pick_unavailable', missed }
+          const until = fixture.limited.get(input.pick.instanceId)
+          if (until && Date.parse(until) > clock.now) return { problem: 'all_limited', until, instanceId: input.pick.instanceId }
+          return { selection: { instanceId: input.pick.instanceId, model: input.pick.model, ...(input.pick.effort ? { effort: input.pick.effort } : {}) } }
+        }
         const free = fixture.candidates.filter((candidate) => {
           const until = fixture.limited.get(candidate.instanceId)
           return !until || Date.parse(until) <= clock.now
@@ -121,11 +130,7 @@ export function botFixture(): BotFixture {
           const until = [...fixture.limited.values()].sort()[0]
           return { problem: 'all_limited', ...(until ? { until } : {}), instanceId: fixture.candidates[0]?.instanceId }
         }
-        // A pick that can't run: Automatic (the first free candidate), and why.
-        const missed = input.pick ? fixture.pickMiss?.(input.pick) : undefined
-        if (missed) return { selection: { ...free[0]! }, missed }
-        // A pick on its entry runs as picked; otherwise the depth's effort on the first free candidate.
-        if (input.pick?.instanceId) return { selection: { instanceId: input.pick.instanceId, model: input.pick.model, ...(input.pick.effort ? { effort: input.pick.effort } : {}) } }
+        // A bot from before picks: the depth's effort on the first free candidate.
         return { selection: { ...free[0]!, ...(depth === 'deep' ? { effort: 'high' } : depth === 'quick' ? { effort: 'low' } : {}) } }
       },
       markLimited: (instanceId, until) => { fixture.limited.set(instanceId, until) }

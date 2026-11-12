@@ -19,6 +19,8 @@ export interface BotModelCandidate {
   defaultEffort?: string
   tier: BotModelTier
   credential: 'subscription' | 'api_key' | 'ambient' | 'unknown'
+  /** The account the entry is signed in to: the gateway's salted hash, when it can tell (#673: a pick remembers it). */
+  account?: string
   /** `YYYY-MM-DD`, from the catalog. */
   released?: string
   /** ISO time until which the instance is at its usage limit. */

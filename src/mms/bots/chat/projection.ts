@@ -83,6 +83,11 @@ export interface PostInput {
   threadId?: string
   /** The message this one answers. */
   replyTo?: string
+  /**
+   * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
+   * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
+   */
+  hidden?: true
 }
 
 /** The chat rows of every bot of a profile, and the summaries built from `bots.db`. */
@@ -129,7 +134,7 @@ export class BotChatProjection {
       // The journal row joins this transaction: a chat row is never kept without it (bot-context.md §4).
       this.options.journal?.appendInTx(this.store.db, {
         botId: input.botId,
-        kind: journalKind(input.author, input.kind, Boolean(input.askId)),
+        kind: input.hidden ? 'model_change' : journalKind(input.author, input.kind, Boolean(input.askId)),
         ...(input.lane ? { lane: input.lane } : {}),
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),

@@ -105,12 +105,14 @@ describe('the bots\' model choice with a Settings default', () => {
     expect(await chooser.resolve({ botId: 'b', pick: null, depth: 'deep', policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'high' } })
   })
 
-  it('a row picked by hand, or the activation\'s own pick, comes before the default', async () => {
+  it('is only for rows on which Mousse chooses: a model by name, or a pick, never uses it (#673)', async () => {
     const chooser = resolver({ instanceId: 'pi:openai', model: 'gpt-5.1-mini' })
     // An older bot's model by name.
     expect(await chooser.resolve({ botId: 'b', pick: { model: 'Big 2' }, depth: 'normal', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'medium' } })
-    // A pick on its entry, Default reasoning: the depth gives it.
-    expect(await chooser.resolve({ botId: 'b', pick: { instanceId: 'claude', model: 'acme-mid-2' }, depth: 'deep', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'high' } })
+    // A pick on its entry runs at the model's own default level, at any depth.
+    expect(await chooser.resolve({ botId: 'b', pick: { instanceId: 'claude', model: 'acme-mid-2' }, depth: 'deep', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' } })
+    // A pick that can't run never falls to the default.
+    expect(await chooser.resolve({ botId: 'b', pick: { instanceId: 'pi:gone', model: 'gpt-5.1' }, depth: 'normal', policy })).toMatchObject({ problem: 'pick_unavailable' })
   })
 
   it('falls back to automatic at the same depth when the default cannot run the bot', async () => {

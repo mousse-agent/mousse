@@ -1,5 +1,6 @@
 import type { BotDepth, BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
+import { isPinned, plainLabel } from '../../../shared/bots/personal/modelSlots'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { InstanceModel, ProviderSelection, RunPolicy } from '../../../shared/harness/types'
 import type { ModelCatalog } from '../../../shared/modelCatalog'
@@ -11,8 +12,9 @@ import { chooseBotModel, effortFor, offeredEfforts, type BotModelCandidate } fro
 
 /**
  * The bots' model choice in the daemon (Bot Phase 1 §5.6, #673): `BotEngine` resolves each activation's first dispatch
- * here. A row picked by hand runs on its own entry; Automatic picks a ready model by depth. Usage limits are remembered
- * in memory, by instance, until their reset; a restart forgets them, and the next limited turn marks the instance again.
+ * here. A row picked by hand runs on its own entry or not at all; a bot from before picks still runs by usage, picking a
+ * ready model by depth. Usage limits are remembered in memory, by instance, until their reset; a restart forgets them,
+ * and the next limited turn marks the instance again.
  */
 
 export interface BotModelResolverDeps {
@@ -68,32 +70,36 @@ export class BotModelChooser implements BotModelResolver {
       catalog: this.catalog(),
       limited: this.limitedAt(now)
     })
-    let missed: BotPickMiss | undefined
+    if (isPinned(input.pick)) return this.picked(input.pick, candidates, snapshots, input.policy, now)
+    // A bot from before picks, as before: a model by name across entries, which falls back to by usage when it is
+    // missing or at its limit; a row on which Mousse chooses, by usage (the Settings default first).
     if (input.pick) {
-      const picked = this.picked(input.pick, input.depth, candidates, snapshots, input.policy, now)
-      if ('selection' in picked) return picked
-      missed = picked.missed
+      const named = chooseBotModel({ mode: 'named', model: input.pick.model, depth: input.depth }, candidates, now)
+      if ('selection' in named) return named
+    } else {
+      const chosen = this.defaultCandidate(candidates, now)
+      if (chosen) return { selection: depthSelection(chosen, input.depth) }
     }
-    const result = this.automatic(input.depth, candidates, snapshots, input.policy, now)
-    return missed ? { ...result, missed } : result
+    const result = chooseBotModel({ mode: 'auto', depth: input.depth }, candidates, now)
+    if ('problem' in result && result.problem === 'no_provider') {
+      const instanceId = signInCandidate({ snapshots, hold: this.deps.hold, policy: input.policy })
+      return instanceId ? { problem: 'no_provider', instanceId } : { problem: 'no_provider' }
+    }
+    return result
   }
 
   /**
-   * A row by hand: its entry's model, at its reasoning level when the model still offers it, else the one the depth
-   * gives. A pick from an older bot without an entry is matched by name across entries, subscriptions first, as before.
+   * A pick on an entry runs there, on the same kind of sign-in and account it was picked on, at its reasoning level
+   * (the model's default when it has none or no longer offers it), or not at all: never on another model or entry.
    */
-  private picked(pick: BotModelPick, depth: BotDepth, candidates: readonly BotModelCandidate[], snapshots: readonly InstanceSnapshot[], policy: RunPolicy, now: Date): { selection: ProviderSelection } | { missed: BotPickMiss } {
-    if (!pick.instanceId) {
-      const named = chooseBotModel({ mode: 'named', model: pick.model, depth }, candidates, now)
-      if ('selection' in named) {
-        const found = candidates.find((candidate) => candidate.instanceId === named.selection.instanceId && candidate.model === named.selection.model)
-        return found ? { selection: selectionOf(found, pick.effort, depth) } : named
-      }
-      return { missed: this.miss(pick, named.problem === 'all_limited' ? 'limited' : 'removed', snapshots) }
-    }
+  private picked(pick: BotModelPick & { instanceId: string }, candidates: readonly BotModelCandidate[], snapshots: readonly InstanceSnapshot[], policy: RunPolicy, now: Date): BotModelResolution {
     const found = candidates.find((candidate) => candidate.instanceId === pick.instanceId && candidate.model === pick.model)
-    if (found && !limitedNow(found, now)) return { selection: selectionOf(found, pick.effort, depth) }
-    return { missed: this.miss(pick, found ? 'limited' : this.pickReason(pick as BotModelPick & { instanceId: string }, snapshots, policy), snapshots) }
+    if (!found) return { problem: 'pick_unavailable', missed: this.miss(pick, this.pickReason(pick, snapshots, policy), snapshots) }
+    const changed = identityChange(pick, found)
+    if (changed) return { problem: 'pick_unavailable', missed: this.miss(pick, changed, snapshots) }
+    // At its usage limit: the work waits for the reset, as when every model is limited.
+    if (limitedNow(found, now)) return { problem: 'all_limited', until: found.limitedUntil!, instanceId: found.instanceId }
+    return { selection: pickSelection(found, pick.effort) }
   }
 
   /** Why a pick on its entry is not among the candidates. */
@@ -103,35 +109,33 @@ export class BotModelChooser implements BotModelResolver {
     if (!snapshot.enabled.effective) return 'off'
     if (snapshot.auth.state === 'signed_out' || snapshot.auth.state === 'expired') return 'signed_out'
     if (!instanceReady(snapshot)) return 'not_ready'
-    if (!this.deps.models(pick.instanceId).some((model) => model.id === pick.model && !model.hidden)) return 'removed'
+    let listed = false
+    try {
+      listed = this.deps.models(pick.instanceId).some((model) => model.id === pick.model && !model.hidden)
+    } catch {
+      // Unreadable: as gone.
+    }
+    if (!listed) return 'model_gone'
     if (!this.deps.hold.canHoldBot(pick.instanceId, policy, pick.model).ok) return 'cant_hold'
-    return 'removed'
+    return 'not_ready'
   }
 
-  /** The chat's words for a pick that could not run: its model's name and its entry's. */
-  private miss(pick: BotModelPick, reason: BotPickReason, snapshots: readonly InstanceSnapshot[]): BotPickMiss {
-    const entry = pick.instanceId ? snapshots.find((snapshot) => snapshot.instanceId === pick.instanceId)?.displayName : undefined
+  /**
+   * The owner's words for a pick that can't run: its model's name and its entry's, as Runs on names them ("Opus 5.5 on
+   * Claude Code"). Both may be text from elsewhere (an entry's name, a custom endpoint's model name): one plain line each,
+   * cut short.
+   */
+  private miss(pick: BotModelPick & { instanceId: string }, reason: BotPickReason, snapshots: readonly InstanceSnapshot[]): BotPickMiss {
+    const entry = snapshots.find((snapshot) => snapshot.instanceId === pick.instanceId)?.displayName
     let name = pick.model
     try {
-      if (pick.instanceId) name = this.deps.models(pick.instanceId).find((model) => model.id === pick.model)?.label || pick.model
+      name = this.deps.models(pick.instanceId).find((model) => model.id === pick.model)?.label || pick.model
     } catch {
       // The entry's models can't be read (it was removed): the model's id names it.
     }
-    // As the Runs on picker names it: "Opus 5.5 on Claude Code".
-    const short = shortModelName(name)
-    return { key: `${pick.instanceId ?? ''}|${pick.model}|${reason}`, label: entry ? `${short} on ${entry}` : short, reason }
-  }
-
-  /** Automatic: the Settings default while it can run the bot, else the best ready model for the depth. */
-  private automatic(depth: BotDepth, candidates: readonly BotModelCandidate[], snapshots: readonly InstanceSnapshot[], policy: RunPolicy, now: Date): BotModelResolution {
-    const chosen = this.defaultCandidate(candidates, now)
-    if (chosen) return { selection: selectionOf(chosen, undefined, depth) }
-    const result = chooseBotModel({ mode: 'auto', depth }, candidates, now)
-    if ('problem' in result && result.problem === 'no_provider') {
-      const instanceId = signInCandidate({ snapshots, hold: this.deps.hold, policy })
-      return instanceId ? { problem: 'no_provider', instanceId } : { problem: 'no_provider' }
-    }
-    return result
+    const model = plainLabel(shortModelName(name)) || plainLabel(pick.model)
+    const where = entry ? plainLabel(entry, 40) : ''
+    return { label: where ? `${model} on ${where}` : model, reason }
   }
 
   /**
@@ -149,22 +153,35 @@ export class BotModelChooser implements BotModelResolver {
   async pickable(): Promise<BotModelOption[]> {
     const snapshots = await this.freshSnapshots()
     const entries = new Map(snapshots.map((snapshot) => [snapshot.instanceId, snapshot.displayName]))
-    return this.candidatesOf(snapshots).map((candidate) => ({
+    return this.candidatesOf(snapshots).map((candidate) => this.optionOf(candidate, entries))
+  }
+
+  private optionOf(candidate: BotModelCandidate, entries: ReadonlyMap<string, string>): BotModelOption {
+    const credential = candidate.credential === 'unknown' ? undefined : candidate.credential
+    return {
       instanceId: candidate.instanceId,
       entry: entries.get(candidate.instanceId) || candidate.instanceId,
       model: candidate.model,
       label: this.deps.models(candidate.instanceId).find((model) => model.id === candidate.model)?.label || candidate.model,
-      efforts: offeredEfforts(candidate.efforts)
-    }))
+      efforts: offeredEfforts(candidate.efforts),
+      ...(credential ? { credential } : {}),
+      ...(candidate.account ? { account: candidate.account } : {}),
+      ...(candidate.names?.length ? { names: candidate.names } : {})
+    }
   }
 
   /**
    * The Runs on choice the owner's words name (`use_model`): among the same options the picker offers, the best name
-   * match, ranked as Automatic ranks (subscriptions first). Undefined when none is named.
+   * match, ranked subscriptions first. Undefined when none is named. It names the option, so the pick is saved with
+   * what the entry is signed in with now.
    */
-  async pickFor(words: string): Promise<{ instanceId: string; model: string } | undefined> {
-    const named = chooseBotModel({ mode: 'named', model: words, depth: 'normal' }, await this.holdableCandidates(), this.now())
-    return 'selection' in named ? { instanceId: named.selection.instanceId, model: named.selection.model } : undefined
+  async pickFor(words: string): Promise<BotModelOption | undefined> {
+    const snapshots = await this.freshSnapshots()
+    const candidates = this.candidatesOf(snapshots)
+    const named = chooseBotModel({ mode: 'named', model: words, depth: 'normal' }, candidates, this.now())
+    if (!('selection' in named)) return undefined
+    const found = candidates.find((candidate) => candidate.instanceId === named.selection.instanceId && candidate.model === named.selection.model)
+    return found ? this.optionOf(found, new Map(snapshots.map((snapshot) => [snapshot.instanceId, snapshot.displayName]))) : undefined
   }
 
   private async holdableCandidates(): Promise<BotModelCandidate[]> {
@@ -218,10 +235,28 @@ export class BotModelChooser implements BotModelResolver {
   }
 }
 
-/** A candidate's selection: the pick's reasoning level while the model offers it, else the one the depth gives (Default). */
-function selectionOf(candidate: BotModelCandidate, effort: string | undefined, depth: BotDepth): ProviderSelection {
-  const chosen = effort && candidate.efforts.includes(effort) ? effort : effortFor(depth, candidate)
+/** A pick's selection: its reasoning level while the model offers it, else the model's own default. */
+function pickSelection(candidate: BotModelCandidate, effort: string | undefined): ProviderSelection {
+  const chosen = effort && candidate.efforts.includes(effort) ? effort : effortFor('normal', candidate)
   return { instanceId: candidate.instanceId, model: candidate.model, ...(chosen ? { effort: chosen } : {}) }
+}
+
+/** By usage on a chosen candidate (the Settings default): the effort the depth gives. */
+function depthSelection(candidate: BotModelCandidate, depth: BotDepth): ProviderSelection {
+  const effort = effortFor(depth, candidate)
+  return { instanceId: candidate.instanceId, model: candidate.model, ...(effort ? { effort } : {}) }
+}
+
+/**
+ * How the entry changed since the pick was saved: it signs in another way now (a subscription switched to an API key
+ * keeps the entry's id), or to another account (an entry removed and added again under the same name gets the same
+ * id). Compared only where both are known; a pick saved before it remembered them has nothing to compare.
+ */
+function identityChange(pick: BotModelPick, candidate: BotModelCandidate): BotPickReason | undefined {
+  const credential = candidate.credential === 'unknown' ? undefined : candidate.credential
+  if (pick.credential && credential && pick.credential !== credential) return 'sign_in_changed'
+  if (pick.account && candidate.account && pick.account !== candidate.account) return 'account_changed'
+  return undefined
 }
 
 /** The resolver `MmsProfileServices` hands to `BotEngine`. */

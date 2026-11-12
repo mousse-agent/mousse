@@ -1,7 +1,8 @@
-import type { BotModelSlots, BotSchedule } from './definition'
+import type { BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
 import type { BotMemoryForgetResult, BotMemoryListing } from './memory'
+import type { LlmProviderOption } from '../../settings'
 
 /** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
 export interface BotComputerChoice {
@@ -13,8 +14,9 @@ export interface BotComputerChoice {
 }
 
 /**
- * One model a bot's row can be given by hand (#673): an entry's model, with the reasoning levels it offers. The same
- * model on two entries is two options, told apart by `entry`.
+ * One model a bot's row can be given by hand (#673), in the daemon: an entry's model, with the reasoning levels it
+ * offers and what the entry is signed in with now (stamped on a pick when it is saved). The same model on two entries
+ * is two options, told apart by `entry`. Clients get `BotRunsOnChoices.providers` instead.
  */
 export interface BotModelOption {
   instanceId: string
@@ -25,18 +27,28 @@ export interface BotModelOption {
   label: string
   /** The reasoning levels it offers, lowest first; empty when it has none to pick. */
   efforts: string[]
+  credential?: BotPickCredential
+  account?: string
+  /** Other words that name it (catalog id and names, family word), lower case: `use_model` checks the owner said one. */
+  names?: string[]
 }
 
 /** What a bot can run on (#673): the ready models that can hold a bot here, and the computers, this one first. */
 export interface BotRunsOnChoices {
   /** One per model name, for an app from before rows (a single Model picker). */
   models: Array<{ model: string; label: string }>
-  /** Every entry's models, for the rows (Talk, Work, and the work levels). Absent from an older service. */
-  options?: BotModelOption[]
+  /**
+   * The rows' choices, as the app's model picker takes them: each ready entry with the models on it that can hold a
+   * bot, and their reasoning levels. Absent from an older service, whose app shows one Model picker.
+   */
+  providers?: LlmProviderOption[]
   /** The computer that holds (or will hold) the bot: always `this_computer` for now. */
   computer: string
   computers: BotComputerChoice[]
 }
+
+/** A bot's rows as Runs on shows them: each a pick on an entry, or null for "Pick a model" (Mousse chooses until then). */
+export type BotShownRows = Record<BotModelSlotKey, BotModelPick | null>
 
 /**
  * The personal-bot methods (PR 6 §4): profile-bound, apart from the Space-bot `bots.*` set and
@@ -126,11 +138,11 @@ export const MAX_BOT_CHAT_ATTACHMENT_BYTES = 50 * 1024 * 1024
 export interface BotsPersonalV2Api {
   'bots.personal.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
   /**
-   * `slots`: the rows picked on New bot (#673), each one of `bots.model.choices`' `options` or null (Automatic).
-   * `model`: one model by name on Talk and Work both (the single picker before rows). Absent, every row is Automatic.
-   * A pick that is not among the current choices is refused (`model_unavailable`) rather than replaced. Older services
+   * `slots`: the rows picked on New bot (#673), all four, each a model on an entry among `bots.model.choices`'
+   * `providers`. A pick that is not offered now is refused (`model_unavailable`) rather than replaced. `model` (an app
+   * from before rows): one model by name on every row; neither, by usage (an app from before picks). Older services
    * refuse these keys, so the app sends `model` only to a service that has `bots.model.choices`, and `slots` only to one
-   * whose choices carry `options`.
+   * whose choices carry `providers`.
    */
   'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
@@ -155,26 +167,34 @@ export interface BotsPersonalV2Api {
   'bots.permissions.revoke': { params: { botId: string; permissionId: string }; result: BotDetail }
   /**
    * The owner adds a schedule (the Automations page's create row, with the bot as Who). `model`: one picked by hand for
-   * its runs (#673); absent, the bot's own choice (by usage).
+   * its runs (#673), by name, saved on the entry that offers it now (refused when none does); absent, the bot's Work.
    */
   'bots.schedules.add': { params: { botId: string; when: BotSchedule['when']; prompt: string; model?: string }; result: BotDetail }
   /**
-   * The bot's models and computer, by hand (#673). `slots`: its rows (null rows are Automatic, the default); a pick
-   * carries its entry when one is known. `model`: the Talk row's model by name, or null, for an app from before rows.
-   * Model names appear here and on the pickers that use them only. `computers` are this one and the person's other
-   * computers; a bot runs on the computer that holds it, so the others carry `unavailable` (why they cannot be picked)
-   * and `offline`. An older service sends no `slots` or `options`, and the app shows its single Model picker.
+   * The bot's models and computer, by hand (#673). `slots`: its rows, each a pick on an entry, or null for "Pick a model"
+   * (a bot from before picks, on which Mousse chooses until the owner picks; a model by name from it is `named`).
+   * `model`: the Talk row's model by name, or null, for an app from before rows. Model names appear here and on the
+   * pickers that use them only. `computers` are this one and the person's other computers; a bot runs on the computer
+   * that holds it, so the others carry `unavailable` (why they cannot be picked) and `offline`. An older service sends
+   * no `slots` or `providers`, and the app shows its single Model picker.
    */
-  'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotModelSlots } & BotRunsOnChoices }
-  /** What New bot's Runs on line offers before the bot exists (#673): the same choices as `bots.model.get`. */
-  'bots.model.choices': { params: Record<string, never>; result: BotRunsOnChoices }
-  /** One model by name on every row (Talk and Work), or null for Automatic on every row: the single picker before rows. */
+  'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>> } & BotRunsOnChoices }
+  /**
+   * What New bot's Runs on offers before the bot exists (#673): the same choices as `bots.model.get`, and `last`, the
+   * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none).
+   */
+  'bots.model.choices': { params: Record<string, never>; result: BotRunsOnChoices & { last?: BotShownRows } }
+  /**
+   * The single picker before rows: one model by name on every row, on the entry that offers it now, or null, which
+   * leaves a bot from before picks by usage. A picked bot is never set back to by usage.
+   */
   'bots.model.set': { params: { botId: string; model: string | null }; result: { bot: BotSummary } }
   /**
-   * The bot's rows (#673), saved as a revision with the same grant. A changed pick must be one of the current `options`
-   * (`model_unavailable` otherwise); a row left as it was may name one that can't run now.
+   * Changes the bot's rows (#673) over the rows as they are now, as a revision with the same grant. `slots`: some rows,
+   * each a pick on an entry offered now (`model_unavailable` otherwise); only those change. `oneWork` (Advanced closing):
+   * Medium work's pick, as it is, on all work. One of the two.
    */
-  'bots.model.setSlots': { params: { botId: string; slots: BotModelSlots }; result: { bot: BotSummary } }
+  'bots.model.setSlots': { params: { botId: string; slots?: Partial<BotModelSlots>; oneWork?: true }; result: { bot: BotSummary } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }

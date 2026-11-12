@@ -15,12 +15,14 @@ import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { botScheduleLabel } from '../../src/shared/scheduleLabel'
 import { fakeAppToolHost } from './appToolsFixture'
 
-function fakeBots(lane: BotLane = 'chat') {
+function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean } = {}) {
   const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string }> = []
   const profiles: Array<{ name?: string; description?: string }> = []
   const models: Array<{ scope: 'now' | 'always'; choice: BotModelChange }> = []
   const works: Array<{ title: string; brief: string; key: string; level?: string }> = []
   const host = {
+    // The owner's message the chat turn holds.
+    ownerWords: () => options.owner ?? 'Please use Opus from now on',
     activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
     schedules: {
       add: (_botId, s) => {
@@ -41,6 +43,7 @@ function fakeBots(lane: BotLane = 'chat') {
     },
     setModel: (_botId, _activationId, scope, choice) => {
       models.push({ scope, choice })
+      return { changed: options.changes ?? true }
     },
     work: {
       start: async (_botId, _from, input) => {
@@ -53,8 +56,9 @@ function fakeBots(lane: BotLane = 'chat') {
     }
   } as BotToolHost
   const activity = createBotActivitySink({ emit: () => {} })
-  // Only the Runs on choices: Opus on the Claude entry.
-  const deps: BotAppToolDeps = { host, activity, models: { pickFor: async (model) => (/opus/i.test(model) ? { instanceId: 'claude', model: 'claude-opus-4-6' } : undefined) } }
+  // Only the Runs on choices: Opus on the Claude entry, a subscription.
+  const opus = { instanceId: 'claude', entry: 'Claude Code', model: 'claude-opus-4-6', label: 'Claude Opus 4.6', efforts: [], credential: 'subscription' as const, account: 'acct-1', names: ['claude-opus-4-6', 'opus 4.6', 'opus'] }
+  const deps: BotAppToolDeps = { host, activity, models: { pickFor: async (model) => (/opus/i.test(model) ? opus : undefined) } }
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
   const ctx = (threadId = 'home', activationId = 'a1'): ToolCallContext => ({
     caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
@@ -125,6 +129,15 @@ describe('set_depth and use_model', () => {
     expect(await bots.call('set_depth', { depth: 'max', scope: 'now' })).toMatchObject({ isError: true })
   })
 
+  it('set_depth on a model the owner picked with its own level says nothing changed, so the bot never promises more time (#673)', async () => {
+    const bots = fakeBots('chat', { changes: false })
+    const now = (await bots.call('set_depth', { depth: 'deep', scope: 'now' })).value
+    expect(now).toMatchObject({ ok: true, changed: false, note: expect.stringContaining('Nothing changes here') })
+    expect(now.note).toContain('level hard')
+    expect(now.note).not.toMatch(/Mousse continues/)
+    expect((await bots.call('set_depth', { depth: 'deep', scope: 'always' })).value).toMatchObject({ ok: true, changed: false, note: expect.stringContaining('nothing changes now') })
+  })
+
   it('a run may change its depth for now only', async () => {
     const bots = fakeBots('run')
     expect((await bots.call('set_depth', { depth: 'deep', scope: 'now' })).value).toMatchObject({ ok: true })
@@ -147,7 +160,8 @@ describe('set_depth and use_model', () => {
     expect(bots.activity.drain('d1')).toEqual([{ icon: 'think', text: 'switched models', highlight: 'from now on' }])
     expect((await bots.call('use_model', { model: 'opus', scope: 'always', for: 'work' })).value).toMatchObject({ ok: true, for: 'work' })
     expect((await bots.call('use_model', { model: 'opus', scope: 'now', for: 'work' })).value).toEqual({ ok: true, scope: 'now' })
-    const pick = { instanceId: 'claude', model: 'claude-opus-4-6' }
+    // The pick keeps what its entry signs in with now.
+    const pick = { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'subscription', account: 'acct-1' }
     expect(bots.models).toEqual([
       { scope: 'always', choice: { pick, rows: 'all' } },
       { scope: 'always', choice: { pick, rows: 'work' } },
@@ -158,6 +172,20 @@ describe('set_depth and use_model', () => {
     expect(missing.value).toMatchObject({ ok: false, reason: expect.stringContaining('not available') })
     expect(await bots.call('use_model', { model: 'opus', scope: 'always', for: 'images' })).toMatchObject({ isError: true })
     expect(bots.models).toHaveLength(3)
+  })
+
+  it('use_model always only when the owner\'s own message names the model; for this chat it needs no such words (#673)', async () => {
+    // The owner asked to think harder; the bot reaches for a model on its own.
+    const unasked = fakeBots('chat', { owner: 'Think harder about this from now on' })
+    expect((await unasked.call('use_model', { model: 'Opus', scope: 'always' })).value).toEqual({ ok: false, reason: expect.stringContaining('Only the owner changes your model for good') })
+    expect(unasked.models).toEqual([])
+    // The owner said the model's name, or its short name, in other words than the bot passed.
+    for (const owner of ['Switch to Claude Opus 4.6 for good', 'use opus-4.6 from now on', 'Use Opus.']) {
+      const named = fakeBots('chat', { owner })
+      expect((await named.call('use_model', { model: 'claude-opus-4-6', scope: 'always' })).value).toMatchObject({ ok: true })
+    }
+    // A word that only contains the name is not the name.
+    expect((await fakeBots('chat', { owner: 'the opuscule' }).call('use_model', { model: 'opus', scope: 'always' })).value).toMatchObject({ ok: false })
   })
 })
 

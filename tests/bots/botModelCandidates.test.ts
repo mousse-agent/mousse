@@ -129,14 +129,11 @@ describe('BotModelResolver', () => {
     expect(await chooser.resolve(normal)).toMatchObject({ selection: { instanceId: 'claude' } })
   })
 
-  it('a model by name from an older bot: matched across entries; one that is not there runs Automatic and says why; use_model finds a choice first', async () => {
+  it('a model by name from an older bot: matched across entries; one that is not there runs by usage, as before picks; use_model finds a choice first', async () => {
     const chooser = resolver()
-    expect(await chooser.resolve({ botId: 'b1', pick: { model: 'grok' }, depth: 'normal', policy })).toEqual({
-      selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' },
-      missed: { key: '|grok|removed', label: 'grok', reason: 'removed' }
-    })
+    expect(await chooser.resolve({ botId: 'b1', pick: { model: 'grok' }, depth: 'normal', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' } })
     expect(await chooser.resolve({ botId: 'b1', pick: { model: 'Big 2' }, depth: 'quick', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'low' } })
-    expect(await chooser.pickFor('big')).toEqual({ instanceId: 'claude', model: 'acme-big-2' })
+    expect(await chooser.pickFor('big')).toMatchObject({ instanceId: 'claude', model: 'acme-big-2' })
     expect(await chooser.pickFor('grok')).toBeUndefined()
   })
 

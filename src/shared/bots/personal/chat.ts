@@ -13,7 +13,8 @@ export type BotState = 'idle' | 'working' | 'needs_you' | 'stuck' | 'paused'
 export interface BotError {
   /** "Gmail sign-in expired" / "Paused until 14:00 (your Claude usage limit)". */
   text: string
-  action?: { kind: 'sign_in' | 'open_providers' | 'resume' | 'retry'; label: string; instanceId?: string }
+  /** `pick_model` opens About → Runs on (#673: a picked model that can't run). */
+  action?: { kind: 'sign_in' | 'open_providers' | 'resume' | 'retry' | 'pick_model'; label: string; instanceId?: string }
 }
 
 export type BotChipIcon = 'search' | 'web' | 'read' | 'edit' | 'schedule' | 'memory' | 'ask' | 'think' | 'name' | 'warning'

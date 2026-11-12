@@ -94,14 +94,20 @@ export const LEVEL_DEPTH: Readonly<Record<BotWorkLevel, BotDepth>> = { light: 'q
 export const DEPTH_LEVEL: Readonly<Record<BotDepth, BotWorkLevel>> = { quick: 'light', normal: 'medium', deep: 'hard' }
 
 /**
- * What a bot thread runs on, as format 2 writes it. `auto` is resolved per activation from the owner's ready providers;
- * `named` is a model by name (a catalog id, the instance's model id, or a family word), matched across entries. `depth`
- * is the bot's standing level: Automatic rows resolve at it, and work that names no level runs at it. Older builds
+ * What a bot thread runs on, as format 2 writes it. `auto` is by usage: resolved per activation from the owner's ready
+ * providers (bots from before picks only); `named` is a model by name (a catalog id, the instance's model id, or a family
+ * word), matched across entries. `depth` is the bot's standing level: work that names no level runs at it. Older builds
  * run every turn on this choice; this build reads `slots` beside it (`slotsOf`).
  */
 export type BotModelChoice =
   | { mode: 'auto'; depth: BotDepth }
   | { mode: 'named'; model: string; depth: BotDepth }
+
+/** The longest model name a definition, a pick or a method takes. */
+export const MAX_BOT_MODEL_CHARS = 200
+
+/** The kinds of sign-in a pick remembers (`CredentialKind` without `unknown`). */
+export type BotPickCredential = 'subscription' | 'api_key' | 'ambient'
 
 /**
  * One activation's own choice (`set_depth` and `use_model` with `now`, an automation's model by hand): a depth, and a
@@ -109,26 +115,35 @@ export type BotModelChoice =
  */
 export type BotModelOverride =
   | { mode: 'auto'; depth: BotDepth }
-  | { mode: 'named'; model: string; depth: BotDepth; instanceId?: string; effort?: string }
+  | { mode: 'named'; model: string; depth: BotDepth; instanceId?: string; effort?: string; credential?: BotPickCredential; account?: string }
 
-/** A new bot's model: automatic, at normal depth. */
+/** The model of a bot made without picks (an app from before them): by usage, at normal depth. */
 export const DEFAULT_BOT_MODEL: BotModelChoice = { mode: 'auto', depth: 'normal' }
 
 /**
- * A model the owner picked for a row (#673): a provider entry, its model and a reasoning level. The entry is kept, so a
- * model picked on a subscription never runs through another entry, such as a paid API key.
+ * A model the owner picked for a row (#673): a provider entry, its model and a reasoning level. It runs only there: when
+ * it can't, nothing runs on another model or entry (a paid API key beside a subscription included).
  */
 export interface BotModelPick {
-  /** The provider entry. Absent only on a pick from an older bot that no single entry offers: matched by name, as before. */
+  /** The provider entry. Absent only on a pick by name from an older bot: matched across entries, as before. */
   instanceId?: string
   model: string
-  /** One of the model's reasoning levels; absent is Default (set by how hard the job is, `effortFor`). */
+  /** One of the model's reasoning levels; absent is the model's default. */
   effort?: string
+  /**
+   * How the entry was signed in when the pick was saved, and the account it was signed in to (the gateway's salted
+   * hash, never a secret). Written by the daemon, never taken from a client. A pick whose entry now signs in another way
+   * (a subscription switched to an API key) or to another account (an entry removed and added again under the same
+   * name) can't run: the owner picks again.
+   */
+  credential?: BotPickCredential
+  account?: string
 }
 
 /**
- * A bot's models (#673): Talk for every chat turn, and one per work level. null is Automatic (by usage). The simple view
- * shows Talk and Work, where Work is all three levels on one pick; Advanced shows the levels apart.
+ * A bot's models (#673): Talk for every chat turn, and one per work level. A bot made with picks has a pick on every
+ * row. null is "Mousse chooses" (by usage), only on a bot from before picks until its owner picks that row. The simple
+ * view shows Talk and Work, where Work is all three levels on one pick; Advanced shows the levels apart.
  */
 export interface BotModelSlots {
   talk: BotModelPick | null
@@ -144,11 +159,12 @@ export interface BotThreadSpec {
   key: string
   title: string
   agent: { definitionId: string; pinRevision: string } | { instructions: string }
-  /** Replaces format 1's fixed `selection`. Mirrors the Talk row while `slots` is written (`withSlots`). */
+  /** Replaces format 1's fixed `selection`. Mirrors the rows while `slots` is written (`withSlots`, `mirrorOf`). */
   model: BotModelChoice
   /**
-   * The rows by hand (#673), written only when `model` alone can't say them. Older builds ignore it and run on `model`;
-   * when one changes `model`, the rows no longer match it and `model` is read again (`slotsOf`).
+   * The rows by hand (#673), written whenever a row holds a pick on an entry. Older builds ignore it and run on `model`;
+   * once one rewrites `model`, the rows no longer match it and are dropped (`slotsOf`). Rows this build does not know
+   * are kept as they are.
    */
   slots?: BotModelSlots
   /** Removes permissions for this thread only; never adds any. */

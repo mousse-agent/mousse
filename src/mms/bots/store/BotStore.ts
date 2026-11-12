@@ -354,10 +354,11 @@ export interface BotRegistryRow {
   error: BotStoredError | null
   readSeq: number
   /**
-   * The last resolved selection (internal; never in a UI payload), and the picks by hand the chat has said it can't use
-   * (#673, `missingAfter`), so it says so once. Older builds rewrite it without `missing`; the line is then said again once.
+   * The last resolved selection (internal; never in a UI payload), and each row's last one (#673): a `model_change`
+   * journal row is written when a row's model changes, not when Talk and Work take turns. Older builds rewrite it without
+   * `rows`; each row then journals its model once more.
    */
-  model: { selection: ProviderSelection; activationId: string; missing?: string[] } | null
+  model: { selection: ProviderSelection; activationId: string; rows?: Partial<Record<string, ProviderSelection>> } | null
 }
 
 function registryOf(row: Row): BotRegistryRow {

@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotSchedule } from '../../../../shared/bots/personal/definition'
-import { workLevelOf } from '../../../../shared/bots/personal/modelSlots'
+import { ownerNamesModel, workLevelOf } from '../../../../shared/bots/personal/modelSlots'
+import type { BotModelOption } from '../../../../shared/bots/personal/methods'
+import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
 import type { BotActivityContext, BotActivitySink, BotToolHost } from '../../../bots/seams'
@@ -89,7 +91,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'set_depth',
-    description: 'Take more time to think (deep), be quicker (quick) or go back to normal. now: this conversation, or the rest of this run. always: from now on, which is also the level of work, scheduled runs and reminders that name none. Use it when the owner asks you to think harder or be faster.',
+    description: 'Take more time to think (deep), be quicker (quick) or go back to normal. now: this conversation, or the rest of this run. always: from now on, which is also the level of work, scheduled runs and reminders that name none. Use it when the owner asks you to think harder or be faster. Its answer says whether anything changed: the owner may have set a model and reasoning level that stay as they are.',
     parameters: Type.Object({
       depth: Type.Union(BOT_DEPTHS.map((depth) => Type.Literal(depth))),
       scope: SCOPE
@@ -97,7 +99,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'use_model',
-    description: 'Only when the owner names a model: use it, as they said it. now: for this conversation. always: from now on, for talking, for work, or both (all). If it is not available here, say so plainly and carry on.',
+    description: 'Only when the owner names a model in their message: use it, as they said it. now: for this conversation. always: from now on, for talking, for work, or both (all); only when this message of theirs names the model. If it is not available here, say so plainly and carry on.',
     parameters: Type.Object({
       model: Type.String({ description: 'The model, in the owner\'s words.' }),
       scope: SCOPE,
@@ -165,8 +167,11 @@ export interface BotAppToolDeps {
   host: BotToolHost
   /** Outcome chips: new schedules, renames, depth. */
   activity?: BotActivitySink
-  /** `use_model`: the Runs on choice the owner's words name, among the same ones the picker offers (`BotModelChooser.pickFor`). */
-  models?: { pickFor(model: string): Promise<{ instanceId: string; model: string } | undefined> }
+  /**
+   * `use_model`: the Runs on choice the owner's words name, among the same ones the picker offers
+   * (`BotModelChooser.pickFor`), with the entry's sign-in now, which the pick keeps.
+   */
+  models?: { pickFor(model: string): Promise<BotModelOption | undefined> }
 }
 
 const NOT_A_BOT = 'Only a bot can use this.'
@@ -345,10 +350,20 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const scope = args.scope === 'always' ? 'always' : args.scope === 'now' ? 'now' : undefined
         if (!scope) return error('scope is now or always.')
         if (scope === 'always' && call.lane !== 'chat') return error(OWNER_ONLY)
+        let changed: boolean
         try {
-          call.deps.host.setModel(call.botId, call.activationId, scope, { depth })
+          changed = call.deps.host.setModel(call.botId, call.activationId, scope, { depth }).changed
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
+        }
+        // A model the owner picked keeps its reasoning level at any depth (#673): say so rather than promise more time.
+        if (!changed) {
+          const note = scope === 'now'
+            ? (call.lane === 'chat'
+              ? 'Nothing changes here: the owner set the model and how long it thinks for this chat in Runs on. Don\'t say you\'ll take more or less time. For a job that needs more thought, start work with level hard; for a quick one, level light.'
+              : 'Nothing changes: this run is already on the model the owner set for that level. Carry on.')
+            : 'Saved, but nothing changes now: your work runs on the same model and reasoning level either way, as the owner set them in Runs on. Don\'t say you\'ll take more or less time; tell them plainly they can set a model for each kind of work there.'
+          return json({ ok: true as const, changed: false, note })
         }
         const result = { ok: true as const, note: scope === 'now' ? 'Mousse continues your turn with the new depth right after this. Carry on where you left off.' : 'Saved: your next conversations and runs use it.' }
         call.deps.activity?.onAppResult(call.activity, 'set_depth', result)
@@ -480,8 +495,14 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const rows = args.for === undefined ? 'all' : args.for === 'talk' || args.for === 'work' || args.for === 'all' ? args.for : undefined
         if (!rows) return error('for is talk, work or all.')
         // Only among the choices About → Runs on offers, each on its own entry; the owner sees the change there and as a chip.
-        const pick = call.deps.models ? await call.deps.models.pickFor(model) : undefined
-        if (!pick) return json({ ok: false, reason: 'That model is not available here. You stay as you were; tell the owner plainly, without naming other models.' })
+        const option = call.deps.models ? await call.deps.models.pickFor(model) : undefined
+        if (!option) return json({ ok: false, reason: 'That model is not available here. You stay as you were; tell the owner plainly, without naming other models.' })
+        // For good only when the owner named it in this message: their words must hold a name of the model (as given here,
+        // its own name or short name, its id, its catalog names or family word), as whole words in a row, ignoring case
+        // and punctuation ("Opus 5.5" and "opus-5-5" are the same words).
+        if (scope === 'always' && !ownerNamesModel(call.deps.host.ownerWords(call.botId, call.activationId), [model, option.label, shortModelName(option.label), option.model, ...(option.names ?? [])]))
+          return json({ ok: false, reason: 'Only the owner changes your model for good, by naming it in their message. Nothing changed; if they want it, ask them to say which model.' })
+        const pick = { instanceId: option.instanceId, model: option.model, ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) }
         try {
           call.deps.host.setModel(call.botId, call.activationId, scope, { pick, ...(scope === 'always' ? { rows } : {}) })
         } catch (failure) {
