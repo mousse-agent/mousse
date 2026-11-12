@@ -3,6 +3,7 @@ import { mousseCallAsksPerson, mousseServerToolOf } from '../../src/mms/run/mcp/
 import {
   TEXT_EMIT_MS,
   TranscriptAssembler,
+  stoppedReplyText,
   unshownReplyText,
   type TranscriptHooks,
   type TranscriptStreamState,
@@ -110,6 +111,15 @@ describe('TranscriptAssembler', () => {
     expect(unshownReplyText(whole, [...['Checking the tests.', 'All pass.'], 'Done: everything works.'])).toBe('')
     // A row the reply does not hold, in that order, leaves the whole reply.
     expect(unshownReplyText(whole, ['All pass.', 'Checking the tests.'])).toBe(whole)
+  })
+
+  it('a stopped turn hands back its open reply; a bot turn cut at a wall right after a call hands back its last one', () => {
+    const closed = ['Looking up the Roborock Q7 first.', 'Roborock Q7: 5,500 Pa suction. ']
+    expect(stoppedReplyText('Still typing', closed, true)).toBe('Still typing')
+    expect(stoppedReplyText('', closed, true)).toBe('Roborock Q7: 5,500 Pa suction.')
+    expect(stoppedReplyText('', [], true)).toBe('')
+    // A person's Stop keeps what was open, and nothing else.
+    expect(stoppedReplyText('', closed, false)).toBe('')
   })
 
   it('appends deltas to completed segments in append mode and keeps the reply open', () => {

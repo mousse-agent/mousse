@@ -257,6 +257,15 @@ export function unshownReplyText(text: string, shown: readonly string[]): string
 }
 
 /**
+ * What a stopped turn hands back as its reply: the text of its open reply. A bot's turn cut at a wall (its work time ran
+ * out, say) right after a tool call has none open: the reply it finished last in this turn is what it had, and its owner
+ * sees it with the ask.
+ */
+export function stoppedReplyText(open: string, closed: readonly string[], wall: boolean): string {
+  return wall && !open ? (closed.at(-1) ?? '').trim() : open
+}
+
+/**
  * Turns streamed text, thinking and tool events into `ChatMessage` mutations (SPEC §13.4 shared
  * builders): one assistant reply row per stretch of text (a tool call ends one in `replace` mode),
  * one thinking message at a time, and one timeline message per tool call, with the turn phase

@@ -123,7 +123,7 @@ import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeIt
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { nestedUnderSubagentOrBackground, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
+import { nestedUnderSubagentOrBackground, stoppedReplyText, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
@@ -12467,7 +12467,7 @@ export class OrchestratorService extends EventEmitter {
         restart ? RESTART_INTERRUPTED_TEXT : wall ? 'Paused: waiting for the owner.' : TURN_STOPPED_TEXT,
         turnEnd ? { turnId: engineRunId, turnEnd } : undefined
       )
-      const response: OrchestratorResponse = { message: partial, actions: [] }
+      const response: OrchestratorResponse = { message: stoppedReplyText(partial, replies.map((reply) => stripActionBlocks(reply.content)), wall), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       try {

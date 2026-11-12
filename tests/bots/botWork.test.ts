@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
-import { BOT_FAILURE_PAUSE_STREAK, MAX_TURN_CAP_CONTINUATIONS, sayOnce } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_FAILURE_PAUSE_STREAK, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -450,6 +450,211 @@ describe('long work', () => {
       }
       expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'turn_cap_repeated' })
       expect(errors().at(-1)).toMatchObject({ error: { text: 'I kept going without finishing, so I stopped here.' } })
+    })
+  })
+
+  describe('work that runs out of room', () => {
+    /** The dispatch's deadline: its timer fires (it is the newest timer of that length). */
+    const deadline = (ms = 60 * MIN) => f.timers.filter((timer) => timer.ms === ms).at(-1)!.fn()
+
+    /** Work that ran its hour: what it had is in the chat with the ask, and the run lane is free. */
+    async function outOfTime(text = 'Two picks so far: Roborock Q7 and Dyson V8.') {
+      const work = await asked()
+      const first = await start(f, work.workId)
+      f.clock.now += 60 * MIN
+      first.prepared.authority.check(call)
+      deadline()
+      expect(first.prepared.authority.time.signal.aborted).toBe(true)
+      await finish(f, first.payload, 'interrupted', { text, outcome: { interruptedBy: 'bot_wall' } })
+      return { ...work, first }
+    }
+
+    it('posts what it had with the ask, waits without holding the run lane, and never counts as a failure', async () => {
+      const { workId, message } = await outOfTime()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+      const notice = chatOf(f, botId).at(-1)!
+      expect(notice).toMatchObject({
+        kind: 'notice',
+        text: roomText('Two picks so far: Roborock Q7 and Dyson V8.'),
+        ask: { title: 'work for up to 2 hours per run', status: 'open', carriesOn: true },
+        replyTo: { id: message.id }
+      })
+      expect(notice.text).toContain('Two picks so far')
+      expect(errors()).toEqual([])
+      expect(f.store.openAsks(botId)).toHaveLength(1)
+      expect(summary()).toMatchObject({ state: 'needs_you', work: [{ id: workId, status: 'paused' }] })
+      expect(f.bots.tools.work.list(botId)).toMatchObject({ now: [{ workId, status: 'paused' }] })
+      expect(f.bots.tools.work.list(botId).recent.some((item) => item.workId === workId)).toBe(false)
+      expect(f.bots.tools.work.note(botId, workId, 'Cordless only.')).toBe('noted')
+      // The run lane is free: other work starts at once.
+      const next = await chat('Also check the weather', 'm2')
+      const other = await f.bots.tools.work.start(botId, next.activation.id, { title: 'Weather', brief: 'Check the weather.', key: 'k-weather' })
+      expect(other.status).toBe('started')
+      expect(f.store.registry(botId)).toMatchObject({ failureStreak: 0, pausedReason: null })
+    })
+
+    it('Allow carries it on in the same thread, and its report answers the original message', async () => {
+      const { workId, message, first } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(120 * MIN)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      const next = f.store.dispatch(workId, 2)!
+      expect(next).toMatchObject({ kind: 'continue', threadId: first.payload.threadId })
+      expect(next.prompt.text).toBe('[Mousse] You have more room now; what you had so far was already sent to the owner. Carry on where you left off.')
+      const second = await start(f, workId, 2)
+      expect(second.prepared.authority.time.deadline() - f.clock.now).toBe(60 * MIN)
+      await finish(f, second.payload, 'completed', { text: 'The Roborock Q7 is the pick.' })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'The Roborock Q7 is the pick.', replyTo: { id: message.id } })
+      expect(chatOf(f, botId).find((row) => row.ask?.askId === askId)!.ask).toMatchObject({ status: 'allowed', carriesOn: true })
+      // Answered once, carried on once: nothing more is sent.
+      await f.bots.maintain()
+      expect(f.store.dispatches(workId)).toHaveLength(2)
+    })
+
+    it('Allow while other work runs carries it on after that work, before anything queued later', async () => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      const turn = await chat('Check the weather', 'm2')
+      const weather = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Weather', brief: 'Check the weather.', key: 'k-weather' })
+      const later = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Trains', brief: 'Check the trains.', key: 'k-trains' })
+      await finish(f, turn.payload, 'completed', { text: 'On it.' })
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'room_allowed' })
+      expect(f.bots.tools.work.list(botId).now.find((item) => item.workId === workId)).toMatchObject({ status: 'queued' })
+      await runDispatch(f, weather.workId, 1, { text: 'Sunny.' })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      expect(f.store.activation(later.workId)).toMatchObject({ status: 'queued' })
+    })
+
+    it('takes over an earlier run\'s open ask; Allow on that card before its turn ended carries it on once the turn let go', async () => {
+      // A run started by hand ran out first: it ended, and its ask waits in the chat.
+      const run = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
+      const earlier = await start(f, run.id)
+      f.clock.now += 60 * MIN
+      earlier.prepared.authority.check(call)
+      deadline()
+      await finish(f, earlier.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      const { workId } = await asked()
+      const first = await start(f, workId)
+      f.clock.now += 60 * MIN
+      first.prepared.authority.check(call)
+      deadline()
+      expect(f.store.escalation(askId)).toMatchObject({ activationId: workId, status: 'open' })
+      expect(f.store.openAsks(botId)).toHaveLength(1)
+      // Its turn is still ending when the owner allows on the earlier card.
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'room_allowed' })
+      expect(f.store.dispatch(workId, 2)).toBeUndefined()
+      await finish(f, first.payload, 'interrupted', { text: 'Half way through the list.', outcome: { interruptedBy: 'bot_wall' } })
+      await flush()
+      expect(chatOf(f, botId).some((row) => row.text === 'Half way through the list.')).toBe(true)
+      expect(f.store.dispatch(workId, 2)).toMatchObject({ kind: 'continue', threadId: first.payload.threadId })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+    })
+
+    it('Not now ends it with what it posted', async () => {
+      const { workId } = await outOfTime()
+      const before = chatOf(f, botId).length
+      await f.bots.service.answer(botId, chatOf(f, botId).at(-1)!.ask!.askId, 'not_now')
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'budget_denied' })
+      expect(chatOf(f, botId)).toHaveLength(before)
+      expect(chatOf(f, botId).at(-1)!.text).toContain('Two picks so far')
+      expect(summary().work).toBeUndefined()
+      expect(f.store.dispatches(workId)).toHaveLength(1)
+    })
+
+    it('after a Not now to that limit in the last day, the next work that runs out ends at once, and still posts what it had', async () => {
+      await outOfTime()
+      await f.bots.service.answer(botId, chatOf(f, botId).at(-1)!.ask!.askId, 'not_now')
+      await flush()
+      const turn = await chat('And the Shark?', 'm2')
+      const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Shark', brief: 'Check the Shark.', key: 'k-shark' })
+      await finish(f, turn.payload, 'completed', { text: 'On it.' })
+      const work = await start(f, workId)
+      f.clock.now += 60 * MIN
+      work.prepared.authority.check(call)
+      deadline()
+      await finish(f, work.payload, 'interrupted', { text: 'The Shark has 2,200 Pa.', outcome: { interruptedBy: 'bot_wall' } })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
+      expect(f.store.openAsks(botId)).toEqual([])
+      const rows = chatOf(f, botId).filter((row) => row.activationId === workId)
+      expect(rows).toMatchObject([
+        { kind: 'error', error: { text: 'I ran out of room on this run, so I stopped.' } },
+        { kind: 'notice', text: 'The Shark has 2,200 Pa.', replyTo: { id: turn.message.id } }
+      ])
+    })
+
+    it('Stop wins: stopped work never carries on, even after Allow', async () => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      expect(await f.bots.service.workStop(botId, workId)).toEqual({ stopped: true })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'cancelled' })
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      await f.bots.maintain()
+      expect(f.store.dispatches(workId)).toHaveLength(1)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'cancelled' })
+      // The wider grant stays for later runs.
+      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(120 * MIN)
+    })
+
+    it('an Allow recorded just before Mousse stopped carries it on once after the restart, with no second notice', async () => {
+      const { workId } = await outOfTime()
+      const before = chatOf(f, botId).length
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      // Allowed, then Mousse stopped before the continuation was written (no run engine to send it).
+      const runs = f.host.runs
+      f.host.runs = () => null
+      await f.bots.service.answer(botId, askId, 'allow')
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'room_allowed' })
+      f.host.runs = runs
+      const restart = async () => {
+        f.bots.close()
+        f.bots = new BotEngine(f.host)
+        await f.bots.reconcileOnStartup()
+        await flush()
+      }
+      await restart()
+      expect(f.store.dispatches(workId)).toHaveLength(2)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      // Another start finds it on its way and sends nothing more.
+      await restart()
+      expect(f.store.dispatches(workId)).toHaveLength(2)
+      expect(chatOf(f, botId)).toHaveLength(before)
+    })
+
+    it('a waiting notice that Mousse never posted is posted at the next start, once', async () => {
+      const work = await asked()
+      const first = await start(f, work.workId)
+      f.clock.now += 60 * MIN
+      first.prepared.authority.check(call)
+      deadline()
+      // Mousse stopped before the turn ended: its run is ended by the next start, and no reply was written.
+      f.runs.markTerminal(first.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+      f.bots.close()
+      f.bots = new BotEngine(f.host)
+      await f.bots.reconcileOnStartup()
+      await f.bots.reconcileOnStartup()
+      const notices = chatOf(f, botId).filter((row) => row.activationId === work.workId && row.ask)
+      expect(notices).toMatchObject([{ kind: 'notice', text: roomText(''), ask: { status: 'open' } }])
+    })
+
+    it('a scheduled run that runs out of room ends as before: failed, with an ask for later runs', async () => {
+      const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
+      const { prepared } = await start(f, activation.id)
+      f.clock.now += 60 * MIN
+      prepared.authority.check(call)
+      deadline()
+      expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I ran out of room on this run. Pip wants to work for up to 2 hours per run.' })
+      expect(chatOf(f, botId).at(-1)!.ask!.carriesOn).toBeUndefined()
     })
   })
 })

@@ -315,6 +315,19 @@ CREATE INDEX bot_work_notes_pending ON bot_work_notes(activation_id, applied_at)
 /** The `end_reason` of a running activation that waits for the internet. */
 export const BOT_OFFLINE_REASON = 'waiting_for_internet'
 
+/**
+ * Work the owner asked for that stopped short and goes on later in the same thread is `blocked` (it does not hold the
+ * run lane) with one of these end reasons, like the internet wait, so an older build still reads `bots.db`:
+ * `budget_exhausted` waits for the owner's answer to its limit ask, `room_allowed` was allowed more and goes on when
+ * the run lane is free.
+ */
+export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed'])
+
+/** Whether an activation is work that waits to go on (`BOT_WORK_WAIT_REASONS`). */
+export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'>): boolean {
+  return row.status === 'blocked' && row.lane === 'run' && row.trigger.kind === 'work' && row.endReason !== null && BOT_WORK_WAIT_REASONS.has(row.endReason)
+}
+
 /** The `bots.db` schema version this build writes. */
 export const BOTS_DB_VERSION = BOTS_MIGRATIONS.at(-1)!.version
 /** How many `bots.db.pre-v<n>` copies are kept beside the database. */
@@ -1066,6 +1079,11 @@ export class BotStore {
   /** A chat turn takes over a run's open ask as its wall: the card it already has stays the same ask. */
   moveAskToWall(id: string, activationId: string, dispatchN: number): void {
     this.run("UPDATE bot_escalations SET activation_id = ?, dispatch_n = ?, mode = 'wall', applied_at = NULL WHERE id = ? AND status = 'open'", activationId, dispatchN, id)
+  }
+
+  /** Work that ran out of room takes over the bot's open ask for that limit (a run's ask): its answer goes on with it. */
+  moveAsk(id: string, activationId: string, dispatchN: number): void {
+    this.run("UPDATE bot_escalations SET activation_id = ?, dispatch_n = ? WHERE id = ? AND status = 'open' AND mode = 'ask'", activationId, dispatchN, id)
   }
 
   setEscalationMessage(id: string, messageId: string): void {

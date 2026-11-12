@@ -39,6 +39,8 @@ export interface BotAskCard {
   status: BotAskStatus
   /** `export_memory`: Allow opens a folder picker and calls `bots.memory.export`; it grants nothing. */
   kind?: 'permission' | 'export_memory'
+  /** A limit that work the owner asked for waits on: Allow carries that work on now, not only from the next run. */
+  carriesOn?: true
 }
 
 export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'

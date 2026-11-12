@@ -8,7 +8,7 @@ import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import type { BotJournal } from '../seams'
-import type { BotEscalationRow, BotMessageRow, BotStore } from '../store/BotStore'
+import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotStore } from '../store/BotStore'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -40,6 +40,11 @@ function cardStatus(status: BotEscalationStatus): BotAskStatus {
   if (status === 'allowed_bot' || status === 'allowed_once') return 'allowed'
   if (status === 'denied') return 'not_now'
   return 'withdrawn'
+}
+
+/** Whether a limit ask's activation is work the owner asked for that its Allow goes on with (not work they stopped). */
+function carriesOn(row: BotActivationRow | undefined): boolean {
+  return row?.trigger.kind === 'work' && row.status !== 'cancelled'
 }
 
 /** A time of day in local time, "14:00". */
@@ -200,7 +205,10 @@ export class BotChatProjection {
       title: text.title,
       note: text.note,
       status: cardStatus(escalation.status),
-      kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission'
+      kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
+      // A limit that work the owner asked for waits on (it took the ask over): Allow carries that work on now, unless the
+      // owner stopped it meanwhile.
+      ...('budget' in escalation.permission && escalation.mode === 'ask' && carriesOn(this.store.activation(escalation.activationId)) ? { carriesOn: true as const } : {})
     }
   }
 
@@ -217,13 +225,14 @@ export class BotChatProjection {
     const live = liveRows.length
     // The chat and its work are apart: the chat's turn has the status line and Stop, work its own line.
     const chatTurn = liveRows.find((row) => row.lane === 'chat' && row.status === 'running')
-    const work: BotWorkItem[] = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused'])
-      .filter((row) => row.lane === 'run')
+    // Work that waits to go on keeps its line (with Stop): held while it waits, waiting its turn once allowed.
+    const work: BotWorkItem[] = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
+      .filter((row) => row.lane === 'run' && (row.status !== 'blocked' || workWaits(row)))
       .sort((a, b) => (a.status === 'queued' ? 1 : 0) - (b.status === 'queued' ? 1 : 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        status: row.status === 'queued' ? 'queued' as const : row.status === 'paused' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
+        status: row.status === 'queued' || row.endReason === 'room_allowed' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {})
       }))
