@@ -10,7 +10,6 @@ import { PlanTool } from "./plan-tool";
 import { ToolGroup } from "./tool-group";
 import { McpTool, unwrapMcpOutput } from "./mcp-tool";
 import { ThinkingTool } from "./thinking-tool";
-import { NoteTool } from "./note-tool";
 import { SearchTool } from "./search-tool";
 import { QuestionTool } from "../question/question-tool";
 import { AnsweredQuestionsTool } from "../question/answered-questions-tool";
@@ -115,8 +114,6 @@ function ToolRendererBody({
       return <AgentTool part={part} nestedTools={nestedTools} chatStatus={chatStatus} />;
     case "tool-Thinking":
       return <ThinkingTool part={part} />;
-    case "tool-Note":
-      return <NoteTool part={part} />;
   }
 
   // Custom renderers: user-defined tools, and the host's own cards for its app tools (keyed by the bare tool name,
