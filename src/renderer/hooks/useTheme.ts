@@ -8,6 +8,7 @@ import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearV
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
 import { setTurnChangedFiles } from '../lib/turnChangedFilesSetting'
+import { applyChatWidth } from '../lib/chatWidth'
 import { setReplyPacing } from '../lib/replyPacingSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
@@ -201,6 +202,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyFontSettings(normalized)
   setAnimationSpeed(normalized.animationSpeed)
   applyFrostedComposer(normalized)
+  applyChatWidth(normalized.chatWidth)
 }
 
 /** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path and the context ring. */

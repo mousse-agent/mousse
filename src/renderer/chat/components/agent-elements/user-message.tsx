@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { UIMessage } from "ai";
 import { cn } from "./utils/cn";
 import { FileAttachment } from "./input/file-attachment";
@@ -105,14 +105,37 @@ function getFileFromPart(part: unknown) {
   };
 }
 
+/** A long prompt shows this much (px) until "Show full message" is pressed. */
+export const PROMPT_FOLD_HEIGHT = 176;
+
+/** True when the element's text is at least twice the fold height, so folding it hides enough to matter. */
+function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string): boolean {
+  const [tall, setTall] = useState(false);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => setTall(element.scrollHeight >= PROMPT_FOLD_HEIGHT * 2);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref, text]);
+  return tall;
+}
+
 export const UserMessage = memo(function UserMessage({
   message,
   className,
   enableImagePreview = true,
 }: UserMessageProps) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const textRef = useRef<HTMLParagraphElement>(null);
   const textParts = message.parts?.filter(isTextPart) ?? [];
   const text = textParts.map((p) => p.text).join("");
+  const foldable = useTallEnoughToFold(textRef, text);
+  const folded = foldable && !expanded;
 
   const images: Array<{ url: string; name?: string }> = [];
   const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
@@ -153,7 +176,7 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
-      <div className="chat-user-bubble max-w-[calc(95%-40px)] ms-[70px] px-3.5 py-1.5 text-base rounded-an-message bg-an-user-message-bg text-an-user-message-text">
+      <div className="chat-user-bubble max-w-[80%] p-3 rounded-an-message bg-an-user-message-bg text-an-user-message-text">
       {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
         {images.map(({ url, name }, i) => {
           const label = name ?? `Image ${i + 1}`;
@@ -213,13 +236,24 @@ export const UserMessage = memo(function UserMessage({
       )}
       {text && (
         <p
-          className="leading-6 whitespace-pre-wrap wrap-break-word"
+          ref={textRef}
+          className={cn("chat-user-text whitespace-pre-wrap wrap-break-word", folded && "is-folded")}
           data-find-text
           data-message-id={message.id}
           data-part-index="0"
         >
           {text}
         </p>
+      )}
+      {text && foldable && (
+        <button
+          type="button"
+          className="chat-user-fold"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "Show less" : "Show full message"}
+        </button>
       )}
       </div>
       {sentFrom && (
