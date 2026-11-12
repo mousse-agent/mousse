@@ -1,21 +1,26 @@
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { NetError, type NodeCapability } from '../../../shared/net'
 import type { BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
 import type { BotLook } from '../../../shared/bots/personal/look'
-import { MAX_BOT_CHAT_PAGE, type BotsPersonalV2Api } from '../../../shared/bots/personal/methods'
+import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
+import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotsPersonalV2Api } from '../../../shared/bots/personal/methods'
 import type { RpcMethod } from '../../net/contracts'
 import { canonicalJson } from '../../net/sync/codec'
 import { isBotId } from '../../bots/definitions/BotDefinitionStore'
 
 /**
- * The phone's personal-bot methods: a bot's chat, its asks, its pause, and a new bot. Deny-default like
- * `BRIDGE_REMOTE_METHODS`; each one calls the same engine method the desktop's `bots.*` handler calls, with the
- * same params (less `attachments`, which name files on this computer) and results. No result carries a model,
- * an instance id or a path on this computer.
+ * The personal-bot methods of the user's other devices (phones and other computers): a bot's chat and its images, its
+ * asks, its pause, what it remembers and the rest of About, and a new bot. Deny-default like `BRIDGE_REMOTE_METHODS`;
+ * each one calls the same `BotChatService` method the desktop's `bots.*` handler calls, with the same params (less
+ * `attachments`, which name files on this computer) and results. No result carries a model, an instance id or a path
+ * on this computer. While "Share bots with other devices" is off, every one is refused.
  */
 export const REMOTE_BOT_METHODS = {
   'bots.get': { capability: 'read', mutating: false },
   'bots.chat.list': { capability: 'read', mutating: false },
+  'bots.chat.attachment': { capability: 'read', mutating: false },
+  'bots.memory.list': { capability: 'read', mutating: false },
   'bots.chat.send': { capability: 'chat', mutating: true },
   'bots.chat.stop': { capability: 'chat', mutating: true },
   'bots.work.stop': { capability: 'chat', mutating: true },
@@ -23,11 +28,16 @@ export const REMOTE_BOT_METHODS = {
   'bots.asks.answer': { capability: 'chat', mutating: true },
   'bots.personal.pause': { capability: 'write', mutating: true },
   'bots.personal.resume': { capability: 'write', mutating: true },
-  'bots.create': { capability: 'write', mutating: true }
+  'bots.create': { capability: 'write', mutating: true },
+  'bots.update': { capability: 'write', mutating: true },
+  'bots.reminders.cancel': { capability: 'write', mutating: true },
+  'bots.schedules.remove': { capability: 'write', mutating: true },
+  'bots.permissions.revoke': { capability: 'write', mutating: true },
+  'bots.memory.forget': { capability: 'write', mutating: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
 
-/** What the phone's methods use of the profile's bots (`BotChatService`). */
+/** What the remote methods use of the profile's bots (`BotChatService`). */
 export interface RemoteBotsPort {
   get(botId: string): BotDetail
   chatList(botId: string, page?: { beforeSeq?: number; limit?: number }): BotsPersonalV2Api['bots.chat.list']['result']
@@ -40,12 +50,21 @@ export interface RemoteBotsPort {
   pause(botId: string): { bot: BotSummary }
   resume(botId: string): Promise<{ bot: BotSummary }>
   create(input: { look: BotLook; name?: string; description: string; clientRequestId: string }): Promise<{ bot: BotSummary }>
+  update(botId: string, change: { name?: string; look?: BotLook }): { bot: BotSummary }
+  reminderCancel(botId: string, reminderId: string): BotDetail
+  removeSchedule(botId: string, scheduleId: string): BotDetail
+  revokePermission(botId: string, id: string): BotDetail
+  memoryList(botId: string, history?: boolean): BotMemoryListing
+  memoryForget(botId: string, id: string): BotMemoryForgetResult
+  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string }
 }
 
 const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: readonly string[] }> = {
   'bots.get': { required: ['botId'] },
   'bots.chat.list': { required: ['botId'], optional: ['beforeSeq', 'limit'] },
-  // No `attachments`: they name files on this computer, which a phone has none of.
+  'bots.chat.attachment': { required: ['botId', 'messageId', 'index'], optional: ['offset'] },
+  'bots.memory.list': { required: ['botId'] },
+  // No `attachments`: they name files on this computer, which another device has none of.
   'bots.chat.send': { required: ['botId', 'text', 'clientRequestId'], optional: ['replyTo'] },
   'bots.chat.stop': { required: ['botId'] },
   'bots.work.stop': { required: ['botId', 'workId'] },
@@ -53,20 +72,71 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
   'bots.asks.answer': { required: ['botId', 'askId', 'answer'] },
   'bots.personal.pause': { required: ['botId'] },
   'bots.personal.resume': { required: ['botId'] },
-  'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name'] }
+  'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name'] },
+  'bots.update': { required: ['botId'], optional: ['name', 'look'] },
+  'bots.reminders.cancel': { required: ['botId', 'reminderId'] },
+  'bots.schedules.remove': { required: ['botId', 'scheduleId'] },
+  'bots.permissions.revoke': { required: ['botId', 'permissionId'] },
+  'bots.memory.forget': { required: ['botId', 'id'] }
 }
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
 const WORK_ID = /^act_[0-9a-f-]{36}$/
+const REMINDER_ID = /^rem_[0-9a-f-]{36}$/
+const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
+const MEMORY_ID = /^m[0-9]{1,12}$/
 const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes'])
 /**
- * A phone's message, in bytes. The desktop's limit is 64K characters; a phone's is smaller so the message the
+ * A remote message, in bytes. The desktop's limit is 64K characters; a remote one is smaller so the message the
  * send returns stays within one RPC reply.
  */
 export const REMOTE_BOT_MESSAGE_BYTES = 32 * 1024
 /** A read's result stays below one RPC reply (63 KiB); older messages are left for the next page. */
 const RESULT_BYTES = 56 * 1024
+/** The largest image another device may read from a bot's chat. */
+export const REMOTE_BOT_IMAGE_BYTES = 1536 * 1024
+/** One part of an image: 40 KiB, under 55 KiB as base64, so a part fits one reply. */
+export const REMOTE_BOT_IMAGE_PART_BYTES = 40 * 1024
+
+/** The types a remote device may read: raster images only, never SVG (which can carry scripts). */
+const IMAGE_TYPES: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
+const OTHER_TYPES: Record<string, string> = {
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  csv: 'text/csv',
+  json: 'application/json',
+  html: 'text/html',
+  zip: 'application/zip',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  svg: 'image/svg+xml',
+  heic: 'image/heic',
+  mp3: 'audio/mpeg',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime'
+}
+const extensionOf = (name: string): string => /\.([a-z0-9]+)$/i.exec(name.trim())?.[1]?.toLowerCase() ?? ''
+
+/** A file's type by its name; `image` only for the raster types `bots.chat.attachment` reads. */
+export function remoteFileType(name: string): { mime: string; image?: true } {
+  const extension = extensionOf(name)
+  const image = IMAGE_TYPES[extension]
+  if (image) return { mime: image, image: true }
+  return { mime: OTHER_TYPES[extension] ?? 'application/octet-stream' }
+}
+
+/** The type an image's first bytes say it is; undefined for anything that is not a PNG, JPEG, GIF or WebP. */
+export function sniffImage(head: Buffer): string | undefined {
+  if (head.length >= 8 && head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
+  if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg'
+  if (head.length >= 6 && /^GIF8[79]a$/.test(head.subarray(0, 6).toString('latin1'))) return 'image/gif'
+  if (head.length >= 12 && head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp'
+  return undefined
+}
 
 const text = (value: unknown, max: number): boolean =>
   typeof value === 'string' && value.trim().length > 0 && value.length <= max
@@ -112,6 +182,11 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       if (p.beforeSeq !== undefined) ok(whole(p.beforeSeq, 1))
       if (p.limit !== undefined) ok(whole(p.limit, 1, MAX_BOT_CHAT_PAGE))
       break
+    case 'bots.chat.attachment':
+      ok(text(p.messageId, 200))
+      ok(whole(p.index, 0, MAX_BOT_CHAT_ATTACHMENTS - 1))
+      if (p.offset !== undefined) ok(whole(p.offset, 0, REMOTE_BOT_IMAGE_BYTES))
+      break
     case 'bots.chat.send':
       ok(text(p.text, REMOTE_BOT_MESSAGE_BYTES) && Buffer.byteLength(p.text as string) <= REMOTE_BOT_MESSAGE_BYTES)
       if (p.replyTo !== undefined) ok(text(p.replyTo, 200))
@@ -131,13 +206,30 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       ok(text(p.description, MAX_BOT_DESCRIPTION_CHARS))
       if (p.name !== undefined) ok(typeof p.name === 'string' && p.name.length <= MAX_BOT_NAME_CHARS)
       break
+    case 'bots.update':
+      ok(p.name !== undefined || p.look !== undefined)
+      if (p.name !== undefined) ok(text(p.name, MAX_BOT_NAME_CHARS))
+      if (p.look !== undefined) ok(lookOf(p.look))
+      break
+    case 'bots.reminders.cancel':
+      ok(typeof p.reminderId === 'string' && REMINDER_ID.test(p.reminderId))
+      break
+    case 'bots.schedules.remove':
+      ok(typeof p.scheduleId === 'string' && SCHEDULE_ID.test(p.scheduleId))
+      break
+    case 'bots.permissions.revoke':
+      ok(text(p.permissionId, 4096))
+      break
+    case 'bots.memory.forget':
+      ok(typeof p.id === 'string' && MEMORY_ID.test(p.id))
+      break
     default:
       break
   }
   return p
 }
 
-/** A bot error as a phone sees it: no instance id (its Sign in opens on the computer). */
+/** A bot error as another device sees it: no instance id (its Sign in opens on the computer). */
 export function remoteBotError(error: BotError): BotError {
   return {
     text: error.text,
@@ -145,27 +237,41 @@ export function remoteBotError(error: BotError): BotError {
   }
 }
 
-/** A bot as a phone sees it. */
+/** A bot as another device sees it. */
 export function remoteBotSummary(bot: BotSummary): BotSummary {
   const { error, ...rest } = bot
   return { ...rest, ...(error ? { error: remoteBotError(error) } : {}) }
 }
 
-/** A chat row as a phone sees it: an attachment's name without its path on this computer, an error without an instance id. */
-export function remoteBotMessage(message: BotChatMessage): BotChatMessage {
+/** About a bot as another device sees it. */
+export function remoteBotDetail(detail: BotDetail): BotDetail {
+  return { ...detail, summary: remoteBotSummary(detail.summary) }
+}
+
+/** An attached file as another device sees it: its name and type; `image` when `bots.chat.attachment` reads it. */
+export interface RemoteBotFile {
+  name: string
+  mime: string
+  image?: true
+}
+
+/** A chat row as another device sees it. */
+export type RemoteBotMessage = Omit<BotChatMessage, 'attachments'> & { attachments?: RemoteBotFile[] }
+
+/** A chat row as another device sees it: a file's name and type without its path on this computer, an error without an instance id. */
+export function remoteBotMessage(message: BotChatMessage): RemoteBotMessage {
   const { attachments, error, ...rest } = message
   return {
     ...rest,
     ...(error ? { error: remoteBotError(error) } : {}),
-    // `path` is part of the shape the desktop reads; a phone gets it empty.
-    ...(attachments ? { attachments: attachments.map((file) => ({ name: file.name }) as { name: string; path: string }) } : {})
+    ...(attachments ? { attachments: attachments.map((file) => ({ name: file.name, ...remoteFileType(file.path || file.name) })) } : {})
   }
 }
 
 const bytes = (value: unknown): number => Buffer.byteLength(canonicalJson(value))
 
 /** One message within a reply: a very long text is cut, with a note that the rest is on the computer. */
-function fitted(message: BotChatMessage, budget = RESULT_BYTES): BotChatMessage {
+function fitted(message: RemoteBotMessage, budget = RESULT_BYTES): RemoteBotMessage {
   if (bytes(message) <= budget) return message
   const over = bytes(message) - budget
   const keep = Math.max(0, Buffer.byteLength(message.text) - over - 256)
@@ -175,12 +281,14 @@ function fitted(message: BotChatMessage, budget = RESULT_BYTES): BotChatMessage 
   return { ...message, text: `${cut}\n\n… (the rest is on the computer)` }
 }
 
-/** A page within one reply: the newest messages that fit; the phone asks for the older ones with `beforeSeq`. */
-function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result']): BotsPersonalV2Api['bots.chat.list']['result'] {
+type RemotePage = Omit<BotsPersonalV2Api['bots.chat.list']['result'], 'messages'> & { messages: RemoteBotMessage[] }
+
+/** A page within one reply: the newest messages that fit; the device asks for the older ones with `beforeSeq`. */
+function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result']): RemotePage {
   const messages = page.messages.map(remoteBotMessage)
   const result = { ...page, messages }
   if (bytes(result) <= RESULT_BYTES) return result
-  const kept: BotChatMessage[] = []
+  const kept: RemoteBotMessage[] = []
   let total = bytes({ ...page, messages: [] })
   for (let at = messages.length - 1; at >= 0; at--) {
     const message = kept.length ? messages[at]! : fitted(messages[at]!, RESULT_BYTES - total)
@@ -192,7 +300,33 @@ function fittedPage(page: BotsPersonalV2Api['bots.chat.list']['result']): BotsPe
   return { ...page, messages: kept }
 }
 
-/** An engine refusal as the plain error a phone sees; it never becomes an uncertain outcome. */
+/** One part of an image file of a bot's chat, checked to be a raster image within the size limit. */
+function imagePart(file: { name: string; path: string }, offset: number): { name: string; mime: string; size: number; offset: number; dataB64: string } {
+  if (!remoteFileType(file.name).image && !remoteFileType(file.path).image)
+    throw new NetError('conflict', 'Only images open on another device.')
+  let fd: number
+  try {
+    fd = openSync(file.path, 'r')
+  } catch {
+    throw new NetError('stream_unknown', `${file.name} is no longer on the computer.`)
+  }
+  try {
+    const size = fstatSync(fd).size
+    if (size > REMOTE_BOT_IMAGE_BYTES) throw new NetError('too_large', `${file.name} is too large to show here. Open it on the computer.`)
+    const head = Buffer.alloc(Math.min(16, size))
+    readSync(fd, head, 0, head.length, 0)
+    const mime = sniffImage(head)
+    if (!mime) throw new NetError('conflict', 'Only images open on another device.')
+    if (offset > size) throw new NetError('bad_request')
+    const part = Buffer.alloc(Math.min(REMOTE_BOT_IMAGE_PART_BYTES, size - offset))
+    const read = part.length ? readSync(fd, part, 0, part.length, offset) : 0
+    return { name: file.name, mime, size, offset, dataB64: part.subarray(0, read).toString('base64') }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** An engine refusal as a plain error; it never becomes an uncertain outcome. */
 function refusal(error: unknown): never {
   if (error instanceof NetError) throw error
   const code = (error as { code?: unknown } | undefined)?.code
@@ -200,6 +334,7 @@ function refusal(error: unknown): never {
   if (typeof code !== 'string') throw error
   const message = error instanceof Error ? error.message : undefined
   if (code === 'bot_not_found') throw new NetError('stream_unknown', 'This bot is gone.')
+  if (code.endsWith('_not_found') || code === 'not_found') throw new NetError('stream_unknown', message)
   throw new NetError(code === 'invalid_params' ? 'bad_request' : 'conflict', message)
 }
 
@@ -214,8 +349,19 @@ function refusing<T>(check: () => T): T {
 export function remoteBotMethods(options: {
   /** The profile's bots; undefined when its `bots.db` could not be opened. */
   bots(): RemoteBotsPort | undefined
+  /**
+   * "Share bots with other devices": undefined while it is on, the refusal's words while it is off. Every call is
+   * refused then, with `forbidden` and the reason `setting_off` (the words stay on this computer: an error's own
+   * words never cross the wire).
+   */
+  refusal?(): string | undefined
 }): RpcMethod[] {
+  const shared = (): void => {
+    const words = options.refusal?.()
+    if (words) throw new NetError('forbidden', words, { details: { reason: 'setting_off' } })
+  }
   const bots = (): RemoteBotsPort => {
+    shared()
     const port = options.bots()
     if (!port) throw new NetError('conflict', 'Bots are unavailable on this computer.')
     return port
@@ -253,12 +399,19 @@ export function remoteBotMethods(options: {
       return handle(p, port)
     }
   })
+  /** For a new call only (a retry of one that went through gets its saved result): `check` refuses plainly. */
+  const first = (check: (p: Record<string, unknown>, port: RemoteBotsPort) => void): Partial<RpcMethod> => ({
+    authorizeNew: (value) => {
+      const p = value as Record<string, unknown>
+      refusing(() => check(p, bots()))
+    }
+  })
+  const gone = (what: string): never => {
+    throw new NetError('stream_unknown', `${what} is gone.`)
+  }
   const botId = (p: Record<string, unknown>): string => p.botId as string
   return [
-    method('bots.get', async (p, port) => {
-      const detail = port.get(botId(p))
-      return { ...detail, summary: remoteBotSummary(detail.summary) }
-    }),
+    method('bots.get', async (p, port) => remoteBotDetail(port.get(botId(p)))),
     method('bots.chat.list', async (p, port) =>
       fittedPage(
         port.chatList(botId(p), {
@@ -267,6 +420,10 @@ export function remoteBotMethods(options: {
         })
       )
     ),
+    method('bots.chat.attachment', async (p, port) =>
+      imagePart(port.attachmentFile(botId(p), p.messageId as string, p.index as number), (p.offset as number | undefined) ?? 0)
+    ),
+    method('bots.memory.list', async (p, port) => port.memoryList(botId(p))),
     method('bots.chat.send', async (p, port) => {
       // A retry with the same `clientRequestId` returns the first message and adds no second one.
       const { message } = await port.chatSend({
@@ -294,23 +451,14 @@ export function remoteBotMethods(options: {
         const { message } = await port.answer(botId(p), p.askId as string, p.answer as 'allow' | 'not_now')
         return { message: fitted(remoteBotMessage(message)) }
       },
-      {
-        // Checked for a new answer only: a retry of an answer that went through gets its saved result.
-        authorizeNew: (value) => {
-          const p = value as Record<string, unknown>
-          const kind = refusing(() => bots().askKind(botId(p), p.askId as string))
-          if (kind === 'export_memory') throw new NetError('forbidden', 'Answer this on the computer.')
-        }
-      }
+      first((p, port) => {
+        // A memory export asks for a folder on this computer.
+        if (port.askKind(botId(p), p.askId as string) === 'export_memory')
+          throw new NetError('forbidden', 'Answer this on the computer.')
+      })
     ),
-    method('bots.personal.pause', async (p, port) => {
-      const { bot } = port.pause(botId(p))
-      return { bot: remoteBotSummary(bot) }
-    }),
-    method('bots.personal.resume', async (p, port) => {
-      const { bot } = await port.resume(botId(p))
-      return { bot: remoteBotSummary(bot) }
-    }),
+    method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
+    method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
     method('bots.create', async (p, port) => {
       const { bot } = await port.create({
         look: p.look as BotLook,
@@ -319,6 +467,41 @@ export function remoteBotMethods(options: {
         clientRequestId: p.clientRequestId as string
       })
       return { bot: remoteBotSummary(bot) }
-    })
+    }),
+    method('bots.update', async (p, port) => {
+      const { bot } = port.update(botId(p), {
+        ...(typeof p.name === 'string' ? { name: p.name } : {}),
+        ...(p.look !== undefined ? { look: p.look as BotLook } : {})
+      })
+      return { bot: remoteBotSummary(bot) }
+    }),
+    method(
+      'bots.reminders.cancel',
+      async (p, port) => remoteBotDetail(port.reminderCancel(botId(p), p.reminderId as string)),
+      first((p, port) => {
+        if (!port.get(botId(p)).reminders?.some((item) => item.id === p.reminderId)) gone('This reminder')
+      })
+    ),
+    method(
+      'bots.schedules.remove',
+      async (p, port) => remoteBotDetail(port.removeSchedule(botId(p), p.scheduleId as string)),
+      first((p, port) => {
+        if (!port.get(botId(p)).runs.some((item) => item.id === p.scheduleId)) gone('This schedule')
+      })
+    ),
+    method(
+      'bots.permissions.revoke',
+      async (p, port) => remoteBotDetail(port.revokePermission(botId(p), p.permissionId as string)),
+      first((p, port) => {
+        if (!port.get(botId(p)).permissions.some((item) => item.id === p.permissionId)) gone('This permission')
+      })
+    ),
+    method(
+      'bots.memory.forget',
+      async (p, port) => port.memoryForget(botId(p), p.id as string),
+      first((p, port) => {
+        if (!port.memoryList(botId(p)).entries.some((entry) => entry.id === p.id && entry.status === 'active')) gone('This memory')
+      })
+    )
   ]
 }

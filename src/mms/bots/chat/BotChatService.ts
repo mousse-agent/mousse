@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs'
+import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../shared/bots/personal/chat'
 import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotSchedule } from '../../../shared/bots/personal/definition'
@@ -338,6 +340,29 @@ export class BotChatService {
     if (escalation.mode === 'wall' && this.store.activation(escalation.activationId)?.status === 'running')
       throw new BotEngineError('ask_not_ready', 'Wait until the bot finishes its message.')
     return isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission'
+  }
+
+  /**
+   * One file a chat message carries, for a device that can't open this computer's files (a phone): only the copy in
+   * the bot's own files folder, where every attachment is kept, never a path anywhere else.
+   */
+  attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string } {
+    this.engine.definitionOf(botId)
+    const folder = this.engine.filesFolder(botId)
+    const row = this.store.message(messageId)
+    if (!row || row.botId !== botId) throw new BotEngineError('message_not_found', 'No such message.')
+    const file = row.attachments?.[index]
+    if (!file) throw new BotEngineError('attachment_not_found', 'No such file.')
+    let real: string
+    let root: string
+    try {
+      real = realpathSync(file.path)
+      root = realpathSync(folder)
+    } catch {
+      throw new BotEngineError('attachment_not_found', `${file.name} is no longer on the computer.`)
+    }
+    if (!real.startsWith(root + sep)) throw new BotEngineError('attachment_not_found', `${file.name} is not in the bot's files.`)
+    return { name: file.name, path: real }
   }
 
   /** `bots.permissions.revoke`: About → Can use → Remove narrows the grant (no consent needed). */
