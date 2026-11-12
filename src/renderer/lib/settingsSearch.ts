@@ -38,6 +38,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
+  { title: 'Chat', section: 'appearance', anchor: 'appearance-chat', keywords: ['conversation', 'replies', 'math'] },
   { title: 'Composer', section: 'appearance', anchor: 'appearance-composer', keywords: ['context ring', 'frosted'] },
   { title: 'Changed files after each turn', section: 'appearance', anchor: 'appearance-turn-changed-files', keywords: ['edits', 'summary', 'diff'] },
   { title: 'Default permission mode', section: 'general', anchor: 'general-permission-mode', keywords: ['permissions', 'approvals', 'ask'] },
