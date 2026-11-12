@@ -83,7 +83,7 @@ export interface AppearanceSettingsProps {
   onCommitFrostedComposer: (key: FrostedComposerSlider, value: number) => void
 }
 
-/** Settings → Appearance: theme, accent, fonts, glass, math, thread colors and animation speed. */
+/** Settings → Appearance: theme, accent, fonts, the title-bar path, glass, math, thread colors and animation speed. */
 export function AppearanceSettings({
   settings,
   options,
@@ -176,6 +176,18 @@ export function AppearanceSettings({
               ariaLabel="Code font"
               value={appearance.codeFont}
               onChange={(codeFont) => onUpdate(fontPatch({ codeFont }))}
+            />
+          }
+        />
+        <SettingsRow
+          title="Thread path in title bar"
+          anchor="appearance-thread-path"
+          description="Project, thread and subagents, with back and forward."
+          control={
+            <Switch
+              label="Thread path in title bar"
+              checked={appearance.threadPathInTitleBar}
+              onChange={(threadPathInTitleBar) => void onUpdate({ appearance: { ...appearance, threadPathInTitleBar } })}
             />
           }
         />

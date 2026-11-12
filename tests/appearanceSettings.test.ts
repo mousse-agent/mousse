@@ -70,6 +70,7 @@ describe('appearance settings', () => {
       interfaceFont: { source: 'default' },
       codeFont: { source: 'default' },
       threadProjectColors: true,
+      threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
       frostedComposer: false,

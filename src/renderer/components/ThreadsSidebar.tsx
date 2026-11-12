@@ -16,6 +16,7 @@ import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../s
 import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
 import { needsMeThreads } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
+import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -656,6 +657,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const delta = revealDelta(scroller.getBoundingClientRect(), target.getBoundingClientRect())
     if (delta) scroller.scrollTop += delta
   }, [expandedProjects])
+
+  // A project the title bar's path asked to show (`showProjectInSidebar`): its group opens and scrolls into view.
+  const revealRequest = useSidebarRevealStore((s) => s.project)
+  const handledReveal = useRef(0)
+  useEffect(() => {
+    if (!revealRequest || revealRequest.seq === handledReveal.current) return
+    handledReveal.current = revealRequest.seq
+    if (Date.now() - revealRequest.at > SIDEBAR_REVEAL_TIMEOUT_MS) return
+    const groupId = listGroupOf(revealRequest.projectId)
+    toggledProjectRef.current = groupId
+    revealProject.current = groupId
+    // A new set even when the group is open already, so the scroll above runs.
+    setExpandedProjects((prev) => new Set(prev).add(groupId))
+    // listGroupOf reads groupOf and groupById, which are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest, groupOf, groupById])
 
   // Marks the list while rows sit below its fold, for the fade and the drawn scrollbar.
   useEffect(() => {
