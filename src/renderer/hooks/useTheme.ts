@@ -12,6 +12,7 @@ import { setReplyPacing } from '../lib/replyPacingSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { setThreadPathInTitleBar } from '../lib/threadPathSetting'
+import { setContextRingInComposer } from '../lib/contextRingSetting'
 import { setAnimationSpeed } from '../lib/motion'
 import { applyFrostedComposer } from '../lib/frostedComposer'
 
@@ -202,13 +203,14 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyFrostedComposer(normalized)
 }
 
-/** Display settings that live under appearance: math, reply pacing, the changed-files summary and the title-bar path. */
+/** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path and the context ring. */
 function applyChatDisplay(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
   setRenderMath(normalized.renderMath)
   setReplyPacing(normalized.replyPacing)
   setTurnChangedFiles(normalized.turnChangedFiles)
   setThreadPathInTitleBar(normalized.threadPathInTitleBar)
+  setContextRingInComposer(normalized.contextRingInComposer)
 }
 
 async function syncWindowBackground(): Promise<void> {

@@ -4,6 +4,7 @@ import { Select, type SelectOption } from '../ui/Select'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
 import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
+import { MessageSquare } from '../../lib/icons'
 
 const TURN_CHANGED_FILES_OPTIONS: readonly SelectOption<TurnChangedFilesMode>[] = [
   { value: 'summary', label: 'Summary line' },
@@ -83,7 +84,10 @@ export interface AppearanceSettingsProps {
   onCommitFrostedComposer: (key: FrostedComposerSlider, value: number) => void
 }
 
-/** Settings → Appearance: theme, accent, fonts, the title-bar path, glass, math, thread colors and animation speed. */
+/**
+ * Settings → Appearance: theme, accent, fonts, the title-bar path, glass, math, thread colors and animation speed,
+ * and the Composer group (the context ring and the frosted composer).
+ */
 export function AppearanceSettings({
   settings,
   options,
@@ -244,52 +248,6 @@ export function AppearanceSettings({
           }
         />
         <SettingsRow
-          title="Frosted composer"
-          anchor="appearance-frosted-composer"
-          description={<span title="Uses more graphics memory.">The chat shows blurred behind the composer.</span>}
-          control={
-            <Switch
-              label="Frosted composer"
-              checked={appearance.frostedComposer}
-              onChange={(frostedComposer) => void onUpdate({ appearance: { ...appearance, frostedComposer } })}
-            />
-          }
-        />
-        {appearance.frostedComposer && FROSTED_COMPOSER_SLIDERS.map(({ key, title, id, format }) => {
-          const range = FROSTED_COMPOSER_RANGES[key]
-          const value = appearance[key]
-          const fill = ((value - range.min) / (range.max - range.min)) * 100
-          return (
-            <SettingsRow
-              key={key}
-              title={title}
-              htmlFor={id}
-              indent
-              control={
-                <>
-                  <input
-                    id={id}
-                    type="range"
-                    className="acrylic-intensity-dial"
-                    min={range.min}
-                    max={range.max}
-                    step={range.step}
-                    value={value}
-                    style={{ '--fill': `${fill}%` } as CSSProperties}
-                    onInput={(e) => {
-                      // onInput only, as for glass intensity: one preview and one save per move.
-                      const next = Number(e.currentTarget.value)
-                      onPreviewFrostedComposer(key, next)
-                      onCommitFrostedComposer(key, next)
-                    }}
-                  />
-                  <span className="acrylic-intensity-value frosted-composer-value">{format(value)}</span>
-                </>
-              }
-            />
-          )
-        })}
-        <SettingsRow
           title="Render math"
           anchor="appearance-render-math"
           description="Show LaTeX in replies and Markdown previews as formatted equations."
@@ -337,6 +295,67 @@ export function AppearanceSettings({
             />
           }
         />
+      </SettingsGroup>
+
+      <SettingsGroup title="Composer" icon={MessageSquare} anchor="appearance-composer">
+        <SettingsRow
+          title="Context ring in composer"
+          anchor="appearance-context-ring"
+          description="How full the model's context is."
+          control={
+            <Switch
+              label="Context ring in composer"
+              checked={appearance.contextRingInComposer}
+              onChange={(contextRingInComposer) => void onUpdate({ appearance: { ...appearance, contextRingInComposer } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Frosted composer"
+          anchor="appearance-frosted-composer"
+          description={<span title="Uses more graphics memory.">The chat shows blurred behind the composer.</span>}
+          control={
+            <Switch
+              label="Frosted composer"
+              checked={appearance.frostedComposer}
+              onChange={(frostedComposer) => void onUpdate({ appearance: { ...appearance, frostedComposer } })}
+            />
+          }
+        />
+        {appearance.frostedComposer && FROSTED_COMPOSER_SLIDERS.map(({ key, title, id, format }) => {
+          const range = FROSTED_COMPOSER_RANGES[key]
+          const value = appearance[key]
+          const fill = ((value - range.min) / (range.max - range.min)) * 100
+          return (
+            <SettingsRow
+              key={key}
+              title={title}
+              htmlFor={id}
+              indent
+              control={
+                <>
+                  <input
+                    id={id}
+                    type="range"
+                    className="acrylic-intensity-dial"
+                    min={range.min}
+                    max={range.max}
+                    step={range.step}
+                    value={value}
+                    style={{ '--fill': `${fill}%` } as CSSProperties}
+                    onInput={(e) => {
+                      // onInput only, as for glass intensity: one preview and one save per move.
+                      const next = Number(e.currentTarget.value)
+                      onPreviewFrostedComposer(key, next)
+                      onCommitFrostedComposer(key, next)
+                    }}
+                  />
+                  <span className="acrylic-intensity-value frosted-composer-value">{format(value)}</span>
+                </>
+              }
+            />
+          )
+        })}
       </SettingsGroup>
 
       <SettingsAdvanced>

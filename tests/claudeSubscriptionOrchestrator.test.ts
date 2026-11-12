@@ -113,7 +113,9 @@ it('persists Claude measurements, populates response metadata and counts usage a
     expect(measured).toMatchObject({ source: 'measured', limit: 200000, modelName: 'claude-opus-official', processedTokens: 370 })
     // Measured from storage: the thread stays unloaded.
     expect(main.orchestrator.hasSession(thread.id)).toBe(false)
-    expect(measured.categories[0]).toMatchObject({ tokens: 50 })
+    // The whole last request: read from the cache, written to it, and sent uncached (50 + 100 + 25).
+    expect(measured.request).toEqual({ cached: 100, uncached: 75 })
+    expect(measured.categories.slice(0, 3).map((category) => category.tokens)).toEqual([100, 25, 50])
     expect(main.lineEditStats.getUsageSnapshot().turns).toHaveLength(2)
     expect(main.lineEditStats.getUsageSnapshot().totals).toMatchObject({ input: 200, output: 40, tokens: 740 })
     expect(main.lineEditStats.getSnapshot().totalTab).toBe(6)
@@ -131,6 +133,59 @@ it('persists Claude measurements, populates response metadata and counts usage a
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+it('keeps counting the system prompt, tools and instructions while a turn runs and after it stops', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-base-'))
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  await main.start()
+  try {
+    main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'opus' } })
+    const thread = main.threads.createThread('Base Claude')
+    const usage = () => main.orchestrator.getContextUsage({ draftInput: '', mode: 'agent' }, thread.id)
+    // A cached request as Claude Code reports it: 864 sent uncached, 41,000 read from the cache, 2,000 written.
+    const metrics = { totalResponseTimeMs: 1000, context: { input: 864, cacheRead: 41_000, cacheWrite: 2_000, contextWindow: 1_000_000 } }
+    let during: Awaited<ReturnType<typeof usage>> | undefined
+    const chat = vi.spyOn(main.claudeSubscription, 'chat').mockImplementationOnce(async (input) => {
+      input.onText('First answer')
+      input.onMetrics?.(metrics)
+      return 'First answer'
+    })
+    await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: thread.id })
+    const measured = await usage()
+    expect(measured).toMatchObject({ source: 'measured', limit: 1_000_000, request: { cached: 41_000, uncached: 2_864 } })
+    // The reply the next request carries is estimated on top of the measured request.
+    expect(measured.used).toBeGreaterThanOrEqual(43_864)
+    expect(measured.used).toBeLessThan(43_900)
+    expect(main.threads.loadThreadData(thread.id).llmContext?.contextBase).toMatchObject({ modelKey: 'claude-subscription:opus' })
+    // While the next turn runs the history has moved on: the estimate still counts what the request carried beyond the messages.
+    chat.mockImplementationOnce(async () => {
+      during = await usage()
+      throw new Error('provider failed')
+    })
+    await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: thread.id }).catch(() => undefined)
+    expect(during).toMatchObject({ source: 'estimated', limit: 1_000_000 })
+    expect(during!.categories[0]).toMatchObject({ label: 'System, tools & instructions' })
+    expect(during!.used).toBeGreaterThan(43_000)
+    expect(during!.used).toBeLessThan(44_000)
+    // And after the turn ended without a measurement.
+    const after = await usage()
+    expect(after.source).toBe('estimated')
+    expect(after.used).toBeGreaterThan(43_000)
+    // From storage, as a window reads a thread it is not running.
+    main.orchestrator.markThreadRestored(thread.id)
+    expect((await usage()).used).toBe(after.used)
+    // Another model has its own system prompt and tools: nothing of this one counts.
+    main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'sonnet' })
+    const other = await usage()
+    expect(other.categories.some((category) => category.label === 'System, tools & instructions')).toBe(false)
+    expect(other.used).toBeLessThan(1_000)
+  } finally {
+    await main.stop()
+    vi.restoreAllMocks()
+    rmSync(home, { recursive: true, force: true })
+  }
+}, 60_000)
 
 it('shows the prompt cache a Claude turn left, until the history changes or is compacted', async () => {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-cache-'))

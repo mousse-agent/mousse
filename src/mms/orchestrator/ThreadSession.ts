@@ -16,7 +16,7 @@ import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
 import type { MessageEstimate } from './contextEstimate'
-import { createNativeContext, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
+import { createNativeContext, isNativeContextBase, isNativeLastTurnUsage, isNativePromptCache, normalizeNativeContext } from './nativeContext'
 
 /**
  * One steer waiting for a live turn to read it. A person's typed steer has only its text. A promoted queue
@@ -182,6 +182,9 @@ export class ThreadSession {
     }
     if (this.nativeContext.promptCache !== undefined && !isNativePromptCache(this.nativeContext.promptCache)) {
       delete this.nativeContext.promptCache
+    }
+    if (this.nativeContext.contextBase !== undefined && !isNativeContextBase(this.nativeContext.contextBase)) {
+      delete this.nativeContext.contextBase
     }
     this.activeToolCallMessageIds.clear()
     this.callToMessage.clear()

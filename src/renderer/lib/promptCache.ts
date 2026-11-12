@@ -4,7 +4,10 @@ import { CONTEXT_DRAFT_CATEGORY, type ContextPromptCache, type ContextUsageSnaps
 
 /** Without a lifetime from the provider, a thread idle this long is treated as cold. */
 export const IDLE_COLD_MS = 60 * 60_000
-/** Below this, compacting saves too little to suggest. */
+/**
+ * Below this, compacting saves too little to suggest. It is the whole request, system prompt and tools included
+ * (about 15–20K on Claude Code), so a thread reaches it with some 20K of history: enough for a summary to save half.
+ */
 export const IDLE_COMPACTION_MIN_TOKENS = 40_000
 
 /** The provider's cache of this thread now: warm for a while yet, expired, or (no lifetime reported) idle. */

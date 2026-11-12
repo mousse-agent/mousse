@@ -133,6 +133,19 @@ describe('Claude measured metrics', () => {
     })
     expect(collector.report().usage!.output).toBe(5)
   })
+  it('measures the context from the last main request of a turn, whole, never the sum of its requests or a subagent\'s', () => {
+    const request = (id: string, usage: Record<string, unknown>, parent: string | null = null) =>
+      ({ type: 'assistant', uuid: id, session_id: 'session', parent_tool_use_id: parent, message: { id, model: 'claude-opus-4-7', usage } }) as SDKMessage
+    const collector = new ClaudeMetricsCollector()
+    // A tool round, then the answer: each request carries the whole context; the last one is the context now.
+    collector.observe(request('first', { input_tokens: 500, output_tokens: 40, cache_read_input_tokens: 30_000, cache_creation_input_tokens: 1_000, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1_000 } }))
+    collector.observe(request('last', { input_tokens: 864, output_tokens: 42, cache_read_input_tokens: 41_000, cache_creation_input_tokens: 2_000, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2_000 } }))
+    // A subagent's request after it is its own context.
+    collector.observe(request('sub', { input_tokens: 9, output_tokens: 1, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 0 }, 'task-1'))
+    const context = collector.report().context!
+    expect(context).toMatchObject({ input: 864, cacheRead: 41_000, cacheWrite: 2_000 })
+    expect(context.input + context.cacheRead + context.cacheWrite).toBe(43_864)
+  })
   it('reports only measured assistant usage if a turn aborts before a result, deduplicating blocks', () => {
     const collector = new ClaudeMetricsCollector()
     collector.observe(assistant('same', null, 2))

@@ -2,6 +2,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setContextRingInComposer } from '../../src/renderer/lib/contextRingSetting'
 
 vi.mock('../../src/renderer/lib/settingsNavigation', () => ({ openSettingsSection: vi.fn() }))
 import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/components/ComposerFooter'
@@ -24,11 +25,14 @@ let root: Root
 let host: HTMLElement
 beforeEach(() => {
   host = document.createElement('div')
+  // The ring is off by default (Settings › Appearance › Composer); these tests read it.
+  setContextRingInComposer(true)
   host.className = 'composer'
   document.body.append(host)
   root = createRoot(host)
 })
 afterEach(() => {
+  setContextRingInComposer(false)
   act(() => root.unmount())
   host.remove()
   document.body.innerHTML = ''

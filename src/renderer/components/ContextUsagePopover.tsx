@@ -41,6 +41,16 @@ export function contextUsageSummary(usage: ContextUsageSnapshot): string {
   return `${percent} · ${approximate}${formatTokenCount(usage.used)} of ${formatTokenCount(usage.limit)}`
 }
 
+/**
+ * The ring's tooltip: the summary, and for a measured request how much of it was read from the provider's cache
+ * and how much was sent anew: "4% · 43.9K of 1M · Cached 41K · New 2.9K".
+ */
+export function contextUsageTooltip(usage: ContextUsageSnapshot): string {
+  const summary = contextUsageSummary(usage)
+  if (usage.source !== 'measured' || !usage.request || usage.request.cached <= 0) return summary
+  return `${summary} · Cached ${formatTokenCount(usage.request.cached)} · New ${formatTokenCount(usage.request.uncached)}`
+}
+
 /** Where this context compacts: at a size, near the window's limit, or never. */
 export type ContextCompaction = { kind: 'at'; tokens: number } | { kind: 'near-limit' } | { kind: 'off' }
 
@@ -266,7 +276,7 @@ export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingPr
         type="button"
         className={`composer-icon-btn context-usage-btn${active ? ' active' : ''}`}
         onClick={onClick}
-        title={summary}
+        title={contextUsageTooltip(usage)}
         aria-label={`Context usage: ${summary} tokens`}
         aria-expanded={active}
       >

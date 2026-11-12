@@ -2,6 +2,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setContextRingInComposer } from '../../src/renderer/lib/contextRingSetting'
 import type { ContextUsageSnapshot } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -51,6 +52,8 @@ const expired = (): ContextUsageSnapshot => ({
 })
 
 beforeEach(async () => {
+  // The ring is off by default (Settings › Appearance › Composer); these tests read it.
+  setContextRingInComposer(true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   const now = new Date().toISOString()
   const { useAppStore } = await import('../../src/renderer/stores/appStore')
@@ -66,6 +69,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  setContextRingInComposer(false)
   act(() => root.unmount())
   host.remove()
   document.body.innerHTML = ''
