@@ -250,7 +250,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const shown = useMemo(() => (pending.length ? [...messages, ...pending] : messages), [messages, pending])
   const places = useMemo(() => placeMessages(shown), [shown])
   // The bot's own browser: its last run's reply shows a live preview, and Expand opens the split view.
-  const browser = useBotBrowser(bot.id, true)
+  // Each watches the browser's pictures only while it is on screen.
+  const browser = useBotBrowser(bot.id)
   const paneOpen = useBotBrowserStore((s) => s.paneBotId === bot.id)
   const browserRun = browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined

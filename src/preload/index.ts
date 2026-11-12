@@ -136,6 +136,7 @@ import type {
   SignInResponse
 } from '../shared/harness/types'
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
+import type { BotBrowserFrameEvent } from '../shared/bots/personal/browser'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
@@ -779,6 +780,12 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, event: BotsPersonalV2EventData['bots.activity']) => cb(event)
       ipcRenderer.on('bots:activity', handler)
       return () => ipcRenderer.removeListener('bots:activity', handler)
+    },
+    /** A picture of a bot's browser this window watches (`bots.browser.watch`), pushed as the page paints. */
+    onBrowserFrame: (cb: (event: BotBrowserFrameEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: BotBrowserFrameEvent) => cb(event)
+      ipcRenderer.on('bots:browserFrame', handler)
+      return () => ipcRenderer.removeListener('bots:browserFrame', handler)
     },
     /** A composer file's path on this computer: where it is, or, for a pasted one, a temporary copy. */
     attachmentPath: async (file: File): Promise<string> =>

@@ -31,6 +31,8 @@
 .bot-browser-status { margin-left: auto; flex-shrink: 0; }
 .bot-browser-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: color-mix(in srgb, var(--text-secondary) 50%, transparent); }
 .bot-browser-preview.is-live .bot-browser-dot { background: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .2); }
+/* No new picture for a while: the picture stays, the dot says it needs attention. */
+.bot-browser-preview.is-stale .bot-browser-dot { background: var(--warning); }
 
 /* The split view: as wide as the chat, the bot's tab and its controls. */
 .bot-browser-pane { flex: 1 1 0; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); background: rgba(var(--surface-base-rgb), .25); }
