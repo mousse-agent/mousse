@@ -1659,6 +1659,12 @@ describe('a plan usage limit (one-shot query)', () => {
     expect(inputs[1].options.resume).toBe('vendor-session')
   })
 
+  it('a provider refusal fails the turn with the provider\'s status and message', async () => {
+    const { service, home } = fixture(() => fakeQuery([init, failure({ api_error_status: 400, errors: ['API Error: 400 messages.3.content.0: tool_use ids were found without tool_result blocks'] })]))
+    const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', details: { provider: 'claude', status: 400 } })
+  })
+
   it('a failure that is not a limit saves no session, even when a rejected window was seen earlier', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
     const assistantText = { type: 'assistant', session_id: 'vendor-session', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] } }

@@ -442,7 +442,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // A failed turn ends with Mousse's line carrying the error: it shows as the turn's error, where Retry is.
     if (msg.role === 'system' && msg.error) {
       base.role = 'assistant'
-      base.parts = [{ type: 'error', title: 'Request failed', message: msg.error.message || msg.content } as unknown as UIMessage['parts'][number]]
+      base.parts = [{ type: 'error', title: errorTitle(msg.error), message: errorText(msg.error, msg.content) } as unknown as UIMessage['parts'][number]]
       out.push(base)
       lastAssistantText = null
       continue
@@ -683,6 +683,20 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         : null
   }
   return markRecoveredFailures(mergeConsecutiveThoughts(out))
+}
+
+/** The title of a failed turn's error: "Provider error" when the provider refused the request, else "Request failed". */
+export function errorTitle(error: { code?: unknown } | undefined): string {
+  const code = typeof error?.code === 'string' ? error.code : ''
+  if (code === 'provider_usage_limit') return 'Usage limit reached'
+  return code.startsWith('provider_') ? 'Provider error' : 'Request failed'
+}
+
+/** A failed turn's error text: its message, then the reference it was logged under when the message does not name it. */
+function errorText(error: { message?: string; details?: unknown }, fallback: string): string {
+  const message = (error.message || fallback).trim()
+  const supportId = error.details && typeof error.details === 'object' ? (error.details as { supportId?: unknown }).supportId : undefined
+  return typeof supportId === 'string' && supportId && !message.includes(supportId) ? `${message} Reference: ${supportId}` : message
 }
 
 type ToolPartShape = { type?: unknown; state?: unknown; failureRecovered?: boolean }

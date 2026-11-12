@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { boundedResetIso, estimatedReset, normalizeProviderError, readUsageLimit, usageLimitError } from '../src/mms/orchestrator/providerErrors'
+import { boundedResetIso, estimatedReset, normalizeProviderError, providerApiError, PROVIDER_MESSAGE_CHARS, readUsageLimit, usageLimitError } from '../src/mms/orchestrator/providerErrors'
+import { classifyProviderFailure } from '../src/mms/agentDefinitions/runtimeFallback'
 import { serializeAppError } from '../src/shared/errors'
 import { APIConnectionError, InternalServerError } from '@anthropic-ai/sdk'
 
@@ -179,4 +180,35 @@ describe('provider error classification', () => {
       expect(normalizeProviderError({ status: 429, message })).toMatchObject({ code: 'provider_quota_exceeded', errorInfo: { retryable: false } })
       expect(normalizeProviderError(message)).toMatchObject({ code: 'provider_quota_exceeded', errorInfo: { retryable: false } })
     })
+})
+
+describe('a provider refusal a runtime reports as text', () => {
+  it('keeps the provider\'s status and message, not a generic line', () => {
+    const error = providerApiError('API Error: 400 messages.3.content.0: tool_use ids were found without tool_result blocks', 'claude')!
+    expect(error).toMatchObject({ code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', errorInfo: { category: 'invalid', retryable: false } })
+    expect(serializeAppError(error).details).toMatchObject({ provider: 'claude', status: 400, supportId: expect.stringMatching(/^[0-9a-f-]{36}$/) })
+  })
+
+  it('reads the message of a JSON body', () => {
+    const error = providerApiError('API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_1"}')!
+    expect(error.message).toBe('500 · Internal server error')
+    expect(error.errorInfo).toEqual({ category: 'unavailable', retryable: false })
+  })
+
+  it('trims the text, removes credentials and cuts a long message', () => {
+    const error = providerApiError(`API Error: 401   Invalid  key sk-ant-api03-abcdefghijklmnop\n${'x'.repeat(900)}`)!
+    expect(error.message.startsWith('401 · Invalid key [redacted] x')).toBe(true)
+    expect(error.message.length).toBeLessThanOrEqual(PROVIDER_MESSAGE_CHARS + 6)
+    expect(error.message.endsWith('…')).toBe(true)
+    expect(error.errorInfo.category).toBe('denied')
+  })
+
+  it('is undefined for any other text', () => {
+    expect(providerApiError('API Error: Connection error.')).toBeUndefined()
+    expect(providerApiError('Claude Code turn failed')).toBeUndefined()
+  })
+
+  it('keeps a rate limit classified as one for fallbacks', () => {
+    expect(classifyProviderFailure(providerApiError('API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Too many tokens per minute"}}'))).toBe('rate_limit')
+  })
 })
