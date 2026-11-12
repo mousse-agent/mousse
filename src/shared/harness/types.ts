@@ -232,6 +232,12 @@ export const APPROVALS_REFUSED_MESSAGE = 'Tools that need approval are refused h
 /** What the model is told when it asks the user a question in a run nobody answers (`approvals: 'never'`). */
 export const QUESTIONS_REFUSED_MESSAGE = 'Nobody can answer questions here. Continue without asking.'
 
+/**
+ * The error code of a turn that reached its runtime's own cap on model turns (Claude Code's `maxTurns`, which only a
+ * bot's turn sets). The turn ended there, not the work: a bot carries it on in its next dispatch.
+ */
+export const PROVIDER_TURN_CAP = 'provider_turn_cap'
+
 /** Why the gateway could not serve a request. Typed so callers never parse messages. */
 export const HARNESS_ERROR_CODES = [
   'instance_unknown',

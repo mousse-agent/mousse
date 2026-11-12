@@ -52,7 +52,7 @@ import {
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { botAllowedOf, type BotAllowed } from '../instructions'
-import type { Enforceability, HarnessError, ProviderSelection, RunPolicy } from '../../../shared/harness/types'
+import { PROVIDER_TURN_CAP, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
@@ -238,6 +238,11 @@ const REMINDER_LATE_MS = 2 * 60_000
 const REPLY_WAIT_MS = 5_000
 /** Retries on another model after usage limits, per activation. */
 const MAX_USAGE_RETRIES = 2
+/**
+ * Continuations after a dispatch reached its runtime's cap on model turns, per activation. Each one worked up to the
+ * cap (300 turns on Claude Code), so this only stops a runtime that reaches the cap at once, again and again.
+ */
+export const MAX_TURN_CAP_CONTINUATIONS = 10
 /** How often deleted bots are swept for the 30-day purge. */
 const SWEEP_EVERY_MS = 24 * 60 * 60_000
 /** The chat's one notice while an activation waits for the internet. */
@@ -2617,6 +2622,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           const error = typeof run.outcome?.error === 'string' ? run.outcome.error : undefined
           // Ended while the internet was gone: it waits and continues, never a failure.
           if ((row.offline || (run.status === 'failed' && isConnectionFailure(error))) && await this.offlineEnd(row, main)) return
+          // The turn reached its runtime's cap on model turns: the turn ended, not the work, which goes on while it has room.
+          if (run.status === 'failed' && isTurnCap(error)) return this.continueAfterTurnCap(row, main)
           return this.failActivation(row, error ?? run.status)
         }
       }
@@ -2753,6 +2760,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /**
+   * A main dispatch that reached its runtime's cap on model turns (`provider_turn_cap`): the activation carries on in
+   * the same thread, as after a restart, under its own limits. Its turn budget, when the grant has one, is checked
+   * first, and `continueWith` checks its work time, so a used-up budget ends it as any limit does (a run's ask, a chat's
+   * wall), never as a failure. Each continuation is a dispatch that worked up to the cap, so only an endless repeat of
+   * them (a runtime that reaches the cap at once) is stopped.
+   */
+  private async continueAfterTurnCap(row: BotActivationRow, main: BotDispatchRow): Promise<void> {
+    // The ended turn's own message is not posted: its work goes on in the continuation, whose message follows.
+    this.drained.delete(`${row.id}:${main.n}`)
+    if (this.store.dispatches(row.id).filter((dispatch) => dispatch.send.turnCap).length >= MAX_TURN_CAP_CONTINUATIONS)
+      return this.failActivation(row, 'turn_cap_repeated')
+    const counters = this.store.counters(row.id)
+    const maxTurns = counters.limits.maxTurns
+    if (maxTurns !== undefined && counters.requests >= maxTurns) {
+      this.raiseWall(row.id, { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxTurns', amount: maxTurns } }, reason: `This bot reached its limit of ${maxTurns} model requests.` })
+      return
+    }
+    await this.continueWith(row.id, ['running'], { turnCap: true })
+  }
+
   /** Every run of the activation (main and consult) has ended, so nothing of it is live. */
   private allRunsEnded(row: BotActivationRow): boolean {
     const runs = this.host.runs()
@@ -2805,7 +2833,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; turnCap?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     const definition = this.host.definitions.revision(row.botId, row.revision)
@@ -2861,7 +2889,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
           ? { usageRetry: true }
-          : { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}) }
+          : { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}), ...(input.turnCap ? { turnCap: true } : {}) }
       }
       this.store.insertDispatch(dispatch)
       for (const answer of answers) this.store.markApplied(answer.id)
@@ -2900,7 +2928,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; turnCap?: boolean }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -2917,6 +2945,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ? input.answers.map(answerLine).join(' ')
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
         : input.restart ? 'Mousse restarted while you were working.'
+          : input.turnCap ? 'You reached the most steps one turn may take; what you did so far is kept.'
           : input.network ? 'The internet connection dropped while you were working; it is back now.'
             : input.afterReport ? 'The owner added something while you worked; what you had so far was already sent to them.'
               : input.notes ? 'The owner added something while you worked.' : 'The owner asked you to continue.'
@@ -4544,6 +4573,11 @@ function contextKey(stored: string): [string, number] {
   return at > 0 && Number.isSafeInteger(gen) ? [stored.slice(0, at), gen] : [stored, 1]
 }
 
+/** A run's error that says its turn reached the runtime's cap on model turns (`[provider_turn_cap] …`). */
+function isTurnCap(error: string | undefined): boolean {
+  return typeof error === 'string' && error.startsWith(`[${PROVIDER_TURN_CAP}]`)
+}
+
 /** A journal that cannot be written (bot-context.md §4): capture's `bot_journal_failed`, or a full disk. */
 function isJournalFailure(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
@@ -4566,6 +4600,7 @@ function failureText(reason: string): string {
     case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
     case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
     case 'no_progress': return 'I couldn\'t get anything done on this run, so I stopped.'
+    case 'turn_cap_repeated': return 'I kept going without finishing, so I stopped here.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }
 }

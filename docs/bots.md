@@ -42,6 +42,12 @@ A person who works for you keeps talking to you while they work. A bot does the 
 - **What the owner sees.** The status line and the composer's Stop follow the chat's own turn only (`BotSummary.chat`). Work is a line each above the composer (`BotSummary.work`): its title, what it is doing (the live chip of that activation), how long it has run, and Stop (`bots.work.stop`). The Recent line reads "Working on <title>" while only work runs.
 - **Failures.** Failed work never counts toward pausing the schedules (`countFailure`), and done work doesn't reset the count. Work dropped from a full queue says so in the chat.
 
+## Long work
+
+Work that takes long is held to the bot's own budget, its work time per activation (an hour in the starter grant) and its turn budget when the grant has one, never to a runtime's limits on one turn.
+
+- **The cap on model turns in one dispatch.** Claude Code ends one query after 300 model turns (`CLAUDE_LOCKED_MAX_TURNS`, only a bot's turn sets it; it was 100). That result is `provider_turn_cap`, not a failure: the activation carries on in the same thread, as after a restart, with "You reached the most steps one turn may take; what you did so far is kept. Continue." (`continueWith`, `turnCap`). The continuation runs on the time the activation has left; with under 15 seconds left, or its turn budget used up, it ends at that limit as any run or chat does (see Asks). Codex has no such cap, and Pi has none of its own (it counts against the grant's turn budget). A runtime that reaches the cap at once, again and again, is stopped after 10 continuations (`MAX_TURN_CAP_CONTINUATIONS`, "I kept going without finishing, so I stopped here.").
+
 ## Replies
 
 Every bot message can name the message it answers (`bot_messages.reply_to`, bots.db v6): a chat reply the owner's message its turn holds (`ownerMessageOf`), a work report and a reminder the message that asked for them. The chat shows a short quote of it (who wrote it and its first line, `BotChatQuote`) when it is not the message right above; clicking it scrolls there. The owner can reply to any message (Reply on hover): `bots.chat.send` carries `replyTo`, a message of the same bot only, and the bot's input starts with `(Replying to your message: "…")` (`messageInput`, which also rebuilds the input from the row after a restart).

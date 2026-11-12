@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
-import { BOT_FAILURE_PAUSE_STREAK, sayOnce } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_FAILURE_PAUSE_STREAK, MAX_TURN_CAP_CONTINUATIONS, sayOnce } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -367,5 +367,89 @@ describe('third review (docs/plans/bot-always-free.md)', () => {
     const turn = await chat('When are the trains?', 'm1')
     await finish(f, turn.payload, 'completed', { text: 'The train leaves at 09:00 from Central.\n\nThe train leaves at 10:00 from Riverside.' })
     expect(chatOf(f, botId).at(-1)!.text).toBe('The train leaves at 09:00 from Central.\n\nThe train leaves at 10:00 from Riverside.')
+  })
+})
+
+describe('long work', () => {
+  const MIN = 60_000
+  /** A run's error when its turn reached the runtime's cap on model turns (Claude Code's `maxTurns`). */
+  const TURN_CAP = { error: '[provider_turn_cap] Claude Code reached the most steps one turn may take.' }
+  /** A call the work makes: progress, so its time is work. */
+  const call = { kind: 'app' as const, tool: 'memory_list', args: {} }
+  const errors = () => chatOf(f, botId).filter((message) => message.kind === 'error')
+
+  /** Work the owner asked for, handed off by the chat (which has answered). */
+  async function asked(text = 'Research vacuums under £250', id = 'm1') {
+    const turn = await chat(text, id)
+    const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Vacuums', brief: 'Compare vacuums under £250.', key: `k-${id}` })
+    await finish(f, turn.payload, 'completed', { text: 'On it.' })
+    return { workId, message: turn.message }
+  }
+
+  describe('the cap on model turns in one dispatch', () => {
+    it('carries the work on in the same thread with the time it has left, and its report answers the message', async () => {
+      const { workId, message } = await asked()
+      const first = await start(f, workId)
+      f.clock.now += 20 * MIN
+      first.prepared.authority.check(call)
+      await finish(f, first.payload, 'failed', { outcome: TURN_CAP })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      const next = f.store.dispatch(workId, 2)!
+      expect(next).toMatchObject({ kind: 'continue', threadId: first.payload.threadId, send: { continuationOfRunId: first.payload.runId, turnCap: true } })
+      expect(next.prompt.text).toBe('[Mousse] You reached the most steps one turn may take; what you did so far is kept. Continue.')
+      expect(errors()).toEqual([])
+      const second = await start(f, workId, 2)
+      expect(second.prepared.authority.time.deadline() - f.clock.now).toBe(40 * MIN)
+      await finish(f, second.payload, 'completed', { text: 'The Roborock Q7 is the pick.' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'The Roborock Q7 is the pick.', replyTo: { id: message.id } })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
+    })
+
+    it('with no time left it ends at its limit with an ask for more, never as something that went wrong', async () => {
+      const { workId } = await asked()
+      const first = await start(f, workId)
+      f.clock.now += 60 * MIN - 10_000
+      first.prepared.authority.check(call)
+      await finish(f, first.payload, 'failed', { outcome: TURN_CAP })
+      expect(f.store.dispatch(workId, 2)).toBeUndefined()
+      expect(f.store.activation(workId)!.endReason).toBe('budget_exhausted')
+      expect(f.store.openAsks(botId)).toMatchObject([{ kind: 'budget', title: 'work for up to 2 hours per run' }])
+      expect(JSON.stringify(chatOf(f, botId))).not.toContain('Something went wrong')
+    })
+
+    it('with its turn budget used up it ends at that limit with its ask', async () => {
+      f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxTurns: 3 } }))
+      const { workId } = await asked()
+      const first = await start(f, workId)
+      for (let i = 0; i < 3; i += 1) expect(first.prepared.authority.counters.charge('request')).toMatchObject({ ok: true })
+      f.clock.now += MIN
+      await finish(f, first.payload, 'failed', { outcome: TURN_CAP })
+      expect(f.store.dispatch(workId, 2)).toBeUndefined()
+      expect(f.store.openAsks(botId)).toMatchObject([{ kind: 'budget', permission: { budget: { key: 'maxTurns' } } }])
+      expect(JSON.stringify(chatOf(f, botId))).not.toContain('Something went wrong')
+    })
+
+    it('a chat turn carries on too, and answers once', async () => {
+      const turn = await chat('Sort my notes', 'm1')
+      f.clock.now += MIN
+      turn.prepared.authority.check(call)
+      await finish(f, turn.payload, 'failed', { outcome: TURN_CAP })
+      expect(f.store.dispatch(turn.activation.id, 2)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
+      await runDispatch(f, turn.activation.id, 2, { text: 'Sorted.' })
+      expect(chatOf(f, botId).filter((message) => message.activationId === turn.activation.id && message.author === 'bot').map((message) => message.text)).toEqual(['Sorted.'])
+      expect(errors()).toEqual([])
+    })
+
+    it('a runtime that reaches the cap again and again is stopped after a few continuations', async () => {
+      const { workId } = await asked()
+      for (let n = 1; n <= MAX_TURN_CAP_CONTINUATIONS + 1; n += 1) {
+        const turn = await start(f, workId, n)
+        f.clock.now += MIN
+        turn.prepared.authority.check(call)
+        await finish(f, turn.payload, 'failed', { outcome: TURN_CAP })
+      }
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'turn_cap_repeated' })
+      expect(errors().at(-1)).toMatchObject({ error: { text: 'I kept going without finishing, so I stopped here.' } })
+    })
   })
 })

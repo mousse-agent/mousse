@@ -36,8 +36,12 @@ import { trackChildProcess } from '../../diagnostics/liveCounts'
 /** The instance profile that runs bots. */
 export const CLAUDE_LOCKED_PROFILE = 'locked'
 
-/** One `query` is one dispatch: a backstop on its model turns, not a policy claim. */
-export const CLAUDE_LOCKED_MAX_TURNS = 100
+/**
+ * One `query` is one dispatch: a backstop on its model turns, not a policy claim. A bot's budget is its work time
+ * (and its turn budget, when its grant has one); a dispatch that reaches this cap ends with `provider_turn_cap` and
+ * the bot carries the work on in its next dispatch, so the cap only bounds one query, never the work.
+ */
+export const CLAUDE_LOCKED_MAX_TURNS = 300
 
 /**
  * Claude Code's built-in tools: the pinned SDK's `ToolInputSchemas` by tool name (the `File` prefix

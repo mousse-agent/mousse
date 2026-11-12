@@ -520,7 +520,14 @@ export interface BotDispatchRow {
   outcome: string | null
   settledBy: 'run' | 'startup' | null
   /** How a continuation is sent (the run it continues, the owner's acknowledgement), so a resend matches it. */
-  send: { continuationOfRunId?: string; acknowledgeUncertain?: boolean; /** A retry on another model after a usage limit. */ usageRetry?: boolean }
+  send: {
+    continuationOfRunId?: string
+    acknowledgeUncertain?: boolean
+    /** A retry on another model after a usage limit. */
+    usageRetry?: boolean
+    /** A continuation after the previous dispatch reached its runtime's cap on model turns. */
+    turnCap?: boolean
+  }
 }
 
 export interface BotEscalationRow {
