@@ -912,6 +912,15 @@ describe('long work', () => {
       expect(chatOf(f, botId).at(-1)!.text).toBe('I had too much waiting, so I dropped "Vacuums". Ask me again when I\'m less busy.')
     })
 
+    it('the owner\'s Continue is refused with a plain message: the work goes on through its ask, and never holds the lane', async () => {
+      const { workId } = await outOfTime()
+      expect(f.bots.getActivation(workId).canContinue).toBe(false)
+      await expect(f.bots.continueActivation(workId)).rejects.toMatchObject({ code: 'bot_work_waiting', message: 'This work ran out of room. Answer its ask to let it carry on, or stop it.' })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+      expect(f.store.laneActivations(botId, 'run', ['running', 'waiting_grant'])).toEqual([])
+      expect(f.store.dispatches(workId)).toHaveLength(1)
+    })
+
     it('the card says it carries the work on only when this answer really did', async () => {
       const { workId } = await outOfTime()
       const askId = chatOf(f, botId).at(-1)!.ask!.askId

@@ -3636,6 +3636,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = this.store.activation(activationId)
     if (!row) throw new BotEngineError('activation_not_found', 'No activation with that id.')
     if (row.status !== 'paused' && row.status !== 'blocked') throw new BotEngineError('bot_not_paused', 'Only a paused or blocked activation can be continued.')
+    // Work that waits to go on goes on by its own way: its ask's answer, or the usage limit's reset (or Resume).
+    if (workWaits(row)) {
+      throw new BotEngineError('bot_work_waiting', row.endReason === 'usage_limit'
+        ? 'This work waits for a usage limit to reset. It carries on then, or press Resume to try now.'
+        : row.endReason === 'room_allowed'
+          ? 'This work already has more room. It carries on when the work before it is done.'
+          : 'This work ran out of room. Answer its ask to let it carry on, or stop it.')
+    }
     if (!row.threadId || !this.store.lastMainDispatch(row.id)) throw new BotEngineError('bot_not_started', 'This activation never started; run the bot again.')
     if (this.store.laneActivations(row.botId, row.lane, [...ACTIVE_HOLDING]).some((other) => other.id !== row.id))
       throw new BotEngineError('bot_busy', 'Another run of this bot is in progress. Continue this one when it has finished.')
@@ -5084,7 +5092,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       counters: { requests: counters.requests, toolCalls: counters.toolCalls, activeMs: counters.activeMs },
       unknownCalls: this.store.unknownCalls(row.id),
       openEscalation: open ? this.escalationSummary(open) : null,
-      canContinue: (row.status === 'paused' || row.status === 'blocked') && Boolean(main),
+      canContinue: (row.status === 'paused' || row.status === 'blocked') && !workWaits(row) && Boolean(main),
       canMarkDone: row.status === 'paused' && run?.status === 'completed',
       uncertain: run?.status === 'uncertain',
       uncertainRunId: run?.status === 'uncertain' ? run.runId : null

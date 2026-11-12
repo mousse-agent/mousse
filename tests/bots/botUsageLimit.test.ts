@@ -211,6 +211,17 @@ describe('work a usage limit stopped', () => {
     expect(f.store.registry(botId)!.pausedReason).toBe('owner')
   })
 
+  it('the owner\'s Continue is refused with a plain message; Resume is the way to try now', async () => {
+    await f.bots.reconcileOnStartup()
+    const until = new Date(f.clock.now + HOUR).toISOString()
+    const { workId } = await work()
+    await limitedOut(workId, until)
+    await expect(f.bots.continueActivation(workId)).rejects.toMatchObject({ code: 'bot_work_waiting', message: 'This work waits for a usage limit to reset. It carries on then, or press Resume to try now.' })
+    expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'usage_limit' })
+    // The schedules are not held by it.
+    expect(f.store.laneActivations(botId, 'run', ['running', 'waiting_grant'])).toEqual([])
+  })
+
   it('Resume tries at once, before the reset', async () => {
     await f.bots.reconcileOnStartup()
     const until = new Date(f.clock.now + HOUR).toISOString()
