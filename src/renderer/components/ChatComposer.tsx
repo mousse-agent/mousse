@@ -235,11 +235,19 @@ export function ChatComposer({
   const shownMentionKeyRef = useRef('')
   const inputValueRef = useRef(input)
   inputValueRef.current = input
-  // Dictated text goes where the caret is when the transcript arrives, then the box gets focus.
+  // The selection (or caret) when dictation started, with the text it was taken from.
+  const dictationRangeRef = useRef<{ start: number; end: number; value: string } | null>(null)
+  // Dictated text replaces the selection made before dictation started, even if the caret moved since.
+  // If the text changed while recording, that range no longer means the same words, so it goes at the caret.
+  // Then the box gets focus.
   const insertDictation = (text: string) => {
     const node = composerInputRef.current
     const current = node?.value ?? inputValueRef.current
-    const inserted = insertTranscript(current, node?.selectionStart ?? current.length, node?.selectionEnd ?? current.length, text)
+    const range = dictationRangeRef.current
+    dictationRangeRef.current = null
+    const start = range && range.value === current ? range.start : node?.selectionStart ?? current.length
+    const end = range && range.value === current ? range.end : node?.selectionEnd ?? current.length
+    const inserted = insertTranscript(current, start, end, text)
     setSuggestionsDismissed(false)
     setSelectedSuggestion(0)
     onInputChange(inserted.value)
@@ -252,6 +260,11 @@ export function ChatComposer({
   }
   const dictation = useDictation({ disabled, loading, onTranscript: insertDictation })
   const { isRecording, recordingPending, transcribing, recordingDuration } = dictation
+  const startDictation = () => {
+    const node = composerInputRef.current
+    dictationRangeRef.current = node ? { start: node.selectionStart, end: node.selectionEnd, value: node.value } : null
+    dictation.start()
+  }
   const [pendingReferences, setPendingReferences] = useState(0)
   // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
   useComposerNotice(pendingReferences > 0 ? { tone: 'info', title: 'Attaching reference…' } : null)
@@ -260,7 +273,7 @@ export function ChatComposer({
   useComposerNotice(dictation.error ? {
     tone: 'error',
     title: dictation.error.message,
-    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: loading || disabled || recordingPending || transcribing, onClick: dictation.start }],
+    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: loading || disabled || recordingPending || transcribing, onClick: startDictation }],
     onDismiss: dictation.dismissError
   } : null)
   // With the picker disabled, `/skills` stays literal text so it is sent to the agent as a prompt.
@@ -906,7 +919,7 @@ export function ChatComposer({
         onSend={() => submit(sendMode === 'steer' ? { steer: true } : undefined)}
         sendLabel={sendLabel}
         onStop={handleStop}
-        onStartRecording={dictation.start}
+        onStartRecording={startDictation}
         onStopRecording={dictation.stop}
         allowAttachWhileLoading
         permission={permission}
