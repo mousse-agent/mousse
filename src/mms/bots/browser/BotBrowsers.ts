@@ -352,7 +352,16 @@ export class BotBrowsers implements BotBrowserHost {
   async input(botId: string, input: BotBrowserInput): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     const sessionId = this.requireLive(state)
-    await this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input, ...(state.follow ? { tabId: state.follow } : {}) }))
+    const navigates = input.kind === 'navigate' || input.kind === 'back' || input.kind === 'forward' || input.kind === 'reload'
+    try {
+      const { navigation } = await this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input, ...(state.follow ? { tabId: state.follow } : {}) }))
+      // The owner's own page replaces what the bot's last page ran into.
+      if (navigates) this.noteBotProblem(state, navigation?.problem)
+    } catch (error) {
+      const problem = error instanceof BrowserAutomationError ? error.details?.problem as BrowserProblem | undefined : undefined
+      if (navigates && problem) this.noteBotProblem(state, problem)
+      throw error
+    }
     return this.viewAfterChange(state)
   }
 

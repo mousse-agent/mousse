@@ -467,6 +467,12 @@ describe.skipIf(!chrome.ok)('a slow page is not a failed page', () => {
     expect((await call(bot, 'browser_open', { url: `${origin}/nav-b.html` })).error).toBeUndefined()
     await expect.poll(() => view.events.at(-1) && (view.events.some((event, index) => index > 0 && event.problem === null)), { timeout: 5_000 }).toBe(true)
     expect((await bots.view(BOT_A)).problem).toBeUndefined()
+    // So does the owner's own page, after the bot's failed one.
+    expect((await call(bot, 'browser_open', { url: await closedAddress() })).error).toMatch(/^site_unreachable/)
+    expect((await bots.view(BOT_A)).problem).toMatchObject({ kind: 'unreachable' })
+    await bots.control(BOT_A, 'owner')
+    await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/nav-a.html` })
+    expect((await bots.view(BOT_A)).problem).toBeUndefined()
     bots.unwatch(BOT_A, 'w1', 'c1')
   }, 60_000)
 
