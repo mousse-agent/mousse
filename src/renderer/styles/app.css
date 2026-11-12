@@ -957,16 +957,25 @@ html.platform-darwin .titlebar-left {
 }
 
 .chat {
-  /* Component CSS also supplies a narrow standalone default at :root.
-     Keep the full app conversation width stable regardless of production
-     stylesheet chunk order. */
-  --an-max-width: 680px;
+  /* The transcript's text column (Settings → Appearance → Chat width) plus the list's 24px
+     gutters; the composer shares the column. Component CSS also supplies a narrow standalone
+     default at :root, so the width is set here regardless of stylesheet chunk order. */
+  --chat-text-width: 736px;
+  --an-max-width: calc(var(--chat-text-width) + 48px);
   flex: 1;
   min-height: 0;
   position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+html[data-chat-width='wide'] .chat {
+  --chat-text-width: 1152px;
+}
+
+html[data-chat-width='full'] .chat {
+  --an-max-width: 100%;
 }
 
 .chat-messages,

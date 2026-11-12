@@ -40,7 +40,7 @@
   --an-input-background: var(--surface-strong);
   --an-input-border-color: var(--border);
   --an-input-color: var(--text-primary);
-  --an-max-width: 680px;
+  --an-max-width: 784px;
 }
 /* Light: the transcript, tables, code chips and the user bubble take the
    theme's text and surface tokens instead of the dark bridge above. */
@@ -77,11 +77,6 @@ html[data-theme='light'] {
     --an-shimmer-base: color-mix(in srgb, var(--text-primary) 48%, var(--surface-base));
     --an-shimmer-peak: var(--text-primary);
   }
-}
-/* Make user bubbles pop in narrow sidebar */
-.an-message-list .max-w-\[calc\(95\%-40px\)\] {
-  max-width: calc(100% - 24px) !important;
-  margin-inline-start: 24px !important;
 }
 /* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
    so registry re-syncs can't silently drop them. Unlayered, so they also
@@ -615,18 +610,46 @@ html.platform-darwin .overlay-titlebar {
   scroll-snap-align: start;
 }
 
+/* A prompt: 12px padding, at most 80% of the column, text at 14px on a 22.75px line. */
 .chat-user-bubble {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  font-size: 14px;
+  line-height: 1.625;
+}
+/* A long prompt shows its first 176px, fading out, until "Show full message" is pressed. */
+.chat-user-text.is-folded {
+  max-height: 176px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.75rem), transparent);
+}
+.chat-user-fold {
+  align-self: flex-start;
+  margin-top: -2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.chat-user-fold:hover {
+  color: var(--text-primary);
+}
+.chat-user-fold:focus-visible {
+  border-radius: 4px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 .chat-user-bubble .chat-user-image-carousel {
   margin-left: 0;
 }
 /* "from <computer>" under a turn that a person on another of the user's computers sent. */
 .chat-user-sent-from {
-  max-width: calc(95% - 40px);
+  max-width: 80%;
   padding-right: 4px;
   overflow: hidden;
   color: var(--text-secondary);

@@ -31,6 +31,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Glass intensity', section: 'appearance', anchor: 'appearance-glass-intensity', keywords: ['acrylic', 'blur', 'opacity'] },
   { title: 'Context ring in composer', section: 'appearance', anchor: 'appearance-context-ring', keywords: ['context', 'tokens', 'usage', 'gauge', 'window', 'composer'] },
   { title: 'Frosted composer', section: 'appearance', anchor: 'appearance-frosted-composer', keywords: ['glass', 'blur', 'translucent', 'transparent', 'opacity', 'color boost'] },
+  { title: 'Chat width', section: 'appearance', anchor: 'appearance-chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
   { title: 'Render math', section: 'appearance', anchor: 'appearance-render-math', keywords: ['latex', 'equations'] },
   { title: 'Show replies a paragraph at a time', section: 'appearance', anchor: 'appearance-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade'] },
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },

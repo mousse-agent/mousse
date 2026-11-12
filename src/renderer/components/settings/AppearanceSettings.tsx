@@ -1,15 +1,21 @@
 import type { CSSProperties } from 'react'
-import { ANIMATION_SPEEDS, FROSTED_COMPOSER_RANGES, type AnimationSpeed, type FrostedComposerSlider, type AppearanceSettings as AppearanceValues, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
+import { ANIMATION_SPEEDS, FROSTED_COMPOSER_RANGES, type AnimationSpeed, type FrostedComposerSlider, type AppearanceSettings as AppearanceValues, type ChatWidth, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
 import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
-import { MessageSquare } from '../../lib/icons'
+import { MessageSquare, MessagesSquare } from '../../lib/icons'
 
 const TURN_CHANGED_FILES_OPTIONS: readonly SelectOption<TurnChangedFilesMode>[] = [
   { value: 'summary', label: 'Summary line' },
   { value: 'list', label: 'Full list' },
   { value: 'off', label: 'Off' }
+]
+
+const CHAT_WIDTH_OPTIONS: readonly SelectOption<ChatWidth>[] = [
+  { value: 'normal', label: 'Normal' },
+  { value: 'wide', label: 'Wide' },
+  { value: 'full', label: 'Full' }
 ]
 
 const ANIMATION_SPEED_LABELS: Record<AnimationSpeed, string> = {
@@ -85,8 +91,9 @@ export interface AppearanceSettingsProps {
 }
 
 /**
- * Settings → Appearance: theme, accent, fonts, the title-bar path, glass, math, thread colors and animation speed,
- * and the Composer group (the context ring and the frosted composer).
+ * Settings → Appearance: theme, accent, fonts, the title-bar path, glass, thread colors and animation speed; the
+ * Chat group (chat width, reply pacing, math and the changed-files line); and the Composer group (the context ring
+ * and the frosted composer).
  */
 export function AppearanceSettings({
   settings,
@@ -248,6 +255,34 @@ export function AppearanceSettings({
           }
         />
         <SettingsRow
+          title="Project colors on threads"
+          anchor="appearance-project-colors"
+          description="Tint threads with their project's color."
+          control={
+            <Switch
+              label="Project colors on threads"
+              checked={appearance.threadProjectColors}
+              onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
+            />
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup title="Chat" icon={MessagesSquare} anchor="appearance-chat">
+        <SettingsRow
+          title="Chat width"
+          anchor="appearance-chat-width"
+          description="How wide the conversation is."
+          control={
+            <Select
+              ariaLabel="Chat width"
+              value={appearance.chatWidth}
+              onChange={(chatWidth) => void onUpdate({ appearance: { ...appearance, chatWidth } })}
+              options={CHAT_WIDTH_OPTIONS}
+            />
+          }
+        />
+        <SettingsRow
           title="Render math"
           anchor="appearance-render-math"
           description="Show LaTeX in replies and Markdown previews as formatted equations."
@@ -280,18 +315,6 @@ export function AppearanceSettings({
               value={appearance.turnChangedFiles}
               onChange={(turnChangedFiles) => void onUpdate({ appearance: { ...appearance, turnChangedFiles } })}
               options={TURN_CHANGED_FILES_OPTIONS}
-            />
-          }
-        />
-        <SettingsRow
-          title="Project colors on threads"
-          anchor="appearance-project-colors"
-          description="Tint threads with their project's color."
-          control={
-            <Switch
-              label="Project colors on threads"
-              checked={appearance.threadProjectColors}
-              onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
             />
           }
         />

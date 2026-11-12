@@ -66,6 +66,8 @@ export interface AppearanceSettings {
   animationSpeed: AnimationSpeed
   /** What a turn that changed files shows at its end. */
   turnChangedFiles: TurnChangedFilesMode
+  /** How wide the transcript's text column is: 736px, 1152px, or the whole pane. */
+  chatWidth: ChatWidth
   /** The chat shows blurred through a translucent composer. Off by default: the blur costs graphics memory. */
   frostedComposer: boolean
   /** Frosted composer opacity, in percent. */
@@ -101,6 +103,15 @@ export const TURN_CHANGED_FILES_MODES: readonly TurnChangedFilesMode[] = ['summa
 
 export function normalizeTurnChangedFiles(value: unknown): TurnChangedFilesMode {
   return TURN_CHANGED_FILES_MODES.includes(value as TurnChangedFilesMode) ? value as TurnChangedFilesMode : 'summary'
+}
+
+/** The transcript's text column: normal (736px), wide (1152px) or the whole pane. */
+export type ChatWidth = 'normal' | 'wide' | 'full'
+
+export const CHAT_WIDTHS: readonly ChatWidth[] = ['normal', 'wide', 'full']
+
+export function normalizeChatWidth(value: unknown): ChatWidth {
+  return CHAT_WIDTHS.includes(value as ChatWidth) ? value as ChatWidth : 'normal'
 }
 
 /**
@@ -831,6 +842,7 @@ export function getDefaultSettings(): MousseSettings {
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
+      chatWidth: 'normal',
       frostedComposer: false,
       frostedComposerOpacity: FROSTED_COMPOSER_RANGES.frostedComposerOpacity.default,
       frostedComposerBlur: FROSTED_COMPOSER_RANGES.frostedComposerBlur.default,
@@ -965,6 +977,7 @@ export function normalizeAppearance(
       typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
     turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles),
+    chatWidth: normalizeChatWidth(raw.chatWidth),
     frostedComposer: typeof raw.frostedComposer === 'boolean' ? raw.frostedComposer : defaults.frostedComposer,
     frostedComposerOpacity: clampFrostedComposer('frostedComposerOpacity', raw.frostedComposerOpacity),
     frostedComposerBlur: clampFrostedComposer('frostedComposerBlur', raw.frostedComposerBlur),
