@@ -1,12 +1,8 @@
 import { dirname, join } from 'node:path'
 import {
-  copyFileSync,
   existsSync,
-  linkSync,
-  lstatSync,
   mkdirSync,
   renameSync,
-  readdirSync,
   readFileSync,
   symlinkSync,
   unlinkSync,
@@ -23,6 +19,7 @@ import {
 import { chromeExecutableRelPath, chromeForTestingPlatform } from '../src/browser-worker/binary/platform'
 import { MANAGED_BROWSER_ROOT, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 import {
+  copyBrowserTreeAsHardlinks,
   makeManagedBrowserTempRoot,
   removeOwnedTempRoot
 } from './fixtures/agent-platform/managed-browser-drain/ownedTemp'
@@ -32,27 +29,6 @@ const roots: string[] = []
 afterEach(() => {
   for (const root of roots.splice(0)) removeOwnedTempRoot(root)
 })
-
-function copyAsHardlinks(source: string, target: string): void {
-  const stat = lstatSync(source)
-  if (stat.isSymbolicLink()) throw new Error(`Fixture Chrome contains a symlink: ${source}`)
-  if (stat.isDirectory()) {
-    mkdirSync(target, { recursive: true })
-    for (const entry of readdirSync(source)) copyAsHardlinks(join(source, entry), join(target, entry))
-    return
-  }
-  mkdirSync(dirname(target), { recursive: true })
-  if (process.platform === 'win32') {
-    copyFileSync(source, target)
-    return
-  }
-  try {
-    linkSync(source, target)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
-    copyFileSync(source, target)
-  }
-}
 
 function materializeActiveInstallerLayout(browserRoot: string, realBinary = false): { version: string; executablePath: string } {
   // Metadata validation is an offline unit test. Only the integration case
@@ -65,7 +41,7 @@ function materializeActiveInstallerLayout(browserRoot: string, realBinary = fals
   const platform = chromeForTestingPlatform()
   const versionRoot = join(browserRoot, 'versions', `${platform}-${legacy.version}`)
   const executableRelativePath = chromeExecutableRelPath(platform)
-  if (realBinary) copyAsHardlinks(certifiedInstallDir(MANAGED_BROWSER_ROOT), versionRoot)
+  if (realBinary) copyBrowserTreeAsHardlinks(certifiedInstallDir(MANAGED_BROWSER_ROOT), versionRoot)
   else {
     mkdirSync(dirname(join(versionRoot, executableRelativePath)), { recursive: true })
     writeFileSync(join(versionRoot, executableRelativePath), 'offline resolver fixture, not an executable')
