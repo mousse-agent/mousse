@@ -218,6 +218,8 @@ export type ClaudeSubscriptionChatInput = {
   onSteer?: (text: string, token?: string) => void
   /** A drained steer could not be pushed because the turn's result had already arrived: it is the next turn. */
   returnSteer?: (text: string, token?: string) => void
+  /** The turn ended at the aborted result of Send now's interrupt (`LiveRun.sendNowAbort`): what it wrote is all it says. */
+  onSendNowCut?: () => void
   /** A drained steer was pushed to Claude: its token is spent. */
   steerTaken?: (token?: string) => void
   /**
@@ -2878,6 +2880,7 @@ export class ClaudeSubscriptionProviderService {
           sendNowCut = result === liveRun.sendNowAbort
           const failure = sendNowCut ? usageLimitFromResult(result, liveRun.rateLimits) : claudeResultFailure(result, liveRun.rateLimits)
           if (failure) throw failure
+          if (sendNowCut) input.onSendNowCut?.()
           if (frames.segmentEmpty && 'result' in result) {
             frames.text += result.result
             input.onText(frames.text)

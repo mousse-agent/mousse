@@ -461,6 +461,41 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     // The person pressed Send now: the turn did not fail, and the thread shows no error.
     expect(w.d.engine.getRun(w.runId)?.status).toBe('completed')
     expect(w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => /orchestrator_turn_failed|Something went wrong/.test(String(message.content)))).toEqual([])
+    // The cut turn wrote nothing: no "Done." placeholder stands where the steer's answer (or its second run) follows.
+    expect(w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => message.role === 'assistant' && message.content === 'Done.')).toEqual([])
+  })
+
+  it('two quick Send nows interrupt once: the second steer goes in with the first, and the run ends at their answer, never stuck', async () => {
+    const w = await running()
+    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
+    await later(30)
+    await w.steer('use pnpm')
+    await waitFor(() => w.held() !== undefined, 'the first steer held')
+    await w.sendNow('now-1')
+    await waitFor(() => w.claude.interrupts === 1 && w.claude.inputs.length === 2, 'the first steer pushed and the interrupt sent')
+    // The command is still running (the interrupt has not landed): the second steer waits for it, and is sent now too.
+    const second = await w.steer('and run lint')
+    await waitFor(() => w.held()?.itemIds.includes(second) === true, 'the second steer held')
+    await w.sendNow('now-2')
+    await waitFor(() => w.claude.inputs.length === 3, 'the second steer pushed')
+    await later(100)
+    const [a, b] = [w.claude.uuid(1), w.claude.uuid(2)]
+    // The first interrupt lands: the command ends, and Claude Code takes both steers for its next request.
+    interruptedCommand(w.claude, 'bash-1', w.prompt)
+    w.claude.emit(lifecycle(a, 'started'), lifecycle(b, 'started'), messageStart(b))
+    // A second interrupt would abort that request; with one interrupt, the model answers both.
+    if (w.claude.interrupts > 1) w.claude.emit(resultFrame({ uuids: [a, b], terminalReason: 'aborted_streaming', error: 'interrupted' }))
+    else w.claude.emit(textDelta('pnpm, then lint', b), resultFrame({ uuids: [a, b], text: 'pnpm, then lint' }))
+    await waitFor(() => w.d.engine.getActiveRun(w.thread.id) === null, 'the run to end', 5_000)
+    await w.first
+    await later(300)
+    expect(w.claude.interrupts).toBe(1)
+    expect(w.d.engine.getRun(w.runId)?.status).toBe('completed')
+    expect(cliInputsWith(w.cli, 'use pnpm')).toBe(1)
+    expect(cliInputsWith(w.cli, 'and run lint')).toBe(1)
+    expect(w.inContext('use pnpm')).toBe(1)
+    expect(w.inContext('and run lint')).toBe(1)
+    expect(w.d.orch.listQueue(w.thread.id)).toEqual([])
   })
 
   it('a later steer that cuts the same turn after a Send now is waited past: the run goes on to its answer, and it is sent once', async () => {

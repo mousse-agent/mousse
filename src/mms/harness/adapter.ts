@@ -331,6 +331,11 @@ export interface TurnResult {
    * reached a terminal update from the runtime itself.
    */
   drain?: { mousseCalls?: number; toolCalls?: number; toolsSettled?: boolean }
+  /**
+   * The turn ended where the person cut it (Send now's interrupt aborted the steer's own request), so a turn with no
+   * text has no reply to show: the thread gets no "Done." placeholder.
+   */
+  noReply?: boolean
 }
 
 /**

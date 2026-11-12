@@ -1043,7 +1043,11 @@ export class LiveSession<Turn = unknown> {
     const interrupt = (): void => {
       if (interrupted || run.read.has(id) || run.settled || run.abandoned || this.dead || this.query !== query) return
       interrupted = true
+      // An earlier Send now's interrupt is still landing: it ends the command, and this steer goes in with that one. A
+      // second interrupt could abort the request that carries both, after the command's aborted result had cleared them.
+      const landing = run.interruptedFor.size > 0
       run.interruptedFor.add(id)
+      if (landing) return
       void Promise.resolve(query.interrupt()).catch(() => undefined)
     }
     if (typeof stopTask === 'function' && stoppable.every((call) => call.taskId)) {
