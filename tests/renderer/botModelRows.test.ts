@@ -77,10 +77,10 @@ describe('a bot\'s model rows', () => {
   it('shows a pick with its level, and its entry beside it while two entries offer models; one not offered now says so', () => {
     render({ talk: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, light: { instanceId: 'pi:gone', model: 'opus' }, medium: { instanceId: 'pi:gone', model: 'opus' }, hard: { instanceId: 'pi:gone', model: 'opus' } })
     expect(pickerOf('Talk').getAttribute('aria-label')).toBe('Pip\'s Talk model: Opus 5.5 · High on Anthropic API')
-    // The entry is in the closed control, muted, inside the one label that is cut with an ellipsis.
+    // The entry is in the closed control, muted, beside the model; each part is cut with an ellipsis on its own.
     const label = pickerOf('Talk').querySelector('.settings-model-btn-label')!
-    expect(label.textContent).toBe('Opus 5.5 · High · Anthropic API')
-    expect(label.querySelector('.settings-model-btn-entry')!.textContent).toBe(' · Anthropic API')
+    expect(label.querySelector('.settings-model-btn-model')!.textContent).toBe('Opus 5.5 · High')
+    expect(label.querySelector('.settings-model-btn-entry')!.textContent).toBe('· Anthropic API')
     expect(pickerOf('Talk').title).toBe('Opus 5.5 on Anthropic API')
     expect(pickerOf('Work').getAttribute('aria-label')).toBe('Pip\'s Work model: opus · not available')
     expect(pickerOf('Work').title).toBe('Not available now. Pick another model.')

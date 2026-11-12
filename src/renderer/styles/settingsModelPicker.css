@@ -35,8 +35,25 @@
   text-overflow: ellipsis;
 }
 
-/* The entry after the model, muted as the menu's subtitle; cut with the label, never wrapped. */
+/* The entry after the model, muted as the menu's subtitle. Model and entry each cut with an ellipsis, never wrap: the
+   entry gives way first, down to a few letters, so a narrow control still shows the model's name and which entry. */
+.settings-model-btn-label.with-entry {
+  display: flex;
+  gap: 4px;
+}
+
+.settings-model-btn-model,
 .settings-model-btn-entry {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-btn-entry {
+  flex-shrink: 100;
+  min-width: 3.5em;
   color: var(--text-secondary);
 }
 

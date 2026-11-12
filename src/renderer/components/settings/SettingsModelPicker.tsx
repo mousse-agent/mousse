@@ -106,7 +106,10 @@ export function SettingsModelPicker({
         onClick={() => setOpen((current) => !current)}
       >
         {selected && <ProviderIcon providerId={providerId} size={14} />}
-        <span className="settings-model-btn-label">{label}{where ? <span className="settings-model-btn-entry"> · {where}</span> : null}</span>
+        {/* With an entry, model and entry each shrink and cut with an ellipsis, so a narrow control still shows both. */}
+        <span className={`settings-model-btn-label${where ? ' with-entry' : ''}`}>
+          {where ? <><span className="settings-model-btn-model">{label}</span><span className="settings-model-btn-entry">· {where}</span></> : label}
+        </span>
         <ChevronDown size={12} aria-hidden="true" />
       </button>
       {open && !disabled && (
