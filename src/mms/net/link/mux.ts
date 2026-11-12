@@ -1,5 +1,5 @@
 import type { Duplex } from 'node:stream'
-import type { Clock, Mux, MuxMessage } from '../contracts'
+import type { Clock, Mux, MuxMessage, MuxSendOptions } from '../contracts'
 import { systemClock } from '../clock'
 import { NetError } from '../../../shared/net/errors'
 import { FRAGMENT_STALL_MS, MAX_FRAME_BYTES } from '../../../shared/net/limits'
@@ -81,7 +81,12 @@ export class StreamMux implements Mux {
     stream.on('end', this.ended)
     stream.on('close', this.ended)
   }
-  send(lane: Lane, message: MuxMessage, signal?: AbortSignal): Promise<void> {
+  send(
+    lane: Lane,
+    message: MuxMessage,
+    signal?: AbortSignal,
+    options: MuxSendOptions = {}
+  ): Promise<void> {
     if (this.closed)
       return Promise.reject(this.closeError ?? new NetError('route_unreachable', 'Mux is closed.'))
     if (signal?.aborted)
@@ -106,6 +111,12 @@ export class StreamMux implements Mux {
     return new Promise((resolve, reject) => {
       const send: Send = { bytes, offset: 0, resolve, reject, signal }
       const abort = () => {
+        if (state.active === send && send.offset > 0 && options.finishStarted) {
+          // The rest of a started message is written as it would have been; it was whole and checked
+          // when the caller built it. Nothing after it is affected, and the connection stays up.
+          send.abort = undefined
+          return
+        }
         if (state.active === send && send.offset > 0) {
           const cancelled = new NetError('cancelled', 'A fragmented send was cancelled.', {
             cause: signal?.reason

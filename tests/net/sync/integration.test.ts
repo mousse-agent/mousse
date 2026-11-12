@@ -199,6 +199,39 @@ function oversizedRecord(seq: number, bytes: number): StoredRecord {
 function handlers() {
   return { onRecord: vi.fn(), onCaughtUp: vi.fn(), onSnapshotInstalled: vi.fn(), onError: vi.fn() }
 }
+/** Appends `count` signed records of about `bytes` each to the owner's stream. */
+function appendLarge(p: Awaited<ReturnType<typeof profiles>>, count: number, bytes: number) {
+  const user = p.aIdentity.self()!.user,
+    node = p.aIdentity.self()!.node
+  for (let i = 0; i < count; i++) {
+    const envelope = encodeEnvelope({
+      v: 1,
+      minor: 0,
+      id: newId('event'),
+      stream: p.stream.id,
+      type: 'message.posted',
+      crit: false,
+      author: { user, node, keyEpoch: 1 },
+      ts: systemClock.now(),
+      body: { text: 'x'.repeat(bytes) }
+    })
+    p.aStore.appendAsAuthority(p.stream.id, {
+      id: JSON.parse(Buffer.from(envelope).toString()).id,
+      envelope,
+      sig: p.aKeys.signAsNode(envelope),
+      recvTs: systemClock.now()
+    })
+  }
+}
+type MuxSend = (lane: string, message: { header: { t: string } }) => Promise<void>
+/** The owner's mux lanes, snapshot jobs and authority, which these tests watch or switch. */
+function internals(session: NetSyncSession) {
+  return session as unknown as {
+    mux: { send: MuxSend; lanes: { bulk: { active?: { offset: number } } } }
+    snapshotJobs: Map<string, unknown>
+    options: { authority: NodeStreamAuthority }
+  }
+}
 
 describe('durable subscription fault boundaries', () => {
   it('keeps live 105 buffered during replay, then resumes from durable 89 after a cut', async () => {
@@ -596,6 +629,123 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(sent.filter((t) => t === 'caughtUp')).toHaveLength(1)
     expect(p.bStore.cursor(p.stream.id).seq).toBe(3)
     expect(h.onError).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
+  it('finishes a snapshot chunk being written when the reader lets the stream go, and keeps the link', async () => {
+    const p = await profiles()
+    appendLarge(p, 4, 40 * 1024)
+    const other = { ...p.stream, id: newId('stream') }
+    p.aStore.createStream(other, 1)
+    p.bStore.createStream(other, 1)
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const owner = internals(connection.a)
+    // A slow link from the owner, so the 160 KiB chunk is still being written when the reader lets go.
+    connection.pair.backward.slow(1024)
+    vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
+    const h = handlers(),
+      subscription = connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(owner.mux.lanes.bulk.active?.offset ?? 0).toBeGreaterThan(0), {
+      interval: 1,
+      timeout: 10_000
+    })
+    subscription.close()
+    await vi.waitFor(() => expect(owner.snapshotJobs.size).toBe(0), { interval: 1 })
+    await vi.waitFor(() => expect(owner.mux.lanes.bulk.active).toBeUndefined(), {
+      interval: 1,
+      timeout: 10_000
+    })
+    // Another stream on the same connection is still served.
+    const next = handlers()
+    connection.b.subscribe(other.id, next)
+    await vi.waitFor(() => expect(next.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+    expect(errors).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
+  })
+  it('ends a snapshot on a block without closing the link or starting another chunk', async () => {
+    const p = await profiles()
+    // About three 512 KiB chunks.
+    appendLarge(p, 30, 40 * 1024)
+    const other = { ...p.stream, id: newId('stream') }
+    p.aStore.createStream(other, 1)
+    p.bStore.createStream(other, 1)
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const owner = internals(connection.a)
+    const sent = vi.spyOn(owner.mux, 'send')
+    const chunks = () =>
+      sent.mock.calls.filter(([, message]) => message.header.t === 'snapshot.chunk').length
+    connection.pair.backward.slow(4 * 1024)
+    vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(owner.mux.lanes.bulk.active?.offset ?? 0).toBeGreaterThan(0), {
+      interval: 1,
+      timeout: 10_000
+    })
+    expect(chunks()).toBe(1)
+    await connection.a.endServing('forbidden')
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledWith('forbidden'), { timeout: 10_000 })
+    await vi.waitFor(() => expect(owner.mux.lanes.bulk.active).toBeUndefined(), {
+      interval: 1,
+      timeout: 10_000
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The chunk under way finished; no other started after the block.
+    expect(chunks()).toBe(1)
+    expect(owner.snapshotJobs.size).toBe(0)
+    expect(errors).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+    expect(h.onError).toHaveBeenCalledOnce()
+    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+    const next = handlers()
+    connection.b.subscribe(other.id, next)
+    await vi.waitFor(() => expect(next.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+  })
+  it('ends a caught-up stream with forbidden when its read right is gone at the next record', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    // The reader's `read` capability is removed, or it leaves the space, without a block.
+    vi.spyOn(internals(connection.a).options.authority, 'canRead').mockReturnValue(false)
+    const received = vi.spyOn(
+      connection.b as unknown as { receive(message: { header: { t: string } }): Promise<void> },
+      'receive'
+    )
+    const row = p.record(1)
+    p.aStore.appendAsAuthority(p.stream.id, {
+      id: JSON.parse(Buffer.from(row.envelope).toString()).id,
+      envelope: row.envelope,
+      sig: row.sig,
+      recvTs: row.recvTs
+    })
+    const [published] = await Promise.allSettled([connection.a.publishRecord(p.stream.id, row)])
+    expect(published.status).toBe('fulfilled')
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledWith('forbidden'))
+    expect(h.onError).toHaveBeenCalledOnce()
+    const types = received.mock.calls.map(([message]) => message.header.t)
+    expect(types).not.toContain('events')
+    expect(types).not.toContain('rosterUpdate')
+    expect(h.onRecord).not.toHaveBeenCalled()
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
     expect(errors).toEqual([])
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
@@ -1841,6 +1991,36 @@ describe('a stream the peer loses the right to read while it is served', () => {
     await expectEndedAlone()
     expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
     expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('ends a caught-up newer subscription that replaced a replay when access goes', async () => {
+    const { p, connection, log, expectEndedAlone } = await setup()
+    const send = (connection.b as unknown as { send(message: unknown): Promise<void> }).send.bind(
+      connection.b
+    )
+    let replaced = false
+    log.after(async (frame) => {
+      // The first replay page is on its way; a newer subscription, already at the head, takes its place
+      // and is caught up before access goes.
+      if (frame.t !== 'rosterUpdate' || replaced) return
+      replaced = true
+      await send({ t: 'subscribe', stream: p.stream.id, after: { epoch: 1, seq: 600 } })
+      await vi.waitFor(() =>
+        expect(log.sent.some((sent) => sent.t === 'caughtUp' && sent.stream === p.stream.id)).toBe(
+          true
+        )
+      )
+      const canRead = vi.mocked(
+        (connection.a as unknown as { options: { authority: NodeStreamAuthority } }).options
+          .authority.canRead
+      )
+      const before = canRead.getMockImplementation()!
+      canRead.mockImplementation((stream, peer) => stream !== p.stream.id && before(stream, peer))
+      log.sent.push({ t: 'lost' })
+    })
+    await send({ t: 'subscribe', stream: p.stream.id, after: { epoch: 1, seq: 0 } })
+    await vi.waitFor(() => expect(replaced).toBe(true))
+    await expectEndedAlone()
   })
 })
 

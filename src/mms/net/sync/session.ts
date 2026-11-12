@@ -55,6 +55,7 @@ import type {
   IdentityService,
   Mux,
   MuxMessage,
+  MuxSendOptions,
   QualifiedClockEstimate,
   SecureChannel,
   SessionState,
@@ -716,7 +717,13 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       !this.serving.get(stream)?.live
     )
       return
-    this.authorizedRead(stream)
+    try {
+      this.authorizedRead(stream)
+    } catch (error) {
+      if (!this.readLost(error)) throw error
+      void this.failServingStream(stream, 'forbidden').catch((cause) => this.fail(cause))
+      return
+    }
     // One delta per session is written at a time, so deltas never hold more than one message in
     // the control lane; newer ones replace older unsent ones with the same key. A slow link then
     // sees fewer deltas instead of a full mux queue that would refuse pings and snapshot requests.
@@ -737,6 +744,14 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     for (const [id, next] of this.deltas) {
       this.deltas.delete(id)
       if (this.currentState !== 'open' || !this.serving.get(next.stream)?.live) continue
+      try {
+        // The read right may have gone while the delta waited; it is dropped, and the stream ends.
+        this.authorizedRead(next.stream)
+      } catch (error) {
+        if (this.readLost(error))
+          void this.failServingStream(next.stream, 'forbidden').catch((cause) => this.fail(cause))
+        continue
+      }
       this.deltaSending = true
       void this.send({ t: 'ephemeral', stream: next.stream, kind: 'delta', data: next.data })
         .catch((error) => {
@@ -836,8 +851,16 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     signal: AbortSignal
   ): Promise<void> {
     if (!this.serving.get(stream)?.live || this.currentState !== 'open') return
-    this.authorizedRead(stream)
-    await this.sendRecords(stream, [record], false, undefined, signal)
+    try {
+      this.authorizedRead(stream)
+      await this.sendRecords(stream, [record], false, undefined, signal)
+    } catch (error) {
+      if (!this.readLost(error)) throw error
+      // A caught-up reader that lost the right to read the stream (its `read` capability removed, removed
+      // from the space) is told on that stream alone. Without this it stays live on both sides and
+      // nothing more arrives. None of the record is sent.
+      await this.failServingStream(stream, 'forbidden')
+    }
   }
 
   /** Ask the subscriber to resync from a snapshot at the current head; it keeps its subscription and gets no error. */
@@ -869,7 +892,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   /**
    * Ends everything this session serves to its peer, as a block on the peer does: each live
    * subscription gets `code` and each snapshot transfer stops. The connection stays up, so
-   * the peer can still be unblocked later without a new handshake.
+   * the peer can still be unblocked later without a new handshake. A snapshot chunk already
+   * partly written finishes (its records were read and checked before the block); no other
+   * chunk starts.
    */
   async endServing(code: NetErrorCode): Promise<void> {
     if (this.currentState !== 'open') return
@@ -1656,8 +1681,19 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       }
     } catch (error) {
       if (!this.readLost(error)) throw error
-      // A newer subscription of the stream, or none, is left as it is.
       if (this.serving.get(stream) === attempt) await this.failServingStream(stream, 'forbidden')
+      // A newer subscription replaced this one. It may be caught up already, and then nothing checks
+      // its read right until a record is published, so it is checked now.
+      else await this.endIfReadLost(stream)
+    }
+  }
+  /** Ends the stream served now with `forbidden` if the peer may no longer read it. */
+  private async endIfReadLost(stream: StreamId): Promise<void> {
+    if (!this.serving.has(stream)) return
+    try {
+      this.authorizedRead(stream)
+    } catch (error) {
+      if (this.readLost(error)) await this.failServingStream(stream, 'forbidden')
     }
   }
   /** One replay page, or undefined when the store no longer holds the history after `cursor`. */
@@ -1711,6 +1747,10 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     const cancelled = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     try {
       let done = false
+      // Cancellation (an unsubscribe, a block, a lost read right) is checked before each chunk. A chunk
+      // still waiting to be written is withdrawn; one partly written finishes, because stopping half way
+      // would leave the connection unusable. Its records were read and checked before the cancellation,
+      // and a reader that no longer subscribes ignores it.
       while (!done && !cancelled.aborted) {
         this.authorizedRead(stream)
         const page = reader.next(512 * 1024, 499)
@@ -1731,6 +1771,8 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       if (attempt && current === attempt) await this.failServingStream(stream, 'forbidden')
       else if (!attempt && !current)
         await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
+      // A newer subscription, which may be caught up already, is checked now.
+      else await this.endIfReadLost(stream)
     } finally {
       if (this.snapshotJobs.get(stream) === job) {
         this.snapshotJobs.delete(stream)
@@ -1745,6 +1787,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     snapshot?: { target: StreamHead; done: boolean },
     signal?: AbortSignal
   ): Promise<void> {
+    // A snapshot transfer stopped part way (an unsubscribe, a block, a lost read right) lets the message
+    // already being written finish rather than close the connection; `serveSnapshot` starts no other.
+    const sending = snapshot ? { finishStarted: true } : undefined
     // A fresh subscriber needs the original signed lease before historical events.
     const evidence = new Map<string, Signed>()
     for (const record of records) {
@@ -1767,7 +1812,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       throw new NetError('too_large')
     for (const roster of evidence.values()) {
       this.authorizedRead(stream)
-      await this.send({ t: 'rosterUpdate', roster }, [], signal)
+      await this.send({ t: 'rosterUpdate', roster }, [], signal, sending)
     }
     this.authorizedRead(stream)
     const parts = records.flatMap((record) => [record.envelope, record.sig])
@@ -1785,7 +1830,8 @@ export class NetSyncSession implements SyncSession, TunnelLink {
           }
         : { t: 'events', stream, records: rows, replay, parts: parts.map((part) => part.length) },
       parts,
-      signal
+      signal,
+      sending
     )
   }
   private beginUpload(h: Extract<WireMessage, { t: 'blob.put.begin' }>): void {
@@ -2211,12 +2257,17 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     if (error) pending.reject(error)
     else pending.resolve(value)
   }
-  private send(header: WireMessage, parts: Uint8Array[] = [], signal?: AbortSignal): Promise<void> {
+  private send(
+    header: WireMessage,
+    parts: Uint8Array[] = [],
+    signal?: AbortSignal,
+    options?: MuxSendOptions
+  ): Promise<void> {
     if (this.revocationFence) return Promise.reject(this.revocationFence)
     if (this.currentState === 'closed' || this.currentState === 'closing')
       return Promise.reject(new NetError('peer_offline'))
     return this.startJob(
-      () => this.mux.send(laneFor(header), { header, parts }, signal),
+      () => this.mux.send(laneFor(header), { header, parts }, signal, options),
       this.scope(header)
     )
   }

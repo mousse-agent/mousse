@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Duplex } from 'node:stream'
 import type { Lane, WireMessage } from '../../../src/shared/net'
 import { NetError } from '../../../src/shared/net/errors'
@@ -258,6 +258,26 @@ describe('real duplex mux', () => {
       code: 'route_unreachable',
       cause: { code: 'cancelled' }
     })
+  })
+  it('finishes a started message on abort with finishStarted, and withdraws one not started', async () => {
+    const { a, b, connection } = pair()
+    const received: string[] = []
+    b.onMessage((_lane, delivered) => received.push(delivered.header.t))
+    connection.forward.stall()
+    const started = new AbortController(),
+      pending = a.send('bulk', message('bulk', 3), started.signal, { finishStarted: true })
+    const waiting = new AbortController(),
+      queued = a
+        .send('bulk', message('bulk', 1), waiting.signal, { finishStarted: true })
+        .catch((error) => error)
+    await tick()
+    started.abort()
+    waiting.abort()
+    expect(await queued).toMatchObject({ code: 'cancelled' })
+    connection.forward.resume()
+    await expect(pending).resolves.toBeUndefined()
+    await expect(a.send('control', ping)).resolves.toBeUndefined()
+    await vi.waitFor(() => expect(received).toEqual(['events', 'ping']))
   })
   it('expires only when fragmented byte progress stalls, including partial headers', async () => {
     const clock = new FakeClock(),

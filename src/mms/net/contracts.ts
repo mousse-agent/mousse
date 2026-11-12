@@ -677,8 +677,23 @@ export interface MuxMessage {
  * Three lanes (control, bulk, tunnel) with independent credit windows. Control is always scheduled first;
  * bulk and tunnel take turns.
  */
+export interface MuxSendOptions {
+  /**
+   * What an abort does to a message whose first bytes are already written. By default the connection
+   * closes, since the peer cannot resynchronize after half a message. With `finishStarted` the rest of that
+   * message is written and the send resolves, so the connection stays up; a message not yet started is
+   * still withdrawn at once. The caller checks its own signal afterwards and starts nothing new.
+   */
+  finishStarted?: boolean
+}
+
 export interface Mux {
-  send(lane: Lane, message: MuxMessage, signal?: AbortSignal): Promise<void>
+  send(
+    lane: Lane,
+    message: MuxMessage,
+    signal?: AbortSignal,
+    options?: MuxSendOptions
+  ): Promise<void>
   onMessage(listener: (lane: Lane, message: MuxMessage) => void): () => void
   onClose(listener: (error?: Error) => void): () => void
   /** Bytes queued and not yet written, per lane. */
