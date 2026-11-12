@@ -1495,6 +1495,14 @@ export class LiveSession<Turn = unknown> {
   setPermissionMode(mode: Parameters<Query['setPermissionMode']>[0]): Promise<void> {
     return this.query ? this.query.setPermissionMode(mode) : Promise.resolve()
   }
+  /**
+   * Switches the running process's model and effort (issue #359). Rejects when there is no process to switch, so the
+   * owner starts a new one rather than believe the switch was made.
+   */
+  applyFlagSettings(settings: Parameters<Query['applyFlagSettings']>[0]): Promise<void> {
+    if (!this.query || typeof this.query.applyFlagSettings !== 'function') return Promise.reject(new Error('This Claude Code cannot switch settings in place'))
+    return this.query.applyFlagSettings(settings)
+  }
 
   interrupt(): Promise<void> {
     return this.query ? Promise.resolve(this.query.interrupt()).then(() => undefined) : Promise.resolve()

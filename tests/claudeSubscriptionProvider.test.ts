@@ -1447,20 +1447,17 @@ it('records successful official file edits only once without asking', async () =
 })
 
 
-it('starts a fresh Claude session with canonical history when the model changes', async () => {
+it('resumes the same Claude session, with no replayed history, when the model changes', async () => {
   const inputs: Array<{ options: Options; prompt: unknown }> = []
   const { service, home } = fixture((input) => { inputs.push(input); return fakeQuery([result]) })
   await service.chat(chatInput(home))
   service.commitConversation('thread', 'full canonical history')
   await service.chat({ ...chatInput(home), model: 'opus:medium', history: 'full canonical history' })
-  expect(inputs[1].options.resume).toBeUndefined()
+  expect(inputs[1].options).toMatchObject({ model: 'opus', effort: 'medium', resume: 'vendor-session' })
   const prompt: unknown[] = []
   for await (const message of inputs[1].prompt as AsyncIterable<unknown>) prompt.push(message)
-  expect(JSON.stringify(prompt)).toContain('full canonical history')
-  expect(inputs[1].options.model).toBe('opus')
-  service.commitConversation('thread', 'next history')
-  await service.chat({ ...chatInput(home), model: 'opus:high', history: 'next history' })
-  expect(inputs[2].options.resume).toBe('vendor-session')
+  expect(JSON.stringify(prompt)).not.toContain('full canonical history')
+  expect(JSON.stringify(prompt)).not.toContain('Previous conversation')
 })
 
 it('reports the vendor OAuth refresh lock as recoverable without committing a session', async () => {

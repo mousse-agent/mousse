@@ -288,6 +288,14 @@ describe('settleFinishedTurn', () => {
     expect(steered.order).toEqual(['a1', 'c0', 's1', 'n1', 'c1', 't1'])
   })
 
+  it('leaves a model switch marker where it is, never as the answer or a note', () => {
+    const marker = { id: 'h1', role: 'assistant', parts: [{ type: 'text', text: 'Claude Opus 5.5 → Claude Sonnet 5.5' }], metadata: { contextHandoff: { from: { model: 'opus' }, to: { model: 'sonnet' } } } }
+    const turn = settle([marker, step('t1', 'tool-Thinking'), said('a1', 'Done.')])
+    expect(turn.order).toEqual(['h1', 't1', 'a1'])
+    expect(turn.grouped).toEqual(['t1'])
+    expect(turn.notes).toEqual([])
+  })
+
   it('still ends a stopped turn on text written after its work', () => {
     const turn = settle([said('n1', 'Checking.'), step('c1'), said('a1', 'Half an ans')], true)
     expect(turn.order).toEqual(['n1', 'c1', 'a1'])
