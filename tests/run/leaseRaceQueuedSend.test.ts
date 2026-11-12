@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
-import { holdQueueAfterStop, listPendingQueue } from '../../src/mms/queue/ThreadMessageQueue'
+import { holdQueueAfterStop, listPendingQueue, reorderQueuedMessages } from '../../src/mms/queue/ThreadMessageQueue'
 import { mutateDurableQueue } from '../../src/mms/queue/durableQueue'
 import {
   getExecutionLeasePath,
@@ -455,6 +455,140 @@ describe('a send that lost the race for the thread lease', () => {
     await waitFor(() => ran('LEASE-PU') === 1, 'the message to run once the peer released the lease', 3_000)
     await settle(300)
     expect(ran('LEASE-PU')).toBe(1)
+    expect(listPendingQueue(store.loadMessageQueue(thread.id))).toHaveLength(0)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  })
+
+  it('waits for the lease when another process takes it between the startup drain look and its claim', async () => {
+    const thread = store.createThread('Lease taken before the startup claim')
+    orch.enqueueForThread(thread.id, 'LEASE-CL queued before the restart')
+
+    await orch.shutdown(5_000)
+    orch = createOrchestrator(home, store, [adapter])
+    // The startup drain finds the lease free and goes to claim; a peer takes the lease before the claim.
+    type Drain = (session: unknown, opts?: { managedByStartup?: boolean }) => void
+    const internals = orch as unknown as { scheduleQueueDrain: Drain }
+    const drain = internals.scheduleQueueDrain.bind(orch)
+    let leasePath = ''
+    vi.spyOn(internals, 'scheduleQueueDrain').mockImplementation((session, opts) => {
+      if (opts?.managedByStartup && !leasePath) leasePath = holdAsPeer(thread.id)
+      drain(session, opts)
+    })
+    // The app's start runs only this pass: no later look finds the peer and waits for it.
+    orch.scheduleStartupQueueRecovery()
+    await waitFor(() => leasePath !== '', 'the startup drain', 2_000)
+    await settle(800)
+    expect(adapter.turns).toHaveLength(0)
+    expect(leaseWaits().get(thread.id)?.poll).not.toBeNull()
+
+    unlinkSync(leasePath)
+    await waitFor(() => ran('LEASE-CL') === 1, 'the message to run once the peer released the lease', 3_000)
+    await settle(300)
+    expect(ran('LEASE-CL')).toBe(1)
+    expect(listPendingQueue(store.loadMessageQueue(thread.id))).toHaveLength(0)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  })
+
+  it('runs a message sent after startup without waiting for the startup drains of other threads', async () => {
+    // Two threads drain long turns at startup and take both startup slots.
+    const slow = [store.createThread('Slow startup A'), store.createThread('Slow startup B')]
+    for (const [index, thread] of slow.entries()) orch.enqueueForThread(thread.id, `SLOW-${index}`)
+    // Another process holds this thread's lease at restart: its lease wait begins at startup.
+    const thread = store.createThread('Lease wait joined after startup')
+    orch.enqueueForThread(thread.id, 'BOOT-J queued before the restart')
+    await orch.shutdown(5_000)
+    const leasePath = holdAsPeer(thread.id)
+
+    const gates: Array<() => void> = []
+    const gated = piAdapter((input) => (input.prompt.includes('SLOW') ? new Promise<string>((resolve) => gates.push(() => resolve('ok'))) : 'ok'))
+    orch = createOrchestrator(home, store, [gated])
+    orch.recoverAndDrainPendingQueues()
+    orch.scheduleStartupQueueRecovery()
+    await waitFor(() => gates.length === 2, 'both slow startup turns', 3_000)
+    expect(leaseWaits().has(thread.id)).toBe(true)
+
+    try {
+      // Later, the person sends a message to the thread while the peer still holds its lease.
+      const later = await orch.send('LATER-J sent after startup', false, { threadId: thread.id })
+      expect(later.queued).toBe(true)
+      unlinkSync(leasePath)
+      await waitFor(() => gated.turns.some((turn) => turn.prompt.includes('LATER-J')), 'the later message to run while the startup turns still run', 3_000)
+      const count = (text: string): number => gated.turns.filter((turn) => turn.prompt.includes(text)).length
+      expect(count('BOOT-J')).toBe(1)
+      expect(count('LATER-J')).toBe(1)
+      expect(gates).toHaveLength(2)
+    } finally {
+      gates.splice(0).forEach((open) => open())
+    }
+    await waitFor(() => slow.every((entry) => listPendingQueue(store.loadMessageQueue(entry.id)).length === 0), 'the slow turns to end', 3_000)
+    await settle(200)
+    const prompts = gated.turns.map((turn) => turn.prompt)
+    for (const text of ['SLOW-0', 'SLOW-1', 'BOOT-J', 'LATER-J']) expect(prompts.filter((prompt) => prompt.includes(text))).toHaveLength(1)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  })
+
+  it('marks a send and a handed-back claim that lost the lease to work in this process, and runs each once after the release', async () => {
+    const thread = store.createThread('Lease lost to a local git operation')
+    const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'git-operation' })!
+    expect(lease).not.toBeNull()
+    try {
+      // A drain claims a queued message; its turn loses the lease and hands the claim back.
+      const claimed = orch.enqueueForThread(thread.id, 'MARK-CLAIM drained during the git operation')!
+      const internals = orch as unknown as { scheduleQueueDrain: (session: unknown) => void }
+      internals.scheduleQueueDrain(orch.getOrCreateSession(thread.id))
+      const onDisk = (id: string) => store.loadMessageQueue(thread.id).find((item) => item.id === id)
+      await waitFor(() => onDisk(claimed.id)?.state === 'pending' && onDisk(claimed.id)?.waitsForLease === true, 'the handed-back claim to be marked', 2_000)
+      // A send while the git operation holds the lease.
+      const sent = await orch.send('MARK-SEND sent during the git operation', false, { threadId: thread.id })
+      expect(sent.queued).toBe(true)
+      expect(onDisk(sent.queueItem!.id)?.waitsForLease).toBe(true)
+      await settle(100)
+      expect(adapter.turns).toHaveLength(0)
+    } finally {
+      releaseExecutionLeaseHandle(lease)
+    }
+
+    await waitFor(() => ran('MARK-CLAIM') === 1 && ran('MARK-SEND') === 1, 'both messages to run after the release', 3_000)
+    await settle(300)
+    expect(ran('MARK-CLAIM')).toBe(1)
+    expect(ran('MARK-SEND')).toBe(1)
+    expect(adapter.turns).toHaveLength(2)
+    expect(listPendingQueue(store.loadMessageQueue(thread.id))).toHaveLength(0)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+  })
+
+  it('runs a send and a handed-back claim that lost the lease to this process first after a restart into a queue a Stop holds', async () => {
+    const thread = store.createThread('Lease lost locally, then a restart')
+    orch.enqueueForThread(thread.id, 'HELD-OLD queued before the Stop')
+    mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+    const lease = tryAcquireExecutionLease(store.getThreadDir(thread.id), { source: 'git-operation' })!
+    expect(lease).not.toBeNull()
+    try {
+      // A message added after the Stop goes first, as a lease wait's drain puts it, and that drain's claim loses the lease.
+      const claimed = orch.enqueueForThread(thread.id, 'MARK-CLAIM after the Stop')!
+      const ids = listPendingQueue(store.loadMessageQueue(thread.id)).map((item) => item.id)
+      mutateDurableQueue(store, thread.id, (items) => reorderQueuedMessages(items, [claimed.id, ...ids.filter((id) => id !== claimed.id)]))
+      const internals = orch as unknown as { scheduleQueueDrain: (session: unknown) => void }
+      internals.scheduleQueueDrain(orch.getOrCreateSession(thread.id))
+      const onDisk = (id: string) => store.loadMessageQueue(thread.id).find((item) => item.id === id)
+      await waitFor(() => onDisk(claimed.id)?.state === 'pending' && onDisk(claimed.id)?.waitsForLease === true, 'the handed-back claim to be marked', 2_000)
+      const sent = await orch.send('MARK-SEND after the Stop', false, { threadId: thread.id })
+      expect(onDisk(sent.queueItem!.id)?.waitsForLease).toBe(true)
+      expect(onDisk(sent.queueItem!.id)?.heldAfterStop).toBeUndefined()
+      expect(adapter.turns).toHaveLength(0)
+
+      // The process stops while the git operation still runs, and the operation ends before the next one starts.
+      await orch.shutdown(5_000)
+    } finally {
+      releaseExecutionLeaseHandle(lease)
+    }
+    orch = createOrchestrator(home, store, [adapter])
+    orch.recoverAndDrainPendingQueues()
+    orch.scheduleStartupQueueRecovery()
+
+    await waitFor(() => ran('HELD-OLD') === 1, 'all three messages to run', 3_000)
+    await settle(300)
+    expect(prompts().map((prompt) => (prompt.includes('MARK-CLAIM') ? 'CLAIM' : prompt.includes('MARK-SEND') ? 'SEND' : 'OLD'))).toEqual(['CLAIM', 'SEND', 'OLD'])
     expect(listPendingQueue(store.loadMessageQueue(thread.id))).toHaveLength(0)
     expect(leaseWaits().has(thread.id)).toBe(false)
   })
