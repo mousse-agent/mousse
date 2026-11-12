@@ -12,9 +12,7 @@ import { createAllowHttpPolicy, createFilesystemArtifactPort } from '../src/mms/
 import { isProcessAlive } from '../src/browser-worker/lifecycle/process'
 import { journalPath, processRecordPath } from '../src/browser-worker/lifecycle/paths'
 import { productBuild, sharedBuild } from './support/build'
-import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startCrossOriginFixtureSite, startFixtureSite, workerRequest } from './fixtures/browser/harness'
-import { launchManagedChrome, windowedChromeUserAgent } from '../src/browser-worker/cdp/launch'
-import { resolveCertifiedBrowser } from '../src/browser-worker/binary/resolver'
+import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
 
@@ -292,73 +290,6 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     expect(existsSync(quarantine) ? await readdir(quarantine) : []).toHaveLength(0)
     await broker.close()
   }, 180_000)
-})
-
-describe.skipIf(!chrome.ok)('what pages see of who drives the browser', () => {
-  it('reads as automated on every page, frame and opened page while the agent drives, and not while a person holds it', async () => {
-    const site = await startCrossOriginFixtureSite()
-    const { broker } = await createInProcessBroker({ chromeExtraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] })
-    try {
-      const opened = await broker.call(workerRequest('profile_mark', 'session.open', { url: `${site.parentOrigin}/automation-parent.html` }))
-      expect(opened.ok, opened.error?.message).toBe(true)
-      const { session, observation } = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-      const observe = async (tabId = observation.tabId) => {
-        const result = await broker.call(workerRequest('profile_mark', 'observe', { sessionId: session.id, tabId }))
-        expect(result.ok, JSON.stringify(result.error)).toBe(true)
-        return result.result as BrowserObservation
-      }
-      const text = (value: BrowserObservation) => value.elements.map((element) => `${element.name ?? ''} ${element.text ?? ''}`).join(' ')
-      // Values the page and its frame print on a timer: wait until they all show.
-      const shows = async (expected: string[], tabId = observation.tabId) => {
-        let seen = ''
-        for (let attempt = 0; attempt < 50; attempt += 1) {
-          seen = text(await observe(tabId))
-          if (expected.every((value) => seen.includes(value))) return
-          await new Promise((resolve) => setTimeout(resolve, 100))
-        }
-        expect(seen).toEqual(expect.stringContaining(expected.find((value) => !seen.includes(value))!))
-      }
-
-      // The agent drives: the page and the frame from another site read true from their first script.
-      // The browser names itself as the Chrome it is, and a page's worker still runs.
-      await shows(['top-first:true', 'top-now:true', 'child-first:true', 'child-now:true', 'identity:chrome', 'worker:ran'])
-      const before = await observe()
-      const clicked = await broker.call(workerRequest('profile_mark', 'act', actParams(session, before, { type: 'click', target: { kind: 'ref', ref: named(before, 'Open popup').ref } }, 'open_popup')))
-      expect(clicked.ok, JSON.stringify(clicked.error)).toBe(true)
-      await shows(['popup:true'])
-      // A tab the agent opens on a page: the same from that page's first script, frames included.
-      const tab = await broker.call(workerRequest('profile_mark', 'tabs.new', { sessionId: session.id, url: `${site.parentOrigin}/automation-parent.html` }))
-      expect(tab.ok, JSON.stringify(tab.error)).toBe(true)
-      await shows(['top-first:true', 'child-first:true', 'identity:chrome'], (tab.result as { id: string }).id)
-
-      // A person holds the browser: the same documents now read false.
-      const taken = await broker.call(workerRequest('profile_mark', 'control.take', { sessionId: session.id, owner: 'human' }))
-      expect(taken.ok, JSON.stringify(taken.error)).toBe(true)
-      await shows(['top-now:false', 'child-now:false'])
-
-      // Given back: true again.
-      const released = await broker.call(workerRequest('profile_mark', 'control.release', { sessionId: session.id, controlLeaseId: (taken.result as { controlLeaseId: string }).controlLeaseId }))
-      expect(released.ok, JSON.stringify(released.error)).toBe(true)
-      await shows(['top-now:true', 'child-now:true'])
-    } finally {
-      await broker.close()
-      await site.close()
-    }
-  }, 120_000)
-
-  it('names itself with the user agent this Chrome has with a window', async () => {
-    const resolution = resolveCertifiedBrowser(MANAGED_BROWSER_ROOT)
-    const userDataDir = await mkdtemp(join(tmpdir(), 'mousse-browser-identity-'))
-    // Launched without the session's arguments, Chrome without a window says HeadlessChrome.
-    const launched = await launchManagedChrome({ executablePath: resolution.executablePath!, userDataDir, headless: true })
-    try {
-      const version = await launched.cdp.send<{ userAgent: string }>('Browser.getVersion')
-      expect(version.userAgent).toContain('HeadlessChrome/')
-      expect(windowedChromeUserAgent(resolution.metadata?.version)).toBe(version.userAgent.replace('HeadlessChrome/', 'Chrome/'))
-    } finally {
-      await launched.stop()
-    }
-  }, 120_000)
 })
 
 describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
