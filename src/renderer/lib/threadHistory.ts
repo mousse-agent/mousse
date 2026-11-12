@@ -3,12 +3,13 @@ import { isThreadStarted } from '../../shared/threadTitle'
 import type { Thread } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
+import { activeRailPage, openRailPage } from './railPages'
 import { selectThread } from './threadActions'
 
 /**
- * The window's thread history, like a browser's: every thread opened in this window, in order, and
- * where in that list the window is. Back and forward walk it; opening another thread after going back
- * drops what was ahead. Kept per window and never saved.
+ * The window's thread history, like a browser's: every thread (and Automations or Usage page) opened in
+ * this window, in order, and where in that list the window is. Back and forward walk it; opening
+ * another one after going back drops what was ahead. Kept per window and never saved.
  */
 export interface ThreadHistory {
   entries: string[]
@@ -80,26 +81,50 @@ function chatThreadIds(): Set<string> {
   return new Set(useChatsStore.getState().snapshot.chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : [])))
 }
 
-/** `openableThread` against the current store. */
-export function canOpenFromHistory(threadId: string): boolean {
-  if (chatThreadIds().has(threadId)) return false
-  return openableThread(useAppStore.getState().threads.find((thread) => thread.id === threadId))
+/**
+ * The pages that open over the workspace and count as places in the history, as entries `page:<name>`.
+ * Settings is not one: it has its own Back and makes the rest of the window inert.
+ */
+export type HistoryPage = 'automations' | 'usage'
+const PAGE_ENTRY = 'page:'
+export const HISTORY_PAGE_TITLES: Record<HistoryPage, string> = { automations: 'Automations', usage: 'Usage' }
+
+/** The page a history entry stands for, or null for a thread. */
+export function historyPage(entry: string): HistoryPage | null {
+  if (!entry.startsWith(PAGE_ENTRY)) return null
+  const page = entry.slice(PAGE_ENTRY.length)
+  return page === 'automations' || page === 'usage' ? page : null
+}
+
+/** The history page the window shows, or null while it shows the workspace (or Settings). */
+function shownPage(state: Pick<ReturnType<typeof useAppStore.getState>, 'scheduledOpen' | 'usageOpen' | 'settingsOpen'>): HistoryPage | null {
+  const page = activeRailPage(state)
+  return page === 'automations' || page === 'usage' ? page : null
+}
+
+/** `openableThread` against the current store; a page can always be opened again. */
+export function canOpenFromHistory(entry: string): boolean {
+  if (historyPage(entry)) return true
+  if (chatThreadIds().has(entry)) return false
+  return openableThread(useAppStore.getState().threads.find((thread) => thread.id === entry))
 }
 
 /** Opens the history entry at `index`. When the switch is refused (unsaved changes kept), the window stays where it was. */
 export async function goToHistoryIndex(index: number): Promise<void> {
   const store = useThreadHistoryStore.getState()
-  const threadId = store.entries[index]
-  if (threadId === undefined || index === store.index) return
+  const entry = store.entries[index]
+  if (entry === undefined || index === store.index) return
   const from = store.index
+  const page = historyPage(entry)
   // Moved first, so the switch below is read as a step through the history, not a new visit.
   useThreadHistoryStore.setState({ index })
   try {
-    await selectThread(threadId)
+    if (page) await openRailPage(page)
+    else await selectThread(entry)
   } finally {
-    if (useAppStore.getState().activeThreadId !== threadId && useThreadHistoryStore.getState().index === index) {
-      useThreadHistoryStore.setState({ index: from })
-    }
+    const state = useAppStore.getState()
+    const arrived = page ? shownPage(state) === page : state.activeThreadId === entry && shownPage(state) === null
+    if (!arrived && useThreadHistoryStore.getState().index === index) useThreadHistoryStore.setState({ index: from })
   }
 }
 
@@ -110,19 +135,33 @@ export function stepHistory(direction: 1 | -1): Promise<void> {
 }
 
 /**
- * Keeps the history in step with the open thread: every thread the window opens is a visit, except a
- * Chats conversation. A profile switch starts a new history. Returns what stops it.
+ * Keeps the history in step with the window: every thread it opens is a visit, except a Chats
+ * conversation, and so are Automations and Usage. Leaving one of those pages for the workspace is a
+ * visit to the thread it shows. A profile switch starts a new history. Returns what stops it.
  */
 export function trackThreadHistory(): () => void {
+  let stopped = false
   const record = (threadId: string | null) => {
     if (!threadId || chatThreadIds().has(threadId)) return
     useThreadHistoryStore.getState().visit(threadId)
   }
-  record(useAppStore.getState().activeThreadId)
-  return useAppStore.subscribe((state, previous) => {
+  const initial = useAppStore.getState()
+  const initialPage = shownPage(initial)
+  if (initialPage) useThreadHistoryStore.getState().visit(PAGE_ENTRY + initialPage)
+  else record(initial.activeThreadId)
+  const unsubscribe = useAppStore.subscribe((state, previous) => {
     if (state.profileId !== previous.profileId) useThreadHistoryStore.getState().reset()
-    if (state.activeThreadId !== previous.activeThreadId) record(state.activeThreadId)
+    const page = shownPage(state)
+    const before = shownPage(previous)
+    if (page && page !== before) useThreadHistoryStore.getState().visit(PAGE_ENTRY + page)
+    // Back to the workspace: once the thread being opened, if any, has been switched to in the same task.
+    else if (!page && before) queueMicrotask(() => { if (!stopped && !shownPage(useAppStore.getState())) record(useAppStore.getState().activeThreadId) })
+    if (!page && state.activeThreadId !== previous.activeThreadId) record(state.activeThreadId)
   })
+  return () => {
+    stopped = true
+    unsubscribe()
+  }
 }
 
 /** The mouse's back and forward buttons, as `MouseEvent.button` reports them. */

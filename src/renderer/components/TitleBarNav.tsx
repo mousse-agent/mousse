@@ -8,7 +8,9 @@ import { selectThread } from '../lib/threadActions'
 import {
   canOpenFromHistory,
   goToHistoryIndex,
+  HISTORY_PAGE_TITLES,
   historyList,
+  historyPage,
   stepHistory,
   stepTarget,
   useThreadHistoryStore
@@ -106,6 +108,12 @@ export function NavMenu({ anchorRef, label, rows, onClose }: NavMenuProps) {
   )
 }
 
+/** A history entry's name when it is a page (Automations, Usage). */
+function pageTitle(entry: string): string | undefined {
+  const page = historyPage(entry)
+  return page ? HISTORY_PAGE_TITLES[page] : undefined
+}
+
 /** The project a thread is in, by name, for the history list. */
 function useProjectNames(): (threadId: string) => string | undefined {
   const threads = useAppStore((s) => s.threads)
@@ -122,8 +130,8 @@ export function HistoryButtons() {
   // Read so the buttons update when a thread in the history is archived or deleted.
   const threads = useAppStore((s) => s.threads)
   const projectOf = useProjectNames()
-  const canBack = useMemo(() => stepTarget(history, -1, canOpenFromHistory) !== null, [history, threads])
-  const canForward = useMemo(() => stepTarget(history, 1, canOpenFromHistory) !== null, [history, threads])
+  const canBack = stepTarget(history, -1, canOpenFromHistory) !== null
+  const canForward = stepTarget(history, 1, canOpenFromHistory) !== null
   const backTitle = useShortcutTitle('Back', 'thread.back')
   const forwardTitle = useShortcutTitle('Forward', 'thread.forward')
   const [menu, setMenu] = useState<-1 | 1 | null>(null)
@@ -185,7 +193,7 @@ export function HistoryButtons() {
 
   const rows: NavMenuRow[] = menu === null ? [] : historyList(history, menu, canOpenFromHistory).map(({ index, threadId }) => ({
     key: `${index}`,
-    label: threads.find((thread) => thread.id === threadId)?.name.trim() || 'New thread',
+    label: pageTitle(threadId) ?? (threads.find((thread) => thread.id === threadId)?.name.trim() || 'New thread'),
     meta: projectOf(threadId),
     onSelect: () => void goToHistoryIndex(index).catch(logFailure('Opening a thread from the history'))
   }))

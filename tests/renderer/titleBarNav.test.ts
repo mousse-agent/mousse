@@ -27,6 +27,7 @@ import {
 import { hiddenSegmentCount, siblingThreads, threadPath } from '../../src/renderer/lib/threadPath'
 import { setThreadPathInTitleBar } from '../../src/renderer/lib/threadPathSetting'
 import { useSidebarRevealStore } from '../../src/renderer/lib/sidebarReveal'
+import { selectThread } from '../../src/renderer/lib/threadActions'
 import { ThreadPathView, TitleBarNav } from '../../src/renderer/components/TitleBarNav'
 import { SubagentParentBar } from '../../src/renderer/components/SubagentParentBar'
 import { useAppStore } from '../../src/renderer/stores/appStore'
@@ -60,7 +61,7 @@ const threads: Thread[] = [
 
 type Patch = Partial<ReturnType<typeof useAppStore.getState>>
 const initial = useAppStore.getInitialState()
-const keys = ['threads', 'projects', 'activeThreadId', 'profileId', 'sidebarMode', 'settingsOpen', 'threadsSidebarOpen', 'threadsSidebarView'] as const
+const keys = ['threads', 'projects', 'activeThreadId', 'profileId', 'sidebarMode', 'settingsOpen', 'scheduledOpen', 'usageOpen', 'threadsSidebarOpen', 'threadsSidebarView'] as const
 const original = Object.fromEntries(keys.map((key) => [key, initial[key]])) as Patch
 /** Server rendering reads the store's initial state, so patch both it and the live state. */
 function setStore(patch: Patch) {
@@ -80,7 +81,7 @@ function mount(element: ReturnType<typeof createElement>) {
 
 beforeEach(() => {
   ;(window as unknown as { mousse: unknown }).mousse = { threads: { select: vi.fn(async () => undefined) }, platform: 'darwin' }
-  setStore({ threads, projects, activeThreadId: null, sidebarMode: 'projects', settingsOpen: false, threadsSidebarOpen: true, threadsSidebarView: 'projects' })
+  setStore({ threads, projects, activeThreadId: null, sidebarMode: 'projects', settingsOpen: false, scheduledOpen: false, usageOpen: false, threadsSidebarOpen: true, threadsSidebarView: 'projects' })
   useThreadHistoryStore.setState(EMPTY_THREAD_HISTORY)
   vi.mocked(confirmNavigation).mockResolvedValue(true)
 })
@@ -146,6 +147,37 @@ describe('the thread history', () => {
       expect(useThreadHistoryStore.getState().entries).toHaveLength(5)
       useAppStore.setState({ activeThreadId: 't4' })
       expect(useThreadHistoryStore.getState().entries).toEqual(['t1', 'archived', 'draft', 't2', 't4'])
+    } finally {
+      stop()
+    }
+  })
+
+  it('counts Automations and Usage as places, and back from one returns to the thread', async () => {
+    const stop = trackThreadHistory()
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+    try {
+      useAppStore.setState({ activeThreadId: 't1' })
+      useAppStore.setState({ scheduledOpen: true })
+      // Opening a thread from the page closes it: the thread is the next place, not t1 again.
+      await act(async () => { await selectThread('t2') })
+      await flush()
+      expect(useThreadHistoryStore.getState().entries).toEqual(['t1', 'page:automations', 't2'])
+      await stepHistory(-1)
+      expect(useAppStore.getState().scheduledOpen).toBe(true)
+      expect(useThreadHistoryStore.getState().index).toBe(1)
+      await stepHistory(-1)
+      await flush()
+      expect(useAppStore.getState()).toMatchObject({ scheduledOpen: false, activeThreadId: 't1' })
+      await stepHistory(1)
+      await stepHistory(1)
+      await flush()
+      expect(useAppStore.getState()).toMatchObject({ scheduledOpen: false, activeThreadId: 't2' })
+      expect(useThreadHistoryStore.getState()).toMatchObject({ entries: ['t1', 'page:automations', 't2'], index: 2 })
+      // Leaving a page with its own button is a visit to the thread the workspace shows.
+      useAppStore.setState({ usageOpen: true })
+      useAppStore.setState({ usageOpen: false })
+      await flush()
+      expect(useThreadHistoryStore.getState().entries).toEqual(['t1', 'page:automations', 't2', 'page:usage', 't2'])
     } finally {
       stop()
     }
