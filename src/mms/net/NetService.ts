@@ -10,7 +10,7 @@ import {
 } from './hosted'
 import type { NodeInviteInput } from './enrollment/service'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
-import { existsSync } from 'node:fs'
+import { existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type {
@@ -791,6 +791,14 @@ export class NetService {
     if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
       return this.transportList()
     if (this.disabled) throw new NetError('disabled')
+    // A computer removed from its devices can never reconnect with its identity: signing in sets
+    // it aside and joins again, as a computer with no identity does.
+    if (this.hosted && method === 'net.plus.login.begin' && this.selfRemoved())
+      return this.track(
+        this.serial(() => this.setAsideRemovedIdentity()).then(() =>
+          this.hosted!.joinSignIn(method, params)
+        )
+      )
     // Signing in to Mousse ID on a computer with no network identity joins the account's network.
     if (
       this.hosted &&
@@ -1242,6 +1250,103 @@ export class NetService {
     return (
       existsSync(join(this.options.profileDir, 'net', 'net.db')) && !!this.runtime().identity.self()
     )
+  }
+  /** This computer has an identity that was removed from its devices (see `NetIdentityService.selfRemoved`). */
+  private selfRemoved(): boolean {
+    try {
+      return this.hasIdentity() && this.runtime().identity.selfRemoved()
+    } catch {
+      return false
+    }
+  }
+  /**
+   * Moves the network identity of a computer removed from its devices out of the way, so signing in
+   * joins again with new keys. `net` becomes `net.removed-<time>`; nothing is deleted, and threads,
+   * chats and the rest of the profile stay as they are. Runs in the serial queue. Checked again
+   * here, so a second sign-in (or one for an identity that is not removed) changes nothing.
+   */
+  private async setAsideRemovedIdentity(): Promise<void> {
+    if (!this.selfRemoved()) return
+    await this.closeRuntime()
+    const directory = join(this.options.profileDir, 'net')
+    let aside = `${directory}.removed-${Date.now()}`
+    if (existsSync(aside)) aside += `-${randomBytes(4).toString('hex')}`
+    try {
+      renameSync(directory, aside)
+    } catch (cause) {
+      // The identity stays where it was: load it again, as it was before the sign-in.
+      try {
+        this.runtime()
+        if (this.config.enabled) await this.activateWithHosted()
+      } catch (error) {
+        this.lastError = error instanceof NetError ? error.code : 'internal'
+      }
+      this.emit()
+      throw new NetError(
+        'internal',
+        `Mousse couldn’t set this computer’s old network identity aside: ${cause instanceof Error ? cause.message : String(cause)}`
+      )
+    }
+    this.emit()
+  }
+  /**
+   * Ends the loaded runtime and everything running on it, but not the service: the next `runtime()`
+   * loads the profile's network again from disk. Follows `shutdown()`.
+   */
+  private async closeRuntime(): Promise<void> {
+    this.tunnels?.endAll('net_off')
+    this.localTunnelStore?.closeAll()
+    this.webrtc?.stop()
+    this.webrtc = undefined
+    this.transport?.admission.close()
+    this.renewal?.cancel()
+    this.renewal = undefined
+    this.presenceTimer?.cancel()
+    this.presenceTimer = undefined
+    this.rosterListener?.()
+    this.rosterListener = undefined
+    this.policyListener?.()
+    this.policyListener = undefined
+    for (const gateway of this.gateways) gateway.close()
+    for (const supervisor of this.supervisors.values()) supervisor.close()
+    for (const session of this.sessions) session.close()
+    this.supervisors.clear()
+    this.gateways.clear()
+    this.routes = undefined
+    this.localSignedRoutes = undefined
+    try {
+      await Promise.all([
+        this.transport?.teardown(),
+        ...[...this.enrollmentListeners].map((listener) => listener.teardown()),
+        this.closeDomain()
+      ])
+    } catch (error) {
+      // The domain could not drain: its stores stay open (as in `shutdown()`) and nothing moves.
+      if (!this.domainClosed) this.domainClosing = undefined
+      throw error
+    } finally {
+      this.transport = undefined
+      this.enrollmentListeners.clear()
+    }
+    await this.drainTasks(
+      [...this.sessions, ...this.drainingSessions].flatMap((session) => session.activeTasks())
+    ).catch(() => {})
+    this.sessions.clear()
+    this.drainingSessions.clear()
+    this.archiveFences.clear()
+    this.state?.streams.close()
+    this.state?.blobs.close()
+    this.state?.db.close()
+    this.state = undefined
+    this.domain = undefined
+    this.domainClosing = undefined
+    this.domainClosed = false
+    this.tunnels = undefined
+    this.presenceStore = undefined
+    this.config = defaults()
+    this.lastError = undefined
+    // Mousse ID's session was bound to the closed runtime; it starts again from the next one.
+    this.hosted?.identityReset()
   }
   /** Invites that a phone redeems over a relay rendezvous; the only route a phone can dial. */
   private async issueRendezvousInvite(
@@ -2822,7 +2927,12 @@ export class NetService {
         keystore: rt.keys.state(),
         protected: rt.keys.protectedAtRest(),
         ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
-        ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}),
+        ...(self
+          ? {
+              self: rt.identity.selfRemoved() ? { ...self, removed: true as const } : self,
+              rosterState: rt.identity.rosterState(self.user)
+            }
+          : {}),
         routes: this.transport?.routes() ?? [],
         transports: this.transport?.statuses() ?? [],
         peers: [...peers.values()],

@@ -155,7 +155,11 @@ export interface NetStatus {
    * Mousse restarts, only a passphrase can protect them.
    */
   vaultUnavailable?: boolean
-  self?: { node: NodeId; user: UserId; isAuthority: boolean }
+  /**
+   * `removed`: this computer was removed from the user's devices and cannot reconnect with this
+   * identity. Signing in to Mousse ID sets it aside and adds the computer back as a new one.
+   */
+  self?: { node: NodeId; user: UserId; isAuthority: boolean; removed?: true }
   rosterState?: RosterState
   routes: Route[]
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>

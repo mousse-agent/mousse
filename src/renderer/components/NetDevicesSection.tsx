@@ -34,6 +34,8 @@ function networkingLine(status?: NetStatus): string {
     if (status.enabled) return `No network identity yet${error}`
     return status.vaultUnavailable ? 'Off · set a passphrase to turn it on' : 'Off · turning it on creates a network identity for this device'
   }
+  // Removed on the owner computer: activation is refused, which is expected rather than a fault.
+  if (status.self.removed) return 'Removed from your devices'
   if (!status.enabled) return status.keystore === 'unlocked' ? `Off · local conversations and network records are kept${error}` : `Off · unlock below to turn it on${error}`
   if (status.keystore === 'locked') return `On · locked until you enter the passphrase${error}`
   if (status.rosterState === 'conflict') return `On · device list conflict, recovery required${error}`
