@@ -186,8 +186,9 @@ function onFrame(event: BotBrowserFrameEvent): void {
     else if (event.behind === false) delete next.behind
     return { views: { ...state.views, [event.botId]: next } }
   })
+  // Only the daemon's word, or a new picture, changes whether pictures can arrive.
   if (event.stalled) setStream(event.botId, { live: false, since: lastGood.get(event.botId) ?? Date.now() })
-  else setStream(event.botId, { live: true })
+  else if (event.live || event.frame) setStream(event.botId, { live: true })
 }
 
 /** What the bot's seen views need together: the widest, the fastest. */
@@ -239,7 +240,8 @@ async function renew(botId: string, watch: Watch): Promise<void> {
     clearTimeout(unanswered)
     if (watch.stopped) return
     put(botId, browser)
-    setStream(botId, { live: true })
+    // The daemon answers whether pictures can reach this view now: a renewal never makes it live by itself.
+    setStream(botId, browser.stalled ? { live: false, since: lastGood.get(botId) ?? Date.now() } : { live: true })
     watch.retryMs = RETRY_MS
     watch.renew = setTimeout(() => { void renew(botId, watch) }, BOT_BROWSER_WATCH_RENEW_MS)
   } catch (cause) {
@@ -289,6 +291,9 @@ function stopWatch(botId: string): void {
     unsubscribeFrames = null
   }
 }
+
+// The page goes (a reload, the window closing): its watches end now, not when the daemon's lease runs out.
+if (typeof window !== 'undefined') window.addEventListener('pagehide', () => { for (const botId of [...watches.keys()]) stopWatch(botId) })
 
 /** Whether the window is shown (not minimised or hidden). */
 function windowShown(): boolean {

@@ -49,8 +49,9 @@ export function browserStatus(view: BotBrowserView, stream: BotBrowserStream | u
     const since = sinceText(stream.since, now)
     return { text: `Not updating · ${since}`, detail: `No new picture for ${since}. Mousse keeps trying.`, live: false }
   }
-  if (view.behind) return { text: 'On another tab', detail: `${botName} is using another of its tabs. This picture updates when it's back on this one.`, live: false }
+  // The tab the owner holds is the one in front (Take over and their input bring it there): never "on another tab".
   if (view.control === 'owner') return { text: 'You have it', live: Boolean(stream?.live) }
+  if (view.behind) return { text: 'On another tab', detail: `${botName} is using another of its tabs. This picture updates when it's back on this one.`, live: false }
   return stream?.live ? { text: 'Live', live: true } : { text: '', live: false }
 }
 

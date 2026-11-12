@@ -88,6 +88,8 @@ export interface BotBrowserViewer {
 
 interface Viewer extends BotBrowserViewer {
   key: string
+  /** The connection it watches on. */
+  connectionId: string
   watchId: string
   width: number
   fps: number
@@ -100,6 +102,8 @@ interface Viewer extends BotBrowserViewer {
   timer?: { clear(): void }
   /** What it was last sent, so only changes go. */
   sent: { viewport?: string; tab?: string; cursorAt?: number | null; behind?: boolean; stalled?: boolean }
+  /** Updates its connection refused one after another as busy. */
+  busy: number
   release?: () => void
 }
 
@@ -130,6 +134,8 @@ interface BotBrowserState {
   tab?: { url: string; title: string }
   cursor?: BrowserAgentCursor
   behind?: boolean
+  /** Why pictures cannot reach the views now (the followed tab closed, the worker does not answer), until they can again. */
+  stalled?: string
   /** When a picture was last taken for `view` (an older app asks each time). */
   frameAt?: number
   lastViewedAt: number
@@ -160,6 +166,14 @@ const WATCHING_MS = 30_000
 const CAPTURE_WAIT_MS = 20_000
 /** A view not renewed for this long is dropped. */
 const VIEWER_LEASE_MS = 3 * BOT_BROWSER_WATCH_RENEW_MS
+/** The most views that watch one bot's browser at once (each app window watches it once). */
+export const MAX_BOT_BROWSER_VIEWERS = 8
+/** The largest update pushed to a view, with room under the connection event's 1 MB. */
+const MAX_UPDATE_CHARS = 1_000_000
+/** A view whose connection refuses this many updates in a row as busy is dropped. */
+const MAX_BUSY_UPDATES = 40
+/** How long a view waits after its connection refused an update as busy before the latest is tried again. */
+const BUSY_RETRY_MS = 250
 const MIN_VIEW_WIDTH = 160
 /** Activations remembered per bot for its previews. */
 const MAX_USED = 50
@@ -168,6 +182,21 @@ const LIVE_LIFECYCLES: ReadonlySet<BrowserSessionRecord['lifecycle']> = new Set(
 /** The bot's answer when it tries to act, open or load a page while its owner holds the browser. */
 function ownerHolds(): BrowserAutomationError {
   return new BrowserAutomationError({ code: 'human_controlled', message: 'Your owner is using your browser now. Wait for them to give it back, or carry on without it.' })
+}
+
+/**
+ * Why a view's connection refused an update: `gone` (it closed, or its profile changed), `busy` (too
+ * many updates waiting on it, or its writes are backed up: the latest goes again shortly) or
+ * `too_large` (the update is over the connection event limit: its picture is dropped).
+ */
+function refusal(error: unknown, viewer: BotBrowserViewer): 'gone' | 'busy' | 'too_large' {
+  if (viewer.lifetime?.aborted) return 'gone'
+  if (error instanceof Error && error.name === 'FrameTooLargeError') return 'too_large'
+  const code = (error as { code?: unknown } | null)?.code
+  if (code === 'resource_limit') return 'busy'
+  // A write backlog reads as closed, but the connection still lives while its lifetime does.
+  if (code === 'connection_closed' && viewer.lifetime) return 'busy'
+  return 'gone'
 }
 
 const defaultTimer = (fn: () => void, ms: number): { clear(): void } => {
@@ -285,6 +314,7 @@ export class BotBrowsers implements BotBrowserHost {
       ...(frame && (options.frame || options.last || !open) ? { frame } : {}),
       ...(open && state.cursor && agentCursorLive(state.cursor, this.now()) ? { cursor: state.cursor } : {}),
       ...(open && state.behind ? { behind: true } : {}),
+      ...(open && state.stalled ? { stalled: state.stalled } : {}),
       ...(this.installing && !open ? { setup: { ...this.installing } } : {})
     }
   }
@@ -294,14 +324,19 @@ export class BotBrowsers implements BotBrowserHost {
    * followed tab's pictures are pushed to it as the page paints, at most `fps` a second and `width`
    * wide (capped: 960, 15 a second, 30 while the owner holds the browser). One capture is shared by
    * every view; each has its own slot, so a slow one drops pictures and never queues them. It ends
-   * with `unwatch`, its connection, or when it is not renewed. Answers the state and the last picture.
+   * with `unwatch`, its connection, or when it is not renewed. A connection watches a bot once: a new
+   * watch on it replaces the one before (an app window that reloaded). At most
+   * `MAX_BOT_BROWSER_VIEWERS` watch one bot. Answers the state, with whether pictures can reach the
+   * view now (`stalled` when not), and the last picture unless the view has had one.
    */
   async watch(botId: string, watchId: string, input: { width: number; fps: number; connectionId: string } & BotBrowserViewer): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     const key = `${input.connectionId}\u0000${watchId}`
     let viewer = state.viewers.get(key)
     if (!viewer) {
-      viewer = { key, watchId, emit: input.emit, width: 0, fps: 0, until: 0, delivering: false, lastPictureAt: 0, sent: {} }
+      for (const other of [...state.viewers.values()]) if (other.connectionId === input.connectionId) this.dropViewer(state, other.key)
+      if (state.viewers.size >= MAX_BOT_BROWSER_VIEWERS) throw new BrowserAutomationError({ code: 'timeout', message: 'Too many views are watching this bot\'s browser. Close one, then try again.' })
+      viewer = { key, connectionId: input.connectionId, watchId, emit: input.emit, ...(input.lifetime ? { lifetime: input.lifetime } : {}), width: 0, fps: 0, until: 0, delivering: false, lastPictureAt: 0, sent: {}, busy: 0 }
       state.viewers.set(key, viewer)
       if (input.lifetime) {
         const lifetime = input.lifetime
@@ -315,11 +350,14 @@ export class BotBrowsers implements BotBrowserHost {
     viewer.fps = Math.max(1, Math.min(BOT_BROWSER_PANE_WATCH.heldFps, Math.floor(input.fps)))
     viewer.until = this.now() + VIEWER_LEASE_MS
     // Everything it has not seen goes with its first update.
-    if (!viewer.lastPictureAt) viewer.sent = {}
+    const hadPicture = viewer.lastPictureAt > 0
+    if (!hadPicture) viewer.sent = {}
+    // The answer says whether pictures can reach it now; a stall it heard of stays told.
+    if (state.stalled) viewer.sent.stalled = true
     this.runCapture(state)
     this.refreshCapture(state)
     state.capture?.wake?.()
-    return this.view(botId, { last: true })
+    return this.view(botId, { last: !hadPicture })
   }
 
   /** A view stops watching. When none is left, the worker stops the tab's screencast. */
@@ -332,7 +370,8 @@ export class BotBrowsers implements BotBrowserHost {
   async control(botId: string, control: 'owner' | 'bot'): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     const sessionId = this.requireLive(state)
-    await this.ownerCall(state, (context) => this.service().sessions.control(context, sessionId, control === 'owner' ? 'human' : 'agent'))
+    // The owner takes the tab they see: it comes to the front, so Chromium paints what they do.
+    await this.ownerCall(state, (context) => this.service().sessions.control(context, sessionId, control === 'owner' ? 'human' : 'agent', control === 'owner' && state.follow ? { tabId: state.follow } : {}))
     // Up to 30 pictures a second while the owner holds it, back to 15 when the bot has it again.
     this.refreshCapture(state)
     return this.viewAfterChange(state)
@@ -362,7 +401,7 @@ export class BotBrowsers implements BotBrowserHost {
     const state = this.stateFor(botId)
     await this.ownerCall(state, async (context) => {
       const opened = await this.ensureSession(state, context, undefined)
-      if (this.record(state)?.lifecycle !== 'human-controlled') await this.service().sessions.control(context, opened.sessionId, 'human')
+      if (this.record(state)?.lifecycle !== 'human-controlled') await this.service().sessions.control(context, opened.sessionId, 'human', state.follow ? { tabId: state.follow } : {})
       if (url) await this.service().sessions.humanInput(context, { sessionId: opened.sessionId, input: { kind: 'navigate', url }, ...(state.follow ? { tabId: state.follow } : {}) })
     })
     state.lastViewedAt = this.now()
@@ -628,6 +667,8 @@ export class BotBrowsers implements BotBrowserHost {
             continue
           }
           failures = 0
+          // The worker answers again: pictures can reach the views, even while the page stays still.
+          this.unstall(state)
           // The view moved to another tab while this was asked: the answer is about the one it left.
           if (state.follow !== tabId && update.tabId !== state.follow) continue
           capture.tabId = update.tabId
@@ -698,7 +739,6 @@ export class BotBrowsers implements BotBrowserHost {
       if (viewer.sent.tab !== JSON.stringify(state.tab)) next.tab = { ...state.tab }
       if ((viewer.sent.cursorAt ?? null) !== (cursor?.at ?? null)) next.cursor = cursor
       if (viewer.sent.behind !== update.behind) next.behind = update.behind
-      if (viewer.sent.stalled) next.live = true
       viewer.slot = next
       this.deliver(state, viewer)
     }
@@ -727,6 +767,13 @@ export class BotBrowsers implements BotBrowserHost {
       send = rest
       viewer.slot = { frame, ...(viewport ? { viewport } : {}) }
     } else viewer.slot = undefined
+    // A picture too large for one connection event is never sent: the next one is (the worker keeps them under the limit).
+    if (send.frame && send.frame.data.length > MAX_UPDATE_CHARS) {
+      const { frame: _tooLarge, ...rest } = send
+      send = rest
+      if (!Object.keys(send).length) return
+    }
+    const sent = { ...viewer.sent }
     if (send.frame) viewer.lastPictureAt = now
     if (send.viewport) viewer.sent.viewport = JSON.stringify(send.viewport)
     if (send.tab) viewer.sent.tab = JSON.stringify(send.tab)
@@ -735,24 +782,51 @@ export class BotBrowsers implements BotBrowserHost {
     if (send.live) viewer.sent.stalled = false
     if (send.stalled) viewer.sent.stalled = true
     viewer.delivering = true
-    void viewer.emit({ botId: state.botId, watchId: viewer.watchId, ...send })
+    const update = send
+    void viewer.emit({ botId: state.botId, watchId: viewer.watchId, ...update })
       .then(() => {
         viewer.delivering = false
+        viewer.busy = 0
         this.deliver(state, viewer)
-      }, () => {
-        // Its connection is gone.
+      }, (error: unknown) => {
         viewer.delivering = false
-        this.dropViewer(state, viewer.key)
+        const refused = refusal(error, viewer)
+        if (refused === 'gone' || (refused === 'busy' && ++viewer.busy >= MAX_BUSY_UPDATES)) {
+          this.dropViewer(state, viewer.key)
+          return
+        }
+        // Not delivered: what it carried goes again, under anything newer, except a picture too large to go at all.
+        viewer.sent = sent
+        const { frame, ...rest } = update
+        viewer.slot = { ...rest, ...(refused === 'busy' && frame ? { frame } : {}), ...viewer.slot }
+        if (refused === 'too_large') {
+          this.deliver(state, viewer)
+          return
+        }
+        viewer.timer?.clear()
+        viewer.timer = defaultTimer(() => { viewer.timer = undefined; this.deliver(state, viewer) }, BUSY_RETRY_MS)
       })
       .finally(() => state.capture?.wake?.())
   }
 
-  /** Pictures stopped: each view hears it once, so it says it is not updating. */
+  /** Pictures stopped: each view hears it once, so it says it is not updating, and a renewal says so too. */
   private stall(state: BotBrowserState, reason: string): void {
+    state.stalled = reason
     for (const viewer of state.viewers.values()) {
       if (viewer.sent.stalled) continue
       viewer.slot = { ...viewer.slot, stalled: reason }
       delete viewer.slot.live
+      this.deliver(state, viewer)
+    }
+  }
+
+  /** Pictures can reach the views again: each that heard of a stall hears it is live. */
+  private unstall(state: BotBrowserState): void {
+    state.stalled = undefined
+    for (const viewer of state.viewers.values()) {
+      if (!viewer.sent.stalled && !viewer.slot?.stalled) continue
+      viewer.slot = { ...viewer.slot, live: true }
+      delete viewer.slot.stalled
       this.deliver(state, viewer)
     }
   }

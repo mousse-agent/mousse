@@ -175,18 +175,28 @@ describe('the pictures pushed to the view', () => {
       fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
       await open()
       expect(status()?.textContent).toBe('Live')
-      await push({ stalled: 'The browser could not be reached.' })
+      // The followed tab closed: the daemon says so, and its renewals keep saying so.
+      browser = { ...browser, stalled: 'The tab closed.' }
+      await push({ stalled: 'The tab closed.' })
       expect(status()?.textContent).toMatch(/^Not updating · \d s$/)
+      // Renewals go on (every 5 s) and answer that pictures still cannot arrive: never Live by themselves.
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
       expect(status()?.textContent).toMatch(/^Not updating · [5-9] s$/)
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+      expect(watches().length).toBeGreaterThanOrEqual(4)
+      expect(status()?.textContent).toMatch(/^Not updating · 1[5-9] s$/)
+      // An update with no picture (the tab's title) does not make it live either.
+      await push({ tab: { url: 'https://bank.example.com/statements', title: 'Statements (1)' } })
+      expect(status()?.textContent).toMatch(/^Not updating/)
       // The picture stays meanwhile.
       expect(host.querySelector('.bot-browser-preview img')).not.toBeNull()
       expect(host.querySelector('.bot-browser-preview')!.classList.contains('is-stale')).toBe(true)
+      browser = { ...browser, stalled: undefined }
       await push({ live: true, frame: { data: '/9j/CCCC', mimeType: 'image/jpeg', width: 480, height: 270, at: Date.now() } })
       expect(status()?.textContent).toBe('Live')
       // The watch cannot be renewed (the service is away): not updating, and it tries again by itself.
       refuseWatch = Object.assign(new Error('connection lost'), { code: 'mms_unavailable' })
-      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
       expect(status()?.textContent).toMatch(/^Not updating/)
       refuseWatch = undefined
       await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
@@ -194,7 +204,7 @@ describe('the pictures pushed to the view', () => {
       // A service that hangs (the renewal never answers) is not updating either, and recovers when it answers.
       let answer: (() => void) | undefined
       hangWatch = new Promise<void>((resolve) => { answer = resolve })
-      await act(async () => { await vi.advanceTimersByTimeAsync(10_000 + 5_000) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000 + 5_000) })
       expect(status()?.textContent).toMatch(/^Not updating/)
       hangWatch = undefined
       await act(async () => { answer!(); await vi.advanceTimersByTimeAsync(0) })
@@ -229,6 +239,25 @@ describe('the pictures pushed to the view', () => {
     await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
     expect(watches()).toHaveLength(3)
     visibility.mockRestore()
+  })
+
+  it('ends its watches when the page goes (a reload), not when the daemon\'s lease runs out', async () => {
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await open()
+    const watchId = watches().at(-1)!.watchId
+    await act(async () => { window.dispatchEvent(new Event('pagehide')) })
+    expect(unwatches()).toContainEqual({ botId: 'noobesh', watchId })
+  })
+})
+
+describe('the view\'s line while the owner holds the browser', () => {
+  it('never reads "On another tab" for the tab the owner holds', async () => {
+    const { browserStatus } = await import('../../src/renderer/components/bots/BotBrowser')
+    const held = { ...browser, control: 'owner' as const, behind: true }
+    expect(browserStatus(held, { live: true }, 'Noobesh', Date.now())).toEqual({ text: 'You have it', live: true })
+    expect(browserStatus({ ...held, control: 'bot' }, { live: true }, 'Noobesh', Date.now()).text).toBe('On another tab')
+    // Not updating still outranks it: the owner is told when pictures stop.
+    expect(browserStatus(held, { live: false, since: Date.now() - 3_000 }, 'Noobesh', Date.now()).text).toMatch(/^Not updating/)
   })
 })
 
