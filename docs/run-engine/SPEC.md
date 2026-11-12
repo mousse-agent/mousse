@@ -577,9 +577,9 @@ Every runtime except the pi loop reaches Mousse's own tools through one MCP serv
 | Adapter | How the server is attached |
 |---|---|
 | `PiLoopAdapter` | in-process `ToolHost`, no MCP needed |
-| `ClaudeSubscriptionAdapter` | SDK `mcpServers: { mousse: { type:'http', url, headers:{ Authorization } } }` |
+| `ClaudeSubscriptionAdapter` | `Query.setMcpServers({ mousse: { type:'http', url, headers:{ Authorization } } })` once the process starts, before its first prompt, with the user's own servers in the same set; never the SDK's `mcpServers` option, which would put the bearer on Claude Code's command line (#358). A new bearer goes to the running process the same way |
 | `AcpAdapter` | ACP `session/new` `mcpServers: [{ name:'mousse', type:'http', url, headers }]`; fall back to the stdio bridge when the agent rejects http |
-| `ClaudeSubscriptionAdapter`, relay | a second entry `mcpServers['mousse-relay']: { type:'http', url: <relay url>, headers:{ Authorization }, timeout: 240000 }`, same bearer |
+| `ClaudeSubscriptionAdapter`, relay | a second entry `'mousse-relay': { type:'http', url: <relay url>, headers:{ Authorization }, timeout: 240000 }` in the same `setMcpServers` set, same bearer |
 | Codex, relay | config overrides `mcp_servers.mousse-relay.url`, `.http_headers` (same bearer), `.tool_timeout_sec = 240`, `.default_tools_approval_mode = 'approve'` (Mousse asks instead, §15.5) |
 | Cursor, relay | a second entry `mcpServers['mousse-relay']: { type:'http', url: <relay url>, headers }` in each send |
 | `AcpAdapter`, relay (http) | a second `session/new` entry `{ name:'mousse-relay', type:'http', url: <relay url>, headers }` |

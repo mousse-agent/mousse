@@ -2161,7 +2161,7 @@ export class ClaudeSubscriptionProviderService {
     key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options,
-    mcp: { servers: () => ClaudeMcpServers; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal } = { servers: () => ({}), mousse: null, timeoutMs: 0 }
+    mcp: { servers: () => ClaudeMcpServers; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal }
   ): Promise<LiveSession<TurnContext> | undefined> {
     const timings = this.liveConfig
     if (!timings) return undefined
