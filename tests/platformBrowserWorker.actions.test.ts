@@ -302,17 +302,17 @@ describe.skipIf(!chrome.ok)('what pages see of who drives the browser', () => {
       const opened = await broker.call(workerRequest('profile_mark', 'session.open', { url: `${site.parentOrigin}/automation-parent.html` }))
       expect(opened.ok, opened.error?.message).toBe(true)
       const { session, observation } = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-      const observe = async () => {
-        const result = await broker.call(workerRequest('profile_mark', 'observe', { sessionId: session.id, tabId: observation.tabId }))
+      const observe = async (tabId = observation.tabId) => {
+        const result = await broker.call(workerRequest('profile_mark', 'observe', { sessionId: session.id, tabId }))
         expect(result.ok, JSON.stringify(result.error)).toBe(true)
         return result.result as BrowserObservation
       }
       const text = (value: BrowserObservation) => value.elements.map((element) => `${element.name ?? ''} ${element.text ?? ''}`).join(' ')
       // Values the page and its frame print on a timer: wait until they all show.
-      const shows = async (expected: string[]) => {
+      const shows = async (expected: string[], tabId = observation.tabId) => {
         let seen = ''
         for (let attempt = 0; attempt < 50; attempt += 1) {
-          seen = text(await observe())
+          seen = text(await observe(tabId))
           if (expected.every((value) => seen.includes(value))) return
           await new Promise((resolve) => setTimeout(resolve, 100))
         }
@@ -326,6 +326,10 @@ describe.skipIf(!chrome.ok)('what pages see of who drives the browser', () => {
       const clicked = await broker.call(workerRequest('profile_mark', 'act', actParams(session, before, { type: 'click', target: { kind: 'ref', ref: named(before, 'Open popup').ref } }, 'open_popup')))
       expect(clicked.ok, JSON.stringify(clicked.error)).toBe(true)
       await shows(['popup:true'])
+      // A tab the agent opens on a page: the same from that page's first script, frames included.
+      const tab = await broker.call(workerRequest('profile_mark', 'tabs.new', { sessionId: session.id, url: `${site.parentOrigin}/automation-parent.html` }))
+      expect(tab.ok, JSON.stringify(tab.error)).toBe(true)
+      await shows(['top-first:true', 'child-first:true', 'identity:chrome'], (tab.result as { id: string }).id)
 
       // A person holds the browser: the same documents now read false.
       const taken = await broker.call(workerRequest('profile_mark', 'control.take', { sessionId: session.id, owner: 'human' }))
