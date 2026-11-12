@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
-import type { ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { CLAUDE_CUT_REFUSAL, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 
@@ -126,7 +126,20 @@ function botTurn(scripts: Script[]) {
     onCompaction,
     ...steer
   })
-  return { run, stop, steer, queries, prompts, events, pending, options, onCompaction }
+  return { run, stop, steer, queries, prompts, events, pending, options, onCompaction, root }
+}
+
+type CanUseTool = (name: string, input: Record<string, unknown>, context: { signal: AbortSignal; toolUseID: string }) => Promise<{ behavior: string; message?: string }>
+type Hook = (event: Record<string, unknown>, toolUseId: string, context: { signal: AbortSignal }) => Promise<Record<string, unknown>>
+/** The query's own permission callbacks, as Claude Code calls them for a call the model makes. */
+function gateOf(options: Record<string, unknown>) {
+  const hooks = options.hooks as Record<'PreToolUse' | 'PostToolUse', Array<{ hooks: Hook[] }>>
+  const signal = new AbortController().signal
+  return {
+    canUse: (toolUseID: string, path: string) => (options.canUseTool as CanUseTool)('Read', { file_path: path }, { signal, toolUseID }),
+    pre: (toolUseID: string, path: string) => hooks.PreToolUse[0]!.hooks[0]!({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: path }, tool_use_id: toolUseID }, toolUseID, { signal }),
+    post: (toolUseID: string) => hooks.PostToolUse[0]!.hooks[0]!({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {}, tool_response: 'ok', tool_use_id: toolUseID }, toolUseID, { signal })
+  }
 }
 
 /** The first query: it waits for the steer's interrupt, then ends as an interrupted query does. */
@@ -294,6 +307,67 @@ describe('a steer into a bot\'s Claude Code turn (#920)', () => {
     turn.pending.splice(0)
     expect(await turn.run()).toBe('done')
     expect(turn.onCompaction.mock.calls).toEqual([['start'], ['complete']])
+  })
+
+  it('a call the model makes once the cut is decided is refused before it runs: nothing is cut mid-run', async () => {
+    // Checked after the turn: an error thrown inside the interrupted query is read as the interrupt's own.
+    const decided: Record<string, unknown> = {}
+    const turn = botTurn([
+      async function* (_prompt, query) {
+        yield init
+        await vi.waitFor(() => expect(query.interrupt).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        // Announced after the check, before the interrupt lands: both of the gate's checks refuse it, so it never starts.
+        const gate = gateOf(turn.options[0]!)
+        const path = join(turn.root, 'notes.md')
+        decided.pre = await gate.pre('late-1', path)
+        decided.canUse = await gate.canUse('late-1', path)
+        yield interrupted
+      },
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        // The query that carries the note runs calls again.
+        decided.next = await gateOf(turn.options[1]!).canUse('next-1', join(turn.root, 'notes.md'))
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield done
+      }
+    ])
+    expect(await turn.run()).toBe('done')
+    expect(CLAUDE_CUT_REFUSAL).toContain('did not run')
+    expect(decided.pre).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: CLAUDE_CUT_REFUSAL } })
+    expect(decided.canUse).toEqual({ behavior: 'deny', message: CLAUDE_CUT_REFUSAL })
+    expect(decided.next).toMatchObject({ behavior: 'allow' })
+    expect(turn.prompts[1]!.message.content).toBe('use the other file')
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  it('a call the gate let start holds the cut until it ends, even before Mousse has read the frame that announces it', async () => {
+    let interruptsWhileRunning = -1
+    const turn = botTurn([
+      async function* (_prompt, query) {
+        // Claude Code asks about the call (and runs it) before its frame reaches Mousse.
+        const gate = gateOf(turn.options[0]!)
+        expect(await gate.canUse('early-1', join(turn.root, 'notes.md'))).toMatchObject({ behavior: 'allow' })
+        yield init
+        // Polls come and go while it runs: the note goes back to wait each time, and nothing is interrupted.
+        await vi.waitFor(() => expect(turn.steer.returnSteer).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        interruptsWhileRunning = query.interrupt.mock.calls.length
+        await gate.post('early-1')
+        await vi.waitFor(() => expect(query.interrupt).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        yield interrupted
+      },
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield done
+      }
+    ])
+    // A note handed back waits to be taken again.
+    turn.steer.returnSteer.mockImplementation((text: string, token?: string) => { turn.pending.unshift({ text, token: token ?? 'drain-x' }) })
+    expect(await turn.run()).toBe('done')
+    expect(interruptsWhileRunning).toBe(0)
+    expect(turn.prompts[1]!.message.content).toBe('use the other file')
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 
   it('a failed result from the restarted query is not a read, and the steer is handed back', async () => {
