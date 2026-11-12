@@ -103,7 +103,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_start',
-    description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Work runs one at a time; later work waits its turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
+    description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Up to 3 pieces of work run at once, so a quick lookup can start beside a long job; more wait their turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
       brief: Type.String({ description: 'The whole task, standing on its own.' })
@@ -363,7 +363,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const title = typeof args.title === 'string' ? args.title : ''
         try {
           const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}` })
-          const result = { ...started, note: started.status === 'queued' ? `It starts after: ${started.ahead.join('; ')}. Tell the owner it is next in line.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running. Tell the owner you are on it; its report reaches them by itself.' }
+          const result = { ...started, note: started.status === 'queued' ? `It starts when there is room, after: ${started.ahead.join('; ')}. Tell the owner it waits its turn.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running, beside anything else you are working on. Tell the owner you are on it; its report reaches them by itself.' }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
