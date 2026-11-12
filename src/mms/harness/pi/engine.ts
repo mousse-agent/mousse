@@ -383,6 +383,13 @@ interface PiCut {
   deferredSettle: boolean
   /** Resolves the wait for the settlement barrier: the first `agent_settled` after the `abort` request. */
   barrier?: () => void
+  /**
+   * The continuation `prompt` and Pi's answer to it, once sent. Pi records the prompt's user message as soon as it
+   * accepts it, even when an abort comes before any request (spike S3 item 7): a Stop waits for this answer.
+   */
+  continuation?: Promise<'started' | 'refused'>
+  /** The steers the continuation carries. */
+  carried?: PiSteer[]
 }
 
 /** One turn on a process: the attempt, its tools, the episode and the event state. */
@@ -1365,12 +1372,14 @@ export class PiRpcEngine implements ProviderAdapter {
     // A person's steer that cuts in answers the question (docs/design/steer-and-interruptions.md §2.1), and a Stop ends
     // it: Pi's abort waits for this gate, so the wait ends with the cut or the Stop (`gateRelease`).
     const release = turn.gateRelease.signal
-    const steered = (): PiGateResponse => denied(`The user sent a new message instead of approving the request to ${what}. Do not retry it unless they ask.`)
+    const steered = (): PiGateResponse => turn.phase === 'stopping' || turn.input.signal.aborted
+      ? denied(`The user stopped the run before approving the request to ${what}.`)
+      : denied(`The user sent a new message instead of approving the request to ${what}. Do not retry it unless they ask.`)
     if (release.aborted) return steered()
-    // While the person is asked, the call is not a running tool: a steer cuts in, and answers it. Nor are the calls of
-    // its batch Pi has not started: Pi starts them one after another through this gate, so none runs before the
-    // person answers (or the steer does).
-    const behind = callId ? [...turn.announced].filter((id) => id !== callId) : []
+    // While the person is asked, the call is not a running tool: a steer cuts in, and answers it. Nor is any other
+    // call of its batch: Pi passes every call of a batch through this gate before it runs any (in parallel mode), or
+    // runs them one after another (sequential mode, where the earlier ones have ended), so none runs meanwhile.
+    const behind = callId ? [...turn.openTools.keys()].filter((id) => id !== callId) : []
     if (callId) {
       turn.asking.add(callId)
       for (const id of [callId, ...behind]) turn.sink.toolAwaiting?.(id, true)
@@ -1673,6 +1682,7 @@ export class PiRpcEngine implements ProviderAdapter {
 
   private async stopTurnOnce(thread: PiThreadProcess, turn: PiTurn): Promise<'interrupted' | 'not_active'> {
     turn.phase = 'stopping'
+    const cut = turn.cut
     // A Stop during a cut wins: the cut's next step sees the new generation and starts nothing, its waits end now, and
     // what it held comes back first in the queue (below).
     turn.opGen += 1
@@ -1716,11 +1726,26 @@ export class PiRpcEngine implements ProviderAdapter {
       await this.send(thread, { type: 'abort' }, INTERRUPT_DEADLINE_MS)
     } catch {
       // The command deadline killed the tree: the writer is released only once it is gone, and the
-      // steers Pi still held come back once.
+      // steers Pi still held come back once. A continuation Pi may have recorded goes with the session.
+      if (cut?.continuation && !thread.ephemeral) this.save(thread.threadId, undefined)
       this.returnSteers(turn)
       await within(this.kill(thread), CLEANUP_DEADLINE_MS)
     }
-    // What a cut held for its continuation never reached Pi's queue: it comes back once.
+    // A cut's continuation prompt: Pi records its user message once it accepts it, even when the abort comes before
+    // any request (spike S3 item 7), and the next turn resumes that session. So it is taken once Pi answers it; if Pi
+    // never answers, the process goes with its session (as for a first prompt Pi never accepted), and it comes back.
+    if (cut?.continuation) {
+      let outcome: 'started' | 'refused' | undefined
+      await within(cut.continuation.then((value) => { outcome = value }), thread.alive && !thread.killed ? this.options.interruptDeadlineMs ?? INTERRUPT_DEADLINE_MS : 0)
+      if (outcome === 'started') {
+        for (const steer of cut.carried ?? []) if (turn.steers.includes(steer)) this.steerRead(turn, steer)
+      } else if (outcome === undefined) {
+        if (!thread.ephemeral) this.save(thread.threadId, undefined)
+        await within(this.kill(thread), CLEANUP_DEADLINE_MS)
+      }
+    }
+    // What a cut still holds never reached Pi: it comes back once, before the turn ends (Pi settles before it answers
+    // the abort, and a hand-back after the turn's end would land nowhere).
     this.returnSteers(turn, 'cutHeld')
     turn.settled()
     return 'interrupted'
@@ -2257,7 +2282,9 @@ export class PiRpcEngine implements ProviderAdapter {
         turn.stepGap = false
         turn.stepTools = false
         this.compactionOver(turn)
-        if (turn.phase === 'stopping') return turn.settled()
+        // A turn being stopped is settled by its Stop, once it has handed back what the turn holds: Pi settles before
+        // it answers Stop's `abort`.
+        if (turn.phase === 'stopping') return turn.stopping ? undefined : turn.settled()
         if (turn.phase === 'cutting' && turn.cut) {
           const cut = turn.cut
           // The settlement barrier: the first `agent_settled` after the abort was written. Several `agent_end`s (a
@@ -2459,7 +2486,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const deadlineMs = this.options.interruptDeadlineMs ?? INTERRUPT_DEADLINE_MS
     cut.stage = 'aborting'
     // Pi's abort waits for the gate: the steer answers what the turn asks the person, and a writer wait lets go.
-    this.releaseGate(turn, true)
+    this.releaseGate(turn, held().some((steer) => steer.person))
     const settled = new Promise<void>((resolve) => { cut.barrier = resolve })
     const aborted = this.send(thread, { type: 'abort' }, deadlineMs + COMMAND_DEADLINE_MS).catch(() => undefined)
     const inTime = await new Promise<boolean>((resolve) => {
@@ -2497,16 +2524,22 @@ export class PiRpcEngine implements ProviderAdapter {
     turn.gateRelease = new AbortController()
     let message = texts.map((steer) => steer.text.trim()).join('\n')
     if (message.startsWith('/')) message = ` ${message}`
-    try {
-      await this.send(thread, { type: 'prompt', message }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS, turn.halt.signal)
-    } catch {
-      if (!current()) return
+    // Its answer is kept on the cut: a Stop meanwhile waits for it, since Pi keeps an accepted prompt in its session.
+    const answer = this.send(thread, { type: 'prompt', message }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS).then(() => 'started' as const, () => 'refused' as const)
+    cut.continuation = answer
+    cut.carried = texts
+    const halted = new Promise<'halted'>((resolve) => {
+      if (turn.halt.signal.aborted) resolve('halted')
+      else turn.halt.signal.addEventListener('abort', () => resolve('halted'), { once: true })
+    })
+    const outcome = await Promise.race([answer, halted])
+    if (!current()) return
+    if (outcome === 'refused') {
       // Refused: the steers come back and run as the next turn; the turn ends with what it has.
       turn.cut = undefined
       this.returnSteers(turn, 'cutHeld')
       return this.settle(thread, turn)
     }
-    if (!current()) return
     // 4. Accepted: each steer is taken and accepted by its own token.
     for (const steer of texts) if (turn.steers.includes(steer)) this.steerRead(turn, steer)
     turn.cut = undefined
@@ -2543,7 +2576,9 @@ export class PiRpcEngine implements ProviderAdapter {
    * steer answers the questions the turn asks them, as the person (docs/design/steer-and-interruptions.md §2.1).
    */
   private releaseGate(turn: PiTurn, answer: boolean): void {
-    if (answer && turn.asking.size) {
+    // Every question pending on the thread, Mousse's own (`ask_user`, a quick action's approval) as well as Pi's, as
+    // a steer on the other agents does (§2.1).
+    if (answer) {
       try {
         turn.host.bridge?.permission?.rejectPending?.(turn.input.threadId)
       } catch (error) {

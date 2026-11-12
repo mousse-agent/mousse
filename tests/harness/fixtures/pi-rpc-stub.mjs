@@ -74,6 +74,8 @@ const queuedSteers = []
 let settleOnSteer = false
 /** `steer: 'hangSecond'`: the native steers received so far. */
 let steersSeen = 0
+/** `abort: 'ignoreFirst'`: the first abort was ignored. */
+let abortsIgnored = false
 
 let buffer = ''
 process.stdin.setEncoding('utf8')
@@ -110,6 +112,11 @@ function handle(command) {
       if (config.abort === 'never') return
       // `abort: 'crash'`: Pi dies as the abort arrives.
       if (config.abort === 'crash') return void process.exit(3)
+      // `abort: 'ignoreFirst'`: Pi does nothing with the first abort (it never answers it); later ones work.
+      if (config.abort === 'ignoreFirst' && !abortsIgnored) {
+        abortsIgnored = true
+        return
+      }
       if (scripted && checking) checking.aborted = true
       if (scripted && current) return current.abort(command)
       // As Pi: the running prompt settles first, then the abort is answered; an idle Pi only answers.
@@ -280,8 +287,10 @@ function startRun(command) {
     aborted: undefined,
     cancel: undefined,
     steerWaiter: undefined,
+    /** Every abort sent while the prompt runs: as Pi, each is answered only once the prompt has settled. */
+    waiting: [],
     abort(abortCommand) {
-      if (run.aborted) return respond(abortCommand)
+      if (run.aborted) return void run.waiting.push(abortCommand)
       run.aborted = abortCommand
       // `abortAnswerFirst`: the abort is answered before the prompt settles (only the settlement says it is over).
       if (config.abortAnswerFirst) {
@@ -352,15 +361,14 @@ async function execute(run) {
     afterTools = false
     if (!fresh) {
       // Pi prepares the next step (`prepareNextTurn`): the steer it took stays unshown meanwhile. Usually that takes a
-      // millisecond or two, and a steer sent in reply to `turn_end` misses the next request (spike S3 item 11).
-      if (step.prepareMs || step.compactMs || step.compactionLost) {
-        if (step.prepareMs) await wait(run, step.prepareMs, false)
-        if (step.compactMs && !run.aborted) await compact(run, step.compactMs)
-        // `compactionLost`: a compaction whose end event never comes.
-        if (step.compactionLost) write({ type: 'compaction_start', reason: 'threshold' })
-        // A long preparation: Pi polls its queue again, only if it took nothing at the step's end.
-        if (!pending.length && agentQueue.length) pending = [agentQueue.shift()]
-      }
+      // millisecond or two, and a steer sent in reply to `turn_end` misses the next request (spike S3 item 11): here
+      // the preparation is synchronous unless the step says otherwise.
+      if (step.prepareMs) await wait(run, step.prepareMs, false)
+      if (step.compactMs && !run.aborted) await compact(run, step.compactMs)
+      // `compactionLost`: a compaction whose end event never comes.
+      if (step.compactionLost) write({ type: 'compaction_start', reason: 'threshold' })
+      // After preparing, Pi polls its queue again if it took nothing at the step's end.
+      if (!pending.length && agentQueue.length) pending = [agentQueue.shift()]
       write({ type: 'turn_start' })
     } else if (attempt) write({ type: 'turn_start' })
     fresh = false
@@ -481,5 +489,7 @@ async function finishAborted(run, partial, opened = false) {
 function finishSettled(run) {
   if (current === run) current = undefined
   write({ type: 'agent_settled', ...(run.aborted ? { aborted: true } : {}) })
-  if (run.aborted && !run.answered) respond(run.aborted)
+  // As Pi: the aborts are answered after `agent_settled`, in a later write.
+  const answers = [...(run.aborted && !run.answered ? [run.aborted] : []), ...run.waiting]
+  if (answers.length) setTimeout(() => { for (const command of answers) respond(command) }, 5)
 }

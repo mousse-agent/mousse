@@ -215,3 +215,94 @@ describe('Pi RPC engine with the real Pi child: a steer and a call waiting for a
     expect([...closed.values()].some((summary) => /^Not run/.test(summary))).toBe(true)
   }, 90_000)
 })
+
+/** The orchestrator's hold and steer bookkeeping around one real-Pi turn, as the hold tests above wire it. */
+function onHold(turn: ReturnType<typeof harness>) {
+  const open = new Map<string, string>()
+  const hold = new SteerHold({ caps: PI_RPC_CAPS, strict: false, foreground: (asking) => [...open].filter(([callId]) => !asking.has(callId)).map(([callId, toolName]) => ({ callId, toolName })) })
+  const record = { pending: [] as string[], accepted: [] as string[], returned: [] as string[], shown: [] as string[] }
+  let drains = 0
+  const facts = () => (record.pending.length ? { person: true, keys: [...record.pending], itemIds: [] } : undefined)
+  turn.sink.tool = (event) => {
+    if (event.phase === 'start' && event.callId) open.set(event.callId, String(event.title).replace(/^Tool /, ''))
+    if (event.phase === 'complete' && event.callId) open.delete(event.callId)
+    hold.toolEvent()
+  }
+  turn.sink.toolAwaiting = (callId, isWaiting) => hold.awaiting(callId, isWaiting)
+  turn.sink.text = (event) => {
+    hold.modelOutput(event.phase)
+    if (event.phase === 'delta') record.shown.push(event.content)
+  }
+  turn.sink.boundary = (at) => hold.boundary(at)
+  turn.sink.compaction = (phase) => hold.compacting(phase === 'start')
+  turn.ctl.peekSteer = () => {
+    const decision = hold.decide(facts())
+    return decision && { delivery: decision.delivery }
+  }
+  turn.ctl.drainSteerEntry = (opts) => {
+    const decision = hold.decide(facts())
+    const expected = opts?.expect === undefined ? undefined : [opts.expect].flat()
+    if (!decision || (expected && !expected.includes(decision.delivery))) return undefined
+    const token = `drain-${++drains}`
+    hold.drained(token, decision.forced)
+    return { text: record.pending.splice(0).join('\n'), token, cut: true }
+  }
+  turn.ctl.mayCut = (token) => hold.mayCut(token)
+  turn.ctl.returnSteer = (text) => void record.returned.push(text)
+  turn.sink.steerAccepted = (text) => void record.accepted.push(text)
+  return record
+}
+
+/** How many of a request's user messages carry `text`. */
+const userMessagesWith = (request: RecordedRequest | undefined, text: string) => sent(request).filter((line) => line.startsWith('user:') && line.includes(text)).length
+
+describe('Pi RPC engine with the real Pi child: Stop while a cut’s continuation is being checked', () => {
+  for (const answered of [true, false]) {
+    it(answered
+      ? 'Pi answers the continuation after Stop: the steer is taken once (Pi keeps it), nothing comes back, and the next request carries it once'
+      : 'Pi does not answer the continuation in time: the process goes with its session, the steer is back by the turn’s end, and a resend reaches the model once', async () => {
+      // The continuation's preflight (the extension asks the engine for the turn) is held until released.
+      let turnCalls = 0
+      let release: () => void = () => {}
+      const held = new Promise<void>((resolve) => { release = resolve })
+      const { engine, recorder, project, spawned } = await setup(cleanups, {
+        interruptDeadlineMs: 1500,
+        holdTurn: async () => {
+          turnCalls += 1
+          if (turnCalls === 2) await held
+        }
+      })
+      cleanups.push(() => release())
+      recorder.respond(slowThenQuick('Done.'))
+      const turn = harness(project)
+      // As the orchestrator does after a Stop: the thread's history then, which the session is saved against.
+      turn.host.context.nativeHistoryNow = () => 'user: Say hello\nassistant: (stopped)'
+      const record = onHold(turn)
+      const running = engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+      await vi.waitFor(() => expect(record.shown.at(-1) ?? '').toMatch(/word3/), { timeout: 20_000, interval: 20 })
+      record.pending.push('use pnpm')
+      // The cut aborted the reply and sent its continuation, whose preflight is now held.
+      await vi.waitFor(() => expect(turnCalls).toBe(2), { timeout: 10_000, interval: 10 })
+      turn.controller.abort()
+      if (answered) setTimeout(() => release(), 300)
+      const result = await running
+      expect(result.aborted).toBe(true)
+      if (answered) {
+        expect(record.accepted).toEqual(['use pnpm'])
+        expect(record.returned).toEqual([])
+      } else {
+        // Back by the time the turn ends, not after it.
+        expect(record.returned).toEqual(['use pnpm'])
+        expect(record.accepted).toEqual([])
+        release()
+      }
+      // The stopped continuation sent no request.
+      expect(recorder.requests).toHaveLength(1)
+      // The next turn resumes Pi's session when it was kept (same history), or hands the history over when it was not.
+      const next = harness(project, { nativeHistory: 'user: Say hello\nassistant: (stopped)', prompt: answered ? 'Carry on' : 'use pnpm' })
+      expect((await engine.startTurn(next.input, next.sink, next.ctl, next.host)).aborted).toBe(false)
+      expect(userMessagesWith(recorder.requests.at(-1), 'use pnpm')).toBe(1)
+      if (!answered) expect(spawned).toHaveLength(2)
+    }, 90_000)
+  }
+})

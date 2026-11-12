@@ -522,7 +522,7 @@ function onHold(t: ReturnType<typeof turn>) {
   const drains = new Map<string, Entry[]>()
   let seq = 0
   let drainSeq = 0
-  const record = { taken: [] as string[], accepted: [] as string[], returned: [] as string[], held: [] as string[], forced: [] as string[], toolStarts: [] as number[], toolEnds: [] as number[], texts: [] as string[], opened: [] as string[], closed: new Map<string, string>() }
+  const record = { taken: [] as string[], accepted: [] as string[], returned: [] as string[], held: [] as string[], forced: [] as string[], toolStarts: [] as number[], toolEnds: [] as number[], texts: [] as string[], opened: [] as string[], closed: new Map<string, string>(), responses: new Map<string, string>() }
   const facts = (): PendingSteerFacts | undefined => (pending.length ? { person: pending.some((entry) => entry.person), keys: pending.map((entry) => entry.key), itemIds: [] } : undefined)
   const decide = () => {
     const current = facts()
@@ -543,6 +543,7 @@ function onHold(t: ReturnType<typeof turn>) {
     }
     if (event.phase === 'complete' && event.callId) {
       record.closed.set(event.callId, String(event.summary))
+      record.responses.set(event.callId, String(event.response ?? ''))
       open.delete(event.callId)
       record.toolEnds.push(Date.now())
     }
@@ -607,7 +608,7 @@ const toolStep = (runMs = 300) => ({ tools: [{ name: 'bash', args: { command: 's
  * The thread's questions for a turn that asks before a command (Ask): `allowAfterMs` answers Allow that long after
  * asking; `deaf` neither answers nor lets a steer or a withdrawal end the question. A steer's answer rejects.
  */
-function asker(options: { allowAfterMs?: number; deaf?: boolean } = {}) {
+function asker(options: { allowAfterMs?: number; deaf?: boolean; allowFirst?: boolean } = {}) {
   const asked: string[] = []
   let rejected = 0
   const waiting = new Set<(answer: string | undefined) => void>()
@@ -615,6 +616,7 @@ function asker(options: { allowAfterMs?: number; deaf?: boolean } = {}) {
     choose: (request, wait) => new Promise((resolve) => {
       asked.push(request.title)
       if (options.deaf) return
+      if (options.allowFirst && asked.length === 1) return resolve('allow')
       const answer = (value: string | undefined) => {
         if (!waiting.delete(answer)) return
         resolve(value)
@@ -998,13 +1000,15 @@ describe('Pi cuts in (stub Pi)', () => {
       t.controller.abort()
       const result = await pending
       expect(result.aborted).toBe(true)
-      await sleep(1500)
+      // Back by the time the turn ends (Pi settles before it answers Stop's abort): a later hand-back lands nowhere.
       expect(h.record.returned).toEqual(['use pnpm'])
       expect(h.record.accepted).toEqual([])
+      await sleep(1500)
+      expect(h.record.returned).toEqual(['use pnpm'])
       expect(promptsIn(cwd)).toEqual(['hi'])
     }, 30_000)
 
-    it('Stop while Pi still checks the continuation prompt gives the steer back once; its late answer is not an acceptance', async () => {
+    it('Stop while Pi still checks the continuation prompt waits for its answer: Pi keeps an accepted prompt, so the steer is taken once, not handed back', async () => {
       const { engine, project } = setup()
       const cwd = project('p', { onPrompt: 'script', continuationDelayMs: 1000, runs: [[{ forever: true }], [{ text: 'answered' }]] })
       const t = turn(cwd)
@@ -1017,11 +1021,56 @@ describe('Pi cuts in (stub Pi)', () => {
       t.controller.abort()
       const result = await pending
       expect(result.aborted).toBe(true)
-      await sleep(1500)
+      // Pi answered it and recorded its user message, though it ran no request for it (spike S3 item 7).
+      expect(stubLog(cwd).some((entry) => entry.abortedBeforeRequest)).toBe(true)
+      expect(h.record.accepted).toEqual(['use pnpm'])
+      expect(h.record.returned).toEqual([])
+      await sleep(500)
+      expect(h.record.returned).toEqual([])
+    }, 30_000)
+
+    it('Stop while Pi does not answer the continuation prompt in time: the process goes with its session, and the steer comes back once, before the turn ends', async () => {
+      const { engine, project, spawned } = setup({ interruptDeadlineMs: 1000 })
+      // The first prompt's reply streams for 2 s: a new process runs it again for the next turn, and it ends.
+      const cwd = project('p', { onPrompt: 'script', continuationDelayMs: 8000, runs: [[{ text: 'one two three four five six seven eight nine ten', deltaMs: 200 }], [{ text: 'answered' }]] })
+      const t = turn(cwd)
+      const h = onHold(t)
+      const pending = run(engine, t)
+      await vi.waitFor(() => expect(promptsIn(cwd)).toEqual(['hi']), { timeout: 10_000 })
+      await sleep(200)
+      h.steer('use pnpm')
+      await vi.waitFor(() => expect(promptsIn(cwd)).toEqual(['hi', 'use pnpm']), { timeout: 10_000 })
+      const stoppedAt = Date.now()
+      t.controller.abort()
+      const result = await pending
+      expect(result.aborted).toBe(true)
+      expect(Date.now() - stoppedAt).toBeLessThan(5000)
       expect(h.record.returned).toEqual(['use pnpm'])
       expect(h.record.accepted).toEqual([])
-      // Pi ran no request for it (spike S3 item 7).
-      expect(stubLog(cwd).some((entry) => entry.abortedBeforeRequest)).toBe(true)
+      expect(alive(spawned[0].pid)).toBe(false)
+      // The next turn starts a new process on a new session: nothing of the stopped continuation is in it.
+      const next = turn(cwd, { prompt: 'use pnpm' })
+      expect((await run(engine, next)).aborted).toBe(false)
+      expect(spawned).toHaveLength(2)
+    }, 30_000)
+
+    it('Stop when Pi does not act on the cut’s abort ends at once: it does not wait for that abort', async () => {
+      const { engine, project } = setup({ interruptDeadlineMs: 8000 })
+      const cwd = project('p', { onPrompt: 'script', abort: 'ignoreFirst', runs: [[{ forever: true }]] })
+      const t = turn(cwd)
+      const h = onHold(t)
+      const pending = run(engine, t)
+      await vi.waitFor(() => expect(promptsIn(cwd)).toEqual(['hi']), { timeout: 10_000 })
+      await sleep(200)
+      h.steer('use pnpm')
+      await vi.waitFor(() => expect(commandsIn(cwd)).toContain('abort'), { timeout: 10_000 })
+      await sleep(200)
+      const stoppedAt = Date.now()
+      t.controller.abort()
+      const result = await pending
+      expect(result.aborted).toBe(true)
+      expect(Date.now() - stoppedAt).toBeLessThan(3000)
+      expect(h.record.returned).toEqual(['use pnpm'])
     }, 30_000)
 
     it('a refused continuation prompt gives the steer back once and ends the turn with what it has', async () => {
@@ -1175,7 +1224,7 @@ describe('Pi cuts in (stub Pi)', () => {
       const t = turn(cwd, { permissionMode: 'ask' })
       const ask = asker({ deaf: true })
       t.host.bridge = ask.bridge
-      onHold(t)
+      const h = onHold(t)
       const pending = run(engine, t)
       await vi.waitFor(() => expect(ask.asked).toHaveLength(1), { timeout: 10_000 })
       const stoppedAt = Date.now()
@@ -1183,6 +1232,45 @@ describe('Pi cuts in (stub Pi)', () => {
       const result = await pending
       expect(result.aborted).toBe(true)
       expect(Date.now() - stoppedAt).toBeLessThan(4000)
+      // The model reads why the call did not run: a Stop, not a new message.
+      expect(h.record.responses.get('call_1')).toMatch(/stopped the run/)
+    }, 30_000)
+
+    it('a steer while the second of two calls waits for approval cuts at once, though the first was approved: it has not run yet', async () => {
+      const { engine, project } = setup()
+      const cwd = project('p', { onPrompt: 'script', runs: [[{ tools: [gated('echo one', 20_000), gated('echo two')] }], [{ text: 'answered' }]] })
+      const t = turn(cwd, { permissionMode: 'ask' })
+      const ask = asker({ allowFirst: true })
+      t.host.bridge = ask.bridge
+      const h = onHold(t)
+      const pending = run(engine, t)
+      await vi.waitFor(() => expect(ask.asked).toHaveLength(2), { timeout: 10_000 })
+      const steeredAt = Date.now()
+      h.steer('use pnpm')
+      const result = await pending
+      expect(result.aborted).toBeFalsy()
+      expect(Date.now() - steeredAt).toBeLessThan(3000)
+      expect(h.record.held).not.toContain('bash')
+      expect(ask.rejected()).toBe(1)
+      expect(promptsIn(cwd)).toEqual(['hi', 'use pnpm'])
+    }, 30_000)
+
+    it('a person’s steer that cuts answers every question pending on the thread, Mousse’s own as well as Pi’s', async () => {
+      const { engine, project } = setup()
+      const cwd = project('p', { onPrompt: 'script', runs: [[{ forever: true }], [{ text: 'answered' }]] })
+      const t = turn(cwd)
+      const ask = asker()
+      t.host.bridge = ask.bridge
+      const h = onHold(t)
+      const pending = run(engine, t)
+      await vi.waitFor(() => expect(promptsIn(cwd)).toEqual(['hi']), { timeout: 10_000 })
+      await sleep(200)
+      // A Mousse tool's question (an `ask_user`) is pending on the thread; Pi asks nothing.
+      h.steer('use pnpm')
+      const result = await pending
+      expect(result.aborted).toBeFalsy()
+      expect(ask.rejected()).toBe(1)
+      expect(h.record.accepted).toEqual(['use pnpm'])
     }, 30_000)
 
     it('a cut whose clear_queue Pi answers after its agent_end and during its compaction aborts nothing: the steer runs next, the compaction ends, and no cut starts before Pi settles', async () => {
