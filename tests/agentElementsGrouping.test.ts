@@ -245,8 +245,8 @@ describe('applet activity segmentation', () => {
 describe('settleFinishedTurn', () => {
   const said = (id: string, text: string, role = 'assistant') => ({ id, role, parts: [{ type: 'text', text }] })
   const step = (id: string, type = 'tool-Bash') => ({ id, role: 'assistant', parts: [tool(type, id)] })
-  const settle = (messages: Array<{ id: string; role?: string; parts: unknown[] }>) => {
-    const settled = settleFinishedTurn(messages, messages.map((message) => analyzeAssistantMessage(message.parts, false)))
+  const settle = (messages: Array<{ id: string; role?: string; parts: unknown[]; metadata?: unknown }>, cutOff = false) => {
+    const settled = settleFinishedTurn(messages, messages.map((message) => analyzeAssistantMessage(message.parts, false)), cutOff)
     return {
       order: settled.order.map((index) => messages[index]!.id),
       grouped: settled.order.filter((index) => settled.analyses[index]!.toolsOnly).map((index) => messages[index]!.id),
@@ -276,5 +276,21 @@ describe('settleFinishedTurn', () => {
   it('moves the one reply row of an older turn below the work that came after it', () => {
     // Turns saved before notes had rows of their own keep all their text in the first reply row.
     expect(settle([step('t1', 'tool-Thinking'), said('a1', 'Checking.All done.'), step('c1'), step('t2', 'tool-Thinking')]).order).toEqual(['t1', 'c1', 't2', 'a1'])
+  })
+
+  it('keeps a stopped turn in the order it ran when its last text came before its last command', () => {
+    // "Running the build." then a command the Stop cut off: the text is a note, not an answer.
+    const turn = settle([said('n1', 'Running the build.'), step('c1')], true)
+    expect(turn.order).toEqual(['n1', 'c1'])
+    expect(turn.notes).toEqual([])
+    const steer = { id: 's1', role: 'user', parts: [], metadata: { steerGroup: [said('m1', 'Also check the docs', 'user')] } }
+    const steered = settle([said('a1', 'Started.'), step('c0'), steer, said('n1', 'Checking the docs.'), step('c1'), step('t1', 'tool-Thinking')], true)
+    expect(steered.order).toEqual(['a1', 'c0', 's1', 'n1', 'c1', 't1'])
+  })
+
+  it('still ends a stopped turn on text written after its work', () => {
+    const turn = settle([said('n1', 'Checking.'), step('c1'), said('a1', 'Half an ans')], true)
+    expect(turn.order).toEqual(['n1', 'c1', 'a1'])
+    expect(turn.notes).toEqual([{ text: 'Checking.' }])
   })
 })
