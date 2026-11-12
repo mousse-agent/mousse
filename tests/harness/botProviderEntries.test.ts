@@ -159,6 +159,17 @@ describe('canHoldBot on a locked Claude Code entry with the recorded evidence (Â
     }
   })
 
+  it('says a locked entry withholds commands without a proven sandbox, and the owner\'s entry withholds nothing', async () => {
+    for (const platform of ['linux', 'darwin'] as const) {
+      const p = profile({ platform, stored: withLocked })
+      await p.harness.instances.recheck(LOCKED)
+      // No sandbox evidence is recorded for any version yet, so a locked entry runs no commands (`claudeLockedTools`).
+      expect(p.harness.botWithheldTools(LOCKED), platform).toEqual(['shell'])
+      expect(p.harness.botWithheldTools('claude'), platform).toEqual([])
+      expect(p.harness.botWithheldTools('claude:unknown'), platform).toEqual([])
+    }
+  })
+
   it('a locked Claude Code that updated itself to a version with no record fails closed; the owner\'s entries still run the bot', async () => {
     const p = profile({ version: '2.1.306', stored: withLocked })
     await p.harness.instances.recheck(LOCKED)

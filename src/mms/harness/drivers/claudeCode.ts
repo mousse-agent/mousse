@@ -214,8 +214,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
   const owned = new Map<string, OwnedService>()
   const platform = options.platform ?? process.platform
   const evidence = options.evidence ?? CONTAINMENT_EVIDENCE
-  /** The locked entries whose runtime is bound: where their policy is read. */
-  const lockedEntries = new Map<string, { home?: string; cwd: () => string }>()
+  /** The locked entries whose runtime is bound: where their policy is read, and whether a program is on their PATH. */
+  const lockedEntries = new Map<string, { home?: string; cwd: () => string; onPath?: (name: string) => boolean }>()
   /**
    * The last policy reading of each locked entry, for the synchronous caps and `botAuthority`. A
    * reading is the entry's own (another entry's home may hold a server-managed policy), and a "no
@@ -304,6 +304,14 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     botAuthority: (config, instanceId) => !claudeLocked(config) || claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),
     // A locked entry holds it only exactly: on a version with no record it holds none.
     botApprovals: (config) => !claudeLocked(config),
+    // A locked entry runs Bash only in a proven sandbox (`admit`, `claudeLockedTools`); the owner's entry runs it either way.
+    botWithheldTools: (config, installedVersion, instanceId) => {
+      if (!claudeLocked(config)) return []
+      const entry = instanceId === undefined ? undefined : lockedEntries.get(instanceId)
+      const contained = entry?.onPath !== undefined && claudeSandboxFact(platform, entry.onPath) === 'available' &&
+        installedVersion !== undefined && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: installedVersion }, evidence)
+      return contained ? [] : ['shell']
+    },
     readPolicyFacts: async (config, instanceId) => {
       if (claudeLocked(config)) await readManaged(instanceId)
     },
@@ -541,7 +549,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       const lockedEntry = !shared && claudeLocked(context.config)
       if (lockedEntry) {
         // Its policy is read as soon as the runtime is bound, so the entry's caps can say what it holds.
-        lockedEntries.set(context.instanceId, { ...(context.env.home ? { home: context.env.home } : {}), cwd: () => service.standaloneWorkspace('locked-policy') })
+        lockedEntries.set(context.instanceId, { ...(context.env.home ? { home: context.env.home } : {}), cwd: () => service.standaloneWorkspace('locked-policy'), onPath: (name) => Boolean(findOnPath([name], context.env)) })
         void readManaged(context.instanceId).then(() => context.changed(), () => undefined)
       }
       const adapter = new ClaudeSubscriptionAdapter(() => service, () => integrations, lockedEntry

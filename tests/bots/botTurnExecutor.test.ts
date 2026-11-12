@@ -126,6 +126,15 @@ describe('a prepared bot turn', () => {
     expect(settled).toEqual([{ payload: expect.objectContaining({ runId: effect.runId }), outcome: { text: 'Footer fixed.' } }])
   })
 
+  it('a failed turn settles with no words, except a turn cap, which hands back what it said last', async () => {
+    orch.setBotDispatcher({ prepare: prepare(), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    runTurn.mockImplementationOnce(async () => ({ message: '[provider_failed] It broke.', actions: [], error: { code: 'provider_failed', message: 'It broke.' } }))
+    await execute(await queuedBotRun('bot-a'))
+    runTurn.mockImplementationOnce(async () => ({ message: '[provider_turn_cap] Claude Code reached the most steps one turn may take.', actions: [], error: { code: 'provider_turn_cap', message: 'Claude Code reached the most steps one turn may take.' }, partial: 'Two picks so far.' }))
+    await execute(await queuedBotRun('bot-b'))
+    expect(settled.map((entry) => entry.outcome)).toEqual([{}, { text: 'Two picks so far.' }])
+  })
+
   it('a thread that already has history fails with bot_state_invalid before anything is sent', async () => {
     orch.setBotDispatcher({ prepare: prepare(), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
     const effect = await queuedBotRun()

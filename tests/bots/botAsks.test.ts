@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
@@ -22,6 +22,8 @@ let notes: string
 const DAY = 24 * 60 * 60_000
 /** A read of a folder: a gate refusal asks for file access as a whole (`filesAsk`), once. */
 const readIn = (folder: string): NormalisedCall => ({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: folder } })
+/** The newest dispatch's deadline fires (the newest timer that is not the watch every live dispatch has). */
+const deadline = () => f.timers.filter((timer) => timer.ms !== BOT_OFFLINE_WATCH_MS).at(-1)!.fn()
 
 beforeEach(async () => {
   f = botFixture()
@@ -256,7 +258,7 @@ describe('asks across lanes and timing (review)', () => {
   it('a limit has one open ask whichever way it was raised', async () => {
     const { payload } = await run('limit-run')
     // A run that reached its time: it ends, with one ask for more.
-    f.timers.at(-1)!.fn()
+    deadline()
     await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     expect(f.store.openAsks(botId).filter((ask) => ask.kind === 'budget')).toHaveLength(1)
     // The chat asking for the same limit takes that ask over rather than adding a second one.
@@ -283,7 +285,7 @@ describe('asks across lanes and timing (review)', () => {
 
   it('a message sent while the chat waits at a limit starts a chat of its own', async () => {
     const turn = await chat('a long job', 'm-long')
-    f.timers.at(-1)!.fn()
+    deadline()
     await finish(f, turn.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     expect(f.store.activation(turn.activation.id)!.status).toBe('waiting_grant')
     await f.bots.service.chatSend({ botId, text: 'never mind, just say hi', clientRequestId: 'm-hi' })
