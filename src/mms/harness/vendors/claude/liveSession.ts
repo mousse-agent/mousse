@@ -553,9 +553,15 @@ export class LiveRun {
    * Steers whose Send now interrupted the turn (`LiveSession.stopForeground`). If Claude Code had already taken one for
    * its next request when the interrupt landed, the aborted result that follows is that steer's own request, not the
    * command's: the run ends there instead of waiting for a result that never comes. The steer is read if the model
-   * answered it before the abort, and handed back once if not.
+   * answered it before the abort, and handed back once if not. Only the first aborted result after the interrupt can be
+   * that request's: it clears the set, so a later steer's cut in the same turn is waited past as usual.
    */
   readonly interruptedFor = new Set<string>()
+  /**
+   * The aborted result the run ended at because Send now's interrupt cut the steer's own request (`interruptedFor`).
+   * The person asked for that interrupt, so the turn did not fail: the provider ends it with what the model wrote.
+   */
+  sendNowAbort: SDKResultMessage | undefined
   steered = false
   settled = false
   /** The turn was cancelled but the stream still owes its result; frames are dropped until then. */
@@ -1859,7 +1865,14 @@ export class LiveSession<Turn = unknown> {
     // The turn a steer interrupted ends at the steer's own result, not at the abort.
     // Unless Send now's interrupt aborted the steer's own request (Claude Code had taken it): no result of its own will
     // come. The run ends here; the steer is read if the model answered it, and handed back once if not.
-    if (isAbortResult(message) && target.steered && !this.interruptAbortedSteer(target)) return void target.deliver(message)
+    if (isAbortResult(message) && target.steered) {
+      const sendNowAbort = this.interruptAbortedSteer(target)
+      // Only the first aborted result after the interrupt is the command's or the steer's request; a later one is a
+      // later steer's cut, which the run waits past like any other.
+      target.interruptedFor.clear()
+      if (!sendNowAbort) return void target.deliver(message)
+      target.sendNowAbort = message
+    }
     // A steer that has not been echoed yet starts a turn this run owns.
     const queued = (message as { queued_turn_count?: number }).queued_turn_count ?? 0
     if (target.owned.size > 0 && queued > 0) return void target.deliver(message)

@@ -458,6 +458,45 @@ describe('a person\'s steer on Claude Code waits for a running tool', () => {
     expect(cliInputsWith(w.cli, 'use pnpm')).toBe(sentTimes)
     expect(w.inContext('use pnpm')).toBe(1)
     expect(w.claude.interrupts).toBe(1)
+    // The person pressed Send now: the turn did not fail, and the thread shows no error.
+    expect(w.d.engine.getRun(w.runId)?.status).toBe('completed')
+    expect(w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => /orchestrator_turn_failed|Something went wrong/.test(String(message.content)))).toEqual([])
+  })
+
+  it('a later steer that cuts the same turn after a Send now is waited past: the run goes on to its answer, and it is sent once', async () => {
+    const w = await running()
+    w.claude.emit(toolStart('bash-1', 'Bash', w.prompt), toolUse('bash-1', 'Bash', { command: 'sleep 30' }))
+    await later(30)
+    await w.steer('use pnpm instead')
+    await waitFor(() => w.held() !== undefined, 'held')
+    // The interrupt ends the command, then Claude Code takes the steer and the model answers it; the turn goes on.
+    w.claude.onInterrupt = (process) => {
+      setTimeout(() => {
+        interruptedCommand(process, 'bash-1', w.prompt)
+        process.emit(lifecycle(process.uuid(1), 'started'), messageStart(process.uuid(1)), textDelta('switching to pnpm', process.uuid(1)))
+      }, 0)
+    }
+    await w.sendNow('now-1')
+    await waitFor(() => w.inContext('use pnpm instead') === 1 || w.outcomes.length > 0, 'the first steer answered')
+    await later(100)
+    // A second steer cuts in while the model writes: Claude Code aborts the request, with no queued_turn_count.
+    await w.steer('also run lint')
+    await waitFor(() => w.claude.inputs.length === 3, 'the second steer pushed')
+    w.claude.emit(resultFrame({ uuids: [w.claude.uuid(1)], terminalReason: 'aborted_streaming', error: 'interrupted' }))
+    await later(200)
+    // Not the late-steer cancel: the run waits for the second steer's own result.
+    expect(w.claude.cancelAsyncCalls).toEqual([])
+    expect(w.d.engine.getActiveRun(w.thread.id)?.runId).toBe(w.runId)
+    answerSteer(w.claude, w.claude.uuid(2), 'running lint too')
+    await w.first
+    await waitFor(() => w.d.engine.getActiveRun(w.thread.id) === null, 'the run to end')
+    await later(300)
+    expect(w.d.engine.getRun(w.runId)?.status).toBe('completed')
+    expect(cliInputsWith(w.cli, 'also run lint')).toBe(1)
+    expect(cliInputsWith(w.cli, 'use pnpm instead')).toBe(1)
+    expect(w.inContext('also run lint')).toBe(1)
+    expect(w.d.orch.listQueue(w.thread.id)).toEqual([])
+    expect(w.claude.interrupts).toBe(1)
   })
 
   it('Send now with two tasks whose stop fails interrupts the turn once', async () => {
