@@ -50,10 +50,12 @@ export interface NewBotDraft {
   look: BotLook | null
   name: string
   description: string
+  /** A model picked by hand on the Runs on line (#673); null is by usage, the default. */
+  model: string | null
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
   touched: boolean
 }
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', touched: false }
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, touched: false }
 
 interface BotsState {
   profileId: string | null
@@ -106,7 +108,7 @@ interface BotsState {
   closeNewBot(): void
   setNewBotDraft(change: Partial<Omit<NewBotDraft, 'touched'>>): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string }): Promise<BotSummary | null>
+  create(input: { look: BotLook; name?: string; description: string; model?: string }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>
@@ -554,7 +556,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 })
 
 /** Failures whose words come from the service and are meant for the owner as they are. */
-const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable'])
+const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable', 'model_unavailable'])
 
 /**
  * What New bot says when Create bot fails. No answer, a lost connection or an unexpected error all

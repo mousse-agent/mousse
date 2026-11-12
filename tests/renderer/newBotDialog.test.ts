@@ -95,7 +95,7 @@ afterEach(() => {
 })
 
 describe('New bot', () => {
-  it('has a look, an optional name, one sentence and Create bot, and nothing about models or permissions', async () => {
+  it('has a look, an optional name, one sentence, where it runs and Create bot, and nothing about permissions', async () => {
     await open([])
     const box = dialog()!
     expect(box.querySelector('h2')?.textContent).toBe('New bot')
@@ -104,7 +104,70 @@ describe('New bot', () => {
     expect(box.querySelector<HTMLInputElement>('#bot-new-name')?.placeholder).toBe('Optional. Leave it empty and the bot names itself.')
     expect(box.querySelector<HTMLTextAreaElement>('#bot-new-text')?.placeholder).toBe('For example: every morning, tell me which emails need a reply.')
     expect([...box.querySelectorAll('input, textarea, select')]).toHaveLength(2)
-    expect(box.textContent).not.toMatch(/model|permission|schedule|device/i)
+    // One quiet line, as About → Runs on says it: this computer, by usage. No model is named until one is picked.
+    expect(box.querySelector('[data-testid="bot-new-runs-on"]')?.textContent).toBe('Runs onDeskBy usage')
+    expect(box.textContent).not.toMatch(/sonnet|permission|schedule|device/i)
+  })
+
+  it('runs by usage on this computer when the line is left alone, and on a model picked by hand otherwise (#673)', async () => {
+    await open([])
+    await type(textBox(), 'Remind me to water the plants.')
+    await act(async () => dialog()!.querySelector<HTMLElement>('[aria-label="New bot\'s model"]')!.click())
+    const options = [...document.querySelectorAll('[role="option"]')].map((option) => option.textContent)
+    expect(options).toEqual(['By usage', 'Claude · sonnet'])
+    await act(async () => ([...document.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent === 'Claude · sonnet'))!.click())
+    expect(dialog()!.querySelector('[data-testid="bot-new-runs-on"]')?.textContent).toContain('Claude · sonnet')
+    // Picking By usage again clears it.
+    await act(async () => dialog()!.querySelector<HTMLElement>('[aria-label="New bot\'s model"]')!.click())
+    await act(async () => ([...document.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent === 'By usage'))!.click())
+    expect(useBotsStore.getState().newBotDraft.model).toBeNull()
+    await act(async () => dialog()!.querySelector<HTMLElement>('[aria-label="New bot\'s model"]')!.click())
+    await act(async () => ([...document.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent === 'Claude · sonnet'))!.click())
+    await act(async () => createButton()!.click())
+    await act(async () => {})
+    expect(creates()[0]![1]).toMatchObject({ description: 'Remind me to water the plants.', model: 'sonnet' })
+    expect(dialog()).toBeNull()
+  })
+
+  it('sends no model when the line is left alone', async () => {
+    await open([])
+    await type(textBox(), 'Remind me to water the plants.')
+    await act(async () => createButton()!.click())
+    await act(async () => {})
+    expect(creates()[0]![1]).not.toHaveProperty('model')
+  })
+
+  it('says so when the picked model is gone by Create bot, and shows it as not available now', async () => {
+    await open([])
+    await type(textBox(), 'Remind me to water the plants.')
+    await act(async () => dialog()!.querySelector<HTMLElement>('[aria-label="New bot\'s model"]')!.click())
+    await act(async () => ([...document.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent === 'Claude · sonnet'))!.click())
+    vi.mocked(fake.client.create).mockRejectedValueOnce(Object.assign(new Error('The model you picked is not available now. Pick another one, or By usage.'), { code: 'model_unavailable' }))
+    vi.mocked(fake.client.modelChoices).mockImplementationOnce(async () => ({ models: [], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))
+    await act(async () => createButton()!.click())
+    await act(async () => {})
+    expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('The model you picked is not available now. Pick another one, or By usage.')
+    expect(dialog()?.querySelector('[data-testid="bot-new-runs-on"]')?.textContent).toContain('sonnet (not available now)')
+    expect(useChatsStore.getState().activeBotId).toBeNull()
+  })
+
+  it('leaves the line out with an older service, and creates by usage as before', async () => {
+    vi.mocked(fake.client.modelChoices).mockRejectedValue(Object.assign(new Error('Unknown method'), { code: 'method_not_found' }))
+    await open([])
+    expect(dialog()!.querySelector('[data-testid="bot-new-runs-on"]')).toBeNull()
+    await type(textBox(), 'Remind me to water the plants.')
+    await act(async () => createButton()!.click())
+    await act(async () => {})
+    expect(creates()[0]![1]).not.toHaveProperty('model')
+  })
+
+  it('lists the person’s other computers greyed, as About does', async () => {
+    vi.mocked(fake.client.modelChoices).mockImplementation(async () => ({ models: [], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }, { id: 'nod_laptop', name: 'Laptop', unavailable: 'A bot runs on the computer that holds it.' }] }))
+    await open([])
+    await act(async () => dialog()!.querySelector<HTMLElement>('[aria-label="New bot\'s computer"]')!.click())
+    const laptop = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Laptop'))
+    expect(laptop?.getAttribute('aria-disabled')).toBe('true')
+    expect(laptop?.textContent).toContain('A bot runs on the computer that holds it.')
   })
 
   it('starts with a look the other bots don’t wear', async () => {
