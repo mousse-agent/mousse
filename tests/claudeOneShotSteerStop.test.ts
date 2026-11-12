@@ -49,7 +49,7 @@ async function firstMessage(prompt: AsyncIterable<SDKUserMessage>): Promise<SDKU
  * A person's turn past the live-process cap (no slot, so one query per run of the turn), each query from `scripts`
  * in order. `beforeStart(n)` runs as query `n` is being started, before the turn has it.
  */
-function cappedTurn(scripts: Script[], steersQueued: { text: string; token: string }[], beforeStart?: (index: number) => void) {
+function cappedTurn(scripts: Script[], steersQueued: { text: string; token: string }[], beforeStart?: (index: number) => void, mcp?: { url: string; token: string }) {
   const home = temp('one-shot-steer-home-')
   const binary = join(home, 'claude')
   writeFileSync(binary, 'fixture')
@@ -60,6 +60,8 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
   const queries: FakeQuery[] = []
   const prompts: SDKUserMessage[] = []
   const events: string[] = []
+  /** Each query's MCP registration (#358) and the moment it read its prompt, in order. */
+  const order: string[] = []
   const query = ({ prompt }: { prompt: AsyncIterable<SDKUserMessage> }): Query => {
     const index = queries.length
     const script = scripts[index]
@@ -78,13 +80,18 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
     queries.push(fake)
     const read = firstMessage(prompt).then((message) => {
       prompts.push(message)
+      order.push(`prompt ${index}`)
       return message
     })
     const replay = (async function* (): AsyncGenerator<SDKUserMessage> {
       yield await read
     })()
     beforeStart?.(index)
-    return Object.assign(script(replay, fake), { close: fake.close, interrupt: fake.interrupt, transport: { process } }) as unknown as Query
+    const setMcpServers = vi.fn(async (servers: Record<string, unknown>) => {
+      order.push(`servers ${index}: ${Object.keys(servers).join(', ')}`)
+      return { added: Object.keys(servers), removed: [], errors: {} }
+    })
+    return Object.assign(script(replay, fake), { close: fake.close, interrupt: fake.interrupt, setMcpServers, transport: { process } }) as unknown as Query
   }
   const reap = vi.fn(async (pid: number) => {
     events.push(`reap ${pid - 70_000}`)
@@ -108,8 +115,8 @@ function cappedTurn(scripts: Script[], steersQueued: { text: string; token: stri
     onSteer: vi.fn((text: string, token?: string) => { events.push(`accepted ${text} ${token}`) }),
     returnSteer: vi.fn((text: string, token?: string) => { events.push(`returned ${text} ${token}`) })
   }
-  const run = () => service.chat({ threadId: 'thread', cwd, model: 'sonnet', prompt: 'go', signal: stop.signal, onText: vi.fn(), ...steer })
-  return { run, stop, steer, queries, prompts, events, pending, reap }
+  const run = () => service.chat({ threadId: 'thread', cwd, model: 'sonnet', prompt: 'go', signal: stop.signal, onText: vi.fn(), ...(mcp ? { mcp } : {}), ...steer })
+  return { run, stop, steer, queries, prompts, events, order, pending, reap }
 }
 
 const ONE = [{ text: 'use the other file', token: 'drain-1' }]
@@ -293,6 +300,23 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     await expect(turn.run()).rejects.toThrow()
     expect(turn.steer.onSteer.mock.calls).toEqual([['use the other file', 'drain-1'], ['and keep the tests', 'drain-2']])
     expect(turn.steer.returnSteer).not.toHaveBeenCalled()
+  })
+
+  it('each query a steer restarts the turn with gets the MCP servers over its input before it reads its prompt (#358)', async () => {
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        yield answer
+        yield done
+      }
+    ], ONE, undefined, { url: 'http://127.0.0.1:9/mcp', token: 'mousse-token-358' })
+    await turn.run()
+    expect(turn.order).toEqual(['servers 0: mousse', 'prompt 0', 'servers 1: mousse', 'prompt 1'])
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 
   it('a stopped process that never ends its output is read no longer than the drain deadline, and the steer is handed back once', async () => {

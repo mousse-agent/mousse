@@ -63,7 +63,11 @@ export function chatgptTokenCommand(endpoint: string, leaseId: string, cli?: Cli
   return { command: command.command, args: [...command.args, 'engine', 'chatgpt-token', endpoint, leaseId], env: { ...command.env } }
 }
 
-/** Claude Agent SDK `mcpServers` (SPEC §15.2): the Mousse server over HTTP, or none. */
+/**
+ * Claude Code's MCP servers for the Mousse server (SPEC §15.2): over HTTP, or none. They are registered over Claude
+ * Code's input once it starts (`registerClaudeMcpServers`), never passed as the Agent SDK's `mcpServers` option, which
+ * would put the bearer on its command line (#358).
+ */
 export function claudeMcpServers(attachment: McpAttachment | null | undefined): Record<string, {
   type: 'http'
   url: string

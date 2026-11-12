@@ -1503,6 +1503,14 @@ export class LiveSession<Turn = unknown> {
     if (!this.query || typeof this.query.applyFlagSettings !== 'function') return Promise.reject(new Error('This Claude Code cannot switch settings in place'))
     return this.query.applyFlagSettings(settings)
   }
+  /**
+   * Replaces the MCP servers registered on the running process (#358): over its input, never its command line. Rejects
+   * when there is no process, so the owner starts a new one rather than believe the servers are there.
+   */
+  setMcpServers(servers: Parameters<Query['setMcpServers']>[0]): ReturnType<Query['setMcpServers']> {
+    if (!this.query || typeof this.query.setMcpServers !== 'function') return Promise.reject(new Error('This Claude Code cannot take MCP servers in place'))
+    return this.query.setMcpServers(servers)
+  }
 
   interrupt(): Promise<void> {
     return this.query ? Promise.resolve(this.query.interrupt()).then(() => undefined) : Promise.resolve()

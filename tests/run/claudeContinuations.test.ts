@@ -116,7 +116,8 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     const task = () => d.engine.delegations.get(builder.delegationId)!
     const callMousse = async (name: string, args: Record<string, unknown> = {}) => {
       const options = cli.last.options
-      const server = (options.mcpServers as Record<string, { url: string; headers: { Authorization: string } }>).mousse
+      // The server as Claude Code was given it, over its input (#358).
+      const server = (cli.last.mcpServers as Record<string, { url: string; headers: { Authorization: string } }>).mousse
       // Claude runs Mousse's PreToolUse hook before each call; the input the hook returns (stamped
       // with the turn's token) is what reaches the server.
       const hooked = await options.hooks!.PreToolUse![0].hooks[0](

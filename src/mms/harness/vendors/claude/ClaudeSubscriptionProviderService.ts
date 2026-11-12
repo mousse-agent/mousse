@@ -62,6 +62,7 @@ import { parseClaudeSubscriptionUsage } from './usage'
 import { checkProxyKey, listedProxySeats, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, readLocalProxySeats, type ProxyUsage, type ProxyUsageOptions } from './localProxyUsage'
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
+import { claudeMcpRegistrationMs, dropMousseServers, promptAfter, registerClaudeMcpServers, type ClaudeMcpServers } from './mcpRegistration'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
@@ -88,9 +89,17 @@ const ONE_SHOT_STOP_DRAIN_MS = 1_500
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /**
  * What a live process is started for, in the order of the key `chat` builds; a change needs a new process. The model
- * and the effort are not among them: a running process switches both in place (`LiveFlags`, issue #359).
+ * and the effort are not among them: a running process switches both in place (`LiveFlags`, issue #359). Nor is the
+ * Mousse credential, only the server's address: a new credential is registered on the running process (#358).
  */
-const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse credential', 'read-only policy']
+const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server', 'read-only policy']
+
+/** The MCP servers registered on a live process (`LiveSession.meta.mcp`), and the Mousse attachment among them. */
+interface RegisteredMcp {
+  servers: ClaudeMcpServers
+  /** Unknown (`token` undefined) after a renewal Claude Code did not take: the next turn registers it again. */
+  mousse: { url: string; token: string | undefined; relay?: McpRelayAttachment } | null
+}
 /**
  * The model and effort a live process runs a turn on. Ultracode is a level here: it runs at the model's default effort
  * with Claude Code's `ultracode` setting on.
@@ -1603,6 +1612,57 @@ export class ClaudeSubscriptionProviderService {
     return created
   }
   /**
+   * A turn's one-shot query, its MCP servers registered over its input before it reads its prompt (#358). A
+   * registration that fails closes the process before it read anything, and the turn fails (`registerClaudeMcpServers`).
+   */
+  private async startQuery(prompt: AsyncIterable<SDKUserMessage>, options: Options, servers: ClaudeMcpServers, signal: AbortSignal, threadId: string): Promise<Query> {
+    if (Object.keys(servers).length === 0) return this.createQuery(prompt, options)
+    let registered!: () => void
+    let refused!: (error: unknown) => void
+    const ready = new Promise<void>((resolve, reject) => {
+      registered = resolve
+      refused = reject
+    })
+    ready.catch(() => undefined)
+    const query = await this.createQuery(promptAfter(ready, prompt), options)
+    try {
+      await registerClaudeMcpServers(query, servers, { timeoutMs: claudeMcpRegistrationMs(options.env ?? {}), signal, threadId })
+    } catch (error) {
+      refused(error)
+      query.close()
+      throw error
+    }
+    registered()
+    return query
+  }
+  /**
+   * Gives a kept live process the turn's Mousse credential when it holds another one (a new credential epoch), over
+   * its input and with the servers it was started with, so its background work keeps running (#358). False when Claude
+   * Code did not take it: the process's Mousse server is unknown then, and the next turn registers it again.
+   */
+  private async renewMousseServer(live: LiveSession<TurnContext>, mousse: McpAttachment | null, input: { timeoutMs: number; signal?: AbortSignal }): Promise<boolean> {
+    const registered = live.meta.mcp as RegisteredMcp | undefined
+    if (!mousse || !registered?.mousse || registered.mousse.token === mousse.token) return true
+    // The address and the relay stay as the process started with them; only the bearer is new.
+    const renewed = { ...registered.mousse, token: mousse.token }
+    const servers = { ...registered.servers, ...claudeMcpServers(renewed) }
+    const options = { timeoutMs: input.timeoutMs, ...(input.signal ? { signal: input.signal } : {}), threadId: live.threadId }
+    const hold = live.reserve()
+    try {
+      // After a renewal it did not take, Claude Code would keep the same config as it is (failed): it goes off first.
+      if (registered.mousse.token === undefined) await dropMousseServers(live, registered.servers, options)
+      await registerClaudeMcpServers(live, servers, options)
+    } catch (error) {
+      live.meta.mcp = { ...registered, mousse: { ...registered.mousse, token: undefined } }
+      if (input.signal?.aborted) throw error
+      return false
+    } finally {
+      hold()
+    }
+    live.meta.mcp = { servers, mousse: renewed } satisfies RegisteredMcp
+    return true
+  }
+  /**
    * How Mousse starts Claude Code. It runs as the user set it up: `settingSources` is left out, so
    * the user, project and local settings load as in a terminal (their `env`, MCP servers, hooks,
    * plugins, permission rules, CLAUDE.md and so on). Mousse adds its own MCP servers and
@@ -1632,6 +1692,8 @@ export class ClaudeSubscriptionProviderService {
       permissionPrompts: 'host',
       // Claude Code's own system prompt, as in a terminal; Mousse only appends to it.
       systemPrompt: { type: 'preset', preset: 'claude_code', ...(appendText ? { append: appendText } : {}) },
+      // Never any here: the SDK writes these on Claude Code's command line, where any local process reads their
+      // credentials. A turn's servers are registered over its input once it starts (`registerClaudeMcpServers`, #358).
       mcpServers: {},
       ...(this.dependencies.settingSources ? { settingSources: [...this.dependencies.settingSources] } : {}),
       ...(settings ? { settings } : {}),
@@ -2089,15 +2151,17 @@ export class ClaudeSubscriptionProviderService {
   /**
    * The thread's live query for this turn: the open one when it is still the right one, a new one
    * otherwise, or undefined when the turn has to run as a one-shot query (live queries are at their
-   * cap). The open one switches to the turn's model and effort in place (issue #359); one that cannot is
-   * replaced. A query that has background work is never replaced silently: a change that needs a new
+   * cap). The open one switches to the turn's model and effort in place (issue #359), and takes a new Mousse
+   * credential in place (#358); one that cannot is replaced. A new one has its MCP servers registered before it is
+   * returned (`mcp`). A query that has background work is never replaced silently: a change that needs a new
    * process is refused, naming the change, because it would end that work.
    */
   private async acquireLive(
     threadId: string,
     key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string },
     resume: string | undefined,
-    create: (live: LiveSession<TurnContext>) => Options
+    create: (live: LiveSession<TurnContext>) => Options,
+    mcp: { servers: () => ClaudeMcpServers; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal } = { servers: () => ({}), mousse: null, timeoutMs: 0 }
   ): Promise<LiveSession<TurnContext> | undefined> {
     const timings = this.liveConfig
     if (!timings) return undefined
@@ -2111,17 +2175,26 @@ export class ClaudeSubscriptionProviderService {
       // Launch settings and integrations apply the next time the process starts; pending work keeps this one.
       const keep = reusable !== undefined && (live.meta.softKey === key.soft || live.obligations.size > 0)
       let switchFailed = false
+      let renewFailed = false
       if (keep) {
-        if (sameFlags(live.meta.flags as LiveFlags | undefined, key.flags)) return live
-        // The idle release must not close the process while Claude Code switches it.
-        const hold = live.reserve()
-        try {
-          if (await this.switchLiveFlags(live, key.flags)) return live
-        } finally {
-          hold()
+        let switched = sameFlags(live.meta.flags as LiveFlags | undefined, key.flags)
+        if (!switched) {
+          // The idle release must not close the process while Claude Code switches it.
+          const hold = live.reserve()
+          try {
+            switched = await this.switchLiveFlags(live, key.flags)
+          } finally {
+            hold()
+          }
         }
-        switchFailed = true
-        console.warn('[claude-subscription] Claude Code could not switch the model or effort in place; the turn starts a new process', { threadId })
+        if (switched && (await this.renewMousseServer(live, mcp.mousse, mcp))) return live
+        if (switched) {
+          renewFailed = true
+          console.warn('[claude-subscription] Claude Code could not take the new Mousse credential in place; the turn starts a new process', { threadId })
+        } else {
+          switchFailed = true
+          console.warn('[claude-subscription] Claude Code could not switch the model or effort in place; the turn starts a new process', { threadId })
+        }
       }
       // Read after the switch: background work may have ended meanwhile.
       const working = live.dead ? 0 : live.obligations.size
@@ -2130,9 +2203,11 @@ export class ClaudeSubscriptionProviderService {
         const changed = HARD_PARTS.filter((_, index) => JSON.stringify(previous[index]) !== JSON.stringify(key.hard[index]))
         const cause = switchFailed
           ? 'Claude Code could not switch its model or effort in place, which needs a new Claude process'
-          : changed.length
-            ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
-            : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
+          : renewFailed
+            ? 'Claude Code could not take Mousse\'s new credential in place, which needs a new Claude process'
+            : changed.length
+              ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
+              : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
         const tasks = working === 1 ? 'a background task' : `${working} background tasks`
         // Tasks Claude read whose reply was cut off (or could not be shown) are not running: the next message
         // clears them. They are told apart from the ones still running, which a change would end.
@@ -2177,11 +2252,21 @@ export class ClaudeSubscriptionProviderService {
     this.live.set(threadId, created)
     try {
       const query = await this.createQuery(created.queue, create(created))
+      // Before its output is read or a prompt pushed (#358): the SDK takes Claude Code's answer by itself. A process
+      // starts with none.
+      const servers = mcp.servers()
+      try {
+        if (Object.keys(servers).length > 0) await registerClaudeMcpServers(query, servers, { timeoutMs: mcp.timeoutMs, ...(mcp.signal ? { signal: mcp.signal } : {}), threadId })
+      } catch (error) {
+        query.close()
+        throw error
+      }
       if (this.stopped || created.dead) {
         query.close()
         throw new Error('Claude provider is stopped')
       }
       created.attach(query)
+      created.meta.mcp = { servers, mousse: mcp.mousse } satisfies RegisteredMcp
     } catch (error) {
       created.close('closed')
       if (this.live.get(threadId) === created) this.live.delete(threadId)
@@ -2579,7 +2664,8 @@ export class ClaudeSubscriptionProviderService {
     this.activeThreads.add(input.threadId)
     // A locked turn takes none of the user's MCP servers or skills.
     const integrations = locked ? undefined : input.integrations
-    // User MCP servers reference their secrets as `${VAR}`; the values ride in Claude's environment.
+    // No MCP credential is in Claude Code's environment, which every command it runs inherits: the servers, their
+    // secrets resolved, go over its input once it starts (`registerClaudeMcpServers`, #358).
     // A locked turn's environment is built from nothing (`lockedEnv`), with the instance's key last.
     // The compaction threshold is set over both: Claude Code's own session holds the tool calls and
     // results that fill its context, so only its auto-compact can keep it under the threshold.
@@ -2591,7 +2677,7 @@ export class ClaudeSubscriptionProviderService {
       ? this.finalEnv({ ...this.dependencies.lockedEnv!(locked.cwd), ...compaction })
       : locked
         ? this.finalEnv({ ...claudeEffectiveEnvironment(this.environment()), ...compaction })
-        : this.finalEnv({ ...this.environment(), ...integrations?.env, ...compaction })
+        : this.finalEnv({ ...this.environment(), ...compaction })
     // A bot turn's gate knows Claude Code's own storage for it (its saved tool output), in the home
     // this turn runs with: reading that back never needs the bot's file access.
     const lockedTurn = locked ? { ...locked, own: claudeOwnStorage(claudeHomeOf(env), locked.cwd) } : undefined
@@ -2887,7 +2973,7 @@ export class ClaudeSubscriptionProviderService {
         instanceId,
         resolve(input.cwd),
         appendTexts.filter(Boolean).join('\n\n'),
-        input.mcp ? [input.mcp.url, input.mcp.token] : null,
+        input.mcp ? input.mcp.url : null,
         readOnlyChild
       ]
       const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
@@ -2926,6 +3012,18 @@ export class ClaudeSubscriptionProviderService {
       const messages = async function* (): AsyncGenerator<SDKUserMessage> {
         yield { ...userMessage(resume ?? branch?.id ?? ''), ...(promptId ? { uuid: promptId as SDKUserMessage['uuid'] } : {}) }
       }
+      // The turn's Mousse server: a bot's turn never attaches the MCP relay, since its grant gate knows only Mousse's own tools.
+      const mousse: McpAttachment | null = input.mcp ? (locked ? { url: input.mcp.url, token: input.mcp.token } : input.mcp) : null
+      /**
+       * The turn's MCP servers, Mousse's last so it keeps its name. They are registered over Claude Code's input once it
+       * starts (`registerClaudeMcpServers`), never named on its command line (#358). A locked turn has Mousse's own only.
+       */
+      const turnServers = (): ClaudeMcpServers => ({
+        ...integrations?.mcpServers,
+        // Servers that sign in with OAuth run in this process and call Mousse's own connection.
+        ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
+        ...claudeMcpServers(mousse)
+      })
       const buildOptions = (sdkController: AbortController, turnOf: () => TurnContext, isLive: boolean): Options => {
         // Mousse's instructions first, then the user's own append text.
         const base = this.options(input.cwd, sdkController, env, appendTexts, turnSettings)
@@ -2942,13 +3040,6 @@ export class ClaudeSubscriptionProviderService {
           // A live query can switch to bypass on a later turn even when it starts in plan or ask mode,
           // unless Claude Code's settings forbid bypassing permissions at all.
           ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild && !bypassDisabled) ? { allowDangerouslySkipPermissions: true } : {}),
-          // The Mousse server keeps its name: user servers are spread first.
-          mcpServers: {
-            ...integrations?.mcpServers,
-            // Servers that sign in with OAuth run in this process and call Mousse's own connection.
-            ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
-            ...claudeMcpServers(input.mcp)
-          },
           // The skills enabled in Mousse reach Claude as a local plugin, next to the user's own.
           ...(integrations?.pluginPath ? { plugins: [{ type: 'local' as const, path: integrations.pluginPath }] } : {}),
           ...this.permissionCallbacks(turnOf)
@@ -2960,8 +3051,6 @@ export class ClaudeSubscriptionProviderService {
           ...buildOptions(sdkController, turnOf, false),
           ...claudeLockedOptions(lockedTurn!, {
             env,
-            // A bot's turn never attaches the MCP relay: its grant gate knows only Mousse's own tools.
-            mcpServers: claudeMcpServers(input.mcp ? { url: input.mcp.url, token: input.mcp.token } : null),
             mousseTools: Boolean(input.mcp),
             // On the owner's entry the process is the turn's own and the SDK's: the turn's signal ends it.
             ...(locked!.ownerEntry ? {} : { spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {}) })
@@ -3002,6 +3091,9 @@ export class ClaudeSubscriptionProviderService {
         // has nothing to restart into, so one that cannot switch goes on with what the process has.
         if (!sameFlags(live.meta.flags as LiveFlags | undefined, flags) && !(await this.switchLiveFlags(live, flags)))
           console.warn('[claude-subscription] could not switch the model or effort of Claude\'s own turn; it runs on the previous one', { threadId: input.threadId })
+        // And for a Mousse credential renewed since (#358): one the process cannot take leaves it on the previous one.
+        if (!(await this.renewMousseServer(live, mousse, { timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal })))
+          console.warn('[claude-subscription] Claude\'s own turn could not take the new Mousse credential; it runs on the previous one', { threadId: input.threadId })
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {
@@ -3011,7 +3103,7 @@ export class ClaudeSubscriptionProviderService {
           live = locked ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
             return buildOptions(created.lifetime, () => created.current ?? turn, true)
-          })
+          }, { servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal })
         } catch (error) {
           // A refused change started nothing: the conversation is as it was, so the next request can resume it.
           // Mousse keeps the refused message in the transcript, so the history the next request carries has
@@ -3153,7 +3245,8 @@ export class ClaudeSubscriptionProviderService {
           const turnTextLength = frames.text.length
           // Checked right before the start: a steer a Stop came before is handed back, and no process ever gets it.
           controller.signal.throwIfAborted()
-          query = await this.createQuery(nextPrompt, options)
+          // Each process the turn starts (a steer restarts it) gets the turn's MCP servers before its prompt (#358).
+          query = await this.startQuery(nextPrompt, options, turnServers(), controller.signal, input.threadId)
           this.queries.set(input.threadId, query)
           // A Stop while the query was being started found no query to end: it is ended now, before it reads anything.
           if (controller.signal.aborted) endOneShot(query)

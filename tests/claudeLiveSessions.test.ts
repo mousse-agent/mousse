@@ -192,16 +192,133 @@ describe('a live Claude query', () => {
     expect(cli.processes).toHaveLength(2)
   })
 
-  it('keeps the Mousse credential on the live query, and a different credential needs a new process', async () => {
-    const { cli, turn } = fixture()
-    const mcp = (token: string) => ({ mcp: { url: 'http://127.0.0.1:9/mcp', token } })
-    await turn(mcp('t1'))
-    await turn(mcp('t1'))
-    expect(cli.processes).toHaveLength(1)
-    expect(JSON.stringify(cli.last.options.mcpServers)).toContain('t1')
-    await turn(mcp('t2'))
-    expect(cli.processes).toHaveLength(2)
-    expect(JSON.stringify(cli.last.options.mcpServers)).toContain('t2')
+  describe('MCP servers go over the process\'s input, never its command line (#358)', () => {
+    const URL = 'http://127.0.0.1:9/mcp'
+    const mcp = (token: string) => ({ mcp: { url: URL, token } })
+    /** A user server with a secret header value, and one with a secret environment value. */
+    const withUser = {
+      integrations: {
+        mcpServers: {
+          web: { type: 'http' as const, url: 'https://example.test/mcp', headers: { 'X-Api-Key': 'user-header-secret-358' } },
+          files: { type: 'stdio' as const, command: 'files-mcp', env: { API_KEY: 'user-env-secret-358' } }
+        },
+        proxiedServers: {}, warnings: [], toolRules: {}
+      }
+    }
+    const warnings = () => vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    it('registers every server before the first prompt, with nothing in the options or the environment', async () => {
+      const { cli, turn } = fixture()
+      await turn({ ...mcp('mousse-token-one'), ...withUser })
+      await turn({ ...mcp('mousse-token-one'), ...withUser })
+      expect(cli.processes).toHaveLength(1)
+      const process = cli.last
+      // What the SDK would write on Claude Code's command line, and its environment: no server and no secret.
+      expect(process.options.mcpServers).toEqual({})
+      expect(JSON.stringify(process.options)).not.toMatch(/mousse-token-one|user-header-secret-358|user-env-secret-358|MOUSSE_MCP_VALUE/)
+      // Registered once, Mousse's last so it keeps its name, the user's values as they resolved.
+      expect(process.mcpRegistrations).toHaveLength(1)
+      expect(process.mcpServers).toEqual({
+        ...withUser.integrations.mcpServers,
+        mousse: { type: 'http', url: URL, headers: { Authorization: 'Bearer mousse-token-one' }, timeout: 60 * 60 * 1000 }
+      })
+    })
+
+    it.each([['a live process', {}], ['a one-shot query', { live: false as const }]])('holds the first prompt until Claude Code has the servers (%s)', async (_, extra) => {
+      const f = fixture({}, new FakeClaudeCli(), undefined, extra)
+      let open!: () => void
+      f.cli.mcpGate = new Promise((resolve) => { open = () => resolve(undefined) })
+      const turn = f.chat(mcp('mousse-token-one'))
+      await vi.waitFor(() => expect(f.cli.last?.mcpRegistrations).toHaveLength(1))
+      await later(30)
+      expect(f.cli.last.inputs).toHaveLength(0)
+      open()
+      expect(await turn).toBe('reply to 1')
+      expect(f.cli.last.inputs).toHaveLength(1)
+    })
+
+    it('a new credential reaches the running process: the same servers, the new bearer, and its background work keeps running', async () => {
+      const f = fixture()
+      f.cli.reply = (message, process) => {
+        process.emit(roster({ id: 'bash-1' }))
+        process.answer(String(message.uuid), 'started')
+      }
+      await f.turn({ ...mcp('mousse-token-one'), ...withUser })
+      const process = f.cli.last
+      f.cli.reply = (message, self) => self.answer(String(message.uuid), 'renewed')
+      // Background work is running: a new credential no longer needs a new process, so the turn is not refused.
+      expect(await f.turn({ ...mcp('mousse-token-two'), ...withUser })).toBe('renewed')
+      expect(f.cli.processes).toHaveLength(1)
+      expect(process.closed).toBe(false)
+      expect(process.mcpRegistrations).toHaveLength(2)
+      expect(process.mcpServers).toEqual({ ...process.mcpRegistrations[0], mousse: { ...(process.mcpRegistrations[0].mousse as object), headers: { Authorization: 'Bearer mousse-token-two' } } })
+      // The same credential again sends nothing.
+      await f.turn({ ...mcp('mousse-token-two'), ...withUser })
+      expect(process.mcpRegistrations).toHaveLength(2)
+    })
+
+    it('a new credential the process cannot take: a new process when it is idle, a refusal naming it while work runs', async () => {
+      const warn = warnings()
+      const idle = fixture()
+      await idle.turn(mcp('mousse-token-one'))
+      idle.cli.last.mcpErrors = { mousse: 'unauthorized' }
+      expect(await idle.turn(mcp('mousse-token-two'))).toBe('reply to 1')
+      expect(idle.cli.processes).toHaveLength(2)
+      expect(idle.cli.processes[0].closed).toBe(true)
+      expect(idle.cli.last.mcpServers).toMatchObject({ mousse: { headers: { Authorization: 'Bearer mousse-token-two' } } })
+
+      const busy = fixture()
+      busy.cli.reply = (message, process) => {
+        process.emit(roster({ id: 'bash-1' }))
+        process.answer(String(message.uuid), 'started')
+      }
+      await busy.turn(mcp('mousse-token-one'))
+      busy.cli.last.mcpErrors = { mousse: 'unauthorized' }
+      await expect(busy.turn(mcp('mousse-token-two'))).rejects.toMatchObject({ code: 'claude_background_work_blocks_change', message: expect.stringContaining('could not take Mousse\'s new credential in place') })
+      expect(busy.cli.processes).toHaveLength(1)
+      // Unknown now: the next turn registers it again, and a process that takes it runs the turn.
+      busy.cli.last.mcpErrors = {}
+      busy.cli.reply = (message, self) => self.answer(String(message.uuid), 'renewed')
+      expect(await busy.turn(mcp('mousse-token-two'))).toBe('renewed')
+      expect(busy.cli.last.mcpServers).toMatchObject({ mousse: { headers: { Authorization: 'Bearer mousse-token-two' } } })
+      warn.mockRestore()
+    })
+
+    it.each([['a live process', {}], ['a one-shot query', { live: false as const }]])('a Mousse server Claude Code cannot attach fails the turn with a clear error before any prompt (%s)', async (_, extra) => {
+      const warn = warnings()
+      for (const failure of ['error', 'throw'] as const) {
+        const f = fixture({}, new FakeClaudeCli(), undefined, extra)
+        if (failure === 'error') f.cli.mcpErrors = { mousse: 'HTTP 401 for Authorization: Bearer mousse-token-one' }
+        else f.cli.mcpFail = 'throw'
+        await expect(f.chat({ ...mcp('mousse-token-one'), ...withUser })).rejects.toMatchObject({
+          code: 'claude_mcp_unavailable',
+          message: expect.stringMatching(failure === 'error' ? /^Mousse's tools could not be attached to Claude Code.*connect to Mousse's MCP server/ : /update Claude Code/)
+        })
+        expect(f.cli.last.inputs).toHaveLength(0)
+        await vi.waitFor(() => expect(f.cli.last.closed).toBe(true))
+      }
+      // Logged by server name only: Claude Code's error can repeat a header.
+      const logged = JSON.stringify(warn.mock.calls)
+      expect(logged).toContain('mousse')
+      expect(logged).not.toMatch(/mousse-token-one|user-header-secret-358|user-env-secret-358|HTTP 401/)
+      warn.mockRestore()
+    })
+
+    it('a user server that fails is left out with a warning by name, and the turn runs', async () => {
+      const warn = warnings()
+      const f = fixture()
+      f.cli.mcpErrors = { web: 'connect failed with X-Api-Key: user-header-secret-358' }
+      expect(await f.turn({ ...mcp('mousse-token-one'), ...withUser })).toBe('reply to 1')
+      const logged = JSON.stringify(warn.mock.calls)
+      expect(logged).toContain('MCP server \\"web\\" could not be attached')
+      expect(logged).not.toMatch(/user-header-secret-358|connect failed|mousse-token-one/)
+      // A Claude Code that cannot take servers at all: the user's are left out, and a turn without Mousse's runs.
+      const old = fixture()
+      old.cli.mcpFail = 'throw'
+      expect(await old.turn(withUser)).toBe('reply to 1')
+      expect(JSON.stringify(warn.mock.calls)).toContain('took none of the turn\'s MCP servers')
+      warn.mockRestore()
+    })
   })
 
   it('applies new integrations when the process restarts: now when it is idle, later when background work keeps it', async () => {

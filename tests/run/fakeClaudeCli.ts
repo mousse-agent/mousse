@@ -167,6 +167,14 @@ export class FakeClaudeProcess {
    */
   cancelAsyncTakenThenDropped: 'silent' | 'lifecycle' | undefined
   backgroundGate: Promise<unknown> | undefined
+  /** Every `setMcpServers` call: the servers registered over the process's input (#358), in order. */
+  readonly mcpRegistrations: Array<Record<string, unknown>> = []
+  /** Servers `setMcpServers` reports as failed, with Claude Code's error for each. */
+  mcpErrors: Record<string, string> = {}
+  /** `setMcpServers` rejects (`'throw'`, a Claude Code without it) or never answers (`'hang'`). */
+  mcpFail: 'throw' | 'hang' | undefined
+  /** While set, `setMcpServers` waits for it before it answers. */
+  mcpGate: Promise<unknown> | undefined
   private readonly started = new Set<string>()
   private readonly cancelled = new Set<string>()
   backgrounded = 0
@@ -220,6 +228,11 @@ export class FakeClaudeProcess {
 
   uuid(index: number): string {
     return String(this.inputs[index]?.uuid)
+  }
+
+  /** The MCP servers the process has now: its last registration. */
+  get mcpServers(): Record<string, unknown> | undefined {
+    return this.mcpRegistrations[this.mcpRegistrations.length - 1]
   }
 
   emit(...emitted: Frame[]): void {
@@ -388,6 +401,23 @@ export class FakeClaudeProcess {
         await this.permissionGate
         this.permissionModes.push(mode)
       },
+      // Like the real Claude Code (2.1.322): the set replaces the one registered before; a server is added when its
+      // config is new or changed (an unchanged one stays connected), and one that failed is added and named in `errors`.
+      setMcpServers: async (servers: Record<string, unknown>) => {
+        const previous = this.mcpServers ?? {}
+        this.mcpRegistrations.push(servers)
+        await this.mcpGate
+        if (this.mcpFail === 'throw') throw new Error('mcp_set_servers is not supported')
+        if (this.mcpFail === 'hang') await new Promise(() => undefined)
+        // An in-process server holds a live MCP server object: it is the same server while its name is.
+        const shape = (config: unknown) => (config as { type?: string } | undefined)?.type === 'sdk' ? 'sdk' : JSON.stringify(config)
+        const same = (name: string) => Object.hasOwn(previous, name) && shape(previous[name]) === shape(servers[name])
+        return {
+          added: Object.keys(servers).filter((name) => !same(name)),
+          removed: Object.keys(previous).filter((name) => !Object.hasOwn(servers, name)),
+          errors: Object.fromEntries(Object.entries(this.mcpErrors).filter(([name]) => Object.hasOwn(servers, name)))
+        }
+      },
       applyFlagSettings: async (settings: Record<string, unknown>) => {
         this.flagSettings.push(settings)
         if (this.flagSettingsFail === 'throw') throw new Error('apply_flag_settings is not supported')
@@ -419,11 +449,20 @@ export class FakeClaudeCli {
   lingersAfterClose = false
   /** The pid each new process's transport shows (`FakeClaudeProcess.pid`); none by default. */
   pid: number | undefined
+  /** What each new process's `setMcpServers` reports failed (`FakeClaudeProcess.mcpErrors`). */
+  mcpErrors: Record<string, string> = {}
+  /** How each new process's `setMcpServers` fails (`FakeClaudeProcess.mcpFail`). */
+  mcpFail: 'throw' | 'hang' | undefined
+  /** What each new process's `setMcpServers` waits for (`FakeClaudeProcess.mcpGate`). */
+  mcpGate: Promise<unknown> | undefined
 
   readonly query = ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }): Query => {
     const process = new FakeClaudeProcess(prompt, options, () => this.reply)
     process.lingersAfterClose = this.lingersAfterClose
     process.pid = this.pid
+    process.mcpErrors = { ...this.mcpErrors }
+    process.mcpFail = this.mcpFail
+    process.mcpGate = this.mcpGate
     this.processes.push(process)
     return process.asQuery()
   }
