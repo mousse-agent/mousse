@@ -120,7 +120,9 @@ describe('guardPackText', () => {
 
   it('holds back only the piece that looks like a credential', () => {
     expect(screened('my key is sk-abcdefghijklmnopqrstuvwxyz, keep it safe')).toBe(`my key is ${MARK}, keep it safe`)
-    expect(screened('My password: hunter2 for the wifi')).toBe(`My password: ${MARK} for the wifi`)
+    // A password may have spaces, so the rest of its line goes with it; the next line stays.
+    expect(screened('My password: hunter2 for the wifi')).toBe(`My password: ${MARK}`)
+    expect(screened('wifi password: correct horse battery staple\nSee you at 5.')).toBe(`wifi password: ${MARK}\nSee you at 5.`)
     expect(screened('api_key: 12345678abcdef and the rest')).toBe(`api_key: ${MARK} and the rest`)
     expect(screened('Two: ghp_0123456789abcdefghijABCDEFGHIJ and AKIAABCDEFGHIJKLMNOP.')).toBe(`Two: ${MARK} and ${MARK}.`)
     expect(screened('the code is Zq8Xk2Lm9Vb4Nc7Hj1Pw6Rt3Ys5Ud0Fg8Ka2 today')).toBe(`the code is ${MARK} today`)

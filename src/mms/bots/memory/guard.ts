@@ -23,7 +23,7 @@ const INVISIBLE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u1
  * Credential shapes, checked everywhere in the text, web addresses included. With `label`, the
  * first group is a label kept in place ("password: ") and only what follows it is the secret.
  */
-const CREDENTIALS: ReadonlyArray<{ pattern: RegExp; label?: true }> = [
+const CREDENTIALS: ReadonlyArray<{ pattern: RegExp; label?: true; line?: true }> = [
   { pattern: /\bsk-[A-Za-z0-9_-]{16,}/g },
   { pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
   { pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g },
@@ -39,7 +39,8 @@ const CREDENTIALS: ReadonlyArray<{ pattern: RegExp; label?: true }> = [
   { pattern: /\bdiscord(?:app)?\.com\/api\/webhooks\/[A-Za-z0-9/_-]{20,}/g },
   // A password in a web address: https://name:secret@host.
   { pattern: /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+(?=@)/gi, label: true },
-  { pattern: /(\b(?:password|passwd|pwd|passcode)\s*[:=]\s*)\S+/gi, label: true },
+  // A password may have spaces: outside a web address, the rest of its line is the secret.
+  { pattern: /(\b(?:password|passwd|pwd|passcode)\s*[:=]\s*)\S+/gi, label: true, line: true },
   { pattern: /(\b(?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*)\S{6,}/gi, label: true }
 ]
 
@@ -82,10 +83,16 @@ type Span = readonly [start: number, end: number]
 /** Where `text` holds something that looks like a password, key or token, sorted and merged. */
 function credentialSpans(text: string): Span[] {
   const spans: Array<[number, number]> = []
-  for (const { pattern, label } of CREDENTIALS)
+  const urls = [...text.matchAll(URLS)].map((url): Span => [url.index, url.index + url[0].length])
+  for (const { pattern, label, line } of CREDENTIALS)
     for (const match of text.matchAll(pattern)) {
       const start = match.index + (label ? match[1]!.length : 0)
-      spans.push([start, match.index + match[0].length])
+      let end = match.index + match[0].length
+      if (line && !urls.some(([from, to]) => start >= from && start < to)) {
+        const lineEnd = text.indexOf('\n', start)
+        end = lineEnd === -1 ? text.length : lineEnd
+      }
+      spans.push([start, end])
     }
   // Long random-looking tokens, outside web addresses; inside one, only secret-named values.
   let outside = text
