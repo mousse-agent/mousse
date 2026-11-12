@@ -108,7 +108,7 @@ import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { botTurnOffers } from '../../shared/bots/personal/walls'
-import { isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
+import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
@@ -11969,7 +11969,9 @@ export class OrchestratorService extends EventEmitter {
           const asksPerson = this.mousseCallsAskingPerson(session.threadId)
           return asksPerson !== undefined && assembler.ownCallMayAsk(asksPerson)
         },
-        settleMs: this.steerSettleMs ?? release.settleMs
+        settleMs: this.steerSettleMs ?? release.settleMs,
+        // A bot's note waits for a compaction only so long: one whose end is never reported never holds it to the end.
+        ...(opts?.bot?.steer ? { compactionLimitMs: BOT_COMPACTION_HOLD_MS } : {})
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
       turnHold = { hold, runId: engineRunId }
@@ -12086,6 +12088,7 @@ export class OrchestratorService extends EventEmitter {
           // A person's steer waits for a compaction the provider runs inside the turn ("Waits for compaction").
           hold.compacting(phase === 'start')
           onCompaction(phase)
+          opts?.bot?.steer?.compacting?.(phase === 'start')
           // A bot's turn gets its memory pack and its job's brief again right after (at the next safe point).
           if (phase === 'complete') opts?.bot?.steer?.compacted()
         },

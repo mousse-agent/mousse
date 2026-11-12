@@ -4,12 +4,13 @@
  * job's brief again (docs/bots.md, Lanes and The chat and its work).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BotEngine, MAX_RUN_SLOTS_PER_BOT, MAX_RUN_SLOTS_PER_PROFILE, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
-import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
+import { BotEngine, MAX_BACKGROUND_SLOTS_PER_BOT, MAX_BACKGROUND_SLOTS_PER_PROFILE, MAX_RUN_SLOTS_PER_BOT, MAX_RUN_SLOTS_PER_PROFILE, NOTE_REPEAT_LINE, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_COMPACTION_HOLD_MS, type PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
-import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
+import { SteerHold } from '../../src/mms/orchestrator/steerHold'
+import { BOT_SCHEDULE_SKIP_TEXT, MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
@@ -141,6 +142,106 @@ describe('several pieces of work at once', () => {
     expect(work.slice(0, 3).every((item) => f.store.activation(item.workId)!.status === 'running')).toBe(true)
     expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(MAX_QUEUED_ACTIVATIONS - 3)
     expect(chatOf(f, botId).some((message) => message.error?.text.includes('"Job 3"'))).toBe(true)
+  })
+
+  it("scheduled runs hold at most 2 of a bot's 3 slots: the owner's work starts at once in the one kept for it", async () => {
+    expect(MAX_BACKGROUND_SLOTS_PER_BOT).toBe(2)
+    const ids = ['s1', 's2', 's3'].map((scheduleId) => {
+      f.clock.now += 1_000
+      const run = f.bots.runScheduledOccurrence({ botId, scheduleId, prompt: `Run ${scheduleId}.`, occurrenceAt: new Date(f.clock.now).toISOString() })
+      return run.kind === 'started' ? run.activationId : ''
+    })
+    await flush()
+    expect(ids.map((id) => f.store.activation(id)!.status)).toEqual(['running', 'running', 'queued'])
+    const { work } = await handOff(['Quick lookup'], 'm1')
+    expect(work[0]!.status).toBe('started')
+    expect(f.store.activation(work[0]!.workId)!.status).toBe('running')
+    expect(runningWork()).toHaveLength(3)
+  })
+
+  it("scheduled runs hold at most 4 of the profile's 6 slots, so another bot's owner work starts at once", async () => {
+    expect(MAX_BACKGROUND_SLOTS_PER_PROFILE).toBe(4)
+    const other = (await createBot(f, { name: 'Ada', reply: 'Hi.' })).botId
+    const third = (await createBot(f, { name: 'Bo', reply: 'Hi.' })).botId
+    for (const bot of [botId, other, third]) {
+      for (const scheduleId of ['s1', 's2']) {
+        f.clock.now += 1_000
+        f.bots.runScheduledOccurrence({ botId: bot, scheduleId, prompt: 'Tidy.', occurrenceAt: new Date(f.clock.now).toISOString() })
+      }
+    }
+    await flush()
+    const running = (bot: string) => f.store.laneActivations(bot, 'run', ['running']).length
+    expect([running(botId), running(other), running(third)]).toEqual([2, 2, 0])
+    const { work } = await handOff(['Lookup'], 'm1', third)
+    expect(work[0]!.status).toBe('started')
+    // A schedule ends: the oldest waiting one takes its place, still 4 in all.
+    const ended = f.store.laneActivations(botId, 'run', ['running'])[0]!
+    await finish(f, (await start(f, ended.id)).payload, 'completed', { text: 'Done.' })
+    expect([running(botId), running(other), running(third)]).toEqual([1, 2, 2])
+  })
+
+  it("when a slot frees at the profile's limit, the next piece is picked across its bots: another bot's owner work before this bot's schedule", async () => {
+    const other = (await createBot(f, { name: 'Ada', reply: 'Hi.' })).botId
+    const third = (await createBot(f, { name: 'Bo', reply: 'Hi.' })).botId
+    const mine = await handOff(['A1', 'A2', 'A3'], 'm1')
+    await handOff(['B1', 'B2', 'B3'], 'm2', other)
+    // This bot's scheduled run comes first, then the third bot's owner work: both wait for the profile.
+    f.clock.now += 1_000
+    const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Tidy.', occurrenceAt: new Date(f.clock.now).toISOString() })
+    const late = await handOff(['C1'], 'm3', third)
+    await flush()
+    const id = scheduled.kind === 'started' ? scheduled.activationId : ''
+    expect(f.store.activation(id)!.status).toBe('queued')
+    expect(late.work[0]!.status).toBe('queued')
+    // The slot this bot frees goes to the third bot's owner work, not to this bot's own schedule.
+    await finish(f, (await start(f, mine.work[0]!.workId)).payload, 'completed', { text: 'Done.' })
+    expect(f.store.activation(late.work[0]!.workId)!.status).toBe('running')
+    expect(f.store.activation(id)!.status).toBe('queued')
+  })
+
+  it('a restart with the profile at its limit (three live on this bot) carries each piece on once and starts nothing over it', async () => {
+    const other = (await createBot(f, { name: 'Ada', reply: 'Hi.' })).botId
+    const third = (await createBot(f, { name: 'Bo', reply: 'Hi.' })).botId
+    const mine = await handOff(['A1', 'A2', 'A3'], 'm1')
+    const theirs = await handOff(['B1', 'B2', 'B3'], 'm2', other)
+    const late = await handOff(['C1'], 'm3', third)
+    const all = [...mine.work, ...theirs.work]
+    const live = await Promise.all(all.map((item) => start(f, item.workId)))
+    f.clock.now += 5 * MIN
+    for (const entry of live) f.runs.markTerminal(entry.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush()
+    for (const [index, item] of all.entries()) {
+      expect(f.store.dispatch(item.workId, 2)).toMatchObject({ kind: 'continue', threadId: live[index]!.payload.threadId })
+      expect(f.store.dispatch(item.workId, 2)!.prompt.text).toContain('Mousse restarted while you were working.')
+    }
+    expect(f.store.activation(late.work[0]!.workId)!.status).toBe('queued')
+    await f.bots.reconcileOnStartup()
+    expect(all.map((item) => f.store.dispatches(item.workId).length)).toEqual([2, 2, 2, 2, 2, 2])
+    // A slot frees: the waiting piece starts in it.
+    await finish(f, (await start(f, mine.work[0]!.workId, 2)).payload, 'completed', { text: 'Done.' })
+    expect(f.store.activation(late.work[0]!.workId)!.status).toBe('running')
+  })
+
+  it('a scheduled run dropped from a full queue says why on its automation, and the chat says so once a day', async () => {
+    const schedules = ['Inbox.', 'News.'].map((prompt) => f.book.add(botId, { when: { kind: 'interval', minutes: 60 }, prompt }, 'owner'))
+    await handOff(['A', 'B', 'C'], 'm1')
+    // Both schedules' runs wait behind the three pieces running.
+    const ids = schedules.map((entry) => {
+      f.clock.now += 1_000
+      const run = f.bots.runScheduledOccurrence({ botId, scheduleId: entry.scheduleId, prompt: entry.prompt, occurrenceAt: new Date(f.clock.now).toISOString() })
+      return run.kind === 'started' ? run.activationId : ''
+    })
+    await flush()
+    expect(ids.map((id) => f.store.activation(id)!.status)).toEqual(['queued', 'queued'])
+    // 17 more pieces: 3 running and 19 waiting is two over 20, so the two oldest that wait, the scheduled runs, go.
+    await handOff(Array.from({ length: 17 }, (_, index) => `Job ${index}`), 'm2')
+    for (const id of ids) expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    for (const entry of schedules) expect(f.book.get(botId, entry.scheduleId)!.skip).toEqual({ at: expect.any(String), reason: 'dropped_queue_full' })
+    expect(BOT_SCHEDULE_SKIP_TEXT.dropped_queue_full).toBe('dropped: the bot had too much waiting')
+    expect(chatOf(f, botId).filter((message) => message.error?.text.includes('dropping some of my scheduled runs'))).toHaveLength(1)
   })
 
   it("only the same schedule's previous run skips it; other runs and the owner's work run beside it", async () => {
@@ -311,8 +412,53 @@ describe('a note reaches running work while it works', () => {
     const prompt = f.store.dispatch(work.workId, 2)!.prompt.text
     expect(prompt).not.toContain('Read before the crash.')
     expect(prompt.match(/Taken, never read\./g)).toHaveLength(1)
+    // The model may have read it before the crash: it says it may be a repeat, so the work does not redo it.
+    expect(prompt).toContain('- (may be a repeat) Taken, never read.')
+    expect(prompt).toContain(NOTE_REPEAT_LINE)
     await f.bots.reconcileOnStartup()
     expect(f.store.dispatches(work.workId)).toHaveLength(2)
+  })
+
+  it('at least once: a note taken but never reported read goes again marked as a possible repeat; one handed back is no repeat', async () => {
+    const work = await runningWithSteer()
+    const steer = work.prepared.steer!
+    f.bots.tools.work.note(botId, work.workId, 'Cordless only.')
+    // The runtime took it and the turn ended before it said the model read it (a result that came first).
+    steer.take()
+    f.bots.tools.work.note(botId, work.workId, 'Under £200.')
+    steer.handedBack(steer.take()!.token)
+    await finish(f, work.payload, 'completed', { text: 'Three picks.' })
+    const prompt = f.store.dispatch(work.workId, 2)!.prompt.text
+    expect(prompt).toContain('- (may be a repeat) Cordless only.')
+    expect(prompt).toContain('- Under £200.')
+    expect(prompt).not.toContain('(may be a repeat) Under £200.')
+    expect(prompt).toContain(NOTE_REPEAT_LINE)
+    // A note that never went in says nothing of the kind.
+    const next = await start(f, work.workId, 2)
+    f.bots.tools.work.note(botId, work.workId, 'Black ones.')
+    await finish(f, next.payload, 'completed', { text: 'Two picks.' })
+    expect(f.store.dispatch(work.workId, 3)!.prompt.text).not.toContain('may be a repeat')
+  })
+
+  it('a forget after a note went in mid-turn removes it from the note, the prompts and a re-give; the run thread keeps what it read', async () => {
+    const work = await runningWithSteer('Clinics')
+    const second = await chat('Only ones treating condition X-17', 'm2')
+    f.bots.tools.work.note(botId, work.workId, 'Only clinics treating condition X-17.', second.activation.id)
+    await finish(f, second.payload, 'completed', { text: 'Passed on.' })
+    const steer = work.prepared.steer!
+    // Delivered mid-turn: the model read it.
+    steer.accepted(steer.take()!.token)
+    expect(f.store.pendingWorkNotes(work.workId)).toEqual([])
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+    f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${second.message.id}`, who: 'owner', text: second.message.text }))
+    const row = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${second.message.id}`)!
+    memory.forget(botId, { refs: [`j${row.seq as number}`], by: 'owner_ui' })
+    expect(f.store.all('SELECT text FROM bot_work_notes WHERE activation_id = ?', work.workId).map((note) => String(note.text)).join('\n')).not.toContain('X-17')
+    // After a compaction the work is given what the owner added again: not the forgotten note.
+    steer.compacted()
+    expect(steer.peek()).toContain('Your context was just summarised')
+    expect(steer.peek()).not.toContain('X-17')
+    for (const dispatch of f.store.dispatches(work.workId)) expect(dispatch.prompt.text).not.toContain('X-17')
   })
 
   it('Stop always wins: nothing goes in once the work is stopped, and its notes stay unread', async () => {
@@ -342,6 +488,39 @@ describe('a note reaches running work while it works', () => {
     f.clock.now = work.prepared.authority.time.deadline() - 20_000
     expect(work.prepared.steer!.peek()).toBeUndefined()
     expect(f.bots.tools.work.reach!(botId, work.workId)).toBe('step_end')
+  })
+})
+
+describe('a compaction that never reports its end', () => {
+  it('holds a note at most 3 minutes, and work_note says the work gets it in a few minutes meanwhile', async () => {
+    const { work } = await handOff(['Vacuums'], 'm1')
+    const live = await start(f, work[0]!.workId)
+    const steer = live.prepared.steer!
+    steer.attached()
+    expect(f.bots.tools.work.reach!(botId, work[0]!.workId)).toBe('now')
+    steer.compacting!(true)
+    expect(f.bots.tools.work.reach!(botId, work[0]!.workId)).toBe('after_compaction')
+    f.clock.now += BOT_COMPACTION_HOLD_MS
+    expect(f.bots.tools.work.reach!(botId, work[0]!.workId)).toBe('now')
+    // Its end reported: now again at once.
+    steer.compacting!(true)
+    steer.compacting!(false)
+    expect(f.bots.tools.work.reach!(botId, work[0]!.workId)).toBe('now')
+  })
+
+  it("a bot turn's hold waits for a compaction no longer than its limit; a person's still waits for the end", () => {
+    let now = 0
+    const caps = { steer: 'native', steerBoundary: 'start' } as never
+    const bot = new SteerHold({ caps, strict: false, foreground: () => [], compactionLimitMs: BOT_COMPACTION_HOLD_MS, now: () => now })
+    const person = new SteerHold({ caps, strict: false, foreground: () => [], now: () => now })
+    bot.compacting(true)
+    person.compacting(true)
+    expect(bot.foregroundTools()).toEqual([{ callId: 'compaction', toolName: 'compaction' }])
+    now += BOT_COMPACTION_HOLD_MS - 1
+    expect(bot.foregroundTools()).toHaveLength(1)
+    now += 1
+    expect(bot.foregroundTools()).toEqual([])
+    expect(person.foregroundTools()).toEqual([{ callId: 'compaction', toolName: 'compaction' }])
   })
 })
 

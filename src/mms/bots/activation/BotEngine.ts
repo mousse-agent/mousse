@@ -69,7 +69,7 @@ import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
 import { tellMeNotifies } from '../../../shared/automations'
-import { BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from './dispatcher'
+import { BOT_COMPACTION_HOLD_MS, BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from './dispatcher'
 
 /**
  * The personal bot engine (PR 6 §4, unit 6c-1): one-time approval with the subset rule, manual
@@ -126,7 +126,7 @@ export interface BotEngineHost {
    * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
-  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'>
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
@@ -330,6 +330,8 @@ interface LiveDispatch {
   /** Compactions of the turn's context the runtime reported, and the last one whose pack and brief the model read. */
   compactions: number
   regiven: number
+  /** The runtime is compacting the turn's context since then (`BotTurnSteer.compacting`): a note waits for it, at most `BOT_COMPACTION_HOLD_MS`. */
+  compactingSince?: number
 }
 
 /** An activation that runs or waits for its owner's answer holds a slot of its lane: what does not fit waits. */
@@ -341,6 +343,10 @@ const ACTIVE_HOLDING = ['running', 'waiting_grant'] as const
 export const MAX_RUN_SLOTS_PER_BOT = 3
 /** Run-lane activations of every bot of a profile that run at once; what does not fit waits in its bot's queue. */
 export const MAX_RUN_SLOTS_PER_PROFILE = 6
+/** Of a bot's run slots, scheduled runs and a reminder's work hold at most this many: one is kept for the owner's work. */
+export const MAX_BACKGROUND_SLOTS_PER_BOT = 2
+/** Of the profile's run slots, scheduled runs and reminders' work hold at most this many. */
+export const MAX_BACKGROUND_SLOTS_PER_PROFILE = 4
 const NOT_ENDED = ['queued', 'running', 'waiting_grant', 'paused', 'blocked'] as const
 
 /** Gate refusals that become a wall: the owner can answer them. */
@@ -395,6 +401,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly service: BotChatService
   /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
   private readonly packs = new Map<string, string>()
+  /**
+   * Notes a live turn took and the runtime never reported read nor handed back, by activation: the model may have read
+   * them before the turn ended (a Stop, a crash, a result that came first), so the continuation that carries them says
+   * they may be repeats. Delivery is at least once, usually once.
+   */
+  private readonly offeredNotes = new Map<string, Set<number>>()
   /** Replies whose final message the executor still delivers, by `<activationId>:<n>`. */
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
@@ -1020,8 +1032,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('queue_full') }, activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
       else if (activation.trigger.kind === 'work')
         this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: `I had too much waiting, so I dropped "${activation.trigger.title}". Ask me again when I'm less busy.` }, ...(activation.trigger.replyTo ? { replyTo: activation.trigger.replyTo } : {}), activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
+      else if (activation.trigger.kind === 'schedule') this.droppedScheduledRun(botId, activation.trigger)
     }
     return over.length
+  }
+
+  /**
+   * A scheduled run dropped from a full queue (inside its transaction): its automation says why, as a skipped occurrence
+   * does, and the chat says scheduled runs are being dropped, at most once a day (`bm_<botId>_sched_dropped_<day>`).
+   */
+  private droppedScheduledRun(botId: string, trigger: Extract<BotActivationTrigger, { kind: 'schedule' }>): void {
+    const day = new Date(this.now()).toISOString().slice(0, 10)
+    this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: 'I have too much waiting, so I\'m dropping some of my scheduled runs. They run again at their next times once I\'m less busy.' }, lane: 'run', id: `bm_${botId}_sched_dropped_${day}` })
+    this.store.db.afterCommit(() => {
+      try {
+        this.host.schedules?.skipped?.(botId, trigger.scheduleId, { at: trigger.occurrenceAt, reason: 'dropped_queue_full' })
+      } catch (error) {
+        console.warn('a dropped scheduled run could not be noted on its automation', { botId, scheduleId: trigger.scheduleId, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
   }
 
   // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
@@ -1165,9 +1194,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.packs.delete(activationId)
     }
     this.changed({ botId: row.botId, activationId })
-    // Its slot is free now: the bot's next run starts beside the others, or another bot's that waited for the profile.
+    // Its slot is free now: the next run starts in it, whichever of the profile's bots it is of (`nextRun`).
     await this.pump(row.botId)
-    await this.pumpWaitingBots(row.botId)
     return this.activationSummary(this.store.activation(activationId)!)
   }
 
@@ -1214,56 +1242,88 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * The owner's work that waits for a run slot now, outside the queue: work allowed to go on (more room, or its usage
    * limit's reset) whose last turn is still letting go. A scheduled run leaves the last free slot to it.
    */
-  private ownerWorkWaits(botId: string): boolean {
-    return this.store.laneActivations(botId, 'run', ['blocked']).some((row) => workWaits(row) &&
+  private ownerWorkWaits(botId: string, except?: string): boolean {
+    return this.store.laneActivations(botId, 'run', ['blocked']).some((row) => row.id !== except && workWaits(row) && runRank(row) === 0 &&
       (row.endReason === 'room_allowed' || (row.endReason === 'usage_limit' && this.usageResumable(row))))
   }
 
   /**
-   * The run lane's next activation, inside a transaction, when a slot is free for it: work that waited and may go on now
-   * first (it was running before), then the queue in its order (`runOrder`: the owner's work, a reminder's work, then
-   * scheduled runs). A scheduled run never takes the bot's last free slot while the owner's work waits for one. A queued
-   * one is moved to running here; work that goes on moves in its continuation (`resumeWork`), with nothing awaited
-   * between. `tried`: waiting work this pump already tried, which is not taken again.
+   * Whether the run-lane activation `row` (one that holds no slot) may take one now: a free slot of its bot and of the
+   * profile (`slotFree`). Scheduled runs and a reminder's work (`runRank` above 0) hold at most
+   * `MAX_BACKGROUND_SLOTS_PER_BOT` of a bot's slots and `MAX_BACKGROUND_SLOTS_PER_PROFILE` of the profile's, so one slot of
+   * each bot is always there for work the owner asks for; nor do they take a bot's last free slot while the owner's work
+   * waits for one (`ownerWorkWaits`).
    */
-  private nextRun(botId: string, tried: ReadonlySet<string>): { resume: BotActivationRow } | { start: BotActivationRow } | undefined {
-    if (!this.slotFree(botId, 'run')) return undefined
-    const waiting = this.resumableWork(botId, tried)
-    if (waiting) return { resume: waiting }
-    const queued = this.store.laneActivations(botId, 'run', ['queued']).sort(runOrder)[0]
+  private runSlotFree(row: BotActivationRow): boolean {
+    if (!this.slotFree(row.botId, 'run', row.id)) return false
+    if (runRank(row) === 0) return true
+    const own = this.holding(row.botId, 'run').filter((other) => other.id !== row.id)
+    if (own.filter((other) => runRank(other) > 0).length >= MAX_BACKGROUND_SLOTS_PER_BOT) return false
+    const profile = this.store.activationsWith([...ACTIVE_HOLDING]).filter((other) => other.lane === 'run' && other.id !== row.id && runRank(other) > 0)
+    if (profile.length >= MAX_BACKGROUND_SLOTS_PER_PROFILE) return false
+    return !(own.length + 1 >= MAX_RUN_SLOTS_PER_BOT && this.ownerWorkWaits(row.botId, row.id))
+  }
+
+  /**
+   * The run lane's next activation across the profile's bots, inside a transaction, when a slot is free for it
+   * (`runSlotFree`): work that waited and may go on now first (it was running before), then the queue in its order
+   * (`runOrder`: the owner's work, a reminder's work, then scheduled runs; oldest first), whichever bot it is of. So when
+   * a slot frees at the profile's limit, no bot's owner work waits behind another bot's scheduled runs. A queued one is
+   * moved to running here; work that goes on moves in its continuation (`resumeWork`), with nothing awaited between.
+   * `tried`: waiting work this pump already tried, which is not taken again. A bot whose journal cannot be written starts
+   * nothing (it is stuck until the owner tries again).
+   */
+  private nextRun(tried: ReadonlySet<string>): { resume: BotActivationRow } | { start: BotActivationRow } | undefined {
+    if (this.profileRunsHeld() >= MAX_RUN_SLOTS_PER_PROFILE) return undefined
+    const stuck = new Map<string, boolean>()
+    const may = (row: BotActivationRow): boolean => {
+      if (!stuck.has(row.botId)) stuck.set(row.botId, this.store.registry(row.botId)?.error?.code === 'bot_journal_failed')
+      return !stuck.get(row.botId) && this.runSlotFree(row)
+    }
+    const waiting = this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) &&
+      (row.endReason === 'room_allowed' || (row.endReason === 'usage_limit' && this.usageResumable(row)))).sort(runOrder)
+    const resume = waiting.find(may)
+    if (resume) return { resume }
+    const queued = this.store.activationsWith(['queued']).filter((row) => row.lane === 'run').sort(runOrder).find(may)
     if (!queued) return undefined
-    if (runRank(queued) === 2 && this.holding(botId, 'run').length + 1 >= MAX_RUN_SLOTS_PER_BOT && this.ownerWorkWaits(botId)) return undefined
     this.store.moveActivation(queued.id, ['queued'], 'running')
     return { start: this.store.activation(queued.id)! }
   }
 
   /**
    * Starts what waits in each lane while it has a free slot: the chat lane one at a time on the home thread, the run
-   * lane up to `MAX_RUN_SLOTS_PER_BOT` side by side (and `MAX_RUN_SLOTS_PER_PROFILE` across the profile's bots). Nothing
-   * starts while the journal cannot be written (the bot is stuck until the owner tries again).
+   * lane up to `MAX_RUN_SLOTS_PER_BOT` side by side and `MAX_RUN_SLOTS_PER_PROFILE` across the profile's bots, picked
+   * across them in one order (`nextRun`). Nothing starts while the journal cannot be written (the bot is stuck until the
+   * owner tries again).
    */
   private async pump(botId: string): Promise<void> {
-    if (this.store.registry(botId)?.error?.code === 'bot_journal_failed') return
-    // The chat lane's thread is the home thread: a stopped activation's turn lets go of it first.
-    const chatHeld = [...this.live.keys()].some((id) => {
-      const live = this.store.activation(id)
-      return live?.botId === botId && live.lane === 'chat' && ENDED_ACTIVATION_STATUSES.has(live.status)
-    })
-    if (!chatHeld) {
-      const next = this.store.db.transaction((): BotActivationRow | undefined => {
-        if (!this.slotFree(botId, 'chat')) return undefined
-        const queued = this.store.laneActivations(botId, 'chat', ['queued'])[0]
-        if (!queued) return undefined
-        this.store.moveActivation(queued.id, ['queued'], 'running')
-        return this.store.activation(queued.id)!
+    if (this.store.registry(botId)?.error?.code !== 'bot_journal_failed') {
+      // The chat lane's thread is the home thread: a stopped activation's turn lets go of it first.
+      const chatHeld = [...this.live.keys()].some((id) => {
+        const live = this.store.activation(id)
+        return live?.botId === botId && live.lane === 'chat' && ENDED_ACTIVATION_STATUSES.has(live.status)
       })
-      if (next) await this.startActivation(next)
+      if (!chatHeld) {
+        const next = this.store.db.transaction((): BotActivationRow | undefined => {
+          if (!this.slotFree(botId, 'chat')) return undefined
+          const queued = this.store.laneActivations(botId, 'chat', ['queued'])[0]
+          if (!queued) return undefined
+          this.store.moveActivation(queued.id, ['queued'], 'running')
+          return this.store.activation(queued.id)!
+        })
+        if (next) await this.startActivation(next)
+      }
     }
+    await this.pumpRuns()
+  }
+
+  /** The run lane of the profile's bots: what waits starts while there is a slot for it, in one order (`nextRun`). */
+  private async pumpRuns(): Promise<void> {
     // Each start runs on its own; the slots are taken one transaction at a time, so two pumps never overfill them.
     const started: Promise<void>[] = []
     const tried = new Set<string>()
     for (;;) {
-      const next = this.store.db.transaction(() => this.nextRun(botId, tried))
+      const next = this.store.db.transaction(() => this.nextRun(tried))
       if (!next) break
       if ('resume' in next) {
         tried.add(next.resume.id)
@@ -1274,20 +1334,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     await Promise.all(started)
   }
 
-  /**
-   * After a run slot of `botId` freed (or nothing of it waited): the profile's other bots whose run work waited for a
-   * free slot of the profile start theirs, the bot whose next run waits longest first (the owner's work before
-   * scheduled runs).
-   */
-  private async pumpWaitingBots(except?: string): Promise<void> {
-    if (this.profileRunsHeld() >= MAX_RUN_SLOTS_PER_PROFILE) return
-    const queued = this.store.activationsWith(['queued']).filter((row) => row.lane === 'run' && row.botId !== except).sort(runOrder)
-    const order = [...new Set([...this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && workWaits(row) && row.botId !== except).map((row) => row.botId), ...queued.map((row) => row.botId)])]
-    for (const botId of order) {
-      if (this.profileRunsHeld() >= MAX_RUN_SLOTS_PER_PROFILE) return
-      await this.pump(botId)
-    }
-  }
 
   /**
    * The activation's thread and scratch folder, its model and context pack, then its first
@@ -1773,6 +1819,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (!live || !next) return undefined
         const token = `${row.id}:d${n}:s${++live.steerSeq}`
         live.steering.set(token, { ids: next.ids, ...(next.regiveFor !== undefined ? { regiveFor: next.regiveFor } : {}) })
+        if (next.ids.length) {
+          const offered = this.offeredNotes.get(row.id) ?? new Set<number>()
+          for (const id of next.ids) offered.add(id)
+          this.offeredNotes.set(row.id, offered)
+        }
         return { text: next.text, token }
       },
       accepted: (token) => {
@@ -1782,6 +1833,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         live.steering.delete(token)
         if (taken.regiveFor !== undefined) live.regiven = Math.max(live.regiven, taken.regiveFor)
         if (!taken.ids.length) return
+        this.notOffered(row.id, taken.ids)
         try {
           this.store.applyWorkNotes(taken.ids)
         } catch (error) {
@@ -1790,13 +1842,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.changed({ botId: row.botId, activationId: row.id })
       },
       handedBack: (token) => {
-        ownLive()?.steering.delete(token)
+        const live = ownLive()
+        // The runtime says the turn never had it: it is no repeat when it goes again.
+        this.notOffered(row.id, live?.steering.get(token)?.ids ?? [])
+        live?.steering.delete(token)
       },
       compacted: () => {
         const live = liveNow()
         if (live) live.compactions += 1
+      },
+      compacting: (active) => {
+        const live = ownLive()
+        if (live) live.compactingSince = active ? this.now() : undefined
       }
     }
+  }
+
+  /** Notes no longer in doubt: read, or handed back unread. */
+  private notOffered(activationId: string, ids: readonly number[]): void {
+    const offered = this.offeredNotes.get(activationId)
+    if (!offered) return
+    for (const id of ids) offered.delete(id)
+    if (!offered.size) this.offeredNotes.delete(activationId)
   }
 
   /**
@@ -1840,11 +1907,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * as it works (at its next step), `step_end` when its current turn cannot take them and gets them when it ends,
    * `start` when it waits to start or to go on.
    */
-  noteReach(botId: string, workId: string): 'now' | 'step_end' | 'start' {
+  noteReach(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start' {
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.status !== 'running') return 'start'
     const live = this.live.get(row.id)
-    return live?.steerable && !live.controller.signal.aborted && live.deadline - this.now() >= 2 * ACTIVE_TIME_CHUNK_MS ? 'now' : 'step_end'
+    if (!(live?.steerable && !live.controller.signal.aborted && live.deadline - this.now() >= 2 * ACTIVE_TIME_CHUNK_MS)) return 'step_end'
+    // The runtime is compacting the turn's context: the note goes in once it ends, or at its time limit.
+    return live.compactingSince !== undefined && this.now() - live.compactingSince < BOT_COMPACTION_HOLD_MS ? 'after_compaction' : 'now'
   }
 
   /** The bot's own browser for one dispatch; none when it can't be offered (never a failed turn). */
@@ -2763,15 +2832,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Waiting work that may go on now, oldest first: work the owner allowed more for, once its last turn has let go (an
-   * Allow on an older card can come while the turn that ran out is still ending; its end pumps again).
-   */
-  private resumableWork(botId: string, tried: ReadonlySet<string> = new Set()): BotActivationRow | undefined {
-    return this.store.laneActivations(botId, 'run', ['blocked']).find((row) => !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) &&
-      (row.endReason === 'room_allowed' || (row.endReason === 'usage_limit' && this.usageResumable(row))))
-  }
-
-  /**
    * Waiting work goes on in its own thread (`pump` found the run lane free for it). After a usage limit its model is
    * chosen again, and a first dispatch that never went out (no model was free) is sent as it was.
    */
@@ -3656,8 +3716,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
-      // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`).
-      if (!(ACTIVE_HOLDING as readonly string[]).includes(current.status) && !this.slotFree(row.botId, current.lane, row.id))
+      // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`); a scheduled
+      // run or a reminder's work also leaves the slot kept for the owner's work (`runSlotFree`).
+      if (!(ACTIVE_HOLDING as readonly string[]).includes(current.status) && !(current.lane === 'run' ? this.runSlotFree(current) : this.slotFree(row.botId, current.lane, row.id)))
         return { kind: 'none' }
       if (!definition || !grant || !effective || grant.digest !== current.grantDigest) {
         // A run going on by itself ends failed (after this transaction): nobody waits to continue it.
@@ -3697,7 +3758,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const n = this.store.nextDispatchN(row.id)
       const neverRan = previous && previousRun && !previousRun.activeAttemptId ? previous.prompt.text : undefined
       // A run takes what the owner added since its last dispatch with whatever continues it.
-      const notes = input.usageRetry ? undefined : this.workNotes(current)
+      const notes = input.usageRetry ? undefined : this.workNotes(current, input.restart === true)
       if (notes) this.store.applyWorkNotes(notes.ids)
       const dispatch = {
         activationId: row.id,
@@ -3858,7 +3919,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           : 'This work ran out of room. Answer its ask to let it carry on, or stop it.')
     }
     if (!row.threadId || !this.store.lastMainDispatch(row.id)) throw new BotEngineError('bot_not_started', 'This activation never started; run the bot again.')
-    if (!this.slotFree(row.botId, row.lane, row.id))
+    if (!(row.lane === 'run' ? this.runSlotFree(row) : this.slotFree(row.botId, row.lane, row.id)))
       throw new BotEngineError('bot_busy', row.lane === 'run'
         ? 'This bot already runs as much as it can at once. Continue this one when one of them has finished.'
         : 'Another run of this bot is in progress. Continue this one when it has finished.')
@@ -4222,9 +4283,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.settle({ kind: 'bot', runId, threadId: dispatch.threadId, activationId: dispatch.activationId, dispatchN: dispatch.n }, {})
   }
 
-  /** The bot's lanes start what waits, then other bots' run work that waited for a slot of the profile. */
+  /** The bot's lanes start what waits; the run lane picks across the profile's bots (`nextRun`). */
   private pumpLater(botId: string): void {
-    void this.pump(botId).then(() => this.pumpWaitingBots(botId)).catch((error) => console.warn('next bot activation could not start', { botId, error: error instanceof Error ? error.message : String(error) }))
+    void this.pump(botId).catch((error) => console.warn('next bot activation could not start', { botId, error: error instanceof Error ? error.message : String(error) }))
   }
 
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
@@ -4233,6 +4294,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.refusedAsks.delete(row.id)
     this.roomKeys.delete(row.id)
     this.carried.delete(row.id)
+    this.offeredNotes.delete(row.id)
     // Its browser tabs close too, and the bot's browser once nothing else uses it.
     try {
       this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
@@ -4953,14 +5015,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
   }
 
-  /** The notes a run takes with its next dispatch, as prompt text, and their ids (marked applied in that dispatch's transaction). */
-  private workNotes(row: BotActivationRow): { text: string; ids: number[] } | undefined {
+  /**
+   * The notes a run takes with its next dispatch, as prompt text, and their ids (marked applied in that dispatch's
+   * transaction). A note the last turn took but never reported read may have reached the model already (`offeredNotes`;
+   * after a restart, any note: what the process before knew is gone), so it says it may be a repeat.
+   */
+  private workNotes(row: BotActivationRow, restart = false): { text: string; ids: number[] } | undefined {
     if (row.lane !== 'run') return undefined
     // A note a live turn took and has not read yet is that turn's until it reads it or hands it back.
     const taken = new Set([...(this.live.get(row.id)?.steering.values() ?? [])].flatMap((entry) => entry.ids))
     const notes = this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
     if (!notes.length) return undefined
-    return { text: `The owner added while you worked:\n${notes.map((note) => `- ${note.text}`).join('\n')}`, ids: notes.map((note) => note.id) }
+    const offered = this.offeredNotes.get(row.id)
+    const repeat = (id: number): boolean => restart || offered?.has(id) === true
+    const lines = notes.map((note) => `- ${repeat(note.id) ? '(may be a repeat) ' : ''}${note.text}`)
+    const ids = notes.map((note) => note.id)
+    const repeats = ids.some(repeat)
+    this.notOffered(row.id, ids)
+    return {
+      text: `The owner added while you worked:\n${lines.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
+      ids
+    }
   }
 
   /** `remind`: a one-off reminder of this bot, said (or its work started) at `dueAt`. */
@@ -5507,6 +5582,9 @@ function contextKey(stored: string): [string, number] {
   const gen = at > 0 ? Number(stored.slice(at + 1)) : 1
   return at > 0 && Number.isSafeInteger(gen) ? [stored.slice(0, at), gen] : [stored, 1]
 }
+
+/** What a continuation says of notes that may have reached the work already (delivery is at least once). */
+export const NOTE_REPEAT_LINE = 'A note marked "may be a repeat" may have reached you already while you worked: if you already acted on it, don\'t do it again.'
 
 /**
  * The owner's notes as they reach running work in the middle of its turn: framed as the owner's addition to the job,

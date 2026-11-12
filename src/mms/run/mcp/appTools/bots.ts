@@ -411,6 +411,8 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const reach = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
         return json({ result, reaches: reach, note: reach === 'now'
           ? 'The work gets this at its next step, while it keeps working, and its report will lead with what changed. Tell the owner it has it now.'
+          : reach === 'after_compaction'
+            ? 'The work is making room in its memory of this job right now; it gets this as soon as that ends (within a few minutes) and keeps working, and its report will lead with what changed. Tell the owner it gets it in a few minutes.'
           : reach === 'step_end'
             ? 'The work gets this when the step it is on now ends, then carries on with it and updates its report. Tell the owner it gets it when this step ends.'
             : 'The work gets this when it starts (or carries on), and takes it into account before it reports. Tell the owner it has it.' })

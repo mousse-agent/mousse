@@ -297,7 +297,8 @@ export const BOT_SCHEDULE_SKIP_TEXT: Record<string, string> = {
   bot_home_trashed: 'skipped: the bot\'s thread is in the trash',
   bot_waiting_for_owner: 'skipped: the bot is waiting for your answer',
   previous_run_still_queued: 'skipped: the previous run has not started yet',
-  previous_run_still_running: 'skipped: the previous run is still going'
+  previous_run_still_running: 'skipped: the previous run is still going',
+  dropped_queue_full: 'dropped: the bot had too much waiting'
 }
 
 /** What approving the published revision means (`bots.definitions.get`'s `approval`). */

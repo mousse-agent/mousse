@@ -66,9 +66,16 @@ export interface PreparedBotTurn {
 }
 
 /**
+ * How long a note waits for a compaction the runtime started inside the turn and never reported ended: past it, the
+ * steer goes in anyway (a compaction takes a minute or two).
+ */
+export const BOT_COMPACTION_HOLD_MS = 3 * 60_000
+
+/**
  * The engine's side of a bot turn's steer (`PreparedBotTurn.steer`). Nothing in it widens the turn's grant: it adds
- * text to the conversation and nothing else. Taken text is delivered once: `accepted` marks it read, `handedBack` puts it
- * back to wait, and whatever the turn never read waits for the dispatch's end, as before.
+ * text to the conversation and nothing else. Taken text is delivered at least once, usually once: `accepted` marks it
+ * read, `handedBack` puts it back to wait, and whatever the turn never reported read waits for the dispatch's end and
+ * goes with the continuation, marked as a possible repeat (the model may have read it before the turn ended).
  */
 export interface BotTurnSteer {
   /** The runtime takes steers into this turn (the orchestrator wired it): a note reaches it while it runs. */
@@ -83,6 +90,8 @@ export interface BotTurnSteer {
   handedBack(token: string): void
   /** The runtime compacted the turn's context: the memory pack and the job's brief go in again at the next safe point. */
   compacted(): void
+  /** The runtime starts (`true`) or ends compacting the turn's context: a note waits for it (`work_note` says so). */
+  compacting?(active: boolean): void
 }
 
 /** A bot turn's browser: its trusted binding, and the runtime that holds it to the bot's own browser. */
