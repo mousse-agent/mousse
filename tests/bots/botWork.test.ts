@@ -8,6 +8,7 @@ import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/perso
 import { BOT_FAILURE_PAUSE_STREAK, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
+import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -746,6 +747,37 @@ describe('long work', () => {
       f.bots = new BotEngine(f.host)
       await f.bots.reconcileOnStartup()
       expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'nothing_to_wait_for' })
+    })
+
+    it('a permission removed while it waits: Allow carries it on under the narrower grant, never the wider one', async () => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      const narrower = (tools: readonly string[]) => tools.filter((tool) => tool !== 'web_fetch')
+      f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, tools: narrower(manifest.tools) as typeof manifest.tools, appTools: narrower(manifest.appTools) }))
+      expect(f.store.activation(workId)!.grantDigest).toBe(f.store.activeGrant(botId)!.digest)
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      const second = await start(f, workId, 2)
+      expect(second.prepared.policy.tools!.allow).not.toContain('web_fetch')
+      expect(second.prepared.policy.tools!.allow).toContain('web_search')
+      expect(errors()).toEqual([])
+    })
+
+    it('revoking the bot\'s grant ends its waiting work and withdraws its ask; approving again brings nothing back', async () => {
+      const { workId, message } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      f.bots.revoke(botId)
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
+      expect(f.store.openAsks(botId)).toEqual([])
+      expect(chatOf(f, botId).find((row) => row.ask?.askId === askId)!.ask).toMatchObject({ status: 'withdrawn' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I stopped "Vacuums": my permissions changed.', replyTo: { id: message.id } })
+      expect(summary().work).toBeUndefined()
+      f.bots.approve(botId, botManifestDigest(f.bots.get(botId).published!.permissions))
+      await expect(f.bots.service.answer(botId, askId, 'allow')).rejects.toMatchObject({ code: 'ask_answered' })
+      await f.bots.maintain()
+      expect(f.store.dispatches(workId)).toHaveLength(1)
     })
 
     it('a scheduled run that runs out of room ends as before: failed, with an ask for later runs', async () => {

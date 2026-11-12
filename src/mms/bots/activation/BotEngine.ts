@@ -764,18 +764,33 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Ends the bot's queued and running activations made under any grant but `keep`: each is
-   * cancelled with `reason`, and a running one's dispatch is stopped (its authority refuses every
-   * call from now on, since it checks the grant on each one).
+   * Ends the bot's queued and running activations, and its work that waits to go on, made under any grant but `keep`:
+   * each is cancelled with `reason`, and a running one's dispatch is stopped (its authority refuses every call from now
+   * on, since it checks the grant on each one). Waiting work's own asks are withdrawn, so no card can bring it back,
+   * and its chat says why it stopped.
    */
   private endUnderGrant(botId: string, reason: string, keep?: string): void {
     const ended = this.store.db.transaction(() => {
-      const rows = this.store.activationsIn(botId, ['queued', 'running']).filter((row) => row.grantDigest !== keep)
-      return rows.filter((row) => this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: reason }))
+      const rows = this.store.activationsIn(botId, ['queued', 'running', 'blocked']).filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)))
+      return rows.filter((row) => {
+        if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: reason })) return false
+        if (row.status === 'blocked') {
+          this.store.withdrawActivationAsks(row.id)
+          this.chat.post({
+            id: `bm_${row.id}_ended`, botId, author: 'bot', kind: 'notice', text: `I stopped "${this.workTitle(row)}": my permissions changed.`,
+            ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}), activationId: row.id, lane: 'run'
+          })
+          this.journalEnd(row, reason)
+        }
+        return true
+      })
     })
     for (const row of ended) {
       if (row.status === 'running') void this.stopRun(row)
-      else this.cleanup({ ...row, status: 'cancelled' })
+      else if (row.status === 'blocked') {
+        for (const ask of this.store.escalations({ activationId: row.id, status: 'withdrawn' })) this.republishAsk(ask.id)
+        this.afterEnd({ ...row, status: 'cancelled' })
+      } else this.cleanup({ ...row, status: 'cancelled' })
       this.changed({ botId, activationId: row.id })
     }
   }
@@ -2991,12 +3006,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const revision = this.definitionCall(() => this.host.definitions.publishRevision(next))
     const digest = botManifestDigest(granted)
     // A running dispatch keeps the wider grant's digest, so its next call is refused as revoked;
-    // queued work moves to the narrower grant.
+    // queued work moves to the narrower grant, and so does work that waits to go on (with a dispatch it has not sent
+    // yet): it goes on under what is approved now, never under the wider grant.
     this.store.db.transaction(() => {
       this.store.setPublished(botId, revision.revision!)
       this.store.approve(botId, digest, granted)
-      for (const row of this.store.activationsIn(botId, ['queued']))
+      for (const row of this.store.activationsIn(botId, ['queued', 'blocked'])) {
+        if (row.status === 'blocked' && !workWaits(row)) continue
         this.store.run('UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE id = ?', digest, revision.revision!, row.id)
+        this.store.run('UPDATE bot_dispatches SET policy_digest = ? WHERE activation_id = ? AND started_at IS NULL', digest, row.id)
+      }
     })
     try {
       this.host.definitions.save({ ...entry.draft, permissions: intersectManifest(narrower(entry.draft.permissions), granted) }, entry.draftHash)

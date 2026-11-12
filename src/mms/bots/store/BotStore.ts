@@ -1127,6 +1127,11 @@ export class BotStore {
     return this.run("UPDATE bot_escalations SET status = ?, answered_at = ? WHERE activation_id = ? AND status = 'open' AND mode = 'wall'", status, this.now(), activationId)
   }
 
+  /** Withdraws an activation's open asks (its work ended under a grant that is gone). */
+  withdrawActivationAsks(activationId: string): number {
+    return this.run("UPDATE bot_escalations SET status = 'withdrawn', answered_at = ? WHERE activation_id = ? AND status = 'open'", this.now(), activationId)
+  }
+
   /** Withdraws every open ask of a bot (it was deleted). */
   withdrawAsks(botId: string): number {
     return this.run("UPDATE bot_escalations SET status = 'withdrawn', answered_at = ? WHERE bot_id = ? AND status = 'open'", this.now(), botId)
