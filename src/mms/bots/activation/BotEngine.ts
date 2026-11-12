@@ -111,6 +111,8 @@ export interface BotEngineHost {
     /** Reads the instance's policy facts again (`HarnessGateway.refreshPolicyFacts`). */
     refreshPolicyFacts?(instanceId: string): Promise<void>
     nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
+    /** The granted tools a bot turn on the instance would not be offered now (`HarnessGateway.botWithheldTools`). */
+    botWithheldTools?(instanceId: string): readonly NeutralTool[]
   }
   /** Wakes the effect worker after a `turn.start` was written. */
   notifyEffects(): void
@@ -199,13 +201,17 @@ export const BOT_FILES_HELD_TEXT = 'You can already use files anywhere on this c
 /** What an ask in a new bot's first message is answered with: nothing has been asked of it yet. */
 export const BOT_ASK_NOT_YET_TEXT = "Don't ask for permissions yet: the owner hasn't asked for anything that needs one. Your files folder, memory and the web already work. Ask when they want something that needs more."
 
-/** What a chat turn's ask for something its work already holds is answered with. */
+/** What a chat turn's ask for something its work already holds is answered with (commands, the web, the browser). */
 export const BOT_WORK_HAS_TEXT = 'Your work already has this; the chat does not use it. Hand the job to work_start and tell the owner you are on it.'
 /**
  * What a run's call or `escalate` is answered with when the owner allowed the permission after its turn started: the
  * turn keeps the permissions it started with, and the work continues with the new one once the turn ends.
  */
 export const BOT_ASK_HELD_NEXT_TEXT = 'The owner already allowed this; you get it as soon as this turn ends. Do not ask again. Finish what you can without it and end your turn: you then continue in this thread with it.'
+/** The same for a chat turn, for a permission the chat uses itself (file access, a skill, a Mousse tool). */
+export const BOT_ASK_HELD_CHAT_TEXT = 'The owner already allowed this; you get it as soon as this reply ends. Do not ask again: finish your reply without it, and you then continue in this chat with it.'
+/** The same for a consult: the bot's next turn has it, the consult does not. */
+export const BOT_ASK_HELD_CONSULT_TEXT = 'The owner already allowed this, but this consult can\'t use it. Do not ask again: answer with what you have and say what needs it.'
 /** What a call or `escalate` is answered with when the grant holds the permission but this turn can't use it. */
 export const BOT_ASK_HELD_UNAVAILABLE_TEXT = 'The owner already allowed this, but it can\'t be used on this turn. Do not ask again. Carry on without it and say in your report what you skipped.'
 
@@ -1453,6 +1459,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return changed > 0
     })
     if (!started) return refuse('bot_dispatch_started', 'This dispatch already started.')
+    // A refusal this dispatch starts with the permission for is answered (a reload, a retry or a restart that began
+    // after the owner's Allow): its report is the report, and no further turn follows for it.
+    this.forgetRefused(row.id, effective)
     const controller = new AbortController()
     const deadline = startedAt + remainingMs
     // At the deadline the dispatch ends at a budget wall: the owner may allow more time. The timer
@@ -1643,7 +1652,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return definition ? this.effectiveManifest(current, definition.permissions, grant.manifest) : undefined
   }
 
-  /** A run's turn was refused `asked`: if the owner allows it before the turn ends, the work continues with it. */
+  /** A turn was refused `asked`: if the owner allows it before the turn ends, the activation continues with it. */
   private refused(activationId: string, asked: BotAskRequest): void {
     if ('budget' in asked || isSpecialAsk(asked)) return
     const permission = filesAskOf(grantRequestOf(asked))
@@ -1652,13 +1661,36 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.refusedAsks.set(activationId, asks)
   }
 
-  /** What a run's turns were refused that the grant holds now, as card titles ("run commands"); forgotten once read. */
+  /** A dispatch of the activation starts with `started`: what it was refused and now holds is no longer waited for. */
+  private forgetRefused(activationId: string, started: BotManifest): void {
+    const asks = this.refusedAsks.get(activationId)
+    if (!asks) return
+    for (const [fingerprint, asked] of asks) if (grantHolds(started, asked)) asks.delete(fingerprint)
+    if (!asks.size) this.refusedAsks.delete(activationId)
+  }
+
+  /**
+   * What the activation's turns were refused that its next turn would have, as card titles ("run commands"): held by
+   * the active grant and offered by its runtime. They are forgotten when a dispatch starts with them, or it ends.
+   */
   private allowedSinceRefused(row: BotActivationRow): string[] {
     const asks = this.refusedAsks.get(row.id)
-    this.refusedAsks.delete(row.id)
     const now = asks ? this.grantNow(row.id) : undefined
     if (!asks || !now) return []
-    return [...asks.values()].filter((asked) => grantHolds(now, asked)).map((asked) => askText(asked).title)
+    return [...asks.values()].filter((asked) => grantHolds(now, asked) && !this.withheld(row, asked)).map((asked) => askText(asked).title)
+  }
+
+  /**
+   * Whether the runtime the activation runs on would not offer `asked` to its next turn although the grant holds it
+   * (Claude Code locked for bots withholds commands where its sandbox can't run).
+   */
+  private withheld(row: BotActivationRow, asked: BotAskRequest): boolean {
+    if (!('tool' in asked) || typeof asked.tool !== 'string' || !row.selection) return false
+    try {
+      return (this.host.harness.botWithheldTools?.(row.selection.instanceId) ?? []).some((tool) => tool === botGrantTool(asked.tool as string))
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -1724,17 +1756,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const firstMessage = row.idempotencyKey.startsWith('create:')
     /**
      * What a turn is told about `asked` when the bot's grant holds it now, though this turn does not (issue #983): no
-     * card, and no count against the ask caps. A chat turn hands the job to work, which has it (the chat is not offered
-     * the web, the browser or commands, and a turn keeps the permissions it started with). A run that started before
-     * the owner allowed it continues with it once its turn ends (`advance`). Undefined when the grant does not hold it.
+     * card, and no count against the ask caps. A turn keeps the permissions it started with. A chat turn hands commands,
+     * the web and the browser to work, which has them (the chat is never offered them). Otherwise the activation
+     * continues with it once its turn ends (`advance`), unless its runtime would not offer it then. Undefined when the
+     * grant does not hold it.
      */
     const heldNow = (asked: BotAskRequest): string | undefined => {
       const now = this.grantNow(row.id)
       if (!now || !grantHolds(now, asked)) return undefined
-      if (row.lane === 'chat') return BOT_WORK_HAS_TEXT
-      if (grantHolds(input.startedWith, asked)) return BOT_ASK_HELD_UNAVAILABLE_TEXT
-      this.refused(row.id, asked)
-      return BOT_ASK_HELD_NEXT_TEXT
+      const workOnly = row.lane === 'chat' && frontDeskLacks(asked)
+      if (workOnly && input.role === 'activation') return BOT_WORK_HAS_TEXT
+      if (grantHolds(input.startedWith, asked) || this.withheld(row, asked)) return BOT_ASK_HELD_UNAVAILABLE_TEXT
+      if (!workOnly) this.refused(row.id, asked)
+      if (input.role === 'context') return BOT_ASK_HELD_CONSULT_TEXT
+      return row.lane === 'chat' ? BOT_ASK_HELD_CHAT_TEXT : BOT_ASK_HELD_NEXT_TEXT
     }
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
@@ -1761,6 +1796,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const authority: BotAuthority = {
       ...base,
       check,
+      held: (asked) => {
+        this.progress(row.id)
+        return heldNow(asked as BotAskRequest)
+      },
       checkAny: (calls: readonly NormalisedCall[]) => {
         this.progress(row.id)
         let refused: BotCheckDenied | undefined
@@ -2685,11 +2724,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const openWalls = this.store.escalations({ activationId: row.id, status: 'open' }).filter((ask) => ask.mode === 'wall')
       // Work the owner added to while it ran posts what it has, then takes the notes and reports again, if it has time
       // left for them; without the time it reports what it has, and the notes stay unread (work_list shows it ended).
-      // The same holds for a permission the owner allowed after the turn was refused it (issue #983).
-      const allowed = !reload && row.lane === 'run' && run.status === 'completed' ? this.allowedSinceRefused(row) : []
+      // The same holds, in either lane, for a permission the owner allowed after the turn was refused it (issue #983).
+      const allowed = !reload && run.status === 'completed' ? this.allowedSinceRefused(row) : []
       let noted = false
       const next = this.recorded(row, () => {
-        noted = !reload && row.lane === 'run' && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
+        noted = !reload && run.status === 'completed' && ((row.lane === 'run' && this.store.pendingWorkNotes(row.id).length > 0) || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         if (unknown || run.status === 'uncertain') {
           this.store.moveActivation(row.id, ['running'], 'paused', { endReason: run.status === 'uncertain' && !unknown ? 'uncertain' : 'unknown_calls', ...(text !== undefined ? { result: text } : {}) })
@@ -2988,8 +3027,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const interrupted = calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${call.role} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : ''
-    // Work that the owner allowed something while it ran (issue #983): this turn has it.
+    // A turn that the owner allowed something while it ran (issue #983): this turn has it (`allowedSinceRefused`).
     if (input.allowed?.length) {
+      if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${input.allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
       const allowedLine = `The owner allowed you to ${input.allowed.join(' and ')} while you worked; you have it now.`
       const notes = input.notes ? `\n\n${input.notes}` : ''
       const sent = input.afterReport ? ' What you had so far was already sent to them.' : ''
@@ -4564,6 +4604,13 @@ function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
   const tool = botGrantTool(asked.tool)
   // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
   return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.includes(tool)
+}
+
+/** Whether `asked` is something a chat turn is never offered, which its work has (`frontDeskManifest`): commands, the web, the browser. */
+function frontDeskLacks(asked: BotAskRequest): boolean {
+  if (!('tool' in asked) || typeof asked.tool !== 'string') return false
+  const tool = botGrantTool(asked.tool)
+  return BOT_WORK_ONLY_TOOLS.includes(tool) || tool === BOT_BROWSER_PERMISSION
 }
 
 /** Whether `authority` already holds the tool, skill or MCP tool `asked` names (a folder or a limit never counts). */
