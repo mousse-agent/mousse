@@ -35,6 +35,7 @@ const BUTTON_BITS: Record<BrowserMouseButton, number> = { left: 1, right: 2, mid
 /** Presses in a row count as one double (or triple) click within this long and this near. */
 const MULTI_CLICK_MS = 500
 const MULTI_CLICK_PX = 5
+const MODIFIER_KEYS = new Set(['Meta', 'Control', 'Alt', 'Shift', 'CapsLock', 'Fn'])
 /** A touch held this long without moving is a right click. */
 const LONG_PRESS_MS = 550
 /** A touch that moves more than this scrolls rather than taps. */
@@ -202,9 +203,12 @@ export function useBotBrowserInput(options: { botId: string; owner: boolean; vie
     if (touch && !touches.current.size && !gesture.moved && !gesture.long) clickAt(event, 'left')
   }
 
+  /** A press on the view's own panels over the picture (the page's dialog, its file request) is theirs, not the page's. */
+  const onPanel = (event: { target: EventTarget | null }) => event.target instanceof Element && Boolean(event.target.closest('.bot-browser-dialog, .bot-browser-closed'))
+
   const frameHandlers = {
     onPointerDown(event: PointerEvent<HTMLDivElement>) {
-      if (!owner) return
+      if (!owner || onPanel(event)) return
       event.preventDefault()
       frame.current?.setPointerCapture?.(event.pointerId)
       if (event.pointerType === 'touch') return touchDown(event)
@@ -221,7 +225,7 @@ export function useBotBrowserInput(options: { botId: string; owner: boolean; vie
       placeKeys(at)
     },
     onPointerMove(event: PointerEvent<HTMLDivElement>) {
-      if (!owner) return
+      if (!owner || (onPanel(event) && !pressed.current.size)) return
       if (event.pointerType === 'touch') return touchMove(event)
       const at = point(event)
       if (!at) return
@@ -245,9 +249,9 @@ export function useBotBrowserInput(options: { botId: string; owner: boolean; vie
       }
       if (owner) releaseAll()
     },
-    onContextMenu(event: { preventDefault(): void }) {
+    onContextMenu(event: { preventDefault(): void; target: EventTarget | null }) {
       // The page has its own menu, if any: the app's never opens over it.
-      event.preventDefault()
+      if (!onPanel(event)) event.preventDefault()
     }
   }
 
@@ -268,8 +272,14 @@ export function useBotBrowserInput(options: { botId: string; owner: boolean; vie
       event.preventDefault()
       const text = typed(event)
       const id = event.code || event.key
+      const modifiers = modifiersOf(event)
+      send({ kind: 'keys', type: 'down', key: event.key, code: event.code, keyCode: event.keyCode, modifiers, ...(text ? { text } : {}), ...(event.repeat ? { repeat: true } : {}) })
+      // A Mac window never hears a key go up while Command is held: a Command shortcut's key goes up at once, so it is not left pressed.
+      if (mac && event.metaKey && !MODIFIER_KEYS.has(event.key)) {
+        send({ kind: 'keys', type: 'up', key: event.key, code: event.code, keyCode: event.keyCode, modifiers })
+        return
+      }
       keysDown.current.set(id, { key: event.key, code: event.code, keyCode: event.keyCode })
-      send({ kind: 'keys', type: 'down', key: event.key, code: event.code, keyCode: event.keyCode, modifiers: modifiersOf(event), ...(text ? { text } : {}), ...(event.repeat ? { repeat: true } : {}) })
     },
     onKeyUp(event: KeyboardEvent<HTMLTextAreaElement>) {
       if (!owner) return

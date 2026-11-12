@@ -415,6 +415,35 @@ describe('the person\'s input in the split view', () => {
     expect(note().textContent).toContain('You\'re using Noobesh\'s browser')
   })
 
+  it('on a Mac, a key pressed with Command goes up at once (the window never hears it go up)', async () => {
+    const platform = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform')
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true })
+    try {
+      await held()
+      await act(async () => { keys().dispatchEvent(new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', keyCode: 65, metaKey: true, bubbles: true, cancelable: true })) })
+      await settle()
+      expect(sentInputs().map((sent) => sent.input)).toEqual([
+        { kind: 'keys', type: 'down', key: 'a', code: 'KeyA', keyCode: 65, modifiers: 4 },
+        { kind: 'keys', type: 'up', key: 'a', code: 'KeyA', keyCode: 65, modifiers: 4 }
+      ])
+    } finally {
+      delete (navigator as { platform?: string }).platform
+      if (platform) Object.defineProperty(Navigator.prototype, 'platform', platform)
+    }
+  })
+
+  it('a press on the page\'s dialog is the dialog\'s, never the page\'s', async () => {
+    const pane = await held({ dialog: { type: 'alert', message: 'Hello' } })
+    const ok = [...pane.querySelectorAll('.bot-browser-dialog button')].find((entry) => entry.textContent === 'OK')!
+    await act(async () => {
+      ok.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10, button: 0, buttons: 1 }))
+      ok.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 10, clientY: 10, button: 0, buttons: 0 }))
+      ;(ok as HTMLElement).click()
+    })
+    await settle()
+    expect(sentInputs().map((sent) => sent.input)).toEqual([{ kind: 'dialog', accept: true }])
+  })
+
   it('pastes the person\'s clipboard text only on their paste', async () => {
     await held()
     const paste = Object.assign(new Event('paste', { bubbles: true, cancelable: true }), { clipboardData: { getData: (type: string) => type === 'text/plain' ? 'from my clipboard' : '' } })
