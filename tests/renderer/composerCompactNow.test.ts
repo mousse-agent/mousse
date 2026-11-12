@@ -100,3 +100,93 @@ describe('Compact now from the composer', () => {
     expect(chip()?.textContent).not.toBe('Compacting…')
   })
 })
+
+describe('the Full/Compact chip on a thread switch', () => {
+  /** A thread answered a minute ago, its cache written for five minutes: warm, no chip. */
+  const warm = (): ContextUsageSnapshot => ({ ...expired(), promptCache: { lastRequestAt: Date.now() - 60_000, ttlMs: 5 * 60_000 } })
+
+  it('shows each thread\'s own chip in the same render as the switch, never the one of the thread before', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const now = new Date().toISOString()
+    useAppStore.setState({
+      threads: [
+        { id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0 },
+        { id: 'thread-b', name: 'B', createdAt: now, updatedAt: now, startedAt: now, order: 1 }
+      ] as never
+    })
+    // Each thread answers for itself; `hold` keeps the next answers pending, like a slow service.
+    let hold = false
+    const asked: Array<string | undefined> = []
+    const getContextUsage = vi.fn((request?: { threadId?: string }) => {
+      asked.push(request?.threadId)
+      if (hold) return new Promise<ContextUsageSnapshot>(() => undefined)
+      return Promise.resolve(request?.threadId === 'thread-b' ? warm() : expired())
+    })
+    bridge = {
+      orchestrator: { getContextUsage, isTurnActive: vi.fn(async () => false) },
+      skills: { list: () => Promise.resolve({ skills: [] }) }
+    }
+    stubBridge()
+    const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
+    await act(async () => root.render(createElement(OrchestratorChat)))
+    await settle()
+    const chip = () => host.querySelector<HTMLElement>('.composer-idle-chip')
+    const ring = () => host.querySelector('.composer-context-anchor')
+    expect(chip()?.textContent).toBe('Full · 182K')
+    expect(asked).toContain('thread-a')
+
+    // B was never measured: until it is, it shows neither ring nor chip (A's chip never shows on B).
+    hold = true
+    act(() => useAppStore.getState().switchToThread('thread-b'))
+    expect(chip()).toBeNull()
+    expect(ring()).toBeNull()
+    hold = false
+    await settle()
+    expect(asked.at(-1)).toBe('thread-b')
+    expect(ring()).not.toBeNull()
+    expect(chip()).toBeNull()
+
+    // Back on A, its chip is there in the switch's own render, before A is measured again.
+    hold = true
+    act(() => useAppStore.getState().switchToThread('thread-a'))
+    expect(chip()?.textContent).toBe('Full · 182K')
+    // And B, opened again, has no chip at any point.
+    act(() => useAppStore.getState().switchToThread('thread-b'))
+    expect(ring()).not.toBeNull()
+    expect(chip()).toBeNull()
+  })
+
+  it('keeps a changed thread\'s ring but holds its chip until the new measurement says where the cache stands', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const now = new Date().toISOString()
+    useAppStore.setState({
+      threads: [
+        { id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0 },
+        { id: 'thread-b', name: 'B', createdAt: now, updatedAt: now, startedAt: now, order: 1 }
+      ] as never
+    })
+    let hold = false
+    bridge = {
+      orchestrator: {
+        getContextUsage: vi.fn((request?: { threadId?: string }) => hold ? new Promise(() => undefined) : Promise.resolve(request?.threadId === 'thread-b' ? warm() : expired())),
+        isTurnActive: vi.fn(async () => false)
+      },
+      skills: { list: () => Promise.resolve({ skills: [] }) }
+    }
+    stubBridge()
+    const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
+    await act(async () => root.render(createElement(OrchestratorChat)))
+    await settle()
+    expect(host.querySelector('.composer-idle-chip')).not.toBeNull()
+    act(() => useAppStore.getState().switchToThread('thread-b'))
+    await settle()
+
+    // A turn ran on A meanwhile (elsewhere): its old record no longer says where its cache stands.
+    hold = true
+    const later = new Date(Date.now() + 1000).toISOString()
+    useAppStore.setState((s) => ({ threads: s.threads.map((thread) => thread.id === 'thread-a' ? { ...thread, updatedAt: later } : thread) }))
+    act(() => useAppStore.getState().switchToThread('thread-a'))
+    expect(host.querySelector('.composer-context-anchor')).not.toBeNull()
+    expect(host.querySelector('.composer-idle-chip')).toBeNull()
+  })
+})
