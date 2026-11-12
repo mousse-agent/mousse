@@ -583,6 +583,18 @@ describe('typed activity items', () => {
     expect(part.output.interrupted).toBeUndefined()
   })
 
+  it('moves the `Exit code N` line a runtime puts before a failed command\'s output to the exit code', () => {
+    const failed = row('c1', { ...activityBase, status: 'failed', id: 'c1', callId: 'x', toolName: 'bash', kind: 'command', command: 'npm test', output: 'Exit code 1\n FAIL tests/a.test.ts\n' })
+    expect(partOf(mousseToUIMessages([failed])[0]!).output).toMatchObject({ stdout: ' FAIL tests/a.test.ts\n', exitCode: 1 })
+    const own = row('c2', { ...activityBase, id: 'c2', callId: 'y', toolName: 'bash', kind: 'command', command: 'cat log', output: 'Exit code 3\n', exitCode: 0 })
+    expect(partOf(mousseToUIMessages([own])[0]!).output).toMatchObject({ stdout: 'Exit code 3\n', exitCode: 0 })
+  })
+
+  it('gives each call the time it started, for its row', () => {
+    const call = row('c1', { ...activityBase, id: 'c1', callId: 'x', toolName: 'bash', kind: 'command', command: 'make', output: '' })
+    expect(partOf(mousseToUIMessages([call])[0]!).createdAt).toBe(call.timestamp)
+  })
+
   it('shows the output of a running command as it arrives', () => {
     const running = row('c1', { ...activityBase, status: 'running', id: 'c1', callId: 'x', toolName: 'bash', kind: 'command', command: 'make', output: 'building\n' })
     const part = partOf(mousseToUIMessages([running])[0]!)
@@ -936,6 +948,7 @@ describe('provider events through the assembler into the cards', () => {
       state: 'output-available',
       input: { pattern: 'foo', query: 'foo', path: 'src' },
       output: { numFiles: 2, text: 'src/a.ts\nsrc/b.ts' },
+      createdAt: messages[0]!.timestamp,
     })
   })
 
@@ -1035,5 +1048,38 @@ describe('the tool search row', () => {
     expect(meta.subtitle!(part('output-available'))).toBe('Read, thread_list')
     expect(meta.detailTitle!(part('output-available'))).toBe('select:Read,mcp__mousse__thread_list')
     expect(meta.subtitle!(part('output-available', 'slack send'))).toBe('slack send')
+  })
+})
+
+describe('failures the agent got past', () => {
+  const readCall = (id: string, status: 'done' | 'failed' | 'running') =>
+    row(id, { ...activityBase, status, id, callId: id, toolName: 'Read', kind: 'generic' } as unknown as AgentActivityItem)
+  const prompt = (id: string) => base({ id, role: 'user', content: 'Go' })
+  const reply = (id: string, content: string) => base({ id, role: 'assistant', content })
+  const failedParts = (out: UIMessage[]) =>
+    out.flatMap((message) => message.parts as unknown as Array<Record<string, any>>).filter((part) => part.state === 'output-error')
+
+  it('marks a failure recovered when a later call succeeds or a reply follows', () => {
+    const out = mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), readCall('b', 'done'), prompt('u2'), readCall('c', 'failed'), reply('r', 'Done.')])
+    expect(failedParts(out).map((part) => part.failureRecovered)).toEqual([true, true])
+  })
+
+  it('marks it recovered while the turn still runs, and when the turn ended normally', () => {
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed')]))[0]!.failureRecovered).toBe(true)
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), prompt('u2')]))[0]!.failureRecovered).toBe(true)
+  })
+
+  it('leaves a failure that ended the turn on an error, or a cut-off turn, loud', () => {
+    const error = base({ id: 'e', role: 'system', content: 'failed', error: { code: 'orchestrator_turn_failed', message: 'failed' } })
+    const ended = mousseToUIMessages([prompt('u1'), reply('r', 'Running it.'), readCall('a', 'failed'), error])
+    expect(failedParts(ended)[0]!.failureRecovered).toBeUndefined()
+    const stopped = base({ id: 's', role: 'system', content: 'Stopped', turnEnd: { cause: 'user' } as ChatMessage['turnEnd'] })
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), stopped]))[0]!.failureRecovered).toBeUndefined()
+  })
+
+  it('does not count a thought after the failure as getting past it', () => {
+    const thought = base({ id: 't', role: 'system', kind: 'thinking', content: '', thinking: { content: 'Hmm', status: 'complete' } as ChatMessage['thinking'] })
+    const error = base({ id: 'e', role: 'system', content: 'failed', error: { code: 'x', message: 'failed' } })
+    expect(failedParts(mousseToUIMessages([prompt('u1'), readCall('a', 'failed'), thought, error]))[0]!.failureRecovered).toBeUndefined()
   })
 })

@@ -1,4 +1,4 @@
-import type { ComponentType, ReactNode } from "react";
+import { createContext, useContext, type ComponentType, type ReactNode } from "react";
 import {
   ClipboardList,
   FilePlus,
@@ -13,6 +13,16 @@ import {
 } from "../../../../lib/icons";
 import { parseMcpToolType, toolRegistry } from "./tool-registry";
 import "./tool-icon.css";
+
+/**
+ * What a tool row knows about its call beyond its own part: when it started (`at`, for the time on hover) and whether
+ * the agent got past its failure (`recovered`). The tool renderer provides it per call; a row's panel resets it, so a
+ * row nested inside another reads its own.
+ */
+export type ToolRowInfo = { at?: string | number | Date; recovered?: boolean };
+export const ToolRowContext = createContext<ToolRowInfo>({});
+export const NO_ROW_INFO: ToolRowInfo = {};
+export const useToolRowInfo = () => useContext(ToolRowContext);
 
 type IconType = ComponentType<{ className?: string; size?: number }>;
 
@@ -50,10 +60,35 @@ export function toolIconFor(type: string | undefined): IconType {
  * and dimmed; failed, it takes the danger colour (tool-icon.css).
  */
 export function ToolStateIcon({ state, children }: { state: ToolIconState; children: ReactNode }) {
+  // A failure the agent got past only dims the icon toward the danger colour (with the row's small ×).
+  const { recovered } = useToolRowInfo();
   return (
-    <span className="an-tool-icon" data-state={state} aria-hidden="true">
+    <span className="an-tool-icon" data-state={state === "failed" && recovered ? "recovered" : state} aria-hidden="true">
       {children}
     </span>
+  );
+}
+
+/** The small × after a failed call the agent got past; its label stays grey. */
+export function RecoveredFailureMark() {
+  return (
+    <span className="an-tool-failed-mark" aria-hidden="true">
+      ×
+    </span>
+  );
+}
+
+/** The time a row's call started, at the row's right edge; it fades in while the row is hovered or focused. */
+const rowTimeFormatter = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+
+export function ToolRowTime({ at }: { at: ToolRowInfo["at"] }) {
+  if (at === undefined || at === null || at === "") return null;
+  const date = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(date.getTime())) return null;
+  return (
+    <time className="an-tool-row-time" dateTime={date.toISOString()}>
+      {rowTimeFormatter.format(date)}
+    </time>
   );
 }
 

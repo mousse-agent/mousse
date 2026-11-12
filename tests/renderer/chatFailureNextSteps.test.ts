@@ -84,6 +84,29 @@ describe('a tool call group with failures', () => {
   })
 })
 
+describe('the turn line of a failed call', () => {
+  const at = (s: number) => `2026-11-05T10:00:0${s}.000Z`
+  const call = (id: string, status: 'done' | 'failed', s: number): ChatMessage => ({
+    id, role: 'system', content: '', timestamp: at(s), kind: 'mcp_tool_call',
+    toolCall: { title: 'Read', summary: 'Read', details: [], status: 'complete' },
+    activity: { id, callId: id, toolName: 'Read', kind: 'generic', status, startedAt: at(s) } as unknown as ChatMessage['activity'],
+  })
+  const thread = (...rest: ChatMessage[]): ChatMessage[] => [{ id: 'u1', role: 'user', content: 'Read the config', timestamp: at(0) }, ...rest]
+  const show = (messages: ChatMessage[], status: 'ready' | 'error') =>
+    render(createElement(MessageList, { messages: mousseToUIMessages(messages), status }))
+
+  it('does not name a failure the agent got past', () => {
+    show(thread(call('a', 'failed', 1), call('b', 'done', 2), { id: 'r', role: 'assistant', content: 'Done.', timestamp: at(3) }), 'ready')
+    expect(text()).not.toMatch(/· \d+ failed/)
+  })
+
+  it('names a failure that ended the turn', () => {
+    const error: ChatMessage = { id: 'e', role: 'system', content: 'failed', timestamp: at(3), error: { code: 'orchestrator_turn_failed', message: 'failed' } }
+    show(thread(call('a', 'done', 1), call('b', 'failed', 2), error), 'error')
+    expect(text()).toMatch(/· 1 failed/)
+  })
+})
+
 describe('the command row', () => {
   const step = (patch: Partial<Extract<TimelineStep, { type: 'tool-call' }>>) =>
     ({ id: 'b1', type: 'tool-call', toolName: 'Bash', bashCommand: 'npm test', ...patch }) as Extract<TimelineStep, { type: 'tool-call' }>

@@ -2512,10 +2512,12 @@ const TurnRow = memo(function TurnRow({
                         label={groupLabel}
                         liveThought={liveThought}
                         autoOpen={anyToolPending}
+                        // Only failures the agent did not get past are named on the group line.
                         failed={
                           items.filter(
                             (item) =>
-                              getToolStatus(item.part).isError,
+                              getToolStatus(item.part).isError &&
+                              !(item.part as { failureRecovered?: boolean }).failureRecovered,
                           ).length
                         }
                         live={isLastTurn && isStreaming}

@@ -9,6 +9,7 @@ import {
 } from '../../utils/messageAttachments'
 import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
+import { splitExitCode } from '../components/agent-elements/utils/bash-output'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
 
@@ -89,6 +90,16 @@ function planTitle(text: string | undefined): string {
   return heading && heading.length > 0 ? (heading.length > 90 ? `${heading.slice(0, 87)}…` : heading) : 'Implementation plan'
 }
 
+/**
+ * A finished command's output and exit code. A runtime that reports the exit code only as the output's first line
+ * (`Exit code 1`, Claude Code) has it moved to the exit code, where the command's exit line shows it.
+ */
+function commandResult(output: string, exitCode: number | null | undefined): { stdout: string; exitCode?: number | null } {
+  if (typeof exitCode === 'number') return { stdout: output, exitCode }
+  const split = splitExitCode(output)
+  return split.exitCode === undefined ? { stdout: output, exitCode } : { stdout: split.output, exitCode: split.exitCode }
+}
+
 /** The card a typed item draws as, with the input and output that card reads; undefined for a generic or unknown kind. */
 function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape | undefined {
   const running = activity.status === 'running'
@@ -99,8 +110,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
           ? compact({ stdout: activity.output, truncated: activity.outputTruncated, bytes: activity.outputBytes })
           : undefined
         : compact({
-            stdout: activity.output ?? '',
-            exitCode: activity.exitCode,
+            ...commandResult(activity.output ?? '', activity.exitCode),
             durationMs: activity.durationMs,
             truncated: activity.outputTruncated,
             bytes: activity.outputBytes,
@@ -287,6 +297,7 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
       state: activity!.status === 'failed' ? 'output-error' : activityState(activity!.status),
       input: typed.input,
       output: typed.output,
+      ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
     }
   }
 
@@ -372,6 +383,8 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
     input,
     output,
     ...(subagentTool ? { subagentTool } : {}),
+    // When the call started: its row shows the time on hover.
+    ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
   }
 }
 
@@ -456,6 +469,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         state,
         input: { thought: msg.thinking.content },
         output: msg.thinking.status === 'complete' ? msg.thinking.content : undefined,
+        ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
       } as unknown as UIMessage['parts'][number]]
       out.push(base)
       lastAssistantText = null
@@ -668,7 +682,48 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         ? { text: displayText.trim(), streaming: !!msg.streaming }
         : null
   }
-  return mergeConsecutiveThoughts(out)
+  return markRecoveredFailures(mergeConsecutiveThoughts(out))
+}
+
+type ToolPartShape = { type?: unknown; state?: unknown; failureRecovered?: boolean }
+
+const isToolPartShape = (part: unknown): part is ToolPartShape =>
+  typeof (part as ToolPartShape | undefined)?.type === 'string' && (part as { type: string }).type.startsWith('tool-')
+
+/**
+ * Marks each failed tool call the agent got past (`failureRecovered`), so its row stays quiet: a later call succeeded
+ * or a reply followed in the same turn, or the turn is still running or ended normally. A failure is loud only when
+ * nothing came after it and the turn ended on an error or was cut off.
+ */
+export function markRecoveredFailures(messages: UIMessage[]): UIMessage[] {
+  let pending: ToolPartShape[] = []
+  const settle = (turnFailed: boolean) => {
+    if (!turnFailed) for (const part of pending) part.failureRecovered = true
+    pending = []
+  }
+  for (const message of messages) {
+    if (message.role === 'user') {
+      settle(false)
+      continue
+    }
+    const meta = message.metadata as { turnEnd?: unknown } | undefined
+    for (const part of (message.parts ?? []) as unknown[]) {
+      const type = (part as { type?: unknown }).type
+      if (type === 'error') {
+        settle(true)
+        continue
+      }
+      if (isToolPartShape(part)) {
+        if (part.state === 'output-error') pending.push(part)
+        else if (part.state === 'output-available' && part.type !== 'tool-Thinking') settle(false)
+        continue
+      }
+      if (type === 'text' && typeof (part as { text?: unknown }).text === 'string' && (part as { text: string }).text.trim()) settle(false)
+    }
+    if (meta?.turnEnd) settle(true)
+  }
+  settle(false)
+  return messages
 }
 
 type ThinkingPartShape = {
