@@ -108,7 +108,7 @@ import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { botTurnOffers } from '../../shared/bots/personal/walls'
-import { isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
+import { isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
@@ -939,6 +939,23 @@ const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'con
 function withBotInstructions(instructions: string | undefined, preamble: string, pack?: string): string {
   const parts = [instructions?.trim() ? `Your role and instructions:\n${instructions.trim()}` : '', pack?.trim() ?? '', preamble]
   return parts.filter(Boolean).join('\n\n')
+}
+
+/**
+ * A bot turn's steer as the turn's remote steer source: what the engine offers goes in as an agent's steer (it waits
+ * for a running tool, then goes in at the runtime's next step), each entry kept with the token the engine took it under.
+ */
+function botSteerSource(steer: BotTurnSteer): { externalDrainSteer: () => SteerEntry[] | undefined; externalPeekSteer: () => SteerEntry[] | undefined } {
+  return {
+    externalDrainSteer: () => {
+      const taken = steer.take()
+      return taken ? [{ text: taken.text, byAgent: true, botSteer: taken.token }] : undefined
+    },
+    externalPeekSteer: () => {
+      const text = steer.peek()
+      return text ? [{ text, byAgent: true }] : undefined
+    }
+  }
 }
 
 /** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
@@ -4717,7 +4734,10 @@ export class OrchestratorService extends EventEmitter {
           runId: payload.runId,
           externalSignal: AbortSignal.any([signal, prepared.authority.time.signal]),
           modelOverride: this.harness.instanceMap.overrideFor({ instanceId: prepared.selection.instanceId, model: prepared.selection.model, ...(prepared.selection.effort ? { effort: prepared.selection.effort } : {}) }),
-          bot: prepared
+          bot: prepared,
+          // What reaches the bot's turn while it runs (the owner's notes, the pack again after a compaction): its own
+          // steer source, never the thread's queue.
+          ...(prepared.steer ? botSteerSource(prepared.steer) : {})
         }
       )
       // A failed turn's message is its error, never the bot's words; a turn its work goes on from hands back what it said.
@@ -11914,8 +11934,15 @@ export class OrchestratorService extends EventEmitter {
       const acceptedDrains = new Set<string>()
       // An acceptance with no token (`steerAccepted`, `nativeMessages`) saves every drained item: every taken drain is
       // accepted with it.
+      /** A bot turn's own steers among `entries` were read: its engine marks them delivered, once. */
+      const botSteersRead = (entries: readonly SteerEntry[]): void => {
+        for (const entry of entries) if (entry.botSteer) opts?.bot?.steer?.accepted(entry.botSteer)
+      }
       const acceptTakenDrains = (): void => {
-        for (const token of takenDrains.keys()) acceptedDrains.add(token)
+        for (const [token, entry] of takenDrains) {
+          acceptedDrains.add(token)
+          botSteersRead(entry.entries)
+        }
         takenDrains.clear()
       }
       const drainScope = `${turnId}:${randomUUID().slice(0, 8)}`
@@ -11944,6 +11971,9 @@ export class OrchestratorService extends EventEmitter {
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
       turnHold = { hold, runId: engineRunId }
+      // A bot's notes reach its turn as it works on a runtime that takes steers; on one that does not, they wait for the
+      // dispatch's end, as before.
+      if (opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only') opts.bot.steer.attached()
       const steerKeys = new WeakMap<SteerEntry, string>()
       let steerKeySeq = 0
       // An entry's identity in a hold: its queue item, or one it keeps for as long as it exists (a hand-back restores the
@@ -12119,6 +12149,14 @@ export class OrchestratorService extends EventEmitter {
             drained.delete(token)
             takenDrains.delete(token)
             acceptedDrains.add(token)
+            botSteersRead(entry!.entries)
+          } else if (opts?.bot?.steer) {
+            // Without a token every drained item is accepted: a bot turn's too.
+            for (const [drainToken, held] of drained) {
+              acceptedDrains.add(drainToken)
+              botSteersRead(held.entries)
+            }
+            drained.clear()
           }
           this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text))
           this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
@@ -12214,12 +12252,16 @@ export class OrchestratorService extends EventEmitter {
             drained.delete(token)
             takenDrains.delete(token)
           }
-          // Returned drains go ahead of anything steered since, oldest first.
+          // Returned drains go ahead of anything steered since, oldest first. A bot turn's own steers go back to its engine,
+          // which offers them again or leaves them for the dispatch's end: never to the thread's queue.
           const put = (...items: SteerEntry[]): void => {
-            turn.pendingSteer.splice(returnedAhead, 0, ...items)
-            returnedAhead += items.length
+            const own = items.filter((item) => !item.botSteer)
+            for (const item of items) if (item.botSteer) opts?.bot?.steer?.handedBack(item.botSteer)
+            turn.pendingSteer.splice(returnedAhead, 0, ...own)
+            returnedAhead += own.length
           }
-          if (!entry) return put({ text })
+          // Text with no drain of a bot turn is the engine's (unread, it waits there): nothing is queued for it.
+          if (!entry) return opts?.bot ? undefined : put({ text })
           // The items these entries stand for are not taken: the next acknowledgement must not drop them.
           for (const steer of entry.entries) if (steer.itemId) session.drainedExternalSteerIds.delete(steer.itemId)
           // In the order they were drained: the external steers first, then the thread's own.

@@ -54,6 +54,32 @@ export interface PreparedBotTurn {
   preamble?: string
   /** The bot's own browser, when its grant holds "use the browser": the turn's browser tools run on it. */
   browser?: BotTurnBrowser
+  /**
+   * What reaches the turn while it runs (a main dispatch only): the owner's notes to running work, and, after the
+   * runtime compacted the turn's context, the memory pack and the job's brief again. The orchestrator offers it to the
+   * runtime as a steer, at the next safe point; a runtime that cannot take one leaves it for the dispatch's end.
+   */
+  steer?: BotTurnSteer
+}
+
+/**
+ * The engine's side of a bot turn's steer (`PreparedBotTurn.steer`). Nothing in it widens the turn's grant: it adds
+ * text to the conversation and nothing else. Taken text is delivered once: `accepted` marks it read, `handedBack` puts it
+ * back to wait, and whatever the turn never read waits for the dispatch's end, as before.
+ */
+export interface BotTurnSteer {
+  /** The runtime takes steers into this turn (the orchestrator wired it): a note reaches it while it runs. */
+  attached(): void
+  /** What waits to go in now, without taking it. */
+  peek(): string | undefined
+  /** Takes what waits: its text, and the token it is accepted or handed back by. */
+  take(): { text: string; token: string } | undefined
+  /** The model read what `token` names: delivered, once. */
+  accepted(token: string): void
+  /** The runtime could not give it to the turn: it waits again. */
+  handedBack(token: string): void
+  /** The runtime compacted the turn's context: the memory pack and the job's brief go in again at the next safe point. */
+  compacted(): void
 }
 
 /** A bot turn's browser: its trusted binding, and the runtime that holds it to the bot's own browser. */

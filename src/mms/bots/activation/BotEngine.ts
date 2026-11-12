@@ -69,7 +69,7 @@ import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
 import { tellMeNotifies } from '../../../shared/automations'
-import { BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
+import { BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from './dispatcher'
 
 /**
  * The personal bot engine (PR 6 §4, unit 6c-1): one-time approval with the subset rule, manual
@@ -322,6 +322,14 @@ interface LiveDispatch {
   watch?: { clear(): void }
   /** Set when the dispatch was ended to wait for the internet: only the time it worked is charged. */
   offline?: { chargeMs: number }
+  /** The orchestrator wired the dispatch's steer into its runtime (`BotTurnSteer.attached`): notes reach it while it runs. */
+  steerable?: boolean
+  /** What the turn took (`BotTurnSteer.take`) and has not read yet, by token: the notes, and the compaction it re-gives for. */
+  steering: Map<string, { ids: number[]; regiveFor?: number }>
+  steerSeq: number
+  /** Compactions of the turn's context the runtime reported, and the last one whose pack and brief the model read. */
+  compactions: number
+  regiven: number
 }
 
 /** An activation that runs or waits for its owner's answer holds a slot of its lane: what does not fit waits. */
@@ -1692,7 +1700,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const spendLimited = spendLimits(effective)
     const spendScope = Object.keys(spendLimited).length ? this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId), row.id, dispatch.n) : null
     const startedMono = this.monotonic()
-    this.live.set(row.id, { controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId, lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0 })
+    this.live.set(row.id, {
+      controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
+      lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0
+    })
     this.liveRuns.set(payload.runId, row.id)
     this.watchOffline(row.id, dispatch.n)
     const authority = this.authorityFor({
@@ -1722,8 +1733,118 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : 'none') : 'thread',
       lane: row.lane,
       ...(pack ? { preamble: pack } : {}),
-      ...(browser ? { browser } : {})
+      ...(browser ? { browser } : {}),
+      steer: this.steerFor(row, dispatch.n)
     }
+  }
+
+  // -- What reaches a running turn (notes, and the pack again after a compaction) ----------------
+
+  /**
+   * The steer of the main dispatch `n` (`PreparedBotTurn.steer`): the owner's notes to running work, and after the
+   * runtime compacted the turn's context, the memory pack and the job's brief again. It offers text only while the
+   * dispatch is live and its activation runs: a Stop, a wall or the deadline ends it first. A note is marked read in
+   * `bots.db` only when the model read it (`accepted`), so it is delivered once: what the turn never read waits for the
+   * dispatch's end and goes on with the continuation, as before.
+   */
+  private steerFor(row: BotActivationRow, n: number): BotTurnSteer {
+    const liveNow = (): LiveDispatch | undefined => {
+      const live = this.live.get(row.id)
+      if (!live || live.n !== n || live.controller.signal.aborted) return undefined
+      return this.store.activation(row.id)?.status === 'running' ? live : undefined
+    }
+    // Read after a Stop too: what the model already read stays read.
+    const ownLive = (): LiveDispatch | undefined => {
+      const live = this.live.get(row.id)
+      return live?.n === n ? live : undefined
+    }
+    return {
+      attached: () => {
+        const live = liveNow()
+        if (live) live.steerable = true
+      },
+      peek: () => {
+        const live = liveNow()
+        return live ? this.steerNext(row, live)?.text : undefined
+      },
+      take: () => {
+        const live = liveNow()
+        const next = live ? this.steerNext(row, live) : undefined
+        if (!live || !next) return undefined
+        const token = `${row.id}:d${n}:s${++live.steerSeq}`
+        live.steering.set(token, { ids: next.ids, ...(next.regiveFor !== undefined ? { regiveFor: next.regiveFor } : {}) })
+        return { text: next.text, token }
+      },
+      accepted: (token) => {
+        const live = ownLive()
+        const taken = live?.steering.get(token)
+        if (!live || !taken) return
+        live.steering.delete(token)
+        if (taken.regiveFor !== undefined) live.regiven = Math.max(live.regiven, taken.regiveFor)
+        if (!taken.ids.length) return
+        try {
+          this.store.applyWorkNotes(taken.ids)
+        } catch (error) {
+          console.warn('a note the work read could not be marked read', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+        }
+        this.changed({ botId: row.botId, activationId: row.id })
+      },
+      handedBack: (token) => {
+        ownLive()?.steering.delete(token)
+      },
+      compacted: () => {
+        const live = liveNow()
+        if (live) live.compactions += 1
+      }
+    }
+  }
+
+  /**
+   * What goes into the live turn next, if anything: the pack and brief again when a compaction since the last re-give
+   * has not been answered (once per compaction, several in a row given once), then the owner's notes not taken yet. Notes
+   * wait for the dispatch's end with under 30 seconds of its time left, as they did before.
+   */
+  private steerNext(row: BotActivationRow, live: LiveDispatch): { text: string; ids: number[]; regiveFor?: number } | undefined {
+    const outstanding = [...live.steering.values()]
+    const taken = new Set(outstanding.flatMap((entry) => entry.ids))
+    const regive = live.compactions > live.regiven && !outstanding.some((entry) => entry.regiveFor !== undefined) ? this.regiveText(row) : undefined
+    const notes = row.lane === 'run' && live.deadline - this.now() >= 2 * ACTIVE_TIME_CHUNK_MS
+      ? this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
+      : []
+    if (!regive && !notes.length) return undefined
+    const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteSteerText(notes.map((note) => note.text))] : [])]
+    return { text: parts.join('\n\n'), ids: notes.map((note) => note.id), ...(regive ? { regiveFor: live.compactions } : {}) }
+  }
+
+  /**
+   * The activation's memory pack and its request again, for a turn whose context the runtime just compacted: what the
+   * first message of the activation carried, which a compaction keeps only as a summary. Read from `bots.db` now, so a
+   * message the owner forgot since is not given back.
+   */
+  private regiveText(row: BotActivationRow): string {
+    const pack = this.packs.get(row.id)?.trim()
+    const request = this.store.dispatch(row.id, 1)?.prompt.text.trim()
+    const added = row.lane === 'run'
+      ? this.store.all('SELECT text FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NOT NULL ORDER BY id', row.id).map((entry) => String(entry.text).trim()).filter(Boolean)
+      : []
+    return [
+      '[Mousse] Your context was just summarised to make room. Here again is your memory and what you were asked, so you keep to them. Nothing about the job changed; carry on where you left off.',
+      ...(pack ? [pack] : []),
+      ...(request ? [`What you were asked:\n${request}`] : []),
+      ...(added.length ? [`What the owner added since:\n${added.map((text) => `- ${text}`).join('\n')}`] : [])
+    ].join('\n\n')
+  }
+
+  /**
+   * Where a note to work reaches it (`work_note`'s answer to the chat): `now` while it runs on a turn that takes notes
+   * as it works (at its next step), `step_end` when its current turn cannot take them and gets them when it ends,
+   * `start` when it waits to start or to go on.
+   */
+  noteReach(botId: string, workId: string): 'now' | 'step_end' | 'start' {
+    const row = this.store.activation(workId)
+    if (!row || row.botId !== botId || row.status !== 'running') return 'start'
+    const live = this.live.get(row.id)
+    return live?.steerable && !live.controller.signal.aborted && live.deadline - this.now() >= 2 * ACTIVE_TIME_CHUNK_MS ? 'now' : 'step_end'
   }
 
   /** The bot's own browser for one dispatch; none when it can't be offered (never a failed turn). */
@@ -4710,7 +4831,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       start: (botId, from, input) => this.startWork(botId, from, input),
       list: (botId) => this.listWork(botId),
       stop: (botId, workId) => this.stopWork(botId, workId),
-      note: (botId, workId, note, from) => this.noteWork(botId, workId, note, from)
+      note: (botId, workId, note, from) => this.noteWork(botId, workId, note, from),
+      reach: (botId, workId) => this.noteReach(botId, workId)
     },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
@@ -4812,8 +4934,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * `work_note`: something the owner added, for work that runs or waits. Waiting work gets it with its request;
-   * running work gets it when its current turn ends, before it reports (`advance`). Ended work can't take it.
+   * `work_note`: something the owner added, for work that runs or waits. Waiting work gets it with its request. Running
+   * work gets it at its turn's next step when its runtime takes notes while it runs (`steerFor`), else when its current
+   * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it.
    */
   noteWork(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' {
     const text = note.trim().slice(0, MAX_WORK_NOTE_CHARS)
@@ -4833,7 +4956,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The notes a run takes with its next dispatch, as prompt text, and their ids (marked applied in that dispatch's transaction). */
   private workNotes(row: BotActivationRow): { text: string; ids: number[] } | undefined {
     if (row.lane !== 'run') return undefined
-    const notes = this.store.pendingWorkNotes(row.id)
+    // A note a live turn took and has not read yet is that turn's until it reads it or hands it back.
+    const taken = new Set([...(this.live.get(row.id)?.steering.values() ?? [])].flatMap((entry) => entry.ids))
+    const notes = this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
     if (!notes.length) return undefined
     return { text: `The owner added while you worked:\n${notes.map((note) => `- ${note.text}`).join('\n')}`, ids: notes.map((note) => note.id) }
   }
@@ -5381,6 +5506,14 @@ function contextKey(stored: string): [string, number] {
   const at = stored.lastIndexOf(':')
   const gen = at > 0 ? Number(stored.slice(at + 1)) : 1
   return at > 0 && Number.isSafeInteger(gen) ? [stored.slice(0, at), gen] : [stored, 1]
+}
+
+/**
+ * The owner's notes as they reach running work in the middle of its turn: framed as the owner's addition to the job,
+ * never as a new task, and with what its report must lead with.
+ */
+export function noteSteerText(notes: readonly string[]): string {
+  return `[Mousse] The owner added this to your job while you work:\n${notes.map((note) => `- ${note}`).join('\n')}\n\nTake it into account from here on. If it changes what you found so far, update it. When you report, lead with what changed because of it, in plain words.`
 }
 
 /** The one line work that waited too long to go on ends with. */

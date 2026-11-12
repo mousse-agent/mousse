@@ -42,6 +42,11 @@ export interface SteerEntry {
    * it again: the text then runs as a turn of its own, whose prompt shows it once.
    */
   echoId?: string
+  /**
+   * A bot turn's own steer (`BotTurnSteer`): the token the bot engine took it under. Read, it is accepted there; handed
+   * back, it goes back to the engine, never to the thread's queue (nothing else is ever steered into a bot's turn).
+   */
+  botSteer?: string
 }
 
 export interface ActiveTurnControl {

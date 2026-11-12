@@ -240,3 +240,107 @@ describe('what assumed one live run, with two pieces live', () => {
     expect(work.map((item) => f.store.activation(item.workId)!.status)).toEqual(['cancelled', 'cancelled'])
   })
 })
+
+describe('a note reaches running work while it works', () => {
+  /** Work that runs, on a turn whose runtime takes steers (the orchestrator wired its steer). */
+  async function runningWithSteer(title = 'Vacuums') {
+    const { work, message } = await handOff([title], 'm1')
+    const live = await start(f, work[0]!.workId)
+    live.prepared.steer!.attached()
+    return { workId: work[0]!.workId, message, ...live }
+  }
+
+  it('goes in at the next safe point, framed as the owner\'s addition, once; the dispatch reports with it and ends', async () => {
+    const work = await runningWithSteer()
+    expect(f.bots.tools.work.reach!(botId, work.workId)).toBe('now')
+    expect(f.bots.tools.work.note(botId, work.workId, 'Only ones under £200.')).toBe('noted')
+    const steer = work.prepared.steer!
+    expect(steer.peek()).toBe(noteSteerText(['Only ones under £200.']))
+    const taken = steer.take()!
+    expect(taken.text).toContain('The owner added this to your job')
+    expect(taken.text).toContain('lead with what changed')
+    // Taken is not read: nothing else offers it meanwhile.
+    expect(steer.peek()).toBeUndefined()
+    steer.accepted(taken.token)
+    steer.accepted(taken.token)
+    expect(f.store.pendingWorkNotes(work.workId)).toEqual([])
+    await finish(f, work.payload, 'completed', { text: 'Under £200: two picks. Changed: dropped the £240 one.' })
+    // One dispatch: no continuation followed, and its report is the report.
+    expect(f.store.dispatches(work.workId)).toHaveLength(1)
+    expect(f.store.activation(work.workId)!.status).toBe('done')
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'Under £200: two picks. Changed: dropped the £240 one.', replyTo: { id: work.message.id } })
+  })
+
+  it('a note the runtime handed back, or never took, reaches the work when its turn ends, once (as before)', async () => {
+    const work = await runningWithSteer()
+    f.bots.tools.work.note(botId, work.workId, 'Cordless only.')
+    const steer = work.prepared.steer!
+    steer.handedBack(steer.take()!.token)
+    // Back to wait: offered again, and taken again unread when the turn ends.
+    steer.take()
+    await finish(f, work.payload, 'completed', { text: 'Three picks.' })
+    const continued = f.store.dispatch(work.workId, 2)!
+    expect(continued.prompt.text.match(/Cordless only\./g)).toHaveLength(1)
+    const next = await start(f, work.workId, 2)
+    expect(next.prepared.steer!.peek()).toBeUndefined()
+    await finish(f, next.payload, 'completed', { text: 'Two cordless picks.' })
+    expect(f.store.pendingWorkNotes(work.workId)).toEqual([])
+  })
+
+  it('on a runtime that takes no notes while it runs, the chat is told the work gets it when the step ends', async () => {
+    const { work } = await handOff(['Vacuums'], 'm1')
+    const live = await start(f, work[0]!.workId)
+    expect(f.bots.tools.work.reach!(botId, work[0]!.workId)).toBe('step_end')
+    f.bots.tools.work.note(botId, work[0]!.workId, 'Cordless only.')
+    await finish(f, live.payload, 'completed', { text: 'Three picks.' })
+    expect(f.store.dispatch(work[0]!.workId, 2)!.prompt.text).toContain('Cordless only.')
+  })
+
+  it('across a restart: one read before it is not sent again, one taken unread goes with the restart once', async () => {
+    const work = await runningWithSteer()
+    const steer = work.prepared.steer!
+    f.bots.tools.work.note(botId, work.workId, 'Read before the crash.')
+    steer.accepted(steer.take()!.token)
+    f.bots.tools.work.note(botId, work.workId, 'Taken, never read.')
+    steer.take()
+    f.runs.markTerminal(work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush()
+    const prompt = f.store.dispatch(work.workId, 2)!.prompt.text
+    expect(prompt).not.toContain('Read before the crash.')
+    expect(prompt.match(/Taken, never read\./g)).toHaveLength(1)
+    await f.bots.reconcileOnStartup()
+    expect(f.store.dispatches(work.workId)).toHaveLength(2)
+  })
+
+  it('Stop always wins: nothing goes in once the work is stopped, and its notes stay unread', async () => {
+    const work = await runningWithSteer()
+    f.bots.tools.work.note(botId, work.workId, 'Also check prices.')
+    await f.bots.service.workStop(botId, work.workId)
+    expect(work.prepared.steer!.peek()).toBeUndefined()
+    expect(work.prepared.steer!.take()).toBeUndefined()
+    expect(f.store.pendingWorkNotes(work.workId)).toHaveLength(1)
+  })
+
+  it('a note whose message the owner forgot goes in without its words', async () => {
+    const work = await runningWithSteer('Clinics')
+    const second = await chat('Only ones treating condition X-17', 'm2')
+    f.bots.tools.work.note(botId, work.workId, 'Only clinics treating condition X-17.', second.activation.id)
+    await finish(f, second.payload, 'completed', { text: 'Passed on.' })
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+    f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${second.message.id}`, who: 'owner', text: second.message.text }))
+    const row = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${second.message.id}`)!
+    memory.forget(botId, { refs: [`j${row.seq as number}`], by: 'owner_ui' })
+    expect(work.prepared.steer!.peek() ?? '').not.toContain('X-17')
+  })
+
+  it('with under 30 seconds of the dispatch left, a note waits for its end', async () => {
+    const work = await runningWithSteer()
+    f.bots.tools.work.note(botId, work.workId, 'One more thing.')
+    f.clock.now = work.prepared.authority.time.deadline() - 20_000
+    expect(work.prepared.steer!.peek()).toBeUndefined()
+    expect(f.bots.tools.work.reach!(botId, work.workId)).toBe('step_end')
+  })
+})

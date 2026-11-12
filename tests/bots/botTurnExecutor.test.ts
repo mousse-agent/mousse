@@ -126,6 +126,23 @@ describe('a prepared bot turn', () => {
     expect(settled).toEqual([{ payload: expect.objectContaining({ runId: effect.runId }), outcome: { text: 'Footer fixed.' } }])
   })
 
+  it("the turn's own steer source is the engine's: an agent's steer per take, kept with the engine's token, never the thread's queue", async () => {
+    const offered = ['The owner added: only cordless.']
+    const steer = {
+      attached: vi.fn(), accepted: vi.fn(), handedBack: vi.fn(), compacted: vi.fn(),
+      peek: () => offered[0],
+      take: () => (offered.length ? { text: offered.shift()!, token: 'act-1:d1:s1' } : undefined)
+    }
+    orch.setBotDispatcher({ prepare: (payload) => ({ ...prepare()(payload) as object, steer }) as never, settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    runTurn.mockImplementation(async () => ({ message: 'Done.', actions: [] }))
+    await execute(await queuedBotRun())
+    const opts = (runTurn.mock.calls[0] as unknown[])[4] as { externalPeekSteer: () => unknown; externalDrainSteer: () => unknown }
+    expect(opts.externalPeekSteer()).toEqual([{ text: 'The owner added: only cordless.', byAgent: true }])
+    expect(opts.externalDrainSteer()).toEqual([{ text: 'The owner added: only cordless.', byAgent: true, botSteer: 'act-1:d1:s1' }])
+    expect(opts.externalDrainSteer()).toBeUndefined()
+    expect(opts.externalPeekSteer()).toBeUndefined()
+  })
+
   it('a failed turn settles with no words, except a turn cap, which hands back what it said last', async () => {
     orch.setBotDispatcher({ prepare: prepare(), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
     runTurn.mockImplementationOnce(async () => ({ message: '[provider_failed] It broke.', actions: [], error: { code: 'provider_failed', message: 'It broke.' } }))

@@ -407,7 +407,13 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
         if (result === 'ended') return json({ result, note: 'That work already finished, so it never saw this. Start new work for it if it still matters.' })
         if (result === 'held') return json({ result, note: 'That work is held (it stopped part-way), so it can\'t take notes. Stop it and start new work with this if it still matters.' })
-        return json({ result, note: 'It takes this into account before it reports.' })
+        // Tell the owner the truth about when the work sees it.
+        const reach = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
+        return json({ result, reaches: reach, note: reach === 'now'
+          ? 'The work gets this at its next step, while it keeps working, and its report will lead with what changed. Tell the owner it has it now.'
+          : reach === 'step_end'
+            ? 'The work gets this when the step it is on now ends, then carries on with it and updates its report. Tell the owner it gets it when this step ends.'
+            : 'The work gets this when it starts (or carries on), and takes it into account before it reports. Tell the owner it has it.' })
       }
     }),
     ownTool(byName.get('remind')!, deps, {
