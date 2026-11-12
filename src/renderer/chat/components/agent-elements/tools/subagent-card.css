@@ -1,9 +1,12 @@
-/* Subagent cards: one quiet row per task in the parent's timeline. A card is a button that opens the subagent. */
+/*
+ * Subagent rows: one compact line per task in the parent's timeline (about 37px), a button that opens the
+ * subagent. No surface at rest; hover and focus tint the background only.
+ */
 
 .subagent-cards {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
   width: 100%;
 }
 
@@ -17,13 +20,13 @@
   gap: 10px;
   width: 100%;
   min-width: 0;
-  padding: 7px 10px;
+  padding: 4px 8px;
   border: 0;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   text-align: left;
 }
 
@@ -44,19 +47,27 @@
   background-image: var(--ui-focus-layer);
 }
 
+/* The provider icon in a 24px chip, its status dot on the corner. */
+.subagent-card .subagent-avatar.is-chip,
+.subagent-group-stack > .subagent-avatar.is-chip {
+  width: 24px;
+  height: 24px;
+}
+
 .subagent-card-body {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 2px;
   min-width: 0;
 }
 
-.subagent-card-head {
+.subagent-card-head,
+.subagent-card-line {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+  white-space: nowrap;
 }
 
 .subagent-card-title {
@@ -64,41 +75,56 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text-primary);
-  font-weight: 450;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.subagent-card-note {
-  flex: 0 0 auto;
-  color: var(--ui-faint);
   font-size: 12px;
-  white-space: nowrap;
-}
-
-.subagent-card-note[data-tone="attention"] {
-  color: var(--warning);
-}
-
-.subagent-card-note[data-tone="failed"] {
-  color: var(--danger);
+  font-weight: 500;
+  line-height: 15px;
+  text-overflow: ellipsis;
 }
 
 .subagent-card-model {
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--ui-faint);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 15px;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+/* The second line: plain text, one line, cut with an ellipsis. Its tooltip and the subagent's thread hold the rest. */
+.subagent-card-line {
+  gap: 0;
+  color: var(--ui-faint);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.subagent-card-result {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subagent-card-note,
+.subagent-card-sep {
+  flex: 0 0 auto;
+}
+
+/* A state worth reading takes a muted tint of its colour, not the full one. */
+.subagent-card-note[data-tone="attention"] {
+  color: color-mix(in srgb, var(--warning) 80%, var(--ui-faint));
+}
+
+.subagent-card-note[data-tone="failed"] {
+  color: color-mix(in srgb, var(--danger) 75%, var(--ui-faint));
 }
 
 .subagent-card-elapsed {
   flex: 0 0 auto;
   margin-left: auto;
   color: var(--ui-faint);
-  font-size: 12px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -108,33 +134,27 @@
   width: 14px;
   height: 14px;
   color: var(--ui-faint);
+  opacity: 0.7;
 }
 
-.subagent-card-result {
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+.subagent-card:not(:disabled):hover .subagent-card-chevron {
+  opacity: 1;
 }
 
-/* Two or more cards fold into a group: a header that opens and folds it, and the rows on one panel. */
+/* Two or more rows fold into a group: a header row that opens and folds it, and the rows in a tight list. */
 .subagent-group-head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
   min-width: 0;
-  padding: 6px 10px;
+  padding: 4px 8px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
@@ -159,7 +179,7 @@
 }
 
 .subagent-group-stack > * + * {
-  margin-left: -8px;
+  margin-left: -6px;
 }
 
 .subagent-group-stack > .subagent-avatar,
@@ -173,12 +193,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: color-mix(in srgb, var(--text-primary) 8%, var(--surface-strong));
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -191,13 +211,16 @@
 
 .subagent-group-title {
   color: var(--text-primary);
-  font-weight: 450;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 15px;
 }
 
 .subagent-group-summary {
   overflow: hidden;
   color: var(--ui-faint);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -207,21 +230,17 @@
 }
 
 .subagent-group-summary [data-tone="attention"] {
-  color: var(--warning);
-}
-
-.subagent-group-summary [data-tone="done"] {
-  color: var(--success);
+  color: color-mix(in srgb, var(--warning) 80%, var(--ui-faint));
 }
 
 .subagent-group-summary [data-tone="failed"] {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 75%, var(--ui-faint));
 }
 
 .subagent-group-elapsed {
   flex: 0 0 auto;
   color: var(--ui-faint);
-  font-size: 12px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -231,35 +250,23 @@
   width: 14px;
   height: 14px;
   color: var(--ui-faint);
+  opacity: 0.7;
   /* A down chevron: open turns it to point up (collapse.css turns it). */
   --ui-collapse-chevron-turn: 180deg;
 }
 
-/* The gap under the group's head opens and closes with its rows. */
-.subagent-cards.is-group {
-  gap: 0;
+.subagent-group-head:hover .subagent-group-chevron {
+  opacity: 1;
 }
 
 .subagent-group-rows {
-  margin-top: 4px;
+  margin-top: 2px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  padding: 4px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
-}
-
-.subagent-group-rows .subagent-card {
-  background: transparent;
-}
-
-.subagent-group-rows .subagent-card:not(:disabled):hover {
-  background: var(--ui-hover);
-}
-
-.subagent-group-rows .subagent-card:not(:disabled):active {
-  background: var(--ui-pressed);
+  gap: 0;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -267,6 +274,7 @@
     transition: none;
   }
 }
+
 
 /* A subagent's results reaching the thread: compact, quiet rows that open the subagent. */
 .subagent-notice {
@@ -332,7 +340,7 @@ button.subagent-notice-row:focus-visible {
   background: var(--danger);
 }
 
-/* A runtime's own subagent (Claude Code's Agent) has no thread: its card opens in place on the calls it made. */
+/* A runtime's own subagent (Claude Code's Agent) has no thread: its row opens in place on its result and the calls it made. */
 .subagent-card-native .subagent-card-chevron {
   /* A down chevron: open turns it to point up (collapse.css turns it). */
   --ui-collapse-chevron-turn: 180deg;
@@ -342,5 +350,18 @@ button.subagent-notice-row:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px 10px 2px 40px;
+  padding: 2px 8px 4px 42px;
+}
+
+.subagent-card-full {
+  margin: 0 0 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.subagent-card-full[data-tone="failed"] {
+  color: color-mix(in srgb, var(--danger) 75%, var(--text-secondary));
 }

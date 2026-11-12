@@ -17,13 +17,14 @@ import {
   cardGroupLabel,
   cardGroupSummary,
   cardIconStack,
+  cardLine,
   cardModelLabel,
-  cardStateNote,
   cardStatusLabel,
   cardTitle,
   isCardRunning,
   lastResultText,
   LruCache,
+  plainResultText,
   RESULT_CACHE_LIMIT,
 } from "./subagent-card-logic";
 import "./subagent-card.css";
@@ -39,16 +40,41 @@ export type SubagentCardViewProps = {
   onOpen: (childThreadId: string) => void;
 };
 
+/** Provider icon size inside a row's 24px avatar. */
+const ROW_ICON_SIZE = 14;
+
 /**
- * One subagent task in the parent's timeline: the provider's icon with a status dot, the subagent's
- * name, where it runs, what it last said and how long it took. Clicking opens the subagent's own thread.
+ * The inside of a row: the provider's icon with a status dot, the name (and where it runs) on the first
+ * line, and on the second line one line of plain text: a state worth reading, then the result or the state.
+ */
+function SubagentRowBody({ card, result, label, inheritedProvider }: { card: SubagentCardModel; result: string | null | undefined; label: string | null; inheritedProvider?: string | null }) {
+  const line = cardLine(card, result);
+  return (
+    <>
+      <SubagentAvatar providerId={subagentIconId(card.provider, inheritedProvider)} tone={subagentBadgeTone(card)} size={ROW_ICON_SIZE} chip />
+      <span className="subagent-card-body">
+        <span className="subagent-card-head">
+          <span className="subagent-card-title">{cardTitle(card)}</span>
+          {label && <span className="subagent-card-model">{label}</span>}
+        </span>
+        <span className="subagent-card-line" title={line.text ?? undefined}>
+          {line.note && <span className="subagent-card-note" data-tone={line.note.tone}>{line.note.text}</span>}
+          {line.note && line.text && <span className="subagent-card-sep" aria-hidden="true"> · </span>}
+          {line.text && <span className="subagent-card-result">{line.text}</span>}
+        </span>
+      </span>
+    </>
+  );
+}
+
+/**
+ * One subagent task in the parent's timeline, as one compact row: the provider's icon with a status dot,
+ * the subagent's name and where it runs, one line of what it last said (or its state), and how long it
+ * took. Clicking opens the subagent's own thread, which holds the full result.
  */
 export function SubagentCardView({ card, now, result, inheritedProvider, onOpen }: SubagentCardViewProps) {
   const title = cardTitle(card);
-  const model = cardModelLabel(card);
   const elapsed = cardElapsedLabel(card, now);
-  const tone = subagentBadgeTone(card);
-  const note = cardStateNote(card);
   const status = cardStatusLabel(card);
   const childThreadId = card.childThreadId;
   return (
@@ -63,15 +89,7 @@ export function SubagentCardView({ card, now, result, inheritedProvider, onOpen 
         if (childThreadId) onOpen(childThreadId);
       }}
     >
-      <SubagentAvatar providerId={subagentIconId(card.provider, inheritedProvider)} tone={tone} chip />
-      <span className="subagent-card-body">
-        <span className="subagent-card-head">
-          <span className="subagent-card-title">{title}</span>
-          {note && <span className="subagent-card-note" data-tone={tone}>{note}</span>}
-          {model && <span className="subagent-card-model">{model}</span>}
-        </span>
-        {result && <span className="subagent-card-result">{result}</span>}
-      </span>
+      <SubagentRowBody card={card} result={result} label={cardModelLabel(card)} inheritedProvider={inheritedProvider} />
       {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
       {childThreadId && <IconChevronRight className="subagent-card-chevron" aria-hidden="true" />}
     </button>
@@ -169,17 +187,16 @@ export type NativeSubagentCardViewProps = {
 
 /**
  * A subagent the runtime started with its own tool (Claude Code's `Agent`). It has no thread of its own,
- * so the card opens in place to list the calls the subagent made.
+ * so the row opens in place on the whole result and the calls the subagent made.
  */
 export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inheritedProvider }: NativeSubagentCardViewProps) {
   const [open, setOpen] = useState(false);
   const title = cardTitle(card);
   const elapsed = cardElapsedLabel(card, now);
-  const tone = subagentBadgeTone(card);
-  const note = cardStateNote(card);
   const status = cardStatusLabel(card);
   const result = card.error ?? card.native?.result ?? null;
-  const expandable = nestedTools.length > 0;
+  const fullResult = result ? plainResultText(result) : "";
+  const expandable = nestedTools.length > 0 || fullResult.length > 0;
   return (
     <div className="subagent-card-native" data-native-subagent={card.toolCallId}>
       <button
@@ -192,20 +209,13 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
         disabled={!expandable}
         onClick={() => setOpen(!open)}
       >
-        <SubagentAvatar providerId={subagentIconId(card.provider, inheritedProvider)} tone={tone} chip />
-        <span className="subagent-card-body">
-          <span className="subagent-card-head">
-            <span className="subagent-card-title">{title}</span>
-            {note && <span className="subagent-card-note" data-tone={tone}>{note}</span>}
-            {card.native?.agentType && <span className="subagent-card-model">{card.native.agentType}</span>}
-          </span>
-          {result && <span className="subagent-card-result">{result}</span>}
-        </span>
+        <SubagentRowBody card={card} result={result} label={card.native?.agentType ?? null} inheritedProvider={inheritedProvider} />
         {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
         {expandable && <IconChevronDown className="subagent-card-chevron ui-collapse-chevron" data-open={open || undefined} aria-hidden="true" />}
       </button>
       {expandable && (
-        <Collapse open={open} className="subagent-card-calls" itemCount={nestedTools.length}>
+        <Collapse open={open} className="subagent-card-calls" itemCount={nestedTools.length + (fullResult ? 1 : 0)}>
+          {fullResult && <p className="subagent-card-full" data-tone={card.error ? "failed" : undefined}>{fullResult}</p>}
           {nestedTools.map((nestedPart, index) => {
             const meta = toolRegistry[nestedPart.type];
             if (!meta) return null;
@@ -289,7 +299,7 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
       <button type="button" className="subagent-group-head" aria-expanded={open} onClick={() => setChosenOpen(!open)}>
         <span className="subagent-group-stack" aria-hidden="true">
           {stack.shown.map((card) => (
-            <SubagentAvatar key={card.toolCallId} providerId={subagentIconId(card.provider, inheritedProvider)} chip />
+            <SubagentAvatar key={card.toolCallId} providerId={subagentIconId(card.provider, inheritedProvider)} size={ROW_ICON_SIZE} chip />
           ))}
           {stack.extra > 0 && <span className="subagent-group-more">+{stack.extra}</span>}
         </span>
