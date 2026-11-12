@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * The transcript's own hooks into the end follower, with the defaults on (motion and paragraph
- * pacing): a prompt sent here is held near the top and the space under it closes when the turn
- * ends; a steer never moves a reader who scrolled up (#873); a long, windowed thread follows too.
+ * pacing): a prompt sent here shows at the end and its reply grows from there, the view on the
+ * end, with no space under it and nothing moving when the turn ends; a steer never moves a reader who scrolled up (#873); a long, windowed thread follows too.
  * jsdom has no layout, so a small one is given by hand: rows of fixed height stacked from the top,
  * the space under the content, and a viewport of 800 px that clamps the scroll position.
  */
@@ -11,7 +11,6 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
-import { PIN_TOP } from '../../src/renderer/chat/components/agent-elements/virtual/end-follow'
 import { RENDER_ALL_THRESHOLD } from '../../src/renderer/chat/components/agent-elements/virtual/turn-window'
 import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 
@@ -30,7 +29,7 @@ const realRect = Element.prototype.getBoundingClientRect
 /** The hand-made layout: content height, the top of each turn row by key, and the scroll position. */
 const layout = { content: 0, rowTops: new Map<string, number>(), scrollTop: 0, writes: 0 }
 const list = () => host.querySelector<HTMLElement>('.an-message-list')!
-const reserve = () => Number.parseFloat(host.querySelector<HTMLElement>('[data-pin-reserve]')?.style.height || '0')
+const reserve = () => Number.parseFloat(host.querySelector<HTMLElement>('[data-end-reserve]')?.style.height || '0')
 const scrollHeight = () => Math.max(CLIENT, layout.content + reserve())
 const clamp = () => { layout.scrollTop = Math.max(0, Math.min(layout.scrollTop, scrollHeight() - CLIENT)) }
 const end = () => scrollHeight() - CLIENT
@@ -58,7 +57,7 @@ beforeEach(() => {
   Element.prototype.getBoundingClientRect = function (this: Element) {
     const el = this as HTMLElement
     if (el.classList?.contains('an-message-list')) return rect(0, CLIENT)
-    if (el.hasAttribute?.('data-pin-reserve')) { clamp(); return rect(layout.content - layout.scrollTop, reserve()) }
+    if (el.hasAttribute?.('data-end-reserve')) { clamp(); return rect(layout.content - layout.scrollTop, reserve()) }
     const key = el.getAttribute?.('data-turn-key')
     if (key && layout.rowTops.has(key)) { clamp(); return rect(layout.rowTops.get(key)! - layout.scrollTop, ROW) }
     return realRect.call(this)
@@ -115,7 +114,7 @@ const lastHeader = () => [...host.querySelectorAll('[data-turn-key]')].pop()?.qu
 const keysOf = (count: number, ...more: string[]) => [...Array.from({ length: count }, (_, i) => `u${i}`), ...more]
 
 describe('a prompt sent here', () => {
-  it('is held near the top while its reply fits, and the space closes when the turn ends', () => {
+  it('stays at the end: the prompt shows at the bottom, the reply grows from there, and nothing moves when the turn ends', () => {
     const before = history(5)
     place(keysOf(5))
     render(before, 'ready')
@@ -123,51 +122,51 @@ describe('a prompt sent here', () => {
     layout.scrollTop = end()
     grew()
 
-    // Send: the prompt's row is laid out under the thread, and the list pins it.
+    // Send: the prompt's row is laid out under the thread, and the view is on the end, under it.
     place(keysOf(5, 'optimistic:1'), 0)
     layout.content += 80
     render([...before, ask('optimistic:1', 'Next please')], 'submitted')
-    const rowTop = layout.rowTops.get('optimistic:1')!
-    expect(list().scrollTop).toBe(rowTop - PIN_TOP)
-    expect(reserve()).toBeGreaterThan(0)
+    expect(reserve()).toBe(0)
+    expect(list().scrollTop).toBe(layout.content - CLIENT)
 
-    // The reply streams in, a paragraph at a time: nothing scrolls while it fits.
-    const writes = layout.writes
+    // The reply streams in, a paragraph at a time: the view follows the end in the same frame.
     for (let step = 1; step <= 4; step++) {
       layout.content += 60
       render([...before, ask('optimistic:1', 'Next please'), answer('r', `${'Paragraph done.\n\n'.repeat(step)}half`)], 'streaming')
       grew()
+      expect(list().scrollTop).toBe(layout.content - CLIENT)
       frames(2)
-      expect(list().scrollTop).toBe(rowTop - PIN_TOP)
+      expect(list().scrollTop).toBe(layout.content - CLIENT)
     }
-    expect(layout.writes).toBe(writes)
 
-    // The turn ends: the space closes over a few frames and the reply settles at the end.
+    // The turn ends: no space to close, nothing slides.
+    const at = list().scrollTop
     render([...before, ask('optimistic:1', 'Next please'), answer('r', 'Paragraph done.\n\n'.repeat(4) + 'end.')], 'ready')
-    expect(reserve()).toBeGreaterThan(0)
-    frames(30)
     expect(reserve()).toBe(0)
-    expect(list().scrollTop).toBe(layout.content - CLIENT)
+    for (let index = 0; index < 30; index++) {
+      frames(1)
+      expect(list().scrollTop).toBe(at)
+    }
   })
 
-  it('is held for a queued turn that starts while the reader is at the end', () => {
+  it('lands on the end for a queued turn that starts while the reader is at the end', () => {
     const before = history(5)
     place(keysOf(5))
     render(before, 'ready')
     attachLayout()
     layout.scrollTop = end()
     grew()
-    // The queue's next turn arrives before its run reports streaming: it is pinned all the same.
+    // The queue's next turn arrives before its run reports streaming: its prompt is at the end.
     place(keysOf(5, 'u-queued'), 80)
     render([...before, ask('u-queued', 'Queued one')], 'ready')
-    expect(list().scrollTop).toBe(layout.rowTops.get('u-queued')! - PIN_TOP)
-    // And it stays pinned once the run starts.
+    expect(list().scrollTop).toBe(layout.content - CLIENT)
+    // And it stays there once the run starts.
     render([...before, ask('u-queued', 'Queued one')], 'streaming')
-    expect(list().scrollTop).toBe(layout.rowTops.get('u-queued')! - PIN_TOP)
-    expect(reserve()).toBeGreaterThan(0)
+    expect(list().scrollTop).toBe(layout.content - CLIENT)
+    expect(reserve()).toBe(0)
   })
 
-  it('shows the queued turn header with its pinned prompt, before its run reports streaming', () => {
+  it('shows the queued turn header with its prompt, before its run reports streaming', () => {
     const before = history(5)
     const live = [...before, ask('u-live', 'Go'), answer('a-live', 'Done.')]
     place(keysOf(5, 'u-live'), 200)
@@ -177,11 +176,11 @@ describe('a prompt sent here', () => {
     grew()
     // The turn ends with a message still queued.
     render(live, 'ready', 'Queued one')
-    // The queue's next turn arrives a commit before its run's status: pinned, and its header is
+    // The queue's next turn arrives a commit before its run's status: at the end, and its header is
     // already there, so nothing under the prompt moves when the status comes.
     place(keysOf(5, 'u-live', 'u-queued'), 80)
     render([...live, ask('u-queued', 'Queued one')], 'ready')
-    expect(list().scrollTop).toBe(layout.rowTops.get('u-queued')! - PIN_TOP)
+    expect(list().scrollTop).toBe(layout.content - CLIENT)
     expect(lastHeader()).toMatch(/^Working/)
     render([...live, ask('u-queued', 'Queued one')], 'streaming')
     expect(lastHeader()).toMatch(/^Working/)

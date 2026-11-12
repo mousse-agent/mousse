@@ -5,37 +5,32 @@ import {
   collapsedReserve,
   heldReserve,
   heldTotalReserve,
-  pinnedReserve,
 } from "./end-follow";
 import type { FollowMode } from "./follow-mode";
 
 /**
  * The transcript's one writer of the scroll position while it follows the end, and the empty
- * space under the content that holds a just-sent prompt near the top (see `end-follow.ts`).
+ * space under the content that holds the end in place while something near it is replaced (see
+ * `end-follow.ts`).
  *
- * - **Pin:** when a turn starts here, its row is held near the top of the viewport and the reply
- *   grows into the space below it. The space shrinks as fast as the reply grows, so the end, and
- *   the view, do not move. When the reply reaches the bottom the space is gone and the end is
- *   followed from there. A reader who leaves the end (a scroll, a jump to a prompt) ends the pin.
  * - **Follow:** whenever the transcript changes size, the view lands on the new end in the same
  *   frame, before paint. It never eases toward it: an eased scroll shows the reply and the queued
  *   messages under it drifting off the bottom and back on every update.
  * - **Hold:** while a turn runs, something near the end that goes away (a queued message sent into
  *   the reply, a line replaced) leaves its space under the content until the reply grows into it,
  *   so the view does not drop and come back a frame later. When a turn ends with messages still
- *   queued, the queue is held where it was painted until the next turn starts and is pinned: one
- *   move. The turn's work folding away above it moves only what is above it, and leaves no space.
- * - **Close:** a space that no longer holds a pinned prompt never stays. While the reader follows
- *   the end (the turn ended, they came back down, they asked for the latest), the part they do not
- *   see is dropped and the rest closes over a quarter of a second, so the reply settles onto the
- *   composer. A reader up in the thread keeps their view: the space only shrinks as they scroll away
+ *   queued, the queue is held where it was painted until the next turn starts; its prompt then
+ *   takes that place at the end and its reply grows from there. The turn's work folding away
+ *   above it moves only what is above it, and leaves no space.
+ * - **Close:** a space nothing grew into never stays. While the reader follows the end (the turn
+ *   ended, they came back down, they asked for the latest), the part they do not see is dropped and
+ *   the rest closes over a quarter of a second. A reader up in the thread keeps their view: the space only shrinks as they scroll away
  *   from it, and closes once they are back at the end.
  */
 export type EndFollower = ReturnType<typeof createEndFollower>;
 
 export function createEndFollower(options: {
   container: () => HTMLElement | null;
-  rows: () => HTMLElement | null;
   /** What is drawn after the turns (the queued messages); null or empty when nothing is queued. */
   after?: () => HTMLElement | null;
   mode: () => FollowMode;
@@ -43,8 +38,6 @@ export function createEndFollower(options: {
 }) {
   let reserveEl: HTMLElement | null = null;
   let reserve = 0;
-  /** The turn held near the top, by its row key; null when nothing is pinned. */
-  let anchorKey: string | null = null;
   /** A turn is running: content that leaves near the end has its space held. */
   let live = false;
   /** The height (content and space) the transcript is held at; null when nothing is held. */
@@ -71,14 +64,6 @@ export function createEndFollower(options: {
   /** Where the content ends: the top of the space under it. */
   const contentHeight = (container: HTMLElement) =>
     reserveEl ? offsetIn(container, reserveEl) : container.scrollHeight - reserve;
-
-  const anchorTop = (container: HTMLElement): number | null => {
-    const rows = options.rows();
-    if (!rows || !anchorKey) return null;
-    const key = typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(anchorKey) : anchorKey;
-    const row = rows.querySelector(`[data-turn-key="${key}"]`);
-    return row ? offsetIn(container, row) : null;
-  };
 
   const write = (container: HTMLElement, top: number) => {
     options.onProgrammaticScroll();
@@ -134,22 +119,11 @@ export function createEndFollower(options: {
   };
 
   /**
-   * Sizes the space for what is pinned or held; otherwise closes it while the end is followed, or
-   * trims what no longer holds the view of a reader up in the thread.
+   * Sizes the space for what is held; otherwise closes it while the end is followed, or trims what
+   * no longer holds the view of a reader up in the thread.
    */
   const sizeReserve = (container: HTMLElement, content: number) => {
     const following = options.mode() === "following-end";
-    if (anchorKey) {
-      const top = anchorTop(container);
-      if (top !== null) {
-        const next = pinnedReserve({ rowTop: top, clientHeight: container.clientHeight, contentHeight: content });
-        setReserve(next);
-        // The reply reached the bottom of the viewport: from here the end is followed.
-        if (next === 0) anchorKey = null;
-        return;
-      }
-      anchorKey = null;
-    }
     if (holdTotal !== null && !following) releaseHold();
     // Something near the end left while a turn runs at the end: hold its space for what replaces it.
     // Only for a transcript taller than the viewport; a short one does not scroll either way.
@@ -180,6 +154,12 @@ export function createEndFollower(options: {
     lastQueueTail = top === null ? null : content + reserve - top;
   };
 
+  const landOnEnd = (container: HTMLElement) => {
+    if (options.mode() !== "following-end") return;
+    const end = container.scrollHeight - container.clientHeight;
+    if (Math.abs(container.scrollTop - end) >= 1) write(container, end);
+  };
+
   return {
     /** The element under the content that holds the space. */
     reserveRef(el: HTMLElement | null) {
@@ -193,19 +173,25 @@ export function createEndFollower(options: {
     },
 
     /**
-     * A turn the person follows has started: hold its row near the top and land there. The landing
-     * is instant, as any arrival at the end of the thread is.
+     * A turn the person follows has started: land on the end, where its prompt is, at once. A queue
+     * held for it (`turnEnded(true)`) stops waiting; what it holds stays until the reply grows
+     * into it, as with anything replaced near the end mid-turn. Any other space left under the
+     * last reply goes at once, so the prompt sits on the bottom.
      */
-    pin(turnKey: string) {
-      const container = options.container();
+    turnStarted() {
       stopCollapse();
-      releaseHold();
-      anchorKey = turnKey;
+      if (holdTimer !== null) clearTimeout(holdTimer);
+      holdTimer = null;
+      queueTail = null;
+      const container = options.container();
       if (!container) return;
+      if (holdTotal === null && reserve > 0) {
+        // The browser clamps the view to the shorter end; marked as ours.
+        options.onProgrammaticScroll();
+        setReserve(0);
+      }
       updateReserve(container);
-      if (options.mode() !== "following-end") return;
-      const end = container.scrollHeight - container.clientHeight;
-      if (Math.abs(container.scrollTop - end) >= 1) write(container, end);
+      landOnEnd(container);
     },
 
     /**
@@ -217,19 +203,16 @@ export function createEndFollower(options: {
       const container = options.container();
       if (!container) return;
       updateReserve(container);
-      if (options.mode() !== "following-end") return;
-      const end = container.scrollHeight - container.clientHeight;
-      if (Math.abs(container.scrollTop - end) >= 1) write(container, end);
+      landOnEnd(container);
     },
 
     /**
-     * The turn ended: unpin, and close the space under the reply (see the summary above). With
-     * messages still queued (`nextQueued`) the next turn is about to start: a reader at the end is
-     * held where they are until it does, so its pin is the only move.
+     * The turn ended: close any space left under the reply (see the summary above). With messages
+     * still queued (`nextQueued`) the next turn is about to start: a reader at the end is held where
+     * they are until it does.
      */
     turnEnded(nextQueued = false) {
       live = false;
-      anchorKey = null;
       releaseHold();
       const container = options.container();
       if (!container) return;
@@ -259,15 +242,13 @@ export function createEndFollower(options: {
 
     /**
      * After a scroll or any input from the person, once the follow mode has taken it in: leaving the
-     * end ends a pin and a hold; back at the end, a space left over closes.
+     * end ends a hold; back at the end, a space left over closes.
      */
     settle() {
       const container = options.container();
       if (!container) return;
-      const following = options.mode() === "following-end";
-      if (anchorKey && !following) anchorKey = null;
-      if (holdTotal !== null && !following) releaseHold();
-      if (!anchorKey && holdTotal === null && reserve > 0) updateReserve(container);
+      if (holdTotal !== null && options.mode() !== "following-end") releaseHold();
+      if (holdTotal === null && reserve > 0) updateReserve(container);
     },
 
     /** Any input from the person: stop every motion of ours where it is. `settle` follows it. */
@@ -277,7 +258,6 @@ export function createEndFollower(options: {
 
     /** The size of the space under the content, for tests. */
     reserve: () => reserve,
-    pinned: () => anchorKey,
     holding: () => holdTotal !== null,
 
     dispose() {
