@@ -119,8 +119,9 @@ describe('the pictures of a watched tab', () => {
     expect((await after(change)).picture).toMatchObject({ data: 'BBB@60', sharp: false })
     // The screencast was never started again: one quality all along.
     expect(qualities('cdp-a')).toEqual([60])
-    // The layout is read when the capture starts and for each still: never per picture.
-    expect(count('Page.getLayoutMetrics')).toBe(2)
+    // The layout is read when the capture starts and for each still, and the scroll for each new
+    // screencast picture (Chromium without a window reports none with it): AAA, BBB.
+    expect(count('Page.getLayoutMetrics')).toBe(4)
     captures.dispose()
   })
 

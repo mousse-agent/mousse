@@ -138,8 +138,6 @@ export interface ViewerCapturesOptions {
 interface ScreencastFrameEvent {
   data?: string
   sessionId?: number
-  /** Where the page was scrolled when it painted, in CSS pixels. */
-  metadata?: { scrollOffsetX?: number; scrollOffsetY?: number }
 }
 
 interface Waiting {
@@ -198,8 +196,8 @@ interface TabCapture {
   problem?: BrowserProblem
   dialog?: BrowserPageDialog
   chooser?: BrowserFileChooser
-  /** The scroll a repeat waiting to go was painted at. */
-  repeatScroll?: { x: number; y: number }
+  /** Where the page was scrolled when last read (a screencast picture does not say). */
+  scroll: { x: number; y: number }
   settle?: ReturnType<typeof setTimeout>
   settling?: Promise<void>
   /** A still was asked for while another was under way. */
@@ -473,7 +471,7 @@ export class ViewerCaptures {
         capture = {
           info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, recent: [], frameSeq: 0, stateSeq: this.bump(),
           handedSeq: 0, quietSeq: -1, held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false,
-          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set()
+          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set(), scroll: { x: 0, y: 0 }
         }
         const problem = this.options.problem?.(info.cdpSessionId)
         if (problem) capture.problem = problem
@@ -582,7 +580,6 @@ export class ViewerCaptures {
       ack()
       return
     }
-    const scroll = { x: event.metadata?.scrollOffsetX ?? 0, y: event.metadata?.scrollOffsetY ?? 0 }
     // The same picture again (a paint that changed nothing visible): nothing to send.
     const data = event.data
     if (data === capture.lastCast) {
@@ -614,7 +611,7 @@ export class ViewerCaptures {
     // flip between two states): sent once, then at most one every growing gap.
     if (recent && now - capture.actedAt > ACTED_MS) {
       ack()
-      this.holdRepeat(capture, data, scroll)
+      this.holdRepeat(capture, data)
       return
     }
     capture.recent = [...capture.recent.filter((entry) => entry !== data), data].slice(-RECENT_PICTURES)
@@ -622,16 +619,32 @@ export class ViewerCaptures {
     capture.repeatTimer = undefined
     capture.repeat = undefined
     capture.repeatGapMs = 0
-    this.show(capture, data, scroll)
+    this.show(capture, data)
     // Held until a watcher takes a picture: Chromium paints no more for nobody.
     capture.held.push(event.sessionId)
     if (capture.settle) clearTimeout(capture.settle)
     capture.settle = undefined
-    this.pump(capture)
+    // A screencast picture does not say where the page was scrolled (Chromium without a window
+    // reports 0): it is read now, before the picture goes, so input on it lands where it should.
+    const shown = capture.latest
+    void this.readScroll(capture).then(() => {
+      if (shown && capture.latest === shown) Object.assign(shown, this.spot(capture))
+      this.pump(capture)
+    })
+  }
+
+  /** Reads where the tab's page is scrolled now (kept for its next pictures). */
+  private async readScroll(capture: TabCapture): Promise<void> {
+    try {
+      const metrics = await this.cdp.send<LayoutMetrics>('Page.getLayoutMetrics', {}, { sessionId: capture.info.cdpSessionId, timeoutMs: 2_000 })
+      capture.scroll = { x: metrics.cssVisualViewport?.pageX ?? 0, y: metrics.cssVisualViewport?.pageY ?? 0 }
+    } catch {
+      // The tab closed or its page is busy: the last scroll read stands.
+    }
   }
 
   /** A screencast picture becomes the latest. A still it replaces soon after was not worth taking: the next one waits longer. */
-  private show(capture: TabCapture, data: string, scroll: { x: number; y: number }): void {
+  private show(capture: TabCapture, data: string): void {
     const now = this.now()
     if (capture.stillAt !== undefined) {
       capture.settleMs = now - capture.stillAt < STILL_STANDS_MS
@@ -640,7 +653,7 @@ export class ViewerCaptures {
       capture.stillAt = undefined
     }
     const scale = Math.min(1, capture.width / capture.viewport.width, SCREENCAST_MAX_HEIGHT / capture.viewport.height)
-    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false, ...this.spot(capture, scroll) }
+    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false, ...this.spot(capture) }
     capture.shownCast = data
     capture.frameSeq = this.bump()
     capture.echoPending = undefined
@@ -652,9 +665,8 @@ export class ViewerCaptures {
    * then 10, 20, 40 and 60 s, each the latest repeat, and only when the view does not show it already.
    * No still picture follows one sent late.
    */
-  private holdRepeat(capture: TabCapture, data: string, scroll: { x: number; y: number }): void {
+  private holdRepeat(capture: TabCapture, data: string): void {
     capture.repeat = data
-    capture.repeatScroll = scroll
     if (capture.repeatTimer) return
     const send = () => {
       capture.repeatTimer = undefined
@@ -663,7 +675,7 @@ export class ViewerCaptures {
       if (!repeat || repeat === capture.shownCast || capture.behind || this.captures.get(capture.info.cdpSessionId) !== capture) return
       const late = capture.repeatGapMs > 0
       capture.repeatGapMs = late ? Math.min(MAX_REPEAT_GAP_MS, capture.repeatGapMs * 2) : REPEAT_GAP_MS
-      this.show(capture, repeat, capture.repeatScroll ?? { x: 0, y: 0 })
+      this.show(capture, repeat)
       if (late) capture.quietSeq = capture.frameSeq
       else if (capture.settle) {
         clearTimeout(capture.settle)
@@ -787,7 +799,8 @@ export class ViewerCaptures {
         if (viewportChanged) this.pump(capture)
         return
       }
-      capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true, ...this.spot(capture, { x: visual.pageX ?? 0, y: visual.pageY ?? 0 }) }
+      capture.scroll = { x: visual.pageX ?? 0, y: visual.pageY ?? 0 }
+      capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true, ...this.spot(capture) }
       capture.lastStill = shot
       capture.shownCast = over
       capture.stillAt = capture.behind ? undefined : this.now()
@@ -837,10 +850,10 @@ export class ViewerCaptures {
     }
   }
 
-  /** The document a picture of the tab shows now, and the scroll it was painted at. */
-  private spot(capture: TabCapture, scroll: { x: number; y: number }): { spot?: BrowserPictureSpot } {
+  /** The document a picture of the tab shows now, and where its page was scrolled (as last read). */
+  private spot(capture: TabCapture): { spot?: BrowserPictureSpot } {
     const documentId = this.options.document?.(capture.info.cdpSessionId)
-    return documentId ? { spot: { documentId, scrollX: scroll.x, scrollY: scroll.y } } : {}
+    return documentId ? { spot: { documentId, scrollX: capture.scroll.x, scrollY: capture.scroll.y } } : {}
   }
 
   private async readViewport(capture: TabCapture): Promise<boolean> {

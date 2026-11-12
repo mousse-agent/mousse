@@ -134,13 +134,20 @@ describe.skipIf(!chrome.ok)('a person\'s input in a bot\'s browser', () => {
     expect((await page()).text.split(`submitted:${sentence}`).length - 1).toBe(1)
   }, 90_000)
 
-  it('adds up fast wheel turns, never dropping one', async () => {
-    const { lab, send, page } = await fixture()
+  it('adds up fast wheel turns, never dropping one, and a click on the picture after the scroll lands where it shows', async () => {
+    const { lab, send, page, picture, noted } = await fixture()
     await lab()
-    // Twenty quick turns of 40 px, each its own input, sent at once.
-    const turns: BotBrowserInput[] = Array.from({ length: 20 }, () => ({ kind: 'scroll', x: 600, y: 500, deltaX: 0, deltaY: 40 }))
-    expect(applied((await Promise.all(turns.map((turn) => send([turn])))).flat())).toBe(true)
+    const before = await picture()
+    // Twenty quick turns of 40 px, each its own input made on the picture from before they began, sent at once.
+    const turns: BotBrowserInput[] = Array.from({ length: 20 }, () => ({ kind: 'scroll', x: 600, y: 650, deltaX: 0, deltaY: 40 }))
+    expect(applied((await Promise.all(turns.map((turn) => send([turn], before)))).flat())).toBe(true)
     await expect.poll(async () => (await page()).title, { timeout: 5_000 }).toBe('Input lab 800')
+    // Back up to 200 px; on the picture of the page there, "far" (at 700 on the page) shows 500 px down.
+    expect(applied(await send([{ kind: 'scroll', x: 600, y: 300, deltaX: 0, deltaY: -600 }], await picture()))).toBe(true)
+    await expect.poll(async () => (await page()).title, { timeout: 5_000 }).toBe('Input lab 200')
+    const now = await picture(await picture())
+    expect(applied(await send(press(190, 520), now))).toBe(true)
+    await noted('clicked:far')
   }, 60_000)
 
   it('drags a slider, double-clicks, right-clicks, and selects text the person then copies', async () => {

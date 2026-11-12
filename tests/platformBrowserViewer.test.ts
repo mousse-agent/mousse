@@ -77,7 +77,8 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     await new Promise((resolve) => setTimeout(resolve, 250))
     const takeover = await viewer.takeControl({ sessionId: session.id })
     expect(takeover.controlOwner).toBe('human')
-    await expect(pending).resolves.toMatchObject({ action: { outcome: 'unknown-effect', dispatched: true } })
+    // The agent is told a person took over while its navigation was under way, and that its page never came.
+    await expect(pending).resolves.toMatchObject({ action: { outcome: 'unknown-effect', dispatched: true, code: 'human_controlled', takeover: 'unknown', message: expect.stringMatching(/^A person took over the browser while this action ran/) } })
     await expect(manager.act(owner, {
       sessionId: session.id,
       tabId: initial.tabId,

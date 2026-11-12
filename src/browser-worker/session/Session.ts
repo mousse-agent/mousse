@@ -927,13 +927,18 @@ export class ManagedSession {
     }
   }
 
-  /** An agent's action a person's Take over cut short (or kept from running): blocked, with whether it took effect. */
+  /**
+   * An agent's action a person's Take over cut short, or kept from running, with whether it took
+   * effect: `blocked` when it never went, `unknown-effect` once it was sent (as any action cut short
+   * after it went), and `takeover` says what is known.
+   */
   private takenOver(request: BrowserActionRequest, dispatched: boolean, takeover: BrowserTakeoverEffect): BrowserActionResult {
+    const outcome = dispatched ? 'unknown-effect' : 'blocked'
     this.journal.append({
       at: nowIso(this.clock), profileId: this.profileId, sessionId: this.id, requestId: request.requestId,
-      generation: this.generation, phase: 'outcome', actionType: request.action.type, dispatched, outcome: 'blocked'
+      generation: this.generation, phase: 'outcome', actionType: request.action.type, dispatched, outcome
     })
-    return { requestId: request.requestId, outcome: 'blocked', dispatched, takeover, code: 'human_controlled', message: browserTakeoverMessage(takeover), artifactIds: [] }
+    return { requestId: request.requestId, outcome, dispatched, takeover, code: 'human_controlled', message: browserTakeoverMessage(takeover), artifactIds: [] }
   }
 
   /**
@@ -1194,7 +1199,7 @@ export class ManagedSession {
     let shifted: { x: number; y: number } | undefined
     const located = 'x' in input && 'y' in input
     if (located && spot) {
-      const fenced = await this.fencePoint(tab, input, spot, signal)
+      const fenced = await this.fencePoint(tab, input, spot, signal, input.kind === 'scroll')
       if (!fenced.ok) {
         // A button or key the person holds is still let go of where it is: nothing is left pressed.
         if (!(input.kind === 'pointer' && input.type === 'up' && pressed.buttons.has(input.button as BrowserMouseButton))) return { applied: false, code: 'page_changed', message: fenced.message }
@@ -1239,7 +1244,7 @@ export class ManagedSession {
    * Checks a point the person picked on a picture against the page as it is now: the same document,
    * and how far it has scrolled since (the point moves with it, so it lands on what they saw).
    */
-  private async fencePoint(tab: TabState, input: { x: number; y: number }, spot: BrowserPictureSpot, signal?: AbortSignal): Promise<{ ok: true; dx: number; dy: number } | { ok: false; message: string }> {
+  private async fencePoint(tab: TabState, input: { x: number; y: number }, spot: BrowserPictureSpot, signal?: AbortSignal, wheel = false): Promise<{ ok: true; dx: number; dy: number } | { ok: false; message: string }> {
     if (spot.documentId !== tab.page) return { ok: false, message: 'The page changed since that picture' }
     const metrics = await this.requireChrome().cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })
     const visual = metrics.cssVisualViewport ?? {}
@@ -1249,6 +1254,8 @@ export class ManagedSession {
     const x = input.x + dx
     const y = input.y + dy
     if (x < 0 || y < 0 || x > (visual.clientWidth ?? Number.POSITIVE_INFINITY) || y > (visual.clientHeight ?? Number.POSITIVE_INFINITY)) {
+      // A wheel turn is never lost to a scroll it helped make: it turns where the person pointed.
+      if (wheel) return { ok: true, dx: 0, dy: 0 }
       return { ok: false, message: 'What that picture showed there has scrolled out of view' }
     }
     return { ok: true, dx, dy }
