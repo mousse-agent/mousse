@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Input lab</title>
+  <style>
+    body { margin: 0; font: 16px sans-serif; height: 3000px; position: relative; }
+    .at { position: absolute; box-sizing: border-box; }
+    #name { left: 40px; top: 30px; width: 400px; height: 36px; font: 16px sans-serif; }
+    #go { left: 460px; top: 30px; width: 80px; height: 36px; }
+    #area { left: 40px; top: 90px; width: 400px; height: 70px; font: 16px sans-serif; }
+    #slider { left: 40px; top: 180px; width: 400px; height: 30px; margin: 0; }
+    #dbl { left: 580px; top: 30px; width: 160px; height: 36px; background: #def; }
+    #words { left: 580px; top: 90px; width: 520px; margin: 0; font: 20px sans-serif; }
+    #ime { left: 580px; top: 180px; width: 300px; height: 36px; font: 16px sans-serif; }
+    #alert { left: 40px; top: 240px; width: 100px; height: 32px; }
+    #confirm { left: 160px; top: 240px; width: 100px; height: 32px; }
+    #prompt { left: 280px; top: 240px; width: 100px; height: 32px; }
+    #file { left: 40px; top: 300px; width: 300px; height: 32px; }
+    #below { left: 40px; top: 400px; width: 300px; height: 40px; background: #fed; }
+    #far { left: 40px; top: 700px; width: 300px; height: 40px; background: #efd; }
+    #out { left: 580px; top: 300px; width: 640px; margin: 0; font: 13px monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <!-- A page that writes down what reaches it, for the tests of a person's input in a bot's browser. -->
+  <form id="form"><input id="name" class="at" autocomplete="off"><button id="go" class="at">Send</button></form>
+  <textarea id="area" class="at">first line of text</textarea>
+  <input id="slider" class="at" type="range" min="0" max="100" value="0">
+  <div id="dbl" class="at">double or right</div>
+  <p id="words" class="at">Select these words please</p>
+  <input id="ime" class="at" autocomplete="off">
+  <button id="alert" class="at">Alert</button>
+  <button id="confirm" class="at">Confirm</button>
+  <button id="prompt" class="at">Prompt</button>
+  <input id="file" class="at" type="file">
+  <div id="below" class="at">below</div>
+  <div id="far" class="at">far</div>
+  <pre id="out" class="at"></pre>
+  <script>
+    const out = document.getElementById('out')
+    const note = (line) => { out.textContent += line + '\n' }
+    document.getElementById('form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      note('submitted:' + document.getElementById('name').value)
+    })
+    const slider = document.getElementById('slider')
+    slider.addEventListener('change', () => note('slider:' + slider.value))
+    const dbl = document.getElementById('dbl')
+    dbl.addEventListener('dblclick', () => note('dblclick'))
+    dbl.addEventListener('contextmenu', (event) => { event.preventDefault(); note('contextmenu') })
+    const ime = document.getElementById('ime')
+    ime.addEventListener('compositionend', (event) => note('composed:' + event.data))
+    ime.addEventListener('change', () => note('ime:' + ime.value))
+    document.getElementById('alert').addEventListener('click', () => { alert('Hello from the page'); note('alert:answered') })
+    document.getElementById('confirm').addEventListener('click', () => note('confirm:' + confirm('Go on?')))
+    document.getElementById('prompt').addEventListener('click', () => note('prompt:' + prompt('Your name?', 'nobody')))
+    const file = document.getElementById('file')
+    file.addEventListener('change', () => note('file:' + [...file.files].map((entry) => entry.name + ':' + entry.size).join(',')))
+    document.getElementById('below').addEventListener('click', () => note('clicked:below'))
+    document.getElementById('far').addEventListener('click', () => note('clicked:far'))
+    document.addEventListener('keydown', (event) => {
+      if (event.ctrlKey || event.metaKey) note('shortcut:' + (event.metaKey ? 'meta+' : 'ctrl+') + event.key)
+    })
+    // What is let go of: a held Shift, a held button.
+    document.addEventListener('keyup', (event) => { if (event.key === 'Shift') note('keyup:Shift') })
+    document.getElementById('far').addEventListener('mouseup', () => note('mouseup:far'))
+    window.addEventListener('scroll', () => { document.title = 'Input lab ' + Math.round(window.scrollY) })
+  </script>
+</body>
+</html>

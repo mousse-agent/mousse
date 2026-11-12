@@ -205,7 +205,7 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
   it('the owner can open the bot\'s browser to sign in for it, under their own control', async () => {
     const { bots, browser, origin } = await fixture()
     const first = `${origin}/automation-page.html?name=owner`
-    const opened = await bots.open(BOT_A, first)
+    const { browser: opened } = await bots.open(BOT_A, first)
     expect(opened).toMatchObject({ open: true, control: 'owner', tab: { url: first } })
     expect(opened.frame?.mimeType).toBe('image/jpeg')
     expect(opened.cursor).toBeUndefined()
