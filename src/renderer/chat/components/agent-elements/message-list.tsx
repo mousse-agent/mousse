@@ -20,6 +20,9 @@ import { modelLabel } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
 import { UserMessage } from "./user-message";
+import { ImageGalleryProvider } from "./image-gallery";
+import { collectThreadImages } from "./image-sources";
+import { safeMarkdownUrl } from "../../../utils/chatLinks";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { holdReplyPacing } from "../../../lib/replyPacingSetting";
 import { LiveMarkdown } from "./live-markdown";
@@ -2054,7 +2057,13 @@ export const MessageList = memo(function MessageList({
   // Tick position and active-turn state live in PromptMarkersOverlay so
   // scrolling never re-renders the conversation to update the rail.
 
+  // An image opened anywhere in the thread steps through all of the thread's images (subagent results joined
+  // to a reply show none of their own).
+  const threadImages = () =>
+    collectThreadImages(normalizedMessages.filter((message) => !isResultNotice(message)), safeMarkdownUrl);
+
   return (
+    <ImageGalleryProvider images={threadImages}>
     <div
       className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col"
       onMouseMove={handleGutterHover}
@@ -2178,6 +2187,7 @@ export const MessageList = memo(function MessageList({
       </button>
     )}
     </div>
+    </ImageGalleryProvider>
   );
 });
 
