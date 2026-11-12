@@ -47,16 +47,36 @@ describe('a thread in view', () => {
     ;(t.router.attached as unknown as { options: { idleMs?: number } }).options.idleMs = undefined
   }, 60_000)
 
+  it('attaches the next thread at once right after a stream is let go, without finding the computer offline', async () => {
+    const options = (t.router.attached as unknown as { options: { idleMs?: number } }).options
+    const released = t.thread('Released')
+    options.idleMs = 20
+    // Focused and let go at once, so the stream is closed while the owner may still be sending what it holds.
+    await t.dispatch('threads.focus', { threadId: t.qualified(released.id) }, t.connection('idle'))
+    await t.dispatch('threads.focus', { threadId: t.qualified(released.id), focused: false }, t.connection('idle'))
+    await vi.waitFor(() => expect(t.router.attached.state().some((row) => row.threadId === released.id)).toBe(false), {
+      timeout: 5000
+    })
+    await vi.waitFor(() => expect(t.ownerThreads().privateHead(t.callerNode, released.id)).toBeUndefined(), {
+      timeout: 5000
+    })
+    options.idleMs = undefined
+    const opened = vi.spyOn(t.client(), 'openStream')
+    const next = t.thread('Next')
+    await t.dispatch('threads.focus', { threadId: t.qualified(next.id) })
+    // The first attach opens the stream: no `computer_offline`, and no retry a second later.
+    await expect(opened.mock.results[0]?.value).resolves.toBeDefined()
+    expect(t.router.attached.state().find((row) => row.threadId === next.id)?.attached).toBe(true)
+    expect(() => t.caller.net.session(t.node)).not.toThrow()
+    opened.mockRestore()
+  }, 60_000)
+
   it('turns the metadata of a thread in view into a change of its row in the merged lists', async () => {
     const thread = t.thread('Before')
     const id = t.qualified(thread.id)
     await t.dispatch('threads.focus', { threadId: id })
-    // Right after the previous test lets its stream go, the first attach can find the computer offline and the
-    // focus returns before a retry attaches. The rename is made once the stream is open, so it travels on it.
-    await vi.waitFor(
-      () => expect(t.router.attached.state().find((row) => row.threadId === thread.id)?.attached).toBe(true),
-      { timeout: 10_000 }
-    )
+    // The stream is open when the focus returns, so the rename travels on it.
+    expect(t.router.attached.state().find((row) => row.threadId === thread.id)?.attached).toBe(true)
     const applied = vi.spyOn(t.caller.bridge.lists, 'applyMetadata')
     const from = t.events.length
     t.owner.threads.updateThreadMeta(thread.id, { name: 'After' })

@@ -81,12 +81,12 @@ async function profiles(clock: Clock = systemClock) {
   }
   aStore.createStream(stream, 1)
   bStore.createStream(stream, 1)
-  const record = (seq: number): StoredRecord => {
+  const record = (seq: number, streamId = stream.id): StoredRecord => {
     const envelope = encodeEnvelope({
       v: 1,
       minor: 0,
       id: newId('event'),
-      stream: stream.id,
+      stream: streamId,
       type: 'message.posted',
       crit: false,
       author: { user, node: aIdentity.self()!.node, keyEpoch: 1 },
@@ -1698,5 +1698,186 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
         })?.state
       ).toBe('uncertain')
     )
+  })
+})
+
+/** Adds rows `from`..`to` to `stream` on the authority's side. */
+function appendRows(p: Awaited<ReturnType<typeof profiles>>, stream: string, from: number, to: number) {
+  for (let seq = from; seq <= to; seq++) {
+    const row = p.record(seq, stream as never)
+    const envelope = JSON.parse(Buffer.from(row.envelope).toString())
+    p.aStore.appendAsAuthority(stream as never, {
+      id: envelope.id,
+      envelope: row.envelope,
+      sig: row.sig,
+      recvTs: row.recvTs
+    })
+  }
+}
+
+/** Every frame the authority's session sends, and a hook that runs once each one is sent. */
+function frames(session: NetSyncSession) {
+  type Frame = { t: string; stream?: string; code?: string }
+  const sent: Frame[] = []
+  const hooks: Array<(frame: Frame) => void | Promise<void>> = []
+  const send = (session as unknown as { send: (...args: unknown[]) => Promise<void> }).send.bind(session)
+  vi.spyOn(session as never, 'send' as never).mockImplementation((async (
+    header: { t: string; stream?: string; re?: string; error?: { code: string } },
+    ...rest: unknown[]
+  ) => {
+    const frame: Frame = {
+      t: header.t,
+      ...(header.stream ?? header.re ? { stream: header.stream ?? header.re } : {}),
+      ...(header.error ? { code: header.error.code } : {})
+    }
+    sent.push(frame)
+    await send(header, ...rest)
+    for (const hook of hooks) await hook(frame)
+  }) as never)
+  return { sent, after: (hook: (frame: Frame) => void | Promise<void>) => hooks.push(hook) }
+}
+
+describe('a stream the peer loses the right to read while it is served', () => {
+  async function setup() {
+    const p = await profiles()
+    // A second stream on the same connection, which must still be served afterwards.
+    const other: StreamDescriptor = { ...p.stream, id: newId('stream') }
+    p.aStore.createStream(other, 1)
+    p.bStore.createStream(other, 1)
+    appendRows(p, other.id, 1, 2)
+    // Two replay pages and two snapshot chunks: a page holds at most 499 records.
+    appendRows(p, p.stream.id, 1, 600)
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const authority = (connection.a as unknown as { options: { authority: NodeStreamAuthority } }).options
+      .authority
+    const canRead = authority.canRead.bind(authority)
+    const lost = new Set<string>()
+    vi.spyOn(authority, 'canRead').mockImplementation((stream, peer) => !lost.has(stream) && canRead(stream, peer))
+    const closed: unknown[] = []
+    connection.a.onClosed((error) => closed.push(error))
+    connection.b.onClosed((error) => closed.push(error))
+    const log = frames(connection.a)
+    // Access goes once the first part of the stream (`kind`) has been sent.
+    const loseAfter = (kind: string) =>
+      log.after((frame) => {
+        if (frame.t === kind && frame.stream === p.stream.id && !lost.size) {
+          lost.add(p.stream.id)
+          log.sent.push({ t: 'lost' })
+        }
+      })
+    // After the loss: one `forbidden` for that stream and nothing else, the connection is up and serves another stream.
+    const expectEndedAlone = async () => {
+      await vi.waitFor(() => expect(log.sent.some((frame) => frame.t === 'error')).toBe(true), { timeout: 10_000 })
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(log.sent.slice(log.sent.findIndex((frame) => frame.t === 'lost') + 1)).toEqual([
+        { t: 'error', stream: p.stream.id, code: 'forbidden' }
+      ])
+      expect(closed).toEqual([])
+      expect(connection.a.state()).toBe('open')
+      expect(connection.b.state()).toBe('open')
+      const h = handlers()
+      connection.b.subscribe(other.id, h)
+      await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+      expect(p.bStore.cursor(other.id).seq).toBe(2)
+    }
+    return { p, connection, log, loseAfter, expectEndedAlone }
+  }
+
+  it('ends the stream alone when access goes mid-replay', async () => {
+    const { p, connection, loseAfter, expectEndedAlone } = await setup()
+    loseAfter('events')
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await expectEndedAlone()
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith('forbidden')
+    expect(h.onCaughtUp).not.toHaveBeenCalled()
+  })
+
+  it('ends the stream alone when access goes mid-snapshot, and installs nothing of it', async () => {
+    const { p, connection, loseAfter, expectEndedAlone } = await setup()
+    vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
+    const open = p.aStore.openSnapshot.bind(p.aStore),
+      close = vi.fn()
+    vi.spyOn(p.aStore, 'openSnapshot').mockImplementation((stream) => {
+      const reader = open(stream)
+      return {
+        target: reader.target,
+        next: (bytes, records) => reader.next(bytes, records),
+        close: () => {
+          close()
+          reader.close()
+        }
+      }
+    })
+    loseAfter('snapshot.chunk')
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await expectEndedAlone()
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith('forbidden')
+    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('answers a snapshot request with no subscription with forbidden alone when access goes mid-transfer', async () => {
+    const { p, connection, loseAfter, expectEndedAlone } = await setup()
+    const open = p.aStore.openSnapshot.bind(p.aStore),
+      close = vi.fn()
+    vi.spyOn(p.aStore, 'openSnapshot').mockImplementation((stream) => {
+      const reader = open(stream)
+      return {
+        target: reader.target,
+        next: (bytes, records) => reader.next(bytes, records),
+        close: () => {
+          close()
+          reader.close()
+        }
+      }
+    })
+    loseAfter('snapshot.chunk')
+    const send = (connection.b as unknown as { send(message: unknown): Promise<void> }).send.bind(connection.b)
+    await send({ t: 'snapshot.get', stream: p.stream.id })
+    await expectEndedAlone()
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0)
+    expect(close).toHaveBeenCalledOnce()
+  })
+})
+
+describe('a replay trimmed after some of it was applied', () => {
+  it('resyncs the subscriber from a snapshot with no gap and no duplicate', async () => {
+    const p = await profiles()
+    appendRows(p, p.stream.id, 1, 600)
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const closed: unknown[] = []
+    connection.a.onClosed((error) => closed.push(error))
+    connection.b.onClosed((error) => closed.push(error))
+    const log = frames(connection.a)
+    let trimmed = false
+    log.after(async (frame) => {
+      if (frame.t !== 'events' || trimmed) return
+      trimmed = true
+      // The first page is applied on the subscriber, then a display snapshot refresh trims past it.
+      await vi.waitFor(() => expect(p.bStore.cursor(p.stream.id).seq).toBe(499), { timeout: 10_000 })
+      p.aStore.truncate(p.stream.id, 550, { forgetIds: true })
+    })
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+    expect(trimmed).toBe(true)
+    expect(h.onSnapshotInstalled).toHaveBeenCalledOnce()
+    const types = log.sent.map((frame) => frame.t)
+    expect(types.indexOf('snapshotRequired')).toBeGreaterThan(types.indexOf('events'))
+    expect(types.filter((t) => t === 'caughtUp')).toHaveLength(1)
+    // What the replay applied came once each, in order; the snapshot then holds the rest without a gap.
+    const applied = h.onRecord.mock.calls.map(([record]) => record.seq as number)
+    expect(applied).toEqual(Array.from({ length: applied.length }, (_, i) => i + 1))
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(600)
+    const held = p.bStore.read(p.stream.id, { epoch: 1, seq: 550 }, 600, 4 * 1024 * 1024)
+    expect(held.records.map((record) => record.seq)).toEqual(Array.from({ length: 50 }, (_, i) => 551 + i))
+    expect(closed).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
   })
 })
