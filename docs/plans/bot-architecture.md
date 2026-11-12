@@ -707,7 +707,7 @@ set_depth({ depth: 'quick' | 'normal' | 'deep', scope: 'now' | 'always' }) → {
 use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' }) → { ok: true } | { ok: false, reason: string }
 ```
 
-- **Rows (#673).** `set_depth` sets a level: `now` for the activation it is called in, `always` the standing level (`main.model.depth`) that work naming none uses. `use_model` resolves the owner's words to one of the Runs on choices on its own entry (`pickFor`); `now` puts it on this chat, `always` on Talk, Work or both (`for`). `work_start` takes `level` (light, medium, hard). See `docs/bots.md`.
+- **Rows (#673).** `set_depth` sets a level: `now` for the activation it is called in, `always` the standing level (`main.model.depth`) that work naming none uses. `use_model` takes only a Runs on choice the owner's own message names (`ownerModelChoice`: a full name for `always`, a family word on Talk's entry also for `now`); `now` puts it on this chat, `always` on Talk, Work or both (`for`), each row kept on its entry when two entries offer the model. `work_start` takes `level` (light, medium, hard). See `docs/bots.md`.
 - **`always`** saves `main.model` through a revision with the manifest unchanged, so no approval is needed.
 - **`now`** writes `bot_activations.model_override_json` and sets `reload_pending`. After that tool call's result, the engine ends the dispatch with `BotReloadAbort`, which is the wall-abort path with no wall. It then continues on the same thread with the new selection and the input `[Mousse] You now have more time to think. Continue where you left off.` On Claude this is the process restart that #359 describes, which locked turns pay on every dispatch anyway.
 - **Hiding the model:**

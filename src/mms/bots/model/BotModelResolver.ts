@@ -170,20 +170,6 @@ export class BotModelChooser implements BotModelResolver {
     }
   }
 
-  /**
-   * The Runs on choice the owner's words name (`use_model`): among the same options the picker offers, the best name
-   * match, ranked subscriptions first. Undefined when none is named. It names the option, so the pick is saved with
-   * what the entry is signed in with now.
-   */
-  async pickFor(words: string): Promise<BotModelOption | undefined> {
-    const snapshots = await this.freshSnapshots()
-    const candidates = this.candidatesOf(snapshots)
-    const named = chooseBotModel({ mode: 'named', model: words, depth: 'normal' }, candidates, this.now())
-    if (!('selection' in named)) return undefined
-    const found = candidates.find((candidate) => candidate.instanceId === named.selection.instanceId && candidate.model === named.selection.model)
-    return found ? this.optionOf(found, new Map(snapshots.map((snapshot) => [snapshot.instanceId, snapshot.displayName]))) : undefined
-  }
-
   private async holdableCandidates(): Promise<BotModelCandidate[]> {
     return this.candidatesOf(await this.freshSnapshots())
   }
@@ -218,6 +204,11 @@ export class BotModelChooser implements BotModelResolver {
     if (Number.isNaN(Date.parse(until))) return
     const held = this.limited.get(instanceId)
     if (!held || Date.parse(until) > Date.parse(held)) this.limited.set(instanceId, until)
+  }
+
+  /** The owner's Resume: the instance is tried again on the next turn. */
+  clearLimited(instanceId: string): void {
+    this.limited.delete(instanceId)
   }
 
   /** The instances at their limit now; resets that passed are forgotten. */

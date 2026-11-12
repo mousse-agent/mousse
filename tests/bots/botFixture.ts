@@ -133,7 +133,8 @@ export function botFixture(): BotFixture {
         // A bot from before picks: the depth's effort on the first free candidate.
         return { selection: { ...free[0]!, ...(depth === 'deep' ? { effort: 'high' } : depth === 'quick' ? { effort: 'low' } : {}) } }
       },
-      markLimited: (instanceId, until) => { fixture.limited.set(instanceId, until) }
+      markLimited: (instanceId, until) => { fixture.limited.set(instanceId, until) },
+      clearLimited: (instanceId) => { fixture.limited.delete(instanceId) }
     },
     context: {
       chatPreamble: async ({ activationId }) => {

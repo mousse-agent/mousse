@@ -8,6 +8,7 @@ import type { BotThreadRole } from '../../../shared/bots/personal/authority'
 import type { BotAskMode, BotAskRequest, BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
 import type { BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
 import type { ProviderSelection } from '../../../shared/harness/types'
+import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 
 /**
@@ -358,7 +359,34 @@ export interface BotRegistryRow {
    * journal row is written when a row's model changes, not when Talk and Work take turns. Older builds rewrite it without
    * `rows`; each row then journals its model once more.
    */
-  model: { selection: ProviderSelection; activationId: string; rows?: Partial<Record<string, ProviderSelection>> } | null
+  model: BotModelState | null
+}
+
+/**
+ * A provider's usage limit on one of a picked bot's entries (#673): until when, and for which models. `family`: a limit
+ * the provider names for one family only (Claude's weekly Opus or Sonnet window), else the whole entry. `said`: the
+ * chat has said it once.
+ */
+export interface BotEntryLimit {
+  instanceId: string
+  until: string
+  family?: string
+  said?: boolean
+}
+
+/**
+ * What the engine keeps about a bot's models in `model_json` (internal; never in a UI payload). `selection` and `rows`:
+ * the last resolved selection and each row's last one; a `model_change` journal row is written when a row's model
+ * changes, not when Talk and Work take turns. `stuck`: rows whose pick can't run (#673), each held until it runs again
+ * or the owner picks again for it. `limits`: usage limits on a picked bot's entries, by entry (and family). Older
+ * builds rewrite it with `selection` and `activationId` only; the rest is then forgotten.
+ */
+export interface BotModelState {
+  selection: ProviderSelection
+  activationId: string
+  rows?: Partial<Record<string, ProviderSelection>>
+  stuck?: BotStuckRows
+  limits?: Record<string, BotEntryLimit>
 }
 
 function registryOf(row: Row): BotRegistryRow {

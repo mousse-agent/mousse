@@ -45,7 +45,9 @@ import {
   type BotLane,
   type BotManifest,
   type BotModelOverride,
+  type BotDepth,
   type BotModelPick,
+  type BotModelSlotKey,
   type BotModelSlots,
   type BotWorkLevel,
   type BotPermissionLine,
@@ -55,7 +57,7 @@ import {
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
-import { allPinned, copyPick, isPinned, pickProblemText, samePick, slotsOf, slotsWith, startDepthOf, turnModelOf, withSlots, type BotPickMiss, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
+import { allPinned, copyPick, isPinned, limitFamilyOf, limitOnPick, pickProblemText, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
@@ -71,7 +73,7 @@ import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread } from '../grants/compile'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkStarted } from '../seams'
-import { workWaits, type BotActivationRow, type BotDispatchRow, type BotEscalationRow, type BotMessageRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
+import { workWaits, type BotActivationRow, type BotDispatchRow, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
@@ -262,6 +264,8 @@ const REPLY_WAIT_MS = 5_000
 const MAX_USAGE_RETRIES = 2
 /** The end reason and stuck-error code of a picked model that can't run (#673). */
 const PICK_UNAVAILABLE = 'bot_pick_unavailable'
+/** The line with the first run of an automation saved with a model by name, on a bot whose rows are all picked (#673). */
+export const OLD_MODEL_NAME_IGNORED = 'This automation had a model of its own saved by an earlier version of Mousse. It now runs on my Work model; change that in About → Runs on.'
 /**
  * How long a usage pause lasts when the provider gave no reset time: the bot tries again then (work a usage limit
  * stopped goes on, schedules run), and pauses again for as long if the limit still holds.
@@ -906,6 +910,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return this.activationSummary(existing)
     }
     const admitted = this.admissible(botId)
+    // Work for a row that can't run is not started (#673): the bot (and a reminder's line) says why, and nothing waits
+    // to run later on it.
+    if (lane === 'run') {
+      const turn = turnModelOf(admitted.published.main, { lane, trigger })
+      if (turn.pick && isPinned(turn.pick) && this.stuckOn(botId, turn.slot))
+        throw new BotEngineError(PICK_UNAVAILABLE, `the model picked for ${rowName(turn.slot).toLowerCase()} can't run now. Pick one in About → Runs on.`)
+    }
     const id = presetId && !this.store.activation(presetId) ? presetId : newActivationId()
     const dropped = this.store.db.transaction(() => {
       // A duplicate of the same request in flight at the same time (a chat message delivered twice)
@@ -1049,6 +1060,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         skip = error instanceof BotEngineError ? error.code : 'bot_unavailable'
       }
     }
+    // A model the owner picked by hand for this automation (#673): this run's pick, on the entry it was saved on, and
+    // like any pick it runs there or not at all. One saved by name only (before picks kept their entry) is matched by
+    // name, as it was, on a bot that still runs by usage; on a bot whose rows are all picked it is ignored, and the run
+    // takes its level's row (Work), which its first run says once.
+    const ownPick = input.pick && isPinned(input.pick) ? copyPick(input.pick) : undefined
+    const picked = admitted ? allPinned(slotsOf(admitted.published.main)) : false
+    const own = ownPick ?? (input.model && !picked ? { model: input.model } : undefined)
+    const ignoredName = !ownPick && Boolean(input.model) && picked
+    if (admitted && !skip) {
+      const depth = admitted.published.main.model.depth
+      const turn = turnModelOf(admitted.published.main, { lane: 'run', trigger: { kind: 'schedule', input: prompt, scheduleId, occurrenceAt }, ...(own ? { modelOverride: { mode: 'named', ...own, depth } } : {}) })
+      if (turn.pick && isPinned(turn.pick)) {
+        // Its row (or its own pick) can't run: skipped with the reason, with no run thread; the chat said so once.
+        if (ownPick ? this.stuckOn(botId, `schedule:${scheduleId}`, ownPick) : this.stuckOn(botId, turn.slot)) skip = 'model_unavailable'
+        // Its pick's entry is at its usage limit: only what runs there waits (#673).
+        else if (this.entryLimitOf(botId, turn.pick)) skip = 'usage_limited'
+      }
+    }
     const id = `act_${randomUUID()}`
     const made = this.store.db.transaction(() => {
       if (!admitted || skip) return false
@@ -1067,11 +1096,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         createdAt: this.store.now(),
         lane: 'run'
       }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
-      // A model the owner picked by hand for this automation (#673): this run's pick, on the entry it was saved on, and
-      // like any pick it runs there or not at all. One saved by name only (before picks kept their entry) is matched by
-      // name, as it was.
-      const own = input.pick && isPinned(input.pick) ? copyPick(input.pick) : input.model ? { model: input.model } : undefined
       if (inserted && own) this.store.setModelOverride(id, { mode: 'named', ...own, depth: admitted.published.main.model.depth })
+      // Said once per automation, with its first run on the bot's Work row (a fixed id: a later run posts nothing).
+      if (inserted && ignoredName)
+        this.chat.post({ id: `bm_${botId}_${scheduleId}_named_model`, botId, author: 'bot', kind: 'notice', text: OLD_MODEL_NAME_IGNORED, activationId: id, lane: 'run', hidden: true })
       if (inserted) this.dropOverQueue(botId, 'run')
       return inserted
     })
@@ -1109,6 +1137,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.endUsagePauseIfDue(botId, now)
       } catch (error) {
         console.warn('a bot\'s usage pause could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+      try {
+        this.forgetPastLimits(botId, now.getTime())
+        // A row that can't run clears by itself once its pick can run again, without a word.
+        await this.recheckStuck(botId)
+      } catch (error) {
+        console.warn('a bot\'s models could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
     // Waiting work that nothing would wake or end ends now, with a line.
@@ -1280,26 +1315,39 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
     if (!definition || !grant) return true // prepare refuses it with the reason
-    if (!row.selection || row.reloadPending) {
-      const turn = turnModelOf(definition.main, row)
-      const resolved = await this.resolveModel(row, definition, grant.manifest, turn)
-      if ('problem' in resolved) {
-        this.modelProblem(row, resolved)
+    const turn = turnModelOf(definition.main, row)
+    // A pick on an entry is checked again before every main dispatch, continuations included (a restart, the internet
+    // back, the turn cap, more room, an answered ask): its entry may have been turned off, or switched to another kind
+    // of sign-in or account, while the activation waited. A model by name or by usage is chosen once, as before.
+    const pinned = isPinned(turn.pick)
+    if (!row.selection || row.reloadPending || pinned) {
+      // A usage limit this picked bot already met on the pick's entry: it waits for that reset, without a call.
+      const limit = pinned ? this.entryLimitOf(row.botId, turn.pick!) : undefined
+      if (limit) {
+        this.usagePause(row, limit.until, limit.instanceId, turn)
         return false
       }
+      const resolved = await this.resolveModel(row, definition, grant.manifest, turn)
+      if ('problem' in resolved) {
+        this.modelProblem(row, resolved, turn)
+        return false
+      }
+      const same = row.selection && !row.reloadPending && row.selection.instanceId === resolved.selection.instanceId && row.selection.model === resolved.selection.model
       const registry = this.store.registry(row.botId)?.model
       // Each row's last model (#673): Talk and Work on different models take turns without a journal row each time.
       const previous = registry?.rows?.[turn.slot]
       const saved = this.recorded(row, () => {
-        this.store.setActivationSelection(row.id, resolved.selection)
-        this.store.setModel(row.botId, { selection: resolved.selection, activationId: row.id, rows: { ...registry?.rows, [turn.slot]: resolved.selection } })
-        if (!previous || previous.instanceId !== resolved.selection.instanceId || previous.model !== resolved.selection.model || previous.effort !== resolved.selection.effort)
-          this.journalInTx({
-            botId: row.botId, kind: 'model_change', lane: row.lane, activationId: row.id, sourceKey: `act:${row.id}:model:${dispatch.n}`, who: 'mousse',
-            text: 'The model changed.', json: { v: 1, row: turn.slot, from: previous ?? null, to: resolved.selection }
-          })
-        // It runs again: a line about a pick that couldn't is not the bot's problem any more.
-        if (this.store.registry(row.botId)?.error?.code === PICK_UNAVAILABLE) this.store.setError(row.botId, null)
+        if (!same) {
+          this.store.setActivationSelection(row.id, resolved.selection)
+          this.store.setModel(row.botId, { ...registry, selection: resolved.selection, activationId: row.id, rows: { ...registry?.rows, [turn.slot]: resolved.selection } })
+          if (!previous || previous.instanceId !== resolved.selection.instanceId || previous.model !== resolved.selection.model || previous.effort !== resolved.selection.effort)
+            this.journalInTx({
+              botId: row.botId, kind: 'model_change', lane: row.lane, activationId: row.id, sourceKey: `act:${row.id}:model:${dispatch.n}`, who: 'mousse',
+              text: 'The model changed.', json: { v: 1, row: turn.slot, from: previous ?? null, to: resolved.selection }
+            })
+        }
+        // It runs again: the rows on this pick are no longer stuck, and nothing is said about it.
+        if (pinned) this.clearStuckInTx(row.botId, (key, entry) => samePickTarget(entry.pick, turn.pick) && (key.startsWith('schedule:') ? row.trigger.kind === 'schedule' && key === `schedule:${row.trigger.scheduleId}` : true))
         return true
       })
       if (!saved) return false
@@ -1336,9 +1384,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** No model could run the activation: it ends, and the bot says why in plain words, with one action. */
-  private modelProblem(row: BotActivationRow, problem: { problem: BotModelProblem; until?: string; instanceId?: string; missed?: BotPickMiss }): void {
-    if (problem.problem === 'all_limited') return this.usagePause(row, problem.until, problem.instanceId)
-    if (problem.problem === 'pick_unavailable') return this.pickProblem(row, problem.missed)
+  private modelProblem(row: BotActivationRow, problem: { problem: BotModelProblem; until?: string; instanceId?: string; missed?: BotPickMiss }, turn?: BotTurnModel): void {
+    if (problem.problem === 'all_limited') return this.usagePause(row, problem.until, problem.instanceId, turn)
+    if (problem.problem === 'pick_unavailable') return this.pickProblem(row, problem.missed, turn)
     const error: BotError = problem.instanceId
       ? { text: 'Sign in so I can work.', action: { kind: 'sign_in', label: 'Sign in', instanceId: problem.instanceId } }
       : { text: 'Set up a provider so I can work.', action: { kind: 'open_providers', label: 'Open providers' } }
@@ -1346,25 +1394,155 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A model the owner picked can't run (#673): the activation ends, and nothing runs on another model or entry. The bot
-   * is stuck with Pick a model, which opens Runs on, until the owner picks again or the pick runs again (each new turn
-   * tries it). The chat says so once while the same problem lasts, naming the model and its entry; that line is kept out
-   * of everything the bot is given (`hidden`). It never counts as a failed run, so schedules don't pause over it.
+   * A model the owner picked can't run (#673): the activation ends, and nothing runs on another model or entry. Every
+   * row that holds this pick is stuck (`BotModelState.stuck`), and so is an automation's own pick: it holds until the
+   * pick runs again (`recheckStuck`, or a turn that runs on it) or the owner picks again for that row. While a work row
+   * is stuck its schedules are skipped and work for it is not started; the chat says so once per stuck row. While Talk
+   * is stuck every owner message gets the line, with no model call. The line names the model and its entry, is kept out
+   * of everything the bot is given (`hidden`), and has one action, Pick a model. It never counts as a failed run.
    */
-  private pickProblem(row: BotActivationRow, missed: BotPickMiss | undefined): void {
+  private pickProblem(row: BotActivationRow, missed: BotPickMiss | undefined, turn: BotTurnModel | undefined): void {
     const text = missed ? pickProblemText(missed) : 'I can\'t use the model picked for me.'
     const error: BotError = { text, action: { kind: 'pick_model', label: 'Pick a model' } }
+    const pick = turn?.pick && isPinned(turn.pick) ? turn.pick : undefined
+    const own = row.modelOverride?.mode === 'named'
     const ended = this.recorded(row, () => {
       if (!this.store.moveActivation(row.id, ['running', 'queued'], 'failed', { endReason: PICK_UNAVAILABLE })) return false
       this.store.closeEscalations(row.id, 'cancelled')
-      const said = this.store.registry(row.botId)?.error
-      this.store.setError(row.botId, { code: PICK_UNAVAILABLE, error })
-      if (said?.code !== PICK_UNAVAILABLE || said.error.text !== text)
+      // A pick another row already waits on was said when that row became stuck.
+      const before = this.stuckRows(row.botId)
+      const known = pick ? before.some(([, entry]) => samePickTarget(entry.pick, pick)) : false
+      if (pick) {
+        const slots = this.slotsNow(row.botId)
+        const keys: string[] = BOT_MODEL_SLOT_KEYS.filter((key) => samePickTarget(slots[key], pick) && !before.some(([held]) => held === key))
+        if (own && row.lane === 'run' && row.trigger.kind === 'schedule') keys.push(`schedule:${row.trigger.scheduleId}`)
+        const at = this.store.now()
+        this.updateModelStateInTx(row.botId, (state) => {
+          const stuck = { ...state.stuck }
+          for (const key of keys) stuck[key] = { pick: copyPick(key.startsWith('schedule:') ? pick : (slots[key as BotModelSlotKey] ?? pick)), text, at }
+          return { ...state, stuck }
+        }, pick)
+      }
+      // Talk: every owner message is answered with the line. Work: once per stuck row.
+      if (row.lane === 'chat' || !known)
         this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_pick`, hidden: true })
       this.journalEnd(row, PICK_UNAVAILABLE)
       return true
     }) ?? false
     if (ended) this.afterEnd(this.store.activation(row.id) ?? row)
+  }
+
+  // -- A picked bot's rows that can't run, and its entries' usage limits (#673) ------------------------------------
+
+  /** The bot's rows as published now; every row Mousse choosing when its definition can't be read. */
+  private slotsNow(botId: string): BotModelSlots {
+    try {
+      return this.ownerSlots(botId)
+    } catch {
+      return { ...UNPICKED_SLOTS }
+    }
+  }
+
+  /** What the engine keeps about the bot's models, changed in the caller's transaction; `placeholder` when none is kept yet. */
+  private updateModelStateInTx(botId: string, change: (state: Partial<BotModelState>) => Partial<BotModelState>, placeholder?: ProviderSelection | BotModelPick): void {
+    const current = this.store.registry(botId)?.model ?? undefined
+    const next = change({ ...current })
+    if (next.stuck && !Object.keys(next.stuck).length) delete next.stuck
+    if (next.limits && !Object.keys(next.limits).length) delete next.limits
+    // Older builds read `selection` whenever `model_json` is there: a bot that never ran keeps the pick there.
+    const selection = next.selection ?? (placeholder?.instanceId ? { instanceId: placeholder.instanceId, model: placeholder.model } : undefined)
+    if (!selection) return
+    this.store.setModel(botId, { ...next, selection, activationId: next.activationId ?? '' })
+  }
+
+  /** The rows (and automations' own picks) still stuck, with their lines: each row that still holds the pick that failed. */
+  stuckRows(botId: string): Array<[string, BotStuckEntry]> {
+    const stuck = this.store.registry(botId)?.model?.stuck
+    return stuck ? stuckRowsOf(stuck, this.slotsNow(botId)) : []
+  }
+
+  /** The line of a row that is stuck, or of an automation's own pick (`schedule:<id>`) while it is the same pick. */
+  private stuckOn(botId: string, key: string, pick?: BotModelPick): BotStuckEntry | undefined {
+    const found = this.stuckRows(botId).find(([held]) => held === key)?.[1]
+    if (!found) return undefined
+    return key.startsWith('schedule:') && !sameStoredPick(found.pick, pick) ? undefined : found
+  }
+
+  /** Clears the stuck entries `which` picks, in the caller's transaction. Nothing is said. */
+  private clearStuckInTx(botId: string, which: (key: string, entry: BotStuckEntry) => boolean): boolean {
+    const stuck = this.store.registry(botId)?.model?.stuck
+    if (!stuck) return false
+    const keep = Object.fromEntries(Object.entries(stuck).filter(([key, entry]) => entry && !which(key, entry)))
+    if (Object.keys(keep).length === Object.keys(stuck).length) return false
+    this.updateModelStateInTx(botId, (state) => ({ ...state, stuck: keep }))
+    this.store.db.afterCommit(() => this.changed({ botId }))
+    return true
+  }
+
+  /** The rows the owner picked again are no longer stuck. */
+  private clearStuckRows(botId: string, keys: readonly string[]): void {
+    if (!keys.length) return
+    this.store.db.transaction(() => this.clearStuckInTx(botId, (key) => keys.includes(key)))
+  }
+
+  /**
+   * Whether each stuck pick can run again (`maintain`, Resume): a pick that resolves now clears every entry on it,
+   * without a word. Nothing runs; only the model choice is asked.
+   */
+  async recheckStuck(botId: string): Promise<void> {
+    const models = this.host.models
+    const held = this.store.registry(botId)?.model?.stuck
+    if (!models || !held || !Object.keys(held).length) return
+    const live = this.stuckRows(botId)
+    // Entries for rows the owner picked again since are dropped here too.
+    if (live.length !== Object.keys(held).length) this.store.db.transaction(() => this.clearStuckInTx(botId, (key) => !live.some(([kept]) => kept === key)))
+    if (!live.length) return
+    let definition: BotDefinition
+    try {
+      definition = this.published(botId)
+    } catch {
+      return
+    }
+    const grant = this.store.activeGrant(botId)
+    if (!grant) return
+    const compiled = this.compileNeutral(definition.main, intersectManifest(definition.permissions, grant.manifest), { escalate: true, consult: definition.context.length > 0, memory: true }, botId)
+    if (!compiled.ok) return
+    const policy: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
+    const tried: BotModelPick[] = []
+    for (const [, entry] of live) {
+      if (tried.some((pick) => samePickTarget(pick, entry.pick))) continue
+      tried.push(entry.pick)
+      try {
+        const resolved = await models.resolve({ botId, pick: entry.pick, depth: 'normal', policy })
+        if ('selection' in resolved) this.store.db.transaction(() => this.clearStuckInTx(botId, (_key, other) => samePickTarget(other.pick, entry.pick)))
+      } catch {
+        // The next check tries again.
+      }
+    }
+  }
+
+  /**
+   * The usage limit this picked bot met on `pick`'s entry that still holds: the entry's own, or its family's (a limit
+   * the provider names for Opus or Sonnet only blocks those models there).
+   */
+  private entryLimitOf(botId: string, pick: BotModelPick): BotEntryLimit | undefined {
+    return limitOnPick(this.store.registry(botId)?.model?.limits, pick, this.now())
+  }
+
+  /** A picked bot's entry limits past their reset are forgotten: their rows run again (`maintain`). */
+  private forgetPastLimits(botId: string, now: number): void {
+    const limits = this.store.registry(botId)?.model?.limits
+    if (!limits || Object.values(limits).every((limit) => Date.parse(limit.until) > now)) return
+    this.store.db.transaction(() => this.updateModelStateInTx(botId, (state) => ({ ...state, limits: Object.fromEntries(Object.entries(state.limits ?? {}).filter(([, limit]) => Date.parse(limit.until) > now)) })))
+    this.changed({ botId })
+  }
+
+  /** What the chat is told about rows that can't run (its situation): work for them is not started. */
+  situationLines(botId: string): string[] {
+    const work = this.stuckRows(botId).map(([key]) => key).filter((key): key is BotWorkLevel => key === 'light' || key === 'medium' || key === 'hard')
+    if (!work.length) return []
+    const names = work.length === 3 ? 'Work' : work.map((key) => rowName(key)).join(' and ')
+    return [`${names} can't run now: the model picked for it can't be used. That work won't start, and its schedules are skipped. If the owner asks for such work, tell them plainly to pick a model in About → Runs on.`]
   }
 
   /**
@@ -1374,7 +1552,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `usage_limit`, without holding the run lane) and goes on in its own thread when the pause ends
    * (`maintain`, or the owner's Resume); its row says so in the same line. Anything else ends.
    */
-  private usagePause(row: BotActivationRow, until: string | undefined, instanceId: string | undefined): void {
+  private usagePause(row: BotActivationRow, until: string | undefined, instanceId: string | undefined, turn?: BotTurnModel, limitKind?: string): void {
+    if (turn?.pick && isPinned(turn.pick)) return this.entryLimitPause(row, until, turn.pick, limitKind)
     const family = instanceId ? this.providerLabel(instanceId) : undefined
     const waits = row.lane === 'run' && row.trigger.kind === 'work'
     const limit = family ? `your ${family} usage limit` : 'a usage limit'
@@ -1413,10 +1592,58 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
+   * A picked row met a usage limit (#673): only what runs on that entry waits, never the whole bot. The limit is kept
+   * by entry, or by entry and family when the provider names a window for one family only (Claude's weekly Opus or
+   * Sonnet limit), until its reset or the owner's Resume. Rows on other entries, and other models on the entry when
+   * the limit is a family's, keep running, schedules included. The chat says "Paused until 14:00 (your Claude usage
+   * limit)" once per limit. Work the owner asked for waits and goes on at the reset, on the same pick; anything else
+   * ends. Never a failed run, and no other model or entry is tried.
+   */
+  private entryLimitPause(row: BotActivationRow, until: string | undefined, pick: BotModelPick & { instanceId: string }, limitKind: string | undefined): void {
+    const provider = this.providerLabel(pick.instanceId)
+    const waits = row.lane === 'run' && row.trigger.kind === 'work'
+    const known = this.entryLimitOf(row.botId, pick)
+    const family = known ? known.family : limitFamilyOf(limitKind)
+    const retryAt = until ?? known?.until ?? new Date(this.now() + USAGE_RECHECK_MS).toISOString()
+    const limit = provider ? `your ${provider} usage limit` : 'a usage limit'
+    const text = until || known
+      ? `Paused until ${clockTime(retryAt)} (${limit})${waits ? '. I\'ll carry on with this then.' : ''}`
+      : `Paused (${limit}, with no reset time given). ${waits ? `I'll try this again every ${USAGE_RECHECK_MS / 60_000} minutes until it goes through.` : `I'll try again at ${clockTime(retryAt)}.`}`
+    const error: BotError = { text, action: { kind: 'resume', label: 'Resume' } }
+    const key = family ? `${pick.instanceId}#${family}` : pick.instanceId
+    const ended = this.recorded(row, () => {
+      if (!this.store.moveActivation(row.id, ['running', 'queued'], waits ? 'blocked' : 'failed', { endReason: 'usage_limit' })) return false
+      this.store.closeEscalations(row.id, 'cancelled')
+      const held = this.store.registry(row.botId)?.model?.limits?.[key]
+      const holds = held && Date.parse(held.until) > this.now()
+      const said = Boolean(holds && held!.said)
+      this.updateModelStateInTx(row.botId, (state) => ({
+        ...state,
+        limits: { ...state.limits, [key]: { instanceId: pick.instanceId, until: holds && Date.parse(held!.until) > Date.parse(retryAt) ? held!.until : retryAt, ...(family ? { family } : {}), said: true } }
+      }), pick)
+      if (!said) this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_limit` })
+      if (!waits) this.journalEnd(row, 'usage_limit')
+      return true
+    }) ?? false
+    if (!ended) return
+    const after = this.store.activation(row.id) ?? row
+    if (!waits) return this.afterEnd(after)
+    this.letGoOfBrowser(after)
+    this.packs.delete(row.id)
+    this.clearLiveChip(after)
+    this.changed({ botId: row.botId, activationId: row.id })
+    this.pumpLater(row.botId)
+  }
+
+  /**
    * Whether work a usage limit stopped may go on: the bot's usage pause has ended (at its reset, or the owner's Resume),
-   * and, under the owner's own pause, the reset time it waits for has passed.
+   * and, under the owner's own pause, the reset time it waits for has passed. Work on a picked row waits for its own
+   * entry's limit only (#673).
    */
   private usageResumable(row: BotActivationRow): boolean {
+    const definition = this.host.definitions.revision(row.botId, row.revision)
+    const turn = definition ? turnModelOf(definition.main, row) : undefined
+    if (turn?.pick && isPinned(turn.pick)) return !this.entryLimitOf(row.botId, turn.pick)
     if (this.store.registry(row.botId)?.pausedReason === 'usage_limit') return false
     return (this.usageWaits.get(row.id)?.at ?? 0) <= this.now()
   }
@@ -3192,6 +3419,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // the next candidate; with none left the bot pauses until the reset (never a failure).
       const limitUntil = run.status === 'failed' ? run.outcome?.usageLimitUntil : undefined
       if (limitUntil && row.selection) {
+        // A pick runs on its own entry or not at all (#673): its row waits for this entry's limit, and no other model or
+        // entry is tried. The limit is kept by the engine for this bot, by entry (and family), not the whole bot.
+        const revision = this.host.definitions.revision(row.botId, row.revision)
+        const turn = revision ? turnModelOf(revision.main, row) : undefined
+        if (turn?.pick && isPinned(turn.pick)) return this.usagePause(row, limitUntil, row.selection.instanceId, turn, run.outcome?.usageLimitKind)
         try { this.host.models?.markLimited(row.selection.instanceId, limitUntil) } catch { /* the resolve below decides */ }
         const retries = this.store.dispatches(row.id).filter((dispatch) => dispatch.send.usageRetry).length
         if (this.host.models && retries < MAX_USAGE_RETRIES) {
@@ -4600,14 +4832,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `bots.personal.resume`: every pause ends (the owner's, three failures, a usage limit), with the failure streak and the stuck error. */
   async resumeBot(botId: string): Promise<void> {
     this.entry(botId)
+    // The usage limits this bot met on its entries go too, here and in the model choice: the next turn tries again.
+    const limited = Object.values(this.store.registry(botId)?.model?.limits ?? {}).map((limit) => limit.instanceId)
     this.store.db.transaction(() => {
       this.store.setPaused(botId, null)
       this.store.setError(botId, null)
+      if (limited.length) this.updateModelStateInTx(botId, (state) => ({ ...state, limits: {} }))
     })
+    for (const instanceId of new Set(limited)) {
+      try { this.host.models?.clearLimited?.(instanceId) } catch { /* the next limit marks it again */ }
+    }
     // Work a usage limit stopped tries again now, as the owner asked.
     for (const [activationId, wait] of this.usageWaits) if (wait.botId === botId) this.usageWaits.delete(activationId)
     this.changed({ botId })
     try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
+    // A row that can't run is not paused: it clears when its pick can run again, which is checked now too.
+    await this.recheckStuck(botId).catch(() => {})
     await this.pump(botId)
   }
 
@@ -4650,6 +4890,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     setProfile: (botId, profile) => this.setProfile(botId, profile),
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice),
     ownerWords: (botId, activationId) => this.ownerWords(botId, activationId),
+    rows: (botId) => this.ownerSlots(botId),
     work: {
       start: (botId, from, input) => this.startWork(botId, from, input),
       list: (botId) => this.listWork(botId),
@@ -5008,13 +5249,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   setOwnerSlots(botId: string, rows: Partial<BotModelSlots>): void {
     this.entry(botId)
     this.publishProfile(botId, (next) => ({ ...next, main: withSlots(next.main, { ...slotsOf(next.main), ...rows }) }))
-    this.clearPickProblem(botId)
+    this.clearPickProblem(botId, Object.keys(rows))
   }
 
-  private clearPickProblem(botId: string): void {
-    if (this.store.registry(botId)?.error?.code !== PICK_UNAVAILABLE) return
-    this.store.setError(botId, null)
-    this.changed({ botId })
+  /** The rows the owner (or `use_model always`) just set are no longer stuck; other rows stay as they are. */
+  private clearPickProblem(botId: string, rows: readonly string[]): void {
+    this.clearStuckRows(botId, rows)
+    // A stuck error from an earlier build of this branch, kept bot-wide.
+    if (this.store.registry(botId)?.error?.code === PICK_UNAVAILABLE) {
+      this.store.setError(botId, null)
+      this.changed({ botId })
+    }
   }
 
   /** The bot's rows, upgraded on read (`slotsOf`): a bot from before rows has its one model on each. */
@@ -5050,13 +5295,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   setModel(botId: string, activationId: string, scope: 'now' | 'always', change: BotModelChange): { changed: boolean } {
     if ('depth' in change && !BOT_DEPTHS.includes(change.depth)) throw new BotEngineError('invalid_model', 'That is not a model choice.')
     if ('pick' in change && (!change.pick.instanceId || !change.pick.model)) throw new BotEngineError('invalid_model', 'That is not a model choice.')
+    if ('slots' in change && (scope !== 'always' || Object.entries(change.slots).some(([key, pick]) => !(BOT_MODEL_SLOT_KEYS as readonly string[]).includes(key) || !pick?.instanceId || !pick.model)))
+      throw new BotEngineError('invalid_model', 'That is not a model choice.')
     if (scope === 'always') {
       const before = this.published(botId).main
-      const after = this.publishProfile(botId, (next) => 'depth' in change
-        ? { ...next, main: { ...next.main, model: { ...next.main.model, depth: change.depth } } }
-        : { ...next, main: withSlots(next.main, slotsWith(slotsOf(next.main), change.rows ?? 'all', copyPick(change.pick))) }).main
-      if ('pick' in change) {
-        this.clearPickProblem(botId)
+      const rowsOf = (change: Exclude<BotModelChange, { depth: BotDepth }>): Partial<BotModelSlots> => 'slots' in change
+        ? Object.fromEntries(Object.entries(change.slots).map(([key, pick]) => [key, copyPick(pick!)]))
+        : slotsWith(slotsOf(before), change.rows ?? 'all', copyPick(change.pick))
+      const set = 'depth' in change ? undefined : rowsOf(change)
+      const after = this.publishProfile(botId, (next) => !set
+        ? { ...next, main: { ...next.main, model: { ...next.main.model, depth: (change as { depth: BotDepth }).depth } } }
+        : { ...next, main: withSlots(next.main, { ...slotsOf(next.main), ...set }) }).main
+      if (set) {
+        this.clearPickProblem(botId, BOT_MODEL_SLOT_KEYS.filter((key) => !samePick(slotsOf(before)[key], slotsOf(after)[key])))
         return { changed: BOT_MODEL_SLOT_KEYS.some((key) => !samePick(slotsOf(before)[key], slotsOf(after)[key])) }
       }
       // Work that names no level, and the chat of a bot from before picks (its Talk follows the depth).
@@ -5070,6 +5321,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.lane === 'run' && 'pick' in change) throw new BotEngineError('invalid_model', 'Only the owner can change this, in your chat.')
     const definition = this.host.definitions.revision(botId, row.revision) ?? this.published(botId)
     const current: BotModelOverride = row.modelOverride ?? { mode: 'auto', depth: startDepthOf(definition.main, row) }
+    if ('slots' in change) throw new BotEngineError('invalid_model', 'That is not a model choice.')
     const next: BotModelOverride = 'depth' in change
       ? { ...current, depth: change.depth }
       : { mode: 'named', ...copyPick(change.pick), model: change.pick.model, depth: current.depth }

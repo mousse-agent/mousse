@@ -7,6 +7,7 @@
  * rows, About saving against a change `use_model` made, and an automation's own pick.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { OLD_MODEL_NAME_IGNORED } from '../../src/mms/bots/activation/BotEngine'
 import { createBotModelResolver } from '../../src/mms/bots/model/BotModelResolver'
 import type { BotRuntimeHold } from '../../src/mms/bots/seams'
 import type { BotActivationTrigger, BotModelSlots, BotThreadSpec } from '../../src/shared/bots/personal/definition'
@@ -223,10 +224,11 @@ describe('a pick runs on its own entry or not at all', () => {
     expect(await chooser.resolve({ botId: 'b', pick: null, depth: 'deep', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'high' } })
   })
 
-  it('use_model finds the owner\'s words among the same choices, a subscription first, with its entry\'s sign-in', async () => {
-    expect(await resolver().pickFor('Big 2')).toMatchObject({ instanceId: 'claude', model: 'acme-big-2', credential: 'subscription', account: 'acct-1' })
-    expect(await resolver([KEY]).pickFor('big')).toMatchObject({ instanceId: 'pi:key', model: 'acme-big-2', credential: 'api_key' })
-    expect(await resolver().pickFor('grok')).toBeUndefined()
+  it('Resume forgets an entry\'s usage limit in the model choice: the next turn tries it again', async () => {
+    const limited = resolver()
+    limited.markLimited('claude', '2030-06-01T12:00:00.000Z')
+    limited.clearLimited('claude')
+    expect(await limited.resolve({ botId: 'b', pick: onSub, depth: 'normal', policy })).toMatchObject({ selection: { instanceId: 'claude' } })
   })
 })
 
@@ -330,31 +332,116 @@ describe('the engine on rows', () => {
     expect(f.bots.ownerSlots(botId)).toEqual({ talk: SUB_WORK, light: SUB_TALK, medium: SUB_TALK, hard: SUB_TALK })
   })
 
-  it('a pick that can\'t run: nothing else runs, the bot is stuck with Pick a model, and one line for the owner that the bot never sees', async () => {
-    f.bots.setOwnerSlots(botId, slotsAllOn(SUB_TALK))
+  it('Talk can\'t run: every owner message gets the line with no model call, working rows keep their schedules, and it clears by itself', async () => {
+    f.bots.setOwnerSlots(botId, { talk: SUB_TALK, light: KEY_OPUS, medium: KEY_OPUS, hard: KEY_OPUS })
+    f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines' }, 'owner')
     f.pickMiss = (pick) => (pick.instanceId === 'claude:sub' ? { label: 'Opus on Team Claude', reason: 'off' } : undefined)
     const line = 'I can\'t use Opus on Team Claude: it\'s turned off.'
     const said = () => chatOf(f, botId).filter((message) => message.error?.text === line)
+    const chats = () => f.store.listActivations(botId).filter((row) => row.lane === 'chat' && (row.trigger.input === 'Hi' || row.trigger.input === 'Again'))
     await f.bots.service.chatSend({ botId, text: 'Hi', clientRequestId: 'm1' })
     await flush()
-    // The turn never ran on the API key beside it.
+    // The turn never ran on the API key beside it, nor on anything: no model call.
     expect(f.store.listActivations(botId).filter((row) => row.selection?.instanceId === 'pi:key')).toEqual([])
     expect(said()).toMatchObject([{ kind: 'error', error: { action: { kind: 'pick_model', label: 'Pick a model' } } }])
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'stuck', error: { text: line, action: { kind: 'pick_model' } } })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'stuck', stateText: `Needs you: ${line}`, error: { text: line, action: { kind: 'pick_model' } } })
     // Journaled as a hidden kind: no pack, search or read gives it to the bot.
     const journaled = f.journal.filter((row) => row.text === line)
     expect(journaled.map((row) => row.kind)).toEqual(['model_change'])
-    // Said once while it lasts: another message, and work, fail without a second line.
+    // A second message is answered the same way: no message goes unanswered.
     await f.bots.service.chatSend({ botId, text: 'Again', clientRequestId: 'm2' })
     await flush()
-    expect(said()).toHaveLength(1)
+    expect(said()).toHaveLength(2)
+    for (const row of chats()) {
+      expect(row).toMatchObject({ status: 'failed', endReason: 'bot_pick_unavailable', selection: null })
+      expect(f.store.dispatches(row.id).every((dispatch) => dispatch.runId === null && dispatch.startedAt === null)).toBe(true)
+    }
     expect(f.store.registry(botId)).toMatchObject({ failureStreak: 0, pausedReason: null })
-    // It runs again: the bot is no longer stuck, and a later problem is said again.
+    // Work on its own entry keeps running its schedules.
+    const { inserted: [scheduled] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    const run = await start(f, scheduled!)
+    expect(run.prepared.selection).toMatchObject({ instanceId: 'pi:key', model: 'opus' })
+    await finish(f, run.payload, 'completed', { text: 'Done.' })
+    expect(f.bots.service.get(botId).summary.error?.text).toBe(line)
+    // The entry is back: the next check clears it without a word, and the messages sent meanwhile are not run.
     f.pickMiss = undefined
-    const third = await chat('Now?', 'm3')
-    expect(third.prepared.selection).toEqual({ instanceId: 'claude:sub', model: 'opus' })
-    await finish(f, third.payload, 'completed', { text: 'Yes.' })
+    const messages = chatOf(f, botId).length
+    await f.tickSchedules(new Date(f.clock.now + 60_000))
     expect(f.bots.service.get(botId).summary.error).toBeUndefined()
+    expect(chatOf(f, botId)).toHaveLength(messages)
+    expect(chats().filter((row) => row.status !== 'failed')).toEqual([])
+    const next = await chat('Now?', 'm3')
+    expect(next.prepared.selection).toEqual({ instanceId: 'claude:sub', model: 'opus' })
+  })
+
+  it('Work can\'t run while Talk can: schedules skip with the reason and no run thread, work is not started, one line, no flapping; it clears by itself', async () => {
+    f.bots.setOwnerSlots(botId, { talk: SUB_TALK, light: KEY_OPUS, medium: KEY_OPUS, hard: KEY_OPUS })
+    f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines' }, 'owner')
+    f.pickMiss = (pick) => (pick.instanceId === 'pi:key' ? { label: 'Opus on Anthropic API', reason: 'off' } : undefined)
+    const line = 'I can\'t use Opus on Anthropic API: it\'s turned off.'
+    const said = () => chatOf(f, botId).filter((message) => message.error?.text === line)
+    const runs = () => f.store.listActivations(botId).filter((row) => row.lane === 'run')
+    // The first run finds out: it ends, and the chat says so once.
+    const { inserted: [first] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    await flush()
+    expect(f.store.activation(first!)).toMatchObject({ status: 'failed', endReason: 'bot_pick_unavailable' })
+    expect(said()).toHaveLength(1)
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'stuck', error: { text: line, action: { kind: 'pick_model' } } })
+    expect(f.bots.situationLines(botId)).toEqual([expect.stringMatching(/^Work can't run now: .*won't start, and its schedules are skipped\. .*About → Runs on\.$/)])
+    // Talk still works, and a finished chat turn does not clear Work's state, nor say the line again.
+    const turn = await chat('Hi', 'm1')
+    expect(turn.prepared.selection).toEqual({ instanceId: 'claude:sub', model: 'opus' })
+    // Work the owner asks for is not started; the bot is told why.
+    await expect(f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Research it.', key: 'k1' })).rejects.toThrow(/medium work can't run now\. Pick one in About → Runs on\./)
+    await finish(f, turn.payload, 'completed', { text: 'Hello.' })
+    expect(f.bots.service.get(botId).summary.error?.text).toBe(line)
+    // Picking Talk again does not clear Work.
+    f.bots.setOwnerSlots(botId, { talk: SUB_WORK })
+    expect(f.bots.service.get(botId).summary.error?.text).toBe(line)
+    // The next occurrence is skipped with the reason, with no run made.
+    const before = runs().length
+    const { inserted } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    expect(inserted).toEqual([])
+    expect(runs()).toHaveLength(before)
+    expect(f.scheduler.listJobs().find((job) => job.bot?.botId === botId)?.botSkip).toMatchObject({ reason: 'model_unavailable' })
+    expect(said()).toHaveLength(1)
+    // The entry is back: cleared by itself, without a word, and the next occurrence runs on Work's entry.
+    f.pickMiss = undefined
+    const messages = chatOf(f, botId).length
+    await f.tickSchedules(new Date(f.clock.now + 60_000))
+    expect(f.bots.service.get(botId).summary.error).toBeUndefined()
+    expect(chatOf(f, botId)).toHaveLength(messages)
+    const { inserted: [third] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    const run = await start(f, third!)
+    expect(run.prepared.selection).toMatchObject({ instanceId: 'pi:key', model: 'opus' })
+  })
+
+  it('a stuck row clears when the owner picks again for that row', async () => {
+    f.bots.setOwnerSlots(botId, { talk: SUB_TALK, light: KEY_OPUS, medium: KEY_OPUS, hard: KEY_OPUS })
+    f.pickMiss = (pick) => (pick.instanceId === 'pi:key' ? { label: 'Opus on Anthropic API', reason: 'off' } : undefined)
+    f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines' }, 'owner')
+    await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    await flush()
+    expect(f.bots.stuckRows(botId).map(([key]) => key)).toEqual(['light', 'medium', 'hard'])
+    f.bots.setOwnerSlots(botId, { light: SUB_WORK, medium: SUB_WORK, hard: SUB_WORK })
+    expect(f.bots.stuckRows(botId)).toEqual([])
+    expect(f.bots.service.get(botId).summary.error).toBeUndefined()
+  })
+
+  it('a continuation checks the pick\'s sign-in again: an entry switched to an API key while the chat waited never runs it', async () => {
+    f.bots.setOwnerSlots(botId, slotsAllOn(SUB_TALK))
+    const turn = await chat('Hi', 'm1')
+    expect(turn.prepared.selection).toEqual({ instanceId: 'claude:sub', model: 'opus' })
+    // The turn ends at the turn cap; meanwhile the entry is switched to an API key.
+    f.pickMiss = (pick) => (pick.instanceId === 'claude:sub' ? { label: 'Opus on Claude', reason: 'sign_in_changed' } : undefined)
+    f.resolved.length = 0
+    await finish(f, turn.payload, 'failed', { outcome: { error: '[provider_turn_cap] Reached maximum number of turns (30)' } })
+    await flush()
+    expect(f.resolved.map((entry) => entry.pick?.instanceId)).toEqual(['claude:sub'])
+    expect(f.store.activation(turn.activation.id)).toMatchObject({ status: 'failed', endReason: 'bot_pick_unavailable' })
+    // The continuation was never sent.
+    expect(f.store.dispatches(turn.activation.id).slice(1).every((dispatch) => dispatch.runId === null && dispatch.startedAt === null)).toBe(true)
+    expect(chatOf(f, botId).some((message) => message.error?.text === 'I can\'t use Opus on Claude: it signs in another way now.')).toBe(true)
   })
 
   it('a usage limit on a subscription pick: the work waits for the reset and goes on, on the same entry; never on the paid key', async () => {
@@ -397,7 +484,73 @@ describe('the engine on rows', () => {
     const { inserted: [second] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
     await flush()
     expect(f.store.activation(second!)).toMatchObject({ status: 'failed', endReason: 'bot_pick_unavailable' })
-    expect(f.resolved.map((entry) => entry.pick?.model)).toEqual(['opus'])
+    // Only its own pick is ever asked for (the run, then the check whether it can run again).
+    expect(new Set(f.resolved.map((entry) => entry.pick?.model))).toEqual(new Set(['opus']))
+    // While it can't run, its later occurrences are skipped with the reason, with no run made.
+    const { inserted } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    expect(inserted).toEqual([])
+    expect(f.scheduler.listJobs().find((job) => job.bot?.botId === botId)?.botSkip).toMatchObject({ reason: 'model_unavailable' })
+  })
+
+  it('an automation saved with a model by name, on a bot whose rows are all picked, runs on Work and says so once; on a bot by usage, by name as before', async () => {
+    // Made before any bot has picks, so it starts by usage.
+    const other = (await createBot(f, { name: 'Old', description: 'From before picks.', reply: 'Hi.' })).botId
+    f.bots.setOwnerSlots(botId, { talk: SUB_TALK, light: SUB_WORK, medium: SUB_WORK, hard: SUB_WORK })
+    f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines', model: 'grok' }, 'owner')
+    const { inserted: [first] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    const run = await start(f, first!)
+    expect(run.prepared.selection).toEqual({ instanceId: 'claude:sub', model: 'sonnet' })
+    expect(f.resolved.at(-1)?.pick).toEqual(SUB_WORK)
+    await finish(f, run.payload, 'completed', { text: 'Done.' })
+    const { inserted: [second] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    await finish(f, (await start(f, second!)).payload, 'completed', { text: 'Done.' })
+    const notes = chatOf(f, botId).filter((message) => message.text === OLD_MODEL_NAME_IGNORED)
+    expect(notes.map((message) => message.activationId)).toEqual([first])
+    // A bot that still runs by usage: the automation's model by name, as before.
+    expect(f.bots.definitionOf(other).main.slots).toBeUndefined()
+    f.bots.addSchedule(other, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines', model: 'grok' }, 'owner')
+    const { inserted: [old] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    await start(f, old!)
+    expect(f.resolved.at(-1)?.pick).toEqual({ model: 'grok' })
+  })
+
+  it('a usage limit on one of two entries holds only the rows on it: the others keep their schedules; said once; Resume clears it', async () => {
+    f.bots.setOwnerSlots(botId, { talk: SUB_TALK, light: KEY_OPUS, medium: KEY_OPUS, hard: KEY_OPUS })
+    f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines' }, 'owner')
+    const until = new Date(f.clock.now + 5 * HOUR).toISOString()
+    const limits = () => chatOf(f, botId).filter((message) => message.error?.text?.startsWith('Paused until'))
+    // Talk meets its entry's limit.
+    const turn = await chat('Hi', 'm1')
+    await finish(f, turn.payload, 'failed', { outcome: { error: 'provider_usage_limit', usageLimitUntil: until } })
+    await flush()
+    expect(limits()).toHaveLength(1)
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'paused', stateText: expect.stringMatching(/^Paused until /) })
+    // Another message while limited: no call, and no second line.
+    await f.bots.service.chatSend({ botId, text: 'Again', clientRequestId: 'm2' })
+    await flush()
+    expect(limits()).toHaveLength(1)
+    // Work on the other entry keeps running its schedule.
+    const { inserted: [scheduled] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    const run = await start(f, scheduled!)
+    expect(run.prepared.selection).toMatchObject({ instanceId: 'pi:key' })
+    await finish(f, run.payload, 'completed', { text: 'Done.' })
+    // Resume clears the limit and tries again.
+    await f.bots.service.resume(botId)
+    expect(f.bots.service.get(botId).summary.state).not.toBe('paused')
+    const after = await chat('Now?', 'm3')
+    expect(after.prepared.selection).toEqual({ instanceId: 'claude:sub', model: 'opus' })
+  })
+
+  it('a limit the provider names for one family holds only that family\'s models on the entry', async () => {
+    f.bots.setOwnerSlots(botId, { talk: SUB_TALK, light: SUB_WORK, medium: SUB_WORK, hard: SUB_WORK })
+    f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines' }, 'owner')
+    const until = new Date(f.clock.now + 24 * HOUR).toISOString()
+    const turn = await chat('Hi', 'm1')
+    await finish(f, turn.payload, 'failed', { outcome: { error: 'provider_usage_limit', usageLimitUntil: until, usageLimitKind: 'seven_day_opus' } })
+    await flush()
+    // Sonnet on the same entry is not at that limit: its schedule runs.
+    const { inserted: [scheduled] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    expect((await start(f, scheduled!)).prepared.selection).toMatchObject({ instanceId: 'claude:sub', model: 'sonnet' })
   })
 
   it('a bot from before rows keeps working: its one model by name on Talk and Work', async () => {

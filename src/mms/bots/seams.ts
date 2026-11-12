@@ -1,5 +1,5 @@
 import type { BotChip } from '../../shared/bots/personal/chat'
-import type { BotDepth, BotLane, BotModelPick, BotSchedule, BotWorkLevel } from '../../shared/bots/personal/definition'
+import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
@@ -50,6 +50,8 @@ export interface BotModelResolver {
   resolve(input: { botId: string; pick: BotModelPick | null; depth: BotDepth; policy: RunPolicy }): Promise<BotModelResolution>
   /** A bot turn on `instanceId` hit its usage limit; skip it until `until`. */
   markLimited(instanceId: string, until: string): void
+  /** The owner's Resume: forget `instanceId`'s limit, so the next turn tries it again. */
+  clearLimited?(instanceId: string): void
 }
 
 /**
@@ -82,6 +84,8 @@ export interface BotToolHost {
   setModel(botId: string, activationId: string, scope: 'now' | 'always', change: BotModelChange): { changed: boolean }
   /** The owner's own words in a chat activation: its owner messages, oldest first (`use_model` checks them). */
   ownerWords(botId: string, activationId: string): string
+  /** The bot's rows as they are now (`use_model` keeps each on its entry when two entries offer the model). */
+  rows(botId: string): BotModelSlots
   /**
    * The chat's work (docs/plans/bot-always-free.md): runs beside the chat that report back. `from` is the chat
    * activation that hands it off; `key` makes a repeated call start nothing new; `level` is how hard the job is (#673).
@@ -101,8 +105,15 @@ export interface BotToolHost {
   }
 }
 
-/** What `set_depth` (a depth) or `use_model` (a pick among the Runs on choices, and with `always` the rows it goes on) changes. */
-export type BotModelChange = { depth: BotDepth } | { pick: BotModelPick & { instanceId: string }; rows?: BotModelRows }
+/**
+ * What `set_depth` (a depth) or `use_model` changes: a pick among the Runs on choices, on this chat (`now`), or with
+ * `always` on the rows given (`rows`, one pick on each), or one pick per row (`slots`: two entries offer the model, and
+ * each row stays on its own).
+ */
+export type BotModelChange =
+  | { depth: BotDepth }
+  | { pick: BotModelPick & { instanceId: string }; rows?: BotModelRows }
+  | { slots: Partial<Record<BotModelSlotKey, BotModelPick & { instanceId: string }>> }
 
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {

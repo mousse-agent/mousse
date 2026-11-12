@@ -291,17 +291,190 @@ function wordsOf(text: string): string[] {
   return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
 }
 
+/** Where `wanted` appears in `said` as whole words in a row: each start. */
+function spansOf(said: readonly string[], wanted: readonly string[]): number[] {
+  const starts: number[] = []
+  if (!wanted.length || wanted.length > said.length) return starts
+  for (let start = 0; start + wanted.length <= said.length; start += 1)
+    if (wanted.every((word, index) => said[start + index] === word)) starts.push(start)
+  return starts
+}
+
 /**
- * Whether the owner's own words name a model: one of `names` (the words `use_model` was given, the model's own name, its
- * short name, its id) appears in `owner` as whole words in a row, ignoring case and punctuation.
+ * Whether `text` holds one of `names` as whole words in a row, ignoring case and punctuation ("Opus 5.5" and "opus-5-5"
+ * are the same words).
  */
-export function ownerNamesModel(owner: string, names: readonly string[]): boolean {
+export function ownerNamesModel(text: string, names: readonly string[]): boolean {
+  const said = wordsOf(text)
+  return names.some((name) => spansOf(said, wordsOf(name)).length > 0)
+}
+
+/**
+ * Words that never name one model on their own: tiers, sizes, settings and makers many models share. A bare number
+ * never does either.
+ */
+const GENERIC_MODEL_WORDS = new Set([
+  'pro', 'mini', 'flash', 'default', 'max', 'fast', 'lite', 'light', 'turbo', 'plus', 'nano', 'ultra', 'large', 'small',
+  'medium', 'high', 'low', 'best', 'latest', 'auto', 'new', 'preview', 'instant', 'thinking', 'chat', 'model', 'code',
+  'recommended'
+])
+
+/** Makers' and brands' words: part of a full name ("GPT-5", "Claude Opus 5.5"), never one model on their own. */
+const BRAND_WORDS = new Set(['claude', 'gpt', 'gemini', 'grok', 'llama', 'openai', 'anthropic', 'google'])
+
+const NUMBER = /^\p{N}+$/u
+
+/**
+ * How a name names a model: `full` (the picker's name "Opus 5.5" or "GPT-5 mini", an id "claude-opus-5-5", a one-word
+ * id with a number in it "llama3"), `family` (one plain word such as "opus" or "haiku"), or not at all (a bare number,
+ * a generic word such as "pro", "mini" or "default", a maker's word alone, or words that are only those).
+ */
+function nameKind(words: readonly string[]): 'full' | 'family' | undefined {
+  if (!words.length) return undefined
+  if (words.length > 1) return words.some((word) => !NUMBER.test(word) && !GENERIC_MODEL_WORDS.has(word)) ? 'full' : undefined
+  const word = words[0]!
+  if (NUMBER.test(word) || GENERIC_MODEL_WORDS.has(word) || BRAND_WORDS.has(word)) return undefined
+  return /\p{N}/u.test(word) ? 'full' : 'family'
+}
+
+/** One Runs on choice as `modelsNamedBy` reads it. */
+export interface NamedModelOption {
+  instanceId: string
+  model: string
+  /** The model's own name; the picker shows it without a maker that comes before a family ("Opus 5.5"). */
+  label: string
+  /** Other names: catalog id and names, family word, route ids. */
+  names?: readonly string[]
+}
+
+/** One model the owner's words name, on each entry that offers it; `direct`: named by its own name or id there. */
+export interface NamedModel<T> {
+  options: T[]
+  direct: T[]
+}
+
+/**
+ * The models the owner's own words name among `options` (#673, `use_model`). Each counts only as whole words in a
+ * row. Full names always count: the model's name as the picker shows it, its own name, its id, its catalog names.
+ * `family`: one plain word for the model ("opus") counts too. A bare number and generic words ("pro", "mini",
+ * "flash", "default") never do. A name inside a longer name the owner said ("GPT-6" inside "GPT-6 mini") is the longer
+ * one only. The same name on two entries is one model, offered twice.
+ */
+export function modelsNamedBy<T extends NamedModelOption>(owner: string, options: readonly T[], shortName: (label: string) => string, family = false): Array<NamedModel<T>> {
   const said = wordsOf(owner)
-  return names.some((name) => {
-    const wanted = wordsOf(name)
-    if (!wanted.length || wanted.length > said.length) return false
-    for (let start = 0; start + wanted.length <= said.length; start += 1)
-      if (wanted.every((word, index) => said[start + index] === word)) return true
-    return false
+  const spans: Array<{ option: T; start: number; end: number; key: string; direct: boolean }> = []
+  for (const option of options) {
+    const own = new Set([option.label, shortName(option.label), option.model].map((name) => wordsOf(name).join(' ')))
+    const names = new Map<string, string[]>()
+    for (const name of [option.label, shortName(option.label), option.model, ...(option.names ?? [])]) {
+      const words = wordsOf(name)
+      const kind = nameKind(words)
+      if (kind === 'full' || (family && kind === 'family')) names.set(words.join(' '), words)
+    }
+    for (const [key, words] of names)
+      for (const start of spansOf(said, words)) spans.push({ option, start, end: start + words.length, key, direct: own.has(key) })
+  }
+  const kept = spans.filter((span) => !spans.some((other) => other.start <= span.start && other.end >= span.end && other.end - other.start > span.end - span.start))
+  const byKey = new Map<string, NamedModel<T>>()
+  for (const span of kept) {
+    const named = byKey.get(span.key) ?? { options: [], direct: [] }
+    if (!named.options.includes(span.option)) named.options.push(span.option)
+    if (span.direct && !named.direct.includes(span.option)) named.direct.push(span.option)
+    byKey.set(span.key, named)
+  }
+  // One option named by two of its names is one model, not two.
+  const models: Array<NamedModel<T>> = []
+  for (const named of byKey.values()) {
+    const same = models.find((other) => other.options.some((option) => named.options.includes(option)))
+    if (!same) {
+      models.push(named)
+      continue
+    }
+    for (const option of named.options) if (!same.options.includes(option)) same.options.push(option)
+    for (const option of named.direct) if (!same.direct.includes(option)) same.direct.push(option)
+  }
+  return models
+}
+
+/** The one option of `named` on `instanceId`: the only one there, else the only one named there by its own name or id. */
+export function namedOn<T extends NamedModelOption>(named: NamedModel<T>, instanceId: string): T | undefined {
+  const there = named.options.filter((option) => option.instanceId === instanceId)
+  if (there.length === 1) return there[0]
+  const direct = named.direct.filter((option) => option.instanceId === instanceId)
+  return direct.length === 1 ? direct[0] : undefined
+}
+
+/** The entries `named` is offered on, each once. */
+export function entriesOf<T extends NamedModelOption>(named: NamedModel<T>): string[] {
+  return [...new Set(named.options.map((option) => option.instanceId))]
+}
+
+// -- A row that can't run (#673) -----------------------------------------------------------------------------------
+
+/**
+ * A row whose pick can't run, or one automation's own pick that can't (`schedule:<id>`): the pick as it was when it
+ * failed, and the owner's line. It holds until the pick runs again or the owner picks again for that row.
+ */
+export interface BotStuckEntry {
+  pick: BotModelPick
+  text: string
+  at: string
+}
+
+export type BotStuckRows = Partial<Record<string, BotStuckEntry>>
+
+/** The same pick as stored: entry, model, reasoning level and what it signs in with. */
+export function sameStoredPick(a: BotModelPick | null | undefined, b: BotModelPick | null | undefined): boolean {
+  if (!a || !b) return false
+  return samePick(a, b) && (a.credential ?? '') === (b.credential ?? '') && (a.account ?? '') === (b.account ?? '')
+}
+
+/** The same model on the same entry, whatever the reasoning level: what decides whether a pick can run. */
+export function samePickTarget(a: BotModelPick | null | undefined, b: BotModelPick | null | undefined): boolean {
+  return Boolean(a && b && a.instanceId && a.instanceId === b.instanceId && a.model === b.model)
+}
+
+/**
+ * The rows still stuck: each one whose row holds the same pick as when it failed. A row the owner picked again since
+ * is not stuck any more, whatever it holds now. `schedule:` entries are kept as they are; the scheduler compares them.
+ */
+export function stuckRowsOf(stuck: BotStuckRows | undefined, slots: BotModelSlots): Array<[string, BotStuckEntry]> {
+  if (!stuck) return []
+  return Object.entries(stuck).filter((entry): entry is [string, BotStuckEntry] => {
+    const [key, value] = entry
+    if (!value) return false
+    if (key.startsWith('schedule:')) return true
+    return (BOT_MODEL_SLOT_KEYS as readonly string[]).includes(key) && sameStoredPick(slots[key as BotModelSlotKey], value.pick)
   })
+}
+
+/**
+ * The model family a provider's limit window is for, when it names one: Claude's weekly `seven_day_opus` and
+ * `seven_day_sonnet` windows hold for that family only. Any other window (`five_hour`, `seven_day`, Codex's) holds for
+ * the whole entry: undefined.
+ */
+export function limitFamilyOf(limitKind: string | undefined): string | undefined {
+  const family = /^seven_day_([a-z]+)$/.exec(limitKind ?? '')?.[1]
+  return family && family !== 'overage' && family !== 'oauth' ? family : undefined
+}
+
+/** A usage limit kept for a picked bot's entry: until when, and for one family only or the whole entry. */
+export interface BotPickLimit {
+  instanceId: string
+  until: string
+  family?: string
+}
+
+/** The kept limit that holds `pick` at `now`: its entry's, or its family's on that entry; the latest reset. */
+export function limitOnPick<T extends BotPickLimit>(limits: Record<string, T> | undefined, pick: BotModelPick, now: number): T | undefined {
+  if (!limits || !pick.instanceId) return undefined
+  const words = wordsOf(pick.model)
+  return Object.values(limits)
+    .filter((limit) => limit.instanceId === pick.instanceId && Date.parse(limit.until) > now && (!limit.family || words.includes(limit.family)))
+    .sort((a, b) => Date.parse(b.until) - Date.parse(a.until))[0]
+}
+
+/** A row's name for the owner and the bot: "Talk", "Light work". */
+export function rowName(key: BotModelSlotKey): string {
+  return key === 'talk' ? 'Talk' : `${key.charAt(0).toUpperCase()}${key.slice(1)} work`
 }

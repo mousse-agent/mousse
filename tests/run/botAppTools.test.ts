@@ -7,22 +7,37 @@ import { describe, expect, it } from 'vitest'
 import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
 import type { BotModelChange, BotToolHost } from '../../src/mms/bots/seams'
 import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
-import { botTools, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
+import { botTools, USE_MODEL_REFUSED, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
-import type { BotLane, BotSchedule } from '../../src/shared/bots/personal/definition'
+import type { BotLane, BotModelSlots, BotSchedule } from '../../src/shared/bots/personal/definition'
+import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { botScheduleLabel } from '../../src/shared/scheduleLabel'
 import { fakeAppToolHost } from './appToolsFixture'
 
-function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean } = {}) {
+/** The Runs on choices: Opus on a Claude subscription, and on a paid API key; Haiku and GPT models beside them. */
+const CHOICES: BotModelOption[] = [
+  { instanceId: 'claude', entry: 'Claude Code', model: 'claude-opus-4-6', label: 'Claude Opus 4.6', efforts: [], credential: 'subscription', account: 'acct-1', names: ['claude-opus-4-6', 'claude opus 4.6', 'opus 4.6', 'opus'] },
+  { instanceId: 'claude', entry: 'Claude Code', model: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', efforts: [], credential: 'subscription', account: 'acct-1', names: ['claude-haiku-4-5', 'claude haiku 4.5', 'haiku 4.5', 'haiku'] },
+  { instanceId: 'pi:key', entry: 'Anthropic API', model: 'claude-opus-4-6', label: 'Claude Opus 4.6', efforts: [], credential: 'api_key', names: ['claude-opus-4-6', 'claude opus 4.6', 'opus 4.6', 'opus'] },
+  { instanceId: 'pi:openai', entry: 'OpenAI', model: 'gpt-5', label: 'GPT-5', efforts: [], credential: 'api_key', names: ['gpt-5', 'gpt'] },
+  { instanceId: 'pi:openai', entry: 'OpenAI', model: 'gpt-5-mini', label: 'GPT-5 mini', efforts: [], credential: 'api_key', names: ['gpt-5-mini', 'gpt', 'mini'] },
+  { instanceId: 'pi:openai', entry: 'OpenAI', model: 'default', label: 'Default', efforts: [], credential: 'api_key', names: ['default'] }
+]
+const ON_SUB = { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'subscription' }
+const ON_KEY = { instanceId: 'pi:key', model: 'claude-opus-4-6', credential: 'api_key' }
+const ROWS_ON_SUB: BotModelSlots = { talk: ON_SUB, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots
+
+function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[] } = {}) {
   const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string }> = []
   const profiles: Array<{ name?: string; description?: string }> = []
   const models: Array<{ scope: 'now' | 'always'; choice: BotModelChange }> = []
   const works: Array<{ title: string; brief: string; key: string; level?: string }> = []
   const host = {
     // The owner's message the chat turn holds.
-    ownerWords: () => options.owner ?? 'Please use Opus from now on',
+    ownerWords: () => options.owner ?? 'Please use Opus 4.6 from now on',
+    rows: () => options.rows ?? ROWS_ON_SUB,
     activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
     schedules: {
       add: (_botId, s) => {
@@ -56,9 +71,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     }
   } as BotToolHost
   const activity = createBotActivitySink({ emit: () => {} })
-  // Only the Runs on choices: Opus on the Claude entry, a subscription.
-  const opus = { instanceId: 'claude', entry: 'Claude Code', model: 'claude-opus-4-6', label: 'Claude Opus 4.6', efforts: [], credential: 'subscription' as const, account: 'acct-1', names: ['claude-opus-4-6', 'opus 4.6', 'opus'] }
-  const deps: BotAppToolDeps = { host, activity, models: { pickFor: async (model) => (/opus/i.test(model) ? opus : undefined) } }
+  const deps: BotAppToolDeps = { host, activity, models: { pickable: async () => options.choices ?? CHOICES } }
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
   const ctx = (threadId = 'home', activationId = 'a1'): ToolCallContext => ({
     caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
@@ -152,40 +165,95 @@ describe('set_depth and use_model', () => {
     expect(bots.models).toEqual([])
   })
 
-  it('use_model takes a Runs on choice the owner named, on its own entry, for the rows they said, with a chip; it says plainly when there is none (#673)', async () => {
+  it('use_model takes the model the owner named in full, on the entry each row is on, for the rows they said, with a chip (#673)', async () => {
     const bots = fakeBots()
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'use_model', input: { model: 'Opus', scope: 'always' } })
     expect((await bots.call('use_model', { model: 'Opus', scope: 'always' })).value).toEqual({ ok: true, scope: 'always', for: 'all' })
     // The owner sees the change, never the model's name.
     expect(bots.activity.drain('d1')).toEqual([{ icon: 'think', text: 'switched models', highlight: 'from now on' }])
-    expect((await bots.call('use_model', { model: 'opus', scope: 'always', for: 'work' })).value).toMatchObject({ ok: true, for: 'work' })
-    expect((await bots.call('use_model', { model: 'opus', scope: 'now', for: 'work' })).value).toEqual({ ok: true, scope: 'now' })
-    // The pick keeps what its entry signs in with now.
+    expect((await bots.call('use_model', { model: 'opus 4.6', scope: 'always', for: 'work' })).value).toMatchObject({ ok: true, for: 'work' })
+    expect((await bots.call('use_model', { model: 'opus', scope: 'now' })).value).toEqual({ ok: true, scope: 'now' })
+    // Two entries offer it: each row stays on the subscription it is on, with what that entry signs in with now.
     const pick = { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'subscription', account: 'acct-1' }
     expect(bots.models).toEqual([
-      { scope: 'always', choice: { pick, rows: 'all' } },
-      { scope: 'always', choice: { pick, rows: 'work' } },
+      { scope: 'always', choice: { slots: { talk: pick, light: pick, medium: pick, hard: pick } } },
+      { scope: 'always', choice: { slots: { light: pick, medium: pick, hard: pick } } },
       { scope: 'now', choice: { pick } }
     ])
-    // Not among the choices: nothing changes.
-    const missing = await bots.call('use_model', { model: 'grok', scope: 'now' })
-    expect(missing.value).toMatchObject({ ok: false, reason: expect.stringContaining('not available') })
     expect(await bots.call('use_model', { model: 'opus', scope: 'always', for: 'images' })).toMatchObject({ isError: true })
-    expect(bots.models).toHaveLength(3)
   })
 
-  it('use_model always only when the owner\'s own message names the model; for this chat it needs no such words (#673)', async () => {
+  it('use_model with two entries offering the model: a row on neither of them is refused, never moved to the paid key', async () => {
+    const elsewhere = { instanceId: 'pi:openai', model: 'gpt-5' } as BotModelSlots['talk']
+    const bots = fakeBots('chat', { rows: { talk: elsewhere, light: ON_KEY, medium: ON_KEY, hard: ON_KEY } as BotModelSlots })
+    expect((await bots.call('use_model', { model: 'Opus 4.6', scope: 'always' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
+    // Work is on the API key already: it stays there.
+    expect((await bots.call('use_model', { model: 'Opus 4.6', scope: 'always', for: 'work' })).value).toMatchObject({ ok: true })
+    expect(bots.models).toEqual([{ scope: 'always', choice: { slots: { light: ON_KEY, medium: ON_KEY, hard: ON_KEY } } }])
+    // On one entry only: every row goes there.
+    const one = fakeBots('chat', { owner: 'Use Haiku 4.5 for everything from now on', rows: { talk: elsewhere, light: elsewhere, medium: elsewhere, hard: elsewhere } as BotModelSlots })
+    expect((await one.call('use_model', { model: 'haiku', scope: 'always' })).value).toMatchObject({ ok: true })
+    expect(Object.values((one.models[0]!.choice as { slots: Record<string, { instanceId: string }> }).slots).map((pick) => pick.instanceId)).toEqual(['claude', 'claude', 'claude', 'claude'])
+  })
+
+  it('use_model always needs the model\'s full name in the owner\'s own message; a family word, a number or a generic word never does (#673)', async () => {
     // The owner asked to think harder; the bot reaches for a model on its own.
     const unasked = fakeBots('chat', { owner: 'Think harder about this from now on' })
-    expect((await unasked.call('use_model', { model: 'Opus', scope: 'always' })).value).toEqual({ ok: false, reason: expect.stringContaining('Only the owner changes your model for good') })
+    expect((await unasked.call('use_model', { model: 'Opus', scope: 'always' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
     expect(unasked.models).toEqual([])
-    // The owner said the model's name, or its short name, in other words than the bot passed.
-    for (const owner of ['Switch to Claude Opus 4.6 for good', 'use opus-4.6 from now on', 'Use Opus.']) {
+    // The owner gave the full name, in other words than the bot passed.
+    for (const owner of ['Switch to Claude Opus 4.6 for good', 'use opus-4.6 from now on', 'Use Opus 4.6.', 'run claude-opus-4-6 always']) {
       const named = fakeBots('chat', { owner })
       expect((await named.call('use_model', { model: 'claude-opus-4-6', scope: 'always' })).value).toMatchObject({ ok: true })
     }
-    // A word that only contains the name is not the name.
-    expect((await fakeBots('chat', { owner: 'the opuscule' }).call('use_model', { model: 'opus', scope: 'always' })).value).toMatchObject({ ok: false })
+    // A family word alone is not enough for good, nor a word that only contains a name.
+    for (const owner of ['Use Opus.', 'the opuscule please', 'switch to haiku from now on'])
+      expect((await fakeBots('chat', { owner }).call('use_model', { model: 'opus', scope: 'always' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
+    // The bot's own words are never what is accepted: the owner named Haiku 4.5, the bot asks for Opus.
+    expect((await fakeBots('chat', { owner: 'Use Haiku 4.5 from now on' }).call('use_model', { model: 'Opus 4.6', scope: 'always' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
+    // A longer name the owner said is that model, not the shorter one inside it.
+    const mini = fakeBots('chat', { owner: 'use GPT-5 mini from now on' })
+    expect((await mini.call('use_model', { model: 'gpt-5 mini', scope: 'always', for: 'talk' })).value).toMatchObject({ ok: true })
+    expect(mini.models).toEqual([{ scope: 'always', choice: { slots: { talk: { instanceId: 'pi:openai', model: 'gpt-5-mini', credential: 'api_key' } } } }])
+  })
+
+  it('ordinary sentences with "5", "haiku", "pro", "mini" or "default" switch nothing, for now or for good (#673)', async () => {
+    const sentences = [
+      'remind me at 5',
+      'write a haiku about autumn',
+      'can you summarise this like a pro?',
+      'book the mini cooper for Saturday',
+      'leave the default settings as they are',
+      'call me at 5 and send me a haiku',
+      'I need a mini summary, pro tips only, by default'
+    ]
+    for (const owner of sentences) {
+      for (const model of ['5', 'haiku', 'pro', 'mini', 'default', 'gpt-5', 'opus']) {
+        const bots = fakeBots('chat', { owner, rows: { talk: { instanceId: 'pi:openai', model: 'gpt-5' }, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots })
+        expect((await bots.call('use_model', { model, scope: 'always' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
+        expect(bots.models).toEqual([])
+      }
+    }
+    // For this chat, a family word is enough only when it names one model on Talk's entry: "haiku" in a sentence about a
+    // poem would name Haiku 4.5 on the Claude entry, so a sentence like that is refused there too while Talk is elsewhere.
+    for (const owner of sentences) {
+      const bots = fakeBots('chat', { owner, rows: { talk: { instanceId: 'pi:openai', model: 'gpt-5' }, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots })
+      for (const model of ['5', 'haiku', 'pro', 'mini', 'default'])
+        expect((await bots.call('use_model', { model, scope: 'now' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
+      expect(bots.models).toEqual([])
+    }
+  })
+
+  it('use_model now needs the owner to name the model: a family word counts only when it names one model on Talk\'s entry (#673)', async () => {
+    // Talk is on the Claude subscription, which offers one Opus: "opus" is enough for this chat.
+    const family = fakeBots('chat', { owner: 'try opus for this one' })
+    expect((await family.call('use_model', { model: 'opus', scope: 'now' })).value).toEqual({ ok: true, scope: 'now' })
+    expect(family.models).toEqual([{ scope: 'now', choice: { pick: { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'subscription', account: 'acct-1' } } }])
+    // No words for a model at all: refused, where before it needed none.
+    expect((await fakeBots('chat', { owner: 'please think harder on this' }).call('use_model', { model: 'opus', scope: 'now' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
+    // A family word names two models on Talk's entry: refused.
+    const two = fakeBots('chat', { owner: 'use gpt for this', rows: { talk: { instanceId: 'pi:openai', model: 'gpt-5' }, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots })
+    expect((await two.call('use_model', { model: 'gpt', scope: 'now' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
   })
 })
 

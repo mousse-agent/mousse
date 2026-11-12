@@ -2032,9 +2032,11 @@ export class MmsProfileServices {
     // What its work is doing and what it will say later, so a chat turn answers "how's it going?" without a tool.
     const work = engine.listWork(botId).now
     const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.text }))
+    // Work rows whose model can't run (#673): the chat can tell the owner why such work does not start.
+    const blocked = engine.situationLines(botId)
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      work, ...(reminders.length ? { reminders } : {})
+      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {})
     }
   }
 

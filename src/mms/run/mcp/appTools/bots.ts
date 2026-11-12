@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotSchedule } from '../../../../shared/bots/personal/definition'
-import { ownerNamesModel, workLevelOf } from '../../../../shared/bots/personal/modelSlots'
+import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
+import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../../shared/bots/personal/methods'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
@@ -99,7 +99,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'use_model',
-    description: 'Only when the owner names a model in their message: use it, as they said it. now: for this conversation. always: from now on, for talking, for work, or both (all); only when this message of theirs names the model. If it is not available here, say so plainly and carry on.',
+    description: 'Only when the owner names a model in their message: use it, as they said it. now: for this conversation. always: from now on, for talking, for work, or both (all); only when this message of theirs gives the model\'s full name. If nothing changes, tell the owner plainly to pick it in About → Runs on, and carry on.',
     parameters: Type.Object({
       model: Type.String({ description: 'The model, in the owner\'s words.' }),
       scope: SCOPE,
@@ -168,10 +168,49 @@ export interface BotAppToolDeps {
   /** Outcome chips: new schedules, renames, depth. */
   activity?: BotActivitySink
   /**
-   * `use_model`: the Runs on choice the owner's words name, among the same ones the picker offers
-   * (`BotModelChooser.pickFor`), with the entry's sign-in now, which the pick keeps.
+   * `use_model`: the same choices the picker offers (`BotModelChooser.pickable`), each with its entry's sign-in now,
+   * which the pick keeps.
    */
-  models?: { pickFor(model: string): Promise<BotModelOption | undefined> }
+  models?: { pickable(): Promise<BotModelOption[]> }
+}
+
+/** `use_model`'s one line when nothing changes. */
+export const USE_MODEL_REFUSED = 'Nothing changed. Ask the owner to pick the model in About → Runs on.'
+
+/**
+ * The model the owner's own message names for `use_model` (#673), on the rows it would go on, or undefined (refused).
+ *
+ * - `always` (`rows`: Talk, Work or both): the message holds a full name of exactly one offered model, as whole words:
+ *   its name as the picker shows it ("Opus 5.5"), its own name or its id. A family word ("opus"), a bare number and
+ *   generic words ("pro", "mini", "default") never do. Offered on one entry: every row goes there. Offered on two:
+ *   each row stays on the entry it is on, when that entry offers it; otherwise it is refused.
+ * - `now` (this chat, Talk's row): a full name as above, kept on Talk's entry when two entries offer it; or else a
+ *   family word, as a whole word, when it names exactly one model among the choices on Talk's entry (all choices
+ *   while Talk has no pick on an entry).
+ */
+export function ownerModelChoice(owner: string, options: readonly BotModelOption[], scope: 'now' | 'always', rows: BotModelRows, current: BotModelSlots): Partial<Record<BotModelSlotKey, BotModelOption>> | undefined {
+  if (!owner.trim() || !options.length) return undefined
+  const keys: BotModelSlotKey[] = scope === 'now' ? ['talk'] : rows === 'talk' ? ['talk'] : rows === 'work' ? ['light', 'medium', 'hard'] : ['talk', 'light', 'medium', 'hard']
+  const place = (named: NamedModel<BotModelOption>): Partial<Record<BotModelSlotKey, BotModelOption>> | undefined => {
+    const entries = entriesOf(named)
+    const placed: Partial<Record<BotModelSlotKey, BotModelOption>> = {}
+    for (const key of keys) {
+      const onRow = current[key]?.instanceId
+      const option = entries.length === 1 ? namedOn(named, entries[0]!) : onRow ? namedOn(named, onRow) : undefined
+      if (!option) return undefined
+      placed[key] = option
+    }
+    return placed
+  }
+  const full = modelsNamedBy(owner, options, shortModelName)
+  if (full.length > 1) return undefined
+  if (full.length === 1) return place(full[0]!)
+  if (scope === 'always') return undefined
+  const entry = current.talk?.instanceId
+  const pool = entry ? options.filter((option) => option.instanceId === entry) : options
+  const family = modelsNamedBy(owner, pool, shortModelName, true)
+  if (family.length !== 1 || family[0]!.options.length !== 1) return undefined
+  return { talk: family[0]!.options[0]! }
 }
 
 const NOT_A_BOT = 'Only a bot can use this.'
@@ -494,17 +533,20 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (!scope) return error('scope is now or always.')
         const rows = args.for === undefined ? 'all' : args.for === 'talk' || args.for === 'work' || args.for === 'all' ? args.for : undefined
         if (!rows) return error('for is talk, work or all.')
-        // Only among the choices About → Runs on offers, each on its own entry; the owner sees the change there and as a chip.
-        const option = call.deps.models ? await call.deps.models.pickFor(model) : undefined
-        if (!option) return json({ ok: false, reason: 'That model is not available here. You stay as you were; tell the owner plainly, without naming other models.' })
-        // For good only when the owner named it in this message: their words must hold a name of the model (as given here,
-        // its own name or short name, its id, its catalog names or family word), as whole words in a row, ignoring case
-        // and punctuation ("Opus 5.5" and "opus-5-5" are the same words).
-        if (scope === 'always' && !ownerNamesModel(call.deps.host.ownerWords(call.botId, call.activationId), [model, option.label, shortModelName(option.label), option.model, ...(option.names ?? [])]))
-          return json({ ok: false, reason: 'Only the owner changes your model for good, by naming it in their message. Nothing changed; if they want it, ask them to say which model.' })
-        const pick = { instanceId: option.instanceId, model: option.model, ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) }
+        // Only among the choices About → Runs on offers, each on its own entry, and only the model the owner's own message
+        // names (`ownerModelChoice`); the bot's words never choose it. The owner sees the change there and as a chip.
+        const options = call.deps.models ? await call.deps.models.pickable().catch(() => []) : []
+        const host = call.deps.host
+        const current = host.rows(call.botId)
+        const chosen = ownerModelChoice(host.ownerWords(call.botId, call.activationId), options, scope, rows, current)
+        // The bot's own words must name the same model: it never points the owner's words at another one.
+        const named = chosen && Object.values(chosen)[0]
+        if (!chosen || !named || ![named.label, shortModelName(named.label), named.model, ...(named.names ?? [])].some((name) => ownerNamesModel(name, [model])))
+          return json({ ok: false, reason: USE_MODEL_REFUSED })
+        const stamp = (option: BotModelOption) => ({ instanceId: option.instanceId, model: option.model, ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) })
         try {
-          call.deps.host.setModel(call.botId, call.activationId, scope, { pick, ...(scope === 'always' ? { rows } : {}) })
+          if (scope === 'now') host.setModel(call.botId, call.activationId, 'now', { pick: stamp(named) })
+          else host.setModel(call.botId, call.activationId, 'always', { slots: Object.fromEntries(Object.entries(chosen).map(([key, option]) => [key, stamp(option)])) })
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
         }

@@ -64,6 +64,8 @@ export interface RunOutcome {
    * scheduler records the occurrence as waiting and runs the job again then.
    */
   usageLimitUntil?: string
+  /** With `usageLimitUntil`: the window the provider named (`five_hour`, `seven_day_opus`), when it named one. */
+  usageLimitKind?: string
   /**
    * `bot_wall`: a personal bot's dispatch ended at a wall (PR 6 §5); the run engine never retries it.
    * `agent`: another thread's agent stopped the run (`thread_interrupt`); it settles as a user's Stop does (`stoppedByPerson`).
