@@ -106,6 +106,8 @@ import MoreVerticalIcon from '@hugeicons/core-free-icons/MoreVerticalIcon'
 import NetworkIcon from '@hugeicons/core-free-icons/NetworkIcon'
 import Notification02Icon from '@hugeicons/core-free-icons/Notification02Icon'
 import PaletteIcon from '@hugeicons/core-free-icons/PaletteIcon'
+import TextFontIcon from '@hugeicons/core-free-icons/TextFontIcon'
+import AppWindowIcon from '@hugeicons/core-free-icons/AppWindowIcon'
 import PanelLeftIcon from '@hugeicons/core-free-icons/PanelLeftIcon'
 import PanelRightCloseIcon from '@hugeicons/core-free-icons/PanelRightCloseIcon'
 import PanelRightOpenIcon from '@hugeicons/core-free-icons/PanelRightOpenIcon'
@@ -275,6 +277,8 @@ export const MoreVertical = /* @__PURE__ */ createIcon('MoreVertical', MoreVerti
 export const MousePointer2 = /* @__PURE__ */ createIcon('MousePointer2', Cursor01Icon)
 export const Network = /* @__PURE__ */ createIcon('Network', NetworkIcon)
 export const Palette = /* @__PURE__ */ createIcon('Palette', PaletteIcon)
+export const TextFont = /* @__PURE__ */ createIcon('TextFont', TextFontIcon)
+export const AppWindow = /* @__PURE__ */ createIcon('AppWindow', AppWindowIcon)
 export const PanelLeft = /* @__PURE__ */ createIcon('PanelLeft', PanelLeftIcon)
 export const PanelRightClose = /* @__PURE__ */ createIcon('PanelRightClose', PanelRightCloseIcon)
 export const PanelRightOpen = /* @__PURE__ */ createIcon('PanelRightOpen', PanelRightOpenIcon)

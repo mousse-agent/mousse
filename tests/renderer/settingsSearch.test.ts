@@ -16,6 +16,7 @@ import { getDefaultSettings, type SettingsOptions } from '../../src/shared/setti
 const PAGES: SettingsSearchPage[] = [
   { id: 'general', label: 'General', keywords: ['notification'] },
   { id: 'appearance', label: 'Appearance', keywords: ['theme'] },
+  { id: 'chat', label: 'Chat', keywords: ['conversation', 'composer', 'width'] },
   { id: 'activity', label: 'Activity', keywords: ['heatmap'] },
   { id: 'providers', label: 'Providers', keywords: ['api key', 'subscription'] },
   { id: 'agents', label: 'Agents', keywords: ['context'] },
@@ -191,6 +192,26 @@ describe('landing on a search result', () => {
     }
   })
 
+  it('lands on a Chat setting by its old Appearance anchor', () => {
+    for (const [from, to] of [
+      ['appearance-chat-width', 'chat-width'],
+      ['appearance-render-math', 'chat-render-math'],
+      ['appearance-reply-pacing', 'chat-reply-pacing'],
+      ['appearance-turn-changed-files', 'chat-turn-changed-files'],
+      ['appearance-context-ring', 'chat-context-ring'],
+      ['appearance-frosted-composer', 'chat-frosted-composer']
+    ]) expect(settingsSearchEntry(from), from).toMatchObject({ anchor: to, section: 'chat' })
+    act(() => root.render(createElement(SettingsRow, {
+      title: 'Context ring',
+      anchor: 'chat-context-ring',
+      control: createElement('button', { type: 'button' }, 'On')
+    })))
+    const done = vi.fn()
+    landOnSettingsAnchor(host, 'appearance-context-ring', { onMissing: vi.fn(), onFound: vi.fn(), onDone: done })
+    expect(done).toHaveBeenCalledOnce()
+    expect(document.activeElement?.textContent).toBe('On')
+  })
+
   it('opens the disclosure a setting sits in', () => {
     act(() => root.render(createElement('details', null,
       createElement('summary', null, 'Advanced'),
@@ -292,7 +313,7 @@ describe('the settings sidebar', () => {
     const groups = new Map<string, string[]>()
     for (const page of pages) groups.set(page.group, [...(groups.get(page.group) ?? []), page.label])
     expect(Object.fromEntries(groups)).toEqual({
-      App: ['General', 'Appearance', 'Speech', 'Shortcuts'],
+      App: ['General', 'Appearance', 'Chat', 'Speech', 'Shortcuts'],
       Agents: ['Providers', 'Agents', 'Skills & MCP'],
       'This computer': ['Devices', 'Storage', 'Activity', 'Labs']
     })
