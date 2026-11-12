@@ -89,8 +89,11 @@ export function botBrowserWorkspace(botId: string): string {
   return `botbrowser_${botId}`
 }
 
-/** A frame asked for again within this long is the same frame. */
-const FRAME_REUSE_MS = 300
+/**
+ * A frame asked for again within this long is the same frame (two views of one browser share it).
+ * Short: the worker answers from the tab's screencast, so a fresh frame costs little.
+ */
+const FRAME_REUSE_MS = 30
 /** The owner counts as watching for this long after their view last asked for a frame. */
 const WATCHING_MS = 30_000
 /** Activations remembered per bot for its previews. */
@@ -198,7 +201,7 @@ export class BotBrowsers implements BotBrowserHost {
     const last = state.lastFrame?.frame
     const live = [...state.activations.entries()].filter(([, entry]) => !entry.ended).map(([id]) => id)
     const activationId = live.reverse().find((id) => state.used.includes(id))
-    const frame: BotBrowserFrame | undefined = last ? { data: last.data, mimeType: 'image/jpeg', width: last.width, height: last.height, viewport: last.viewport, at: state.lastFrame!.at } : undefined
+    const frame: BotBrowserFrame | undefined = last ? { data: last.data, mimeType: 'image/jpeg', width: last.width, height: last.height, viewport: last.viewport, at: Date.parse(last.capturedAt) || state.lastFrame!.at } : undefined
     return {
       open,
       control: record?.lifecycle === 'human-controlled' ? 'owner' : 'bot',

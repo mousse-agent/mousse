@@ -28,6 +28,7 @@ import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '.
 import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/ReferenceStore'
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
+import { SCREENCAST_MAX_HEIGHT, TabScreencast } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
 import { dispatchAction, dispatchHumanInput, navigateAndWaitForLoad, waitForLoad } from '../action/dispatch'
 import { ScopedActionJournal } from '../action/journal'
@@ -105,6 +106,8 @@ export class ManagedSession {
   private cursor: BrowserAgentCursor | undefined
   /** The tab last brought to the front (`toFront`). */
   private frontTargetId = ''
+  /** The screencast of the tab a person watches (`frame()`), started on the first picture asked for. */
+  private screencast: TabScreencast | null = null
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -261,6 +264,8 @@ export class ManagedSession {
       navigated.frameId = frame.id ?? navigated.frameId
       navigated.url = sanitizeUrl(frame.url ?? navigated.url)
       navigated.documentId = 'doc_' + randomUUID()
+      // Chromium sends no more screencast pictures once a new page commits: the next one restarts it.
+      this.screencast?.forget(navigated.cdpSessionId)
       this.refs.invalidateTab(navigated.publicId)
       this.touch()
     })
@@ -275,6 +280,7 @@ export class ManagedSession {
       }
       const detached = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
       if (detached) {
+        this.screencast?.forget(detached.cdpSessionId)
         this.refs.invalidateTab(detached.publicId)
         this.tabs.delete(detached.publicId)
         if (this.activeTabId === detached.publicId) this.activeTabId = this.tabs.keys().next().value ?? ''
@@ -306,6 +312,8 @@ export class ManagedSession {
     }
     await Promise.allSettled([...this.ops])
     await Promise.allSettled([...this.frameEnables.values()])
+    this.screencast?.dispose()
+    this.screencast = null
     const chrome = this.chrome
     try {
       if (chrome) await chrome.stop()
@@ -384,6 +392,7 @@ export class ManagedSession {
     this.throwIfUnavailable(signal)
     this.refs.invalidateTab(tabId)
     await chrome.cdp.send('Target.closeTarget', { targetId: tab.targetId }, { signal })
+    this.screencast?.forget(tab.cdpSessionId)
     this.tabs.delete(tabId)
     if (this.activeTabId === tabId) this.activeTabId = this.tabs.keys().next().value ?? ''
     this.touch()
@@ -698,30 +707,39 @@ export class ManagedSession {
   /**
    * A live picture of a tab for a person watching (a bot's browser view): a JPEG of the visible
    * viewport, and the agent cursor while it is recent. Not an observation: no refs, no artifact, and
-   * nothing a model reads.
+   * nothing a model reads. The tab's screencast keeps its latest painted picture, so a viewer asking
+   * often gets each change as soon as it is painted; until its first one, or when it is stale, a
+   * picture is taken here.
    */
   async frame(params: Record<string, unknown>): Promise<BrowserViewerFrame> {
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
     const cdp = this.requireChrome().cdp
     await this.toFront(tab)
-    const metrics = await cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
+    const maxWidth = typeof params.maxWidth === 'number' && params.maxWidth >= 160 ? Math.min(params.maxWidth, 1920) : 960
+    this.screencast ??= new TabScreencast(cdp, { now: () => this.clock().getTime() })
+    const [painted, metrics] = await Promise.all([
+      this.screencast.watch(tab.cdpSessionId, maxWidth),
+      cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
+    ])
     const visual = metrics.cssVisualViewport ?? {}
     const width = visual.clientWidth && visual.clientWidth > 0 ? visual.clientWidth : 1280
     const height = visual.clientHeight && visual.clientHeight > 0 ? visual.clientHeight : 720
-    const maxWidth = typeof params.maxWidth === 'number' && params.maxWidth >= 160 ? Math.min(params.maxWidth, 1920) : 960
+    const now = this.clock()
+    const cursor = this.cursor?.tabId === tab.publicId && agentCursorLive(this.cursor, now.getTime()) ? this.cursor : undefined
+    const picture = { tabId: tab.publicId, url: tab.url, title: boundText(tab.title, 512), mimeType: 'image/jpeg' as const, viewport: { width, height }, ...(cursor ? { cursor } : {}) }
+    if (painted) {
+      // The screencast fits the whole viewport (scrollbars overlay the page) in maxWidth × its height cap.
+      const scale = Math.min(1, maxWidth / width, SCREENCAST_MAX_HEIGHT / height)
+      return { ...picture, data: painted.data, width: Math.round(width * scale), height: Math.round(height * scale), capturedAt: new Date(painted.at).toISOString() }
+    }
     const scale = Math.min(1, maxWidth / width)
     // The clip is in page coordinates: the visible viewport starts at the scroll offset.
     const shot = await cdp.send<{ data: string }>('Page.captureScreenshot', {
       format: 'jpeg', quality: 60, fromSurface: true, captureBeyondViewport: false,
       clip: { x: visual.pageX ?? 0, y: visual.pageY ?? 0, width, height, scale }
     }, { sessionId: tab.cdpSessionId, timeoutMs: 10_000 })
-    const now = this.clock()
-    const cursor = this.cursor?.tabId === tab.publicId && agentCursorLive(this.cursor, now.getTime()) ? this.cursor : undefined
-    return {
-      tabId: tab.publicId, url: tab.url, title: boundText(tab.title, 512), data: shot.data, mimeType: 'image/jpeg',
-      width: Math.round(width * scale), height: Math.round(height * scale), viewport: { width, height },
-      capturedAt: nowIso(this.clock), ...(cursor ? { cursor } : {})
-    }
+    this.screencast.keep(tab.cdpSessionId, shot.data)
+    return { ...picture, data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), capturedAt: nowIso(this.clock) }
   }
 
   /** A person's input while they hold the session (`control.take` as human): trusted input on the tab. */
