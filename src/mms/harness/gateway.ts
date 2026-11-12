@@ -221,6 +221,8 @@ export interface HarnessGateway {
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>
   /** The model's name as Mousse shows it: the instance's listing (an instance id, or a provider name), else a name it listed before, else one made from the id. */
   modelName(instanceId: string, model: string): string
+  /** The name of the agent a model runs on, as Mousse shows it (an instance id, or a provider name): Claude Code, Codex, a Pi provider's name. */
+  providerName(instanceId: string): string
   /**
    * Issue #142: the instance's look at the user's own setup before a delegated child runs on it
    * (`ProviderAdapter.childPreflight`); null when nothing stands in the way. Reads, never changes.
@@ -2014,17 +2016,31 @@ export class Harness implements HarnessGateway {
    * a name made from its id. Never the stored string with its level.
    */
   modelName(named: string, model: string): string {
-    // Callers holding only a provider name (older selections, a default set by provider) get its instance.
-    let instanceId = named
-    try {
-      if (!this.instanceMap.get(named)) instanceId = this.instanceMap.instanceIdOf({ llmProvider: named }) || named
-    } catch {
-      // Unknown either way: the name is made from the id.
-    }
+    const instanceId = this.namedInstance(named)
     const listed = findListedModel(this.recordOrUndefined(instanceId)?.runtime.models() ?? [], model)
     const { modelId } = modelChoiceOf({ provider: instanceId, model })
     const label = listed?.label?.trim() || findListedModel(this.prefs.get(instanceId).custom, model)?.label || this.names.get(instanceId)[modelId]
     return modelChoiceOf({ provider: instanceId, model }, label).name
+  }
+
+  providerName(named: string): string {
+    const record = this.recordOrUndefined(this.namedInstance(named))
+    if (!record) return named
+    if (record.entry.driver === 'pi') {
+      const providerId = piProviderIdOf(record.instanceId) ?? record.instanceId
+      return this.options.piDisplayName?.(providerId) ?? providerId
+    }
+    return record.driver.label
+  }
+
+  /** The instance an instance id or a provider name means: callers holding only a provider name (older selections, a default set by provider) get its instance. */
+  private namedInstance(named: string): string {
+    try {
+      if (!this.instanceMap.get(named)) return this.instanceMap.instanceIdOf({ llmProvider: named }) || named
+    } catch {
+      // Unknown either way: the name is used as it is.
+    }
+    return named
   }
 
   /** The names listings gave models the instance does not list now, for a selection that still names one. */

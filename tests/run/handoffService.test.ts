@@ -183,7 +183,9 @@ describe('provider switch through the orchestrator (SPEC §16.1)', () => {
     const turn = claude.turns[0]
     expect(turn.nativeHistory).toBe('')
     expect(turn.prompt).toBe(
-      '<handoff strategy="full_summary" covered="1" items="2/2">\n[user] First question\n[assistant] pi answered: First question\n</handoff>\n\nSecond question'
+      '<handoff strategy="full_summary" covered="1" items="2/2">\n[user] First question\n[assistant] pi answered: First question\n</handoff>\n\n' +
+      // The new model is told it is a different one, after the history and before the person's message.
+      '[Mousse] Model change: you are now Claude Sonnet (Test claude). The earlier assistant replies in this thread were written by GPT-Replay (openai).\n\nSecond question'
     )
     expect(blockedSwitch).toMatchObject({ code: 'handoff_pending' })
 
@@ -201,7 +203,7 @@ describe('provider switch through the orchestrator (SPEC §16.1)', () => {
     const sent = pi.turns[1].prompt
     expect(sent.startsWith('<handoff strategy="delta" covered="2"')).toBe(true)
     expect(sent).toContain('[user] Second question')
-    expect(sent.endsWith('</handoff>\n\nThird question')).toBe(true)
+    expect(sent.endsWith('</handoff>\n\n[Mousse] Model change: you are now GPT-Replay (openai). The earlier assistant replies in this thread were written by GPT-Replay (openai) and Claude Sonnet (Test claude). The latest one was written by Claude Sonnet (Test claude).\n\nThird question')).toBe(true)
     // The canonical transcript keeps every turn: the delta prefix was not persisted over it.
     const canonical = d.orch.getNativeContext(thread.id).messages
     expect(canonical.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['First question', 'Second question', 'Third question'])
