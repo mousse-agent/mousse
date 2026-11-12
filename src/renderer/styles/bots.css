@@ -10,11 +10,11 @@
 .bot-roster .bot-roster-unread { position: absolute; top: 4px; right: 3px; z-index: 1; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
 .chat-list-row .bot-unread { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: grid; place-items: center; font-size: 10px; font-weight: 600; background: var(--accent); color: var(--surface-strong, #18151c); }
 
-/* Header: the face, the name and what it does; one menu. */
+/* Header: the face and the name on one line (what it does is in About); one menu. */
 .bot-header-about { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; text-align: left; color: inherit; border-radius: 9px; }
 .bot-header-about > div { min-width: 0; }
-.bot-header-about h1 { display: flex; align-items: center; gap: 4px; font-size: 15px; font-weight: 600; margin: 0 0 4px; }
-.bot-header-about span { display: block; font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app .bot-header-about h1 { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 20px; font-weight: 600; margin: 0; }
+.bot-conversation > .chat-conversation-header { padding-block: 12px; }
 .bot-menu-root { position: relative; margin-left: auto; }
 .bot-header-more { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--text-secondary); }
 .bot-header-more:hover, .bot-header-more.is-open { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
@@ -28,6 +28,14 @@
    easing to 78% on a wide one, and never wider than 1200px. Both gutters are kept so the column stays centred under
    the composer. */
 .bot-conversation { --bot-column: min(calc(100% - 32px), 1200px, max(78%, calc(44% + 510px))); }
+/* The thread's type scale: messages at the chat body size (1rem, 14px), the owner's with a thread prompt's line
+   height and the bot's with a reply's; names, times, labels and day lines at the thread's small meta size
+   ("Worked for"). */
+.bot-conversation { --bot-text: 1rem; --bot-meta: 12.5px; }
+.bot-conversation .chat-message-markdown.chat-markdown { font-size: var(--bot-text); line-height: 1.65; }
+.bot-conversation .bot-you-bubble.chat-markdown { line-height: 1.5; }
+.bot-conversation .chat-message-meta { font-size: var(--bot-meta); line-height: 18px; margin-bottom: 4px; }
+.bot-conversation .chat-run-status { font-size: var(--bot-meta); }
 .bot-conversation .chat-transcript { padding: 12px 0 20px; scrollbar-gutter: stable both-edges; }
 .bot-conversation .chat-transcript > * { width: var(--bot-column); margin-inline: auto; box-sizing: border-box; }
 
@@ -40,20 +48,20 @@
 .bot-conversation .chat-participant-message.bot-you:not(.is-group-start) { margin-top: 3px; }
 .bot-conversation .chat-participant-message.is-quoted:not(.is-group-start) { margin-top: 14px; }
 .chat-participant-message > .bot-message-face { margin-top: -2px; }
-.bot-message-gutter { flex: none; display: flex; justify-content: flex-end; width: 40px; padding-top: 2px; }
-.bot-group-time { margin-top: 5px; font-size: 11px; line-height: 14px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.bot-message-gutter { flex: none; display: flex; justify-content: flex-end; width: 36px; padding-top: 2px; }
+.bot-group-time { margin-top: 5px; font-size: var(--bot-meta); line-height: 16px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .bot-group-time[data-author='owner'] { text-align: right; padding-right: 6px; }
-.bot-group-time[data-author='bot'] { padding-left: 52px; }
+.bot-group-time[data-author='bot'] { padding-left: 48px; }
 /* A new day: its name, small and centred on a faint tint. */
 .bot-day { display: flex; justify-content: center; margin-top: 26px; }
-.bot-day > span { padding: 3px 10px; border-radius: 999px; font-size: 11px; line-height: 16px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 8%, transparent); }
+.bot-day > span { padding: 2px 10px; border-radius: 999px; font-size: var(--bot-meta); line-height: 18px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 8%, transparent); }
 
 /* The owner's are right-aligned bubbles; in a group, the bubbles under the first square their top corner. */
 .chat-participant-message.bot-you { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; padding-left: 20%; }
 .chat-participant-message.bot-you.is-pending { opacity: .7; }
 .bot-you-line { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
 .bot-you-content { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 0; max-width: 100%; }
-.bot-you-bubble { max-width: 100%; padding: 9px 14px; border-radius: 18px 18px 5px 18px; background: rgba(var(--accent-rgb), .2); color: var(--text-primary); }
+.bot-you-bubble { max-width: 100%; padding: 7px 13px; border-radius: 16px 16px 5px 16px; background: rgba(var(--accent-rgb), .2); color: var(--text-primary); }
 .bot-you:not(.is-group-start) .bot-you-bubble { border-top-right-radius: 6px; }
 .bot-you-bubble p { margin: 0 0 8px; }
 .bot-you-bubble p:last-child { margin-bottom: 0; }
@@ -66,7 +74,7 @@
   --quote-bg-hover: color-mix(in srgb, var(--bot-colour, var(--text-secondary)) 18%, transparent);
   --quote-mark: var(--bot-colour, var(--text-secondary));
   display: flex; align-items: center; gap: 7px; min-width: 0; padding: 4px 10px 4px 8px; border-radius: 8px;
-  font-size: 12px; line-height: 18px; color: color-mix(in srgb, var(--text-primary) 78%, transparent); background: var(--quote-bg);
+  font-size: var(--bot-meta, 12.5px); line-height: 18px; color: color-mix(in srgb, var(--text-primary) 78%, transparent); background: var(--quote-bg);
 }
 /* The owner's: the tint of their own bubbles (.bot-you-bubble), with accent text. */
 .bot-quote[data-author='owner'] {
@@ -92,19 +100,19 @@
 .bot-replying button:hover { background: var(--quote-bg-hover); color: var(--text-primary); }
 @media (prefers-reduced-motion: reduce) { .chat-participant-message.is-shown { animation: none; } .bot-reply-button { transition: none; } }
 .bot-you-files { display: flex; flex-wrap: wrap; gap: 6px; }
-.bot-file-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 8px; font-size: 11px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+.bot-file-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 8px; font-size: var(--bot-meta, 12.5px); line-height: 18px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
 .bot-loading-older { text-align: center; }
 /* The chat's first load: a quiet line in the middle, or what failed with Retry. */
-.bot-conversation .chat-transcript > .bot-load-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 100%; font-size: 12px; color: var(--text-secondary); }
+.bot-conversation .chat-transcript > .bot-load-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 100%; font-size: var(--bot-meta); color: var(--text-secondary); }
 .bot-load-state.is-failed button { padding: 5px 11px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
 .bot-load-state.is-failed button:hover { background: color-mix(in srgb, var(--text-secondary) 18%, transparent); }
 /* A reminder or a work report says so in a small label: beside the name, or above the text later in a group. */
-.bot-message-label { padding: 1px 7px; border-radius: 6px; font-size: 11px; line-height: 16px; font-weight: 500; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 10%, transparent); }
+.bot-message-label { padding: 1px 7px; border-radius: 6px; font-size: var(--bot-meta, 12.5px); line-height: 18px; font-weight: 500; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 10%, transparent); }
 .bot-message-label.is-own-line { display: inline-block; margin-bottom: 7px; }
 
 /* One-line activity chips: quiet, never a tool log. */
 .bot-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.bot-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 11px; border-radius: 9px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); color: var(--text-secondary); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11px; }
+.bot-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 11px; border-radius: 9px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); color: var(--text-secondary); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 12px; }
 .bot-chip b { font-weight: 500; color: var(--accent); }
 .bot-chip.is-live svg { animation: chat-spin 1s linear infinite; }
 .chat-run-status .bot-chip { margin-left: 4px; }
@@ -112,20 +120,20 @@
 
 /* Asking for something, inside the bot's message; the approval look (#590). */
 .ask-card { margin-top: 12px; max-width: 520px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(var(--accent-rgb), .28); background: rgba(var(--accent-rgb), .06); }
-.ask-card-title { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-primary); }
+.ask-card-title { display: flex; align-items: center; gap: 8px; font-size: var(--bot-text, 14px); line-height: 20px; color: var(--text-primary); }
 .ask-card-title svg { color: var(--accent); flex-shrink: 0; }
 .ask-card-title strong { font-weight: 600; }
-.ask-card-note { margin: 6px 0 0 24px; font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
+.ask-card-note { margin: 4px 0 0 24px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); line-height: 1.5; }
 .ask-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-.ask-card-answer { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary); }
+.ask-card-answer { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); }
 .bot-ghost-button { border-radius: 8px; padding: 8px 13px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
 .bot-ghost-button:disabled, .ask-card .chat-primary-button:disabled { opacity: .5; }
 
 /* Something went wrong: one red line and one way out. */
-.bot-error { display: flex; align-items: center; gap: 10px; margin-top: 10px; max-width: 520px; padding: 10px 14px; border-radius: 10px; background: color-mix(in srgb, var(--error, #e79090) 12%, transparent); color: var(--error, #e79090); font-size: 12px; }
+.bot-error { display: flex; align-items: center; gap: 10px; margin-top: 10px; max-width: 520px; padding: 10px 14px; border-radius: 10px; background: color-mix(in srgb, var(--error, #e79090) 12%, transparent); color: var(--error, #e79090); font-size: var(--bot-meta, 12.5px); }
 .bot-error span { flex: 1; }
 .bot-error button { color: var(--text-primary); font-weight: 500; font-size: 12px; padding: 6px 10px; border-radius: 7px; background: color-mix(in srgb, var(--text-secondary) 14%, transparent); }
-.bot-paused-line { margin: 0; font-size: 12px; color: var(--text-secondary); }
+.bot-paused-line { margin: 0; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); }
 .bot-paused-line button { color: var(--accent); font-weight: 500; }
 
 /* New bot and the look dialogs. */
@@ -174,7 +182,7 @@
 
 /* Work beside the chat (docs/plans/bot-always-free.md): one quiet line each above the composer, with Stop. */
 .bot-work { list-style: none; display: flex; flex-direction: column; gap: 2px; margin: 0 4px 6px; padding: 4px; border-radius: 10px; background: color-mix(in srgb, var(--text-secondary) 6%, transparent); }
-.bot-work-line { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 4px 3px 8px; font-size: 12px; color: var(--text-secondary); }
+.bot-work-line { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 4px 3px 8px; font-size: var(--bot-meta); color: var(--text-secondary); }
 .bot-work-line svg { flex: none; }
 .bot-work-line.is-running svg { color: var(--accent); }
 .bot-work-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: color-mix(in srgb, var(--text-secondary) 45%, transparent); margin: 0 3px; }
@@ -186,7 +194,7 @@
 /* What waits on the owner (an open ask, the bot's error), pinned above the composer as one line each; a click shows
    the full message. */
 .bot-pins { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 4px 8px; }
-.bot-pinned { display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; padding: 5px 12px 5px 10px; border-radius: 10px; font-size: 12px; line-height: 18px; text-align: left; color: var(--text-primary); background: rgba(var(--accent-rgb), .1); }
+.bot-pinned { display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; padding: 5px 12px 5px 10px; border-radius: 10px; font-size: var(--bot-meta); line-height: 18px; text-align: left; color: var(--text-primary); background: rgba(var(--accent-rgb), .1); }
 .bot-pinned > svg { flex: none; color: var(--accent); }
 .bot-pinned > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-pinned:not(:disabled):hover { background: rgba(var(--accent-rgb), .16); }
@@ -195,7 +203,7 @@
 .bot-pinned[data-kind='error'] > svg { color: inherit; }
 .bot-pinned[data-kind='error']:not(:disabled):hover { background: color-mix(in srgb, var(--error, #e79090) 17%, transparent); }
 /* Scrolled up when a message arrives: one small pill floating above the composer. */
-.bot-jump { position: absolute; z-index: 2; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px 6px 11px; border-radius: 999px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: var(--bg-secondary, #201d23); border: 1px solid rgba(var(--accent-pale-rgb), .14); box-shadow: 0 6px 20px rgba(0, 0, 0, .28); }
+.bot-jump { position: absolute; z-index: 2; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px 6px 11px; border-radius: 999px; font-size: var(--bot-meta); line-height: 18px; font-weight: 500; color: var(--text-primary); background: var(--bg-secondary, #201d23); border: 1px solid rgba(var(--accent-pale-rgb), .14); box-shadow: 0 6px 20px rgba(0, 0, 0, .28); }
 .bot-jump > svg { color: var(--accent); }
 .bot-jump:hover { background: color-mix(in srgb, var(--text-secondary) 14%, var(--bg-secondary, #201d23)); }
 
