@@ -1,5 +1,7 @@
-import { memo, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { flushSync } from "react-dom";
 import type { UIMessage } from "ai";
+import { FIND_REVEAL_EVENT } from "./find/reveal";
 import { cn } from "./utils/cn";
 import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
@@ -67,16 +69,27 @@ function getFileFromPart(part: unknown) {
 /** A long prompt shows this much (px) until "Show full message" is pressed. */
 export const PROMPT_FOLD_HEIGHT = 176;
 
-/** True when the element's text is at least twice the fold height, so folding it hides enough to matter. */
+/**
+ * True when the element's text is at least twice the fold height, so folding it hides enough to matter.
+ *
+ * Measured in the resize observer's callback only, never while React commits: reading a size during a
+ * commit lays out the transcript half-way through a move of the turn window (the previous window's
+ * spacers still in place), and the browser clamps the scroll position to that layout, undoing a jump
+ * such as Find's to the last turn. The observer reports every element once it is observed, before the
+ * frame is painted, and the fold is applied in that same frame.
+ */
 function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string): boolean {
   const [tall, setTall] = useState(false);
+  const tallRef = useRef(false);
   useLayoutEffect(() => {
     const element = ref.current;
-    if (!element) return;
-    const measure = () => setTall(element.scrollHeight >= PROMPT_FOLD_HEIGHT * 2);
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const next = element.scrollHeight >= PROMPT_FOLD_HEIGHT * 2;
+      if (next === tallRef.current) return;
+      tallRef.current = next;
+      flushSync(() => setTall(next));
+    });
     observer.observe(element);
     return () => observer.disconnect();
   }, [ref, text]);
@@ -96,6 +109,14 @@ export const UserMessage = memo(function UserMessage({
   const text = textParts.map((p) => p.text).join("");
   const foldable = useTallEnoughToFold(textRef, text);
   const folded = foldable && !expanded;
+  // Find landing on a match in the folded part opens the prompt, so the match is not hidden under the fold.
+  useEffect(() => {
+    const element = textRef.current;
+    if (!element || !folded) return;
+    const open = () => setExpanded(true);
+    element.addEventListener(FIND_REVEAL_EVENT, open);
+    return () => element.removeEventListener(FIND_REVEAL_EVENT, open);
+  }, [folded]);
 
   const images = userMessageImageTiles(message);
   const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
