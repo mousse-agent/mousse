@@ -215,6 +215,8 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
   overflow: hidden;
 }
 
+.downloads-row-waiting { display: inline-grid; opacity: 0.5; }
+
 .downloads-row-note {
   font-size: 11.5px;
   line-height: 1.3;

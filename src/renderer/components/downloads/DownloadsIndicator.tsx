@@ -303,7 +303,12 @@ function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen }: {
   const bad = entry.phase === 'failed' || (entry.phase === 'ready' && Boolean(entry.error))
 
   let glyph: ReactNode
-  if (active) {
+  if (offer && entry.phase === 'downloading') {
+    // A package manager reports steps, not progress.
+    glyph = <Loader2 size={15} strokeWidth={1.8} className="spin" role="progressbar" aria-label={`Updating ${entry.label}`} />
+  } else if (offer && entry.phase === 'queued') {
+    glyph = <span className="downloads-row-waiting"><ProviderIcon providerId={iconIdOf({ driver: offer.driver, instanceId: offer.instanceId })} size={16} /></span>
+  } else if (active) {
     glyph = (
       <span className="downloads-glyph" role="progressbar" aria-label={`Downloading ${entry.label}`}
         aria-valuemin={0} aria-valuemax={100} aria-valuenow={entry.percent ?? 0}>
