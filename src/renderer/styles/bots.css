@@ -172,6 +172,14 @@
 .bot-about-row button { font-size: 11px; color: var(--text-secondary); }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
+/* A bot's model rows (#673, About → Runs on and New bot): a label, its model, and the model's reasoning level. */
+.bot-model-rows { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; column-gap: 8px; row-gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
+.bot-model-row { display: contents; }
+.bot-model-row-label { white-space: nowrap; }
+.bot-model-rows .ui-select.small.bot-model-row-model { width: 100%; }
+.bot-model-rows .ui-select.small.bot-model-row-level { max-width: 92px; }
+.bot-model-advanced .bot-model-row-label { color: var(--text-secondary); }
+.bot-model-advanced .toggle-switch { grid-column: 3; justify-self: end; }
 .bot-about-foot { display: flex; gap: 8px; margin-top: 22px; }
 .bot-about-foot button { flex: 1; }
 .bot-about-foot .is-danger { color: var(--error, #e79090); }

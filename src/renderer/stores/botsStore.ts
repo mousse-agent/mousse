@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
+import type { BotModelSlots } from '../../shared/bots/personal/definition'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
@@ -50,12 +51,17 @@ export interface NewBotDraft {
   look: BotLook | null
   name: string
   description: string
-  /** A model picked by hand on the Runs on line (#673); null is by usage, the default. */
+  /** A model picked by hand on the single Runs on picker (#673, an older service); null is by usage, the default. */
   model: string | null
+  /**
+   * The rows picked on Runs on (#673, `BotModelRows`): null until the owner picks one, which is every row Automatic.
+   * Create bot sends them only to a service whose choices carry `options`.
+   */
+  slots: BotModelSlots | null
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
   touched: boolean
 }
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, touched: false }
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, touched: false }
 
 interface BotsState {
   profileId: string | null
@@ -108,7 +114,7 @@ interface BotsState {
   closeNewBot(): void
   setNewBotDraft(change: Partial<Omit<NewBotDraft, 'touched'>>): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string; model?: string }): Promise<BotSummary | null>
+  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>

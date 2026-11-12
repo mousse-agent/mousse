@@ -72,7 +72,7 @@ describe('About this bot', () => {
     expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS', 'MEMORY', 'RUNS ON'])
   })
 
-  it('runs by usage until the owner picks a model by hand, on this computer (#673)', async () => {
+  it('with an older service (no rows): one Model picker, by usage until the owner picks a model by hand, on this computer (#673)', async () => {
     await show()
     // One computer: no Computer row (computer names show only with two or more).
     expect(rows('RUNS ON')).toEqual(['Model'])
@@ -82,6 +82,83 @@ describe('About this bot', () => {
     await click(sonnet)
     expect(fake.calls).toContainEqual(['setModel', 'b1', 'sonnet'])
     expect(host.querySelector('[data-testid="bot-about-model"]')?.textContent).toContain('Claude · sonnet')
+  })
+
+  describe('model rows (#673)', () => {
+    const OPUS_SUB = { instanceId: 'claude', entry: 'Claude Code', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
+    const OPUS_KEY = { instanceId: 'pi:key', entry: 'Anthropic API', model: 'opus', label: 'Opus', efforts: ['low', 'high'] }
+    const HAIKU = { instanceId: 'claude', entry: 'Claude Code', model: 'haiku', label: 'Haiku', efforts: [] }
+    const AUTO = { talk: null, light: null, medium: null, hard: null }
+    const withRows = (slots: object) => vi.mocked(fake.client.model).mockImplementation(async () => ({ model: null, slots, models: [], options: [OPUS_SUB, OPUS_KEY, HAIKU], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }) as never)
+    const labels = () => [...host.querySelectorAll('.bot-model-row-label')].map((element) => element.textContent)
+    const select = (label: string) => host.querySelector<HTMLElement>(`[aria-label="Inbox helper's ${label}"]`) ?? undefined
+    const option = (text: string, group?: string) => {
+      const options = [...document.querySelectorAll('[role="option"]')]
+      if (!group) return options.find((element) => element.textContent?.trim() === text)
+      // The option under a group heading (the entry).
+      const heading = [...document.querySelectorAll('.ui-select-group')].find((element) => element.textContent === group)
+      let node = heading?.nextElementSibling
+      while (node && !node.classList.contains('ui-select-group')) {
+        if (node.getAttribute('role') === 'option' && node.textContent?.trim() === text) return node
+        node = node.nextElementSibling
+      }
+      return undefined
+    }
+    const lastSlots = () => fake.calls.filter((entry) => entry[0] === 'setSlots').at(-1)?.[2]
+
+    it('Talk and Work, each Automatic until picked; the same model on two entries is told apart', async () => {
+      withRows(AUTO)
+      await show()
+      expect(labels()).toEqual(['Talk', 'Work', 'Advanced'])
+      expect(select('Talk model')?.textContent).toContain('Automatic')
+      // Automatic has no reasoning level to pick.
+      expect(select('Talk reasoning level')).toBeUndefined()
+      await click(select('Work model'))
+      expect([...document.querySelectorAll('.ui-select-group')].map((element) => element.textContent)).toEqual(['Claude Code', 'Anthropic API'])
+      await click(option('Opus', 'Anthropic API'))
+      // Work is every level in the simple view.
+      const onKey = { instanceId: 'pi:key', model: 'opus' }
+      expect(lastSlots()).toEqual({ talk: null, light: onKey, medium: onKey, hard: onKey })
+      expect(select('Work model')?.textContent).toContain('Opus · Anthropic API')
+      // Its reasoning levels: Default, then the model's own.
+      await click(select('Work reasoning level'))
+      expect([...document.querySelectorAll('[role="option"]')].map((element) => element.textContent?.trim())).toEqual(['Default', 'Low', 'High'])
+      await click(option('High'))
+      expect(lastSlots()).toEqual({ talk: null, light: { ...onKey, effort: 'high' }, medium: { ...onKey, effort: 'high' }, hard: { ...onKey, effort: 'high' } })
+    })
+
+    it('Advanced shows each kind of work, opens by itself when they differ, and closing it puts Medium work on all work', async () => {
+      const sub = { instanceId: 'claude', model: 'opus' }
+      withRows({ talk: null, light: sub, medium: sub, hard: sub })
+      await show()
+      await click(host.querySelector('.bot-model-advanced [role="switch"]') ?? undefined)
+      expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work', 'Advanced'])
+      // Opening it saves nothing.
+      expect(lastSlots()).toBeUndefined()
+      await click(select('Hard work model'))
+      await click(option('Haiku'))
+      expect(lastSlots()).toEqual({ talk: null, light: sub, medium: sub, hard: { instanceId: 'claude', model: 'haiku' } })
+      // A model with no levels to pick shows no level picker.
+      expect(select('Hard work reasoning level')).toBeUndefined()
+      await click(host.querySelector('.bot-model-advanced [role="switch"]') ?? undefined)
+      expect(lastSlots()).toEqual({ talk: null, light: sub, medium: sub, hard: sub })
+      expect(labels()).toEqual(['Talk', 'Work', 'Advanced'])
+    })
+
+    it('rows that differ open Advanced; a pick not offered now stays, marked; a refused save goes back', async () => {
+      withRows({ talk: { instanceId: 'pi:gone', model: 'opus' }, light: null, medium: { instanceId: 'claude', model: 'opus' }, hard: null })
+      await show()
+      expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work', 'Advanced'])
+      expect(host.querySelector('.bot-model-advanced [role="switch"]')?.getAttribute('aria-checked')).toBe('true')
+      await click(select('Talk model'))
+      expect(option('opusNot available now')).toBeDefined()
+      await click(option('Automatic'))
+      vi.mocked(fake.client.setSlots).mockRejectedValueOnce({ code: 'model_unavailable', message: 'The model you picked is not available now. Pick another one, or Automatic.' })
+      await click(select('Light work model'))
+      await click(option('Opus', 'Anthropic API'))
+      expect(host.querySelector('[role="alert"]')?.textContent).toBe('The model you picked is not available now. Pick another one, or Automatic.')
+      expect(select('Light work model')?.textContent).toContain('Automatic')
+    })
   })
 
   it('lists the person’s other computers in Computer, greyed: a bot runs on the computer that holds it', async () => {

@@ -6,7 +6,8 @@ import type { BotsPersonalV2Result } from '../../../shared/bots/personal/methods
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
 import { useAppStore } from '../../stores/appStore'
 import { errorText } from '../../services/personalBotsClient'
-import { BotComputerSelect, BotModelSelect } from './BotRunsOn'
+import type { BotModelSlots } from '../../../shared/bots/personal/definition'
+import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
 
 /** "Mon 09:00" for a run's next time; today's runs show the time alone. */
@@ -26,8 +27,10 @@ export function reminderWhenText(at: string, now = new Date()): string {
 }
 
 /**
- * What a bot runs on, by hand (#673): By usage (the default) or a model, and the computer it runs on (the one that
- * holds it; the person's other computers are listed, greyed, once there are two or more).
+ * What a bot runs on, by hand (#673): its model rows (Talk and Work, and with Advanced each kind of work), each
+ * Automatic (the default) or an entry's model at a reasoning level, and the computer it runs on (the one that holds it;
+ * the person's other computers are listed, greyed, once there are two or more). An older service has no rows: one
+ * Model picker, as before.
  */
 function RunsOn({ botId, name }: { botId: string; name: string }) {
   const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.get'> | null>(null)
@@ -37,7 +40,8 @@ function RunsOn({ botId, name }: { botId: string; name: string }) {
     let live = true
     client.model(botId).then((next) => { if (live) setChoices(next) }, (cause) => { if (live) setError(errorText(cause)) })
     return () => { live = false }
-    // The client is a thin wrapper over the window's transport; the bot decides what to read.
+    // Read when About opens: each read checks every entry again. The client is a thin wrapper over the window's
+    // transport; the bot decides what to read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [botId])
   if (!choices) return error ? <p className="bot-about-empty" role="alert">{error}</p> : null
@@ -50,11 +54,24 @@ function RunsOn({ botId, name }: { botId: string; name: string }) {
       setError(errorText(cause))
     }
   }
+  const pickRows = async (slots: BotModelSlots) => {
+    const before = choices
+    setError(null)
+    setChoices({ ...choices, slots, model: slots.talk?.model ?? null })
+    try {
+      await client.setSlots(botId, slots)
+    } catch (cause) {
+      setChoices(before)
+      setError(errorText(cause))
+    }
+  }
   return <>
-    <div className="bot-about-row" data-testid="bot-about-model">
-      <span>Model</span>
-      <BotModelSelect ariaLabel={`${name}'s model`} models={choices.models} value={choices.model} onChange={(model) => void pick(model)} />
-    </div>
+    {choices.slots && choices.options
+      ? <BotModelRows name={name} options={choices.options} slots={choices.slots} onChange={(slots) => void pickRows(slots)} />
+      : <div className="bot-about-row" data-testid="bot-about-model">
+        <span>Model</span>
+        <BotModelSelect ariaLabel={`${name}'s model`} models={choices.models} value={choices.model} onChange={(model) => void pick(model)} />
+      </div>}
     {choices.computers.length > 1 ? (
       <div className="bot-about-row" data-testid="bot-about-computer">
         <span>Computer</span>

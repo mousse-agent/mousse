@@ -1,18 +1,21 @@
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryListing } from '../../shared/bots/personal/memory'
-import type { BotSchedule } from '../../shared/bots/personal/definition'
+import type { BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
 import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
 
 /**
  * The Bot UI's methods (`bots.personal.v2`, Bot Phase 1 §5.11) over the host's profile-bound
- * bridge. No result carries a model: the renderer never needs one.
+ * bridge. No result carries a model, apart from the Runs on pickers' (`bots.model.*`, #673).
  */
 export interface PersonalBotsClient {
   list(): Promise<BotSummary[]>
-  /** `model`: one picked by hand on New bot; leave it out for by usage (an older service refuses the key). */
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string }): Promise<BotSummary>
+  /**
+   * `slots`: the rows picked on New bot (#673), sent only to a service whose choices carry `options`; `model`: one model
+   * on Talk and Work (the single picker). Leave both out for Automatic: an older service refuses the keys.
+   */
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<BotSummary>
   pause(botId: string): Promise<BotSummary>
@@ -28,9 +31,12 @@ export interface PersonalBotsClient {
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
   addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): Promise<BotDetail>
-  /** The bot's model by hand or by usage (null), and the computers it can run on (#673). */
+  /** The bot's rows (`slots`, absent from an older service), its Talk model by name, and the computers it can run on (#673). */
   model(botId: string): Promise<BotsPersonalV2Result<'bots.model.get'>>
+  /** One model on every row, or Automatic (null): the single picker of an older service. */
   setModel(botId: string, model: string | null): Promise<BotSummary>
+  /** The bot's rows (#673); only a service that sent `slots` has it. */
+  setSlots(botId: string, slots: BotModelSlots): Promise<BotSummary>
   /** What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. */
   modelChoices(): Promise<BotsPersonalV2Result<'bots.model.choices'>>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
@@ -48,8 +54,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     transport.request<BotsPersonalV2Result<M>>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
-    create: async ({ look, name, description, clientRequestId, model }) =>
-      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(model ? { model } : {}) })).bot,
+    create: async ({ look, name, description, clientRequestId, model, slots }) =>
+      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
     pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,
@@ -66,6 +72,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     addSchedule: (botId, when, prompt, model) => call('bots.schedules.add', { botId, when, prompt, ...(model ? { model } : {}) }),
     model: (botId) => call('bots.model.get', { botId }),
     setModel: async (botId, model) => (await call('bots.model.set', { botId, model })).bot,
+    setSlots: async (botId, slots) => (await call('bots.model.setSlots', { botId, slots })).bot,
     modelChoices: () => call('bots.model.choices', {}),
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
