@@ -437,6 +437,8 @@ export function ComposerFooter({
             title="Dictate"
             aria-label="Dictate"
             aria-busy={recordingPending || transcribing}
+            // The box keeps focus, so its selection stays highlighted while recording.
+            onMouseDown={(event) => event.preventDefault()}
             onClick={onStartRecording}
             disabled={disabled || recordingPending || transcribing}
           >
@@ -476,6 +478,7 @@ export function ComposerFooter({
             className="composer-action-btn composer-action-btn-recording"
             title="Stop recording"
             aria-label="Stop recording"
+            onMouseDown={(event) => event.preventDefault()}
             onClick={onStopRecording}
           >
             <Square size={14} strokeWidth={2} fill="currentColor" />
