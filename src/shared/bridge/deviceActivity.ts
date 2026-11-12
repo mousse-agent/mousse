@@ -118,6 +118,8 @@ const phrase = (row: string, one: string, many: string): Phrase => ({
 
 const TURN: Phrase = phrase('Started a turn', 'started a turn', 'started {n} turns')
 const STEER: Phrase = phrase('Steered a turn', 'steered a turn', 'steered {n} turns')
+/** Send now on a held steer: the steer goes in at once and stops the command it waited for. */
+const STEER_NOW: Phrase = phrase('Sent a steer now, stopping a command', 'sent a steer now, stopping a command', 'sent {n} steers now, stopping commands')
 const STOP: Phrase = phrase('Stopped a turn', 'stopped a turn', 'stopped {n} turns')
 const RETRY: Phrase = phrase('Retried a turn', 'retried a turn', 'retried {n} turns')
 const QUEUED: Phrase = phrase('Queued a message', 'queued a message', 'queued {n} messages')
@@ -199,6 +201,7 @@ const NOTICE_ROWS: Record<string, string> = {
 const PHRASES: Record<string, Phrase> = {
   'orchestrator.send': TURN,
   'orchestrator.steer': STEER,
+  'orchestrator.steerNow': STEER_NOW,
   'orchestrator.abort': STOP,
   'orchestrator.retry': RETRY,
   'orchestrator.answerQuestions': ANSWER,
