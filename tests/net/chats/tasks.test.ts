@@ -88,7 +88,10 @@ it('keeps frozen Chat status readable with current read-only target leases, and 
 },25000)
 
 it('queries the exact original after a lost actual TLS result and restart without dispatching or rerunning Native',async()=>{
-  const f=await linkedTaskFixture();f.selection.input.limits.maxElapsedMs=2500
+  // The caller waits out the whole deadline for the dropped result, and the deadline is the
+  // target's work budget plus 5 s. The budget covers the target's real Git work and run: when it
+  // runs out after the run started, the target rightly answers "may have partly happened".
+  const f=await linkedTaskFixture();f.selection.input.limits.maxElapsedMs=8000
   await f.target.services.bridge.dispatch.bindRepository(f.selection.input.repoId,f.repo)
   f.caller.services.chatNetwork.selectTask(f.selection)
   const mux=(f.target.services.net.session(f.caller.services.net.runtime().identity.self()!.node) as unknown as {mux:Mux}).mux,send=mux.send.bind(mux)
@@ -130,7 +133,7 @@ it('queries the exact original after a lost actual TLS result and restart withou
   expect((await reopened.services.chatNetwork.dispatch(input)).selection).toMatchObject({validation:'authorized',status:{state:'completed'}})
   expect(f.target.contexts).toHaveLength(1);expect(reopened.contexts).toHaveLength(0)
   expect(f.target.services.net.runtime().db.database.prepare('SELECT count(DISTINCT execution) AS n FROM net_rpc_aliases WHERE id=?').get(input.taskId)!.n).toBe(1)
-},35000)
+},60000)
 
 it('keeps a malicious independently signed result pending and exposes no result from read-only retrieval',async()=>{
   const f=await linkedTaskFixture();await f.target.services.bridge.dispatch.bindRepository(f.selection.input.repoId,f.repo)

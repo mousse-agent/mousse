@@ -1625,7 +1625,21 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     let cursor = { ...after }
     while (!attempt.cancelled && cursor.seq < head.seq) {
       this.authorizedRead(stream)
-      const page = this.options.store.read(stream, cursor, head.seq, 512 * 1024)
+      const page = this.replayPage(stream, cursor, head.seq)
+      if (!page) {
+        // The history this replay reads was trimmed or replaced after it started (a display
+        // snapshot refresh, a new thread generation). The subscriber resyncs from a snapshot,
+        // as a lagging one does, and the connection stays up for everything else it carries.
+        attempt.live = false
+        attempt.cancelled = true
+        const reason = this.options.store.snapshotReason(stream, cursor) ?? 'cursorTooOld'
+        await this.send(
+          { t: 'snapshotRequired', stream, reason, head: this.options.store.head(stream) },
+          [],
+          signal
+        )
+        return
+      }
       if (!page.records.length) throw new NetError('storage_corrupt')
       await this.sendRecords(stream, page.records, true, undefined, signal)
       cursor = { epoch: page.records.at(-1)!.epoch, seq: page.records.at(-1)!.seq }
@@ -1633,6 +1647,15 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     if (!attempt.cancelled) {
       this.authorizedRead(stream)
       await this.send({ t: 'caughtUp', stream }, [], signal)
+    }
+  }
+  /** One replay page, or undefined when the store no longer holds the history after `cursor`. */
+  private replayPage(stream: StreamId, cursor: StreamHead, through: number) {
+    try {
+      return this.options.store.read(stream, cursor, through, 512 * 1024)
+    } catch (error) {
+      if (error instanceof NetError && error.code === 'snapshot_required') return undefined
+      throw error
     }
   }
   private pumpSnapshots(): void {
