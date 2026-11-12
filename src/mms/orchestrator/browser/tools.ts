@@ -7,11 +7,18 @@ import {
   type BrowserToolDescriptor
 } from '../../../shared/browser/automation'
 
+/**
+ * How every browser tool reports a page that loads, for the model: done once it committed and its
+ * document is ready, still loading is no failure, and the problem classes not to retry.
+ */
+export const BROWSER_NAVIGATION_GUIDE =
+  'A page is open once it has committed and its document is ready; navigation.state "loading" means it is still loading, which is not a failure: carry on, or browser_wait for {"type":"document-ready"}. A page that fails comes back as site_unreachable (check the address; try again later at most once), site_blocked (the site refused this browser) or needs_person (a sign-in, a consent choice or a human check), each with what to do next. Never retry a blocked site or one that needs a person in a loop, and never work around it: ask the person (browser_request_human where you have it) or carry on without it. The browser session stays open whatever a page did.'
+
 export const BROWSER_TOOL_DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   {
     name: 'browser_open',
     description:
-      'Open a session on the host-selected in-app tab or managed browser and return its initial observation. The host selects the backend and tab; do not pass backend, uiTabId, profile, or execution fields.',
+      `Open a session on the host-selected in-app tab or managed browser and return its initial observation. The host selects the backend and tab; do not pass backend, uiTabId, profile, or execution fields. ${BROWSER_NAVIGATION_GUIDE}`,
     capability: 'browser.session',
     vision: false,
     effect: 'external'
@@ -40,14 +47,14 @@ export const BROWSER_TOOL_DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   {
     name: 'browser_act',
     description:
-      'Perform one browser action using the sessionId, tabId, generation, observationId and controlLeaseId from the latest observation. Copy element refs exactly. Example action: {"type":"fill","target":{"kind":"ref","ref":"el_123"},"text":"hello"}; then {"type":"key","key":"Enter"}. Target requires kind:"ref", not elementRef or a selector. Use the returned observation for the next action. Coordinate/image-point actions require a vision-capable host binding.',
+      'Perform one browser action using the sessionId, tabId, generation, observationId and controlLeaseId from the latest observation. Copy element refs exactly. Example action: {"type":"fill","target":{"kind":"ref","ref":"el_123"},"text":"hello"}; then {"type":"key","key":"Enter"}. Target requires kind:"ref", not elementRef or a selector. Use the returned observation for the next action. Coordinate/image-point actions require a vision-capable host binding. For navigate, back, forward and reload the result has action.navigation: "loading" is still loading, not a failure; site_unreachable, site_blocked and needs_person come with what to do next, and a blocked site or one that needs a person is never retried in a loop.',
     capability: 'browser.action',
     vision: true,
     effect: 'external'
   },
   {
     name: 'browser_wait',
-    description: 'Wait for an explicit bounded browser condition.',
+    description: 'Wait for an explicit bounded browser condition. {"type":"document-ready"} waits until the page has finished loading.',
     capability: 'browser.observe',
     vision: false,
     effect: 'read'

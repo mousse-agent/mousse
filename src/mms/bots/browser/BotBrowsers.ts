@@ -8,6 +8,7 @@ import type { BrowserAutomationTool, BrowserToolContext, BrowserToolOutput } fro
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BrowserSetupStatus } from '../../../shared/browser/setup'
 import type { BrowserSessionRecord, BrowserTab, BrowserViewerUpdate } from '../../../shared/browser/types'
+import type { BrowserNavigation, BrowserProblem } from '../../../shared/browser/navigation'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../shared/execution/types'
 import { BrowserAutomationError } from '../../browser/automation/BrowserSessionManager'
 import type { MmsBrowserService } from '../../browser/MmsBrowserService'
@@ -99,7 +100,7 @@ interface Viewer extends BotBrowserViewer {
   lastPictureAt: number
   timer?: { clear(): void }
   /** What it was last sent, so only changes go. */
-  sent: { viewport?: string; tab?: string; cursorAt?: number | null; behind?: boolean; stalled?: boolean }
+  sent: { viewport?: string; tab?: string; cursorAt?: number | null; behind?: boolean; stalled?: boolean; loading?: boolean; problem?: string }
   release?: () => void
 }
 
@@ -130,6 +131,8 @@ interface BotBrowserState {
   tab?: { url: string; title: string }
   cursor?: BrowserAgentCursor
   behind?: boolean
+  loading?: boolean
+  problem?: BrowserProblem
   /** When a picture was last taken for `view` (an older app asks each time). */
   frameAt?: number
   lastViewedAt: number
@@ -285,6 +288,8 @@ export class BotBrowsers implements BotBrowserHost {
       ...(frame && (options.frame || options.last || !open) ? { frame } : {}),
       ...(open && state.cursor && agentCursorLive(state.cursor, this.now()) ? { cursor: state.cursor } : {}),
       ...(open && state.behind ? { behind: true } : {}),
+      ...(open && state.loading ? { loading: true } : {}),
+      ...(open && state.problem ? { problem: { ...state.problem } } : {}),
       ...(this.installing && !open ? { setup: { ...this.installing } } : {})
     }
   }
@@ -414,13 +419,15 @@ export class BotBrowsers implements BotBrowserHost {
       const url = typeof params.url === 'string' ? params.url : undefined
       const opened = await this.ensureSession(state, context, url)
       let tabId: string | undefined
+      // How the page went (a slow or failed page leaves the browser open).
+      let navigation = opened.opened?.navigation
       if (opened.opened) tabId = opened.opened.observation?.tabId
-      else if (url || !activation.current) tabId = await this.newTab(context, opened.sessionId, url)
+      else if (url || !activation.current) ({ tabId, navigation } = await this.newTab(context, opened.sessionId, url))
       else tabId = activation.current
       if (tabId) this.useTab(state, activation, tabId)
       const observed = await this.invoke(context, 'browser_observe', { sessionId: opened.sessionId, ...(tabId ? { tabId } : {}) })
       const session = this.record(state)
-      result = { ...observed, ...(session ? { session, capabilities: session.capabilities } : {}) }
+      result = { ...observed, ...(session ? { session, capabilities: session.capabilities } : {}), ...(navigation ? { navigation } : {}) }
     } else {
       const sessionId = this.liveSession(state)
       if (!sessionId) throw new BrowserAutomationError({ code: 'session_closed', message: 'Your browser is closed. Open a page with browser_open first.' })
@@ -443,9 +450,11 @@ export class BotBrowsers implements BotBrowserHost {
 
   private async tabs(state: BotBrowserState, activation: ActivationTabs, context: BrowserToolContext, sessionId: string, params: Record<string, unknown>): Promise<BrowserToolOutput> {
     const operation = params.operation ?? 'list'
+    let navigation: BrowserNavigation | undefined
     if (operation === 'new') {
-      const tabId = await this.newTab(context, sessionId, typeof params.url === 'string' ? params.url : undefined)
-      if (tabId) this.useTab(state, activation, tabId)
+      const made = await this.newTab(context, sessionId, typeof params.url === 'string' ? params.url : undefined)
+      navigation = made.navigation
+      if (made.tabId) this.useTab(state, activation, made.tabId)
     } else if (operation === 'switch' || operation === 'close') {
       if (typeof params.tabId !== 'string' || !activation.tabs.has(params.tabId))
         throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That tab belongs to another of your runs.' })
@@ -459,7 +468,7 @@ export class BotBrowsers implements BotBrowserHost {
     } else if (operation !== 'list') throw new BrowserAutomationError({ code: 'invalid_action', message: 'Invalid browser operation' })
     // Every operation answers with this activation's own tabs.
     const listed = await this.invoke(context, 'browser_tabs', { sessionId, operation: 'list' })
-    return { tabs: (listed.tabs ?? []).filter((tab: BrowserTab) => activation.tabs.has(tab.id)) }
+    return { tabs: (listed.tabs ?? []).filter((tab: BrowserTab) => activation.tabs.has(tab.id)), ...(navigation ? { navigation } : {}) }
   }
 
   private useTab(state: BotBrowserState, activation: ActivationTabs, tabId: string): void {
@@ -480,9 +489,13 @@ export class BotBrowsers implements BotBrowserHost {
     this.runCapture(state)
   }
 
-  /** A new tab in the bot's session: the one the browser opened for this call, whatever other activations opened meanwhile. */
-  private async newTab(context: BrowserToolContext, sessionId: string, url: string | undefined): Promise<string | undefined> {
-    return (await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })).tab?.id
+  /**
+   * A new tab in the bot's session: the one the browser opened for this call, whatever other
+   * activations opened meanwhile, and how its page went.
+   */
+  private async newTab(context: BrowserToolContext, sessionId: string, url: string | undefined): Promise<{ tabId?: string; navigation?: BrowserNavigation }> {
+    const made = await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })
+    return { ...(made.tab?.id ? { tabId: made.tab.id } : {}), ...(made.navigation ? { navigation: made.navigation } : {}) }
   }
 
   private async invoke(context: BrowserToolContext, name: BrowserAutomationTool, args: Record<string, unknown>): Promise<BrowserToolOutput> {
@@ -689,6 +702,9 @@ export class BotBrowsers implements BotBrowserHost {
     state.tab = { url: update.url, title: update.title }
     state.cursor = update.cursor
     state.behind = update.behind
+    state.loading = update.loading === true
+    state.problem = update.problem
+    const problem = JSON.stringify(update.problem ?? null)
     const cursor = update.cursor && agentCursorLive(update.cursor, now) ? update.cursor : null
     for (const viewer of state.viewers.values()) {
       const next: NonNullable<Viewer['slot']> = { ...viewer.slot }
@@ -698,6 +714,8 @@ export class BotBrowsers implements BotBrowserHost {
       if (viewer.sent.tab !== JSON.stringify(state.tab)) next.tab = { ...state.tab }
       if ((viewer.sent.cursorAt ?? null) !== (cursor?.at ?? null)) next.cursor = cursor
       if (viewer.sent.behind !== update.behind) next.behind = update.behind
+      if ((viewer.sent.loading ?? false) !== (update.loading === true)) next.loading = update.loading === true
+      if ((viewer.sent.problem ?? 'null') !== problem) next.problem = update.problem ?? null
       if (viewer.sent.stalled) next.live = true
       viewer.slot = next
       this.deliver(state, viewer)
@@ -732,6 +750,8 @@ export class BotBrowsers implements BotBrowserHost {
     if (send.tab) viewer.sent.tab = JSON.stringify(send.tab)
     if (send.cursor !== undefined) viewer.sent.cursorAt = send.cursor?.at ?? null
     if (send.behind !== undefined) viewer.sent.behind = send.behind
+    if (send.loading !== undefined) viewer.sent.loading = send.loading
+    if (send.problem !== undefined) viewer.sent.problem = JSON.stringify(send.problem)
     if (send.live) viewer.sent.stalled = false
     if (send.stalled) viewer.sent.stalled = true
     viewer.delivering = true

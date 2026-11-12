@@ -386,3 +386,86 @@ describe.skipIf(!chrome.ok)('watching a bot\'s browser', () => {
     expect(methods.filter((method) => method === 'frame.next')).toEqual([])
   }, 60_000)
 })
+
+interface ModelNavigation { state: string; note?: string; problem?: string; reason?: string; next?: string }
+/** An address nothing answers on: a port that was free a moment ago (port 1 would be one Chromium refuses as unsafe). */
+async function closedAddress(): Promise<string> {
+  const { createServer } = await import('node:net')
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  return `http://127.0.0.1:${port}/`
+}
+/** A tool result the model reads (an error's text is the same JSON when the page failed). */
+const modelResult = (result: Parsed & { error?: string }) => (result.error?.startsWith('{') ? JSON.parse(result.error) : result) as Parsed & { navigation?: ModelNavigation; action?: { outcome: string; navigation?: ModelNavigation } }
+
+describe.skipIf(!chrome.ok)('a slow page is not a failed page', () => {
+  it('a page that commits and never finishes loading is still loading, and the browser stays open', async () => {
+    const { turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const started = Date.now()
+    const opened = modelResult(await call(bot, 'browser_open', { url: `${origin}/never-loads.html` }))
+    // Done once the document is ready, not when every image has come.
+    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(opened.error).toBeUndefined()
+    expect(opened.navigation).toMatchObject({ state: 'loading', note: expect.stringMatching(/not a failure/) })
+    expect(opened.session!.lifecycle).toBe('agent-controlled')
+    expect(opened.observation!.warnings).toContain('page-still-loading')
+    expect(opened.observation!.elements.some((element) => element.name?.includes('Ready, still loading'))).toBe(true)
+    // Waiting for it to finish loading waits, and says it did not.
+    expect((await call(bot, 'browser_wait', { tabId: opened.observation!.tabId, condition: { type: 'document-ready' }, timeoutMs: 800 })).error).toMatch(/timeout/)
+    // The browser goes on: the same session opens the next page.
+    const next = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    expect(next.session!.id).toBe(opened.session!.id)
+    expect(next.observation!.warnings).not.toContain('page-still-loading')
+  }, 60_000)
+
+  it('a site that can\'t be reached, one that refuses the browser and one that needs a person come back in their class, and the browser stays open', async () => {
+    const { turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const nowhere = await closedAddress()
+    // The first page fails: the session opens anyway, and the model reads the class and what to do next.
+    const unreachable = await call(bot, 'browser_open', { url: nowhere })
+    expect(unreachable.error).toBeDefined()
+    const failed = modelResult(unreachable)
+    expect(failed.session!.id).toBeTruthy()
+    expect(failed.navigation).toMatchObject({ state: 'failed', problem: 'unreachable', next: expect.stringMatching(/^Can't reach 127\.0\.0\.1 \(net::ERR_CONNECTION_REFUSED\)\. Check the address/) })
+    // It goes on in the same session.
+    const good = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    expect(good.session!.id).toBe(failed.session!.id)
+    const page = good.observation!
+    const act = (url: string) => call(bot, 'browser_act', { tabId: page.tabId, generation: page.generation, observationId: page.observationId, controlLeaseId: good.session!.controlLeaseId, action: { type: 'navigate', url } })
+    expect((await act(nowhere)).error).toMatch(/^site_unreachable: Can't reach 127\.0\.0\.1 \(net::ERR_CONNECTION_REFUSED\)/)
+    // Chromium refuses an unsafe port for this browser: blocked, never to be retried.
+    const fresh = modelResult(await call(bot, 'browser_observe', { tabId: page.tabId })).observation!
+    const blocked = await call(bot, 'browser_act', { tabId: fresh.tabId, generation: fresh.generation, observationId: fresh.observationId, controlLeaseId: good.session!.controlLeaseId, action: { type: 'navigate', url: 'http://127.0.0.1:6000/' } })
+    expect(blocked.error).toMatch(/^site_blocked: 127\.0\.0\.1 blocked this browser \(net::ERR_UNSAFE_PORT\)\. Don't retry it/)
+    // A sign-in wall opens, and says it needs a person.
+    const signIn = modelResult(await call(bot, 'browser_open', { url: `${origin}/sign-in.html` }))
+    expect(signIn.error).toBeUndefined()
+    expect(signIn.navigation).toMatchObject({ state: 'ready', problem: 'needs-you', reason: 'sign-in', next: expect.stringMatching(/needs a person: a sign-in \(HTTP 401\)\. Don't retry it/) })
+    expect(modelResult(await call(bot, 'browser_tabs', { operation: 'list' })).tabs!.length).toBeGreaterThanOrEqual(2)
+  }, 60_000)
+
+  it('the owner\'s own navigation answers at the commit, and the view shows the page loading or what it ran into', async () => {
+    const { bots, origin } = await fixture()
+    await bots.open(BOT_A, `${origin}/nav-a.html`)
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 960, fps: 15, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const started = Date.now()
+    await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/never-loads.html` })
+    expect(Date.now() - started).toBeLessThan(3_000)
+    await expect.poll(() => view.events.some((event) => event.loading === true), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).loading).toBe(true)
+    // A site that can't be reached: the owner's call fails in its class, and the view says so.
+    const failed = await bots.input(BOT_A, { kind: 'navigate', url: await closedAddress() }).catch((error: unknown) => error)
+    expect(failed).toMatchObject({ code: 'site_unreachable', details: { problem: { kind: 'unreachable', code: 'net::ERR_CONNECTION_REFUSED' } } })
+    await expect.poll(() => view.events.some((event) => event.problem?.kind === 'unreachable'), { timeout: 5_000 }).toBe(true)
+    // A good page clears it.
+    await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/nav-b.html` })
+    await expect.poll(() => view.events.at(-1)?.problem === null || view.events.some((event, index) => index > 0 && event.problem === null), { timeout: 5_000 }).toBe(true)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+})

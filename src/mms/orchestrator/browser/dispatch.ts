@@ -6,6 +6,7 @@ import type {
 } from '../../../shared/browser/automation'
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { ExecutionContext } from '../../../shared/execution/types'
+import { browserProblemForAgent, type BrowserNavigation } from '../../../shared/browser/navigation'
 import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import {
   type BrowserExecutionBinding,
@@ -163,12 +164,27 @@ export async function dispatchBrowserTool(input: {
   }
 }
 
+/**
+ * How a page went, for the model: its state and, for a problem, its class and what to do next in
+ * plain words. Still loading is no failure: carry on, or wait for it.
+ */
+function navigationForModel(navigation: BrowserNavigation | undefined): Record<string, unknown> | undefined {
+  if (!navigation) return undefined
+  return {
+    url: navigation.url,
+    state: navigation.state,
+    ...(navigation.state === 'loading' ? { note: 'Still loading. This is not a failure: carry on with what is there, or browser_wait with {"type":"document-ready"}.' } : {}),
+    ...(navigation.problem ? { problem: navigation.problem.kind, ...(navigation.problem.reason ? { reason: navigation.problem.reason } : {}), next: browserProblemForAgent(navigation.problem) } : {})
+  }
+}
+
 export function formatBrowserToolOutput(output: BrowserToolOutput): BrowserDispatchResult {
   const actionOutcome = output.action?.outcome
   const isError =
     actionOutcome === 'unknown-effect' ||
     actionOutcome === 'failed' ||
-    actionOutcome === 'blocked'
+    actionOutcome === 'blocked' ||
+    output.navigation?.state === 'failed'
   const payload = {
     untrusted: true,
     provenance: 'untrusted-page' as const,
@@ -184,9 +200,11 @@ export function formatBrowserToolOutput(output: BrowserToolOutput): BrowserDispa
           dispatched: output.action.dispatched,
           code: output.action.code,
           message: output.action.message,
+          navigation: navigationForModel(output.action.navigation),
           observation: output.action.observation ? sanitizeObservation(output.action.observation) : undefined
         }
       : undefined,
+    navigation: navigationForModel(output.navigation),
     extraction: output.extraction,
     artifacts: output.artifacts?.map((artifact) => ({
       id: artifact.id,

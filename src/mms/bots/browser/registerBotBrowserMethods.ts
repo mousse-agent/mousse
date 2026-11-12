@@ -113,8 +113,8 @@ export function registerBotBrowserMethods(domains: DomainHandlerRegistry, browse
         try {
           return await handle(context, method, params, browsers)
         } catch (error) {
-          // The browser's own refusals keep their code and plain message.
-          if (error instanceof BrowserAutomationError) throw new DomainRpcError(error.code, error.message)
+          // The browser's own refusals keep their code and plain message, and a failed page its class and Chromium's code.
+          if (error instanceof BrowserAutomationError) throw new DomainRpcError(error.code, error.message, error.details?.problem ? { problem: error.details.problem } : undefined)
           throw error
         }
       }
