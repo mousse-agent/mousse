@@ -1,26 +1,9 @@
 /**
- * How the transcript keeps up with a reply in progress, as pure arithmetic: where a just-sent
- * prompt is held, how much empty space under the reply that takes, how that space holds the end
- * while something near it is replaced, and how it closes. The DOM side is `end-follower.ts`.
+ * How the transcript keeps up with a reply in progress, as pure arithmetic: how an empty space
+ * under the content holds the end while something near it is replaced, and how it closes. The DOM side is `end-follower.ts`.
  *
  * Positions are scroll-space pixels: 0 is the top of the transcript's content.
  */
-
-/**
- * Where a just-sent prompt's turn sits, from the top of the viewport. The same as the list's top
- * padding, so the first prompt of a thread is already there and nothing scrolls for it.
- */
-export const PIN_TOP = 24;
-
-/**
- * The empty space under the content that lets a turn starting at `rowTop` sit `PIN_TOP` below the
- * top of the viewport while its reply is shorter than the screen. As the reply grows the space
- * shrinks by as much, so the end of the transcript, and with it the view, stays where it is. 0 once
- * the reply reaches the bottom of the viewport: from there the end is followed.
- */
-export function pinnedReserve(input: { rowTop: number; clientHeight: number; contentHeight: number }): number {
-  return Math.max(0, Math.ceil(input.rowTop - PIN_TOP + input.clientHeight - input.contentHeight));
-}
 
 /**
  * The part of an empty space under the content (`reserve`) that the current view still stands on.

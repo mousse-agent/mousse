@@ -236,7 +236,7 @@ html[data-theme='light'] {
 }
 .an-message-list[data-windowed="true"],
 .an-message-list [aria-hidden][data-spacer],
-.an-message-list > [data-pin-reserve] {
+.an-message-list > [data-end-reserve] {
   overflow-anchor: none;
 }
 /* While the list follows the end it writes scrollTop itself, once per frame

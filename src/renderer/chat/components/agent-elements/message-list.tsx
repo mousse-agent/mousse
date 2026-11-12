@@ -1571,11 +1571,10 @@ export const MessageList = memo(function MessageList({
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollAtRef.current = performance.now();
   }, []);
-  // Holds a just-sent prompt near the top and lands on the end as the reply grows (virtual/end-follower.ts).
+  // Lands on the end as the reply grows, holding it while something near it is replaced (virtual/end-follower.ts).
   const followerRef = useRef<EndFollower | null>(null);
   followerRef.current ??= createEndFollower({
     container: () => chatContainerRef.current,
-    rows: () => rowsRef.current,
     after: () => afterTurnsRef.current,
     mode: () => followModeRef.current,
     onProgrammaticScroll: () => {
@@ -1697,7 +1696,7 @@ export const MessageList = memo(function MessageList({
     // The one writer that follows the end: the transcript grew (a streamed
     // delta, an image, a tool card opening, the reply gap) or the viewport
     // changed, and the observer runs after layout and before paint. The
-    // follower resizes the space under a pinned prompt, then lands on the end
+    // follower resizes any held space under the content, then lands on the end
     // in the same frame (virtual/end-follower.ts).
     // When reading history (free) nothing is written: streamed text appends
     // below the viewport, and growth above it is held by native scroll
@@ -1777,8 +1776,6 @@ export const MessageList = memo(function MessageList({
   const lastUserMessageIdRef = useRef(lastUserMessageId);
   // The last turn ended with messages still queued: the next prompt to arrive is the queue's next turn.
   const queuedTurnNextRef = useRef(false);
-  // The last row's key, set in render below; read by the effect that pins a starting turn.
-  const lastTurnKeyRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (
       lastUserMessageId &&
@@ -1792,11 +1789,8 @@ export const MessageList = memo(function MessageList({
         turnKeyAliasRef.current.has(lastUserMessageId);
       if (sentHere || followModeRef.current === "following-end") {
         dispatchFollow({ type: "new-turn" });
-        // A turn that is starting (sent here, or the queue's next) is held near the top while its
-        // reply fills the space below. A turn that arrives already answered is not.
-        const turnKey = lastTurnKeyRef.current;
-        const starting = replyActive || !turns[turns.length - 1]?.assistantMsgs.length;
-        if (turnKey && starting) followerRef.current?.pin(turnKey);
+        // The prompt shows at the end and the reply grows from there, the view on the end.
+        followerRef.current?.turnStarted();
         void virtualizationRef.current?.settleToEnd();
       }
       lastUserMessageIdRef.current = lastUserMessageId;
@@ -1811,7 +1805,7 @@ export const MessageList = memo(function MessageList({
   );
   // The queue's next turn: its prompt arrives a moment before its run's status does. It is starting
   // already, so it waits for its reply from this render on, as a prompt sent here does: its header
-  // renders with the row, and the row is pinned with it (no hop of the queue a frame later).
+  // renders with the row (no hop of the queue a frame later).
   const queuedTurnArrived =
     queuedTurnNextRef.current &&
     lastUserMessageId !== lastUserMessageIdRef.current &&
@@ -1838,7 +1832,7 @@ export const MessageList = memo(function MessageList({
   );
   follower.setLive(replyActive);
   const turnLive = replyActive || showAwaitingReply;
-  // The last turn whose reply was seen running. A queued turn waiting for its run keeps its pin
+  // The last turn whose reply was seen running. A queued turn waiting for its run is not ended
   // until its reply has run and ended.
   const liveTurnRef = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -1870,7 +1864,6 @@ export const MessageList = memo(function MessageList({
   const turnKeys = turns.map((turn, index) =>
     resolveTurnKey(turn, index, turnKeyAliasRef.current),
   );
-  lastTurnKeyRef.current = turnKeys[turnKeys.length - 1] ?? null;
   // Long threads mount only the turns near the viewport; short ones (and any
   // render without a window) keep every row.
   const windowed =
@@ -2095,8 +2088,8 @@ export const MessageList = memo(function MessageList({
           <div aria-hidden="true" data-reply-gap className={cn(REPLY_GAP_CLASS, "w-full")} />
         )}
       </div>
-      {/* The space a just-sent prompt's reply grows into; sized by the follower, 0 otherwise. */}
-      <div ref={follower.reserveRef} aria-hidden="true" data-pin-reserve />
+      {/* The space that holds the end while something near it is replaced; sized by the follower, 0 otherwise. */}
+      <div ref={follower.reserveRef} aria-hidden="true" data-end-reserve />
     </div>
     <PromptMarkersOverlay
       turns={turns}
