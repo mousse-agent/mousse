@@ -216,13 +216,13 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(s.d.engine.listRuns(s.childThread).map((run) => run.source)).not.toContain('provider-continuation')
   })
 
-  it('a model change is refused while background work exists, with a message that says what to do', async () => {
+  it('a model change while background work exists runs on the same process, and the work keeps running', async () => {
     const s = await scene()
     s.d.orch.setThreadModelOverride(s.childThread, { llmProvider: 'claude-subscription', model: 'opus' })
-    await s.d.orch.send('switch', false, { threadId: s.childThread, clientRequestId: 'switch' }).catch(() => undefined)
-    const refused = s.d.engine.listRuns(s.childThread).find((run) => run.status === 'failed')
-    expect(refused?.outcome?.error).toMatch(/claude_background_work_blocks_change.*Stop/)
+    await s.d.orch.send('switch', false, { threadId: s.childThread, clientRequestId: 'switch' })
+    expect(s.d.engine.listRuns(s.childThread).some((run) => run.status === 'failed')).toBe(false)
     expect(s.cli.processes).toHaveLength(1)
+    expect(s.cli.last.flagSettings).toEqual([{ model: 'opus', effortLevel: null }])
     expect(s.service.hasBackgroundWork(s.childThread)).toBe(true)
   })
 

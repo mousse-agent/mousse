@@ -4,7 +4,7 @@ import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liv
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { ModelInfo, Options, PermissionMode, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
+import type { EffortLevel, ModelInfo, Options, PermissionMode, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
 import type {
   ClaudeSubscriptionStatus,
   CliProviderConfig,
@@ -86,8 +86,20 @@ const CLAUDE_STOP_GRACE_MS = 1_000
 const ONE_SHOT_STOP_DRAIN_MS = 1_500
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
-/** What a live process is started for, in the order of the key `chat` builds; a change needs a new process. */
-const HARD_PARTS = ['instance', 'folder', 'model', 'reasoning effort', 'instructions', 'Mousse credential', 'read-only policy']
+/**
+ * What a live process is started for, in the order of the key `chat` builds; a change needs a new process. The model
+ * and the effort are not among them: a running process switches both in place (`LiveFlags`, issue #359).
+ */
+const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse credential', 'read-only policy']
+/**
+ * The model and effort a live process runs a turn on. Ultracode is a level here: it runs at the model's default effort
+ * with Claude Code's `ultracode` setting on.
+ */
+type LiveFlags = { model: string; effort: string | null; ultracode: boolean }
+/** How long Claude Code may take to switch a live process's model or effort before the turn starts a new process. */
+const LIVE_FLAGS_SWITCH_MS = 15_000
+const sameFlags = (a: LiveFlags | undefined, b: LiveFlags): boolean =>
+  a !== undefined && a.model === b.model && a.effort === b.effort && a.ultracode === b.ultracode
 type SavedSession = {
   sessionId: string
   cwd: string
@@ -281,6 +293,8 @@ type Dependencies = {
   live?: false | Partial<LiveTimings>
   /** How long a turn Claude Code holds after a rejected plan window runs before Mousse ends it (tests). */
   usageLimitHoldMs?: number
+  /** How long Claude Code may take to switch a live process's model or effort (default `LIVE_FLAGS_SWITCH_MS`; tests). */
+  liveFlagsSwitchMs?: number
   /** Reads the limits of a local proxy Claude Code's base URL points at (default `readLocalProxyClaudeUsage`; tests). */
   proxyUsage?: (options: ProxyUsageOptions) => Promise<ProxyUsage | undefined>
   /** The proxy's sign-ins before their usage (default `previewLocalProxyClaudeAccounts`; tests). */
@@ -1927,7 +1941,7 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * The thread's live process when this turn can use it: it was started for the same instance, folder,
-   * model, effort, instructions, credential and read-only policy, and its conversation is the one this
+   * instructions, credential and read-only policy (a model or effort change is switched in place), and its conversation is the one this
    * turn continues. That is so when the saved history fingerprint matches (`resume` is its session),
    * or when the last turn on the process ended without saving one (a failure, a stop) and this
    * request's history is the boundary that turn left: the process holds exactly that, nothing was undone.
@@ -1944,12 +1958,13 @@ export class ClaudeSubscriptionProviderService {
   /**
    * The thread's live query for this turn: the open one when it is still the right one, a new one
    * otherwise, or undefined when the turn has to run as a one-shot query (live queries are at their
-   * cap). A query that has background work is never replaced silently: a change that needs a new
+   * cap). The open one switches to the turn's model and effort in place (issue #359); one that cannot is
+   * replaced. A query that has background work is never replaced silently: a change that needs a new
    * process is refused, naming the change, because it would end that work.
    */
   private async acquireLive(
     threadId: string,
-    key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; historyNow: string },
+    key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options
   ): Promise<LiveSession<TurnContext> | undefined> {
@@ -1961,16 +1976,32 @@ export class ClaudeSubscriptionProviderService {
       live = undefined
     }
     if (live) {
-      const working = live.obligations.size
       const reusable = this.reusableLive(threadId, key.hard, resume, key.historyNow)
       // Launch settings and integrations apply the next time the process starts; pending work keeps this one.
-      if (reusable && (live.meta.softKey === key.soft || working > 0)) return live
+      const keep = reusable !== undefined && (live.meta.softKey === key.soft || live.obligations.size > 0)
+      let switchFailed = false
+      if (keep) {
+        if (sameFlags(live.meta.flags as LiveFlags | undefined, key.flags)) return live
+        // The idle release must not close the process while Claude Code switches it.
+        const hold = live.reserve()
+        try {
+          if (await this.switchLiveFlags(live, key.flags)) return live
+        } finally {
+          hold()
+        }
+        switchFailed = true
+        console.warn('[claude-subscription] Claude Code could not switch the model or effort in place; the turn starts a new process', { threadId })
+      }
+      // Read after the switch: background work may have ended meanwhile.
+      const working = live.dead ? 0 : live.obligations.size
       if (working > 0) {
         const previous = (live.meta.hardParts as readonly unknown[] | undefined) ?? []
         const changed = HARD_PARTS.filter((_, index) => JSON.stringify(previous[index]) !== JSON.stringify(key.hard[index]))
-        const cause = changed.length
-          ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
-          : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
+        const cause = switchFailed
+          ? 'Claude Code could not switch its model or effort in place, which needs a new Claude process'
+          : changed.length
+            ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
+            : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
         const tasks = working === 1 ? 'a background task' : `${working} background tasks`
         // Tasks Claude read whose reply was cut off (or could not be shown) are not running: the next message
         // clears them. They are told apart from the ones still running, which a change would end.
@@ -2011,7 +2042,7 @@ export class ClaudeSubscriptionProviderService {
       },
       timings
     )
-    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode }
+    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags }
     this.live.set(threadId, created)
     try {
       const query = await this.createQuery(created.queue, create(created))
@@ -2026,6 +2057,41 @@ export class ClaudeSubscriptionProviderService {
       throw error
     }
     return created
+  }
+  /**
+   * Switches a live process to `flags` before a turn is pushed: false when Claude Code refused, did not answer in time,
+   * or the process ended meanwhile. The model is always named: a `null` one would reset it to Claude Code's default,
+   * not the thread's. A `null` effort is the model's default; Ultracode runs at it with `ultracode` on, and leaving
+   * Ultracode turns it off, since only a change of level does that by itself.
+   */
+  private async switchLiveFlags(live: LiveSession<TurnContext>, flags: LiveFlags): Promise<boolean> {
+    const previous = live.meta.flags as LiveFlags | undefined
+    const settings: Parameters<Query['applyFlagSettings']>[0] = {
+      model: flags.model,
+      effortLevel: flags.effort as EffortLevel | null,
+      ...(flags.ultracode ? { ultracode: true } : previous?.ultracode ? { ultracode: false } : {})
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        live.applyFlagSettings(settings),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Claude Code did not answer in time')), this.dependencies.liveFlagsSwitchMs ?? LIVE_FLAGS_SWITCH_MS)
+          timer.unref?.()
+        })
+      ])
+    } catch (error) {
+      console.warn('[claude-subscription] switching the model or effort of a live process failed', {
+        threadId: live.threadId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return false
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    if (live.dead) return false
+    live.meta.flags = flags
+    return true
   }
   private notifyHost(call: () => void): void {
     try {
@@ -2442,7 +2508,9 @@ export class ClaudeSubscriptionProviderService {
     }
     const saved = stored && sessionBoundTo(stored, instanceId) ? stored : undefined
     const historyNow = historyKey(input.history ?? '')
-    const sameSetup = saved?.cwd === resolve(input.cwd) && saved.model === parseThinkingSuffixFromModelId(input.model).baseId
+    // A model change resumes the session too (issue #359): Claude Code takes a session made on another model, as its
+    // own model switch does, so the conversation keeps its thinking, images and tool calls.
+    const sameSetup = saved?.cwd === resolve(input.cwd)
     const resume = !saved?.fork && sameSetup && saved?.historyKey === historyNow ? saved.sessionId : undefined
     /**
      * Issue #360: the session resumed cut, into a new session (`id`) so the one it came from stays
@@ -2661,7 +2729,10 @@ export class ClaudeSubscriptionProviderService {
       // Ultracode runs at the model's default effort, with Claude Code's `ultracode` setting on.
       const ultracode = level === 'ultracode'
       const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
+      // What a live process is keyed on besides `hard`: the settings without Ultracode, which switches in place.
+      const launchSettings = turnSettings
       if (ultracode && !locked) turnSettings = { ...turnSettings, ultracode: true }
+      const flags: LiveFlags = { model: selected.baseId, effort: effort ?? null, ultracode: ultracode && !locked }
       // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
       // not allow itself, Auto-accept edits lets edits through, Auto hands the decision to Claude Code's
       // auto mode (its classifier runs what it judges safe and asks through canUseTool about the rest),
@@ -2677,33 +2748,36 @@ export class ClaudeSubscriptionProviderService {
       const hard = [
         instanceId,
         resolve(input.cwd),
-        selected.baseId,
-        ultracode ? 'ultracode' : effort ?? null,
         appendTexts.filter(Boolean).join('\n\n'),
         input.mcp ? [input.mcp.url, input.mcp.token] : null,
         readOnlyChild
       ]
-      const reuse = !input.continuation && this.reusableLive(input.threadId, hard, resume, historyNow) !== undefined
-      // A process that holds this history already is the conversation; nothing is cut.
-      if (reuse) branch = undefined
-      const prompt = (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') +
-        (!resume && !branch && !reuse && input.history
-          ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
-          : '') + input.prompt
-      const content: SDKUserMessage['message']['content'] = [
-        { type: 'text', text: prompt || '(image attachment)' }
-      ]
-      for (const image of input.images ?? []) {
-        if (
-          !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) ||
-          Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024
-        )
-          throw new Error(`Unsupported Claude image: ${image.name}`)
-        content.push({
-          type: 'image',
-          source: { type: 'base64', media_type: image.mimeType as 'image/png', data: image.data }
-        })
+      const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
+      /** The prompt, with the history in front when no session holds it: none resumed, cut or kept warm. */
+      const contentFor = (reuse: boolean): SDKUserMessage['message']['content'] => {
+        const prompt = (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') +
+          (!resume && !branch && !reuse && input.history
+            ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
+            : '') + input.prompt
+        const built: SDKUserMessage['message']['content'] = [
+          { type: 'text', text: prompt || '(image attachment)' }
+        ]
+        for (const image of input.images ?? []) {
+          if (
+            !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) ||
+            Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024
+          )
+            throw new Error(`Unsupported Claude image: ${image.name}`)
+          built.push({
+            type: 'image',
+            source: { type: 'base64', media_type: image.mimeType as 'image/png', data: image.data }
+          })
+        }
+        return built
       }
+      // A process that holds this history already is the conversation; nothing is cut. A new process started
+      // in its place (`acquireLive` could not switch its model) is told again below.
+      let content = contentFor(reusable !== undefined)
       const userMessage = (sessionId: string): SDKUserMessage => ({
         type: 'user',
         message: { role: 'user', content },
@@ -2786,10 +2860,14 @@ export class ClaudeSubscriptionProviderService {
           await live.setPermissionMode(permissionMode)
           live.meta.permissionMode = permissionMode
         }
+        // The same for a model or effort changed since: the turn runs on the thread's current choice. Claude's own turn
+        // has nothing to restart into, so one that cannot switch goes on with what the process has.
+        if (!sameFlags(live.meta.flags as LiveFlags | undefined, flags) && !(await this.switchLiveFlags(live, flags)))
+          console.warn('[claude-subscription] could not switch the model or effort of Claude\'s own turn; it runs on the previous one', { threadId: input.threadId })
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {
-        const key = { hard, soft: this.launchKey(env, integrations, turnSettings, input.mcp?.relay ?? null), mode: permissionMode, historyNow }
+        const key = { hard, soft: this.launchKey(env, integrations, launchSettings, input.mcp?.relay ?? null), mode: permissionMode, flags, historyNow }
         try {
           // A bot's process is never kept warm: a locked turn is one query.
           live = locked ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
@@ -2817,6 +2895,10 @@ export class ClaudeSubscriptionProviderService {
           }
           throw error
         }
+        if (live && live === reusable) branch = undefined
+        // The process found holding the conversation was replaced (its launch settings changed, or it could not switch
+        // its model), or the turn runs as a one-shot query: the prompt carries what no resumed session does.
+        else if (reusable) content = contentFor(false)
         // Held until the run exists, so the idle release cannot close the process in between.
         const hold = live?.reserve()
         try {
@@ -3081,7 +3163,7 @@ export class ClaudeSubscriptionProviderService {
               ...(success || cutNotMade ? {} : { turns: reached ? withTurn(savedSessionId) : turnsBefore(savedSessionId) }),
               sessionId: savedSessionId,
               cwd: resolve(input.cwd),
-              // A stopped turn saves no model of its own, and the next turn resumes only on the same one.
+              // The model the turn ran on, which a compaction resumes the session with.
               model: parseThinkingSuffixFromModelId(input.model).baseId,
               ...(baseline ? { usageBaseline: baseline } : {}),
               instanceId

@@ -113,6 +113,10 @@ export class FakeClaudeProcess {
   /** Every message read from the prompt stream, in order. */
   readonly inputs: SDKUserMessage[] = []
   readonly permissionModes: string[] = []
+  /** Every `applyFlagSettings` call, in order. */
+  readonly flagSettings: Array<Record<string, unknown>> = []
+  /** `applyFlagSettings` rejects (`'throw'`) or never answers (`'hang'`), like a Claude Code that cannot switch in place. */
+  flagSettingsFail: 'throw' | 'hang' | undefined
   interrupts = 0
   /** The options of each `interrupt()` call. */
   readonly interruptOptions: Array<{ cancelQueued?: boolean } | undefined> = []
@@ -383,6 +387,11 @@ export class FakeClaudeProcess {
       setPermissionMode: async (mode: string) => {
         await this.permissionGate
         this.permissionModes.push(mode)
+      },
+      applyFlagSettings: async (settings: Record<string, unknown>) => {
+        this.flagSettings.push(settings)
+        if (this.flagSettingsFail === 'throw') throw new Error('apply_flag_settings is not supported')
+        if (this.flagSettingsFail === 'hang') await new Promise(() => undefined)
       },
       backgroundTasks: async (toolUseId?: string) => {
         this.backgrounded++

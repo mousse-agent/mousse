@@ -661,7 +661,7 @@ describe('Stop and process lifetime', () => {
     })
   })
 
-  it('refuses a model, folder or instruction change while background work exists, and replaces the process when there is none', async () => {
+  it('refuses a folder or instruction change while background work exists, and replaces the process when there is none', async () => {
     const f = fixture()
     f.cli.reply = (message, process) => {
       process.emit(roster({ id: 'bash-1' }))
@@ -669,15 +669,15 @@ describe('Stop and process lifetime', () => {
     }
     await f.turn()
     f.cli.reply = undefined
-    for (const change of [{ model: 'opus' }, { systemPromptAppend: 'new rules' }, { cwd: join(f.home, 'other') }])
+    for (const change of [{ systemPromptAppend: 'new rules' }, { cwd: join(f.home, 'other') }])
       await expect(f.chat({ history: '', ...change })).rejects.toMatchObject({ code: 'claude_background_work_blocks_change', message: expect.stringContaining('Stop') })
     expect(f.cli.processes).toHaveLength(1)
     expect(f.cli.last.closed).toBe(false)
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
     // After Stop the same change just starts a new process.
     f.service.stopThread('thread')
-    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'on opus')
-    expect(await f.chat({ model: 'opus', history: '' })).toBe('on opus')
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'new rules')
+    expect(await f.chat({ systemPromptAppend: 'new rules', history: '' })).toBe('new rules')
     expect(f.cli.processes).toHaveLength(2)
   })
 
@@ -729,6 +729,106 @@ describe('Stop and process lifetime', () => {
   })
 })
 
+describe('a model or effort change (issue #359)', () => {
+  /** A finished turn that leaves a background shell running on the process. */
+  const withShell = async (f: ReturnType<typeof fixture>) => {
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn({ history: 'h0' }, 'h0')
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'switched')
+  }
+
+  it('a model change switches the running process in place and keeps its session, with no replayed history', async () => {
+    const f = fixture()
+    await f.turn({ history: 'earlier turns' }, 'earlier turns')
+    const process = f.cli.last
+    expect(await f.turn({ model: 'opus:medium', history: 'earlier turns' }, 'earlier turns')).toBe('reply to 2')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(process.closed).toBe(false)
+    // The model is always named: without it Claude Code would go back to its own default.
+    expect(process.flagSettings).toEqual([{ model: 'opus', effortLevel: 'medium' }])
+    expect(process.text(1)).not.toContain('Previous conversation')
+    // Switched once: the next turn on the same model and effort sends nothing.
+    await f.turn({ model: 'opus:medium', history: 'earlier turns' }, 'earlier turns')
+    expect(process.flagSettings).toHaveLength(1)
+  })
+
+  it('an effort-only change keeps the process, and going back to the model default clears the level', async () => {
+    const f = fixture()
+    await f.turn({ model: 'sonnet:high', history: 'h' }, 'h')
+    const process = f.cli.last
+    await f.turn({ model: 'sonnet:low', history: 'h' }, 'h')
+    await f.turn({ model: 'sonnet', history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(process.flagSettings).toEqual([{ model: 'sonnet', effortLevel: 'low' }, { model: 'sonnet', effortLevel: null }])
+  })
+
+  it('a model and effort change while background work runs is applied, and the work keeps running', async () => {
+    const f = fixture()
+    await withShell(f)
+    const process = f.cli.last
+    expect(await f.chat({ model: 'opus:high', history: 'h0' })).toBe('switched')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(process.closed).toBe(false)
+    expect(process.flagSettings).toEqual([{ model: 'opus', effortLevel: 'high' }])
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+  })
+
+  it('when Claude Code cannot switch in place, the turn starts a new process that resumes the session, and the message goes through', async () => {
+    const f = fixture()
+    await f.turn({ history: 'h0' }, 'h0')
+    f.cli.last.flagSettingsFail = 'throw'
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    expect(await f.chat({ model: 'opus', history: 'h0' })).toBe('reply to 1')
+    warn.mockRestore()
+    expect(f.cli.processes).toHaveLength(2)
+    expect(f.cli.processes[0].closed).toBe(true)
+    expect(f.cli.last.options).toMatchObject({ model: 'opus', resume: SESSION })
+    expect(f.cli.last.text(0)).toContain('hello')
+    expect(f.cli.last.text(0)).not.toContain('Previous conversation')
+  })
+
+  it('a switch Claude Code never answers falls back to a new process once its time is up', async () => {
+    const f = fixture({}, undefined, undefined, { liveFlagsSwitchMs: 20 })
+    await f.turn({ history: 'h0' }, 'h0')
+    f.cli.last.flagSettingsFail = 'hang'
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    expect(await f.chat({ model: 'opus', history: 'h0' })).toBe('reply to 1')
+    warn.mockRestore()
+    expect(f.cli.processes).toHaveLength(2)
+    expect(f.cli.last.options).toMatchObject({ model: 'opus', resume: SESSION })
+  })
+
+  it('when the switch fails while background work runs, the change is refused and the work is kept', async () => {
+    const f = fixture()
+    await withShell(f)
+    f.cli.last.flagSettingsFail = 'throw'
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await expect(f.chat({ model: 'opus', history: 'h0' })).rejects.toMatchObject({
+      code: 'claude_background_work_blocks_change',
+      message: expect.stringContaining('could not switch its model or effort in place')
+    })
+    warn.mockRestore()
+    expect(f.cli.processes).toHaveLength(1)
+    expect(f.cli.last.closed).toBe(false)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+  })
+
+  it('a new process after a model change resumes the session instead of replaying the history', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ idleCloseMs: 1000 })
+    await f.turn({ history: 'h' }, 'h')
+    await vi.advanceTimersByTimeAsync(1001)
+    expect(f.cli.last.closed).toBe(true)
+    await f.turn({ model: 'opus', history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(2)
+    expect(f.cli.last.options).toMatchObject({ model: 'opus', resume: SESSION })
+    expect(f.cli.last.text(0)).not.toContain('Previous conversation')
+  })
+})
+
 describe('idle release and the cap on live processes', () => {
   it('closes an idle thread with no background work after the idle timeout, and the next turn resumes the session', async () => {
     vi.useFakeTimers()
@@ -747,16 +847,6 @@ describe('idle release and the cap on live processes', () => {
     expect(f.cli.last.text(0)).not.toContain('Previous conversation')
   })
 
-  it('a main thread with no background work changes model exactly as before: a fresh process with the history in the prompt', async () => {
-    const f = fixture()
-    await f.turn({ history: 'earlier turns' }, 'earlier turns')
-    await f.turn({ model: 'opus:medium', history: 'earlier turns' }, 'earlier turns')
-    expect(f.cli.processes).toHaveLength(2)
-    expect(f.cli.processes[0].closed).toBe(true)
-    expect(f.cli.last.options).toMatchObject({ model: 'opus', resume: undefined })
-    expect(f.cli.last.text(0)).toContain('Previous conversation')
-    expect(f.cli.last.text(0)).toContain('earlier turns')
-  })
 
   it('keeps the process while background work is pending, and releases it at the pin cap counted from when it became owed, however active the process is', async () => {
     vi.useFakeTimers()
@@ -1207,10 +1297,10 @@ describe('result routing and steering edge cases', () => {
     f.service.commitInterrupted('thread', 'h')
     // The cancel runs asynchronously: the tasks are lost once it has.
     await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalled())
-    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({
+    await expect(f.chat({ history: 'h', systemPromptAppend: 'new rules' })).rejects.toMatchObject({
       message: expect.stringMatching(/may not arrive.*Press Stop to release it now/)
     })
-    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.not.toMatchObject({ message: expect.stringContaining('Wait for it to finish') })
+    await expect(f.chat({ history: 'h', systemPromptAppend: 'new rules' })).rejects.not.toMatchObject({ message: expect.stringContaining('Wait for it to finish') })
   })
 
   it('what a discarded wake left is cleared by the next turn that begins afterwards and commits, not before', async () => {
@@ -1221,8 +1311,8 @@ describe('result routing and steering edge cases', () => {
     process.emit(notification('bash-1'))
     await later(30)
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
-    // The model may not be changed meanwhile, and the error says what to do.
-    await expect(f.chat({ history: '', model: 'opus' })).rejects.toMatchObject({ message: expect.stringMatching(/read the result of a background task.*could not be shown.*press Stop/) })
+    // The instructions may not be changed meanwhile, and the error says what to do.
+    await expect(f.chat({ history: '', systemPromptAppend: 'new rules' })).rejects.toMatchObject({ message: expect.stringMatching(/read the result of a background task.*could not be shown.*press Stop/) })
     f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
     expect(await f.chat({ history: '' })).toBe('next')
     // Not committed yet: the turn has to commit.
@@ -1248,7 +1338,7 @@ describe('result routing and steering edge cases', () => {
     f.service.commitInterrupted('thread', 'h')
     await vi.waitFor(() => expect(process.interruptOptions).toEqual([undefined, { cancelQueued: true }]))
     await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('four-hour limit')))
-    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({ message: expect.stringMatching(/may not arrive/) })
+    await expect(f.chat({ history: 'h', systemPromptAppend: 'new rules' })).rejects.toMatchObject({ message: expect.stringMatching(/may not arrive/) })
   })
 
   it('a discarded wake never discharges anything, not even what a cut-off turn left for it', async () => {
@@ -1515,7 +1605,7 @@ describe('result routing and steering edge cases', () => {
     await expect(f.chat({ history: 'edited + the refused request' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
     expect(f.cli.processes).toHaveLength(1)
     // Whereas a refusal that only the new message caused leaves the boundary.
-    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({ message: expect.stringContaining('model changed') })
+    await expect(f.chat({ history: 'h', systemPromptAppend: 'new rules' })).rejects.toMatchObject({ message: expect.stringContaining('instructions changed') })
     f.service.commitFailed('thread', 'h + refused')
     f.cli.reply = (message, process) => process.answer(String(message.uuid), 'ok')
     expect(await f.chat({ history: 'h + refused' })).toBe('ok')
@@ -1915,7 +2005,6 @@ describe('result routing and steering edge cases', () => {
     helper(f)
     await f.turn({ history: 'h' }, 'h')
     f.cli.reply = undefined
-    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({ message: expect.stringContaining('model changed') })
     await expect(f.chat({ history: 'h', systemPromptAppend: 'new' })).rejects.toMatchObject({ message: expect.stringContaining('instructions changed') })
     // The history no longer matches what the process holds (an undo or edit).
     await expect(f.chat({ history: 'something else' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
@@ -2199,7 +2288,7 @@ describe('background helpers as the real Claude Code reports them', () => {
     process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
     await later(30)
     f.service.commitInterrupted('thread', '')
-    return f.chat({ history: '', model: 'opus' }).then(() => undefined, (caught: Error) => caught)
+    return f.chat({ history: '', systemPromptAppend: 'new rules' }).then(() => undefined, (caught: Error) => caught)
   }
 
   it('a task a cut-off wake had read is not described as one whose result may not arrive, or as work a change would end', async () => {
@@ -2228,7 +2317,7 @@ describe('background helpers as the real Claude Code reports them', () => {
     obligations.release(lost, 'lost')
     obligations.consume('bash-2', read)
     obligations.release(read, 'discarded')
-    const error = await f.chat({ history: '', model: 'opus' }).then(() => undefined, (caught: Error) => caught)
+    const error = await f.chat({ history: '', systemPromptAppend: 'new rules' }).then(() => undefined, (caught: Error) => caught)
     expect(error?.message).toMatch(/holding a background task for this thread whose result may not arrive, along with another background task\..*Press Stop/)
   })
 

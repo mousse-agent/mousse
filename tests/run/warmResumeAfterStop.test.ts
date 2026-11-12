@@ -309,22 +309,21 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(claude.text(2)).not.toContain('please \\n')
   }, 30_000)
 
-  it('a refused model change leaves the process usable: the next plain message runs on it', async () => {
-    const { cli, d, thread } = await threadWithHelper()
+  it('a model change while a helper runs switches the same process: the helper keeps running, nothing is replayed, and the switch marker shows', async () => {
+    const { cli, d, thread, service } = await threadWithHelper()
     d.orch.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'opus' })
-    await d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' }).catch(() => undefined)
-    await waitFor(() => d.engine.listRuns(thread.id).some((run) => run.status === 'failed'), 'the refused run to fail')
-    expect(cli.processes).toHaveLength(1)
-    // The user goes back to the model the process runs, and sends a plain message.
-    d.orch.setThreadModelOverride(thread.id, CLAUDE)
-    cli.reply = (message, claude) => claude.answer(String(message.uuid), 'back on sonnet')
-    await d.orch.send('three', false, { threadId: thread.id, clientRequestId: 'turn-3' })
+    cli.reply = (message, claude) => claude.answer(String(message.uuid), 'on opus')
+    await d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' })
     expect(cli.processes).toHaveLength(1)
     expect(cli.last.closed).toBe(false)
+    expect(cli.last.flagSettings).toEqual([{ model: 'opus', effortLevel: null }])
+    expect(service.hasBackgroundWork(thread.id)).toBe(true)
     expect(d.engine.listRuns(thread.id).filter((run) => run.status === 'completed')).toHaveLength(2)
-    // The refused message was never sent to Claude, and nothing was replayed.
     expect(cli.last.inputs).toHaveLength(2)
     expect(cli.last.text(1)).not.toContain('Previous conversation')
+    const markers = d.orch.getOrCreateSession(thread.id).messages.filter((message) => message.kind === 'context_handoff')
+    expect(markers).toHaveLength(1)
+    expect(markers[0].contextHandoff).toMatchObject({ to: { model: 'opus' } })
   }, 30_000)
 
   it('replaying an old Stop does not close the process, and the helper, that a newer run started', async () => {
