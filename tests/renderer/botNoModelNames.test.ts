@@ -143,9 +143,18 @@ describe('no model name on any bot screen', () => {
     }
   })
 
-  it('is absent from New bot', async () => {
+  it('is absent from every step of New bot', async () => {
     await click(button('New bot'))
     expect(host.querySelector('[role="dialog"] h2')?.textContent).toBe('New bot')
+    expect(found()).toEqual([])
+    await click(button('Next'))
+    const text = host.querySelector<HTMLTextAreaElement>('#bot-new-text')!
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => { setter.call(text, 'Remind me to water the plants.'); text.dispatchEvent(new Event('input', { bubbles: true })) })
+    expect(found()).toEqual([])
+    // Runs on names no model until one is picked by hand.
+    await click(button('Next'))
+    expect(host.querySelector('[data-testid="bot-new-runs-on"]')).not.toBeNull()
     expect(found()).toEqual([])
   })
 })

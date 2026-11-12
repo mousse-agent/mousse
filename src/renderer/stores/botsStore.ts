@@ -58,10 +58,25 @@ export interface NewBotDraft {
    * Create bot sends them only to a service whose choices carry `options`.
    */
   slots: BotModelSlots | null
+  /** The step New bot shows, so closing and reopening returns to it. */
+  step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
   touched: boolean
 }
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, touched: false }
+/** New bot's steps: the look, what it does (name and sentence), and where it runs. */
+export type NewBotStep = 'look' | 'about' | 'runsOn'
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, step: 'look', touched: false }
+
+/**
+ * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service
+ * refuses is What it does's. Anything else (no answer, a busy service) stays where Create bot was pressed.
+ */
+export function newBotStepForFailure(cause: unknown, current: NewBotStep): NewBotStep {
+  const code = cause && typeof cause === 'object' && 'code' in cause ? String((cause as { code: unknown }).code) : ''
+  if (code === 'model_unavailable') return 'runsOn'
+  if (code === 'invalid_params' || code === 'bot_invalid') return 'about'
+  return current
+}
 
 interface BotsState {
   profileId: string | null
@@ -112,7 +127,9 @@ interface BotsState {
   openNewBot(): void
   /** Closes New bot; what was put in stays for the next time it opens. */
   closeNewBot(): void
-  setNewBotDraft(change: Partial<Omit<NewBotDraft, 'touched'>>): void
+  setNewBotDraft(change: Partial<Omit<NewBotDraft, 'touched' | 'step'>>): void
+  /** Moves New bot to a step; moving alone is not putting anything in. */
+  setNewBotStep(step: NewBotStep): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
   create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
@@ -459,6 +476,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     setNewBotDraft(change) { set((state) => ({ newBotDraft: { ...state.newBotDraft, ...change, touched: true } })) },
 
+    setNewBotStep(step) { set((state) => ({ error: state.errorBotId === null ? null : state.error, newBotDraft: { ...state.newBotDraft, step } })) },
+
     create(input) {
       if (createOperation) return createOperation
       const owner = epoch
@@ -476,7 +495,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
           return bot
         } catch (cause) {
           if (owner !== epoch) return null
-          set({ error: createFailureText(cause), errorBotId: null, busy: false })
+          set((state) => ({ error: createFailureText(cause), errorBotId: null, busy: false, newBotDraft: { ...state.newBotDraft, step: newBotStepForFailure(cause, state.newBotDraft.step) } }))
           // An answer that never came may still have made the bot: the list shows it if so.
           void get().refresh()
           return null
