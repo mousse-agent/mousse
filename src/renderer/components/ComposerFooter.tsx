@@ -82,6 +82,8 @@ export interface ComposerRunProps {
   onCompactNow?: () => void
   /** A compaction the person started is running: the chip reads "Compacting…". */
   compacting?: boolean
+  /** A bot's own thread: the bot keeps its context, so there is no ring, popover or Compact chip whatever the settings. */
+  contextHidden?: boolean
 }
 
 /** The thread's permission mode and how to change it; it shows beside the model button. */
@@ -422,7 +424,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {run ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
+        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
 
         <button
           type="button"

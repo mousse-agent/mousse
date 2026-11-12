@@ -46,6 +46,12 @@ export function routeLink(href: string, context?: { threadId?: string; projectId
   if (route.kind === 'reject') return false
   if (route.kind === 'web') {
     const store = useAppStore.getState()
+    // In Chats (a bot's or an agent chat) the Browser panel would swap the chat for the Projects workspace, so a
+    // web link opens in the person's own browser and the chat stays on screen.
+    if (store.sidebarMode === 'chats') {
+      window.open(route.url, '_blank', 'noopener,noreferrer')
+      return true
+    }
     const tabId = store.addBrowserTab(store.activeThreadId)
     store.updateBrowserTab(tabId, { url: route.url, title: route.url })
     store.setActiveBrowserTab(store.activeThreadId, tabId)
