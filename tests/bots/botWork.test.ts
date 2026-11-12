@@ -9,6 +9,7 @@ import { BOT_FAILURE_PAUSE_STREAK, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomTe
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
+import { isBotRoomAbort, isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -512,6 +513,18 @@ describe('long work', () => {
       await finish(f, first.payload, 'interrupted', { text, outcome: { interruptedBy: 'bot_wall' } })
       return { ...work, first }
     }
+
+    it('its turn is cut as out of room, so it hands back what it had; a chat\'s wall is cut as a plain wall', async () => {
+      const { first } = await outOfTime()
+      expect(isBotRoomAbort(first.prepared.authority.time.signal.reason)).toBe(true)
+      // A chat turn at a wall (here, its own hour) is a wall like any other: it hands back only its open reply.
+      const turn = await chat('How long?', 'm2')
+      f.clock.now += 60 * MIN
+      turn.prepared.authority.check(call)
+      deadline()
+      expect(isBotWallAbort(turn.prepared.authority.time.signal.reason)).toBe(true)
+      expect(isBotRoomAbort(turn.prepared.authority.time.signal.reason)).toBe(false)
+    })
 
     it('posts what it had with the ask, waits without holding the run lane, and never counts as a failure', async () => {
       const { workId, message } = await outOfTime()

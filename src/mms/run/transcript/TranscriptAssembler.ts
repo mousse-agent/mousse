@@ -257,12 +257,13 @@ export function unshownReplyText(text: string, shown: readonly string[]): string
 }
 
 /**
- * What a stopped turn hands back as its reply: the text of its open reply. A bot's turn cut at a wall (its work time ran
- * out, say) right after a tool call has none open: the reply it finished last in this turn is what it had, and its owner
- * sees it with the ask.
+ * What a stopped turn hands back as its reply: the text of its open reply. Only a bot's work cut because it ran out of
+ * room (`outOfRoom`) right after a tool call, with none open, hands back the reply it finished last in this turn: that is
+ * what it had, and its owner sees it with the ask. Every other stop (a chat's wall, a reload, the owner's Stop) hands back
+ * only its open reply, as before.
  */
-export function stoppedReplyText(open: string, closed: readonly string[], wall: boolean): string {
-  return wall && !open ? (closed.at(-1) ?? '').trim() : open
+export function stoppedReplyText(open: string, closed: readonly string[], outOfRoom: boolean): string {
+  return outOfRoom && !open ? (closed.at(-1) ?? '').trim() : open
 }
 
 /**

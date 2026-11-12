@@ -108,7 +108,7 @@ import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { botTurnOffers } from '../../shared/bots/personal/walls'
-import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
+import { isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
@@ -12473,7 +12473,9 @@ export class OrchestratorService extends EventEmitter {
         restart ? RESTART_INTERRUPTED_TEXT : wall ? 'Paused: waiting for the owner.' : TURN_STOPPED_TEXT,
         turnEnd ? { turnId: engineRunId, turnEnd } : undefined
       )
-      const response: OrchestratorResponse = { message: stoppedReplyText(partial, replies.map((reply) => stripActionBlocks(reply.content)), wall), actions: [] }
+      // Work cut because it ran out of room hands back what it had, even right after a tool call; any other stop its open reply.
+      const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
+      const response: OrchestratorResponse = { message: stoppedReplyText(partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       try {

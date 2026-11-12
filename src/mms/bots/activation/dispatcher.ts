@@ -93,6 +93,23 @@ export class BotReloadAbort extends BotWallAbort {
   }
 }
 
+/**
+ * The abort reason of work that ran out of room (`BotEngine.budgetEnd`): a wall whose turn hands back what it had, the
+ * reply it finished last when it was cut right after a tool call (`stoppedReplyText`).
+ */
+export class BotRoomAbort extends BotWallAbort {
+  readonly botRoom = true
+  constructor() {
+    super('bot_out_of_room')
+    this.name = 'BotRoomAbort'
+  }
+}
+
 export function isBotWallAbort(reason: unknown): boolean {
   return reason instanceof BotWallAbort || (Boolean(reason) && typeof reason === 'object' && (reason as { botWall?: unknown }).botWall === true)
+}
+
+/** Whether a bot turn was cut because its work ran out of room (`BotRoomAbort`). */
+export function isBotRoomAbort(reason: unknown): boolean {
+  return reason instanceof BotRoomAbort || (Boolean(reason) && typeof reason === 'object' && (reason as { botRoom?: unknown }).botRoom === true)
 }

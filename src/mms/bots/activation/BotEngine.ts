@@ -69,7 +69,7 @@ import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
 import { tellMeNotifies } from '../../../shared/automations'
-import { BotReloadAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
+import { BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
 
 /**
  * The personal bot engine (PR 6 §4, unit 6c-1): one-time approval with the subset rule, manual
@@ -2335,7 +2335,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (isJournalFailure(error)) this.journalFailed(row)
       else throw error
     }
-    live?.controller.abort(new BotWallAbort())
+    // Work hands back what it had (its last finished reply, when it was cut right after a call); any other run as before.
+    live?.controller.abort(row.trigger.kind === 'work' && !options.stuck ? new BotRoomAbort() : new BotWallAbort())
     if (ended) {
       if (waits) this.letGoOfBrowser(row)
       else {

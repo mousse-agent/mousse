@@ -113,12 +113,12 @@ describe('TranscriptAssembler', () => {
     expect(unshownReplyText(whole, ['All pass.', 'Checking the tests.'])).toBe(whole)
   })
 
-  it('a stopped turn hands back its open reply; a bot turn cut at a wall right after a call hands back its last one', () => {
+  it('a stopped turn hands back its open reply; only work cut for room right after a call hands back its last one', () => {
     const closed = ['Looking up the Roborock Q7 first.', 'Roborock Q7: 5,500 Pa suction. ']
     expect(stoppedReplyText('Still typing', closed, true)).toBe('Still typing')
     expect(stoppedReplyText('', closed, true)).toBe('Roborock Q7: 5,500 Pa suction.')
     expect(stoppedReplyText('', [], true)).toBe('')
-    // A person's Stop keeps what was open, and nothing else.
+    // A person's Stop, a chat's wall and a reload keep what was open, and nothing else.
     expect(stoppedReplyText('', closed, false)).toBe('')
   })
 
