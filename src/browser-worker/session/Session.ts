@@ -32,7 +32,7 @@ import { captureViewportScreenshot } from '../observation/screenshot'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
 import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readPageSigns, type NavigationOptions } from '../action/dispatch'
-import { hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
+import { BROWSER_PROBLEM_CODES, browserNoteForPerson, browserProblemMessage, classifyOpenedPage, hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep, workerWarning } from '../util'
@@ -150,6 +150,8 @@ export class ManagedSession {
   private readonly loadingTabs = new Set<string>()
   /** What each tab's last navigation ran into, or what its opened page needs, by CDP session: for people watching. */
   private readonly tabProblems = new Map<string, BrowserProblem>()
+  /** A tab's page to be read again for what it needs (`recheckPage`), by CDP session. */
+  private readonly pageRechecks = new Map<string, ReturnType<typeof setTimeout>>()
   /** How the session's first page went (`start` with a URL): a slow or failed page never fails the session. */
   firstNavigation: BrowserNavigation | undefined
   /** Pages and frames carrying the automation mark (`markAutomation`), by CDP session. */
@@ -328,6 +330,12 @@ export class ManagedSession {
     }
     this.chrome.cdp.on('Page.frameStartedLoading', loading(true))
     this.chrome.cdp.on('Page.frameStoppedLoading', loading(false))
+    // A page that moved without loading another (a sign-in done in place): what it needs is read again.
+    this.chrome.cdp.on('Page.navigatedWithinDocument', (params: unknown, sessionId?: string) => {
+      if (this.closed || this.closing || !sessionId) return
+      const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
+      if (tab && (params as { frameId?: string } | undefined)?.frameId === tab.targetId) this.recheckPage(tab)
+    })
     // What a person watching sees of a tab: its title as the page sets it (kept apart from what agents are told), and its size.
     this.chrome.cdp.on('Target.targetInfoChanged', (params: unknown) => {
       if (this.closed || this.closing) return
@@ -410,6 +418,8 @@ export class ManagedSession {
     this.viewers = null
     this.loadingTabs.clear()
     this.tabProblems.clear()
+    for (const timer of this.pageRechecks.values()) clearTimeout(timer)
+    this.pageRechecks.clear()
     const chrome = this.chrome
     try {
       if (chrome) await chrome.stop()
@@ -687,12 +697,20 @@ export class ManagedSession {
     const condition = validateBrowserWait(params.condition ?? params)
     const timeoutMs = typeof params.timeoutMs === 'number' ? params.timeoutMs : 5_000
     const deadline = Date.now() + Math.min(timeoutMs, 30_000)
+    const startedAt = Date.now()
     let observation = await this.observe(params)
     while (Date.now() < deadline) {
       if (signal?.aborted) fail('cancelled', 'Wait cancelled')
       if (this.matchWait(observation, condition)) return observation
       await new Promise((resolve) => setTimeout(resolve, 100))
       observation = await this.observe(params)
+    }
+    // A page that never stops loading (a stream, a script that keeps fetching) is still usable.
+    if (observation.warnings.includes(PAGE_STILL_LOADING)) {
+      const seconds = Math.round((Date.now() - startedAt) / 1000)
+      fail('timeout', condition.type === 'document-ready'
+        ? `The page is still loading after ${seconds} s. It can be used as it is: carry on with what is there, or wait again if you need what is still coming.`
+        : `The condition was not met in ${seconds} s, and the page is still loading. Carry on with what is there, or wait again.`)
     }
     fail('timeout', 'Wait condition was not met')
   }
@@ -786,6 +804,7 @@ export class ManagedSession {
       else await dispatchAction(this.requireChrome().cdp, actionSessionId, request.action, target, abort.signal)
       const downloads = await this.publishCompletedDownloads(request.timeoutMs, abort.signal)
       if (navigation) this.refs.invalidateTab(tab.publicId)
+      else this.recheckPage(tab)
       if (request.action.type === 'drag') {
         await new Promise((resolve) => setTimeout(resolve, 100))
         // The cursor ends where the drag dropped.
@@ -811,10 +830,13 @@ export class ManagedSession {
         })
         return result
       }
+      // A page that opened but is nothing but a check or a wall (or that the site refused): the action failed, the tab shows it.
+      const failedPage = navigation?.state === 'failed' && navigation.problem ? navigation.problem : undefined
       const result: BrowserActionResult = {
-        requestId: request.requestId, outcome: 'verified', dispatched: true, observation,
+        requestId: request.requestId, outcome: failedPage ? 'failed' : 'verified', dispatched: true, observation,
         artifactIds: [...(observation.screenshot ? [observation.screenshot.artifactId] : []), ...downloads.map((item) => item.artifactId)],
         ...(downloads.length ? { artifacts: downloads } : {}),
+        ...(failedPage ? { code: BROWSER_PROBLEM_CODES[failedPage.kind], message: browserProblemMessage(failedPage) } : {}),
         ...(navigation ? { navigation } : {})
       }
       this.journal.append({
@@ -1019,8 +1041,9 @@ export class ManagedSession {
     else await dispatchHumanInput(cdp, tab.cdpSessionId, input, signal)
     // The page it committed, known now (Chromium's commit event may come a moment after the answer).
     if (navigation && navigation.state !== 'failed') tab.url = sanitizeUrl(navigation.url)
-    // What the person did may change the page under any ref the agent holds.
+    // What the person did may change the page under any ref the agent holds, and what it needs of them.
     this.refs.invalidateTab(tab.publicId)
+    if (!navigation) this.recheckPage(tab)
     this.touch()
     return { ok: true, ...(navigation ? { navigation } : {}) }
   }
@@ -1045,12 +1068,39 @@ export class ManagedSession {
   private async watchNavigation(tab: TabState, navigation: Promise<BrowserNavigation>): Promise<BrowserNavigation> {
     try {
       const outcome = await navigation
-      if (outcome.problem) this.tabProblem(tab.cdpSessionId, outcome.problem)
+      // A person watching is told of a failure, or of a sign-in or check on the page that is theirs to do.
+      this.tabProblem(tab.cdpSessionId, outcome.problem ?? browserNoteForPerson(outcome.notes, hostOf(outcome.url)))
       return outcome
     } catch (error) {
       if (isBrowserWorkerError(error) && error.problem) this.tabProblem(tab.cdpSessionId, error.problem)
       throw error
     }
+  }
+
+  /**
+   * What a tab's page needs from a person follows the page as it is now: after the person's or the
+   * agent's input, or a same-page navigation, a tab told it needs a sign-in or a check is read again
+   * (the person signed in by typing and clicking, say), a moment after.
+   */
+  private recheckPage(tab: TabState, delayMs = 700): void {
+    if (this.tabProblems.get(tab.cdpSessionId)?.kind !== 'needs-you') return
+    const pending = this.pageRechecks.get(tab.cdpSessionId)
+    if (pending) clearTimeout(pending)
+    const timer = setTimeout(() => {
+      this.pageRechecks.delete(tab.cdpSessionId)
+      if (this.closed || this.closing || !this.tabs.has(tab.publicId) || this.tabProblems.get(tab.cdpSessionId)?.kind !== 'needs-you') return
+      void (async () => {
+        const cdp = this.requireChrome().cdp
+        const frameId = tab.frameId || (await cdp.send<{ frameTree?: { frame?: { id?: string } } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })).frameTree?.frame?.id
+        if (!frameId) return
+        const signs = await readPageSigns(cdp, tab.cdpSessionId, frameId)
+        if (!signs || this.tabProblems.get(tab.cdpSessionId)?.kind !== 'needs-you') return
+        const opened = classifyOpenedPage({ ...signs, url: signs.url ?? tab.url })
+        this.tabProblem(tab.cdpSessionId, opened.problem ?? browserNoteForPerson(opened.notes, hostOf(signs.url ?? tab.url)))
+      })().catch(() => undefined)
+    }, delayMs)
+    timer.unref?.()
+    this.pageRechecks.set(tab.cdpSessionId, timer)
   }
 
   /** Keeps what a tab's navigation ran into (with Chromium's code when it is known), for people watching. */

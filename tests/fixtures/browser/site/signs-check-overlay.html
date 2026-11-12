@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Tickets</title>
+  <style>
+    body { margin: 20px; font: 18px sans-serif; }
+    .overlay { position: fixed; inset: 0; background: #000c; display: flex; align-items: center; justify-content: center; z-index: 5; }
+    .h-captcha { width: 303px; height: 78px; background: #fff; }
+  </style>
+</head>
+<body>
+  <!-- A page with plenty on it, covered by an overlay that holds a human check: the page can't be reached until it is done. -->
+  <h1>Concert tickets</h1>
+  <p>Seats in every row, from the stalls to the balcony.</p>
+  <ul><li><a href="/nav-a.html">Friday</a></li><li><a href="/nav-b.html">Saturday</a></li><li><a href="/nav-a.html">Sunday</a></li></ul>
+  <form><input name="seats" placeholder="Seats"><button type="submit">Buy</button></form>
+  <div class="overlay"><div class="h-captcha" data-sitekey="fixture"><iframe title="hCaptcha" src="https://newassets.hcaptcha.com/captcha/v1/fixture/static/hcaptcha.html#frame=checkbox" width="303" height="78" style="border:0"></iframe></div></div>
+</body>
+</html>

@@ -32,8 +32,8 @@ const ERROR_CODES: readonly BrowserErrorCode[] = [
   ...Object.values(BROWSER_PROBLEM_CODES)
 ]
 
-const PROBLEM_KINDS: readonly BrowserProblem['kind'][] = ['unreachable', 'blocked', 'needs-you', 'cannot-start']
-const NEEDS_YOU_REASONS: readonly NonNullable<BrowserProblem['reason']>[] = ['sign-in', 'consent', 'human-check']
+const PROBLEM_KINDS: readonly BrowserProblem['kind'][] = ['unreachable', 'blocked', 'needs-you', 'browser-refused', 'cannot-start']
+const PROBLEM_REASONS: readonly NonNullable<BrowserProblem['reason']>[] = ['sign-in', 'consent', 'human-check', 'unsafe-port', 'browser-rules', 'certificate']
 
 /** A failed navigation's class, from a worker error's details: bounded plain fields only. */
 function problemDetails(value: unknown): { problem?: BrowserProblem } | undefined {
@@ -42,7 +42,7 @@ function problemDetails(value: unknown): { problem?: BrowserProblem } | undefine
   if (details.problem === undefined) return {}
   const p = object(details.problem, ['kind', 'reason', 'code', 'host', 'cause'])
   if (!PROBLEM_KINDS.includes(p.kind as BrowserProblem['kind'])) throw new Error('invalid_action: unsupported problem kind')
-  if (p.reason !== undefined && !NEEDS_YOU_REASONS.includes(p.reason as NonNullable<BrowserProblem['reason']>)) throw new Error('invalid_action: unsupported problem reason')
+  if (p.reason !== undefined && !PROBLEM_REASONS.includes(p.reason as NonNullable<BrowserProblem['reason']>)) throw new Error('invalid_action: unsupported problem reason')
   const text = (field: unknown, max: number) => field === undefined ? undefined : string(field, max)
   const code = text(p.code, 128)
   const host = text(p.host, 255)

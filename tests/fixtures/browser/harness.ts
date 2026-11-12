@@ -77,6 +77,32 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
       res.flushHeaders()
       return
     }
+    // A local app's sign-in page, as a thread agent meets one: it signs in where it is (no new page).
+    if (req.method === 'GET' && url.pathname === '/login') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end(`<!doctype html><title>Log in · Local app</title><style>body{margin:0;font:20px sans-serif} form{position:absolute;left:40px;top:40px;width:400px} input,button{display:block;width:380px;height:36px;font:20px sans-serif;margin:8px 0}</style>
+<main id="app"><form id="login"><input id="email" name="email" placeholder="Email" autocomplete="off"><input id="password" type="password" name="password" placeholder="Password" autocomplete="off"><button id="go" type="submit">Log in</button></form></main>
+<script>document.getElementById('login').addEventListener('submit', (event) => { event.preventDefault(); const who = document.getElementById('email').value || 'someone'; document.getElementById('app').innerHTML = '<h1>Signed in as ' + who.replace(/[<>&]/g, '') + '</h1><p>Your dashboard.</p>' })</script>`)
+      return
+    }
+    // An address that is a file to download, not a page.
+    if (req.method === 'GET' && url.pathname === '/report.csv') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/csv')
+      res.setHeader('content-disposition', 'attachment; filename="report.csv"')
+      res.end('month,total\njanuary,12\n')
+      return
+    }
+    // The site answers an error status, with a page (?body=1) or none; a 429 names its wait.
+    if (req.method === 'GET' && url.pathname === '/status') {
+      const status = Number(url.searchParams.get('code') ?? 500)
+      res.statusCode = status
+      if (status === 429) res.setHeader('retry-after', '30')
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end(url.searchParams.get('body') === '1' ? `<!doctype html><title>HTTP ${status}</title><h1>The site says ${status}</h1>` : '')
+      return
+    }
     // A sign-in wall: 401 and a password field.
     if (req.method === 'GET' && url.pathname === '/sign-in.html') {
       res.statusCode = 401

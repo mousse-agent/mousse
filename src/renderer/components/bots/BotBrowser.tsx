@@ -45,7 +45,7 @@ interface BrowserStatus {
 }
 
 /** A page's problem in a word or two, for the preview's status. */
-const PROBLEM_WORD = { unreachable: 'Can\'t reach site', blocked: 'Blocked', 'needs-you': 'Needs you', 'cannot-start': 'Can\'t start' } as const
+const PROBLEM_WORD = { unreachable: 'Can\'t reach site', blocked: 'Refused', 'needs-you': 'Needs you', 'browser-refused': 'Won\'t open', 'cannot-start': 'Can\'t start' } as const
 
 /** What the view says of the bot's browser: "Live" only while pictures can arrive. */
 export function browserStatus(view: BotBrowserView, stream: BotBrowserStream | undefined, botName: string, now: number): BrowserStatus {

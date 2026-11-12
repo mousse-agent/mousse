@@ -308,7 +308,7 @@ describe('what a page ran into', () => {
     await act(async () => {})
     expect(calls).toContainEqual(['bots.browser.input', { botId: 'noobesh', input: { kind: 'navigate', url: 'https://shop.example.com' } }])
     const note = host.querySelector('.bot-browser-pane .bot-browser-note')!
-    expect(note.textContent).toBe('shop.example.com blocked this browser')
+    expect(note.textContent).toBe('shop.example.com refused this browser')
     expect(note.getAttribute('title')).toContain('HTTP 403')
   })
 })

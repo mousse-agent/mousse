@@ -12,7 +12,7 @@ import {
  * document is ready, still loading is no failure, and the problem classes not to retry.
  */
 export const BROWSER_NAVIGATION_GUIDE =
-  'A page is open once it has committed and its document is ready; navigation.state "loading" means it is still loading, which is not a failure: carry on, or browser_wait for {"type":"document-ready"}. A page that fails comes back as site_unreachable (check the address; try again later at most once), site_blocked (the site refused this browser) or needs_person (a sign-in, a consent choice or a human check), each with what to do next. Never retry a blocked site or one that needs a person in a loop, and never work around it: ask the person (browser_request_human where you have it) or carry on without it. The browser session stays open whatever a page did.'
+  'When a result has a navigation field (the managed browser gives one), it says how the page went. state "loading" means it is still loading, which is not a failure: carry on, or browser_wait for {"type":"document-ready"}. A page that opened is never a failure because of what is on it: its note says what it shows that you may deal with (a sign-in form, a cookie banner, a human check that is part of the page, a page not found or a server error). A page that fails comes back as site_unreachable (check the address; try again later at most once), site_blocked (the site refused this browser: don\'t retry it), needs_person (the page is nothing but a human check or consent wall: don\'t retry it or get around it, ask the person; or a sign-in the browser can\'t show), browser_refused (an unsafe port, the browser\'s own rules, or a certificate it does not trust: never get around it), or browser_cannot_start, each with what to do next. The browser session stays open whatever a page did.'
 
 export const BROWSER_TOOL_DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   {
@@ -47,14 +47,14 @@ export const BROWSER_TOOL_DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   {
     name: 'browser_act',
     description:
-      'Perform one browser action using the sessionId, tabId, generation, observationId and controlLeaseId from the latest observation. Copy element refs exactly. Example action: {"type":"fill","target":{"kind":"ref","ref":"el_123"},"text":"hello"}; then {"type":"key","key":"Enter"}. Target requires kind:"ref", not elementRef or a selector. Use the returned observation for the next action. Coordinate/image-point actions require a vision-capable host binding. For navigate, back, forward and reload the result has action.navigation: "loading" is still loading, not a failure; site_unreachable, site_blocked and needs_person come with what to do next, and a blocked site or one that needs a person is never retried in a loop.',
+      'Perform one browser action using the sessionId, tabId, generation, observationId and controlLeaseId from the latest observation. Copy element refs exactly. Example action: {"type":"fill","target":{"kind":"ref","ref":"el_123"},"text":"hello"}; then {"type":"key","key":"Enter"}. Target requires kind:"ref", not elementRef or a selector. Use the returned observation for the next action. Coordinate/image-point actions require a vision-capable host binding. For navigate, back, forward and reload in the managed browser, the result has action.navigation (see browser_open): "loading" is still loading, not a failure, and its note says what the page shows.',
     capability: 'browser.action',
     vision: true,
     effect: 'external'
   },
   {
     name: 'browser_wait',
-    description: 'Wait for an explicit bounded browser condition. {"type":"document-ready"} waits until the page has finished loading.',
+    description: 'Wait for an explicit bounded browser condition. {"type":"document-ready"} waits until the page has finished loading where the browser can tell (the managed browser; an in-app tab answers at once). A page that never finishes loading can be used as it is.',
     capability: 'browser.observe',
     vision: false,
     effect: 'read'

@@ -6,7 +6,7 @@ import type {
 } from '../../../shared/browser/automation'
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { ExecutionContext } from '../../../shared/execution/types'
-import { browserProblemForAgent, type BrowserNavigation } from '../../../shared/browser/navigation'
+import { BROWSER_PROBLEM_CODES, browserNoteForAgent, browserProblemForAgent, type BrowserNavigation, type BrowserNoteReader } from '../../../shared/browser/navigation'
 import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import {
   type BrowserExecutionBinding,
@@ -150,7 +150,10 @@ export async function dispatchBrowserTool(input: {
   }
   try {
     const output = await input.port.dispatch(context, input.name, args)
-    const result = formatBrowserToolOutput(output)
+    // A bot has no sign-in of its own: a page's sign-in form is its owner's to fill.
+    const actor = input.binding.execution.actor
+    const reader: BrowserNoteReader = actor.kind === 'agent' && actor.definitionId?.startsWith('bot:') ? 'bot' : 'agent'
+    const result = formatBrowserToolOutput(output, reader)
     const screenshot = output.observation?.screenshot
     if (input.name === 'browser_screenshot') {
       if (!context.vision || !input.port.readScreenshot || !screenshot || !output.observation) {
@@ -165,26 +168,36 @@ export async function dispatchBrowserTool(input: {
 }
 
 /**
- * How a page went, for the model: its state and, for a problem, its class and what to do next in
- * plain words. Still loading is no failure: carry on, or wait for it.
+ * How a page went, for the model: its state; for a failure, its class and what to do next; for a
+ * page that opened, what it shows that the model may deal with (never an order to stop); a download
+ * it started instead, or the address the tab really ended on. Still loading is no failure.
  */
-function navigationForModel(navigation: BrowserNavigation | undefined): Record<string, unknown> | undefined {
+function navigationForModel(navigation: BrowserNavigation | undefined, reader: BrowserNoteReader): Record<string, unknown> | undefined {
   if (!navigation) return undefined
+  const notes = [
+    ...(navigation.state === 'loading' ? ['Still loading. This is not a failure: carry on with what is there, or browser_wait with {"type":"document-ready"}.'] : []),
+    ...(navigation.download ? [`This address started a download (${navigation.download.name}) instead of opening a page; the tab stays on ${navigation.url}.`] : []),
+    ...(navigation.replaced ? [`Another navigation replaced the one to ${navigation.replaced.asked}: the tab is on ${navigation.url}.`] : []),
+    ...(navigation.notes ?? []).map((note) => browserNoteForAgent(note, reader))
+  ]
   return {
     url: navigation.url,
     state: navigation.state,
-    ...(navigation.state === 'loading' ? { note: 'Still loading. This is not a failure: carry on with what is there, or browser_wait with {"type":"document-ready"}.' } : {}),
-    ...(navigation.problem ? { problem: navigation.problem.kind, ...(navigation.problem.reason ? { reason: navigation.problem.reason } : {}), next: browserProblemForAgent(navigation.problem) } : {})
+    ...(navigation.download ? { download: navigation.download.name } : {}),
+    ...(navigation.notes?.length ? { shows: navigation.notes.map((note) => note.kind === 'http-status' ? `http-${note.status}` : note.kind) } : {}),
+    ...(notes.length ? { note: notes.join(' ') } : {}),
+    ...(navigation.problem ? { problem: BROWSER_PROBLEM_CODES[navigation.problem.kind], ...(navigation.problem.reason ? { reason: navigation.problem.reason } : {}), next: browserProblemForAgent(navigation.problem) } : {})
   }
 }
 
-export function formatBrowserToolOutput(output: BrowserToolOutput): BrowserDispatchResult {
+export function formatBrowserToolOutput(output: BrowserToolOutput, reader: BrowserNoteReader = 'agent'): BrowserDispatchResult {
   const actionOutcome = output.action?.outcome
   const isError =
     actionOutcome === 'unknown-effect' ||
     actionOutcome === 'failed' ||
     actionOutcome === 'blocked' ||
-    output.navigation?.state === 'failed'
+    output.navigation?.state === 'failed' ||
+    output.action?.navigation?.state === 'failed'
   const payload = {
     untrusted: true,
     provenance: 'untrusted-page' as const,
@@ -200,11 +213,11 @@ export function formatBrowserToolOutput(output: BrowserToolOutput): BrowserDispa
           dispatched: output.action.dispatched,
           code: output.action.code,
           message: output.action.message,
-          navigation: navigationForModel(output.action.navigation),
+          navigation: navigationForModel(output.action.navigation, reader),
           observation: output.action.observation ? sanitizeObservation(output.action.observation) : undefined
         }
       : undefined,
-    navigation: navigationForModel(output.navigation),
+    navigation: navigationForModel(output.navigation, reader),
     extraction: output.extraction,
     artifacts: output.artifacts?.map((artifact) => ({
       id: artifact.id,

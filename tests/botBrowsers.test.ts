@@ -16,6 +16,10 @@ import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyServ
 import { BotBrowsers, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
 import type { BotTurnBrowser } from '../src/mms/bots/activation/dispatcher'
 import { dispatchBrowserTool } from '../src/mms/orchestrator/browser/dispatch'
+import { snapshotBrowserExecutionBinding } from '../src/mms/orchestrator/browser/binding'
+import { browserToolCapability } from '../src/mms/orchestrator/browser/tools'
+import { BrowserAutomationError } from '../src/mms/browser/automation/BrowserSessionManager'
+import type { BrowserRuntimePort } from '../src/shared/browser/runtime'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
 import type { BotBrowserFrameEvent } from '../src/shared/bots/personal/browser'
@@ -567,21 +571,22 @@ describe.skipIf(!chrome.ok)('a slow page is not a failed page', () => {
     expect(unreachable.error).toBeDefined()
     const failed = modelResult(unreachable)
     expect(failed.session!.id).toBeTruthy()
-    expect(failed.navigation).toMatchObject({ state: 'failed', problem: 'unreachable', next: expect.stringMatching(/^Can't reach 127\.0\.0\.1 \(net::ERR_CONNECTION_REFUSED\)\. Check the address/) })
+    expect(failed.navigation).toMatchObject({ state: 'failed', problem: 'site_unreachable', next: expect.stringMatching(/^Can't reach 127\.0\.0\.1 \(net::ERR_CONNECTION_REFUSED\)\. Check the address/) })
     // It goes on in the same session.
     const good = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
     expect(good.session!.id).toBe(failed.session!.id)
     const page = good.observation!
     const act = (url: string) => call(bot, 'browser_act', { tabId: page.tabId, generation: page.generation, observationId: page.observationId, controlLeaseId: good.session!.controlLeaseId, action: { type: 'navigate', url } })
     expect((await act(nowhere)).error).toMatch(/^site_unreachable: Can't reach 127\.0\.0\.1 \(net::ERR_CONNECTION_REFUSED\)/)
-    // Chromium refuses an unsafe port for this browser: blocked, never to be retried.
+    // An unsafe port is the browser refusing the address itself, not the site.
     const fresh = modelResult(await call(bot, 'browser_observe', { tabId: page.tabId })).observation!
-    const blocked = await call(bot, 'browser_act', { tabId: fresh.tabId, generation: fresh.generation, observationId: fresh.observationId, controlLeaseId: good.session!.controlLeaseId, action: { type: 'navigate', url: 'http://127.0.0.1:6000/' } })
-    expect(blocked.error).toMatch(/^site_blocked: 127\.0\.0\.1 blocked this browser \(net::ERR_UNSAFE_PORT\)\. Don't retry it/)
-    // A sign-in wall opens, and says it needs a person.
+    const refused = await call(bot, 'browser_act', { tabId: fresh.tabId, generation: fresh.generation, observationId: fresh.observationId, controlLeaseId: good.session!.controlLeaseId, action: { type: 'navigate', url: 'http://127.0.0.1:6000/' } })
+    expect(refused.error).toMatch(/^browser_refused: This browser won't open that address: its port is one browsers refuse \(net::ERR_UNSAFE_PORT\)/)
+    // A sign-in page (401 with its form) opens: a note for the bot to ask its owner, never a failure.
     const signIn = modelResult(await call(bot, 'browser_open', { url: `${origin}/sign-in.html` }))
     expect(signIn.error).toBeUndefined()
-    expect(signIn.navigation).toMatchObject({ state: 'ready', problem: 'needs-you', reason: 'sign-in', next: expect.stringMatching(/needs a person: a sign-in \(HTTP 401\)\. Don't retry it/) })
+    expect(signIn.navigation).toMatchObject({ state: 'ready', shows: ['sign-in-form'], note: expect.stringMatching(/sign-in form\. You have no sign-in of your own: ask your owner to sign in here/) })
+    expect(JSON.stringify(signIn.navigation)).not.toMatch(/Don't retry/)
     expect(modelResult(await call(bot, 'browser_tabs', { operation: 'list' })).tabs!.length).toBeGreaterThanOrEqual(2)
   }, 60_000)
 
@@ -610,6 +615,80 @@ describe.skipIf(!chrome.ok)('a slow page is not a failed page', () => {
     await bots.control(BOT_A, 'owner')
     await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/nav-a.html` })
     expect((await bots.view(BOT_A)).problem).toBeUndefined()
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('a thread agent reads a local sign-in page as a form it may fill, and fills it; a bot is told to ask its owner', async () => {
+    const { browser, turn, call, origin } = await fixture()
+    // A thread's agent, as the orchestrator dispatches it (not a bot).
+    const policy = new ExecutionPolicyService().snapshot(profileId, { allowedTools: [...BROWSER_AUTOMATION_TOOLS], allowedCapabilities: [...new Set(BROWSER_AUTOMATION_TOOLS.map(browserToolCapability))], allowedEffects: ['read', 'external'], maxToolCalls: 50, maxElapsedMs: 60_000 })
+    const binding = snapshotBrowserExecutionBinding({ execution: { profileId, threadId: 'thread-1', turnId: 'turn-1', actor: { kind: 'main' }, source: 'gui', policySnapshotId: policy.id, cancellationId: 'turn-1' }, policy, mode: 'structured', vision: false })
+    const port: BrowserRuntimePort = {
+      resolveTarget: () => ({ backend: 'managed-chromium' }),
+      requestAccess: async () => 'already-allowed',
+      dispatch: async (context, name, args) => {
+        const result = await browser.tools.invoke(name, args as Record<string, unknown>, context)
+        if (!result.ok) throw new BrowserAutomationError(result.error)
+        return result.value
+      }
+    }
+    const agent = async (name: string, args: Record<string, unknown>) => dispatchBrowserTool({ port, binding, name, args })
+    const opened = await agent('browser_open', { url: `${origin}/login` })
+    expect(opened.isError).toBe(false)
+    const result = JSON.parse(opened.text) as Parsed & { navigation?: Record<string, unknown> }
+    expect(result.navigation).toMatchObject({ state: 'ready', shows: ['sign-in-form'], note: expect.stringMatching(/sign-in form\. Fill it if you have what it needs/) })
+    expect(opened.text).not.toMatch(/Don't retry|needs_person|ask your owner/)
+    // It fills the form with the test account it was given, and is signed in.
+    const page = result.observation!
+    const field = (name: string) => page.elements.find((element) => element.role === 'textbox' && element.name?.includes(name))!
+    const act = async (action: Record<string, unknown>, seen: BrowserObservation) => JSON.parse((await agent('browser_act', { sessionId: seen.sessionId, tabId: seen.tabId, generation: seen.generation, observationId: seen.observationId, controlLeaseId: result.session!.controlLeaseId, action })).text) as Parsed
+    let seen = (await act({ type: 'fill', target: { kind: 'ref', ref: field('Email').ref }, text: 'tester@local.test' }, page)).action!.observation!
+    seen = (await act({ type: 'fill', target: { kind: 'ref', ref: seen.elements.find((element) => element.name?.includes('Password'))!.ref }, text: 'test-password' }, seen)).action!.observation!
+    await act({ type: 'click', target: { kind: 'ref', ref: seen.elements.find((element) => element.role === 'button')!.ref } }, seen)
+    expect((JSON.parse((await agent('browser_extract', { sessionId: page.sessionId, tabId: page.tabId })).text) as Parsed).extraction!.text).toMatch(/Signed in as tester@local\.test/)
+    // A bot on the same page has no sign-in of its own: its note says to ask its owner.
+    const bot = turn(BOT_A, 'act-1')
+    const botOpened = modelResult(await call(bot, 'browser_open', { url: `${origin}/login` }))
+    expect(botOpened.navigation).toMatchObject({ state: 'ready', note: expect.stringMatching(/You have no sign-in of your own: ask your owner to sign in here/) })
+  }, 60_000)
+
+  it('the owner signs in by clicking and typing: the view no longer says the page needs a sign-in', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/login` })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 960, fps: 15, connectionId: 'c1', emit: view.emit })
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 5_000 }).toMatchObject({ kind: 'needs-you', reason: 'sign-in', host: '127.0.0.1' })
+    await bots.control(BOT_A, 'owner')
+    // The form signs in where it is: no new page commits.
+    await bots.input(BOT_A, { kind: 'click', x: 230, y: 66 })
+    await bots.input(BOT_A, { kind: 'type', text: 'owner@local.test' })
+    await bots.input(BOT_A, { kind: 'click', x: 230, y: 110 })
+    await bots.input(BOT_A, { kind: 'type', text: 'secret' })
+    await bots.input(BOT_A, { kind: 'key', key: 'Enter' })
+    await expect.poll(() => view.events.some((event) => event.problem === null), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).problem).toBeUndefined()
+    await bots.control(BOT_A, 'bot')
+    expect((await call(bot, 'browser_extract', {})).extraction!.text).toMatch(/Signed in as owner@local\.test/)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('what the bot\'s failed new tab ran into stops showing once the bot carries on in the tab the view follows', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const opened = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    // A new tab on an address nothing answers on closes again; the view says what happened.
+    expect((await call(bot, 'browser_open', { url: await closedAddress() })).error).toMatch(/^site_unreachable/)
+    await expect.poll(async () => (await bots.view(BOT_A)).problem?.kind, { timeout: 5_000 }).toBe('unreachable')
+    // The bot carries on by clicking a link in its tab: the view follows the tab as it is now.
+    const seen = modelResult(await call(bot, 'browser_observe', { tabId: opened.observation!.tabId })).observation!
+    const link = seen.elements.find((element) => element.role === 'link')!
+    expect((await call(bot, 'browser_act', { tabId: seen.tabId, generation: seen.generation, observationId: seen.observationId, controlLeaseId: opened.session!.controlLeaseId, action: { type: 'click', target: { kind: 'ref', ref: link.ref } } })).error).toBeUndefined()
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 5_000 }).toBeUndefined()
+    expect((await bots.view(BOT_A)).tab?.url).toBe(`${origin}/nav-b.html`)
     bots.unwatch(BOT_A, 'w1', 'c1')
   }, 60_000)
 
