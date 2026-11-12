@@ -350,14 +350,15 @@ export class BrowserSessionManager {
     return { extraction: result }
   }
 
-  async control(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human'): Promise<BrowserToolOutput> {
+  /** Who holds the session. A person taking it may name the tab they take (`tabId`): it comes to the front. */
+  async control(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human', options: { tabId?: string } = {}): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId, owner })
-    return this.changeControl(context, sessionId, owner)
+    return this.changeControl(context, sessionId, owner, owner === 'human' ? options.tabId : undefined)
   }
 
-  private async changeControl(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human'): Promise<BrowserToolOutput> {
+  private async changeControl(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human', tabId?: string): Promise<BrowserToolOutput> {
     const entry = this.requireOwned(sessionId, context.execution)
-    const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
+    const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner, ...(tabId ? { tabId } : {}) }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
     entry.record = { ...entry.record, controlLeaseId: result.controlLeaseId, generation: result.generation ?? entry.record.generation, lifecycle: result.lifecycle ?? entry.record.lifecycle, updatedAt: new Date().toISOString() }
     if (owner === 'agent' && entry.record.humanHandoff) entry.record.humanHandoff = { ...entry.record.humanHandoff, state: 'resumed', updatedAt: new Date().toISOString() }
     this.observations.delete(sessionId)

@@ -6,15 +6,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CdpEventListener, CdpTransport } from '../src/browser-worker/cdp/transport'
-import { SETTLE_MS, STILL_WAIT_MS, ViewerCaptures, type ViewerTabInfo, type ViewerUpdate } from '../src/browser-worker/observation/screencast'
+import { MAX_PICTURE_CHARS, MAX_REPEAT_GAP_MS, REPEAT_GAP_MS, SETTLE_MS, ViewerCaptures, type ViewerTabInfo, type ViewerUpdate } from '../src/browser-worker/observation/screencast'
 
 /**
  * A Chromium of one or more tabs: `paint` changes a tab's page and sends it while its screencast
  * runs (as `<page>@<quality>`). As measured on Chromium 153: a screencast that starts usually sends
- * the page as it is (not always: `sendsOnStart`), and a screenshot can make it send the page again
- * (`screenshotRepaints`).
+ * the page as it is (not always: `sendsOnStart`), and a screenshot makes it send the page again
+ * (`screenshotRepaints`), as another encoding of the same page the first time (`'variant'`:
+ * `<page>@<quality>~`), and then as that same encoding. `shot` answers a screenshot's picture.
  */
-function fakeCdp({ sendsOnStart = true, screenshotRepaints = false } = {}) {
+function fakeCdp({ sendsOnStart = true, screenshotRepaints = false as boolean | 'variant', shot = undefined as ((params: Record<string, unknown>, index: number) => string) | undefined } = {}) {
   const listeners = new Map<string, Set<CdpEventListener>>()
   const sent: Array<{ method: string; params?: Record<string, unknown>; sessionId?: string }> = []
   const pages = new Map<string, string>()
@@ -34,8 +35,9 @@ function fakeCdp({ sendsOnStart = true, screenshotRepaints = false } = {}) {
       if (method === 'Page.getLayoutMetrics') return { cssVisualViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } } as T
       if (method === 'Page.captureScreenshot') {
         const page = pages.get(sessionId)
-        if (screenshotRepaints && page && casting.has(sessionId)) emit(sessionId, `${page}@${casting.get(sessionId)}`)
-        return { data: `SHOT${++shots}` } as T
+        if (screenshotRepaints && page && casting.has(sessionId)) emit(sessionId, `${page}@${casting.get(sessionId)}${screenshotRepaints === 'variant' ? '~' : ''}`)
+        shots += 1
+        return { data: shot ? shot(params!, shots) : `SHOT${shots}` } as T
       }
       if (method === 'Page.stopScreencast') casting.delete(sessionId)
       if (method === 'Page.startScreencast') {
@@ -89,7 +91,7 @@ describe('the pictures of a watched tab', () => {
   })
 
   it('starts a screencast for the first watcher, answers a paint at once, sends nothing more for a still page but one sharp picture', async () => {
-    const { cdp, paint, count, sent, qualities } = fakeCdp()
+    const { cdp, paint, count, sent, qualities } = fakeCdp({ screenshotRepaints: true })
     const captures = new ViewerCaptures(cdp, { behind: () => false })
     const state = await join(captures, TAB_A, 'w1')
     expect(state).toMatchObject({ tabId: 'tab_a', url: 'https://a.example/', title: 'A', viewport: { width: 1280, height: 720 }, behind: false })
@@ -99,49 +101,174 @@ describe('the pictures of a watched tab', () => {
     paint('cdp-a', 'AAA')
     const one = await after(first)
     expect(one.picture).toMatchObject({ data: 'AAA@60', width: 960, height: 540, sharp: false })
-    // The page stops changing: the screencast is sent again at full quality, once, then nothing.
+    // The page stops changing: one screenshot at full quality, the screencast left as it is, then nothing.
     const sharp = await after(ask(captures, TAB_A, 'w1', one), SETTLE_MS + 10)
-    expect(sharp.picture).toMatchObject({ data: 'AAA@90', sharp: true, width: 960, height: 540 })
-    expect(qualities('cdp-a')).toEqual([60, 90])
+    expect(sharp.picture).toMatchObject({ data: 'SHOT1', sharp: true, width: 960, height: 540 })
+    expect(sent.find((entry) => entry.method === 'Page.captureScreenshot')!.params).toMatchObject({ quality: 90, clip: { scale: 0.75 } })
     expect(await after(ask(captures, TAB_A, 'w1', sharp, { waitMs: 5_000 }), 5_000)).toMatchObject({ idle: true })
-    expect(qualities('cdp-a')).toEqual([60, 90])
-    // A page in front is never screenshotted: that would make Chromium paint it again.
-    expect(count('Page.captureScreenshot')).toBe(0)
+    expect(count('Page.captureScreenshot')).toBe(1)
     // The same picture painted again is no change.
     const repeat = ask(captures, TAB_A, 'w1', sharp, { waitMs: 1_000 })
     paint('cdp-a', 'AAA')
     paint('cdp-a', 'AAA')
     const repeated = await after(repeat, 1_000)
     expect(repeated).toMatchObject({ idle: true })
-    // It changes again: that picture goes, and the screencast is back at the lighter quality.
+    // It changes again: that picture goes.
     const change = ask(captures, TAB_A, 'w1', sharp)
     paint('cdp-a', 'BBB')
-    expect((await after(change)).picture).toMatchObject({ data: 'BBB@90', sharp: false })
-    expect(qualities('cdp-a')).toEqual([60, 90, 60])
-    // The layout is read when the capture starts: never per picture.
-    expect(count('Page.getLayoutMetrics')).toBe(1)
+    expect((await after(change)).picture).toMatchObject({ data: 'BBB@60', sharp: false })
+    // The screencast was never started again: one quality all along.
+    expect(qualities('cdp-a')).toEqual([60])
+    // The layout is read when the capture starts and for each still: never per picture.
+    expect(count('Page.getLayoutMetrics')).toBe(2)
     captures.dispose()
   })
 
-  it('takes one screenshot when Chromium sends nothing at the restart, and what it makes Chromium send asks for no other', async () => {
-    const { cdp, paint, count, qualities } = fakeCdp({ sendsOnStart: false, screenshotRepaints: true })
+  it('a still page\'s screenshot echo asks for no endless stills: at most two, then nothing', async () => {
+    const { cdp, paint, count, qualities } = fakeCdp({ sendsOnStart: false, screenshotRepaints: 'variant', shot: () => 'SAME' })
     const captures = new ViewerCaptures(cdp, { behind: () => false })
     const state = await join(captures, TAB_A, 'w1')
     const first = ask(captures, TAB_A, 'w1', state)
     paint('cdp-a', 'AAA')
-    const one = await after(first)
-    expect(one.picture).toMatchObject({ data: 'AAA@60', sharp: false })
-    const sharp = await after(ask(captures, TAB_A, 'w1', one), SETTLE_MS + STILL_WAIT_MS + 10)
-    expect(sharp.picture!.sharp).toBe(true)
-    expect(count('Page.captureScreenshot')).toBe(1)
-    let seen: ViewerUpdate = sharp
-    for (let index = 0; index < 5; index += 1) {
+    let seen: ViewerUpdate = await after(first)
+    expect(seen.picture).toMatchObject({ data: 'AAA@60', sharp: false })
+    const pictures: string[] = []
+    for (let index = 0; index < 20; index += 1) {
       const update = await after(ask(captures, TAB_A, 'w1', seen, { waitMs: 1_000 }), 1_000)
-      if (update.picture) expect(update.picture.sharp).toBe(true)
+      if (update.picture) pictures.push(update.picture.data)
       seen = update.picture ? update : { ...update, frameSeq: seen.frameSeq }
     }
+    // The screenshot's echo is a new encoding of the page: a second screenshot, the same bytes, says nothing changed.
+    expect(pictures).toEqual(['SAME'])
+    expect(count('Page.captureScreenshot')).toBe(2)
+    expect(qualities('cdp-a')).toEqual([60])
+    captures.dispose()
+  })
+
+  it('a page that changes just as its still is taken: the second screenshot shows it, at full quality', async () => {
+    let page = 'AAA'
+    const { cdp, paint, count } = fakeCdp({ sendsOnStart: false, screenshotRepaints: 'variant', shot: () => `SHOT-${page}` })
+    const captures = new ViewerCaptures(cdp, { behind: () => false })
+    const state = await join(captures, TAB_A, 'w1')
+    const first = ask(captures, TAB_A, 'w1', state)
+    paint('cdp-a', 'AAA')
+    let seen: ViewerUpdate = await after(first)
+    // The page changes right as the still is taken: Chromium's next picture is its echo window's.
+    page = 'BBB'
+    const pictures: string[] = []
+    for (let index = 0; index < 6; index += 1) {
+      const update = await after(ask(captures, TAB_A, 'w1', seen, { waitMs: 1_000 }), 1_000)
+      if (update.picture) pictures.push(update.picture.data)
+      seen = update.picture ? update : { ...update, frameSeq: seen.frameSeq }
+    }
+    expect(pictures.at(-1)).toBe('SHOT-BBB')
+    expect(count('Page.captureScreenshot')).toBeLessThanOrEqual(3)
+    captures.dispose()
+  })
+
+  it('a page that changes a little every second costs its changes: no restart, and stills stop once each is replaced at once', async () => {
+    let clock = ''
+    const { cdp, paint: paintPage, count } = fakeCdp({ screenshotRepaints: 'variant', shot: () => `SHOT-${clock}` })
+    const paint = (sessionId: string, page: string) => { clock = page; return paintPage(sessionId, page) }
+    const captures = new ViewerCaptures(cdp, { behind: () => false })
+    let seen: Seen = await join(captures, TAB_A, 'w1')
+    const pictures: Array<{ data: string; sharp: boolean }> = []
+    let stop = false
+    const loop = (async () => {
+      while (!stop) {
+        const update: ViewerUpdate = await ask(captures, TAB_A, 'w1', seen, { waitMs: 2_000 })
+        seen = update
+        if (update.picture) pictures.push({ data: update.picture.data, sharp: update.picture.sharp })
+      }
+    })()
+    // A clock: a new picture each second for 30 s.
+    for (let second = 1; second <= 30; second += 1) {
+      paint('cdp-a', `T${second}`)
+      await vi.advanceTimersByTimeAsync(1_000)
+    }
+    stop = true
+    await vi.advanceTimersByTimeAsync(2_000)
+    await loop
+    const ticks = pictures.filter((picture) => /^T\d+@60$/.test(picture.data))
+    expect(ticks).toHaveLength(30)
+    // Stills after the first two ticks (each replaced within the second, so the wait doubles past it),
+    // then none until the clock stops: one more. Each still is checked once against its echo.
+    expect(pictures.filter((picture) => picture.sharp).map((picture) => picture.data)).toEqual(['SHOT-T1', 'SHOT-T2', 'SHOT-T30'])
+    expect(count('Page.captureScreenshot')).toBeLessThanOrEqual(6)
+    // The screencast never restarts.
+    expect(count('Page.startScreencast')).toBe(1)
+    expect(pictures).toHaveLength(33)
+    captures.dispose()
+  })
+
+  it('a blinking caret sends the flip back once, then one every 5, 10, 20, 40 and 60 s; an action brings one back at once', async () => {
+    const { cdp, paint, count } = fakeCdp()
+    const captures = new ViewerCaptures(cdp, { behind: () => false })
+    let seen: Seen = await join(captures, TAB_A, 'w1')
+    const pictures: Array<{ data: string; at: number }> = []
+    const start = Date.now()
+    let stop = false
+    const loop = (async () => {
+      while (!stop) {
+        const update: ViewerUpdate = await ask(captures, TAB_A, 'w1', seen, { waitMs: 2_000 })
+        seen = update
+        if (update.picture) pictures.push({ data: update.picture.data, at: Date.now() - start })
+      }
+    })()
+    // The caret blinks every 530 ms (Chromium's period) for three minutes.
+    for (let blink = 0; blink < 340; blink += 1) {
+      paint('cdp-a', blink % 2 ? 'CARET-OFF' : 'CARET-ON')
+      await vi.advanceTimersByTimeAsync(530)
+    }
+    const caret = pictures.filter((picture) => picture.data.startsWith('CARET'))
+    // The first picture and the flip back, then at most one per growing gap (5, 10, 20, 40, 60, 60 s).
+    expect(caret.length).toBeGreaterThanOrEqual(2)
+    expect(caret.length).toBeLessThanOrEqual(2 + 7)
+    const late = caret.slice(2).map((picture) => picture.at)
+    expect(late.slice(1).map((at, index) => at - late[index]!).every((gap) => gap >= REPEAT_GAP_MS - 600)).toBe(true)
+    expect(late.slice(1).map((at, index) => at - late[index]!).every((gap) => gap <= MAX_REPEAT_GAP_MS + 600)).toBe(true)
+    // Stills only in the first seconds (the flips replace them at once), and no restart.
+    expect(count('Page.captureScreenshot')).toBeLessThanOrEqual(3)
+    expect(count('Page.startScreencast')).toBe(1)
+    // The agent acts (a click toggles a box back to how it was): that picture goes at once.
+    const before = pictures.length
+    captures.acted('tab_a')
+    // The last blink painted CARET-OFF: the page goes back to CARET-ON.
+    paint('cdp-a', 'CARET-ON')
+    await vi.advanceTimersByTimeAsync(50)
+    expect(pictures.length).toBe(before + 1)
+    stop = true
+    await vi.advanceTimersByTimeAsync(2_500)
+    await loop
+    captures.dispose()
+  })
+
+  it('an older view asking every 40 ms still gets the sharp picture of a still page', async () => {
+    const { cdp, paint, count } = fakeCdp()
+    const captures = new ViewerCaptures(cdp, { behind: () => false })
+    await after(captures.latest(TAB_A, 960))
+    paint('cdp-a', 'P1')
+    let last: string | undefined
+    for (let index = 0; index < 40; index += 1) {
+      last = (await after(captures.latest(TAB_A, 960), 40)).picture?.data
+    }
+    expect(last).toBe('SHOT1')
     expect(count('Page.captureScreenshot')).toBe(1)
-    expect(qualities('cdp-a')).toEqual([60, 90])
+    captures.dispose()
+  })
+
+  it('never hands out a picture over the limit: a still at a lower quality, or smaller, instead', async () => {
+    const big = 'X'.repeat(MAX_PICTURE_CHARS + 1)
+    const { cdp, paint, sent } = fakeCdp({ shot: (params, index) => (params.quality as number) >= 60 ? big : `SMALL${index}` })
+    const captures = new ViewerCaptures(cdp, { behind: () => false })
+    const state = await join(captures, TAB_A, 'w1')
+    const first = ask(captures, TAB_A, 'w1', state)
+    // A screencast picture over the limit (a noisy page) is not sent; a still that fits is.
+    paint('cdp-a', big)
+    const got = await after(first, 50)
+    expect(got.picture!.data).toMatch(/^SMALL/)
+    expect(got.picture!.data.length).toBeLessThanOrEqual(MAX_PICTURE_CHARS)
+    expect(sent.filter((entry) => entry.method === 'Page.captureScreenshot').map((entry) => entry.params!.quality)).toEqual([90, 60, 40])
     captures.dispose()
   })
 
@@ -196,7 +323,7 @@ describe('the pictures of a watched tab', () => {
     expect(moving.length).toBeLessThanOrEqual(6)
     // The last paint arrived, then the sharp picture of it.
     expect(moving.at(-1)!.data).toBe('P20@60')
-    expect(pictures.at(-1)).toMatchObject({ data: 'P20@90', sharp: true })
+    expect(pictures.at(-1)).toMatchObject({ data: 'SHOT1', sharp: true })
     captures.dispose()
   })
 

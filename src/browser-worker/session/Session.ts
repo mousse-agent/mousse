@@ -134,8 +134,14 @@ export class ManagedSession {
   private downloadStates = new Map<string, 'inProgress' | 'completed' | 'canceled' | 'interrupted'>()
   /** Where the agent last acted (`agentCursor.ts`): held here, drawn by viewers over `frame()`, never in the page. */
   private cursor: BrowserAgentCursor | undefined
-  /** The tab last brought to the front (`toFront`), or opened: the one Chromium paints. */
+  /**
+   * The target Chromium paints: the tab last brought to the front (`toFront`) or opened. Kept true:
+   * a tab a site opens is sent behind again at once (nobody uses it), and when the front tab closes,
+   * the tab in front before it comes back (`frontGone`), rather than the one Chromium would pick.
+   */
   private frontTargetId = ''
+  /** Tabs in the order they came to the front, the latest last. */
+  private frontHistory: string[] = []
   /** The pictures of the tabs people watch (`frame.next`, `frame`), created on the first one asked for. */
   private viewers: ViewerCaptures | null = null
   /** Each tab's title as its page last set it, by target id, for people watching. */
@@ -271,7 +277,11 @@ export class ManagedSession {
     this.throwIfUnavailable(signal)
     this.tabs.set(tabId, tab)
     this.activeTabId = tabId
-    this.frontTargetId = created.targetId
+    // The tab in front closed (by itself, or a site's): the one in front before it comes back.
+    this.chrome.cdp.on('Target.targetDestroyed', (params: unknown) => {
+      const targetId = (params as { targetId?: string })?.targetId
+      if (targetId && !this.closed && !this.closing) this.frontGone(targetId)
+    })
     this.chrome.cdp.on('Page.frameNavigated', (params: unknown, sessionId?: string) => {
       if (this.closed || this.closing) return
       const frame = (params as { frame?: { id?: string; parentId?: string; loaderId?: string; url?: string; unreachableUrl?: string } })?.frame
@@ -363,7 +373,7 @@ export class ManagedSession {
         this.refs.invalidateTab(detached.publicId)
         this.tabs.delete(detached.publicId)
         if (this.activeTabId === detached.publicId) this.activeTabId = this.tabs.keys().next().value ?? ''
-        this.viewers?.frontChanged()
+        this.frontGone(detached.targetId)
       }
     })
     if (initialUrl) {
@@ -482,8 +492,7 @@ export class ManagedSession {
       const navigation = url ? await this.loadNewTab(tab, url, opSignal) : undefined
       this.tabs.set(tabId, tab)
       this.activeTabId = tabId
-      // A new tab opens in front.
-      this.frontTargetId = created.targetId
+      // It came to the front when it was created (`openPage`), unless another tab was brought forward since.
       this.viewers?.frontChanged()
       this.touch()
       return { id: tabId, title: tab.title, url: tab.url, ...(navigation ? { navigation } : {}) }
@@ -540,6 +549,7 @@ export class ManagedSession {
     this.viewers?.forget(tab.cdpSessionId)
     this.tabs.delete(tabId)
     if (this.activeTabId === tabId) this.activeTabId = this.tabs.keys().next().value ?? ''
+    this.frontGone(tab.targetId)
     this.viewers?.frontChanged()
     this.touch()
   }
@@ -766,6 +776,7 @@ export class ManagedSession {
           ? target.from.cdpSessionId
           : (fail('unsupported', 'Cross-frame drag is not certified'), tab.cdpSessionId)
         : target?.cdpSessionId ?? tab.cdpSessionId
+      this.viewers?.acted(tab.publicId)
       // A navigation is done once its page committed and is ready; later loading is reported, not waited for.
       const ceilingMs = Math.min(request.timeoutMs, navigationPace.ceilingMs())
       let navigation: BrowserNavigation | undefined
@@ -857,22 +868,48 @@ export class ManagedSession {
    * person watching never moves it: their view of a tab behind is a still (`ViewerCaptures`).
    */
   private async toFront(tab: TabState): Promise<void> {
-    if (this.frontTargetId === tab.targetId || this.tabs.size < 2) {
-      this.frontTargetId = tab.targetId
+    if (this.frontTargetId === tab.targetId) return
+    await this.requireChrome().cdp.send('Target.activateTarget', { targetId: tab.targetId }, { timeoutMs: 5_000 })
+    this.setFront(tab.targetId)
+  }
+
+  /** Chromium paints `targetId` now. */
+  private setFront(targetId: string): void {
+    this.frontTargetId = targetId
+    this.frontHistory = [...this.frontHistory.filter((entry) => entry !== targetId), targetId].slice(-64)
+    this.viewers?.frontChanged()
+  }
+
+  /** A tab a site opened may have taken the front: the tab in front before is brought back. */
+  private async keepFront(): Promise<void> {
+    const front = this.frontTargetId
+    if (!front || this.closed || this.closing) return
+    await this.chrome?.cdp.send('Target.activateTarget', { targetId: front }, { timeoutMs: 5_000 }).catch(() => undefined)
+  }
+
+  /**
+   * A target closed. When it was the one in front, Chromium puts another in front by its own rule
+   * (the tab next to it); the session's tab most recently in front is brought there instead, so
+   * which tab is in front is always known.
+   */
+  private frontGone(targetId: string): void {
+    this.frontHistory = this.frontHistory.filter((entry) => entry !== targetId)
+    if (targetId !== this.frontTargetId) return
+    const open = new Set([...this.tabs.values()].map((tab) => tab.targetId))
+    const next = [...this.frontHistory].reverse().find((entry) => open.has(entry)) ?? [...open].at(-1)
+    if (!next) {
+      this.frontTargetId = ''
+      this.viewers?.frontChanged()
       return
     }
-    await this.requireChrome().cdp.send('Target.activateTarget', { targetId: tab.targetId }, { timeoutMs: 5_000 })
-    this.frontTargetId = tab.targetId
-    this.viewers?.frontChanged()
+    this.setFront(next)
+    void this.chrome?.cdp.send('Target.activateTarget', { targetId: next }, { timeoutMs: 5_000 }).catch(() => undefined)
   }
 
   /** Whether a tab is not the one in front, so Chromium does not paint it. */
   private behind(cdpSessionId: string): boolean {
-    if (this.tabs.size < 2) return false
-    const tabs = [...this.tabs.values()]
-    const tab = tabs.find((entry) => entry.cdpSessionId === cdpSessionId)
-    const front = tabs.find((entry) => entry.targetId === this.frontTargetId)
-    return Boolean(tab && front && front !== tab)
+    const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === cdpSessionId)
+    return Boolean(tab && this.frontTargetId && tab.targetId !== this.frontTargetId)
   }
 
   private viewerCaptures(): ViewerCaptures {
@@ -970,7 +1007,11 @@ export class ManagedSession {
     if (params.controlLeaseId !== this.controlLeaseId) fail('human_controlled', 'Control lease was replaced')
     const input = validateBrowserHumanInput(params.input)
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
+    // What the person's input changes reaches the view at once, even a picture the page showed before.
+    this.viewers?.acted(tab.publicId)
     const cdp = this.requireChrome().cdp
+    // A tab in the back takes no input in a browser without a window (the event never completes): it comes forward first.
+    await this.toFront(tab)
     // The person's own navigation answers once the page has committed: their view shows it loading from there.
     let navigation: BrowserNavigation | undefined
     if (input.kind === 'navigate') navigation = await this.navigateTabOf(tab, input.url, { signal, untilCommit: true })
@@ -1043,7 +1084,11 @@ export class ManagedSession {
         // A page the agent's action was still loading never commits for the person.
         const loadingForAgent = owner === 'human' && this.inFlight?.dispatched ? this.inFlight.tabSessionId : undefined
         const taken = this.takeControl(owner)
-        return this.afterControlMoved(loadingForAgent).then(() => taken)
+        // The tab a person takes comes to the front: Chromium paints only that one, so they see what they do.
+        const held = owner === 'human' && typeof params.tabId === 'string' ? this.tabs.get(params.tabId) : undefined
+        return this.afterControlMoved(loadingForAgent)
+          .then(() => held && this.tabs.has(held.publicId) ? this.toFront(held).catch(() => undefined) : undefined)
+          .then(() => taken)
       }
       case 'control.release':
         this.releaseControl(requiredId(params.controlLeaseId))
@@ -1138,7 +1183,7 @@ export class ManagedSession {
    * before it runs. A worker has no `navigator.webdriver` and runs at once.
    */
   private onAttached(params: unknown, parentSessionId?: string): void {
-    const record = params as { sessionId?: string; waitingForDebugger?: boolean; targetInfo?: { type?: string; targetId?: string; parentFrameId?: string; url?: string } }
+    const record = params as { sessionId?: string; waitingForDebugger?: boolean; targetInfo?: { type?: string; targetId?: string; parentFrameId?: string; url?: string; openerId?: string } }
     const sessionId = record.sessionId
     const info = record.targetInfo
     const cdp = this.chrome?.cdp
@@ -1159,6 +1204,9 @@ export class ManagedSession {
       pageSessionId: type === 'page' ? sessionId : parent?.pageSessionId ?? parentSessionId ?? sessionId
     }
     this.marked.set(sessionId, target)
+    // A tab a site opened (a link to a new tab, `window.open`) may take the front: nobody uses it, so
+    // the tab in front before goes back there, and the agent, the person and the view stay on it.
+    if (type === 'page' && info.openerId) void this.keepFront()
     if (type === 'iframe') {
       this.frames.set(sessionId, {
         sessionId,
@@ -1229,6 +1277,8 @@ export class ManagedSession {
   private async openPage(signal: AbortSignal, created?: (page: { targetId: string; sessionId?: string }) => void): Promise<{ targetId: string; sessionId: string }> {
     const cdp = this.requireChrome().cdp
     const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' }, { signal })
+    // Chromium puts a new tab in front.
+    this.setFront(targetId)
     created?.({ targetId })
     if (!this.attachWork.has(targetId)) {
       await new Promise<void>((resolve, reject) => {

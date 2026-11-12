@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Owner input</title>
+  <style>
+    body { margin: 0; font: 24px sans-serif; }
+    #field { position: absolute; left: 40px; top: 80px; width: 400px; height: 40px; font: 24px sans-serif; }
+  </style>
+</head>
+<body>
+  <!-- Says whether the tab is the one Chromium paints, and what was typed into the field. -->
+  <p id="state">tab:<span id="vis"></span> typed:<span id="typed"></span></p>
+  <input id="field" autocomplete="off">
+  <script>
+    const show = () => { document.getElementById('vis').textContent = document.visibilityState }
+    show()
+    document.addEventListener('visibilitychange', show)
+    const field = document.getElementById('field')
+    field.addEventListener('input', () => { document.getElementById('typed').textContent = field.value })
+  </script>
+</body>
+</html>

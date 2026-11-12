@@ -59,7 +59,8 @@ export function browserStatus(view: BotBrowserView, stream: BotBrowserStream | u
     const said = browserProblemForPerson(view.problem)
     return { text: PROBLEM_WORD[view.problem.kind], detail: `${said.line}. ${said.detail}`, live: Boolean(stream?.live), attention: true }
   }
-  if (view.behind) return { text: 'On another tab', detail: `${botName} is using another of its tabs. This picture updates when it's back on this one.`, live: false }
+  // The tab the owner holds is the one in front (Take over and their input bring it there): never "on another tab".
+  if (view.behind && view.control !== 'owner') return { text: 'On another tab', detail: `${botName} is using another of its tabs. This picture updates when it's back on this one.`, live: false }
   if (view.loading) return { text: 'Loading', detail: 'The page is still loading.', live: Boolean(stream?.live) }
   if (view.control === 'owner') return { text: 'You have it', live: Boolean(stream?.live) }
   return stream?.live ? { text: 'Live', live: true } : { text: '', live: false }

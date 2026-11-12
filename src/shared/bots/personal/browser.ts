@@ -43,6 +43,11 @@ export interface BotBrowserView {
   loading?: boolean
   /** What its last page ran into (can't reach, blocked) or needs from the owner (a sign-in, a human check). */
   problem?: BrowserProblem
+  /**
+   * Pictures cannot reach a view now, and why (the followed tab closed, the browser does not answer):
+   * a view says it is not updating until they can. Absent while they can.
+   */
+  stalled?: string
 }
 
 /** A person's input in the split view, at the page's CSS pixels. */
@@ -82,8 +87,11 @@ export const BOTS_BROWSER_STREAM_CAPABILITY = 'bots.browser.stream.v1'
 export const BOT_BROWSER_PREVIEW_WATCH = { width: 480, fps: 5 } as const
 /** The split view: the panel's width up to 960 px, at most 15 a second, 30 while the owner holds the browser. */
 export const BOT_BROWSER_PANE_WATCH = { maxWidth: 960, fps: 15, heldFps: 30 } as const
-/** How often a view renews its watch; the daemon drops one not renewed for three times this. */
-export const BOT_BROWSER_WATCH_RENEW_MS = 10_000
+/**
+ * How often a view renews its watch; the daemon drops one not renewed for three times this. A
+ * renewal answers whether pictures can reach the view now, and no picture once it has had one.
+ */
+export const BOT_BROWSER_WATCH_RENEW_MS = 5_000
 
 /** The bot-browser methods (`bots.browser.*`), apart from the required Bot UI set: an older daemon lacks them. */
 export const BOTS_BROWSER_METHODS = ['bots.browser.get', 'bots.browser.control', 'bots.browser.input', 'bots.browser.open', 'bots.browser.close', 'bots.browser.watch', 'bots.browser.unwatch'] as const

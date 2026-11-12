@@ -13,8 +13,17 @@ import type { BrowserProblem } from '../../shared/browser/navigation'
  * - **Chromium is not asked for pictures nobody takes**: a painted picture is acknowledged only once
  *   a watcher takes one, so while every watcher is busy (or held back by its cap) Chromium keeps the
  *   few it sent and paints no more for the screencast.
- * - **A still page ends up sharp**: about 300 ms after the last change, one picture at full quality
- *   is taken. That also brings the last change when Chromium dropped its paint.
+ * - **The screencast runs at one quality** and is started again only for a new page or a new width.
+ * - **A still page ends up sharp**: about 300 ms after the last new picture, one screenshot at full
+ *   quality is taken, without touching the screencast. When that picture keeps being replaced soon
+ *   after (a page that changes every second), the wait doubles, up to about 5 s, so such a page
+ *   costs its changes and no extra pictures.
+ * - **A page flipping between pictures it showed a moment ago** (a blinking caret, the screencast's
+ *   own repaint after a screenshot) sends the flip back once, then at most one every 5 s, then
+ *   10, 20, 40 and 60 s, unless the agent or the person acted on the tab since (then it goes at
+ *   once). The view is never left on a picture the page no longer shows for longer than that gap.
+ * - **No picture is larger than `MAX_PICTURE_CHARS`**: a larger one is replaced by a still at a
+ *   lower quality, or smaller.
  * - **A tab behind is never brought to the front**: Chromium without a window paints only its front
  *   tab, and the agent acts on that one. A watched tab behind gets one still picture (a screenshot
  *   of a tab behind is fresh and leaves the front tab painting) and is marked `behind`; its
@@ -22,16 +31,30 @@ import type { BrowserProblem } from '../../shared/browser/navigation'
  */
 
 export const SCREENCAST_MAX_HEIGHT = 2160
-/** The screencast's JPEG quality while the page changes. */
-const MOVING_QUALITY = 60
+/** The screencast's JPEG quality. */
+const CAST_QUALITY = 60
 /** The quality of the picture taken once the page is still, or of a tab behind. */
 const STILL_QUALITY = 90
-/** How long after the last change the still picture is taken. */
+/** How long after the last new picture the still picture is taken, at first. */
 export const SETTLE_MS = 300
-/** How long a screencast restarted at full quality has to send the page before a screenshot is taken instead. */
-export const STILL_WAIT_MS = 400
-/** How long after a still is asked for the screencast's pictures count as sharp. */
-const STILL_WINDOW_MS = 1_000
+/** The longest that wait grows to for a page whose still picture keeps being replaced at once. */
+export const MAX_SETTLE_MS = 4_800
+/** A still picture replaced sooner than this was not worth taking: the next wait is twice as long. */
+const STILL_STANDS_MS = 2_000
+/** Screencast pictures this soon after a screenshot that repeat a recent picture are its echo. */
+const ECHO_MS = 250
+/** How many of a tab's recent pictures a repeat is looked for in. */
+const RECENT_PICTURES = 4
+/** The first wait before a repeat of a recent picture is sent; it doubles up to `MAX_REPEAT_GAP_MS`. */
+export const REPEAT_GAP_MS = 5_000
+export const MAX_REPEAT_GAP_MS = 60_000
+/** An action of the agent or the person on a tab counts this long: what it brings back is sent at once. */
+const ACTED_MS = 2_000
+/**
+ * The largest picture handed out, in base64 characters: the daemon pushes each picture to a view in
+ * one connection event of at most 1 MB.
+ */
+export const MAX_PICTURE_CHARS = 900_000
 /** A watcher with no long-poll waiting for this long is gone (its daemon stopped asking). */
 const WATCHER_LEASE_MS = 5_000
 /** The longest a long-poll waits before it is answered with nothing new. */
@@ -54,7 +77,7 @@ export interface ViewerPicture {
   height: number
   /** When it was painted or taken (ms since the epoch). */
   at: number
-  /** Taken at full quality once the page was still (or of a tab behind). */
+  /** The still picture, taken once the page was still (or of a tab behind), at the best quality that fits. */
   sharp: boolean
 }
 
@@ -138,16 +161,20 @@ interface TabCapture {
   viewportRead: boolean
   /** The screencast's width now, 0 while it is stopped. */
   width: number
-  /** The screencast's JPEG quality now. */
-  quality: number
-  /** Until when the next picture is the sharp one asked for (a screencast restarted at full quality). */
-  sharpenUntil: number
   starting?: Promise<void>
   latest?: ViewerPicture
   /** The last screencast picture, to drop one that repeats it. */
   lastCast?: string
+  /** The tab's last few distinct screencast pictures (since its page committed or it came to the front). */
+  recent: string[]
+  /** The screencast picture `latest` shows (itself, or the one a still was taken over). */
+  shownCast?: string
   frameSeq: number
   stateSeq: number
+  /** The `frameSeq` a watcher last took. */
+  handedSeq: number
+  /** A repeat sent late: no still picture follows it. */
+  quietSeq: number
   /** Screencast pictures not acknowledged yet. */
   held: number[]
   behind: boolean
@@ -157,6 +184,27 @@ interface TabCapture {
   problem?: BrowserProblem
   settle?: ReturnType<typeof setTimeout>
   settling?: Promise<void>
+  /** A still was asked for while another was under way. */
+  stillAgain?: boolean
+  /** How long after a new picture the still is taken now. */
+  settleMs: number
+  /** When the still now shown was taken (until a picture replaces it). */
+  stillAt?: number
+  /** Until when a screencast picture is the echo of a screenshot. */
+  echoUntil: number
+  /** The last still handed, and how it was taken: a second one taken the same way tells whether the page changed. */
+  lastStill?: { data: string; params: Record<string, unknown> }
+  /** An echo never seen before: the page may have changed as the still was taken. */
+  echoPending?: string
+  /** Checks of an echo since the last new picture (bounded). */
+  echoChecks: number
+  /** The latest repeat not sent yet, and when it goes. */
+  repeat?: string
+  repeatTimer?: ReturnType<typeof setTimeout>
+  /** The wait before the next repeat goes (0: the next goes at once). */
+  repeatGapMs: number
+  /** When the agent or the person last acted on the tab. */
+  actedAt: number
   watchers: Set<Watcher>
 }
 
@@ -254,6 +302,7 @@ export class ViewerCaptures {
     const capture = this.captures.get(cdpSessionId)
     if (!capture) return
     capture.latest = picture
+    capture.shownCast = undefined
     capture.frameSeq = this.bump()
     this.pump(capture)
   }
@@ -278,6 +327,9 @@ export class ViewerCaptures {
     capture.lastCast = undefined
     capture.viewportRead = false
     capture.stateSeq = this.bump()
+    // A new page: what the last one showed says nothing about it, and its still comes as soon as it settles.
+    this.forgetRecent(capture)
+    capture.settleMs = this.settleMs
     if (capture.width) {
       capture.width = 0
       void this.start(capture)
@@ -305,8 +357,16 @@ export class ViewerCaptures {
   cursorMoved(tabId: string): void {
     for (const capture of this.captures.values()) {
       if (capture.info.tabId !== tabId) continue
+      capture.actedAt = this.now()
       capture.stateSeq = this.bump()
       this.pump(capture)
+    }
+  }
+
+  /** The agent or the person acted on a tab: what it changes is sent at once, even a picture it showed before. */
+  acted(tabId: string): void {
+    for (const capture of this.captures.values()) {
+      if (capture.info.tabId === tabId) capture.actedAt = this.now()
     }
   }
 
@@ -374,7 +434,11 @@ export class ViewerCaptures {
     if (!watcher) {
       let capture = this.captures.get(info.cdpSessionId)
       if (!capture) {
-        capture = { info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, quality: MOVING_QUALITY, sharpenUntil: 0, frameSeq: 0, stateSeq: this.bump(), held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false, watchers: new Set() }
+        capture = {
+          info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, recent: [], frameSeq: 0, stateSeq: this.bump(),
+          handedSeq: 0, quietSeq: -1, held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false,
+          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set()
+        }
         const problem = this.options.problem?.(info.cdpSessionId)
         if (problem) capture.problem = problem
         this.captures.set(info.cdpSessionId, capture)
@@ -413,7 +477,7 @@ export class ViewerCaptures {
         capture.viewportRead = true
         await this.readViewport(capture)
       }
-      await this.cast(capture, MOVING_QUALITY)
+      await this.cast(capture)
     })().catch(() => {
       // A tab that cannot screencast is still pictured once it is still (`settle`).
     })
@@ -421,29 +485,39 @@ export class ViewerCaptures {
     await starting
     // Chromium sends the page as it is when the screencast starts, but not for a tab behind, and a
     // still picture is taken anyway if nothing came.
-    this.armSettle(capture, this.settleMs)
+    this.armSettle(capture, capture.settleMs)
   }
 
   /**
-   * (Re)starts the tab's screencast at its width and `quality`. Stopped first: after a new page
-   * commits Chromium may keep the screencast "active" but send nothing more, and it refuses to start
-   * it again until it is stopped. Chromium sends the page as it is when a screencast starts (a tab
-   * in front), without painting it again.
+   * (Re)starts the tab's screencast at its width: for a new watcher's width, or a new page. Stopped
+   * first: after a new page commits Chromium may keep the screencast "active" but send nothing more,
+   * and it refuses to start it again until it is stopped. Chromium sends the page as it is when a
+   * screencast starts (a tab in front), without painting it again.
    */
-  private async cast(capture: TabCapture, quality: number): Promise<void> {
+  private async cast(capture: TabCapture): Promise<void> {
     const sessionId = capture.info.cdpSessionId
-    capture.quality = quality
     await this.cdp.send('Page.stopScreencast', {}, { sessionId, timeoutMs: 5_000 }).catch(() => undefined)
-    // A new screencast counts its own pictures: the old one's are not acknowledged.
+    // A new screencast counts its own pictures: the old one's are not acknowledged. At another width its pictures differ.
     capture.held = []
+    this.forgetRecent(capture)
     await this.cdp.send('Page.startScreencast', {
-      format: 'jpeg', quality, maxWidth: capture.width, maxHeight: SCREENCAST_MAX_HEIGHT, everyNthFrame: 1
+      format: 'jpeg', quality: CAST_QUALITY, maxWidth: capture.width, maxHeight: SCREENCAST_MAX_HEIGHT, everyNthFrame: 1
     }, { sessionId, timeoutMs: 5_000 })
+  }
+
+  /** The tab's recent pictures no longer count as repeats (a new page, a new width, back in front). */
+  private forgetRecent(capture: TabCapture): void {
+    capture.recent = []
+    capture.repeat = undefined
+    if (capture.repeatTimer) clearTimeout(capture.repeatTimer)
+    capture.repeatTimer = undefined
+    capture.repeatGapMs = 0
   }
 
   private stopCapture(capture: TabCapture, send = true): void {
     if (capture.settle) clearTimeout(capture.settle)
     capture.settle = undefined
+    this.forgetRecent(capture)
     this.captures.delete(capture.info.cdpSessionId)
     const held = capture.held.splice(0)
     if (!send || !capture.width) return
@@ -469,24 +543,98 @@ export class ViewerCaptures {
       return
     }
     // The same picture again (a paint that changed nothing visible): nothing to send.
-    if (event.data === capture.lastCast) {
+    const data = event.data
+    if (data === capture.lastCast) {
       ack()
       return
     }
-    capture.lastCast = event.data
-    // Pictures of a screencast started at full quality for the still page are sharp, for a moment:
-    // the one Chromium sends at the start, and any a fallback screenshot made it send.
-    const sharp = capture.quality === STILL_QUALITY && capture.sharpenUntil >= this.now()
-    const scale = Math.min(1, capture.width / capture.viewport.width, SCREENCAST_MAX_HEIGHT / capture.viewport.height)
-    capture.latest = { data: event.data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: this.now(), sharp }
-    capture.frameSeq = this.bump()
+    capture.lastCast = data
+    const now = this.now()
+    const recent = capture.recent.includes(data)
+    // A screenshot makes Chromium paint the page again, which the screencast sends (another encoding
+    // of the same page, or one it sent before): that echo is not a change. One never seen may hide a
+    // change made as the still was taken: a second screenshot, taken the same way, tells.
+    if (now <= capture.echoUntil) {
+      ack()
+      if (recent) return
+      capture.recent = [...capture.recent, data].slice(-RECENT_PICTURES)
+      capture.echoPending = data
+      this.settleWith(capture, () => this.checkEcho(capture))
+      return
+    }
+    // Too large to push to a view: a still that fits is taken instead.
+    if (data.length > MAX_PICTURE_CHARS) {
+      ack()
+      if (capture.settling) capture.stillAgain = true
+      else this.settleWith(capture, () => this.takeStill(capture))
+      return
+    }
+    // The page went back to a picture it showed a moment ago, and nobody acted (a blinking caret, a
+    // flip between two states): sent once, then at most one every growing gap.
+    if (recent && now - capture.actedAt > ACTED_MS) {
+      ack()
+      this.holdRepeat(capture, data)
+      return
+    }
+    capture.recent = [...capture.recent.filter((entry) => entry !== data), data].slice(-RECENT_PICTURES)
+    if (capture.repeatTimer) clearTimeout(capture.repeatTimer)
+    capture.repeatTimer = undefined
+    capture.repeat = undefined
+    capture.repeatGapMs = 0
+    this.show(capture, data)
     // Held until a watcher takes a picture: Chromium paints no more for nobody.
     capture.held.push(event.sessionId)
     if (capture.settle) clearTimeout(capture.settle)
     capture.settle = undefined
-    // The page changes again: this picture goes as it is, and the next ones at the lighter quality.
-    if (!sharp && capture.quality === STILL_QUALITY) void this.cast(capture, MOVING_QUALITY).catch(() => undefined)
     this.pump(capture)
+  }
+
+  /** A screencast picture becomes the latest. A still it replaces soon after was not worth taking: the next one waits longer. */
+  private show(capture: TabCapture, data: string): void {
+    const now = this.now()
+    if (capture.stillAt !== undefined) {
+      capture.settleMs = now - capture.stillAt < STILL_STANDS_MS
+        ? Math.min(MAX_SETTLE_MS, capture.settleMs * 2)
+        : Math.max(this.settleMs, capture.settleMs / 2)
+      capture.stillAt = undefined
+    }
+    const scale = Math.min(1, capture.width / capture.viewport.width, SCREENCAST_MAX_HEIGHT / capture.viewport.height)
+    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false }
+    capture.shownCast = data
+    capture.frameSeq = this.bump()
+    capture.echoPending = undefined
+    capture.echoChecks = 0
+  }
+
+  /**
+   * A repeat of a recent picture: the first after a new picture goes at once, the next after 5 s,
+   * then 10, 20, 40 and 60 s, each the latest repeat, and only when the view does not show it already.
+   * No still picture follows one sent late.
+   */
+  private holdRepeat(capture: TabCapture, data: string): void {
+    capture.repeat = data
+    if (capture.repeatTimer) return
+    const send = () => {
+      capture.repeatTimer = undefined
+      const repeat = capture.repeat
+      capture.repeat = undefined
+      if (!repeat || repeat === capture.shownCast || capture.behind || this.captures.get(capture.info.cdpSessionId) !== capture) return
+      const late = capture.repeatGapMs > 0
+      capture.repeatGapMs = late ? Math.min(MAX_REPEAT_GAP_MS, capture.repeatGapMs * 2) : REPEAT_GAP_MS
+      this.show(capture, repeat)
+      if (late) capture.quietSeq = capture.frameSeq
+      else if (capture.settle) {
+        clearTimeout(capture.settle)
+        capture.settle = undefined
+      }
+      this.pump(capture)
+    }
+    if (!capture.repeatGapMs) {
+      send()
+      return
+    }
+    capture.repeatTimer = setTimeout(send, capture.repeatGapMs)
+    capture.repeatTimer.unref?.()
   }
 
   /** Answers each waiting watcher that has something new (a picture only once its cap allows). */
@@ -522,13 +670,19 @@ export class ViewerCaptures {
     if (handed) this.handed(capture)
   }
 
-  /** A watcher took the latest picture: Chromium may paint again; a still page gets its sharp picture soon. */
+  /**
+   * A watcher took the latest picture: Chromium may paint again. A new picture, taken for the first
+   * time, means a still page gets its sharp picture soon; a reader asking again for the same one
+   * (an older view, every 40 ms) does not put that off.
+   */
   private handed(capture: TabCapture): void {
     const held = capture.held.splice(0)
     const sessionId = capture.info.cdpSessionId
     for (const id of held) void this.cdp.send('Page.screencastFrameAck', { sessionId: id }, { sessionId, timeoutMs: 5_000 }).catch(() => undefined)
-    // A tab behind had its one still when it went behind.
-    if (!capture.latest?.sharp && !capture.behind) this.armSettle(capture, this.settleMs)
+    if (capture.handedSeq === capture.frameSeq) return
+    capture.handedSeq = capture.frameSeq
+    // A tab behind had its one still when it went behind; a repeat sent late is followed by none.
+    if (!capture.latest?.sharp && !capture.behind && capture.quietSeq !== capture.frameSeq) this.armSettle(capture, capture.settleMs)
   }
 
   private armSettle(capture: TabCapture, ms: number): void {
@@ -537,61 +691,107 @@ export class ViewerCaptures {
       capture.settle = undefined
       // Still held pictures: the page may still change; it is pictured when a watcher takes one.
       if (capture.held.length || capture.latest?.sharp || !capture.watchers.size || this.captures.get(capture.info.cdpSessionId) !== capture) return
-      capture.settling ??= this.takeStill(capture).finally(() => { capture.settling = undefined })
+      // A still (or a check) under way was taken before this: this one is taken after it.
+      if (capture.settling) capture.stillAgain = true
+      else this.settleWith(capture, () => this.takeStill(capture))
     }, ms)
     capture.settle.unref?.()
   }
 
+  /** Runs one still or echo check at a time; a still asked for meanwhile comes after it. */
+  private settleWith(capture: TabCapture, work: () => Promise<void>): void {
+    if (capture.settling) return
+    capture.settling = work().finally(() => {
+      capture.settling = undefined
+      if (!capture.stillAgain) return
+      capture.stillAgain = false
+      this.armSettle(capture, 0)
+    })
+  }
+
   /**
-   * One picture at full quality of the tab as it is, without bringing it to the front.
-   *
-   * In front, the screencast starts again at full quality, and Chromium usually sends the page as it
-   * is. Only when it sends nothing is a screenshot taken. A screenshot makes Chromium paint the page
-   * again, which the screencast sends: those pictures, at full quality too, count as sharp for a
-   * moment, so they never ask for another still (which would loop).
-   *
-   * Behind, the screencast sends nothing, so a screenshot it is (what it makes Chromium paint is not
-   * sent while the tab is behind).
+   * One picture of the tab as it is, at full quality (lower, or smaller, when that would be too
+   * large), without bringing it to the front and without touching its screencast: a screenshot.
+   * In front, the screenshot makes Chromium paint the page again, which the screencast sends; that
+   * echo repeats a recent picture and is dropped (`onFrame`). Behind, the screencast sends nothing.
    */
   private async takeStill(capture: TabCapture): Promise<void> {
     const sessionId = capture.info.cdpSessionId
     if (!capture.width) return
-    if (!capture.behind) {
-      const started = capture.frameSeq
-      capture.sharpenUntil = this.now() + STILL_WINDOW_MS
-      try {
-        await this.cast(capture, STILL_QUALITY)
-      } catch {
-        capture.sharpenUntil = 0
-        return
-      }
-      await new Promise((resolve) => { setTimeout(resolve, STILL_WAIT_MS).unref?.() })
-      if (capture.frameSeq !== started || this.captures.get(sessionId) !== capture || capture.behind) return
-      capture.sharpenUntil = this.now() + STILL_WINDOW_MS
-    }
     const before = capture.frameSeq
+    const over = capture.lastCast
     try {
       const metrics = await this.cdp.send<LayoutMetrics>('Page.getLayoutMetrics', {}, { sessionId, timeoutMs: 5_000 })
       const viewportChanged = this.applyViewport(capture, metrics)
       const visual = metrics.cssVisualViewport ?? {}
       const { width, height } = capture.viewport
-      const scale = Math.min(1, capture.width / width, SCREENCAST_MAX_HEIGHT / height)
-      // The clip is in page coordinates: the visible viewport starts at the scroll offset.
-      const shot = await this.cdp.send<{ data: string }>('Page.captureScreenshot', {
-        format: 'jpeg', quality: STILL_QUALITY, fromSurface: true, captureBeyondViewport: false,
-        clip: { x: visual.pageX ?? 0, y: visual.pageY ?? 0, width, height, scale }
-      }, { sessionId, timeoutMs: 10_000 })
+      let scale = Math.min(1, capture.width / width, SCREENCAST_MAX_HEIGHT / height)
+      let shot: { data: string; params: Record<string, unknown> } | undefined
+      // Full quality, then lower, then half the size: the first that fits.
+      for (const [quality, shrink] of [[STILL_QUALITY, 1], [CAST_QUALITY, 1], [40, 1], [40, 0.5]] as const) {
+        if (capture.frameSeq !== before || this.captures.get(sessionId) !== capture) break
+        // The clip is in page coordinates: the visible viewport starts at the scroll offset.
+        const params = { format: 'jpeg', quality, fromSurface: true, captureBeyondViewport: false, clip: { x: visual.pageX ?? 0, y: visual.pageY ?? 0, width, height, scale: scale * shrink } }
+        const data = await this.screenshot(capture, params)
+        if (data.length <= MAX_PICTURE_CHARS) {
+          shot = { data, params }
+          scale *= shrink
+          break
+        }
+      }
       if (this.captures.get(sessionId) !== capture) return
       // The page painted meanwhile: that newer picture stands, and this one is not sent.
-      if (capture.frameSeq !== before) {
+      if (capture.frameSeq !== before || !shot) {
         if (viewportChanged) this.pump(capture)
         return
       }
       capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true }
+      capture.lastStill = shot
+      capture.shownCast = over
+      capture.stillAt = capture.behind ? undefined : this.now()
+      capture.frameSeq = this.bump()
+      this.pump(capture)
+      // An echo never seen came while it was taken: is it a change?
+      while (capture.echoPending && capture.echoChecks < 3) await this.checkEcho(capture)
+    } catch {
+      // The tab closed or its renderer is busy: the last picture stands.
+    }
+  }
+
+  /** One screenshot; the screencast pictures it makes Chromium send meanwhile and just after are its echo. */
+  private async screenshot(capture: TabCapture, params: Record<string, unknown>): Promise<string> {
+    capture.echoUntil = Number.POSITIVE_INFINITY
+    try {
+      return (await this.cdp.send<{ data: string }>('Page.captureScreenshot', params, { sessionId: capture.info.cdpSessionId, timeoutMs: 10_000 })).data
+    } finally {
+      capture.echoUntil = this.now() + ECHO_MS
+    }
+  }
+
+  /**
+   * An echo never seen before came with a still: the page may have changed as it was taken. A second
+   * screenshot taken the same way is the same bytes when nothing changed (Chromium encodes the same
+   * page the same way), and then nothing is sent; otherwise it is the page as it is now, and goes as
+   * the still. A few checks at most between two new pictures.
+   */
+  private async checkEcho(capture: TabCapture): Promise<void> {
+    const still = capture.lastStill
+    const echo = capture.echoPending
+    capture.echoPending = undefined
+    if (!echo || !still || capture.latest?.data !== still.data || capture.echoChecks >= 3 || this.captures.get(capture.info.cdpSessionId) !== capture) return
+    capture.echoChecks += 1
+    const before = capture.frameSeq
+    try {
+      const data = await this.screenshot(capture, still.params)
+      if (capture.frameSeq !== before || this.captures.get(capture.info.cdpSessionId) !== capture || data === still.data || data.length > MAX_PICTURE_CHARS) return
+      capture.latest = { ...capture.latest, data, at: this.now() }
+      capture.lastStill = { data, params: still.params }
+      capture.shownCast = capture.lastCast
+      capture.stillAt = capture.behind ? undefined : this.now()
       capture.frameSeq = this.bump()
       this.pump(capture)
     } catch {
-      // The tab closed or its renderer is busy: the last picture stands.
+      // The tab closed: nothing to check.
     }
   }
 
@@ -620,12 +820,14 @@ export class ViewerCaptures {
     if (behind === capture.behind) return false
     capture.behind = behind
     capture.stateSeq = this.bump()
+    // Pictures after it moves are compared with nothing from before.
+    this.forgetRecent(capture)
     if (behind) {
       // Its last picture may be from before it went behind: one fresh still, then nothing until it is in front.
       if (capture.latest) capture.latest = { ...capture.latest, sharp: false }
       this.armSettle(capture, 0)
     } else {
-      this.armSettle(capture, this.settleMs)
+      this.armSettle(capture, capture.settleMs)
     }
     return true
   }
