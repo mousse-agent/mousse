@@ -106,7 +106,7 @@ export class BotChatService {
     now(): number
     /** The models the owner may pick by hand (#673): ready, and able to hold a bot here. */
     modelChoices?(): Promise<Array<{ model: string; label: string }>>
-    /** This computer's name. */
+    /** This computer's name, as the rest of the app shows it. */
     computerName?(): string
     /** The person's other computers, online or not. */
     otherComputers?(): Array<{ node: string; name: string; online: boolean }>
@@ -398,7 +398,7 @@ export class BotChatService {
   /** `bots.model.choices`: what `bots.model.get` offers, before a bot exists (New bot's Runs on line). */
   async modelChoices(): Promise<BotRunsOnChoices> {
     const models = await this.pickableModels().catch(() => [])
-    const computer = this.options.computerName?.() ?? 'This computer'
+    const computer = this.options.computerName?.() || 'This computer'
     let others: Array<{ node: string; name: string; online: boolean }> = []
     try {
       others = this.options.otherComputers?.() ?? []

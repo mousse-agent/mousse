@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chooseComputerName, resolveComputerName, stripLocalSuffix } from '../src/main/computerName'
+import { chooseComputerName, computerNameIfKnown, getComputerName, resolveComputerName, stripLocalSuffix } from '../src/mms/computerName'
 
 const base = { platform: 'darwin' as const, env: {}, hostname: () => 'Avarnics-Mac-mini.local' }
 
@@ -43,5 +43,13 @@ describe('computer name', () => {
   it('falls back to the hostname when the lookup fails or times out', async () => {
     const run = async () => { throw new Error('ETIMEDOUT') }
     await expect(resolveComputerName({ ...base, run })).resolves.toBe('Avarnics-Mac-mini')
+  })
+
+  it('answers at once with the looked-up name once the lookup has answered', async () => {
+    // The first call starts the lookup; it may not have answered yet.
+    computerNameIfKnown()
+    const name = await getComputerName()
+    expect(name).toBeTruthy()
+    expect(computerNameIfKnown()).toBe(name)
   })
 })
