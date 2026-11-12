@@ -6,10 +6,23 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { mousseVersion } from '../../appVersion'
-import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type ToolOutcome, type ToolRegistry } from './appTools'
+import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
 import { RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
+
+/** The `tools/list` `_meta` key that keeps a tool out of Claude Code's tool search (`MousseTool.alwaysLoad`). */
+export const ALWAYS_LOAD_META = 'anthropic/alwaysLoad'
+
+/** One Mousse tool as `tools/list` gives it; an `alwaysLoad` tool says so in its `_meta`. */
+export function listedTool(tool: Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'alwaysLoad'>) {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> },
+    ...(tool.alwaysLoad ? { _meta: { [ALWAYS_LOAD_META]: true } } : {})
+  }
+}
 
 /** The MCP relay (`mousse-relay`) a turn attaches: its URL on the same listener, and the catalogue revision. */
 export interface McpRelayAttachment {
@@ -221,11 +234,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
       // For the thread's ceiling, not the turn's mode, and for the credential's agent access level as it
       // is now. A runtime that caches the list gets a new bearer when the level changes (the level is part
       // of the runtime generation), and the call-time check refuses a tool the list left out in any case.
-      tools: registry.listForThread(resolved.threadId, 'default', (credentials.current(resolved.tokenHash) ?? resolved).accessLevel).map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> }
-      }))
+      tools: registry.listForThread(resolved.threadId, 'default', (credentials.current(resolved.tokenHash) ?? resolved).accessLevel).map(listedTool)
     }))
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { clientRequestId, ...args } = (request.params.arguments ?? {}) as Record<string, unknown>
