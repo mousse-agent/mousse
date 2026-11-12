@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import type { BotBrowserInput, BotBrowserView, BotsBrowserApi, BotsBrowserMethod } from '../../shared/bots/personal/browser'
+import type { BotBrowserFrame, BotBrowserInput, BotBrowserView, BotsBrowserApi, BotsBrowserMethod } from '../../shared/bots/personal/browser'
 import { errorText } from '../services/personalBotsClient'
 
 /**
@@ -9,8 +9,12 @@ import { errorText } from '../services/personalBotsClient'
  * browser is open and on screen; seldom otherwise. A daemon without the methods shows none.
  */
 
-/** How often an open browser on screen is pictured again. */
-export const BOT_BROWSER_FRAME_MS = 700
+/**
+ * How often an open browser on screen is pictured again, start to start (up to 25 a second). The
+ * daemon answers from the tab's screencast, so this is how soon a painted change shows; a page that
+ * did not change costs one local read and no re-render.
+ */
+export const BOT_BROWSER_FRAME_MS = 40
 /** How often a bot's browser is checked while nothing of it shows. */
 const IDLE_POLL_MS = 3000
 
@@ -39,12 +43,23 @@ const call: Call = (method, params) => (transport ?? ((m, p) => window.mousse.pl
 /** The daemon (or this app's bridge) does not know the bot-browser methods. */
 const missingMethod = (cause: unknown) => /method not allowed|not allowlisted|unknown method/i.test(errorText(cause))
 
+/** The same picture (whenever it was read). */
+const samePicture = (a: BotBrowserFrame, b: BotBrowserFrame) =>
+  a.data === b.data && a.width === b.width && a.height === b.height && a.viewport.width === b.viewport.width && a.viewport.height === b.viewport.height
+
+/** Two views that show the same: the same picture object, and the rest alike. */
+const sameView = (a: BotBrowserView, b: BotBrowserView) =>
+  a.frame === b.frame && JSON.stringify({ ...a, frame: undefined }) === JSON.stringify({ ...b, frame: undefined })
+
 export const useBotBrowserStore = create<BotBrowserState>((set, get) => {
   const put = (botId: string, view: BotBrowserView) => set((state) => {
     const previous = state.views[botId]
     // A view without a picture keeps the last one: a seldom check never blanks the preview.
-    const frame = view.frame ?? previous?.frame
-    return { views: { ...state.views, [botId]: { ...view, ...(frame ? { frame } : {}) } } }
+    const frame = view.frame && previous?.frame && samePicture(view.frame, previous.frame) ? previous.frame : view.frame ?? previous?.frame
+    const next = { ...view, ...(frame ? { frame } : {}) }
+    // Nothing new (a page that did not change): the state stays as it was, so nothing re-renders.
+    if (previous && sameView(previous, next)) return state
+    return { views: { ...state.views, [botId]: next } }
   })
   const act = async (botId: string, run: () => Promise<{ browser: BotBrowserView }>) => {
     set({ busy: true, error: null })
@@ -90,8 +105,11 @@ export function useBotBrowser(botId: string, showing: boolean): BotBrowserView |
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
     const tick = async () => {
+      const started = Date.now()
       await useBotBrowserStore.getState().load(botId, live)
-      if (!stopped) timer = setTimeout(() => { void tick() }, live ? BOT_BROWSER_FRAME_MS : IDLE_POLL_MS)
+      // Start to start: the time a read takes is not added to the wait.
+      const wait = (live ? BOT_BROWSER_FRAME_MS : IDLE_POLL_MS) - (Date.now() - started)
+      if (!stopped) timer = setTimeout(() => { void tick() }, Math.max(0, wait))
     }
     void tick()
     return () => { stopped = true; if (timer) clearTimeout(timer) }

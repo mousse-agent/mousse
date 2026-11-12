@@ -175,4 +175,22 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/remember.html` })
     expect((await bots.view(BOT_A, { frame: true })).tab?.url).toBe(`${origin}/remember.html`)
   }, 60_000)
+
+  it('the owner\'s view comes from the tab\'s screencast: a still page is the same picture, a change shows as it is painted', async () => {
+    const { bots, origin } = await fixture()
+    await bots.open(BOT_A, `${origin}/nav-a.html`)
+    // The screencast is running once its first paint has arrived; a still page then sends nothing new.
+    await expect.poll(async () => {
+      const first = (await bots.view(BOT_A, { frame: true })).frame!
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const again = (await bots.view(BOT_A, { frame: true })).frame!
+      return again.at === first.at && again.data === first.data
+    }, { timeout: 5_000, interval: 100 }).toBe(true)
+    const still = (await bots.view(BOT_A, { frame: true })).frame!
+    expect(still.viewport).toEqual({ width: 1280, height: 720 })
+    expect(Buffer.from(still.data, 'base64').subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]))
+    // The owner goes to another page: its picture shows soon after, without anyone asking twice.
+    await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/nav-b.html` })
+    await expect.poll(async () => (await bots.view(BOT_A, { frame: true })).frame!.data !== still.data, { timeout: 2_000, interval: 40 }).toBe(true)
+  }, 60_000)
 })

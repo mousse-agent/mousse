@@ -159,3 +159,49 @@ describe('the agent cursor over a live in-app page', () => {
     expect(host.querySelector('.agent-cursor-ripple')).not.toBeNull()
   })
 })
+
+describe('the bot browser\'s pictures', () => {
+  it('an unchanged picture read again changes nothing, so nothing re-renders; a new one replaces it', async () => {
+    let views = 0
+    const stop = useBotBrowserStore.subscribe(() => { views += 1 })
+    const read = () => act(async () => { await useBotBrowserStore.getState().load('noobesh', true) })
+    await read()
+    const first = useBotBrowserStore.getState().views.noobesh
+    expect(views).toBe(1)
+    // The same page read again (a fresh copy, read later): the state stays as it was.
+    browser = JSON.parse(JSON.stringify({ ...browser, frame: { ...FRAME, at: FRAME.at + 40 } })) as BotBrowserView
+    await read()
+    expect(views).toBe(1)
+    expect(useBotBrowserStore.getState().views.noobesh).toBe(first)
+    // The page painted something new: it shows.
+    browser = { ...browser, frame: { ...FRAME, data: '/9j/BBBB', at: FRAME.at + 80 } }
+    await read()
+    expect(views).toBe(2)
+    expect(useBotBrowserStore.getState().views.noobesh!.frame!.data).toBe('/9j/BBBB')
+    stop()
+  })
+
+  it('asks for the next picture at a steady pace, the read\'s own time included', async () => {
+    vi.useFakeTimers()
+    try {
+      const { useBotBrowser, BOT_BROWSER_FRAME_MS } = await import('../../src/renderer/stores/botBrowserStore')
+      const reads: number[] = []
+      setBotBrowserTransport((async () => {
+        reads.push(Date.now())
+        // A read that takes 30 ms of the interval.
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        return { browser }
+      }) as never)
+      useBotBrowserStore.setState({ views: { noobesh: browser } })
+      const Probe = () => { useBotBrowser('noobesh', true); return null }
+      await act(async () => root.render(createElement(Probe)))
+      await act(async () => { await vi.advanceTimersByTimeAsync(BOT_BROWSER_FRAME_MS * 10) })
+      const gaps = reads.slice(1).map((at, index) => at - reads[index]!)
+      expect(gaps.length).toBeGreaterThanOrEqual(8)
+      expect(gaps.every((gap) => gap === BOT_BROWSER_FRAME_MS)).toBe(true)
+      expect(BOT_BROWSER_FRAME_MS).toBeLessThanOrEqual(50)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
