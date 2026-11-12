@@ -15,6 +15,7 @@ import {
   isQueueHeldByStop,
   listClaimedQueue,
   listPendingQueue,
+  markWaitingForLease,
   normalizeQueuedMessages,
   promoteQueuedMessageToSteer,
   QueueConflictError,
@@ -67,6 +68,31 @@ describe('ThreadMessageQueue domain', () => {
     expect(() => promoteQueuedMessageToSteer(items, internal.id)).toThrow(/internal/i)
     expect(clearPendingQueue(items)).toEqual([expect.objectContaining({ id: internal.id })])
     expect(normalizeQueuedMessages(items, 't1').find((item) => item.id === internal.id)?.internal).toBe(true)
+  })
+
+  it('keeps the lease-wait mark on a pending message through a save, and drops it once claimed or held by a Stop', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'behind the lease', waitsForLease: true }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'queued later' }).items
+    const [behind, later] = listPendingQueue(items)
+    expect(behind?.waitsForLease).toBe(true)
+    expect(later).not.toHaveProperty('waitsForLease')
+    const saved = normalizeQueuedMessages(JSON.parse(JSON.stringify(items)), 't1')
+    expect(saved.map((item) => item.waitsForLease)).toEqual([true, undefined])
+    // A steer never waits for the lease, and a malformed mark is dropped.
+    expect(enqueueMessage([], { threadId: 't1', content: 'steer', intent: 'steer', waitsForLease: true }).item).not.toHaveProperty('waitsForLease')
+    expect(normalizeQueuedMessages([{ ...behind!, waitsForLease: 'yes' as unknown as true }], 't1')[0]).not.toHaveProperty('waitsForLease')
+
+    const claimed = claimNextNormal(saved, { ownerPid: 1, ownerToken: 'tok' })
+    expect(claimed.claimed?.content).toBe('behind the lease')
+    expect(claimed.claimed).not.toHaveProperty('waitsForLease')
+    expect(normalizeQueuedMessages([{ ...behind!, state: 'claimed', claim: { ownerPid: 1, ownerToken: 'tok', claimedAt: new Date().toISOString() } }], 't1')[0]).not.toHaveProperty('waitsForLease')
+
+    const held = holdQueueAfterStop(saved)
+    expect(held.map((item) => [item.heldAfterStop, item.waitsForLease])).toEqual([[true, undefined], [true, undefined]])
+    // Marking later: only a pending normal message the Stop did not hold.
+    const marked = markWaitingForLease(saved, new Set([later!.id]))
+    expect(marked.map((item) => item.waitsForLease)).toEqual([true, true])
+    expect(markWaitingForLease(held, new Set([later!.id]))).toBe(held)
   })
 
   it('validates reorder and remove', () => {

@@ -40,6 +40,8 @@ export interface EnqueueMessageInput {
   permissionMode?: PermissionMode
   origin?: QueuedMessage['origin']
   sentFrom?: QueuedMessage['sentFrom']
+  /** Queued because the thread's lease was held (`QueuedMessage.waitsForLease`). */
+  waitsForLease?: boolean
 }
 
 export interface ClaimOwnerInput {
@@ -232,6 +234,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
       ...(item.heldAfterStop === true ? { heldAfterStop: true as const } : {}),
+      ...(item.waitsForLease === true && state === 'pending' && intent === 'normal' ? { waitsForLease: true as const } : {}),
       ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {}),
       ...(typeof item.sentFrom?.node === 'string' && item.sentFrom.node ? { sentFrom: { node: item.sentFrom.node } } : {}),
       // Only a steering item is bound to a run.
@@ -308,7 +311,8 @@ export function enqueueMessage(
     ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
     ...(input.sentFrom ? { sentFrom: input.sentFrom } : {}),
-    ...(input.origin ? { origin: input.origin } : {})
+    ...(input.origin ? { origin: input.origin } : {}),
+    ...(input.waitsForLease && (input.intent ?? 'normal') === 'normal' ? { waitsForLease: true as const } : {})
   }
 
   return { items: sortQueue([...items, item]), item }
@@ -506,8 +510,10 @@ export function claimNextNormal(
     claimedAt: owner.claimedAt ?? new Date().toISOString(),
     source: owner.source
   }
+  // Claimed, it waits for the lease no longer.
+  const { waitsForLease: _waits, ...rest } = next
   const claimed: QueuedMessage = {
-    ...next,
+    ...rest,
     state: 'claimed',
     claim
   }
@@ -691,8 +697,22 @@ export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]
  * handed back) is marked `heldAfterStop`, so a restart leaves them for the person too.
  */
 export function holdQueueAfterStop(items: QueuedMessage[]): QueuedMessage[] {
-  if (!items.some((item) => (item.state === 'pending' || item.state === 'steering') && !item.heldAfterStop)) return items
-  return items.map((item) => ((item.state === 'pending' || item.state === 'steering') && !item.heldAfterStop ? { ...item, heldAfterStop: true as const } : item))
+  if (!items.some((item) => (item.state === 'pending' || item.state === 'steering') && (!item.heldAfterStop || item.waitsForLease))) return items
+  return items.map((item) => {
+    if (item.state !== 'pending' && item.state !== 'steering') return item
+    if (item.heldAfterStop && !item.waitsForLease) return item
+    // Held, it waits for the person, not for the lease.
+    const { waitsForLease: _waits, ...rest } = item
+    return { ...rest, heldAfterStop: true as const }
+  })
+}
+
+/** Marks the pending items `ids` as queued behind the thread's lease (`QueuedMessage.waitsForLease`). */
+export function markWaitingForLease(items: QueuedMessage[], ids: ReadonlySet<string>): QueuedMessage[] {
+  if (!items.some((item) => ids.has(item.id) && item.state === 'pending' && item.intent === 'normal' && !item.heldAfterStop && !item.waitsForLease)) return items
+  return items.map((item) =>
+    ids.has(item.id) && item.state === 'pending' && item.intent === 'normal' && !item.heldAfterStop && !item.waitsForLease ? { ...item, waitsForLease: true as const } : item
+  )
 }
 
 /** The queue goes on (a turn of the thread starts): no item is held by a Stop any more. */

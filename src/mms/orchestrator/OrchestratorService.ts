@@ -281,6 +281,7 @@ import {
   enqueueMessage,
   holdQueueAfterStop,
   isQueueHeldByStop,
+  markWaitingForLease,
   listClaimedQueue,
   listPendingQueue,
   promoteQueuedMessageToSteer,
@@ -949,11 +950,24 @@ const QUEUED_ROW_RELEASE_RETRY_MS = 2_000
 const QUEUE_REPAIR_ATTEMPTS = 6
 /** How often a message queued behind the thread lease looks whether another process released it. */
 const LEASE_WAIT_POLL_MS = 500
+/**
+ * The longest a lease wait goes between looks while a turn of the thread is only admitted (it may wait minutes for its
+ * folders or an unplugged drive): from LEASE_WAIT_POLL_MS the interval doubles up to this.
+ */
+const LEASE_WAIT_ADMITTED_POLL_MAX_MS = 4_000
 /** How many deleted threads remember what their lease wait waited for, for a restore; the oldest is forgotten first. */
 const LEASE_WAITS_OF_DELETED_MAX = 256
 
 /** Messages queued behind the thread's execution lease, waiting for it to be free (`waitForThreadLease`). */
-type LeaseWait = { threadDir: string; itemIds: Set<string>; poll: NodeJS.Timeout | null; wakeQueued: boolean }
+type LeaseWait = {
+  threadDir: string
+  itemIds: Set<string>
+  poll: NodeJS.Timeout | null
+  pollMs: number
+  wakeQueued: boolean
+  /** Started by startup recovery: its drain goes through the startup drain queue and its concurrency limit. */
+  startup: boolean
+}
 
 /** None of the messages a lease wait woke for is still waiting by the time the queue lock is held. */
 class LeaseWaitGone extends Error {}
@@ -7294,16 +7308,17 @@ export class OrchestratorService extends EventEmitter {
   private readonly leaseWaitsOfDeleted = new Map<string, Set<string>>()
   private stopLeaseReleaseWatch: (() => void) | null = null
 
-  private waitForThreadLease(threadId: string, itemId: string): void {
+  private waitForThreadLease(threadId: string, itemId: string, opts?: { startup?: boolean }): void {
     if (this.lifecycle.stopping) return
     const threadDir = this.resolveThreadDir(threadId)
     if (!threadDir) return
     let wait = this.leaseWaits.get(threadId)
     const started = !wait
     if (!wait) {
-      wait = { threadDir: resolve(threadDir), itemIds: new Set(), poll: null, wakeQueued: false }
+      wait = { threadDir: resolve(threadDir), itemIds: new Set(), poll: null, pollMs: LEASE_WAIT_POLL_MS, wakeQueued: false, startup: false }
       this.leaseWaits.set(threadId, wait)
     }
+    if (opts?.startup) wait.startup = true
     wait.itemIds.add(itemId)
     this.stopLeaseReleaseWatch ??= onExecutionLeaseReleased((released) => {
       const dir = resolve(released)
@@ -7326,10 +7341,12 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  /** Poll the wait: what it waits for fires nothing in this process. */
-  private startLeasePoll(threadId: string, wait: LeaseWait): void {
-    if (wait.poll) return
-    wait.poll = setInterval(() => this.wakeLeaseWait(threadId), LEASE_WAIT_POLL_MS)
+  /** Poll the wait every `ms`: what it waits for fires nothing in this process. */
+  private startLeasePoll(threadId: string, wait: LeaseWait, ms = LEASE_WAIT_POLL_MS): void {
+    if (wait.poll && wait.pollMs === ms) return
+    if (wait.poll) clearInterval(wait.poll)
+    wait.pollMs = ms
+    wait.poll = setInterval(() => this.wakeLeaseWait(threadId), ms)
     wait.poll.unref?.()
   }
 
@@ -7417,7 +7434,9 @@ export class OrchestratorService extends EventEmitter {
     // wait again all the same, for a turn that drains nothing after it. One that ends before it takes the lease (it
     // failed while it was set up) releases nothing, so the wait polls until the lease is taken or the turn is gone.
     if (session.isTurnRunning() || session.turnAdmitted) {
-      this.startLeasePoll(threadId, wait)
+      // A turn only admitted may wait long for its folders or drive before it takes the lease: look less often meanwhile.
+      const admittedOnly = session.turnAdmitted && session.activeTurn === null
+      this.startLeasePoll(threadId, wait, admittedOnly && wait.poll ? Math.min(wait.pollMs * 2, LEASE_WAIT_ADMITTED_POLL_MAX_MS) : LEASE_WAIT_POLL_MS)
       return
     }
     this.refreshSessionQueueFromDisk(session)
@@ -7452,6 +7471,11 @@ export class OrchestratorService extends EventEmitter {
         return
       }
     }
+    // A wait startup recovery began drains as every startup drain does, a few threads at a time.
+    if (wait.startup) {
+      this.queueStartupDrain(threadId)
+      return
+    }
     this.scheduleQueueDrain(session, {
       // Something took the lease again before the drain could claim (another process): wait for it once more.
       onSettled: (result) => {
@@ -7459,6 +7483,17 @@ export class OrchestratorService extends EventEmitter {
         for (const id of waiting) this.waitForThreadLease(threadId, id)
       }
     })
+  }
+
+  /** Marks a pending message as queued behind the thread's lease (`waitsForLease`); best effort. */
+  private markWaitingForLease(session: ThreadSession, itemId: string): void {
+    const mark = (items: QueuedMessage[]): QueuedMessage[] => markWaitingForLease(items, new Set([itemId]))
+    try {
+      session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, mark) : mark(session.queue)
+    } catch (error) {
+      // Unmarked, it still waits for the lease here; only a restart into a queue a Stop holds leaves it for Send now.
+      console.warn('a message queued behind the thread lease could not be marked as waiting for it', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
@@ -8024,6 +8059,8 @@ export class OrchestratorService extends EventEmitter {
       continuationOfRunId?: string
       /** Runs once the queue holding the item is saved, before the queue lock is released; the item is the saved one, an existing one included. */
       afterSave?: (item: QueuedMessage, saved: QueuedMessage[]) => void
+      /** Queued because the thread's lease is held (`QueuedMessage.waitsForLease`). */
+      waitsForLease?: boolean
     }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
@@ -8064,7 +8101,8 @@ export class OrchestratorService extends EventEmitter {
           origin: opts?.origin,
           id: opts?.id,
           atFront: opts?.atFront,
-          continuationOfRunId: opts?.continuationOfRunId
+          continuationOfRunId: opts?.continuationOfRunId,
+          waitsForLease: opts?.waitsForLease
         })
         item = result.item
         return result.items
@@ -8092,7 +8130,8 @@ export class OrchestratorService extends EventEmitter {
       origin: opts?.origin,
       id: opts?.id,
       atFront: opts?.atFront,
-      continuationOfRunId: opts?.continuationOfRunId
+      continuationOfRunId: opts?.continuationOfRunId,
+      waitsForLease: opts?.waitsForLease
     })
     session.queue = result.items
     item = result.item
@@ -10542,7 +10581,8 @@ export class OrchestratorService extends EventEmitter {
         ...(opts?.clientRequestId ? { clientRequestId: opts.clientRequestId } : {}),
         runId: run?.runId,
         permissionMode: opts?.permissionMode,
-        origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined)
+        origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined),
+        ...(externalLease ? { waitsForLease: true } : {})
       })
       // Another process holds the thread: its turn drains the queue when it ends, but other work it holds the lease
       // for does not, so the message also waits here for the lease.
@@ -11090,7 +11130,7 @@ export class OrchestratorService extends EventEmitter {
     const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
-    const requeueUnstarted = (): OrchestratorResponse => {
+    const requeueUnstarted = (behindLease = false): OrchestratorResponse => {
       // An edited prompt never waits in the queue, where nothing would check its branch: it is refused instead.
       if (expectedBranchOf(input)) throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
       // Nor does a bound send, which would run later on whatever the thread has then: its run ends unstarted.
@@ -11104,6 +11144,7 @@ export class OrchestratorService extends EventEmitter {
       }
       if (queueItemId) {
         const released = this.releaseSessionClaim(session, queueItemId, claimOwnerToken)
+        if (released && behindLease) this.markWaitingForLease(session, released.id)
         return { message: '', actions: [], queued: true, queueItem: released ?? undefined }
       }
       // A scheduled turn keeps its model and origin on the item, so the drain that runs it later binds them;
@@ -11113,7 +11154,7 @@ export class OrchestratorService extends EventEmitter {
         : opts?.agent
           ? agentOriginOf(opts.agent)
           : undefined
-      const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin })
+      const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin, ...(behindLease ? { waitsForLease: true } : {}) })
       return { message: '', actions: [], queued: true, queueItem: item }
     }
     // Before recovery and provisioning read the folder synchronously: a pending macOS permission prompt
@@ -11153,7 +11194,7 @@ export class OrchestratorService extends EventEmitter {
         })
         // Peer won the race: the turn runs later, in its place, as soon as the lease is free.
         if (!lease) {
-          const queued = requeueUnstarted()
+          const queued = requeueUnstarted(true)
           if (queued.queueItem) this.waitForThreadLease(session.threadId, queued.queueItem.id)
           return queued
         }
@@ -13040,18 +13081,29 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Another process holds the thread's lease as this one starts (a git operation, a terminal, a turn): what waits in
-   * the queue, other than what a Stop held, waits for the lease to be free, as it did in the process that queued it.
+   * As this process starts, what waits in the queue waits for the lease to be free, as it did in the process that
+   * queued it, while another process holds the lease (a git operation, a terminal, a turn). What a Stop held waits for
+   * the person instead. In a queue a Stop holds, only what was queued behind the lease (`waitsForLease`) waits: the
+   * lease wait's drain puts it first, and its turn lifts the hold. What was added after the Stop otherwise (queued from
+   * another window or computer) waits for the person with the rest, as it did before the restart.
    */
   private waitForLeaseAtStartup(threadId: string, session: ThreadSession): void {
-    try {
-      this.refreshSessionQueueFromDisk(session)
-    } catch {
-      return
-    }
+    this.refreshSessionQueueFromDisk(session)
+    const held = isQueueHeldByStop(session.queue)
     for (const item of listPendingQueue(session.queue)) {
-      if (item.intent === 'normal' && item.state === 'pending' && !item.heldAfterStop) this.waitForThreadLease(threadId, item.id)
+      if (item.intent !== 'normal' || item.state !== 'pending' || item.heldAfterStop) continue
+      if (held && !item.waitsForLease) continue
+      this.waitForThreadLease(threadId, item.id, { startup: true })
     }
+  }
+
+  /** Puts the thread on the startup drain queue, which drains a few threads at a time. */
+  private queueStartupDrain(threadId: string): void {
+    if (!this.startupDrainScheduled.has(threadId)) {
+      this.startupDrainScheduled.add(threadId)
+      this.startupDrainPending.push(threadId)
+    }
+    this.pumpStartupDrainQueue()
   }
 
   /** Loads one thread's session and schedules its drain when it still has pending normal work. */
@@ -13071,9 +13123,16 @@ export class OrchestratorService extends EventEmitter {
         (item) => item.intent === 'normal' && item.state === 'pending'
       )
       // A compaction another live process runs holds the queue; one a restart cut short holds nothing (its row was
-      // settled as interrupted when the session loaded, and its saved hold is removed here). A queue a Stop held
-      // waits for the person, as it did before the restart (`heldAfterStop`).
-      if (!hasPendingNormal || isQueueHeldByStop(session.queue) || this.pausedHoldsQueue(threadId, session.queue) || this.compactionHoldsQueue(threadId)) return
+      // settled as interrupted when the session loaded, and its saved hold is removed here).
+      if (!hasPendingNormal || this.pausedHoldsQueue(threadId, session.queue) || this.compactionHoldsQueue(threadId)) return
+      // A queue a Stop held waits for the person, as it did before the restart (`heldAfterStop`). A message that only
+      // waited for the lease (`waitsForLease`, held then by work in the process that stopped) was never held: it runs
+      // first, as it would have once the lease was free, through the lease wait; a peer holding the lease at restart
+      // does the same.
+      if (isQueueHeldByStop(session.queue)) {
+        this.waitForLeaseAtStartup(threadId, session)
+        return
+      }
       this.startupDrainScheduled.add(threadId)
       this.startupDrainPending.push(threadId)
     } catch (err) {
@@ -13102,6 +13161,13 @@ export class OrchestratorService extends EventEmitter {
         if (!session.deleted && !session.isTurnRunning()) this.waitForLeaseAtStartup(threadId, session)
         continue
       }
+      // The drain claims the first pending message: never one a Stop held, which waits for the person. A message that
+      // waited for the lease was put ahead of those; it may have been run, removed or held since.
+      this.refreshSessionQueueFromDisk(session)
+      if (listPendingQueue(session.queue).find((item) => item.intent === 'normal' && item.state === 'pending')?.heldAfterStop) {
+        this.startupDrainScheduled.delete(threadId)
+        continue
+      }
       this.startupDrainActive += 1
       // Startup-managed: one turn per slot. Internal auto-drain is suppressed so chaining
       // stays under this pump and concurrency never exceeds STARTUP_QUEUE_DRAIN_CONCURRENCY.
@@ -13110,6 +13176,10 @@ export class OrchestratorService extends EventEmitter {
         onSettled: (result) => {
           this.startupDrainActive = Math.max(0, this.startupDrainActive - 1)
           this.startupDrainScheduled.delete(threadId)
+          // Another process took the lease after the look above and before the claim: wait for it.
+          if (result === 'idle' && !session.deleted && !session.isTurnRunning() && this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)) {
+            this.waitForLeaseAtStartup(threadId, session)
+          }
           // Only chain further items after a successful run. Failures advance the
           // startup queue without infinite-retrying the same pre-accept error.
           if (result === 'ran') {
