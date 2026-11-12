@@ -88,6 +88,15 @@ describe('an answered ask', () => {
     expect(askAnswerLine(ask({ status: 'not_now' }))).toBe('Not now: use files on this computer')
     expect(askAnswerLine(ask({ status: 'withdrawn' }))).toBe('No longer needed: use files on this computer')
   })
+
+  it('says what Allow did for a run’s permission: the work carries on, the next run has it, or nothing is running', () => {
+    // The work that asked is still running or waiting: it continues with the permission.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands', carriesOn: true }), true)).toBe('Allowed: run commands. It carries on with this now.')
+    // It ended, and other work runs: the next run has it.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands' }), true)).toBe('Allowed: run commands. It uses it from the next run.')
+    // Nothing of the bot was running or waiting.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands', idle: true }), true)).toBe('Allowed: run commands. Nothing is running now; it has this from now on.')
+  })
 })
 
 describe('in the chat', () => {

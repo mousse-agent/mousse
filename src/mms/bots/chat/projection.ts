@@ -47,6 +47,11 @@ function carriesOn(row: BotActivationRow | undefined): boolean {
   return row?.trigger.kind === 'work' && row.status !== 'cancelled'
 }
 
+/** Whether a run activation still runs, waits at a wall, or waits to go on: whatever it was allowed reaches it. */
+function stillWorking(row: BotActivationRow): boolean {
+  return row.status === 'running' || row.status === 'waiting_grant' || workWaits(row)
+}
+
 /** A time of day in local time, "14:00". */
 export function clockTime(iso: string): string {
   const at = new Date(iso)
@@ -208,8 +213,32 @@ export class BotChatProjection {
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
       // A limit that work the owner asked for waits on (it took the ask over): Allow carries that work on now, unless the
       // owner stopped it meanwhile.
-      ...('budget' in escalation.permission && escalation.mode === 'ask' && carriesOn(this.store.activation(escalation.activationId)) ? { carriesOn: true as const } : {})
+      ...('budget' in escalation.permission && escalation.mode === 'ask' && carriesOn(this.store.activation(escalation.activationId)) ? { carriesOn: true as const } : {}),
+      ...this.permissionOutcome(escalation)
     }
+  }
+
+  /**
+   * What a run's permission ask did once allowed: the run that asked carries on with it (it is still running or
+   * waiting, or it went on after the answer), or the bot has it from its next run, saying so when nothing of the bot
+   * was running or waiting at the answer.
+   */
+  private permissionOutcome(escalation: BotEscalationRow): { carriesOn?: true; idle?: true } {
+    if (escalation.mode !== 'ask' || 'budget' in escalation.permission || isSpecialAsk(escalation.permission)) return {}
+    if (escalation.status !== 'allowed_bot' && escalation.status !== 'allowed_once') return {}
+    const asker = this.store.activation(escalation.activationId)
+    const answeredAt = escalation.answeredAt ?? this.store.now()
+    const answered = Date.parse(answeredAt)
+    if (asker?.lane === 'run' && (stillWorking(asker) || this.store.dispatches(asker.id).some((dispatch) => dispatch.kind !== 'consult' && dispatch.n > escalation.dispatchN && dispatch.startedAt !== null && dispatch.startedAt >= answered)))
+      return { carriesOn: true }
+    const busy = this.store.all(
+      "SELECT id FROM bot_activations WHERE bot_id = ? AND lane = 'run' AND id != ? AND created_at <= ? AND ((ended_at IS NULL AND status IN ('queued', 'running', 'waiting_grant', 'blocked')) OR ended_at > ?)",
+      escalation.botId, escalation.activationId, answeredAt, answeredAt
+    ).some((entry) => {
+      const row = this.store.activation(entry.id as string)
+      return row !== undefined && (row.status !== 'blocked' || workWaits(row))
+    })
+    return busy ? {} : { idle: true }
   }
 
   /** One bot as the Bots section and Recent list it (§5.7). */

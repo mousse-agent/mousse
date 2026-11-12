@@ -256,6 +256,46 @@ describe('work that was running when the owner pressed Allow', () => {
   })
 })
 
+describe('the card says what Allow did for the run that asked', () => {
+  const card = () => cards().find((message) => message.ask!.title === 'run commands')!.ask!
+
+  it('work still running carries on with it, and the card keeps saying so after it went on', async () => {
+    const work = await workStarted('Is cua-driver installed?', 'm1')
+    work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To check.' })
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    expect(card()).toMatchObject({ status: 'allowed', carriesOn: true })
+    expect(card().idle).toBeUndefined()
+    await finish(f, work.payload, 'completed', { text: 'Not yet.' })
+    const continued = await start(f, work.workId, 2)
+    await finish(f, continued.payload, 'completed', { text: 'Installed.' })
+    expect(f.store.activation(work.workId)!.status).toBe('done')
+    expect(card()).toMatchObject({ status: 'allowed', carriesOn: true })
+  })
+
+  it('a run that already ended, with nothing else running, has it from now on', async () => {
+    const run = await f.bots.activate({ botId, input: 'Check the disk', clientRequestId: 'r1' })
+    const { payload, prepared } = await start(f, run.id)
+    prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To check.' })
+    await finish(f, payload, 'completed', { text: 'Could not check.' })
+    expect(f.store.activation(run.id)!.status).toBe('done')
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    expect(card()).toMatchObject({ status: 'allowed', idle: true })
+    expect(card().carriesOn).toBeUndefined()
+  })
+
+  it('a run that already ended while other work runs has it from the next run', async () => {
+    const run = await f.bots.activate({ botId, input: 'Check the disk', clientRequestId: 'r1' })
+    const { payload, prepared } = await start(f, run.id)
+    prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To check.' })
+    await finish(f, payload, 'completed', { text: 'Could not check.' })
+    await workStarted('Sum my numbers', 'm1')
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    expect(card().status).toBe('allowed')
+    expect(card().carriesOn).toBeUndefined()
+    expect(card().idle).toBeUndefined()
+  })
+})
+
 describe('a chat turn that was running when the owner pressed Allow', () => {
   it('hands commands and the browser to work instead of making a second card', async () => {
     const work = await workStarted('Check cua-driver', 'm1')

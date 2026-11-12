@@ -2347,8 +2347,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * chosen again, and a first dispatch that never went out (no model was free) is sent as it was.
    */
   private async resumeWork(row: BotActivationRow): Promise<void> {
+    // A permission the owner allowed after the work was refused it reaches it now, and the work is told.
+    const allowed = this.allowedSinceRefused(row)
     if (row.endReason !== 'usage_limit') {
-      await this.continueWith(row.id, ['blocked'], { moreRoom: true })
+      await this.continueWith(row.id, ['blocked'], { moreRoom: true, ...(allowed.length ? { allowed } : {}) })
       return
     }
     this.usageWaits.delete(row.id)
@@ -2360,7 +2362,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       await this.sendDispatch(this.store.activation(row.id)!, main)
       return
     }
-    await this.continueWith(row.id, ['blocked'], { usageReset: true })
+    await this.continueWith(row.id, ['blocked'], { usageReset: true, ...(allowed.length ? { allowed } : {}) })
   }
 
   /** The fingerprint of an ask: one open ask per bot and permission (a limit's by its key alone). */
@@ -3103,7 +3105,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.raiseWall(row.id, { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxTurns', amount: maxTurns } }, reason: `This bot reached its limit of ${maxTurns} model requests.` })
       return
     }
-    await this.continueWith(row.id, ['running'], { turnCap: true })
+    const allowed = this.allowedSinceRefused(row)
+    await this.continueWith(row.id, ['running'], { turnCap: true, ...(allowed.length ? { allowed } : {}) })
   }
 
   /** Every run of the activation (main and consult) has ended, so nothing of it is live. */
@@ -3293,7 +3296,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const interrupted = calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${call.role} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : ''
-    // A turn that the owner allowed something while it ran (issue #983): this turn has it (`allowedSinceRefused`).
+    // A turn that the owner allowed something while it ran (issue #983): this turn has it (`allowedSinceRefused`). Work
+    // that goes on after it waited, or after the turn cap, hears it with why it goes on.
+    if (input.allowed?.length && (input.moreRoom || input.usageReset || input.turnCap))
+      return `[Mousse] ${lead} The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.${interrupted}${input.notes ? `\n\n${input.notes}\n\nTake it into account as you continue.` : ''} ${input.moreRoom ? 'Carry on where you left off' : 'Continue where you left off'}, and do what you skipped without it.`
     if (input.allowed?.length) {
       if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${input.allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
       const allowedLine = `The owner allowed you to ${input.allowed.join(' and ')} while you worked; you have it now.`

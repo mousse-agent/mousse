@@ -55,12 +55,16 @@ export function AskCard({ line, lineText, note, answered, layout = 'card', onAns
   </div>
 }
 
-/** The one line a bot's answered ask becomes. */
+/**
+ * The one line a bot's answered ask becomes. A run's Allow says what happens now: the work carries on with it, the bot
+ * has it from its next run, or nothing of the bot is running and it has it from now on.
+ */
 export function askAnswerLine(ask: BotAskData, fromRun = false): string {
   if (ask.status === 'allowed') {
     if (ask.kind === 'export_memory') return 'Saved its memory to the folder you picked'
     if (ask.carriesOn) return `Allowed: ${ask.title}. It carries on with this now.`
-    return fromRun ? `Allowed: ${ask.title}. It uses it from the next run.` : `Allowed: ${ask.title}`
+    if (!fromRun) return `Allowed: ${ask.title}`
+    return ask.idle ? `Allowed: ${ask.title}. Nothing is running now; it has this from now on.` : `Allowed: ${ask.title}. It uses it from the next run.`
   }
   if (ask.status === 'not_now') return `Not now: ${ask.title}`
   return `No longer needed: ${ask.title}`
@@ -70,7 +74,7 @@ export function askAnswerLine(ask: BotAskData, fromRun = false): string {
 export function BotAsk({ botName, ask, fromRun = false, onAnswer, onExport }: {
   botName: string
   ask: BotAskData
-  /** A run's ask (a notice row): Allow applies from the next run. */
+  /** A run's ask (a notice row): its answered line says what Allow did for the run (`askAnswerLine`). */
   fromRun?: boolean
   onAnswer(answer: 'allow' | 'not_now'): Promise<void> | void
   /** `export_memory`: Allow picks a folder and saves the memory there, then closes the card. */
