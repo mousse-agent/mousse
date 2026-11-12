@@ -779,7 +779,7 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
 
   it('Mousse\'s asking tools are matched exactly: a look-alike title is no Mousse call', () => {
     const lookup = (tool: string) => ({ ask_user: { asksUser: 'question' }, thread_read: { access: 'readsOthers' } } as Record<string, { asksUser?: string; access?: string }>)[tool]
-    for (const name of ['mcp__mousse__ask_user', 'mousse/ask_user', 'mousse.ask_user', 'mousse__ask_user', 'mousse: ask_user', 'ask_user (mousse MCP Server)', 'ask_user', 'mcp__mousse-relay__github__create_issue', 'mcp__mousse__newer_tool'])
+    for (const name of ['mcp__mousse__ask_user', 'mousse/ask_user', 'mousse.ask_user', 'mousse__ask_user', 'mousse: ask_user', 'ask_user (mousse MCP Server)', 'ask_user', 'mcp__mousse-relay__github__create_issue', 'mcp__mousse__newer_tool', 'mousse-relay/github__createIssue', 'mousse-relay.Linear__Create_Issue', 'github__createIssue (mousse-relay MCP Server)'])
       expect(mousseCallAsksPerson(name, lookup), name).toBe(true)
     for (const name of ['mousse/docs', 'Mousse.md', 'mousse.md', 'MOUSSE/ask_user', 'mousse/thread_read', 'mcp__mousse__thread_read', 'docs (mousse MCP Server)', 'ask_user.md'])
       expect(mousseCallAsksPerson(name, lookup), name).toBe(false)

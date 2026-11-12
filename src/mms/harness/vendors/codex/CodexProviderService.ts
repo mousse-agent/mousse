@@ -640,6 +640,8 @@ class TurnRun {
   private adoptedFailureWaiters: Array<() => void> = []
   /** The run has interrupted its own thread (Stop, a cap or a failure sweep): an `interrupted` turn is then expected. */
   selfInterrupted = false
+  /** Turns a person's steer cut (`turn/interrupt` for a steer): their `interrupted` end is expected, never a failure. */
+  readonly cutTurns = new Set<string>()
   /** The chat returned; late events only settle the turn and reach nobody. */
   private muted = false
   private readonly questionsDone = new AbortController()
@@ -1013,8 +1015,9 @@ class TurnRun {
         // Mousse's own turn may be running by now; it keeps its turn open, and this one's end is not its news.
         const current = this.turnId === completed.turn.id
         if (current) this.turnOpen = false
-        // An interruption this run asked for itself (a cap or a Stop sweep) is how the run ends, not a failure.
-        const failed = completed.turn.status === 'failed' || (completed.turn.status === 'interrupted' && !this.selfInterrupted)
+        // An interruption this run asked for itself (a cap or a Stop sweep) is how the run ends, not a failure. A person's
+        // steer that cut the adopted turn is not a failure either: the steer goes in as the next turn of the run.
+        const failed = completed.turn.status === 'failed' || (completed.turn.status === 'interrupted' && !this.selfInterrupted && !this.cutTurns.has(completed.turn.id))
         // The adopted turn is over and none of its commands runs: a steer held for it (strict release) goes in now, as
         // the next turn of the run, rather than waiting for the helpers.
         if (current && !failed) this.input.onBoundary?.()
@@ -3018,7 +3021,7 @@ export class CodexProviderService {
         for (const entry of [...nextSteers.splice(0), ...waiting.splice(0), ...inFlight.splice(0)])
           input.returnSteer?.(entry.text, entry.token)
       }
-      const cutTurns = new Set<string>()
+      const cutTurns = current.cutTurns
       let cutWaiting = false
       const cutTurn = (): void => {
         const turnId = current.turnId

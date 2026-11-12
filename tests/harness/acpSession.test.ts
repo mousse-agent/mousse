@@ -821,7 +821,8 @@ describe('ACP sessions', () => {
 
     describe.each([
       ['as Claude Code names MCP calls', 'mcp__mousse__ask_user'],
-      ['as some agents title them', 'ask_user (mousse MCP Server)']
+      ['as some agents title them', 'ask_user (mousse MCP Server)'],
+      ['a relayed tool waiting for its approval, named with capitals', 'mousse-relay/github__createIssue']
     ])("Mousse's ask_user over MCP (%s): the steer cuts and answers it, on an agent whose window was never measured (strict)", (_name, title) => {
       const asks = (held: boolean) => {
         const toolStarted = gate()

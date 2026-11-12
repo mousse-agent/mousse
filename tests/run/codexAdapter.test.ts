@@ -1728,11 +1728,18 @@ describe('CodexAdapter', () => {
         ? readTranscript(join(__dirname, 'fixtures', 'steer-during-command', 'codex.ndjson'))
         : parseTranscript([{ kind: 'transcript', adapter: 'codex', scenario: 'unit', boundary: CODEX_APP_SERVER_BOUNDARY, recordedAt: 'hand-authored', version: 1 }, ...frames].map((line) => JSON.stringify(line)).join('\n'))
       const replay = new ReplayTransport(transcript, { onCue: cues(hold), stallMs: 3_000 })
+      // Every request the adapter sent, by method (the replay also fails on any frame the transcript does not have).
+      const sent: string[] = []
+      const send = replay.send.bind(replay)
+      replay.send = (frame: unknown) => {
+        sent.push((frame as { method?: string }).method ?? '')
+        send(frame)
+      }
       const sink = hold.wrap(recordingSink())
       const result = await new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'Run the tests' }), sink, hold.ctl, host())
       replay.assertDone()
       const events = hold.log.map(([event, detail]) => `${event}:${detail}`)
-      return { hold, sink, result, events }
+      return { hold, sink, result, events, sent }
     }
     const before = (events: string[], a: string, b: string) => {
       expect(events).toContain(a)
@@ -1759,7 +1766,7 @@ describe('CodexAdapter', () => {
     })
 
     it('strict release: the held steer waits past the window and the model\'s text, for turn/completed, and goes in with no interrupt', async () => {
-      const { events } = await run([
+      const { events, sent } = await run([
         ...head(),
         started('cmd-1'),
         cue({ action: 'steer' }),
@@ -1772,8 +1779,11 @@ describe('CodexAdapter', () => {
         ...answers(6)
       ], { strict: true })
       before(events, 'boundary:', `drain:${STEER}`)
-      // No cut: nothing was interrupted, so no check at dispatch either.
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
+      // interrupted: the turn is already over, and the next turn/start carries it.
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
+      before(events, 'boundary:', 'mayCut:true')
+      expect(sent).not.toContain('turn/interrupt')
       expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
     })
 
@@ -1815,7 +1825,7 @@ describe('CodexAdapter', () => {
     })
 
     it('strict release: text between two commands keeps the steer held through the second command, to the turn\'s end', async () => {
-      const { events } = await run([
+      const { events, sent } = await run([
         ...head(),
         started('cmd-1'),
         cue({ action: 'steer' }),
@@ -1830,7 +1840,11 @@ describe('CodexAdapter', () => {
         ...answers(6)
       ], { strict: true })
       before(events, 'tool:complete:cmd-2', `drain:${STEER}`)
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
+      // interrupted: the turn is already over, and the next turn/start carries it.
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
+      before(events, 'boundary:', 'mayCut:true')
+      expect(sent).not.toContain('turn/interrupt')
     })
 
     it('a delayed start notification: the next command\'s start reaches Mousse after the window, so the cut meets it (the documented best-effort window)', async () => {
@@ -1852,7 +1866,7 @@ describe('CodexAdapter', () => {
     })
 
     it('strict release: a delayed start notification finds the steer still held, and it goes in at the turn\'s end', async () => {
-      const { events } = await run([
+      const { events, sent } = await run([
         ...head(),
         started('cmd-1'),
         cue({ action: 'steer' }),
@@ -1866,7 +1880,11 @@ describe('CodexAdapter', () => {
         ...answers(6)
       ], { strict: true })
       before(events, 'tool:complete:cmd-2', `drain:${STEER}`)
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
+      // interrupted: the turn is already over, and the next turn/start carries it.
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
+      before(events, 'boundary:', 'mayCut:true')
+      expect(sent).not.toContain('turn/interrupt')
     })
 
     it('a command that starts while the cut waits behind an earlier steer is not interrupted: the steer is held again', async () => {
@@ -1898,7 +1916,7 @@ describe('CodexAdapter', () => {
     })
 
     it('a command that ends right before the turn does: the turn\'s end closes the window, so the steer starts the next turn of the same run', async () => {
-      const { events } = await run([
+      const { events, sent } = await run([
         ...head(),
         started('cmd-1'),
         cue({ action: 'steer' }),
@@ -1908,7 +1926,11 @@ describe('CodexAdapter', () => {
         ...answers(6)
       ])
       before(events, 'boundary:', `drain:${STEER}`)
-      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual([])
+      // A person's steer at the turn's end goes through the cut path (checked once at dispatch), and nothing is
+      // interrupted: the turn is already over, and the next turn/start carries it.
+      expect(events.filter((event) => event.startsWith('mayCut'))).toEqual(['mayCut:true'])
+      before(events, 'boundary:', 'mayCut:true')
+      expect(sent).not.toContain('turn/interrupt')
     })
 
     it('the boundary ends when the next server turn starts: a steer before that turn writes anything cuts it', async () => {

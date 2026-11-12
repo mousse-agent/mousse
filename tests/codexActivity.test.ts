@@ -808,6 +808,76 @@ describe('Codex activity against a scripted app-server', () => {
     expect(interrupted.filter((thread) => thread === PARENT)).toEqual([])
   })
 
+  it('a person\'s steer that cuts a turn Codex started on its own during the helper wait does not fail the run: the steer goes in as the next turn', async () => {
+    const events: ProviderToolEvent[] = []
+    let turns = 0
+    let helperActive = true
+    const interrupted: string[] = []
+    const s = server({
+      // Tree mode: the process lists the helper, active until the steer's turn.
+      respond: (message) => {
+        const params = (message.params ?? {}) as Record<string, unknown>
+        if (message.method === 'thread/list' && params.parentThreadId && params.ancestorThreadId) return { error: { code: -32602, message: 'parentThreadId and ancestorThreadId are mutually exclusive' } }
+        if (message.method === 'thread/list' && params.ancestorThreadId === PARENT)
+          return { result: { data: [{ id: HELPER, parentThreadId: PARENT, createdAt: 0, status: { type: helperActive ? 'active' : 'idle' } }], nextCursor: null } }
+        if (message.method === 'thread/read') return { result: { thread: { id: params.threadId, status: { type: params.threadId === HELPER && helperActive ? 'active' : 'idle' } } } }
+        return undefined
+      },
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          turns += 1
+          if (turns === 1) {
+            send(spawn())
+            send(helperTurn())
+            send(turnDone(PARENT, 'turn-1'))
+            return
+          }
+          helperActive = false
+          send(itemFrame('completed', PARENT, 'turn-1', { type: 'subAgentActivity', id: 'sub-1', kind: 'completed', agentThreadId: HELPER, agentPath: '/' }))
+          send(turnDone(HELPER, 'h-turn-1'))
+          send(turnDone(PARENT, 'turn-1'))
+        }),
+      onInterrupt: (send, params) => {
+        interrupted.push(`${params.threadId}:${params.turnId}`)
+        // The adopted turn ends interrupted, as Codex reports a turn it was asked to stop.
+        if (params.turnId === 'turn-a') send(turnDone(PARENT, 'turn-a', 'interrupted'))
+        else interruptReply(send, params)
+      }
+    })
+    const hold = holdControl(CODEX_CAPS)
+    const sink = hold.wrap({ text: () => {}, thinking: () => {}, tool: () => {}, progress: () => {}, providerRef: () => {}, usage: () => {}, steerAccepted: () => {} } as unknown as TurnSink)
+    const ctl = hold.ctl
+    const result = chat(create(s), events, {
+      peekSteer: () => ctl.peekSteer!(),
+      drainSteerEntry: (opts) => ctl.drainSteerEntry!(opts),
+      mayCut: (token) => ctl.mayCut!(token),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token!),
+      onSteer: (text, token) => sink.steerAccepted(text, token),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
+      onTool: (event) => {
+        events.push(event)
+        sink.tool(runtimeToolEvent(event))
+      }
+    })
+    result.catch(() => undefined)
+    await vi.waitFor(() => expect(events.some((event) => event.callId === `helper:${HELPER}`)).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    // A helper's message wakes the thread: Codex starts a turn of its own, and the model writes in it.
+    s.emit(note('turn/started', { threadId: PARENT, turn: { id: 'turn-a', status: 'inProgress', error: null } }))
+    await vi.waitFor(() => expect(hold.log.filter(([event]) => event === 'providerTurn').length).toBe(2))
+    // The person steers: the adopted turn is cut.
+    hold.steer('use pnpm')
+    await vi.waitFor(() => expect(interrupted).toContain(`${PARENT}:turn-a`))
+    await expect(result).resolves.toBeDefined()
+    expect(turns).toBe(2)
+    const log = hold.log.map(([event, detail]) => `${event}:${detail}`)
+    expect(log.filter((entry) => entry.startsWith('accepted:'))).toEqual(['accepted:use pnpm@drain-1'])
+    expect(log.filter((entry) => entry.startsWith('returned:'))).toEqual([])
+  })
+
   it('a turn that completes after Stop was requested leaves the plan to Stop: it ends stopped, not done', async () => {
     const events: ProviderToolEvent[] = []
     const s = server({

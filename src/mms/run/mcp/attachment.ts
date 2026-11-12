@@ -112,15 +112,17 @@ export const CLAUDE_RELAY_TOOL_PREFIX = `mcp__${MOUSSE_RELAY_SERVER_NAME}__`
  * Which server Mousse serves a call's tool name belongs to, and the tool's own name there, however the runtime names
  * an MCP call: `mcp__mousse__ask_user` (Claude, Codex, Cursor), and the forms some ACP agents use, `mousse__ask_user`,
  * `mousse.ask_user`, `mousse/ask_user`, `mousse: ask_user` or `ask_user (mousse MCP Server)`. The server's name is
- * matched exactly (lower case, as Mousse names it) and the tool's must be snake case, as Mousse's tools are, so a
- * title such as `Mousse.md` is no Mousse call. `exact`: the `mcp__<server>__` form, which only an MCP call has.
+ * matched exactly (lower case, as Mousse names it). A Mousse tool's name must be snake case, as Mousse's tools are, so a
+ * title such as `Mousse.md` is no Mousse call; a relayed tool's may be any of letters, digits and `_`, as the relay
+ * names it (`github__createIssue`). `exact`: the `mcp__<server>__` form, which only an MCP call has.
  * Undefined for any other name, a bare tool name included.
  */
 export function mousseServerToolOf(toolName: string): { server: 'mousse' | 'relay'; tool: string; exact: boolean } | undefined {
   const name = toolName.trim()
   if (name.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return { server: 'relay', tool: name.slice(CLAUDE_RELAY_TOOL_PREFIX.length), exact: true }
   if (name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { server: 'mousse', tool: name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length), exact: true }
-  const relay = /^mousse-relay(?:__|[./:] ?)([a-z0-9_]+(?:__[a-z0-9_]+)*)$/.exec(name) ?? /^([a-z0-9_]+(?:__[a-z0-9_]+)*) \(mousse-relay MCP Server\)$/.exec(name)
+  // A relayed tool keeps its integration's spelling, capitals included (`sanitizeToolNamePart`: letters, digits, `_`).
+  const relay = /^mousse-relay(?:__|[./:] ?)([A-Za-z0-9_]+)$/.exec(name) ?? /^([A-Za-z0-9_]+) \(mousse-relay MCP Server\)$/.exec(name)
   if (relay) return { server: 'relay', tool: relay[1]!, exact: false }
   const own = /^mousse(?:__|[./:] ?)([a-z][a-z0-9_]*)$/.exec(name) ?? /^([a-z][a-z0-9_]*) \(mousse MCP Server\)$/.exec(name)
   return own ? { server: 'mousse', tool: own[1]!, exact: false } : undefined
