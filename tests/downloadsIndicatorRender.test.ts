@@ -75,7 +75,7 @@ describe('downloads indicator rendering', () => {
     let entries = applyLocalModelStatus([], 'dictation-model', 'Parakeet TDT 110M', { modelId: 'parakeet-tdt-110m', state: { status: 'error', message: 'Download failed with HTTP 503' } }, 1)
     entries = applyUpdateState(entries, update({ phase: 'downloaded', availableVersion: '1.1.0' }))
     const html = list(entries)
-    expect(text(html)).toContain('|Mousse 1.1.0|')
+    expect(text(html)).toContain('|Mousse|')
     expect(text(html)).toContain('|Ready to install|')
     expect(html).toMatch(/<button[^>]*class="downloads-btn"[^>]*>Restart to update</)
     expect(html).toContain('aria-label="Try again"')

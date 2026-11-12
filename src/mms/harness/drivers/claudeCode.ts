@@ -266,6 +266,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     binaryNames: cliNames('claude'),
     ...compatibilityFields('claude'),
     latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' },
+    brewName: 'claude-code',
     multiInstance: true,
     privateHome: true,
     canInstall: false,
@@ -309,6 +310,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @anthropic-ai/claude-code@latest'
+      if (owner === 'pnpm') return 'pnpm add -g @anthropic-ai/claude-code@latest'
+      if (owner === 'bun') return 'bun add -g @anthropic-ai/claude-code@latest'
       if (owner === 'brew') return 'brew upgrade claude-code'
       if (owner === 'standalone') return 'claude update'
       return undefined

@@ -57,7 +57,7 @@ describe('downloads store transitions', () => {
   it('maps every update phase that needs attention and nothing else', () => {
     expect(updateEntry(update({ phase: 'up-to-date' }))).toBeNull()
     expect(updateEntry(update({ phase: 'error', error: { message: 'offline', during: 'check' } }))).toBeNull()
-    expect(updateEntry(update({ phase: 'available', availableVersion: '1.1.0' }))).toMatchObject({ phase: 'available', label: 'Mousse 1.1.0' })
+    expect(updateEntry(update({ phase: 'available', availableVersion: '1.1.0' }))).toMatchObject({ phase: 'available', label: 'Mousse', fromVersion: '1.0.0', toVersion: '1.1.0' })
     expect(updateEntry(update({ phase: 'downloading', availableVersion: '1.1.0', downloadPercent: 42 }))).toMatchObject({ phase: 'downloading', percent: 42 })
     expect(updateEntry(update({ phase: 'downloaded', availableVersion: '1.1.0' }))).toMatchObject({ phase: 'ready' })
     expect(updateEntry(update({ phase: 'downloaded', availableVersion: '1.1.0', error: { message: 'not applied', during: 'install' } })))
@@ -99,14 +99,14 @@ describe('downloads store: agent installs and updates', () => {
   it('tracks an install from its byte progress to done, one entry per instance', () => {
     let entries: DownloadEntry[] = []
     entries = applyProviderOperation(entries, op({ phase: 'progress', message: 'Starting' }), 'Antigravity', 1)
-    expect(entries).toEqual([{ id: 'agent:antigravity', kind: 'agent', sourceId: 'op-1', label: 'Antigravity', phase: 'downloading' }])
+    expect(entries).toEqual([{ id: 'agent:antigravity', kind: 'agent', sourceId: 'op-1', label: 'Antigravity', operation: 'install', phase: 'downloading' }])
     entries = applyProviderOperation(entries, op({ phase: 'progress', message: 'Downloading 57 MB of 136 MB', fraction: 0.419 }), 'Antigravity', 2)
     expect(entries).toMatchObject([{ phase: 'downloading', percent: 41 }])
     // A step without a fraction keeps the last percent.
     entries = applyProviderOperation(entries, op({ phase: 'progress', message: 'Verifying' }), 'Antigravity', 3)
     expect(entries).toMatchObject([{ percent: 41 }])
     entries = applyProviderOperation(entries, op({ phase: 'completed' }), 'Antigravity', 4)
-    expect(entries).toEqual([{ id: 'agent:antigravity', kind: 'agent', sourceId: 'op-1', label: 'Antigravity', phase: 'done', percent: 100, settledAt: 4 }])
+    expect(entries).toEqual([{ id: 'agent:antigravity', kind: 'agent', sourceId: 'op-1', label: 'Antigravity', operation: 'install', phase: 'done', percent: 100, settledAt: 4 }])
   })
 
   it('shows bytes when the install reports them, keeps them through steps without bytes, and weights the total by them', () => {

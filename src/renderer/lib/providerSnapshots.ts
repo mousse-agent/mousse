@@ -446,6 +446,34 @@ export function useProviderSnapshots(scope: ProviderScope): ProviderSnapshotsVie
   return { snapshots: state?.snapshots, error: state?.error, loading: state?.loading ?? true, reload }
 }
 
+/**
+ * Keeps this computer's snapshots loaded outside any page (the update button reads their updates)
+ * and calls `changed` with them whenever they change, the first time at once. Remote computers'
+ * providers are not included.
+ */
+export function watchDeviceSnapshots(changed: (snapshots: InstanceSnapshot[] | undefined) => void): () => void {
+  const key = scopeKey(DEVICE_SCOPE)
+  const sync = (): void => {
+    ensureProfile(useAppStore.getState().profileId)
+    ensureListening()
+    const current = useProviderSnapshotsStore.getState().scopes[key]
+    if (!current?.snapshots && !current?.loading) void loadProviderSnapshots(DEVICE_SCOPE)
+  }
+  sync()
+  const offProfile = useAppStore.subscribe((state, previous) => {
+    if (state.profileId !== previous.profileId) sync()
+  })
+  const offSnapshots = useProviderSnapshotsStore.subscribe((state, previous) => {
+    const next = state.scopes[key]?.snapshots
+    if (next !== previous.scopes[key]?.snapshots) changed(next)
+  })
+  changed(useProviderSnapshotsStore.getState().scopes[key]?.snapshots)
+  return () => {
+    offProfile()
+    offSnapshots()
+  }
+}
+
 /** An operation of the instance that is still running (progress or waiting on a prompt). */
 export function useRunningOperation(instanceId: string): ProviderOperationEvent | undefined {
   return useProviderSnapshotsStore((store) =>

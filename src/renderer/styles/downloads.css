@@ -207,7 +207,61 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
   font-variant-numeric: tabular-nums;
 }
 
-.downloads-row-detail.downloads-bad { color: var(--danger); }
+.downloads-row-detail.downloads-bad {
+  color: var(--danger);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.downloads-row-waiting { display: inline-grid; opacity: 0.5; }
+
+.downloads-row-note {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--ui-faint);
+}
+
+/* A command to run by hand (an update that needs administrator rights). */
+.downloads-command {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 4px 6px 38px;
+  padding: 2px 2px 2px 8px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+}
+
+.downloads-command code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.downloads-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 8px 4px 4px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.downloads-footer-note {
+  flex: 1;
+  min-width: 0;
+  padding-left: 4px;
+  font-size: 11.5px;
+  color: var(--ui-faint);
+}
 
 .downloads-row-actions {
   display: inline-flex;
