@@ -1950,9 +1950,12 @@ export class Harness implements HarnessGateway {
     const mcp = this.mcp
     const relay = attachment && relayGrant && app.relay ? { url: attachment.relayUrl, revision: app.relay.revision } : undefined
     const texts = app.instructions(attachment !== null, relay !== undefined)
+    // What the server's tool list depends on, apart from the bearer: a runtime that keeps its process for a bearer
+    // renewed in place starts a new one when this changes, since it would keep offering a tool the list dropped.
+    const tools = [...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
     return {
       bridge: {
-        mcp: attachment ? { url: attachment.url, token: attachment.token, ...(relay ? { relay } : {}) } : null,
+        mcp: attachment ? { url: attachment.url, token: attachment.token, ...(tools ? { tools } : {}), ...(relay ? { relay } : {}) } : null,
         turnToken: app.turnToken,
         sessionInstructions: texts.sessionInstructions,
         turnPreamble: texts.turnPreamble,

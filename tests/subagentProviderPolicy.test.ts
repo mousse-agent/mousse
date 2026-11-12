@@ -162,8 +162,9 @@ describe('Claude Subscription children', () => {
    */
   const untouched = (turn: Options) => {
     for (const key of ['tools', 'disallowedTools', 'strictMcpConfig', 'settingSources']) expect(turn).not.toHaveProperty(key)
-    expect(turn.extraArgs).toEqual(CLAUDE_TURN_EXTRA_ARGS)
-    expect(Object.keys(registered.get(turn) ?? {})).toEqual(expect.arrayContaining(['mousse', 'userserver', 'oauthserver']))
+    // The user's own servers reach Claude Code through the pipe it reads at its start; the rest over its input (#358).
+    expect(turn.extraArgs).toEqual({ ...CLAUDE_TURN_EXTRA_ARGS, ...(process.platform === 'win32' ? {} : { 'mcp-config': '/dev/fd/3' }) })
+    expect(Object.keys(registered.get(turn) ?? {})).toEqual(expect.arrayContaining(['mousse', 'oauthserver', ...(process.platform === 'win32' ? ['userserver'] : [])]))
   }
 
   it('a shared child keeps the default permission mode and is denied writes, shell, external MCP tools and thread-writing tools, first and resumed', async () => {

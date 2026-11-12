@@ -10,6 +10,20 @@ import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/c
 export type Frame = Record<string, unknown>
 type Handler = (message: SDKUserMessage, process: FakeClaudeProcess) => void
 
+/** What `FakeClaudeProcess.startup` reads: the `mcpServers` of the pipe Mousse's spawn hands its process. */
+async function readStartup(options: Options): Promise<Record<string, unknown> | undefined> {
+  if (options.extraArgs?.['mcp-config'] !== '/dev/fd/3' || !options.spawnClaudeCodeProcess) return undefined
+  const child = options.spawnClaudeCodeProcess({
+    command: process.execPath,
+    args: ['-e', 'process.stdout.write(require("fs").readFileSync("/dev/fd/3"))'],
+    env: { PATH: process.env.PATH },
+    signal: new AbortController().signal
+  }) as unknown as { stdout: NodeJS.ReadableStream }
+  let text = ''
+  for await (const chunk of child.stdout) text += String(chunk)
+  return (JSON.parse(text) as { mcpServers: Record<string, unknown> }).mcpServers
+}
+
 export const SESSION = 'vendor-session'
 
 export const textDelta = (text: string, uuid?: string, extra: Frame = {}): Frame => ({
@@ -171,8 +185,11 @@ export class FakeClaudeProcess {
   readonly mcpRegistrations: Array<Record<string, unknown>> = []
   /** Servers `setMcpServers` reports as failed, with Claude Code's error for each. */
   mcpErrors: Record<string, string> = {}
-  /** `setMcpServers` rejects (`'throw'`, a Claude Code without it) or never answers (`'hang'`). */
-  mcpFail: 'throw' | 'hang' | undefined
+  /**
+   * `setMcpServers` rejects as a Claude Code without the request answers (`'unsupported'`), rejects otherwise (`'throw'`,
+   * the process ended), or never answers (`'hang'`).
+   */
+  mcpFail: 'unsupported' | 'throw' | 'hang' | undefined
   /** While set, `setMcpServers` waits for it before it answers. */
   mcpGate: Promise<unknown> | undefined
   private readonly started = new Set<string>()
@@ -201,11 +218,20 @@ export class FakeClaudeProcess {
   private waiting: ((result: IteratorResult<SDKMessage>) => void) | undefined
   private ended = false
 
+  /**
+   * The servers Mousse gave the process through its startup pipe (`--mcp-config /dev/fd/3`, #358), read the way
+   * Claude Code reads them: Mousse's own spawn is run with a command that prints its fourth stream. Undefined when the
+   * process got none.
+   */
+  readonly startup: Promise<Record<string, unknown> | undefined>
+
   constructor(
     readonly prompt: string | AsyncIterable<SDKUserMessage>,
     readonly options: Options,
     private readonly reply: () => Handler | undefined
   ) {
+    this.startup = readStartup(options)
+    this.startup.catch(() => undefined)
     if (typeof prompt !== 'string') void this.readPrompt(prompt)
   }
 
@@ -407,7 +433,8 @@ export class FakeClaudeProcess {
         const previous = this.mcpServers ?? {}
         this.mcpRegistrations.push(servers)
         await this.mcpGate
-        if (this.mcpFail === 'throw') throw new Error('mcp_set_servers is not supported')
+        if (this.mcpFail === 'unsupported') throw new Error('Unsupported control request subtype: mcp_set_servers')
+        if (this.mcpFail === 'throw') throw new Error('ProcessTransport is not ready for writing')
         if (this.mcpFail === 'hang') await new Promise(() => undefined)
         // An in-process server holds a live MCP server object: it is the same server while its name is.
         const shape = (config: unknown) => (config as { type?: string } | undefined)?.type === 'sdk' ? 'sdk' : JSON.stringify(config)
@@ -452,7 +479,7 @@ export class FakeClaudeCli {
   /** What each new process's `setMcpServers` reports failed (`FakeClaudeProcess.mcpErrors`). */
   mcpErrors: Record<string, string> = {}
   /** How each new process's `setMcpServers` fails (`FakeClaudeProcess.mcpFail`). */
-  mcpFail: 'throw' | 'hang' | undefined
+  mcpFail: 'unsupported' | 'throw' | 'hang' | undefined
   /** What each new process's `setMcpServers` waits for (`FakeClaudeProcess.mcpGate`). */
   mcpGate: Promise<unknown> | undefined
 

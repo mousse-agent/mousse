@@ -186,7 +186,7 @@ describe('Claude subscription attachment', () => {
     expect(relayed[1]).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/planning only/) })
   })
 
-  it('the service registers the user\'s MCP servers with their secrets over Claude Code\'s input, and adds the skills plugin and tool limits', async () => {
+  it('the service gives the user\'s MCP servers with their secrets through the startup pipe and registers Mousse\'s own over Claude Code\'s input, and adds the skills plugin and tool limits', async () => {
     const options: Options[] = []
     const { home, questions, registered, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
     questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
@@ -204,14 +204,20 @@ describe('Claude subscription attachment', () => {
       }
     })
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
-    // Mousse's server keeps its name; the user's secret goes only with its server, never in Claude Code's environment.
+    // Mousse's server keeps its name: registered over the input with the one Mousse runs in process; the user's other
+    // server, its secret with it, goes through the pipe, and an impostor of Mousse's name goes nowhere.
     expect(registered[0]).toEqual({
-      files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: 'resolved-key' } },
       linear: { type: 'sdk', name: 'linear', instance: expect.anything() },
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
     })
+    expect(options[0].extraArgs?.['mcp-config']).toBe('/dev/fd/3')
+    const reader = options[0].spawnClaudeCodeProcess!({ command: process.execPath, args: ['-e', 'process.stdout.write(require("fs").readFileSync("/dev/fd/3"))'], env: { PATH: process.env.PATH }, signal: new AbortController().signal }) as unknown as { stdout: NodeJS.ReadableStream }
+    let piped = ''
+    for await (const chunk of reader.stdout) piped += String(chunk)
+    expect(JSON.parse(piped)).toEqual({ mcpServers: { files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: 'resolved-key' } } } })
     expect(options[0].mcpServers).toEqual({})
     expect(JSON.stringify(options[0].env)).not.toMatch(/resolved-key|tok-secret|MOUSSE_MCP_VALUE/)
+    expect(JSON.stringify(options[0].extraArgs)).not.toMatch(/resolved-key|tok-secret/)
     expect(options[0].plugins).toEqual([{ type: 'local', path: '/generated/plugin' }])
     expect(options[0]).not.toHaveProperty('settingSources')
     expect(options[0].extraArgs?.['strict-mcp-config']).toBeUndefined()

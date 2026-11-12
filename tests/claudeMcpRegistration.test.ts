@@ -1,11 +1,15 @@
 /**
- * Issue #358: Claude Code gets a turn's MCP servers over its input (`setMcpServers`), never on its command line.
- * `registerClaudeMcpServers` decides what a failure means: Mousse's own server must connect or the turn fails with a
- * clear error; a user server that does not is left out with a warning; only server names are ever logged.
+ * Issue #358: Claude Code gets a turn's MCP servers over its input (`setMcpServers`) or through a pipe it reads at its
+ * start, never on its command line or in its environment. `registerClaudeMcpServers` decides what a failure means:
+ * Mousse's own server must connect or the turn fails with an error that names the cause; a user server that does not
+ * is left out and named; only server names are ever logged.
  */
-import type { McpSetServersResult, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { McpSetServersResult, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { claudeMcpRegistrationMs, dropMousseServers, promptAfter, registerClaudeMcpServers, type ClaudeMcpServers } from '../src/mms/harness/vendors/claude/mcpRegistration'
+import {
+  CLAUDE_MCP_STARTUP_WAIT_MS, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpRegistrationMs, claudeStartupMcpOptions, dropMousseServers, promptAfter,
+  registerClaudeMcpServers, registerUserServersLater, type ClaudeMcpServers
+} from '../src/mms/harness/vendors/claude/mcpRegistration'
 
 const SECRET = 'mousse-token-358'
 const servers: ClaudeMcpServers = {
@@ -63,21 +67,74 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     expect(logged).not.toMatch(/user-secret-358|refused|down/)
   })
 
-  it('a Claude Code that cannot take servers, or does not answer in time: the turn fails when Mousse\'s server was among them', async () => {
+  it('a request that fails names its cause: "update Claude Code" only when Claude Code lacks the request', async () => {
     const warn = warned()
-    const old = process(async () => { throw new Error(`unknown control request mcp_set_servers with Bearer ${SECRET}`) })
+    const old = process(async () => { throw new Error('Unsupported control request subtype: mcp_set_servers') })
     await expect(registerClaudeMcpServers(old, servers, { timeoutMs: 1_000 })).rejects.toMatchObject({ code: 'claude_mcp_unavailable', message: expect.stringContaining('update Claude Code') })
-    // Only the user's: they are left out, and the turn runs.
-    await registerClaudeMcpServers(old, { web: servers.web! }, { timeoutMs: 1_000 })
+    await expect(registerClaudeMcpServers({}, servers, { timeoutMs: 1_000 })).rejects.toMatchObject({ code: 'claude_mcp_unavailable', message: expect.stringContaining('update Claude Code') })
+    const ended = process(async () => { throw new Error(`write after end, Bearer ${SECRET}`) })
+    await expect(registerClaudeMcpServers(ended, servers, { timeoutMs: 1_000 })).rejects.toMatchObject({ message: 'Mousse\'s tools could not be attached to Claude Code, so this turn did not start. Claude Code ended before Mousse\'s MCP server was attached; try again.' })
     vi.useFakeTimers()
     const silent = process(() => new Promise<never>(() => undefined))
-    const waiting = registerClaudeMcpServers(silent, servers, { timeoutMs: 5_000 })
-    const settled = expect(waiting).rejects.toMatchObject({ code: 'claude_mcp_unavailable' })
-    await vi.advanceTimersByTimeAsync(5_000)
+    const waiting = registerClaudeMcpServers(silent, servers, { timeoutMs: 60_000 })
+    const settled = expect(waiting).rejects.toMatchObject({ message: 'Mousse\'s tools could not be attached to Claude Code, so this turn did not start. Claude Code did not answer within 60 s while it connected to Mousse\'s MCP server; try again.' })
+    await vi.advanceTimersByTimeAsync(60_000)
     await settled
     const logged = JSON.stringify(warn.mock.calls)
-    expect(logged).toContain('took none of the turn\'s MCP servers')
-    expect(logged).not.toMatch(/mousse-token-358|unknown control request/)
+    expect(logged).toContain('took none of these MCP servers')
+    expect(logged).not.toMatch(/mousse-token-358|write after end/)
+  })
+
+  it('without Mousse\'s server in the set, a failed request leaves the user\'s servers out by name, and the turn goes on', async () => {
+    const warn = warned()
+    const old = process(async () => { throw new Error('Unsupported control request subtype: mcp_set_servers') })
+    await expect(registerClaudeMcpServers(old, { web: servers.web! }, { timeoutMs: 1_000 })).resolves.toEqual({ failed: ['web'] })
+    expect(JSON.stringify(warn.mock.calls)).toContain('"servers":["web"]')
+    // A user server that failed is returned for the thread's warning; Mousse's own are not the user's.
+    await expect(registerClaudeMcpServers(process(added(Object.keys(servers), { web: 'down', 'mousse-relay': 'down' })), servers, { timeoutMs: 1_000 })).resolves.toEqual({ failed: ['web'] })
+  })
+
+  it('registers the user\'s servers later without waiting, Mousse\'s sent again unchanged, and reports the ones that failed', async () => {
+    warned()
+    let answer!: (result: McpSetServersResult) => void
+    const target = process(() => new Promise((resolve) => { answer = resolve }))
+    const done = vi.fn()
+    const mousse = { mousse: servers.mousse! }
+    const sent = registerUserServersLater(target, mousse, { web: servers.web! }, 't', done)
+    expect(sent).toEqual({ web: servers.web, mousse: servers.mousse })
+    expect(target.sent).toEqual([sent])
+    expect(done).not.toHaveBeenCalled()
+    answer(added(['web'], { web: 'timed out' }))
+    await vi.waitFor(() => expect(done).toHaveBeenCalledExactlyOnceWith(['web']))
+  })
+
+  it('gives the user\'s servers through a pipe Claude Code reads at its start, never on its command line or in its environment', async () => {
+    const options = { env: { PATH: '/bin' }, extraArgs: { 'thinking-display': 'summarized' } }
+    const user: ClaudeMcpServers = { web: servers.web!, files: { type: 'stdio', command: 'files-mcp', env: { KEY: 'user-env-secret-358' } } }
+    const onSpawned = vi.fn()
+    const piped = claudeStartupMcpOptions(options, user, onSpawned, { platform: 'linux' })!
+    expect(piped.extraArgs).toEqual({ 'thinking-display': 'summarized', 'mcp-config': '/dev/fd/3' })
+    expect(piped.env).toEqual({ PATH: '/bin', CLAUDE_CODE_MCP_STARTUP_WAIT_MS: String(CLAUDE_MCP_STARTUP_WAIT_MS) })
+    // The user's own wait is kept.
+    expect(claudeStartupMcpOptions({ env: { CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0' } }, user, onSpawned, { platform: 'linux' })!.env).toEqual({ CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0' })
+    // A real process reads the pipe; its command line and environment hold nothing of the servers.
+    const child = piped.spawnClaudeCodeProcess!({ command: globalThis.process.execPath, args: ['-e', 'process.stdout.write(require("fs").readFileSync("/dev/fd/3"))'], env: { PATH: globalThis.process.env.PATH }, signal: new AbortController().signal }) as unknown as { stdout: NodeJS.ReadableStream; pid: number }
+    let text = ''
+    for await (const chunk of child.stdout) text += String(chunk)
+    expect(JSON.parse(text)).toEqual({ mcpServers: user })
+    expect(onSpawned).toHaveBeenCalledExactlyOnceWith(child.pid)
+    expect(JSON.stringify({ args: piped.extraArgs, env: piped.env })).not.toMatch(/user-secret-358|user-env-secret-358/)
+    // Not where the pipe cannot be used.
+    expect(claudeStartupMcpOptions(options, user, onSpawned, { platform: 'win32' })).toBeUndefined()
+    expect(claudeStartupMcpOptions({ extraArgs: { 'mcp-config': 'mine.json' } }, user, onSpawned, { platform: 'linux' })).toBeUndefined()
+  })
+
+  it('reads the user\'s servers a turn started without from Claude Code\'s init frame, and says them by name', () => {
+    const init = { type: 'system', subtype: 'init', mcp_servers: [{ name: 'web', status: 'pending' }, { name: 'files', status: 'failed' }, { name: 'gh', status: 'needs-auth' }, { name: 'ok', status: 'connected' }, { name: 'mousse', status: 'failed' }] } as unknown as SDKMessage
+    const left = claudeMcpLeftOut(init, new Set(['web', 'files', 'gh', 'ok']))
+    expect(left).toEqual([{ name: 'web', state: 'starting' }, { name: 'files', state: 'failed' }, { name: 'gh', state: 'needs-auth' }])
+    expect(claudeMcpLeftOutText(left!)).toBe('Claude started this turn without some MCP servers: web (still starting; its tools come in a later turn); files (could not connect); gh (needs you to sign in).')
+    expect(claudeMcpLeftOut({ type: 'assistant' } as unknown as SDKMessage, new Set(['web']))).toBeUndefined()
   })
 
   it('a Stop ends the wait with the turn\'s own reason, and nothing is logged', async () => {
