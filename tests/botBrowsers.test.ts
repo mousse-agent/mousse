@@ -448,6 +448,28 @@ describe.skipIf(!chrome.ok)('a slow page is not a failed page', () => {
     expect(modelResult(await call(bot, 'browser_tabs', { operation: 'list' })).tabs!.length).toBeGreaterThanOrEqual(2)
   }, 60_000)
 
+  it('the owner\'s view shows the bot\'s new tab loading, and a page the bot could not open even in a tab that closed again', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    // A new tab on a page that never finishes loading: the view follows it, loading.
+    const opened = modelResult(await call(bot, 'browser_open', { url: `${origin}/never-loads.html` }))
+    expect(opened.navigation).toMatchObject({ state: 'loading' })
+    await expect.poll(() => view.events.some((event) => event.loading === true), { timeout: 5_000 }).toBe(true)
+    // A new tab on an address nothing answers on is closed again; the view still says what happened.
+    expect((await call(bot, 'browser_open', { url: await closedAddress() })).error).toMatch(/^site_unreachable/)
+    await expect.poll(() => view.events.some((event) => event.problem?.kind === 'unreachable'), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).problem).toMatchObject({ kind: 'unreachable', code: 'net::ERR_CONNECTION_REFUSED' })
+    // A page that opens clears it.
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-b.html` })).error).toBeUndefined()
+    await expect.poll(() => view.events.at(-1) && (view.events.some((event, index) => index > 0 && event.problem === null)), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).problem).toBeUndefined()
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
   it('the owner\'s own navigation answers at the commit, and the view shows the page loading or what it ran into', async () => {
     const { bots, origin } = await fixture()
     await bots.open(BOT_A, `${origin}/nav-a.html`)

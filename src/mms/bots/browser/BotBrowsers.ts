@@ -132,7 +132,12 @@ interface BotBrowserState {
   cursor?: BrowserAgentCursor
   behind?: boolean
   loading?: boolean
+  /** What the view shows: the followed tab's problem, else the bot's last. */
   problem?: BrowserProblem
+  /** The followed tab's own (from the worker). */
+  tabProblem?: BrowserProblem
+  /** What the bot's last page ran into, wherever it was. */
+  botProblem?: BrowserProblem
   /** When a picture was last taken for `view` (an older app asks each time). */
   frameAt?: number
   lastViewedAt: number
@@ -414,6 +419,7 @@ export class BotBrowsers implements BotBrowserHost {
     // While the owner holds the browser the bot reads it, and acts, opens or loads nothing.
     const opens = name === 'browser_act' || name === 'browser_open' || (name === 'browser_tabs' && params.operation === 'new')
     if (opens && this.record(state)?.lifecycle === 'human-controlled') throw ownerHolds()
+    try {
     if (name === 'browser_open') {
       if (Object.keys(params).some((key) => key !== 'url')) throw new BrowserAutomationError({ code: 'invalid_action', message: 'browser_open takes only a url' })
       const url = typeof params.url === 'string' ? params.url : undefined
@@ -443,6 +449,14 @@ export class BotBrowsers implements BotBrowserHost {
         result = await this.invoke(context, name, params)
       }
     }
+    } catch (error) {
+      // A page the bot could not open (in a tab that closed again, too): its owner's view says so.
+      const problem = error instanceof BrowserAutomationError ? error.details?.problem as BrowserProblem | undefined : undefined
+      if (opens && problem) this.noteBotProblem(state, problem)
+      throw error
+    }
+    const navigation = result.navigation ?? result.action?.navigation
+    if (opens && navigation) this.noteBotProblem(state, navigation.problem)
     const tabId = result.observation?.tabId ?? result.action?.observation?.tabId
     if (tabId && activation.tabs.has(tabId)) this.useTab(state, activation, tabId)
     return result
@@ -703,8 +717,10 @@ export class BotBrowsers implements BotBrowserHost {
     state.cursor = update.cursor
     state.behind = update.behind
     state.loading = update.loading === true
-    state.problem = update.problem
-    const problem = JSON.stringify(update.problem ?? null)
+    state.tabProblem = update.problem
+    // The followed tab's own problem, else what the bot's last page ran into (a tab that closed again).
+    state.problem = update.problem ?? state.botProblem
+    const problem = JSON.stringify(state.problem ?? null)
     const cursor = update.cursor && agentCursorLive(update.cursor, now) ? update.cursor : null
     for (const viewer of state.viewers.values()) {
       const next: NonNullable<Viewer['slot']> = { ...viewer.slot }
@@ -715,9 +731,24 @@ export class BotBrowsers implements BotBrowserHost {
       if ((viewer.sent.cursorAt ?? null) !== (cursor?.at ?? null)) next.cursor = cursor
       if (viewer.sent.behind !== update.behind) next.behind = update.behind
       if ((viewer.sent.loading ?? false) !== (update.loading === true)) next.loading = update.loading === true
-      if ((viewer.sent.problem ?? 'null') !== problem) next.problem = update.problem ?? null
+      if ((viewer.sent.problem ?? 'null') !== problem) next.problem = state.problem ?? null
       if (viewer.sent.stalled) next.live = true
       viewer.slot = next
+      this.deliver(state, viewer)
+    }
+  }
+
+  /**
+   * What the bot's last page ran into, or nothing once a page went well: shown to its owner even
+   * when it was in a tab that closed again (a tab opened on an address nothing answers on).
+   */
+  private noteBotProblem(state: BotBrowserState, problem: BrowserProblem | undefined): void {
+    state.botProblem = problem
+    const shown = state.tabProblem ?? problem
+    if (JSON.stringify(shown ?? null) === JSON.stringify(state.problem ?? null)) return
+    state.problem = shown
+    for (const viewer of state.viewers.values()) {
+      viewer.slot = { ...viewer.slot, problem: shown ?? null }
       this.deliver(state, viewer)
     }
   }

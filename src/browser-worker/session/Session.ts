@@ -305,12 +305,13 @@ export class ManagedSession {
       this.refs.invalidateTab(navigated.publicId)
       this.touch()
     })
-    // Whether a tab's page is still loading: a page target's main frame has the target's id.
+    // Whether a tab's page is still loading: a page target's main frame has the target's id. A tab opened
+    // on a URL starts loading before it is one of the session's tabs, so every page Chromium attached counts.
     const loading = (started: boolean) => (params: unknown, sessionId?: string) => {
       if (this.closed || this.closing || !sessionId) return
       const frameId = (params as { frameId?: string } | undefined)?.frameId
-      const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
-      if (!tab || frameId !== tab.targetId) return
+      const page = this.marked.get(sessionId)
+      if (!page || page.type !== 'page' || frameId !== page.targetId) return
       if (started) this.loadingTabs.add(sessionId)
       else this.loadingTabs.delete(sessionId)
       this.viewers?.loading(sessionId, started)
@@ -345,6 +346,7 @@ export class ManagedSession {
         const target = this.marked.get(sessionId)
         this.marked.delete(sessionId)
         this.agentPages.delete(sessionId)
+        this.loadingTabs.delete(sessionId)
         if (target && this.attachWork.get(target.targetId)?.sessionId === sessionId) this.attachWork.delete(target.targetId)
       }
       if (sessionId && this.frames.has(sessionId)) {
