@@ -70,6 +70,17 @@ describe('the settings search', () => {
     expect(searchSettings('own worktree', PAGES)[0]).toMatchObject({ title: 'Worktree per subagent' })
   })
 
+  it('finds a provider’s update, models, Claude settings and sign-in', () => {
+    // Mousse's own update stays first; the provider's is offered too.
+    expect(searchSettings('upgrade', PAGES)).toContainEqual({ title: 'Update', section: 'providers', anchor: 'providers-update' })
+    expect(searchSettings('cli update', PAGES)[0]).toMatchObject({ anchor: 'providers-update' })
+    expect(searchSettings('favorites', PAGES)[0]).toEqual({ title: 'Models', section: 'providers', anchor: 'providers-models' })
+    expect(searchSettings('custom model', PAGES)[0]).toMatchObject({ anchor: 'providers-models' })
+    expect(searchSettings('settings.json', PAGES)[0]).toEqual({ title: 'Claude settings', section: 'providers', anchor: 'providers-claude-settings' })
+    expect(searchSettings('sign in', PAGES)[0]).toMatchObject({ title: 'Sign in', section: 'providers', anchor: 'providers-status' })
+    expect(searchSettings('prompt cache', PAGES).map((result) => result.title)).toContain('Keep prompt cache 1 hour')
+  })
+
   it('lands on each automation limit', () => {
     const host = document.createElement('div')
     const root = createRoot(host)

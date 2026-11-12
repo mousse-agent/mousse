@@ -58,13 +58,16 @@ export function SetupRow({
   snapshot,
   status,
   operation,
-  actions
+  actions,
+  updateRow
 }: {
   snapshot: InstanceSnapshot
   status: StatusDescription
   /** The install or update this page saw start, for live progress. */
   operation?: ProviderOperationEvent
   actions: InstanceActions
+  /** An Update row follows in Setup, so the status offers no update of its own. */
+  updateRow?: boolean
 }) {
   const { busy, error, run } = useAsyncAction()
   const step = status.nextStep
@@ -123,6 +126,7 @@ export function SetupRow({
         } else control = button('signin', isManagedSetup(snapshot) ? 'Continue with ChatGPT' : step.label, actions.signIn)
         break
       case 'update':
+        if (updateRow) break
         // Mousse runs the owner's command too; the command stays beside the button for a terminal.
         control = button('update', step.label, actions.update)
         if (step.command) below = <CommandBox command={step.command} label="Copy update command" />
@@ -147,6 +151,7 @@ export function SetupRow({
     <>
       <SettingsRow
         title="Status"
+        anchor="providers-status"
         description={withError(progress ?? <StatusLine status={status} />, error)}
         control={
           <>
@@ -226,6 +231,7 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
     return (
       <SettingsRow
         className="prov-update is-notice"
+        anchor="providers-update"
         title={target ? `${target} is available` : 'Update available'}
         description="Mousse can't tell how this copy was installed. Update it the way you installed it."
       />
@@ -235,6 +241,7 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
     return (
       <SettingsRow
         className="prov-update is-advisory"
+        anchor="providers-update"
         title={target ? `Update to ${target}` : 'Update available'}
         description="Needs administrator rights. Run it yourself in a terminal:"
       >
@@ -247,6 +254,7 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
   return (
     <SettingsRow
       className={`prov-update ${advisory ? 'is-advisory' : 'is-one-click'}`}
+      anchor="providers-update"
       title={target ? `Update to ${target}` : 'Update available'}
       description={withError(updating && operation?.phase === 'progress' ? operation.message : idleText, error)}
       control={
@@ -414,14 +422,14 @@ export function PromptCacheHourRow({ snapshot, onSave }: { snapshot: InstanceSna
   if (!state || state.basis === 'subscription') return null
   return (
     <SettingsRow
-      title="Keep the prompt cache for 1 hour"
+      title="Keep prompt cache 1 hour"
       anchor="providers-prompt-cache-hour"
       htmlFor="providers-prompt-cache-hour"
       description={withError(promptCacheHourNote(state), error)}
       control={
         <Switch
           id="providers-prompt-cache-hour"
-          label="Keep the prompt cache for 1 hour"
+          label="Keep prompt cache 1 hour"
           checked={state.on}
           disabled={state.userSetting === true}
           onChange={(on) => void run('promptCacheHour', () => onSave(on))}

@@ -54,7 +54,11 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Token usage', section: 'activity', anchor: 'account-token-usage', keywords: ['tokens'] },
 
   { title: 'Telemetry', section: 'providers', anchor: 'providers-telemetry', keywords: ['privacy', 'tracking'] },
-  { title: 'Keep the prompt cache for 1 hour', section: 'providers', anchor: 'providers-prompt-cache-hour', keywords: ['cache', 'ttl', 'one hour', 'api key', 'claude code', 'when the cache expires'] },
+  { title: 'Keep prompt cache 1 hour', section: 'providers', anchor: 'providers-prompt-cache-hour', keywords: ['cache', 'ttl', 'one hour', 'api key', 'claude code', 'when the cache expires', 'keep the prompt cache for 1 hour'] },
+  { title: 'Sign in', section: 'providers', anchor: 'providers-status', keywords: ['status', 'login', 'log in', 'account', 'sign out'] },
+  { title: 'Update', section: 'providers', anchor: 'providers-update', keywords: ['cli update', 'upgrade', 'new version', 'update now'], needs: { anchor: 'providers-status', reason: 'Update appears when a newer version is available.' } },
+  { title: 'Models', section: 'providers', anchor: 'providers-models', keywords: ['favorites', 'favourites', 'hidden', 'hide', 'custom model', 'model list'] },
+  { title: 'Claude settings', section: 'providers', anchor: 'providers-claude-settings', keywords: ['settings.json', 'claude code settings'], needs: { anchor: 'providers-status', reason: 'Claude settings appear on a Claude Code provider.' } },
   { title: 'API key', section: 'providers', anchor: 'providers-api-key', keywords: ['key'] },
   { title: 'Executable path', section: 'providers', anchor: 'providers-executable', keywords: ['binary', 'cli'] },
   { title: 'Launch arguments', section: 'providers', anchor: 'providers-arguments', keywords: ['flags', 'args'] },

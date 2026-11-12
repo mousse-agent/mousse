@@ -229,7 +229,7 @@ describe('the parts', () => {
     expect(promptCacheHourNote({ basis: 'per_token', userSetting: true, on: false })).toBe('Your Claude Code settings choose this.')
     const row = (state: PromptCacheHour) => renderToStaticMarkup(createElement(PromptCacheHourRow, { snapshot: { promptCacheHour: state } as InstanceSnapshot, onSave: async () => {} }))
     expect(row({ basis: 'subscription', on: true })).toBe('')
-    expect(row({ basis: 'per_token', on: false })).toContain('Keep the prompt cache for 1 hour')
+    expect(row({ basis: 'per_token', on: false })).toContain('Keep prompt cache 1 hour')
     expect(row({ basis: 'per_token', on: false })).not.toMatch(/cost|price|×/i)
     expect(row({ basis: 'unconfirmed', on: false })).toContain('confirm a subscription')
   })
