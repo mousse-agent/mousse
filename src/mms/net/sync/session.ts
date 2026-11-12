@@ -11,6 +11,7 @@ import type {
   SpaceDiscoveryGetMessage,
   SpaceIdentityGetMessage,
   SpaceStreamDiscoveryProof,
+  SnapshotReason,
   StoredRecord,
   StreamDescriptor,
   StreamHead,
@@ -839,10 +840,14 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     await this.sendRecords(stream, [record], false, undefined, signal)
   }
 
-  /** Ask the subscriber to resync from a snapshot; it keeps its subscription and gets no error. */
-  private async requireSnapshot(stream: StreamId): Promise<void> {
+  /** Ask the subscriber to resync from a snapshot at the current head; it keeps its subscription and gets no error. */
+  private async requireSnapshot(
+    stream: StreamId,
+    reason: SnapshotReason = 'cursorTooOld',
+    signal?: AbortSignal
+  ): Promise<void> {
     const head = this.options.store.head(stream)
-    await this.send({ t: 'snapshotRequired', stream, reason: 'cursorTooOld', head })
+    await this.send({ t: 'snapshotRequired', stream, reason, head }, [], signal)
   }
 
   /** Trusted authority failure: terminate only an already authorized serving subscription. */
@@ -1613,40 +1618,46 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     if (old) old.cancelled = true
     const attempt = { cancelled: false, live: false }
     this.serving.set(stream, attempt)
-    const head = this.options.store.head(stream),
-      reason = this.options.store.snapshotReason(stream, after)
+    const reason = this.options.store.snapshotReason(stream, after)
     if (reason) {
-      await this.send({ t: 'snapshotRequired', stream, reason, head }, [], signal)
+      await this.requireSnapshot(stream, reason, signal)
       return
     }
+    const head = this.options.store.head(stream)
     attempt.live = true
-    await this.send({ t: 'subscribed', stream, head, replayThrough: head.seq }, [], signal)
-    if (attempt.cancelled) return
-    let cursor = { ...after }
-    while (!attempt.cancelled && cursor.seq < head.seq) {
-      this.authorizedRead(stream)
-      const page = this.replayPage(stream, cursor, head.seq)
-      if (!page) {
-        // The history this replay reads was trimmed or replaced after it started (a display
-        // snapshot refresh, a new thread generation). The subscriber resyncs from a snapshot,
-        // as a lagging one does, and the connection stays up for everything else it carries.
-        attempt.live = false
-        attempt.cancelled = true
-        const reason = this.options.store.snapshotReason(stream, cursor) ?? 'cursorTooOld'
-        await this.send(
-          { t: 'snapshotRequired', stream, reason, head: this.options.store.head(stream) },
-          [],
-          signal
-        )
-        return
+    try {
+      await this.send({ t: 'subscribed', stream, head, replayThrough: head.seq }, [], signal)
+      if (attempt.cancelled) return
+      let cursor = { ...after }
+      while (!attempt.cancelled && cursor.seq < head.seq) {
+        // Lost access wins over a trim: a reader that may no longer read the stream gets `forbidden`, never its head.
+        this.authorizedRead(stream)
+        const page = this.replayPage(stream, cursor, head.seq)
+        if (!page) {
+          // The history this replay reads was trimmed or replaced after it started (a display
+          // snapshot refresh, a new thread generation). The subscriber resyncs from a snapshot,
+          // as a lagging one does, and the connection stays up for everything else it carries.
+          attempt.live = false
+          attempt.cancelled = true
+          await this.requireSnapshot(
+            stream,
+            this.options.store.snapshotReason(stream, cursor) ?? 'cursorTooOld',
+            signal
+          )
+          return
+        }
+        if (!page.records.length) throw new NetError('storage_corrupt')
+        await this.sendRecords(stream, page.records, true, undefined, signal)
+        cursor = { epoch: page.records.at(-1)!.epoch, seq: page.records.at(-1)!.seq }
       }
-      if (!page.records.length) throw new NetError('storage_corrupt')
-      await this.sendRecords(stream, page.records, true, undefined, signal)
-      cursor = { epoch: page.records.at(-1)!.epoch, seq: page.records.at(-1)!.seq }
-    }
-    if (!attempt.cancelled) {
-      this.authorizedRead(stream)
-      await this.send({ t: 'caughtUp', stream }, [], signal)
+      if (!attempt.cancelled) {
+        this.authorizedRead(stream)
+        await this.send({ t: 'caughtUp', stream }, [], signal)
+      }
+    } catch (error) {
+      if (!this.readLost(error)) throw error
+      // A newer subscription of the stream, or none, is left as it is.
+      if (this.serving.get(stream) === attempt) await this.failServingStream(stream, 'forbidden')
     }
   }
   /** One replay page, or undefined when the store no longer holds the history after `cursor`. */
@@ -1657,6 +1668,15 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       if (error instanceof NetError && error.code === 'snapshot_required') return undefined
       throw error
     }
+  }
+  /**
+   * Whether `error` says the peer may no longer read a stream this session was serving it: its reader
+   * closed it (a private stream let go of while its records were on their way), or the right to read it
+   * was taken away. That stream ends with `forbidden` and the connection stays up for everything else
+   * the peer does here.
+   */
+  private readLost(error: unknown): boolean {
+    return error instanceof NetError && error.code === 'forbidden' && this.currentState === 'open'
   }
   private pumpSnapshots(): void {
     while (
@@ -1686,6 +1706,8 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       controller = new AbortController()
     const job = { reader, controller }
     this.snapshotJobs.set(stream, job)
+    // The subscription this transfer is for, if any; a newer one is left as it is.
+    const attempt = this.serving.get(stream)
     const cancelled = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     try {
       let done = false
@@ -1703,7 +1725,12 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         )
       }
     } catch (error) {
-      if (!cancelled.aborted) throw error
+      if (cancelled.aborted) return
+      if (!this.readLost(error)) throw error
+      const current = this.serving.get(stream)
+      if (attempt && current === attempt) await this.failServingStream(stream, 'forbidden')
+      else if (!attempt && !current)
+        await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
     } finally {
       if (this.snapshotJobs.get(stream) === job) {
         this.snapshotJobs.delete(stream)
