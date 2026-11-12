@@ -1,3 +1,4 @@
+import { MOUSSE_BUILTIN_TOOL_GROUPS, MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
@@ -81,9 +82,13 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
 
   { title: 'Skills', section: 'integrations', anchor: 'integrations-skills' },
   { title: 'MCP servers', section: 'integrations', anchor: 'integrations-mcp', keywords: ['tools'] },
-  { title: 'Available to main agent', section: 'integrations', anchor: 'integrations-main-agent', keywords: ['skill defaults'] },
-  { title: 'Let other agents use your MCP servers', section: 'integrations', anchor: 'integrations-share', keywords: ['relay', 'mcp', 'share with other agents'] },
   { title: 'Web search', section: 'integrations', anchor: 'integrations-web-search', keywords: ['search tool'] },
+  { title: 'Exa', section: 'integrations', anchor: 'integrations-web-exa', keywords: ['web search', 'api key'] },
+  { title: 'Parallel', section: 'integrations', anchor: 'integrations-web-parallel', keywords: ['web search', 'api key'] },
+  { title: 'Who can use them', section: 'integrations', anchor: 'integrations-access', keywords: ['available to main agent', 'available to agents', 'skill defaults', 'skills', 'mcp', 'agents'] },
+  { title: 'Share MCP servers', section: 'integrations', anchor: 'integrations-share', keywords: ['relay', 'mcp', 'let other agents use your mcp servers'] },
+  { title: 'Built-in tools', section: 'integrations', anchor: 'integrations-tools', keywords: ['tools', 'mousse tools'] },
+  ...builtInToolEntries(),
 
   { title: 'Read aloud', section: 'speech', anchor: 'speech-read-aloud', keywords: ['text to speech'] },
   { title: 'Voice', section: 'speech', anchor: 'speech-voice', keywords: ['read aloud'], needs: { anchor: 'speech-read-aloud', reason: 'Voice appears once you choose a read aloud model that has voices.' } },
@@ -115,6 +120,21 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Heap snapshot', section: 'labs', anchor: 'labs-heap-snapshot', keywords: ['memory', 'diagnostics'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Profiler agent access', section: 'labs', anchor: 'labs-profiler-agents', keywords: ['tools', 'agents', 'profiler tools'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } }
 ]
+
+/**
+ * Built-in tools: one entry per tool group, found by its tools' names. The web tools sit under Web
+ * search, one row each; the development-only group has none.
+ */
+function builtInToolEntries(): SettingsSearchEntry[] {
+  const words = (id: string) => [id, id.replace(/_/g, ' ')]
+  return MOUSSE_BUILTIN_TOOL_GROUPS.filter((group) => group.id !== 'devgui').flatMap((group) => {
+    const tools = MOUSSE_BUILTIN_TOOLS.filter((tool) => tool.group === group.id)
+    if (group.id === 'web') {
+      return tools.map((tool) => ({ title: tool.label, section: 'integrations' as const, anchor: `integrations-tool-${tool.id.replace(/_/g, '-')}`, keywords: [...words(tool.id), 'web search', 'built-in tools'] }))
+    }
+    return [{ title: group.label, section: 'integrations' as const, anchor: `integrations-tools-${group.id}`, keywords: [...tools.flatMap((tool) => words(tool.id)), 'built-in tools'] }]
+  })
+}
 
 /** Settings that exist only when this build has the Mousse ID service. */
 export const MOUSSE_ID_ANCHORS: readonly string[] = ['account-mousse-id', 'account-phones']
@@ -198,17 +218,28 @@ const FOCUSABLE = [
 export function revealSettingsAnchor(root: ParentNode, anchor: string): boolean {
   const target = root.querySelector<HTMLElement>(`[data-settings-anchor="${anchor}"]`)
   if (!target) return false
+  let opened = false
   for (let details = target.closest('details'); details; details = details.parentElement?.closest('details') ?? null) {
+    if (!details.open) opened = true
     details.open = true
   }
   const control = target.querySelector(':scope > .settings-item-control')?.querySelector<HTMLElement>(FOCUSABLE)
     ?? target.querySelector<HTMLElement>(FOCUSABLE)
   const focusable = control ?? target
   if (!control && !target.hasAttribute('tabindex')) target.tabIndex = -1
-  target.scrollIntoView?.({ block: 'center' })
-  focusable.focus({ preventScroll: true })
+  const land = (): void => {
+    target.scrollIntoView?.({ block: 'center' })
+    focusable.focus({ preventScroll: true })
+  }
+  land()
+  // A fold that just opened animates its rows in, and Chromium focuses nothing inside it until they
+  // show: land again once it is open.
+  if (opened && target.ownerDocument.activeElement !== focusable) setTimeout(land, FOLD_OPEN_MS)
   return true
 }
+
+/** A little longer than a fold's open animation (`details.ui-collapse-details` in styles/collapse.css). */
+const FOLD_OPEN_MS = 220
 
 /** What landing on a search result reports back to the page. */
 export interface SettingsAnchorLanding {
