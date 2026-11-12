@@ -59,12 +59,12 @@ function ProfilerRows({ profiler, set, notices, setNotices }: {
       />
       <HeapSnapshotRow />
       <SettingsRow
-        title="Agent access"
+        title="Agents can read the profiler"
         anchor="labs-profiler-agents"
         htmlFor="labs-profiler-agents"
         indent
-        description={<span title="Agents in Mousse threads can call the profiler tools turned on below. They return numbers only; thread titles only for this profile's threads.">Agents can read the profiler.</span>}
-        control={<Switch id="labs-profiler-agents" label="Agent access" checked={profiler.agentAccess} onChange={(agentAccess) => void set({ agentAccess })} />}
+        description={<span title="Agents in Mousse threads can call the profiler tools turned on below. They return numbers only; thread titles only for this profile's threads.">Numbers only, through the tools below.</span>}
+        control={<Switch id="labs-profiler-agents" label="Agents can read the profiler"checked={profiler.agentAccess} onChange={(agentAccess) => void set({ agentAccess })} />}
       />
       {profiler.agentAccess && PROFILER_TOOL_NAMES.map((name) => (
         <SettingsRow

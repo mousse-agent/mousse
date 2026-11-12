@@ -292,10 +292,10 @@ export function NetDevicesSection() {
 
   const devicesDescription = !status ? undefined
     : !self ? (mousseId
-      ? 'Sign in to Mousse ID above to join the computers signed in to it, or turn on networking to start a new set.'
+      ? 'Sign in to Mousse ID above to join the devices signed in to it, or turn on networking to start a new set.'
       : 'Join devices you already use, or turn on networking to start a new set.')
-      : !unlocked ? 'Unlock this device to see your other devices.'
-        : !authority ? 'Add devices from the computer that manages your devices.'
+      : !unlocked ? 'Unlock this device to see my other devices.'
+        : !authority ? 'Add devices from the device that manages my devices.'
           : !inviteReady ? 'Protect network keys to add devices.'
             : undefined
 
@@ -375,19 +375,19 @@ export function NetDevicesSection() {
         <SettingsRow
           title="Works on threads"
           description={worksOnThreads(selfDevice)
-            ? <span title="This computer can open and change threads on your other computers that share them.">On · can work on your other computers’ threads</span>
-            : <span title="This computer cannot work on threads on your other computers, which is why theirs are not listed. The computer that manages your devices can turn it on for this one.">Off · the computer that manages your devices can turn it on</span>}
+            ? <span title="This device can open and change threads on my other devices that share them.">On · can work on threads on my other devices</span>
+            : <span title="This device cannot work on threads on my other devices, which is why theirs are not listed. The device that manages my devices can turn it on for this one.">Off · the device that manages my devices can turn it on</span>}
         />
       )}
       {self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
         // Its own switch, apart from Networking: the short title is for scanning, the switch keeps the permission's full name.
         <SettingsRow
-          title="Let other computers work here"
+          title="Let my other devices work here"
           anchor="devices-inbound"
           description={workOnThreads
-            ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device below'
-            : 'Off · no other computer can open or change this computer’s threads'}
-          control={<Switch checked={workOnThreads} label="Let my other computers work on this computer's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+            ? 'On · devices with Works on threads can open and change this device’s threads, within the limits set for each device below'
+            : 'Off · no other device can open or change this device’s threads'}
+          control={<Switch checked={workOnThreads} label="Let my other devices work on this device's threads"disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
         />
       )}
       {/* Unlocking and protecting keys are next steps, so they stay here; keys already protected are noted under Advanced. */}
@@ -498,9 +498,10 @@ export function NetDevicesSection() {
     )}
 
     {status && served && !showAddons && (
-      <SettingsGroup className="devices-group" anchor="devices-tailscale-serve" title="Tailscale Serve">
+      <SettingsGroup className="devices-group">
         <SettingsRow
           title="Tailscale Serve"
+          anchor="devices-tailscale-serve"
           description={servePending ? 'Started but not confirmed · Turn off Serve clears it' : `Still on · tailnet port ${served.servePort} forwards to this device, also while networking is off`}
           control={<button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>}
         />
@@ -560,6 +561,7 @@ export function NetDevicesSection() {
                     key={`${manifest.id}-serve`}
                     indent
                     title="Tailscale Serve"
+                    anchor="devices-tailscale-serve"
                     description={served ? (servePending ? 'Started but not confirmed · Turn off Serve clears it' : `On · tailnet port ${served.servePort} forwards to this device`) : 'Keep the listener on this computer only and let Tailscale forward a tailnet port to it'}
                     control={served
                       ? <button type="button" className="settings-btn" disabled={busy} onClick={() => void turnOffServe()}>Turn off Serve</button>
@@ -709,7 +711,7 @@ export function NetDevicesSection() {
         onClose={() => setRevoking(undefined)}
         footer={<button type="button" className="settings-btn devices-dialog-btn danger-fill" disabled={busy} onClick={() => { const node = revoking.node; setRevoking(undefined); void action('bridge.revoke', { node }) }}>Revoke</button>}
       >
-        <p>{revoking.name} will no longer connect to your other devices.</p>
+        <p>{revoking.name} will no longer connect to my other devices.</p>
       </Modal>
     )}
 

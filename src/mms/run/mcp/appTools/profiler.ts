@@ -155,7 +155,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 /**
  * The profiler's tools (Settings → Labs → Profiler): an agent reads what loads Mousse while the person keeps working.
- * Each is listed and offered only while the profiler, Agent access and the tool's own switch are on, and checked
+ * Each is listed and offered only while the profiler, "Agents can read the profiler" and the tool's own switch are on, and checked
  * again at the call. They return numbers and fixed names only; a thread is named by its id alone, and only when it
  * belongs to the caller's profile. Other profiles belong to other people and count only in totals.
  */

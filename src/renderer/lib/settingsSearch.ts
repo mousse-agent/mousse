@@ -30,23 +30,25 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Thread path in title bar', section: 'appearance', anchor: 'appearance-thread-path', keywords: ['breadcrumb', 'back', 'forward', 'history', 'navigation', 'subagent', 'parent'] },
   { title: 'Acrylic glass', section: 'appearance', anchor: 'appearance-acrylic', keywords: ['translucent', 'transparent', 'blur', 'window'] },
   { title: 'Glass intensity', section: 'appearance', anchor: 'appearance-glass-intensity', keywords: ['acrylic', 'blur', 'opacity'] },
-  { title: 'Context ring in composer', section: 'appearance', anchor: 'appearance-context-ring', keywords: ['context', 'tokens', 'usage', 'gauge', 'window', 'composer'] },
+  { title: 'Context ring', section: 'appearance', anchor: 'appearance-context-ring', keywords: ['context', 'tokens', 'usage', 'gauge', 'window', 'composer'] },
   { title: 'Frosted composer', section: 'appearance', anchor: 'appearance-frosted-composer', keywords: ['glass', 'blur', 'translucent', 'transparent', 'opacity', 'color boost'] },
   { title: 'Chat width', section: 'appearance', anchor: 'appearance-chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
   { title: 'Render math', section: 'appearance', anchor: 'appearance-render-math', keywords: ['latex', 'equations'] },
-  { title: 'Show replies a paragraph at a time', section: 'appearance', anchor: 'appearance-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade'] },
+  { title: 'Replies by paragraph', section: 'appearance', anchor: 'appearance-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade', 'paragraph at a time'] },
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
+  { title: 'Chat', section: 'appearance', anchor: 'appearance-chat', keywords: ['conversation', 'replies', 'math'] },
+  { title: 'Composer', section: 'appearance', anchor: 'appearance-composer', keywords: ['context ring', 'frosted'] },
   { title: 'Changed files after each turn', section: 'appearance', anchor: 'appearance-turn-changed-files', keywords: ['edits', 'summary', 'diff'] },
   { title: 'Default permission mode', section: 'general', anchor: 'general-permission-mode', keywords: ['permissions', 'approvals', 'ask'] },
   { title: 'Resume after usage limits reset', section: 'general', anchor: 'general-resume', keywords: ['rate limit', 'paused', 'continue'] },
-  { title: 'When a thread finishes', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'completion sound', 'toast', 'system notification', 'done'] },
-  { title: 'When a thread needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'question', 'approval', 'toast', 'sound'] },
-  { title: 'When a thread stops', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
+  { title: 'Finished', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'when a thread finishes', 'completion sound', 'toast', 'system notification', 'done'] },
+  { title: 'Needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'when a thread needs you', 'question', 'approval', 'toast', 'sound'] },
+  { title: 'Stopped', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'when a thread stops', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
   { title: 'Delete private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto delete', 'timer', 'incognito', 'chats'] },
-  { title: 'All threads on my other computers', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote'] },
-  { title: 'Version and updates', section: 'general', anchor: 'general-updates', keywords: ['check for updates', 'about', 'upgrade'] },
+  { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },
+  { title: 'Updates', section: 'general', anchor: 'general-updates', keywords: ['version', 'check for updates', 'about', 'upgrade'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
   { title: 'Phones', section: 'connections', anchor: 'account-phones', keywords: ['mobile', 'pair'], needs: { anchor: 'account-mousse-id', reason: 'Phones appear once you sign in to Mousse ID.' } },
@@ -103,10 +105,10 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
 
   { title: 'Device name', section: 'connections', anchor: 'devices-name', keywords: ['computer name'] },
   { title: 'Networking', section: 'connections', anchor: 'devices-networking', keywords: ['network', 'connection'] },
-  { title: 'Let other computers work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', "let my other computers work on this computer's threads"] },
+  { title: 'Let my other devices work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', 'computers', "let my other devices work on this device's threads"] },
   { title: 'Passphrase', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'network keys'] },
   { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['pair', 'add device', 'computers'] },
-  { title: 'Let my editor reach my other computers', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh'] },
+  { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },
   { title: 'Tailscale Serve', section: 'connections', anchor: 'devices-tailscale-serve' },
   { title: 'Connection add-ons', section: 'connections', anchor: 'devices-addons', keywords: ['tunnel', 'relay', 'ssh'] },
   { title: 'Connection checks', section: 'connections', anchor: 'devices-checks', keywords: ['diagnostics', 'features'] },
@@ -122,7 +124,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Memory', section: 'labs', anchor: 'labs-profiler-memory', keywords: ['ram', 'diagnostics', 'report', 'leak', 'processes'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Memory notices', section: 'labs', anchor: 'labs-memory-notices', keywords: ['ram', 'diagnostics', 'notification'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Heap snapshot', section: 'labs', anchor: 'labs-heap-snapshot', keywords: ['memory', 'diagnostics'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
-  { title: 'Profiler agent access', section: 'labs', anchor: 'labs-profiler-agents', keywords: ['tools', 'agents', 'profiler tools'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } }
+  { title: 'Agents can read the profiler', section: 'labs', anchor: 'labs-profiler-agents', keywords: ['agent access', 'tools', 'profiler tools'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } }
 ]
 
 /**
@@ -148,9 +150,21 @@ export function searchIndex(mousseIdAvailable: boolean): readonly SettingsSearch
   return mousseIdAvailable ? SETTINGS_SEARCH_INDEX : SETTINGS_SEARCH_INDEX.filter((entry) => !MOUSSE_ID_ANCHORS.includes(entry.anchor))
 }
 
-/** The index entry for an anchor, if the search knows it. */
+/**
+ * Anchors of settings that moved, mapped to where they are now, so a link or landing that still names
+ * the old anchor reaches the setting. Add the old anchor here whenever a setting's anchor changes.
+ */
+export const SETTINGS_ANCHOR_ALIASES: Readonly<Record<string, string>> = {}
+
+/** The anchor a setting has now: `anchor` itself, or where it moved to. */
+export function currentSettingsAnchor(anchor: string, aliases: Readonly<Record<string, string>> = SETTINGS_ANCHOR_ALIASES): string {
+  return Object.hasOwn(aliases, anchor) ? aliases[anchor] : anchor
+}
+
+/** The index entry for an anchor (old anchors included), if the search knows it. */
 export function settingsSearchEntry(anchor: string): SettingsSearchEntry | undefined {
-  return SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === anchor)
+  const current = currentSettingsAnchor(anchor)
+  return SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === current)
 }
 
 /** A page as the search sees it: its name and the words it is found by. */
@@ -167,41 +181,62 @@ export interface SettingsSearchResult {
   anchor?: string
 }
 
-/** How well `text` matches `query`: 3 starts with it, 2 a word starts with it, 1 contains it, 0 not at all. */
+const WORD_CHAR = /[\p{L}\p{N}]/u
+/** Endings a whole word may still have: "notification" is the word "notifications". */
+const WORD_ENDING = /^(?:s|es|ed|d|ing)?(?![\p{L}\p{N}])/u
+
+/**
+ * How `query` sits in `text`: 2 as a whole word ("back" in "Back"), 1 at the start of a longer word
+ * ("back" in "background"), 0 not at the start of any word ("ring" in "sharing").
+ */
+function wordMatch(text: string, query: string): number {
+  let best = 0
+  for (let at = text.indexOf(query); at >= 0 && best < 2; at = text.indexOf(query, at + 1)) {
+    if (at > 0 && WORD_CHAR.test(text[at - 1])) continue
+    best = WORD_ENDING.test(text.slice(at + query.length)) ? 2 : 1
+  }
+  return best
+}
+
+/** How well `text` matches `query`: 3 starts with it, 2 a later word starts with it, 0 not at all. */
 function matchScore(text: string, query: string): number {
   const lower = text.toLowerCase()
   if (lower.startsWith(query)) return 3
-  if (lower.includes(` ${query}`)) return 2
-  return lower.includes(query) ? 1 : 0
+  return wordMatch(lower, query) ? 2 : 0
 }
 
 /**
  * The settings and pages matching `query`, best first: a title match before a keyword match, and a
- * setting before a page at the same strength. Every word of the query must match.
+ * setting before a page at the same strength. Every word of the query must start a word of the
+ * setting's title, its keywords or its page name. When some results have every word whole, only
+ * those show: "back" lists what is called back, not "background"; "backg" still finds it.
  */
 export function searchSettings(query: string, pages: readonly SettingsSearchPage[], index: readonly SettingsSearchEntry[] = SETTINGS_SEARCH_INDEX): SettingsSearchResult[] {
   const q = query.trim().toLowerCase().replace(/\s+/g, ' ')
   if (!q) return []
   const words = q.split(' ')
   const pageLabel = new Map(pages.map((page) => [page.id, page.label]))
-  const score = (title: string, keywords: readonly string[], context: string): number => {
+  /** Whether every word is whole, and the result's rank; undefined when a word starts no word. */
+  const score = (title: string, keywords: readonly string[], context: string): { whole: boolean; value: number } | undefined => {
     const haystack = [title, ...keywords, context].join(' ').toLowerCase()
-    if (!words.every((word) => haystack.includes(word))) return 0
+    const matched = Math.min(...words.map((word) => wordMatch(haystack, word)))
+    if (!matched) return undefined
     const titled = matchScore(title, q)
-    if (titled) return 10 + titled
-    return Math.max(1, ...keywords.map((keyword) => matchScore(keyword, q)))
+    return { whole: matched === 2, value: titled ? 10 + titled : Math.max(1, ...keywords.map((keyword) => matchScore(keyword, q))) }
   }
-  const scored: Array<SettingsSearchResult & { score: number; order: number }> = []
+  const scored: Array<SettingsSearchResult & { whole: boolean; score: number; order: number }> = []
   index.forEach((entry, order) => {
     if (!pageLabel.has(entry.section)) return
-    const value = score(entry.title, entry.keywords ?? [], pageLabel.get(entry.section) ?? '')
-    if (value) scored.push({ title: entry.title, section: entry.section, anchor: entry.anchor, score: value + 0.5, order })
+    const match = score(entry.title, entry.keywords ?? [], pageLabel.get(entry.section) ?? '')
+    if (match) scored.push({ title: entry.title, section: entry.section, anchor: entry.anchor, whole: match.whole, score: match.value + 0.5, order })
   })
   pages.forEach((page, order) => {
-    const value = score(page.label, page.keywords, '')
-    if (value) scored.push({ title: page.label, section: page.id, score: value, order: index.length + order })
+    const match = score(page.label, page.keywords, '')
+    if (match) scored.push({ title: page.label, section: page.id, whole: match.whole, score: match.value, order: index.length + order })
   })
+  const anyWhole = scored.some((result) => result.whole)
   return scored
+    .filter((result) => result.whole || !anyWhole)
     .sort((a, b) => b.score - a.score || a.order - b.order)
     .map(({ title, section, anchor }) => (anchor ? { title, section, anchor } : { title, section }))
 }
@@ -275,6 +310,7 @@ export function landOnSettingsAnchor(
   landing: SettingsAnchorLanding,
   { quietMs = ANCHOR_QUIET_MS, waitMs = ANCHOR_WAIT_MS }: { quietMs?: number; waitMs?: number } = {}
 ): () => void {
+  anchor = currentSettingsAnchor(anchor)
   if (revealSettingsAnchor(root, anchor)) {
     landing.onDone()
     return () => {}

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { landOnSettingsAnchor, revealSettingsAnchor, searchIndex, searchSettings, SETTINGS_SEARCH_INDEX, SETTINGS_SECTION_IDS, type SettingsSearchPage } from '../../src/renderer/lib/settingsSearch'
+import { currentSettingsAnchor, landOnSettingsAnchor, revealSettingsAnchor, searchIndex, searchSettings, settingsSearchEntry, SETTINGS_ANCHOR_ALIASES, SETTINGS_SEARCH_INDEX, SETTINGS_SECTION_IDS, type SettingsSearchPage } from '../../src/renderer/lib/settingsSearch'
 import { AgentsSettings } from '../../src/renderer/components/settings/AgentsSettings'
 import { SettingsRow } from '../../src/renderer/components/settings/SettingsRow'
 import { RunSettingsGroup } from '../../src/renderer/components/settings/RunSettingsGroup'
@@ -105,6 +105,33 @@ describe('the settings search', () => {
       if (entry.needs) expect(sources, entry.needs.anchor).toContain(`anchor="${entry.needs.anchor}"`)
     }
   })
+
+  it('has an entry for every anchor a row or group in the app sets', () => {
+    const indexed = new Set(SETTINGS_SEARCH_INDEX.map((entry) => entry.anchor))
+    const sources = rendererSources().join('\n')
+    const anchors = new Set([...sources.matchAll(/\banchor(?:="|: ')([a-z][a-z-]*)['"]/g)].map((match) => match[1]))
+    expect(anchors.size).toBeGreaterThan(40)
+    expect([...anchors].filter((anchor) => !indexed.has(anchor))).toEqual([])
+  })
+
+  it('matches the start of a word only', () => {
+    const titles = (query: string) => searchSettings(query, PAGES).map((result) => result.title)
+    expect(titles('back')).not.toContain('Reduce background noise')
+    expect(titles('ring')[0]).toBe('Context ring')
+    expect(titles('ring')).not.toContain('Let my other devices work here')
+    expect(titles('ground')).toEqual([])
+    expect(titles('backg')).toEqual(['Reduce background noise'])
+    expect(titles('noise')).toEqual(['Reduce background noise'])
+    // A whole word with a plural ending still counts as whole.
+    expect(titles('notification')).toEqual(expect.arrayContaining(['Finished', 'Needs you', 'Stopped', 'General']))
+  })
+
+  it('titles a result as its page does', () => {
+    expect(searchSettings('finished', PAGES)[0]).toMatchObject({ title: 'Finished', anchor: 'general-notify-finished' })
+    expect(searchSettings('needs you', PAGES)[0]).toMatchObject({ title: 'Needs you' })
+    expect(searchSettings('stopped', PAGES)[0]).toMatchObject({ title: 'Stopped' })
+    expect(searchSettings('updates', PAGES)[0]).toMatchObject({ title: 'Updates', anchor: 'general-updates' })
+  })
 })
 
 describe('landing on a search result', () => {
@@ -146,6 +173,21 @@ describe('landing on a search result', () => {
     for (const anchor of ['general-notify-finished', 'general-notify-needs-you', 'general-notify-stopped', 'general-remote-notifications']) {
       expect(revealSettingsAnchor(host, anchor), anchor).toBe(true)
       expect(host.querySelector(`[data-settings-anchor="${anchor}"]`)?.contains(document.activeElement), anchor).toBe(true)
+      // The result's title is the row's title, so the result and the row read the same.
+      const title = host.querySelector(`[data-settings-anchor="${anchor}"] .settings-item-title`)?.textContent
+      expect(SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === anchor)?.title, anchor).toBe(title)
+    }
+  })
+
+  it('lands on a setting by an old anchor it moved from', () => {
+    expect(currentSettingsAnchor('appearance-old-ring', { 'appearance-old-ring': 'chat-context-ring' })).toBe('chat-context-ring')
+    expect(currentSettingsAnchor('appearance-theme', { 'appearance-old-ring': 'chat-context-ring' })).toBe('appearance-theme')
+    expect(currentSettingsAnchor('toString')).toBe('toString')
+    const anchors = new Set(SETTINGS_SEARCH_INDEX.map((entry) => entry.anchor))
+    for (const [from, to] of Object.entries(SETTINGS_ANCHOR_ALIASES)) {
+      expect(anchors.has(from), from).toBe(false)
+      expect(anchors.has(to), to).toBe(true)
+      expect(settingsSearchEntry(from)?.anchor).toBe(to)
     }
   })
 
@@ -255,6 +297,16 @@ describe('the settings sidebar', () => {
       'This computer': ['Devices', 'Storage', 'Activity', 'Labs']
     })
   })
+
+  it('finds Providers by sign in, account, cache, update and telemetry', () => {
+    const source = readFileSync(join(__dirname, '../../src/renderer/components/SettingsPage.tsx'), 'utf8')
+    const line = source.split('\n').find((text) => text.includes("id: 'providers'"))!
+    const keywords = [...line.slice(line.indexOf('keywords:')).matchAll(/'([^']+)'/g)].map((match) => match[1])
+    const pages: SettingsSearchPage[] = [{ id: 'providers', label: 'Providers', keywords }]
+    for (const query of ['sign in', 'account', 'cache', 'update', 'telemetry']) {
+      expect(searchSettings(query, pages, []), query).toEqual([{ title: 'Providers', section: 'providers' }])
+    }
+  })
 })
 
 describe('the search results list', () => {
@@ -273,7 +325,7 @@ describe('the search results list', () => {
     const removal = searchSettings('remove worktrees', PAGES).map((result) => result.title)
     expect(removal).toEqual([
       'Remove worktrees inactive for',
-      'Remove worktrees whose work is merged into the default branch'
+      'Remove merged worktrees'
     ])
   })
 })

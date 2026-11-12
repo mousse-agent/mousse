@@ -108,7 +108,7 @@ describe('context ring in composer', () => {
 
   it('is found by Settings search on the Appearance page', () => {
     const pages: SettingsSearchPage[] = [{ id: 'appearance', label: 'Appearance', keywords: [] }]
-    expect(searchSettings('context ring', pages)[0]).toMatchObject({ title: 'Context ring in composer', section: 'appearance', anchor: 'appearance-context-ring' })
+    expect(searchSettings('context ring', pages)[0]).toMatchObject({ title: 'Context ring', section: 'appearance', anchor: 'appearance-context-ring' })
   })
 })
 
@@ -149,16 +149,16 @@ describe('Settings › Appearance › Composer', () => {
     expect(heading).toBeDefined()
     const group = heading.closest('[aria-labelledby]') ?? heading.parentElement!.parentElement!
     const titles = [...group.querySelectorAll('.settings-item-title')].map((title) => title.textContent)
-    expect(titles).toEqual(['Context ring in composer', 'Frosted composer'])
+    expect(titles).toEqual(['Context ring', 'Frosted composer'])
     // The general appearance options stay outside it.
     expect([...host.querySelectorAll('.settings-item-title')].map((title) => title.textContent)).toEqual(expect.arrayContaining(['Color theme', 'Render math', 'Project colors on threads']))
     expect(titles).not.toContain('Render math')
 
-    const toggle = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Context ring in composer"]')!
+    const toggle = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Context ring"]')!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await act(async () => { toggle.click() })
     expect(store.get().appearance.contextRingInComposer).toBe(true)
-    expect(host.querySelector('[role="switch"][aria-label="Context ring in composer"]')?.getAttribute('aria-checked')).toBe('true')
+    expect(host.querySelector('[role="switch"][aria-label="Context ring"]')?.getAttribute('aria-checked')).toBe('true')
     expect(new SettingsStore(MousseConfigStore.load(home)).get().appearance.contextRingInComposer).toBe(true)
 
     // useTheme hands the saved value to the composer when settings change.

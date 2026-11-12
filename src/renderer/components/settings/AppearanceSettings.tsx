@@ -295,12 +295,12 @@ export function AppearanceSettings({
           }
         />
         <SettingsRow
-          title="Show replies a paragraph at a time"
+          title="Replies by paragraph"
           anchor="appearance-reply-pacing"
           description={<span title="Each finished paragraph, list item or code line fades in; off shows text as it arrives.">Instead of word by word.</span>}
           control={
             <Switch
-              label="Show replies a paragraph at a time"
+              label="Replies by paragraph"
               checked={appearance.replyPacing}
               onChange={(replyPacing) => void onUpdate({ appearance: { ...appearance, replyPacing } })}
             />
@@ -322,12 +322,12 @@ export function AppearanceSettings({
 
       <SettingsGroup title="Composer" icon={MessageSquare} anchor="appearance-composer">
         <SettingsRow
-          title="Context ring in composer"
+          title="Context ring"
           anchor="appearance-context-ring"
           description="How full the model's context is."
           control={
             <Switch
-              label="Context ring in composer"
+              label="Context ring"
               checked={appearance.contextRingInComposer}
               onChange={(contextRingInComposer) => void onUpdate({ appearance: { ...appearance, contextRingInComposer } })}
             />
