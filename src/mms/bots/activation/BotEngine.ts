@@ -794,22 +794,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const rows = this.store.activationsIn(botId, ['queued', 'running', 'blocked']).filter((row) => row.grantDigest !== keep && (row.status !== 'blocked' || workWaits(row)))
       return rows.filter((row) => {
         if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: reason })) return false
-        if (row.status === 'blocked') {
-          this.store.withdrawActivationAsks(row.id)
-          this.chat.post({
-            id: `bm_${row.id}_ended`, botId, author: 'bot', kind: 'notice', text: `I stopped "${this.workTitle(row)}": my permissions changed.`,
-            ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}), activationId: row.id, lane: 'run'
-          })
-          this.journalEnd(row, reason)
-        }
+        if (row.status === 'blocked') this.store.withdrawActivationAsks(row.id)
         return true
       })
     })
     for (const row of ended) {
       if (row.status === 'running') void this.stopRun(row)
       else if (row.status === 'blocked') {
+        // Waiting work had posted what it had, with its card: the card now says it is no longer needed, and a line why.
         for (const ask of this.store.escalations({ activationId: row.id, status: 'withdrawn' })) this.republishAsk(ask.id)
-        this.afterEnd({ ...row, status: 'cancelled' })
+        const after = this.store.activation(row.id) ?? { ...row, status: 'cancelled' as const }
+        this.recorded(after, () => this.chat.post({
+          id: `bm_${row.id}_ended`, botId, author: 'bot', kind: 'notice', text: `I stopped "${this.workTitle(row)}": my permissions changed.`,
+          ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}), activationId: row.id, lane: 'run'
+        }))
+        this.afterEnd(after)
       } else this.cleanup({ ...row, status: 'cancelled' })
       this.changed({ botId, activationId: row.id })
     }
@@ -3799,9 +3798,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const capped = run.status === 'failed' && isProviderTurnCap(run.outcome?.error)
     const text = run.status === 'failed' && !capped ? undefined : outcome.text
     if (dispatch.endedAt !== null) {
-      // The capped turn's words arrive after its work went on: its next message carries them.
-      const carried = capped && text?.trim() ? this.carried.get(row.id) : undefined
-      if (carried && !carried.text) carried.text = text!.trim()
+      // A capped turn's words that arrive after its end: its work already went on (its next message carries them), or
+      // it is still moving on (`advance` reads them as a late text).
+      if (capped && text?.trim()) {
+        const carried = this.carried.get(row.id)
+        if (!carried) this.lateTexts.set(key, text)
+        else if (!carried.text) carried.text = text.trim()
+      }
       // Settled from the run's terminal event first: the executor's final message still lands.
       if (text !== undefined && !capped) {
         this.store.run("UPDATE bot_activations SET result = ? WHERE id = ? AND status IN ('done', 'paused', 'waiting_grant', 'blocked') AND (result IS NULL OR result = '')", text, row.id)

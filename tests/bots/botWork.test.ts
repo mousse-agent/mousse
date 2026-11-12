@@ -483,6 +483,21 @@ describe('long work', () => {
       expect(notice.chips.map((chip) => chip.text)).toEqual(['Searched the web'])
     })
 
+    it('the capped turn\'s words still reach the next message when they arrive after its work went on', async () => {
+      const { workId } = await asked()
+      const first = await start(f, workId)
+      f.clock.now += MIN
+      first.prepared.authority.check(call)
+      // The run's end settles the dispatch first; the executor's words come after the continuation was written.
+      f.runs.markTerminal(first.payload.runId, 'failed', TURN_CAP)
+      f.bots.settle(first.payload, {})
+      await flush()
+      expect(f.store.dispatch(workId, 2)).toMatchObject({ send: { turnCap: true } })
+      f.bots.settle(first.payload, { text: 'Two picks so far.' })
+      await runDispatch(f, workId, 2, { text: '' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'Two picks so far.' })
+    })
+
     it('the capped turn\'s chips go into the report of the turn that finishes the work', async () => {
       const { workId } = await asked()
       const first = await start(f, workId)
