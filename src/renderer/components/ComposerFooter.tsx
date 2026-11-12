@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
+import { ArrowTurnForward, ArrowUp, Layers, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
@@ -17,9 +17,15 @@ import { formatBinding } from '../../shared/commands'
 import { useCommandBindings } from '../commands/commandRegistry'
 import { useAppStore } from '../stores/appStore'
 
-import { STEER_BINDING } from '../lib/steerKey'
+import { STEER_BINDING, type SendMode } from '../lib/steerKey'
 
 export { STEER_BINDING, isSteerKey } from '../lib/steerKey'
+
+/** The thread's send mode while a reply runs, shown as one icon left of the send button; clicking it switches. */
+export interface ComposerSendModeProps {
+  mode: SendMode
+  onSwitch: () => void
+}
 
 /** The model picker's fade-out, before the speed scale; matches its close animation in composer-run-controls.css. */
 const MODEL_PICKER_EXIT_MS = 90
@@ -113,6 +119,11 @@ export interface ComposerFooterProps {
   allowAttachWhileLoading?: boolean
   /** The thread's permission mode and how to change it; without it (or `run`) the footer has no such control. */
   permission?: ComposerPermissionProps
+  /**
+   * The thread's send mode, while a reply runs and Enter can either queue or steer. Without it there is no mode
+   * button and the send button queues (a bot's chat, an idle thread, a card that takes the message).
+   */
+  sendMode?: ComposerSendModeProps
 }
 
 /** The permission chip and the model button with its picker. */
@@ -364,13 +375,24 @@ export function ComposerFooter({
   implementPlanDisabled = false,
   allowAttachWhileLoading = false,
   permission,
-  sendLabel
+  sendLabel,
+  sendMode
 }: ComposerFooterProps) {
   const bindings = useCommandBindings()
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
   const stopBinding = bindings['run.stop']
   const stopTitle = stopBinding ? `Stop · ${formatBinding(stopBinding, platform)}` : 'Stop'
-  const queueTitle = `Queue · ${formatBinding('Enter', platform)} — Steer · ${formatBinding(STEER_BINDING, platform)}`
+  const enterKey = formatBinding('Enter', platform)
+  const steerKey = formatBinding(STEER_BINDING, platform)
+  // In Steer mode the send button steers, as Enter does.
+  const steers = sendMode?.mode === 'steer'
+  const runningTitle = steers ? `Steer · ${enterKey} — Queue · ${steerKey}` : `Queue · ${enterKey} — Steer · ${steerKey}`
+  const switchBinding = bindings['composer.switchSendMode']
+  const modeTitle = [
+    steers ? 'Steer' : 'Queue',
+    `${steerKey} ${steers ? 'queues' : 'steers'}`,
+    ...(switchBinding ? [`${formatBinding(switchBinding, platform)} switches`] : [])
+  ].join(' · ')
 
   const handleActionClick = () => {
     if (primaryAction === 'implement-plan') {
@@ -424,6 +446,21 @@ export function ComposerFooter({
 
         {primaryAction !== 'implement-plan' && !isRecording && stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
 
+        {sendMode && primaryAction !== 'implement-plan' && !isRecording ? (
+          <button
+            type="button"
+            className={`composer-icon-btn composer-send-mode-btn${steers ? ' is-steer' : ''}`}
+            title={modeTitle}
+            aria-label={steers ? 'Send mode: Steer' : 'Send mode: Queue'}
+            // Switching keeps the caret in the box, so the next Enter sends from there. It never sends.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={sendMode.onSwitch}
+            disabled={disabled}
+          >
+            {steers ? <ArrowTurnForward size={16} strokeWidth={2} /> : <Layers size={16} strokeWidth={2} />}
+          </button>
+        ) : null}
+
         {primaryAction === 'implement-plan' ? (
           <button
             type="button"
@@ -449,8 +486,8 @@ export function ComposerFooter({
           <button
             type="button"
             className={`composer-action-btn${canSend ? ' composer-action-btn-active' : ''}`}
-            title={sendLabel ?? (loading ? queueTitle : 'Send')}
-            aria-label={sendLabel ?? (loading ? 'Queue message' : 'Send message')}
+            title={sendLabel ?? (loading ? runningTitle : 'Send')}
+            aria-label={sendLabel ?? (loading ? (steers ? 'Steer message' : 'Queue message') : 'Send message')}
             onClick={handleActionClick}
             disabled={disabled || !canSend}
           >
