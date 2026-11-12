@@ -1,7 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
-  ACTIVITY_DESCRIPTION_CHARS,
   INTERRUPTED_SUMMARY,
+  taskEndSummary,
   type ActivityInterruptedBy,
   type ActivityPatch,
   type ProviderToolEvent
@@ -390,7 +390,7 @@ export class TurnFrames {
     const title = this.tools.get(callId)
     if (title === undefined) return
     const kind = this.contexts.get(callId)?.kind
-    const summary = typeof frame.summary === 'string' && frame.summary.trim() ? clipSummary(frame.summary) : undefined
+    const summary = taskEndSummary(frame.summary, kind)
     const usage = record(frame.usage)
     const duration = typeof usage?.duration_ms === 'number' && (kind === 'subagent' || kind === 'command') ? usage.duration_ms : undefined
     const outcome =
@@ -427,11 +427,6 @@ export class TurnFrames {
       this.forget(callId)
     }
   }
-}
-
-function clipSummary(text: string): string {
-  const clean = text.replace(/\s+/g, ' ').trim()
-  return clean.length > ACTIVITY_DESCRIPTION_CHARS ? `${clean.slice(0, ACTIVITY_DESCRIPTION_CHARS - 1)}…` : clean
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

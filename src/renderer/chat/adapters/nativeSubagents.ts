@@ -18,7 +18,7 @@ export interface NativeSubagentInfo {
   agentType: string | null
   /** The runtime's task id, which a continuation's notice names. */
   taskId: string | null
-  /** What the agent reported when it ended, clipped by the daemon. */
+  /** What the agent reported when it ended, as Markdown with its line breaks, clipped by the daemon. */
   result: string | null
 }
 
@@ -30,6 +30,11 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.replace(/\s+/g, ' ').trim() : null
+}
+
+/** A report as written: Markdown keeps its line breaks. The one-line row strips it itself. */
+function report(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
 function timeOf(value: unknown): number | null {
@@ -86,7 +91,7 @@ export function nativeSubagentModel(
   // A background row's end is when its turn settled, not when the agent finished: only its reported duration counts.
   const background = input.run_in_background === true
   const ended = duration !== null && startedAt !== null ? startedAt + duration : background ? null : timeOf(output?.endedAt)
-  const summary = text(output?.summary)
+  const summary = report(output?.summary)
   const reported = summary && summary !== BACKGROUND_SUMMARY ? summary : null
   return {
     toolCallId: part.toolCallId,

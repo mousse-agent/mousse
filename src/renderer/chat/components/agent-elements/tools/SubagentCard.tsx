@@ -8,6 +8,7 @@ import { SubagentAvatar } from "../../../../components/SubagentAvatar";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { subagentBadgeTone, subagentIconId } from "../../../../components/subagentStatus";
 import { getToolStatus } from "../utils/format-tool";
+import { Markdown } from "../markdown";
 import { GenericTool } from "./generic-tool";
 import { toolRegistry } from "./tool-registry";
 import { useInheritedProvider, useSubagentCard, useSubagentCards } from "./subagent-cards-context";
@@ -24,7 +25,6 @@ import {
   isCardRunning,
   lastResultText,
   LruCache,
-  plainResultText,
   RESULT_CACHE_LIMIT,
 } from "./subagent-card-logic";
 import "./subagent-card.css";
@@ -195,7 +195,8 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
   const elapsed = cardElapsedLabel(card, now);
   const status = cardStatusLabel(card);
   const result = card.error ?? card.native?.result ?? null;
-  const fullResult = result ? plainResultText(result) : "";
+  // The row's line is plain text; opened, the whole report keeps its Markdown.
+  const fullResult = result?.trim() ?? "";
   const expandable = nestedTools.length > 0 || fullResult.length > 0;
   return (
     <div className="subagent-card-native" data-native-subagent={card.toolCallId}>
@@ -215,7 +216,7 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
       </button>
       {expandable && (
         <Collapse open={open} className="subagent-card-calls" itemCount={nestedTools.length + (fullResult ? 1 : 0)}>
-          {fullResult && <p className="subagent-card-full" data-tone={card.error ? "failed" : undefined}>{fullResult}</p>}
+          {fullResult && <NativeSubagentResult text={fullResult} failed={Boolean(card.error)} />}
           {nestedTools.map((nestedPart, index) => {
             const meta = toolRegistry[nestedPart.type];
             if (!meta) return null;
@@ -233,6 +234,15 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
           })}
         </Collapse>
       )}
+    </div>
+  );
+}
+
+/** A native subagent's whole report, opened under its row: Markdown, as the reply of a Mousse subagent's thread shows it. */
+export function NativeSubagentResult({ text, failed }: { text: string; failed: boolean }) {
+  return (
+    <div className="subagent-card-full" data-tone={failed ? "failed" : undefined}>
+      <Markdown content={text} />
     </div>
   );
 }
