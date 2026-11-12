@@ -176,10 +176,12 @@
 .bot-model-rows { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; column-gap: 8px; row-gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
 .bot-model-row { display: contents; }
 .bot-model-row-label { white-space: nowrap; }
-.bot-model-rows .ui-select.small.bot-model-row-model { width: 100%; }
+.bot-model-rows .ui-select.small.bot-model-row-model { width: 100%; height: auto; min-height: 24px; padding-block: 3px; }
+.bot-model-pick { display: flex; flex-direction: column; gap: 1px; min-width: 0; line-height: 1.2; }
+.bot-model-pick > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-model-pick small { font-size: 10.5px; color: var(--text-secondary); }
 .bot-model-rows .ui-select.small.bot-model-row-level { max-width: 92px; }
-.bot-model-advanced .bot-model-row-label { color: var(--text-secondary); }
-.bot-model-advanced .toggle-switch { grid-column: 3; justify-self: end; }
+.bot-model-advanced { display: flex; align-items: center; justify-content: space-between; padding: 6px 0 3px; font-size: 12px; color: var(--text-secondary); }
 .bot-about-foot { display: flex; gap: 8px; margin-top: 22px; }
 .bot-about-foot button { flex: 1; }
 .bot-about-foot .is-danger { color: var(--error, #e79090); }

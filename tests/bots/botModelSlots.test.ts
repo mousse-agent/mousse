@@ -97,7 +97,7 @@ describe('the said-once list', () => {
     expect(missingAfter(['claude|opus|off'], TALK, { key: 'claude|opus|signed_out' })).toEqual(['claude|opus|signed_out'])
     expect(missingAfter(['claude|opus|off', 'pi:key|sonnet|off'], TALK, undefined)).toEqual(['pi:key|sonnet|off'])
     expect(missingAfter(['claude|opus|off'], null, undefined)).toEqual(['claude|opus|off'])
-    expect(pickMissText({ label: 'Opus (Claude Code)', reason: 'off' })).toBe('I can\'t use Opus (Claude Code): it\'s turned off, so I\'m using Automatic for now.')
+    expect(pickMissText({ label: 'Opus on Claude Code', reason: 'off' })).toBe('I can\'t use Opus on Claude Code: it\'s turned off, so I\'m using Automatic for now.')
   })
 })
 
@@ -162,7 +162,7 @@ describe('a pick keeps its entry', () => {
   })
 
   it('a pick that can\'t run never moves to the other entry: Automatic for that turn, and why', async () => {
-    const label = 'Big 2 (Anthropic API)'
+    const label = 'Big 2 on Anthropic API'
     const off = await resolver([SUB, snapshot('pi:key', 'Anthropic API', { enabled: false })]).resolve({ botId: 'b', pick: onKey, depth: 'normal', policy })
     expect(off).toEqual({ selection: automatic, missed: { key: 'pi:key|acme-big-2|off', label, reason: 'off' } })
     const out = await resolver([SUB, snapshot('pi:key', 'Anthropic API', { auth: { state: 'signed_out' } })]).resolve({ botId: 'b', pick: onKey, depth: 'normal', policy })
@@ -253,9 +253,9 @@ describe('the engine on rows', () => {
 
   it('a picked row that can\'t run: Automatic, and one line in the chat while it lasts; said again after it ran (#673)', async () => {
     f.bots.setOwnerSlots(botId, slotsAllOn(TALK))
-    const broken = { key: 'claude|opus|off', label: 'Opus (Claude Code)', reason: 'off' as const }
+    const broken = { key: 'claude|opus|off', label: 'Opus on Claude Code', reason: 'off' as const }
     f.pickMiss = (pick) => (pick.instanceId === 'claude' ? broken : undefined)
-    const line = 'I can\'t use Opus (Claude Code): it\'s turned off, so I\'m using Automatic for now.'
+    const line = 'I can\'t use Opus on Claude Code: it\'s turned off, so I\'m using Automatic for now.'
     const said = () => chatOf(f, botId).filter((message) => message.text === line).length
     const first = await chat('Hi', 'm1')
     expect(first.prepared.selection).toEqual(PI)

@@ -109,7 +109,7 @@ describe('About this bot', () => {
     it('Talk and Work, each Automatic until picked; the same model on two entries is told apart', async () => {
       withRows(AUTO)
       await show()
-      expect(labels()).toEqual(['Talk', 'Work', 'Advanced'])
+      expect(labels()).toEqual(['Talk', 'Work'])
       expect(select('Talk model')?.textContent).toContain('Automatic')
       // Automatic has no reasoning level to pick.
       expect(select('Talk reasoning level')).toBeUndefined()
@@ -119,12 +119,17 @@ describe('About this bot', () => {
       // Work is every level in the simple view.
       const onKey = { instanceId: 'pi:key', model: 'opus' }
       expect(lastSlots()).toEqual({ talk: null, light: onKey, medium: onKey, hard: onKey })
-      expect(select('Work model')?.textContent).toContain('Opus · Anthropic API')
+      // The model's name, and under it its entry, since the other entry offers the same model.
+      expect([...(select('Work model')?.querySelectorAll('.bot-model-pick > *') ?? [])].map((element) => element.textContent)).toEqual(['Opus', 'Anthropic API'])
+      // A model only one entry offers names no entry.
+      await click(select('Talk model'))
+      await click(option('Haiku'))
+      expect([...(select('Talk model')?.querySelectorAll('.bot-model-pick > *') ?? [])].map((element) => element.textContent)).toEqual(['Haiku'])
       // Its reasoning levels: Default, then the model's own.
       await click(select('Work reasoning level'))
       expect([...document.querySelectorAll('[role="option"]')].map((element) => element.textContent?.trim())).toEqual(['Default', 'Low', 'High'])
       await click(option('High'))
-      expect(lastSlots()).toEqual({ talk: null, light: { ...onKey, effort: 'high' }, medium: { ...onKey, effort: 'high' }, hard: { ...onKey, effort: 'high' } })
+      expect(lastSlots()).toEqual({ talk: { instanceId: 'claude', model: 'haiku' }, light: { ...onKey, effort: 'high' }, medium: { ...onKey, effort: 'high' }, hard: { ...onKey, effort: 'high' } })
     })
 
     it('Advanced shows each kind of work, opens by itself when they differ, and closing it puts Medium work on all work', async () => {
@@ -132,7 +137,7 @@ describe('About this bot', () => {
       withRows({ talk: null, light: sub, medium: sub, hard: sub })
       await show()
       await click(host.querySelector('.bot-model-advanced [role="switch"]') ?? undefined)
-      expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work', 'Advanced'])
+      expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work'])
       // Opening it saves nothing.
       expect(lastSlots()).toBeUndefined()
       await click(select('Hard work model'))
@@ -142,13 +147,13 @@ describe('About this bot', () => {
       expect(select('Hard work reasoning level')).toBeUndefined()
       await click(host.querySelector('.bot-model-advanced [role="switch"]') ?? undefined)
       expect(lastSlots()).toEqual({ talk: null, light: sub, medium: sub, hard: sub })
-      expect(labels()).toEqual(['Talk', 'Work', 'Advanced'])
+      expect(labels()).toEqual(['Talk', 'Work'])
     })
 
     it('rows that differ open Advanced; a pick not offered now stays, marked; a refused save goes back', async () => {
       withRows({ talk: { instanceId: 'pi:gone', model: 'opus' }, light: null, medium: { instanceId: 'claude', model: 'opus' }, hard: null })
       await show()
-      expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work', 'Advanced'])
+      expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work'])
       expect(host.querySelector('.bot-model-advanced [role="switch"]')?.getAttribute('aria-checked')).toBe('true')
       await click(select('Talk model'))
       expect(option('opusNot available now')).toBeDefined()

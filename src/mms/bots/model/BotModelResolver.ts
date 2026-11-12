@@ -3,6 +3,7 @@ import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { InstanceModel, ProviderSelection, RunPolicy } from '../../../shared/harness/types'
 import type { ModelCatalog } from '../../../shared/modelCatalog'
+import { shortModelName } from '../../../shared/modelNames'
 import { modelCatalog } from '../../models/modelCatalog'
 import type { BotModelResolution, BotModelResolver, BotPickMiss, BotPickReason, BotRuntimeHold } from '../seams'
 import { botModelCandidates, instanceReady, signInCandidate } from './candidates'
@@ -116,7 +117,9 @@ export class BotModelChooser implements BotModelResolver {
     } catch {
       // The entry's models can't be read (it was removed): the model's id names it.
     }
-    return { key: `${pick.instanceId ?? ''}|${pick.model}|${reason}`, label: entry ? `${name} (${entry})` : name, reason }
+    // As the Runs on picker names it: "Opus 5.5 on Claude Code".
+    const short = shortModelName(name)
+    return { key: `${pick.instanceId ?? ''}|${pick.model}|${reason}`, label: entry ? `${short} on ${entry}` : short, reason }
   }
 
   /** Automatic: the Settings default while it can run the bot, else the best ready model for the depth. */

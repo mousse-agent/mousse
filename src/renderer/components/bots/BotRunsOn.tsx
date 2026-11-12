@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import type { BotModelPick, BotModelSlotKey, BotModelSlots } from '../../../shared/bots/personal/definition'
 import type { BotComputerChoice, BotModelOption, BotRunsOnChoices } from '../../../shared/bots/personal/methods'
 import { slotsWith, workRowsDiffer } from '../../../shared/bots/personal/modelSlots'
+import { shortModelName } from '../../../shared/modelNames'
 import { reasoningLevelLabel } from '../../../shared/modelVariants'
 import { Switch } from '../settings/SettingsRow'
 import { Select, type SelectOption } from '../ui/Select'
@@ -65,10 +66,17 @@ export function botOptionOf(options: readonly BotModelOption[], pick: BotModelPi
   return pick?.instanceId ? options.find((option) => option.instanceId === pick.instanceId && option.model === pick.model) : undefined
 }
 
+/** A model's name as the composer shows it ("Opus 5.5"). */
+const nameOf = (option: Pick<BotModelOption, 'label'>) => shortModelName(option.label)
+
+/** Whether another entry offers a model of the same name. */
+function hasTwin(options: readonly BotModelOption[], option: BotModelOption): boolean {
+  return options.some((other) => other !== option && other.label === option.label && other.instanceId !== option.instanceId)
+}
+
 /** A model's name, with its entry's when another entry offers a model of the same name. */
 function optionName(options: readonly BotModelOption[], option: BotModelOption): string {
-  const twin = options.some((other) => other !== option && other.label === option.label && other.instanceId !== option.instanceId)
-  return twin ? `${option.label} · ${option.entry}` : option.label
+  return hasTwin(options, option) ? `${nameOf(option)} · ${option.entry}` : nameOf(option)
 }
 
 /**
@@ -81,7 +89,7 @@ export function botPickOptions(options: readonly BotModelOption[], pick: BotMode
   const byEntry = entries.flatMap((instanceId) => options.filter((option) => option.instanceId === instanceId))
   const choices: SelectOption[] = [
     { value: '', label: 'Automatic' },
-    ...byEntry.map((option) => ({ value: botPickValue(option), label: option.label, textValue: optionName(options, option), group: option.entry }))
+    ...byEntry.map((option) => ({ value: botPickValue(option), label: nameOf(option), textValue: optionName(options, option), group: option.entry }))
   ]
   if (pick && !botOptionOf(options, pick)) choices.push({ value: botPickValue(pick), label: pick.model, description: pick.instanceId ? 'Not available now' : 'On any entry that offers it' })
   return choices
@@ -137,7 +145,7 @@ export function BotModelRows({ name, options, slots, onChange, disabled }: {
     // One Work model again: Medium work's, on all work.
     if (!next && differ) onChange(slotsWith(slots, 'work', slots.medium))
   }
-  return <div className="bot-model-rows" data-testid="bot-model-rows">
+  return <div className="bot-model-picker" data-testid="bot-model-rows"><div className="bot-model-rows">
     {rows.map((row) => {
       const pick = pickOf(row.key)
       const option = botOptionOf(options, pick)
@@ -152,7 +160,10 @@ export function BotModelRows({ name, options, slots, onChange, disabled }: {
           value={botPickValue(pick)}
           options={botPickOptions(options, pick)}
           title={option ? `${option.label} on ${option.entry}` : pick ? pick.model : AUTOMATIC_TITLE}
-          renderValue={(selected) => (option ? optionName(options, option) : selected?.label ?? 'Automatic')}
+          // The model's name; its entry under it when another entry offers the same model, so the two stay apart.
+          renderValue={(selected) => (option
+            ? <span className="bot-model-pick"><span>{nameOf(option)}</span>{hasTwin(options, option) ? <small>{option.entry}</small> : null}</span>
+            : selected?.label ?? 'Automatic')}
           disabled={disabled}
           onChange={(value) => {
             const next = pickOfValue(value)
@@ -177,8 +188,9 @@ export function BotModelRows({ name, options, slots, onChange, disabled }: {
           : <span className="bot-model-row-level" aria-hidden />}
       </div>
     })}
-    <div className="bot-model-row bot-model-advanced">
-      <span className="bot-model-row-label" id={advancedId} title="A model for each kind of work">Advanced</span>
+  </div>
+    <div className="bot-model-advanced">
+      <span id={advancedId} title="A model for each kind of work">Advanced</span>
       <Switch checked={advanced} onChange={toggle} labelledBy={advancedId} disabled={disabled} />
     </div>
   </div>
