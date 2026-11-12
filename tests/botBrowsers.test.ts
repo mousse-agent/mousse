@@ -150,6 +150,10 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     const refused = await call(chatTurn, 'browser_act', { sessionId: fresh.sessionId, tabId: fresh.tabId, generation: fresh.generation, observationId: fresh.observationId,
       controlLeaseId: 'lease_x', action: { type: 'click', target: { kind: 'ref', ref: name.ref } } })
     expect(refused.error).toMatch(/owner is using your browser/)
+    // Nor can it open or load a page meanwhile: nothing it starts runs while the owner holds the browser.
+    expect((await call(chatTurn, 'browser_open', { url: `${origin}/remember.html` })).error).toMatch(/owner is using your browser/)
+    expect((await call(chatTurn, 'browser_tabs', { operation: 'new', url: `${origin}/remember.html` })).error).toMatch(/owner is using your browser/)
+    expect((await call(chatTurn, 'browser_tabs', { operation: 'list' })).tabs).toHaveLength(1)
     await bots.input(BOT_A, { kind: 'click', x: name.bounds!.x + 5, y: name.bounds!.y + 5 })
     await bots.input(BOT_A, { kind: 'type', text: 'Ada' })
     await bots.input(BOT_A, { kind: 'key', key: 'Enter' })
@@ -167,13 +171,38 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
   }, 60_000)
 
   it('the owner can open the bot\'s browser to sign in for it, under their own control', async () => {
-    const { bots, origin } = await fixture()
-    const opened = await bots.open(BOT_A, `${origin}/remember.html?set=owner`)
-    expect(opened).toMatchObject({ open: true, control: 'owner', tab: { url: `${origin}/remember.html?set=owner` } })
+    const { bots, browser, origin } = await fixture()
+    const first = `${origin}/automation-page.html?name=owner`
+    const opened = await bots.open(BOT_A, first)
+    expect(opened).toMatchObject({ open: true, control: 'owner', tab: { url: first } })
     expect(opened.frame?.mimeType).toBe('image/jpeg')
     expect(opened.cursor).toBeUndefined()
+    // The owner holds the browser before its first page loads: a check on that page sees a person.
+    const policy = new ExecutionPolicyService().snapshot(profileId, { allowedTools: [...BROWSER_AUTOMATION_TOOLS], allowedCapabilities: ['browser.session', 'browser.observe'], allowedEffects: ['read', 'external'], maxToolCalls: 10, maxElapsedMs: 60_000 })
+    const home: BrowserToolContext = { execution: { profileId, threadId: 'home-a', turnId: 'owner-check', actor: { kind: 'main' }, source: 'schedule', policySnapshotId: policy.id, cancellationId: 'owner-check' }, policy, target: { backend: 'managed-chromium' } }
+    const sessionId = browser.sessions.listThreadSessions({ profileId, threadId: 'home-a' })[0]!.id
+    const seen = await browser.tools.invoke('browser_observe', { sessionId }, home)
+    expect(seen.ok).toBe(true)
+    const text = seen.ok ? seen.value.observation!.elements.map((element) => `${element.name ?? ''} ${element.text ?? ''}`).join(' ') : ''
+    expect(text).toContain('owner-first:false')
     await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/remember.html` })
     expect((await bots.view(BOT_A, { frame: true })).tab?.url).toBe(`${origin}/remember.html`)
+  }, 60_000)
+
+  it('gives each of two activations opening pages at once its own tab', async () => {
+    const { turn, call, origin } = await fixture()
+    const first = turn(BOT_A, 'act-first')
+    expect((await call(first, 'browser_open', { url: `${origin}/form.html` })).error).toBeUndefined()
+    const one = turn(BOT_A, 'act-one')
+    const two = turn(BOT_A, 'act-two')
+    const [a, b] = await Promise.all([call(one, 'browser_open', { url: `${origin}/nav-a.html` }), call(two, 'browser_open', { url: `${origin}/nav-b.html` })])
+    expect(a.error).toBeUndefined()
+    expect(b.error).toBeUndefined()
+    expect(a.observation!.tabId).not.toBe(b.observation!.tabId)
+    expect(a.observation!.url).toBe(`${origin}/nav-a.html`)
+    expect(b.observation!.url).toBe(`${origin}/nav-b.html`)
+    expect((await call(one, 'browser_tabs', { operation: 'list' })).tabs!.map((tab) => tab.id)).toEqual([a.observation!.tabId])
+    expect((await call(two, 'browser_tabs', { operation: 'list' })).tabs!.map((tab) => tab.id)).toEqual([b.observation!.tabId])
   }, 60_000)
 
   it('the owner\'s view comes from the tab\'s screencast: a still page is the same picture, a change shows as it is painted', async () => {

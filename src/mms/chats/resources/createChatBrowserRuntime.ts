@@ -8,6 +8,10 @@ import type { MmsProfileServices } from '../../MmsProfileServices'
 import type { ChatGroupResourceBinding } from './createMmsChatResourceService'
 import type { ChatResourceService } from './ChatResourceService'
 
+function personHolds(): BrowserAutomationError {
+  return new BrowserAutomationError({ code: 'policy_denied', message: 'A person is controlling the shared browser; ask them to resume agents' })
+}
+
 /** Active-execution admission permits only this chat's agents to share its browser. */
 export function createChatBrowserRuntime(
   services: MmsProfileServices,
@@ -83,6 +87,9 @@ export function createChatBrowserRuntime(
       const found = selected ? foundObservations.get(selected.id) : undefined
       const before = found && found.observationId === params.observationId && found.generation === latest?.generation ? found : latest
       let result: BrowserToolOutput
+      // While a person holds the shared browser, agents read it, and act, open or load nothing.
+      const opens = name === 'browser_act' || name === 'browser_open' || (name === 'browser_tabs' && params.operation === 'new')
+      if (opens && selected?.lifecycle === 'human-controlled') throw personHolds()
       if (name === 'browser_open' && selected) {
         if (Object.keys(params).some((key) => !['url', 'persistent', 'workspaceId'].includes(key))) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Unexpected shared browser open argument' })
         if (!context.policy.allowedTools.includes('browser_open') || !context.policy.allowedCapabilities.includes('browser.session') || !context.policy.allowedEffects.includes('external')) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Agent is not allowed to open browser pages' })
@@ -99,7 +106,7 @@ export function createChatBrowserRuntime(
         if (name !== 'browser_open' && params.sessionId === undefined && selected) params.sessionId = selected.id
         if (name === 'browser_act' && selected) {
           const scope = services.platform.browser.sessions.trustedSessionScope({ profileId: services.profileId, threadId: context.execution.threadId, sessionId: selected.id })
-          if (!scope.record.controlLeaseId || scope.record.lifecycle === 'human-controlled') throw new BrowserAutomationError({ code: 'policy_denied', message: 'A person is controlling the shared browser; ask them to resume agents' })
+          if (!scope.record.controlLeaseId || scope.record.lifecycle === 'human-controlled') throw personHolds()
           params.controlLeaseId = scope.record.controlLeaseId
         }
         const dispatched = await services.platform.browser.tools.invoke(name, params, context)

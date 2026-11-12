@@ -100,6 +100,11 @@ const WATCHING_MS = 30_000
 const MAX_USED = 50
 const LIVE_LIFECYCLES: ReadonlySet<BrowserSessionRecord['lifecycle']> = new Set(['ready', 'agent-controlled', 'human-controlled', 'waiting-approval'])
 
+/** The bot's answer when it tries to act, open or load a page while its owner holds the browser. */
+function ownerHolds(): BrowserAutomationError {
+  return new BrowserAutomationError({ code: 'human_controlled', message: 'Your owner is using your browser now. Wait for them to give it back, or carry on without it.' })
+}
+
 const defaultTimer = (fn: () => void, ms: number): { clear(): void } => {
   const timer = setTimeout(fn, ms)
   timer.unref?.()
@@ -234,14 +239,15 @@ export class BotBrowsers implements BotBrowserHost {
 
   /**
    * Opens the bot's browser for its owner, under their control: to sign in to a site for the bot.
-   * An open browser is handed to the owner as it is, on `url` when one is given.
+   * An open browser is handed to the owner as it is, on `url` when one is given. A closed one opens
+   * blank and is the owner's before it loads anything, so `url` loads as the owner's page.
    */
   async open(botId: string, url?: string): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     await this.ownerCall(state, async (context) => {
-      const opened = await this.ensureSession(state, context, url)
+      const opened = await this.ensureSession(state, context, undefined)
       if (this.record(state)?.lifecycle !== 'human-controlled') await this.service().sessions.control(context, opened.sessionId, 'human')
-      if (url && !opened.opened) await this.service().sessions.humanInput(context, { sessionId: opened.sessionId, input: { kind: 'navigate', url }, ...(state.follow ? { tabId: state.follow } : {}) })
+      if (url) await this.service().sessions.humanInput(context, { sessionId: opened.sessionId, input: { kind: 'navigate', url }, ...(state.follow ? { tabId: state.follow } : {}) })
     })
     state.lastViewedAt = this.now()
     if (![...state.activations.values()].some((entry) => !entry.ended)) this.armIdle(state)
@@ -283,6 +289,9 @@ export class BotBrowsers implements BotBrowserHost {
     state.idle?.clear()
     state.idle = undefined
     let result: BrowserToolOutput
+    // While the owner holds the browser the bot reads it, and acts, opens or loads nothing.
+    const opens = name === 'browser_act' || name === 'browser_open' || (name === 'browser_tabs' && params.operation === 'new')
+    if (opens && this.record(state)?.lifecycle === 'human-controlled') throw ownerHolds()
     if (name === 'browser_open') {
       if (Object.keys(params).some((key) => key !== 'url')) throw new BrowserAutomationError({ code: 'invalid_action', message: 'browser_open takes only a url' })
       const url = typeof params.url === 'string' ? params.url : undefined
@@ -307,8 +316,6 @@ export class BotBrowsers implements BotBrowserHost {
         if (params.tabId === undefined && activation.current) params.tabId = activation.current
         if (typeof params.tabId === 'string' && !activation.tabs.has(params.tabId))
           throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That tab belongs to another of your runs. Open your own with browser_open.' })
-        if (name === 'browser_act' && this.record(state)?.lifecycle === 'human-controlled')
-          throw new BrowserAutomationError({ code: 'human_controlled', message: 'Your owner is using your browser now. Wait for them to give it back, or carry on without it.' })
         result = await this.invoke(context, name, params)
       }
     }
@@ -344,12 +351,9 @@ export class BotBrowsers implements BotBrowserHost {
     state.follow = tabId
   }
 
-  /** A new tab in the bot's session; its id is the one the list did not have before. */
+  /** A new tab in the bot's session: the one the browser opened for this call, whatever other activations opened meanwhile. */
   private async newTab(context: BrowserToolContext, sessionId: string, url: string | undefined): Promise<string | undefined> {
-    const before = new Set((await this.invoke(context, 'browser_tabs', { sessionId, operation: 'list' })).tabs?.map((tab) => tab.id) ?? [])
-    await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })
-    const after = (await this.invoke(context, 'browser_tabs', { sessionId, operation: 'list' })).tabs ?? []
-    return after.find((tab) => !before.has(tab.id))?.id
+    return (await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })).tab?.id
   }
 
   private async invoke(context: BrowserToolContext, name: BrowserAutomationTool, args: Record<string, unknown>): Promise<BrowserToolOutput> {
