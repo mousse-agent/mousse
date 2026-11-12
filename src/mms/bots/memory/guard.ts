@@ -3,8 +3,9 @@ import { dayLabel } from './render'
 /**
  * The memory guard (docs/plans/bot-context.md §9): every `memory_save`, and every journal row that
  * enters a context pack, passes it first. It rejects invisible and bidi characters, credential
- * shapes (secrets belong in a vault, #595, never in memory) and instruction-shaped text. These are
- * heuristics, not proofs: the pack still frames everything it carries as data.
+ * shapes (secrets belong in a vault, #595, never in memory) and instruction-shaped text. In a pack
+ * only the credential piece of a row is held back. These are heuristics, not proofs: the pack still
+ * frames everything it carries as data.
  */
 
 export type GuardReason = 'invisible' | 'credential' | 'instruction'
@@ -18,18 +19,35 @@ const OK: GuardResult = { ok: true }
 // emoji sequences and several scripts need them.
 const INVISIBLE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb]|[\u{e0000}-\u{e007f}]/u
 
-const CREDENTIALS: readonly RegExp[] = [
-  /\bsk-[A-Za-z0-9_-]{16,}/,
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
-  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/,
-  /\bAIza[0-9A-Za-z_-]{35}\b/,
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\b(?:password|passwd|pwd|passcode)\s*[:=]\s*\S+/i,
-  /\b(?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*\S{6,}/i
+/**
+ * Credential shapes, checked everywhere in the text, web addresses included. With `label`, the
+ * first group is a label kept in place ("password: ") and only what follows it is the secret.
+ */
+const CREDENTIALS: ReadonlyArray<{ pattern: RegExp; label?: true }> = [
+  { pattern: /\bsk-[A-Za-z0-9_-]{16,}/g },
+  { pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
+  { pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g },
+  { pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/g },
+  { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { pattern: /\bxox[abprs]-[A-Za-z0-9-]{10,}/g },
+  { pattern: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  { pattern: /\bya29\.[0-9A-Za-z_-]{20,}/g },
+  { pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
+  { pattern: /\b\d{8,10}:[A-Za-z0-9_-]{35}\b/g },
+  { pattern: /\bhooks\.slack\.com\/services\/[A-Za-z0-9/_-]{20,}/g },
+  { pattern: /\bdiscord(?:app)?\.com\/api\/webhooks\/[A-Za-z0-9/_-]{20,}/g },
+  // A password in a web address: https://name:secret@host.
+  { pattern: /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+(?=@)/gi, label: true },
+  { pattern: /(\b(?:password|passwd|pwd|passcode)\s*[:=]\s*)\S+/gi, label: true },
+  { pattern: /(\b(?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*)\S{6,}/gi, label: true }
 ]
+
+// Web addresses. Their host and path are never checked for randomness (a document's or a
+// parcel's ID is not a secret), nor are most query values; the shapes above still are.
+const URLS = /\bhttps?:\/\/[^\s<>"'`]+/gi
+// A query or fragment value whose name says it is a secret: ?token=…, &sig=…, #access_token=….
+const URL_SECRET_PARAM = /[?&#;]((?:[A-Za-z0-9_.-]*?)(?:token|key|secret|signature|sig|password|passwd|pwd|auth|credentials?|session(?:id)?|sid|code))=([^&#\s]{16,})/gi
 
 const INSTRUCTIONS: readonly RegExp[] = [
   /\b(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:of\s+)?(?:the\s+|your\s+|my\s+)?(?:previous|prior|above|earlier|preceding|system|original)\s+(?:instructions?|messages?|rules?|prompts?|directions?|context)/i,
@@ -59,11 +77,38 @@ function invisible(text: string): GuardResult | undefined {
   return INVISIBLE.test(text) ? { ok: false, reason: 'invisible', message: 'It has hidden or direction-changing characters. Write it in plain text.' } : undefined
 }
 
-function credential(text: string): GuardResult | undefined {
-  const found = CREDENTIALS.some((pattern) => pattern.test(text)) ||
-    (text.match(/[A-Za-z0-9+/_=-]{32,}/g) ?? []).some(highEntropy)
-  return found ? { ok: false, reason: 'credential', message: 'It looks like a password, key or token. Secrets are never kept in memory.' } : undefined
+type Span = readonly [start: number, end: number]
+
+/** Where `text` holds something that looks like a password, key or token, sorted and merged. */
+function credentialSpans(text: string): Span[] {
+  const spans: Array<[number, number]> = []
+  for (const { pattern, label } of CREDENTIALS)
+    for (const match of text.matchAll(pattern)) {
+      const start = match.index + (label ? match[1]!.length : 0)
+      spans.push([start, match.index + match[0].length])
+    }
+  // Long random-looking tokens, outside web addresses; inside one, only secret-named values.
+  let outside = text
+  for (const url of text.matchAll(URLS)) {
+    outside = outside.slice(0, url.index) + ' '.repeat(url[0].length) + outside.slice(url.index + url[0].length)
+    for (const param of url[0].matchAll(URL_SECRET_PARAM)) {
+      const end = url.index + param.index + param[0].length
+      spans.push([end - param[2]!.length, end])
+    }
+  }
+  for (const token of outside.matchAll(/[A-Za-z0-9+/_=-]{32,}/g))
+    if (highEntropy(token[0])) spans.push([token.index, token.index + token[0].length])
+  spans.sort((a, b) => a[0] - b[0])
+  const merged: Array<[number, number]> = []
+  for (const span of spans) {
+    const last = merged.at(-1)
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1])
+    else merged.push([span[0], span[1]])
+  }
+  return merged
 }
+
+const CREDENTIAL_MESSAGE = 'It looks like a password, key or token. Secrets are never kept in memory.'
 
 function instruction(text: string): GuardResult | undefined {
   return INSTRUCTIONS.some((pattern) => pattern.test(text))
@@ -71,17 +116,32 @@ function instruction(text: string): GuardResult | undefined {
     : undefined
 }
 
-/** The guard for a `memory_save`: all three checks. */
+/** The guard for a `memory_save`: all three checks, and any credential refuses the save. */
 export function guardMemoryText(text: string): GuardResult {
-  return invisible(text) ?? credential(text) ?? instruction(text) ?? OK
+  return invisible(text) ??
+    (credentialSpans(text).length ? { ok: false, reason: 'credential', message: CREDENTIAL_MESSAGE } : undefined) ??
+    instruction(text) ?? OK
 }
 
+export type PackTextResult = { ok: true; text: string } | Extract<GuardResult, { ok: false }>
+
 /**
- * The guard for a journal row entering a pack. The owner's own words skip the instruction check:
- * they are the owner's to give. Everything else gets all three.
+ * The guard for a journal row entering a pack. Hidden characters, and instruction-shaped text
+ * from anyone but the owner (their words are theirs to give), hold back the whole row. Anything
+ * that looks like a credential is replaced by `marker`, and the rest of the row stays.
  */
-export function guardPackText(text: string, who: string): GuardResult {
-  return invisible(text) ?? credential(text) ?? (who === 'owner' ? undefined : instruction(text)) ?? OK
+export function guardPackText(text: string, who: string, marker: string): PackTextResult {
+  const refused = invisible(text) ?? (who === 'owner' ? undefined : instruction(text))
+  if (refused && !refused.ok) return refused
+  const spans = credentialSpans(text)
+  if (!spans.length) return { ok: true, text }
+  let out = ''
+  let at = 0
+  for (const [start, end] of spans) {
+    out += text.slice(at, start) + marker
+    at = end
+  }
+  return { ok: true, text: out + text.slice(at) }
 }
 
 const WEEKDAY = '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)'

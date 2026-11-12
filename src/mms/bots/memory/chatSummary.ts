@@ -27,11 +27,14 @@ export function speaker(row: BotJournalRow): Who {
   return row.kind === 'owner_msg' ? 'Owner' : row.kind === 'run_report' ? 'My run report' : 'Me'
 }
 
-/** A journal row's text as it may enter a pack: held back when the guard refuses it. */
+/**
+ * A journal row's text as it may enter a pack: what looks like a secret is held back in place,
+ * and a row the guard refuses as a whole is held back whole.
+ */
 export function packText(row: BotJournalRow): string {
   if (row.redactedAt) return row.text
-  const guard = guardPackText(row.text, row.who)
-  return guard.ok ? row.text : `(held back: ${guard.message.toLowerCase().replace(/\.$/, '')}. memory_read j${row.seq} shows it.)`
+  const guard = guardPackText(row.text, row.who, `[held back: looks like a secret · memory_read j${row.seq} shows it]`)
+  return guard.ok ? guard.text : `(held back: ${guard.message.toLowerCase().replace(/\.$/, '')}. memory_read j${row.seq} shows it.)`
 }
 
 export function firstLine(text: string): string {
