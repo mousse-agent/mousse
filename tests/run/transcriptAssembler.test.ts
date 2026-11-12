@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mousseCallAsksPerson, mousseServerToolOf } from '../../src/mms/run/mcp/attachment'
 import {
   TEXT_EMIT_MS,
   TranscriptAssembler,
@@ -764,6 +765,25 @@ describe('TranscriptAssembler.foregroundTools (the calls a held steer waits for)
     expect(assembler.foregroundTools(new Set(), asks).map((tool) => tool.callId)).toEqual(['b1'])
     // With no question pending (no predicate), ask_user holds like any call.
     expect(ids(assembler)).toEqual(['ask', 'b1'])
+  })
+
+  it('ownCallMayAsk: only the turn\'s own (root) call may be the asker, never one under a subagent', () => {
+    const { assembler } = harness()
+    const asks = (name: string) => mousseCallAsksPerson(name, (tool) => (tool === 'ask_user' ? { asksUser: 'question' } : undefined))
+    assembler.tool(agent('a1'))
+    assembler.tool(start('sub-ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' }, 'a1'))
+    expect(assembler.ownCallMayAsk(asks)).toBe(false)
+    assembler.tool(start('ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' }))
+    expect(assembler.ownCallMayAsk(asks)).toBe(true)
+  })
+
+  it('Mousse\'s asking tools are matched exactly: a look-alike title is no Mousse call', () => {
+    const lookup = (tool: string) => ({ ask_user: { asksUser: 'question' }, thread_read: { access: 'readsOthers' } } as Record<string, { asksUser?: string; access?: string }>)[tool]
+    for (const name of ['mcp__mousse__ask_user', 'mousse/ask_user', 'mousse.ask_user', 'mousse__ask_user', 'mousse: ask_user', 'ask_user (mousse MCP Server)', 'ask_user', 'mcp__mousse-relay__github__create_issue', 'mcp__mousse__newer_tool'])
+      expect(mousseCallAsksPerson(name, lookup), name).toBe(true)
+    for (const name of ['mousse/docs', 'Mousse.md', 'mousse.md', 'MOUSSE/ask_user', 'mousse/thread_read', 'mcp__mousse__thread_read', 'docs (mousse MCP Server)', 'ask_user.md'])
+      expect(mousseCallAsksPerson(name, lookup), name).toBe(false)
+    expect(mousseServerToolOf('Mousse.md')).toBeUndefined()
   })
 
   it('ownsForegroundCall: the turn\'s own calls, open or ended; not a subagent\'s, a background call or a wait tool', () => {

@@ -745,6 +745,20 @@ export class TranscriptAssembler {
   }
 
   /**
+   * Whether one of the turn's own open calls (never one under a subagent or a background call) may be the one asking
+   * the person a question that is pending (`asksPerson`, the same test `foregroundTools` leaves such calls out by). A
+   * question a subagent's call asks does not count: the turn's own work goes on without its answer, and a steer must
+   * not answer it.
+   */
+  ownCallMayAsk(asksPerson: (toolName: string) => boolean): boolean {
+    for (const messageId of this.state.activeToolCallMessageIds.values()) {
+      const message = this.hooks.getMessage(messageId)
+      if (message && this.ownsForeground(message) && asksPerson(toolNameOf(message))) return true
+    }
+    return false
+  }
+
+  /**
    * Whether `callId` is one of the turn's own foreground calls (open or ended): its events restart a held steer's
    * release window (§2.3); a subagent's, a background call's or a wait tool's do not. A call with no row counts.
    */

@@ -40,9 +40,9 @@ export interface SteerHoldOptions {
   /** The turn's foreground tools now, leaving out the calls a person is asked about. */
   foreground: (waitingOnPerson: ReadonlySet<string>) => ForegroundTool[]
   /**
-   * The thread has a question or an approval pending that no call reported (`awaiting`): one Mousse asks for its own
-   * tools (`ask_user`, a quick action's or a relayed tool's approval). Like a reported one, it means the turn waits
-   * for a person, so a steer goes in and answers it.
+   * One of the turn's own (root) calls asks the person a question no call reported (`awaiting`): Mousse asks it for
+   * its own tools (`ask_user`, a quick action's or a relayed tool's approval). Like a reported one, it means the turn
+   * waits for a person, so a steer goes in and answers it. A subagent's question never counts.
    */
   asking?: () => boolean
   /** The release window after the last foreground tool (`start` providers). */

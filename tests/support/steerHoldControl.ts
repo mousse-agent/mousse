@@ -3,8 +3,8 @@
  * `SteerHold` and `steerDelivery` decide, fed by what the adapter reports through the sink, the way the orchestrator
  * feeds them: the sink's tool events build rows in a real `TranscriptAssembler`, whose `foregroundTools` are what a
  * steer waits for, and only the turn's own calls (`ownsForegroundCall`) restart the release window. With `questions`,
- * a question pending in the thread means the turn waits for a person, and Mousse's own calls that may be asking it
- * do not hold (`mousseCallAsksPerson`), as in the orchestrator.
+ * a question pending in the thread, asked by one of the turn's own calls, means the turn waits for a person, and
+ * Mousse's own calls that may be asking it do not hold (`mousseCallAsksPerson`), as in the orchestrator.
  * Every drain, take, hand-back and acceptance is logged in order, with the time it happened.
  */
 import type { TurnControl, TurnSink } from '../../src/mms/harness/adapter'
@@ -73,13 +73,19 @@ export function holdControl(
     persist: () => undefined,
     setPhase: () => undefined
   }, state)
-  const asking = (): boolean => options.questions?.pending() === true
+  // As the orchestrator: while a question is pending, Mousse's own calls that may ask it do not hold, and the turn waits
+  // for a person only when one of its own (root) calls may be the asker.
+  const asksPerson = (): ((name: string) => boolean) | undefined =>
+    options.questions?.pending() === true ? (name) => mousseCallAsksPerson(name, (tool) => MOUSSE_TOOLS[tool]) : undefined
   const release = steerReleaseWindow(caps, options.strict ? 'strict' : undefined)
   const hold = new SteerHold({
     caps,
     strict: release.strict,
-    foreground: (waiting) => assembler.foregroundTools(waiting, asking() ? (name) => mousseCallAsksPerson(name, (tool) => MOUSSE_TOOLS[tool]) : undefined),
-    asking,
+    foreground: (waiting) => assembler.foregroundTools(waiting, asksPerson()),
+    asking: () => {
+      const test = asksPerson()
+      return test !== undefined && assembler.ownCallMayAsk(test)
+    },
     settleMs: options.settleMs ?? release.settleMs
   })
   const pending: Pending[] = []

@@ -997,6 +997,8 @@ class TurnRun {
         this.turnId = started.turn.id
         this.adoptedTurn = started.turn.id
         this.turnOpen = true
+        // A turn of the run, as one Mousse starts: a held steer now waits for its commands, and for its end.
+        this.input.onProviderTurn?.()
       } else this.turnId ??= started.turn.id
       return
     }
@@ -1013,6 +1015,9 @@ class TurnRun {
         if (current) this.turnOpen = false
         // An interruption this run asked for itself (a cap or a Stop sweep) is how the run ends, not a failure.
         const failed = completed.turn.status === 'failed' || (completed.turn.status === 'interrupted' && !this.selfInterrupted)
+        // The adopted turn is over and none of its commands runs: a steer held for it (strict release) goes in now, as
+        // the next turn of the run, rather than waiting for the helpers.
+        if (current && !failed) this.input.onBoundary?.()
         if (current && failed) {
           this.adoptedFailure = completed.turn
           for (const waiter of this.adoptedFailureWaiters.splice(0)) waiter()
@@ -3057,8 +3062,10 @@ export class CodexProviderService {
           if (!delivery || delivery === 'hold') return
           entry = input.drainSteerEntry!({ expect: [delivery] })
           // `native`: an agent's steer, or a held steer at the server turn's end, joins without a cut (`turn/steer`
-          // while a turn is open, else the next turn of the run).
-          asCut = delivery === 'cut'
+          // while a turn is open, else the next turn of the run). A person's steer never goes in by `turn/steer`
+          // (§2.5: Codex may drop a steer it has not read yet): at the boundary it goes through the cut, which carries it
+          // in the next `turn/start`, and cuts a turn that opened meanwhile.
+          asCut = delivery === 'cut' || entry?.cut === true
         } else {
           entry = input.drainSteerEntry ? input.drainSteerEntry() : undefined
           asCut = entry?.cut === true

@@ -20,12 +20,18 @@ export type TurnProgressState = {
   /** The thread, and when the service last changed its turn state: together they name one sighting of a step. */
   threadId?: string | null;
   updatedAt?: string;
-  /** A person's steer waits for the running tool (`TurnState.heldSteer`): the line's tooltip says when it goes in. */
-  steerHeld?: boolean;
+  /**
+   * A person's steer is held (`TurnState.heldSteer`): the line's tooltip says when it goes in. `turn_end`: strict
+   * release keeps it until the agent's turn ends, and no call of the turn runs (`HeldSteer.untilTurnEnd`), so a tool
+   * the line shows (a subagent's, a background call) is not what it waits for.
+   */
+  steerHeld?: boolean | "turn_end";
 };
 
 /** The tooltip sentence a running tool's line adds while a steer waits for it. */
 export const STEER_HELD_TITLE = "Your steer goes in when it finishes.";
+/** The same, while strict release keeps the steer until the agent's turn ends. */
+export const STEER_HELD_TURN_END_TITLE = "Your steer goes in when the turn ends.";
 
 export const TurnProgressContext = createContext<TurnProgressState | null>(null);
 
@@ -170,8 +176,10 @@ function hasContent(messages: readonly UIMessage[]): boolean {
 export function describeTurnProgress(input: TurnProgressInput): TurnProgress | null {
   const progress = describeProgress(input);
   // The line keeps "Running Bash…" while a steer waits for it; the Steer block shows the wait, the tooltip says when.
-  if (progress && input.state?.steerHeld && (progress.kind === "running-tool" || progress.kind === "preparing-tool"))
-    return { ...progress, title: progress.title ? `${progress.title}\n${STEER_HELD_TITLE}` : STEER_HELD_TITLE };
+  if (progress && input.state?.steerHeld && (progress.kind === "running-tool" || progress.kind === "preparing-tool")) {
+    const when = input.state.steerHeld === "turn_end" ? STEER_HELD_TURN_END_TITLE : STEER_HELD_TITLE;
+    return { ...progress, title: progress.title ? `${progress.title}\n${when}` : when };
+  }
   return progress;
 }
 

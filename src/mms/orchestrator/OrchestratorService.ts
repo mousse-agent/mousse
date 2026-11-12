@@ -11895,9 +11895,13 @@ export class OrchestratorService extends EventEmitter {
         // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
         // waits, Mousse's own calls that ask the person do not hold.
         foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
-        // Such a question means the turn waits for a person, as a provider's own does: the steer goes in and answers it,
-        // and neither the window nor strict release keeps it back.
-        asking: () => this.questions.listPendingForThread(session.threadId).length > 0,
+        // Such a question, asked by one of the turn's own calls, means the turn waits for a person, as a provider's own
+        // does: the steer goes in and answers it, and neither the window nor strict release keeps it back. A question a
+        // subagent's call asks does not: the steer never answers it.
+        asking: () => {
+          const asksPerson = this.mousseCallsAskingPerson(session.threadId)
+          return asksPerson !== undefined && assembler.ownCallMayAsk(asksPerson)
+        },
         settleMs: this.steerSettleMs ?? release.settleMs
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)

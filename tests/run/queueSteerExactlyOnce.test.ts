@@ -2090,6 +2090,34 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     })
   })
 
+  it('start, strict release: a question a subagent\'s call asks does not release the held steer, and the steer never answers it', async () => {
+    const w = await world('start', { strict: true })
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('agent', 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'research' } as ActivityPatch)
+    w.adapter.toolStart('b1')
+    await w.steer('after the turn')
+    await waitFor(() => w.held() !== undefined, 'held for b1')
+    w.adapter.toolDone('b1')
+    // The subagent asks the person through Mousse's ask_user.
+    w.adapter.toolStart('sub-ask', 'mcp__mousse__ask_user', { toolName: 'mcp__mousse__ask_user', kind: 'generic' } as ActivityPatch, 'agent')
+    const answer = w.d.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], w.thread.id)
+    answer.catch(() => undefined)
+    await waitFor(() => w.d.questions.listPendingForThread(w.thread.id).length === 1, 'the subagent\'s question pending')
+    await sleep(STEER_SETTLE_MS * 2)
+    expect(w.delivered()).toEqual([])
+    expect(w.held()).toMatchObject({ untilTurnEnd: true })
+    expect(w.d.questions.listPendingForThread(w.thread.id)).toHaveLength(1)
+    // The turn's end: the steer goes in then, and the subagent's question is still the person's to answer.
+    w.adapter.boundary()
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    expect(w.delivered()).toEqual(['native:after the turn'])
+    expect(w.d.questions.listPendingForThread(w.thread.id)).toHaveLength(1)
+    w.d.questions.dismissAllForThread(w.thread.id)
+    w.adapter.toolDone('sub-ask', 'mcp__mousse__ask_user')
+    w.adapter.toolDone('agent', 'Agent')
+    await w.finish()
+  })
+
   it('runs.steerRelease set over the protocol reaches the next turn: strict holds past the window', async () => {
     const configHome = mkdtempSync(join(tmpdir(), 'mousse-steer-release-'))
     extra.push(() => rmSync(configHome, { recursive: true, force: true }))

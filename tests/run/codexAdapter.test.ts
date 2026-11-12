@@ -2022,6 +2022,33 @@ describe('CodexAdapter', () => {
       })
     })
 
+    it.each([['best effort', false], ['strict', true]] as const)('%s: a person\'s steer that arrives while the turn carrying a cut starts is never sent by turn/steer: it cuts that turn and starts the next', async (_name, strict) => {
+      const SECOND = 'and keep the lockfile'
+      const [startOut, startReply, started2] = turnStart(7, STEER, 'turn-2')
+      const { events } = await run([
+        ...head(),
+        ...message('msg-1', ['Looking around']),
+        cue({ action: 'steer' }),
+        interrupt(6),
+        inn({ id: 6, result: {} }),
+        completed('interrupted'),
+        // The turn/start carrying the first steer is on its way when the second arrives (Codex has not answered yet).
+        startOut!,
+        cue({ action: 'steer', text: SECOND }),
+        cue({ action: 'drained', text: SECOND }),
+        startReply!,
+        started2!,
+        // No turn/steer: the new turn is cut, and the next one carries the second steer.
+        interrupt(8, 'turn-2'),
+        inn({ id: 8, result: {} }),
+        completed('interrupted', 'turn-2'),
+        ...turnStart(9, SECOND, 'turn-3'),
+        ...message('msg-3', ['Keeping it'], 'turn-3'),
+        completed('completed', 'turn-3')
+      ], { strict })
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`, `accepted:${SECOND}@drain-2`])
+    })
+
     it('two steers around a cut reach the next turn in the order they were sent', async () => {
       const SECOND = 'and keep the lockfile'
       const { events } = await run([

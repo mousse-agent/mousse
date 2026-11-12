@@ -6,7 +6,7 @@ Status: design, revision 4 (final), after council rounds 1–3 (responses in §8
 
 Three related changes to how a running turn takes a person's message:
 
-1. **A steer waits for a running command (best effort by default, strict as an option).**
+1. **A steer waits for a running command (best effort where the provider's window was measured, strict otherwise and as an option).**
    - While the model writes or thinks, Steer still cuts in at once (#873).
    - While a foreground tool of the turn's own agent is announced or running (Bash, an edit, an MCP call), the steer is held until the tool's result is recorded, then goes in.
    - Background shells, subagents and everything a subagent runs are never waited on.
@@ -161,7 +161,7 @@ The decision and the cut are separate steps: the adapter sends the cut after the
    - Pi: before `abort` (§3.2).
    - ACP agents and Cursor: before `session/cancel` / `active.cancel()` (§2.7).
 
-#### 2.3.1 The best-effort guarantee (default)
+#### 2.3.1 The best-effort guarantee (the default on Codex and Grok)
 
 **Mousse never sends a cut while it knows of a foreground tool that is announced or running, or while the release window is open.** That is the whole promise. It is best effort, because what remains is a tool the provider runs that Mousse does not know of when the cut reaches the provider:
 
@@ -179,11 +179,13 @@ Send now and Stop end tools by design; the guarantee is about steers only.
 #### 2.3.2 Strict release (an option per provider instance)
 
 - **What it does.** With strict release on, a held steer on a `start` provider is released only at a boundary that excludes running tools: the provider's own turn end (`boundary()` above), or Send now. It is never released on output or a timer.
-  - The steer then goes in as the next provider turn of the same Mousse turn, with no cut. On Codex this is the existing `undelivered` path (`CodexProviderService.ts:3058-3082`); on ACP agents it is the guidance re-prompt after the prompt's response; on Cursor, the next run with the guidance.
+  - The steer then goes in as the next provider turn of the same Mousse turn, with no cut. On Codex it is carried by the next `turn/start` through the cut path (`waiting`), never by `turn/steer`; on ACP agents it is the guidance re-prompt after the prompt's response; on Cursor, the next run with the guidance. A turn Codex starts on its own while the run waits for its helpers (an adopted turn) is a provider turn too: its end is a boundary.
+  - The one exception: a held steer stops waiting when the only open call of the turn's own agent waits for a person's answer (an approval, a question, Mousse's `ask_user`). Nothing can start until they answer, so the steer cuts and answers it (§2.1). A question a subagent's call asks does not count.
 - **What it costs.** A steer held during a command waits for the agent's whole turn to end, which can be many commands and a long answer. Send now is the escape.
 - **What it does not change.** Strict only keeps a steer that is already held held. A steer sent while the model writes, with no tool known and the window closed, still cuts at once, with the writing-case window stated above.
-- **Where it is set.** It is a per-instance setting, `runs.steerRelease[<instanceId>]: 'best_effort' | 'strict'`, read when the turn starts and passed to `steerDelivery` as `strict`. It is `best_effort` by default and has no UI in this design. On `announce` providers it changes nothing.
-- **Why both ship.** The two modes differ only in how `releaseOpen` ends, so either can become the default without a redesign. Best effort is the chosen default (§7).
+- **Where it is set.** It is a per-instance setting, `runs.steerRelease[<instanceId>]: 'best_effort' | 'strict'`, read when the turn starts and passed to `steerDelivery` as `strict`. Unset, it is best effort on a provider with a measured window (Codex, Grok) and strict on every other `start` provider, whatever the setting (`steerReleaseWindow`). It has no UI in this design. On `announce` providers it changes nothing.
+- **Why both ship.** The two modes differ only in how `releaseOpen` ends, so either can become the default without a redesign. Best effort is the chosen default where the window was measured (§7).
+- **What windows show.** While no call of the turn runs, the Steer block reads "Waits for the turn to end", and a running tool's progress line (a subagent's, a background call's) says the steer goes in when the turn ends.
 
 ### 2.4 Claude Code
 
@@ -247,6 +249,7 @@ Until then, PR 2 holds and then pushes `now` after `mayCut`. On 2.1.322 the push
 
 - **Mechanism.** `steerBoundary: 'start'`. A person's steer is held while a command, MCP call or web search runs, and while the release window is open. Then the existing #873 cut runs: `mayCut`, `turn/interrupt`, and the next `turn/start` carries the text. It counts as taken only when that start is accepted (`waiting`, `handBack`). The command's output is already in Codex's history by then. Cut messages and steers that wait for the next turn share one list, in the order they were drained, so two steers around a cut reach the next turn in the order they were sent. A cut taken while the run only waits for its helpers starts the next turn and does not cut it.
 - **Strict release** waits for `turn/completed`, then starts the next turn of the run with the text (`waiting`). There is no interrupt.
+- **Never `turn/steer` for a person's steer.** A person's steer drained at a boundary (`native`) goes through the cut path, not `turn/steer` (S2: Codex can drop a steered input it has not read). If the next turn opened meanwhile (a `turn/start` was on its way), that turn is cut and the next one carries the steer.
 - **Questions.** Codex's approvals and `item/tool/requestUserInput` report `toolAwaiting` for their item, so the call that asks never holds a steer: the steer cuts and answers it. A helper's events (its commands' output included) never restart the release window.
 - **Send now.** A forced drain goes through the same cut while the command runs, so `turn/interrupt` ends it. There is no new state.
 - **Agents' steers and notices** keep today's `turn/steer` path, unchanged.

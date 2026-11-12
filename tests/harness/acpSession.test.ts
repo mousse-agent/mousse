@@ -883,6 +883,39 @@ describe('ACP sessions', () => {
       })
     })
 
+    it.each(['mousse/docs', 'Mousse.md'])('a call titled %s is no Mousse question: it holds a steer while a question is pending, like any call', async (title) => {
+      const toolStarted = gate()
+      const finishTool = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update(toolCall('docs-1', title))
+          toolStarted.open()
+          await finishTool.opened
+          await ctx.update(toolDone('docs-1'))
+          await ctx.notify('read it')
+          return 'end_turn'
+        }
+      })
+      const turn = holdTurn(agent)
+      await toolStarted.opened
+      const answer = turn.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], 't')
+      answer.catch(() => undefined)
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      await sleep(300)
+      expect(turn.hold.drained()).toEqual([])
+      expect(turn.hold.heldSteer()).toMatchObject({ tools: 1 })
+      turn.questions.dismissAllForThread('t')
+      finishTool.open()
+      await turn.result
+      expect(agent.cancels).toEqual([])
+      expect(turn.prompts()).toEqual(['work', STEER])
+    })
+
     it('strict release with a tool the agent never reports complete: the steer is never cut in, and stays for the follow-up', async () => {
       const toolStarted = gate()
       const endPrompt = gate()

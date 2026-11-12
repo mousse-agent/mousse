@@ -110,24 +110,28 @@ export const CLAUDE_RELAY_TOOL_PREFIX = `mcp__${MOUSSE_RELAY_SERVER_NAME}__`
 
 /**
  * Which server Mousse serves a call's tool name belongs to, and the tool's own name there, however the runtime names
- * an MCP call: `mcp__mousse__ask_user` (Claude, Codex, Cursor), `mousse__ask_user`, `mousse.ask_user`,
- * `mousse/ask_user`, `mousse: ask_user`, or `ask_user (mousse MCP Server)` (titles some ACP agents give). Undefined
- * for any other name, a bare tool name included.
+ * an MCP call: `mcp__mousse__ask_user` (Claude, Codex, Cursor), and the forms some ACP agents use, `mousse__ask_user`,
+ * `mousse.ask_user`, `mousse/ask_user`, `mousse: ask_user` or `ask_user (mousse MCP Server)`. The server's name is
+ * matched exactly (lower case, as Mousse names it) and the tool's must be snake case, as Mousse's tools are, so a
+ * title such as `Mousse.md` is no Mousse call. `exact`: the `mcp__<server>__` form, which only an MCP call has.
+ * Undefined for any other name, a bare tool name included.
  */
-export function mousseServerToolOf(toolName: string): { server: 'mousse' | 'relay'; tool: string } | undefined {
+export function mousseServerToolOf(toolName: string): { server: 'mousse' | 'relay'; tool: string; exact: boolean } | undefined {
   const name = toolName.trim()
-  if (name.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return { server: 'relay', tool: name.slice(CLAUDE_RELAY_TOOL_PREFIX.length) }
-  if (name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { server: 'mousse', tool: name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) }
-  const relay = /^mousse-relay(?:__|[./:]\s*)(\S+)$/i.exec(name) ?? /^(\S+) \(mousse-relay MCP Server\)$/i.exec(name)
-  if (relay) return { server: 'relay', tool: relay[1]! }
-  const own = /^mousse(?:__|[./:]\s*)([A-Za-z0-9_-]+)$/i.exec(name) ?? /^([A-Za-z0-9_-]+) \(mousse MCP Server\)$/i.exec(name)
-  return own ? { server: 'mousse', tool: own[1]! } : undefined
+  if (name.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return { server: 'relay', tool: name.slice(CLAUDE_RELAY_TOOL_PREFIX.length), exact: true }
+  if (name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { server: 'mousse', tool: name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length), exact: true }
+  const relay = /^mousse-relay(?:__|[./:] ?)([a-z0-9_]+(?:__[a-z0-9_]+)*)$/.exec(name) ?? /^([a-z0-9_]+(?:__[a-z0-9_]+)*) \(mousse-relay MCP Server\)$/.exec(name)
+  if (relay) return { server: 'relay', tool: relay[1]!, exact: false }
+  const own = /^mousse(?:__|[./:] ?)([a-z][a-z0-9_]*)$/.exec(name) ?? /^([a-z][a-z0-9_]*) \(mousse MCP Server\)$/.exec(name)
+  return own ? { server: 'mousse', tool: own[1]!, exact: false } : undefined
 }
 
 /**
  * While the thread has a question pending, whether a call named `toolName` may be the one asking it: a relayed tool
- * (its approval), a Mousse tool that asks the person (`asksUser`: `ask_user`, a quick action's approval) or asks before
- * it edits (`editsWorkspace`), and a Mousse tool `lookup` does not know. A bare name is looked up as it is.
+ * (its approval), or a Mousse tool that asks the person (`asksUser`: `ask_user`, a quick action's approval) or asks
+ * before it edits (`editsWorkspace`), by its exact name in `lookup`. A tool `lookup` does not know counts only in the
+ * exact MCP form (`mcp__mousse__<tool>`, a Mousse tool newer than the registry); in a looser form, or as a bare name,
+ * an unknown tool is no Mousse call, and it runs as any call does.
  */
 export function mousseCallAsksPerson(
   toolName: string,
@@ -136,7 +140,7 @@ export function mousseCallAsksPerson(
   const served = mousseServerToolOf(toolName)
   if (served?.server === 'relay') return true
   const tool = lookup(served ? served.tool : toolName)
-  if (!tool) return served !== undefined
+  if (!tool) return served?.exact === true
   return Boolean(tool.asksUser) || tool.access === 'editsWorkspace'
 }
 
