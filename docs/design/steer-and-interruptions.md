@@ -836,7 +836,7 @@ Conclusion against §2.4:
 
 ### S2: Codex native `turn/steer` (optional, one run each)
 
-`codex app-server` 0.167.0 with a Responses mock. Mousse's managed pin, 0.162.1, was not tested.
+`codex app-server` 0.167.0 with a Responses mock. This spike was not rerun on Mousse's managed pin, 0.162.1. The steer hold of §2.5 was also checked by hand on the managed pin 0.162.1 on 2026-11-12, with the same checks as on 0.167.0, and passed: a person's steer never went in by `turn/steer`.
 - **`turn/steer` during a 3 s command.** It was answered at once, and the command finished. Codex then emitted `item/started` for a `userMessage` with the steer's text, and the next request carried the text after the command's output. That item is a read signal (condition 1 of §2.5).
 - **`turn/steer`, then `turn/interrupt` before the command ended.** The turn ended `interrupted`. The steer was gone: no `userMessage` item, absent from the next turn's request, and no event said so (condition 2, for an interrupt). A failed turn and a thread resumed after a kill were not tried.
 - **Conclusion.** Native steer stays a later change: Mousse would have to hand back an accepted, unread steer on every interrupt itself.
