@@ -1,7 +1,7 @@
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
-export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'activity', 'providers', 'agents', 'integrations', 'speech', 'shortcuts', 'connections', 'storage', 'labs'] as const
+export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'connections', 'storage', 'activity', 'labs'] as const
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number]
 
 /**

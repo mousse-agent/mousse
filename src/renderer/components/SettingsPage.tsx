@@ -38,16 +38,16 @@ import { useStorageReviewPending } from '../lib/storageReview'
 import '../styles/settings.css'
 
 const SETTINGS_SECTIONS = [
-  { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
-  { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'Settings', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'math', 'latex', 'project colors', 'tint'] },
-  { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'Settings', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
-  { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Settings', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
-  { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
-  { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Customize', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
-  { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
-  { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
+  { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'App', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
+  { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'App', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'math', 'latex', 'project colors', 'tint'] },
+  { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'App', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
+  { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'App', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
+  { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Agents', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
+  { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Agents', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
+  { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Agents', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },
   { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['delete', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] },
+  { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'This computer', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
   { id: 'labs', label: 'Labs', icon: FlaskConical, hue: 3, group: 'This computer', keywords: ['experimental', 'profiler', 'memory', 'ram', 'cpu', 'diagnostics', 'heap', 'leak'] }
 ] as const satisfies ReadonlyArray<{ id: SettingsSectionId; label: string; icon: unknown; hue: number; group: string; keywords: readonly string[] }>
 
