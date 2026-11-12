@@ -21,6 +21,12 @@ export type HarnessDriverKind = ProviderDriverKind
 export interface HarnessCaps {
   /** How steer text reaches a live turn (`CommandPolicy.steerStrategy`). */
   steer: 'native' | 'interrupt_restart' | 'queue_only'
+  /**
+   * When the adapter reports a tool call, so a person's steer can wait for it (`CommandPolicy.steerDelivery`):
+   * `announce` before it runs, `start` when it starts, `none` when the adapter keeps the behaviour from before
+   * the hold (a steer cuts in at once). Caps from before the key existed read as `none`.
+   */
+  steerBoundary: 'announce' | 'start' | 'none'
   /** The live turn can be interrupted natively (`CommandPolicy.stopStrategy`). */
   interrupt: boolean
   rollback: 'native' | 'none'
@@ -78,11 +84,11 @@ export interface HarnessCaps {
  */
 export type RunCapabilities = Pick<
   HarnessCaps,
-  'steer' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp' | 'childPolicy'
+  'steer' | 'steerBoundary' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp' | 'childPolicy'
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
+  'steer', 'steerBoundary', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */

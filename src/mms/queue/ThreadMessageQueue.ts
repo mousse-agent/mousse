@@ -241,10 +241,51 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(state === 'steering' && typeof item.steerRunId === 'string' && item.steerRunId ? { steerRunId: item.steerRunId } : {}),
       // Absent (an older build's file) reads as promoted by an older build.
       ...(state === 'steering' && item.promotedWithCopyId === true ? { promotedWithCopyId: true as const } : {}),
+      // Only a steering item can be sent now (Send now on its hold).
+      ...(state === 'steering' && isSteerNow(item.steerNow) ? { steerNow: { runId: item.steerNow.runId, holdGeneration: item.steerNow.holdGeneration, requestId: item.steerNow.requestId } } : {}),
       ...(origin ? { origin } : {})
     })
   }
   return sortQueue(out)
+}
+
+function isSteerNow(value: unknown): value is NonNullable<QueuedMessage['steerNow']> {
+  const field = value as Partial<NonNullable<QueuedMessage['steerNow']>> | null | undefined
+  return Boolean(field) && typeof field!.runId === 'string' && Boolean(field!.runId) &&
+    typeof field!.requestId === 'string' && Boolean(field!.requestId) &&
+    typeof field!.holdGeneration === 'number' && Number.isSafeInteger(field!.holdGeneration)
+}
+
+/** The item without its Send now request (`QueuedMessage.steerNow`). */
+export function withoutSteerNow(item: QueuedMessage): QueuedMessage {
+  if (!item.steerNow) return item
+  const { steerNow: _steerNow, ...rest } = item
+  return rest
+}
+
+/**
+ * Send now on held steers (docs/design/steer-and-interruptions.md §2.9): sets `steerNow` on each named item that is
+ * still `steering` and bound to `runId` (its `steerRunId`, or none while `runId` is the thread's active run).
+ * Idempotent: an item that already carries this request is left alone. `applied`: the ids that carry it now.
+ */
+export function markSteerNow(
+  items: QueuedMessage[],
+  request: { runId: string; holdGeneration: number; requestId: string; itemIds: readonly string[] },
+  activeRunId: string | null
+): { items: QueuedMessage[]; applied: string[] } {
+  const named = new Set(request.itemIds)
+  const applied: string[] = []
+  const next = items.map((item) => {
+    if (!named.has(item.id) || item.intent !== 'steer' || item.state !== 'steering') return item
+    const bound = item.steerRunId ? item.steerRunId === request.runId : activeRunId === request.runId
+    if (!bound) return item
+    applied.push(item.id)
+    // This request, or another click for the same hold: already asked for, nothing to change.
+    if (item.steerNow?.requestId === request.requestId) return item
+    if (item.steerNow?.runId === request.runId && item.steerNow.holdGeneration === request.holdGeneration) return item
+    return { ...item, steerNow: { runId: request.runId, holdGeneration: request.holdGeneration, requestId: request.requestId } }
+  })
+  return { items: applied.length ? next : items, applied }
 }
 
 export function sortQueue(items: QueuedMessage[]): QueuedMessage[] {
@@ -670,7 +711,8 @@ export function demoteSteerItems(items: QueuedMessage[], ids?: readonly string[]
   const demoted = sortQueue(
     items.map((item) => {
       if (item.intent !== 'steer' || item.state === 'claimed' || (only && !only.has(item.id))) return item
-      const { steerRunId: _steerRunId, promotedWithCopyId: _promotedWithCopyId, ...rest } = item
+      // A Send now request belongs to the run the steer was held in: it never follows the item out of `steering`.
+      const { steerRunId: _steerRunId, promotedWithCopyId: _promotedWithCopyId, steerNow: _steerNow, ...rest } = item
       demotedIds.add(item.id)
       return { ...rest, intent: 'normal' as const, state: 'pending' as const, claim: undefined }
     })

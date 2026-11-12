@@ -53,7 +53,9 @@ export const PRIVATE_DELTA_TYPES = [
   'actions.updated',
   'workspace.updated',
   'git.selectionChanged',
-  'thread.title-generation-failed'
+  'thread.title-generation-failed',
+  // A Send now click's outcome (`applied` or `stale`): the window that clicked leaves "Sending…". Phones cannot Send now.
+  'steer.now'
 ] as const
 export interface ThreadDisplayEvent {
   type: (typeof THREAD_EVENT_TYPES)[number] | (typeof BRIDGE_ROUTED_EVENT_TYPES)[number]

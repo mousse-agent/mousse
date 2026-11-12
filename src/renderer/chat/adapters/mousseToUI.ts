@@ -595,7 +595,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     }
     // A message that delivers subagent results carries them structured; the transcript renders
     // those, never the text, which stays what the model reads.
-    if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true }
+    // A steer that is the copy of a queued message keeps its item: the Steer block shows the wait line of its hold.
+    if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true, ...(msg.steerItemId ? { steerItemId: msg.steerItemId } : {}) }
     // The turn a person on another of the user's computers sent says so (the sender is kept on the run, not on the message).
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }

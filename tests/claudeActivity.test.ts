@@ -18,7 +18,7 @@ import { TranscriptAssembler, type TranscriptStreamState } from '../src/mms/run/
 import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
 import type { AgentActivityItem, ProviderToolEvent } from '../src/shared/agentActivity'
 import type { ChatMessage } from '../src/shared/types'
-import { FakeClaudeCli, SESSION, resultFrame, type Frame } from './run/fakeClaudeCli'
+import { FakeClaudeCli, SESSION, messageStart, resultFrame, toolStart, type Frame } from './run/fakeClaudeCli'
 
 const FIXTURE = join(__dirname, 'run', 'fixtures', 'activity', 'claude-subscription.ndjson')
 
@@ -613,5 +613,27 @@ describe('Claude text blocks', () => {
       reader.observe(frame)
     expect(reader.text).toBe('Checking the logs.\n\nThe logs are clean.')
     expect(texts.at(-1)).toBe('Checking the logs.\n\nThe logs are clean.')
+  })
+})
+
+describe('a call dropped before it ran (its input cut off) closes without a result', () => {
+  const dropped = (end: Frame, stopped: boolean) => {
+    const events: ProviderToolEvent[] = []
+    const reader = frameReader(events)
+    reader.stopped = () => stopped
+    reader.observe(toolStart('late', 'Bash', 'prompt') as unknown as SDKMessage)
+    reader.observe(end as unknown as SDKMessage)
+    return events.find((event) => event.phase === 'complete' && event.callId === 'late')?.activity
+  }
+
+  it('at the next message or a steer\'s aborted result: no result reported', () => {
+    expect(dropped(messageStart('steer'), false)).toMatchObject({ status: 'interrupted', interruptedBy: 'no_result' })
+    expect(dropped(resultFrame({ terminalReason: 'aborted_streaming' }), false)).toMatchObject({ status: 'interrupted', interruptedBy: 'no_result' })
+  })
+
+  it('at a Stop\'s aborted result: stopped, like every other call the Stop ended', () => {
+    expect(dropped(resultFrame({ terminalReason: 'aborted_streaming' }), true)).toMatchObject({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
+    // A Stop says nothing about the next message: a call dropped there was cut off by a steer.
+    expect(dropped(messageStart('steer'), true)).toMatchObject({ interruptedBy: 'no_result' })
   })
 })

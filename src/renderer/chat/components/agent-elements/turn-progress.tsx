@@ -20,7 +20,12 @@ export type TurnProgressState = {
   /** The thread, and when the service last changed its turn state: together they name one sighting of a step. */
   threadId?: string | null;
   updatedAt?: string;
+  /** A person's steer waits for the running tool (`TurnState.heldSteer`): the line's tooltip says when it goes in. */
+  steerHeld?: boolean;
 };
+
+/** The tooltip sentence a running tool's line adds while a steer waits for it. */
+export const STEER_HELD_TITLE = "Your steer goes in when it finishes.";
 
 export const TurnProgressContext = createContext<TurnProgressState | null>(null);
 
@@ -162,7 +167,15 @@ function hasContent(messages: readonly UIMessage[]): boolean {
  * the agent waits for, which the header shows, or a thought streaming, whose row is the live line).
  * Starting, waiting for the model and finishing all read "Thinking…", with what it is in the tooltip.
  */
-export function describeTurnProgress({ state, messages, stepSince, awaitingSubagents, standalone, now }: TurnProgressInput): TurnProgress | null {
+export function describeTurnProgress(input: TurnProgressInput): TurnProgress | null {
+  const progress = describeProgress(input);
+  // The line keeps "Running Bash…" while a steer waits for it; the Steer block shows the wait, the tooltip says when.
+  if (progress && input.state?.steerHeld && (progress.kind === "running-tool" || progress.kind === "preparing-tool"))
+    return { ...progress, title: progress.title ? `${progress.title}\n${STEER_HELD_TITLE}` : STEER_HELD_TITLE };
+  return progress;
+}
+
+function describeProgress({ state, messages, stepSince, awaitingSubagents, standalone, now }: TurnProgressInput): TurnProgress | null {
   const phase = state?.phase;
   const step = state?.step;
   if (state?.stopping) return { kind: "stopping", label: "Stopping…" };

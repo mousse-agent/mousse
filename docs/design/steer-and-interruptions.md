@@ -1,6 +1,6 @@
 # Steer waits for commands, Pi cuts in, and cut-off turns are marked
 
-Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). Nothing here is built yet. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
+Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). PR 1 (acceptance per token) and PR C (the mark) are built; PR 2 (the hold on Claude Code, Send now) builds §2.2–§2.4 and §2.9–§2.11, with §2.4 updated to spike S1. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
 
 ## Summary
 
@@ -68,7 +68,7 @@ Three related changes to how a running turn takes a person's message:
 | At a step boundary the provider reports (Pi's `turn_end`; the provider's turn end on Codex, ACP agents and Cursor) | Sent natively; nothing to cut. | Native, as today. |
 | A foreground tool is announced or running, or the release window is open | **Held** until every foreground tool has its result and the release rule (§2.3) holds. | Held on an `interrupt_restart` provider. On a `native` provider: native, as today (it waits for the tool by itself). |
 | Only background work runs (background calls, subagents and their own calls, wait-only tools) | Cut now. A foreground subagent is first moved to the background where the provider can do that (§2.4). | As today. |
-| A call waits for an approval or a question, and no other foreground tool runs | Cut now. The steer answers it as the person, as today (`autoRejectPendingForThread`, #873). | Waits, and never answers it (existing rule, `OS.ts:11962-11968`). |
+| A call waits for an approval or a question, and no other foreground tool runs | Cut now. The steer answers it as the person, as today (`autoRejectPendingForThread`, #873). This covers the provider's own approvals and questions, and Mousse's (`ask_user`, a quick action's or a Mousse tool's approval, the relay's): while the thread has a question pending, Mousse's calls that ask the person do not hold. | Waits, and never answers it (existing rule, `OS.ts:11962-11968`). |
 | Pi compacts its context | Held ("Waits for compaction"). A steer never stops a compaction. | Held. |
 | Set up, stopping, ending or paused | Unchanged (`steerWhenStarted`, `sendNowAfterTurn`, `sendNowIdle`, `steer-late`). | Unchanged. |
 
@@ -154,7 +154,7 @@ The decision and the cut are separate steps: the adapter sends the cut after the
    - model output (§0) is seen, or
    - `STEER_SETTLE_MS` passes with no tool event.
 
-   Any tool event (a start, update or result of any own call) restarts the window. The value comes from spike S4 (§6) under a rule written now.
+   Any tool event (a start, update or result of any own call) restarts the window. Events of a subagent's calls, of a background call or of a wait-only tool do not: they say nothing about the turn's next tool. The value comes from spike S4 (§6) under a rule written now.
 3. **The check at dispatch.** Every adapter calls `mayCut(token)` as the last step before the provider's cut request. If it returns false, the adapter hands the drain back. A tool that started during an await is seen here, through the same tool events.
    - Claude: inside `LiveSession.steer`, after the background moves and `afterCancel()`, just before `push` (`liveSession.ts:782-793`).
    - Codex: inside `cut()`'s `steering` step, before `turn/interrupt` (`CodexProviderService.ts:2957-2964`).
@@ -196,8 +196,10 @@ Send now and Stop end tools by design; the guarantee is about steers only.
 - `LiveSession.steer` makes the background moves, waits for `afterCancel()`, calls `mayCut(token)`, and only then pushes `priority: 'now'`. Claude Code has the tool's result in its conversation by then, so the cut only ends the request that follows.
 
 **Background moves.**
-- `LiveSession.steer` stops calling `backgroundTasks()` with no argument, which the SDK says also moves a foreground Bash.
-- It calls `backgroundTasks(toolUseId)` once for each foreground subagent call still open. The 5 s wait (`STEER_BACKGROUND_MOVE_MS`) stays.
+- `LiveSession.steer` no longer calls `backgroundTasks()` with no argument. S1 showed that this call is what ended commands for the person (#874): it moves a running Bash to the background, where it finishes unseen and a wake turn follows.
+- It calls `backgroundTasks(toolUseId)` once for each foreground subagent call still open that Claude Code runs as a task (`task_started` seen). The 5 s wait (`STEER_BACKGROUND_MOVE_MS`) stays; a move that does not answer within it counts as not moved. A move that worked is recorded, so a later steer does not move that subagent again.
+- A subagent call with no task yet (its prompt still streams) is not moved: `backgroundTasks(id)` answers false for it (S1), and the push alone drops a call whose input still streams. It is not marked `notMovable` either; `task_started` clears that mark if it was set.
+- A root call whose whole `assistant` message never arrived is closed (without a result) when the next root message starts or an aborted result comes: a push that crossed its announcement dropped it before it ran, and no result will follow. Left open, it would hold every later steer until the turn ends.
 - **A subagent that cannot be moved.** When the call throws (background tasks are disabled for the session) or returns false:
   - the adapter reports a tool-event patch, `{ phase: 'update', callId, activity: { notMovable: true } }`, so `foregroundTools` counts that subagent;
   - it hands the steer back.
@@ -205,8 +207,15 @@ Send now and Stop end tools by design; the guarantee is about steers only.
   The next peek then says `hold` rather than `cut`, so the adapter does not retry the move every poll. The subagent is waited on, never ended.
 
 **Send now.**
-- It drains forced and pushes `now`, with no background move.
-- If S1 shows that `now` only moves the Bash to the background (a `detachedToolCall` or "running in the background" result), Send now then calls `stopTask(taskId)` (SDK 0.3.291 `Query.stopTask`) for that task, with the task id from the result (`claudeActivity.ts:381`). The command is stopped either way.
+- It drains forced and pushes the steer, with no background move. On Claude Code 2.1.322 a `'now'` message waits for a running Bash: it neither kills nor moves it (S1). So pushing alone does not stop the command.
+- Right after the push, Send now stops the foreground calls:
+  - when Claude Code has named a task for every one of them (`task_started`, about 3 s after a command starts), `stopTask(taskId)` for each (SDK 0.3.291 `Query.stopTask`). The command ends, and the steer is read once in the same turn;
+  - otherwise one `interrupt()`. It ends the command, and the pushed steer stays queued and runs once, as the turn's next request. An interrupt also stops background agents, so the task stop is preferred when it is possible;
+  - nothing, when no foreground call is left (the command ended on its own as the click came): the push alone cuts the next request, and an interrupt would only stop background work;
+  - never an interrupt once Claude Code took the steer (a `started` lifecycle): it would end the steer's own request. If the interrupt still lands after the take (the command ended as the click came, before Mousse saw it), the aborted result that follows is the steer's own request: the run ends there instead of waiting for a result that never comes, and the steer is read if the model had begun to answer it, or handed back once if not;
+  - at most one interrupt, however many task stops fail;
+  - none for WebFetch or WebSearch: the push alone ends them (S1), and an interrupt would also stop background agents.
+- The push comes first, so the steer is already queued when the command ends: it cannot be lost to the interrupt, and it is never sent twice.
 
 **No live session:** the same hold through `drainEntry`, and `mayCut` before `query.interrupt()`.
 
@@ -217,7 +226,7 @@ It may replace the hold for Claude only if S1 proves all three of these:
 2. what Stop, an interrupt and a daemon crash do with a pushed, unread `'next'` message, so a "pushed, unread" state can be given back exactly once;
 3. that Send now can stop the tool (`stopTask` or an interrupt) without the text being sent twice.
 
-Until then, PR 2 holds and then pushes `now` after `mayCut`.
+Until then, PR 2 holds and then pushes `now` after `mayCut`. On 2.1.322 the push after the result only ends the request that follows (S1: `'now'` waits for a running Bash), so a steer released after a command never ends one.
 
 **Spike S1** (hands-on: the real Claude Code CLI against a local fake Messages server, fake key, isolated home, no sign-in). In this order:
 1. `priority: 'next'`, for each of these questions:
@@ -329,7 +338,7 @@ heldSteer?: { waitsFor: string; detail?: string; tools: number; since: string; h
    - the receipt;
    - a `queue_commands` entry (new op `'steer_now'`, status `pending`, intent `{ runId, holdGeneration, itemIds, requestId }`);
    - the `steer.now_requested` event;
-   - the audit event (`steered_run`, `{ now: true }`).
+   - the audit event: `person.action` with `{ action: 'steered_run', now: true, runId, requestId }` (agents cannot Send now, so it is never an `agent.action`).
 
    A run that is not the active run returns `ignored` (`run_not_active`) and writes no entry. A repeated `clientRequestId` replays the receipt.
 2. **Apply.** Under the queue lock (`mutateDurableQueue`), the journal sets the field on each named item that is still `steering` and bound to the run. An item counts as bound when `steerRunId === runId`. An item with no `steerRunId` also counts when `runId` is the thread's active run in the engine at that moment. (`steerRunId` is set at promotion only when a run is active, `OS.ts:8205`; the composer's and a remote turn's steers can lack it.) The field it sets is:
@@ -351,7 +360,11 @@ heldSteer?: { waitsFor: string; detail?: string; tools: number; since: string; h
    - On `applied`, the hold line clears as the steer goes in.
    - On `stale`, the button goes back to "Send now" for whatever hold is shown then, or the line is gone.
    - The button also leaves "Sending…" whenever `heldSteer` clears or its `holdGeneration` changes. Stop, `returnOrphanedSteers` and a turn's end strip the field without either event, so no ordering of writes can leave the button stuck.
-   - A held entry with no queue item (text a provider handed back) can be forced only by the owning process. A click about it from another process is recorded `stale` at once, so it never hangs on "Sending…".
+   - A person's steer that comes with no queue item (a steer from a device with a permission limit, a run-bound `orchestrator.steer`) is given one as it joins the turn: a row added and marked `steering` for the run in one write, with the device's limit. It still joins the turn at the turn's mode, but a crash while it waits for a tool returns it once (`returnOrphanedSteers`), a Stop returns it to the queue like any held steer, and an unread one becomes the queued message it would have been. Plain text steered in process (`steerThread` with no item, as tests and older callers do) keeps its own follow-up: a queued run from the start (SPEC §14.7).
+   - A held entry with no queue item left (text a provider handed back, or a steer whose row could not be written) can be forced only by the owning process. Windows show its wait line on the newest Steer block. A click about it from another process is recorded `stale` at once, so it never hangs on "Sending…".
+   - The owner's own click is applied only once its command is recorded (receipt, journal entry, audit event). If the run database refuses the command, the click forces nothing.
+   - Only a held batch with a person's steer shows the wait line and Send now. An agent's steer or a subagent notice that waits for a tool is never forced (§2.2), so `heldSteer` is not published for it, and a click that names such a hold is `stale`.
+   - A repeated `clientRequestId` replays the receipt and changes nothing: the owner's hold remembers every request id it was given, so a replayed click neither forces again nor gets a second outcome.
 
 **A stale field never outlives its run.** Every path that moves an item out of `steering`, or hands it back, strips `steerNow`:
 - `demoteSteerItems` and `dropSteerItems` (`src/mms/queue/ThreadMessageQueue.ts:633`, `:650`), which `returnUnreadSteerItems`, promotion reverts and `returnOrphanedSteers` use;
@@ -367,7 +380,7 @@ The field carries `runId` too, and is honoured only for that run. A click that m
 - A second click with a new `clientRequestId` finds the generation consumed, or the field already set with another `requestId` for the same generation (it is then a no-op `applied`).
 - A second click with the same id replays the receipt.
 
-**Who may Send now:** the people who may steer the thread (GUI, and Bridge peers with the `chat` capability, through `orchestrator.steerNow`). Agents may not: `thread_steer` has no `now`, so an agent never ends another thread's command. There is no CLI command in this design (scope, §8).
+**Who may Send now:** a person who may steer the thread: a window on this computer, or one on another of the user's computers (a routed call with the `chat` capability), through `orchestrator.steerNow`. The handler refuses any other caller (`forbidden`). Agents may not: `thread_steer` has no `now`, so an agent never ends another thread's command. There is no CLI command in this design (scope, §8), and phones do not have it: a phone steers or stops only its own runs, which never hold. Windows on another computer hear the outcome as the `steer.now` event on their private stream.
 
 ### 2.10 UI
 
@@ -383,7 +396,8 @@ The Steer block (`steer-group.tsx`) gets one line while the turn's `heldSteer` n
 - "Waits for Bash" is muted, in the existing `.steer-group-label` style. Its tooltip reads "Goes in when Bash finishes" and gives the command (`npm test`). With several tools: "Waits for 2 tools", and the tooltip lists them.
 - "Send now" is a quiet text button like `.chat-run-interrupted-action` (no fill, hover background). Tooltip: "Stop Bash and send now". After the click it reads "Sending…" until `steer.now_applied` or `steer.now_stale` arrives, or the hold clears or changes generation (§2.9).
 - When the steer goes in, the line clears and the reply continues below the block. There is no "Delivered" state.
-- No edge bars, no accent fill, no new colour. The button is focusable, with the accessible name "Send steer now, stops Bash". There is no keyboard shortcut.
+- While a steer waits, its block stays below what the agent writes at the turn's top level: when a new top-level row comes after it, the Steer row takes a time after that row's. Windows order rows by time, so the row is re-stamped in place, not moved (the thread database would write a moved row again), and only that row is sent, as an update. A subagent's or a background call's rows are drawn nested under their call, so they never move it.
+- No edge bars, no accent fill, no new colour. The button is focusable, with the accessible name "Send now: stops Bash" (it starts with the visible words), and its description (`aria-describedby`) gives what it waits for and the command. While it sends it is `aria-disabled`, not `disabled`, so keyboard focus stays on it. There is no keyboard shortcut.
 - A held steer is `steering`, which the queue list already hides (`useThreadQueue.ts:448-452`). The composer's "Steered" notice (`OrchestratorChat.tsx:461-481`) is unchanged.
 
 ### 2.11 Fit with #874, #880 and #872
@@ -443,7 +457,7 @@ Each new test must fail on the code before its change.
   - a Bash that starts during the move hands the steer back;
   - `backgroundTasks(id)` only for subagent calls, never the no-argument form;
   - a failed move reports `notMovable` and the next peek holds without another move;
-  - Send now pushes `now` during the tool, then `stopTask` when the result says it moved to the background.
+  - Send now pushes the steer during the tool, then interrupts the turn; or stops the command's task (`stopTask`) once Claude Code named it (`task_started`).
 - `tests/run/codexAdapter.test.ts` with a new fixture `steer-during-command`:
   - `item/started` for a command, the steer held, `item/completed`, the window, `turn/interrupt`, then `turn/start` with the text, taken on its acceptance;
   - strict: `turn/completed`, then `turn/start` with the text, and no interrupt;

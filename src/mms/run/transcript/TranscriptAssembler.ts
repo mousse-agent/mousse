@@ -7,6 +7,7 @@ import {
   applyToolResult,
   capRecord,
   mergeActivityPatch,
+  normalizeToolName,
   type ActivityInterruptedBy,
   type ActivityPatch,
   type ActivityStatus,
@@ -15,6 +16,7 @@ import {
 import { subagentToolName } from '../../../shared/subagentTools'
 import { parseProviderToolCall } from '../../../shared/toolCallDisplay'
 import type { ChatMessage, TurnPhase } from '../../../shared/types'
+import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../mcp/attachment'
 import type {
   StreamingLlmTextEvent,
   StreamingLlmThinkingEvent,
@@ -67,8 +69,114 @@ export interface TranscriptHooks {
  * turn is one of these, the thread shows Waiting instead of Working. Mousse's own delegation
  * tools return at once and wake the parent later, so they are not here.
  * - `TaskOutput`: Claude Code waiting for a background shell or subagent (older Claude Code).
+ * - `thread_wait`: Mousse's tool that waits for another thread's run (`mcp__mousse__thread_wait` over MCP).
  */
-export const WAIT_TOOL_NAMES: ReadonlySet<string> = new Set(['TaskOutput'])
+export const WAIT_TOOL_NAMES: ReadonlySet<string> = new Set(['TaskOutput', 'thread_wait'])
+
+/** A wait tool (`WAIT_TOOL_NAMES`), by its own name or as the Mousse MCP server's tool. */
+function isWaitTool(name: string): boolean {
+  return WAIT_TOOL_NAMES.has(name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) ? name.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) : name)
+}
+
+/** A foreground call a held steer waits for (`TranscriptAssembler.foregroundTools`). */
+export interface ForegroundTool {
+  /** The provider's id for the call. */
+  callId: string
+  /** The tool's display name: `Bash`, `Write`, an MCP tool's own name. */
+  toolName: string
+  /** The first line of what it runs or touches (a command, a path), when known. */
+  detail?: string
+}
+
+function toolNameOf(message: ChatMessage): string {
+  return message.activity?.toolName ?? message.toolCall?.toolName ?? message.toolCall?.title ?? ''
+}
+
+/** An MCP tool's own name as a window shows it: `create_issue` reads "Create Issue". */
+function mcpDisplayName(tool: string): string {
+  return tool.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim() || 'tool'
+}
+
+/**
+ * The name a window's progress line gives a call ("Running Bash…", from the row's card type), so the Steer block's
+ * "Waits for …" names the same call the same way, whatever the provider calls the tool (Codex's `shell` is a command,
+ * so "Bash"). Kept in step with `activityPart`/`toolPart` (`mousseToUI.ts`) and `toolProgress` (`turn-progress.tsx`).
+ */
+function shownToolName(message: ChatMessage): string {
+  const activity = message.activity
+  switch (activity?.kind) {
+    case 'command':
+      return 'Bash'
+    case 'file_change':
+      return activity.changes.length > 0 && activity.changes.every((change) => change.change === 'add') ? 'Write' : 'Edit'
+    case 'search':
+      return activity.scope === 'code' ? 'Grep' : 'Glob'
+    case 'web_search':
+      return 'WebSearch'
+    case 'subagent':
+      // The line reads "Running subagent…".
+      return 'subagent'
+  }
+  const raw = toolNameOf(message)
+  const mcp = raw.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
+  if (mcp) return mcpDisplayName(mcp[2]!)
+  // A provider that names the server apart (Codex): `server` with the tool's own name.
+  if (activity?.kind === 'generic' && activity.server) return mcpDisplayName(raw)
+  if (!raw) return 'tool'
+  if (subagentToolName(raw)) return 'subagent'
+  const name = normalizeToolName(raw)
+  return name === 'Generic' || name === 'Mcp' ? 'tool' : name
+}
+
+/** A subagent call (Claude's Task or Agent, Mousse's subagent tools) or a call that runs in the background. */
+function isBackgroundOrSubagent(message: ChatMessage): boolean {
+  const activity = message.activity
+  if (activity?.kind === 'subagent') return true
+  if (activity && 'background' in activity && activity.background === true) return true
+  return subagentToolName(toolNameOf(message)) !== null
+}
+
+/**
+ * The row's parent chain reaches a subagent call or a background call: windows draw it nested under that call, never
+ * at the turn's top level. A chain that cannot be resolved counts as not nested.
+ */
+export function nestedUnderSubagentOrBackground(message: ChatMessage, getMessage: (id: string) => ChatMessage | undefined): boolean {
+  const seen = new Set<string>([message.id])
+  let parentId = message.activity?.parentId
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId)
+    const parent = getMessage(parentId)
+    if (!parent) return false
+    if (isBackgroundOrSubagent(parent)) return true
+    parentId = parent.activity?.parentId
+  }
+  return false
+}
+
+const DETAIL_CHARS = 120
+
+function firstLine(text: string | undefined): string | undefined {
+  const line = text?.trim().split('\n')[0]?.trim()
+  if (!line) return undefined
+  return line.length > DETAIL_CHARS ? `${line.slice(0, DETAIL_CHARS - 1)}…` : line
+}
+
+/** What a call runs or touches, in one line: a command, a file, a query. */
+function activityDetail(activity: AgentActivityItem | undefined): string | undefined {
+  switch (activity?.kind) {
+    case 'command':
+      return firstLine(activity.command)
+    case 'file_change':
+      return firstLine(activity.changes[0]?.path)
+    case 'search':
+    case 'web_search':
+      return firstLine(activity.query)
+    case 'subagent':
+      return firstLine(activity.description)
+    default:
+      return undefined
+  }
+}
 
 /**
  * How a text event's `content` relates to the open reply. `replace`: each delta and `complete`
@@ -611,6 +719,60 @@ export class TranscriptAssembler {
     this.state.activeThinkingMessageId = null
   }
 
+  /**
+   * The turn's own calls that are announced or running and whose result the turn waits for, oldest first
+   * (docs/design/steer-and-interruptions.md §0, §2.2). Left out: a call a person is asked about
+   * (`waitingOnPerson`, the provider's call ids), a background call, a subagent call (unless the provider could not
+   * move it to the background: `notMovable`), a wait-only tool, and every call whose parent chain reaches a subagent
+   * or background call. A call whose parent cannot be found counts as the turn's own: it may hold, never cut.
+   *
+   * `asksPerson`: while the thread has a question pending that no provider call reported (`waitingOnPerson` only knows
+   * the provider's own approvals and questions), the calls that may be the one asking it: Mousse's own tools that ask
+   * the person (`ask_user`, an approval). The steer answers such a question, as it answers the provider's.
+   */
+  foregroundTools(waitingOnPerson: ReadonlySet<string> = new Set(), asksPerson?: (toolName: string) => boolean): ForegroundTool[] {
+    const tools: ForegroundTool[] = []
+    for (const [callId, messageId] of this.state.activeToolCallMessageIds) {
+      if (waitingOnPerson.has(callId)) continue
+      const message = this.hooks.getMessage(messageId)
+      if (!message || !this.ownsForeground(message)) continue
+      const toolName = toolNameOf(message)
+      if (asksPerson?.(toolName)) continue
+      const detail = activityDetail(message.activity)
+      tools.push({ callId, toolName: shownToolName(message), ...(detail ? { detail } : {}) })
+    }
+    return tools
+  }
+
+  /**
+   * Whether `callId` is one of the turn's own foreground calls (open or ended): its events restart a held steer's
+   * release window (§2.3); a subagent's, a background call's or a wait tool's do not. A call with no row counts.
+   */
+  ownsForegroundCall(callId: string | undefined): boolean {
+    if (!callId) return true
+    const messageId = this.state.activeToolCallMessageIds.get(callId) ?? this.callToMessage.get(callId)
+    const message = messageId ? this.hooks.getMessage(messageId) : undefined
+    return !message || this.ownsForeground(message)
+  }
+
+  /** The call is the turn's own foreground call: not excluded itself, and no subagent or background call above it. */
+  private ownsForeground(message: ChatMessage): boolean {
+    if (isBackgroundOrSubagent(message) && !message.activity?.notMovable) return false
+    if (isWaitTool(toolNameOf(message))) return false
+    const seen = new Set<string>([message.id])
+    let parentId = message.activity?.parentId
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId)
+      const parent = this.hooks.getMessage(parentId)
+      // Unresolvable: the call is counted as the turn's own.
+      if (!parent) return true
+      // A subagent's own calls never hold, whether it runs in the foreground or was moved to the background.
+      if (isBackgroundOrSubagent(parent)) return false
+      parentId = parent.activity?.parentId
+    }
+    return true
+  }
+
   private setToolPhase(): void {
     this.blockedOnWait = this.isBlockedOnWait()
     this.hooks.setPhase('tool_running', this.blockedOnWait ? { blockedOnWait: true } : undefined)
@@ -623,7 +785,7 @@ export class TranscriptAssembler {
       const message = this.hooks.getMessage(messageId)
       const call = message?.toolCall
       // Vendor runtimes name the tool in the title; the pi loop parses it into `toolName`.
-      if (!WAIT_TOOL_NAMES.has(message?.activity?.toolName ?? call?.toolName ?? call?.title ?? '')) return false
+      if (!isWaitTool(message?.activity?.toolName ?? call?.toolName ?? call?.title ?? '')) return false
     }
     return true
   }

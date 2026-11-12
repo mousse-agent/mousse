@@ -311,6 +311,12 @@ export function bridgeProtocolEvent(
       console.error(`[title] generation failed for ${threadId}: ${err}`)
       return true
     }
+    case 'steer.now': {
+      const data = event.data as { requestId?: unknown; outcome?: unknown } | undefined
+      if (typeof data?.requestId === 'string' && (data.outcome === 'applied' || data.outcome === 'stale'))
+        broadcast('orchestrator:steer-now', { threadId, requestId: data.requestId, outcome: data.outcome })
+      return true
+    }
     case 'turn.steered': {
       const text = (event.data as { text?: string })?.text ?? ''
       broadcast('orchestrator:turn-steered', { threadId, text })

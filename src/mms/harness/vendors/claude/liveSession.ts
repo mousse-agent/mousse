@@ -453,6 +453,26 @@ class CancelTimedOut extends Error {
   }
 }
 
+/** How a steer is delivered (`LiveSession.steer`). */
+export interface SteerOptions {
+  /** Send now: pushed at once with no background move, and the foreground tools are stopped. */
+  forced?: boolean
+  /**
+   * The turn's own subagent calls still in the foreground that Claude Code runs as a task (`task_started`): each is
+   * moved to the background before the push. A subagent call with no task yet is not moved: Claude Code drops a call
+   * whose input still streams when an immediate message arrives (spike S1).
+   */
+  subagents?: readonly string[]
+  /** A subagent that was moved: it is not moved again for a later steer. */
+  moved?: (callId: string) => void
+  /** A subagent that could not be moved: the steer is not pushed, and waits for it. */
+  notMovable?: (callId: string) => void
+  /** The check at dispatch, right before the push; false: the steer is not pushed. */
+  mayCut?: () => boolean
+  /** Send now: the calls to stop, with the task each runs as when Claude Code reported one. */
+  foreground?: () => ReadonlyArray<{ callId: string; taskId?: string; toolName?: string }>
+}
+
 /** A push met a cancel in progress; the caller waits for `afterCancel()` and pushes again. */
 export class CancelInProgress extends Error {
   constructor() {
@@ -529,6 +549,13 @@ export class LiveRun {
   onRead: ((id: string) => void) | undefined
   /** The ids of the steers this run pushed (`LiveSession.steer`). */
   readonly steerIds = new Set<string>()
+  /**
+   * Steers whose Send now interrupted the turn (`LiveSession.stopForeground`). If Claude Code had already taken one for
+   * its next request when the interrupt landed, the aborted result that follows is that steer's own request, not the
+   * command's: the run ends there instead of waiting for a result that never comes. The steer is read if the model
+   * answered it before the abort, and handed back once if not.
+   */
+  readonly interruptedFor = new Set<string>()
   steered = false
   settled = false
   /** The turn was cancelled but the stream still owes its result; frames are dropped until then. */
@@ -656,6 +683,9 @@ function echoedIds(message: SDKMessage): string[] {
   if (Array.isArray(frame.user_message_uuids)) return frame.user_message_uuids.filter((id): id is string => typeof id === 'string')
   return typeof frame.user_message_uuid === 'string' ? [frame.user_message_uuid] : []
 }
+
+/** Tools an immediate message ends by itself (spike S1: WebFetch is cancelled, WebSearch returns empty): Send now needs no interrupt for them. */
+const PUSH_ENDS_TOOLS: ReadonlySet<string> = new Set(['WebFetch', 'WebSearch'])
 
 const isTaskOrigin = (message: SDKMessage): boolean => {
   const origin = (message as { origin?: unknown }).origin
@@ -891,28 +921,42 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * Delivers a steer to the live turn without interrupting it: foreground subagents move to the
-   * background first (a steer aborts the stream, which would end them), then the text is pushed as an
-   * immediate user message the run owns. Returns the pushed message's id, or false when the run ended first.
+   * Delivers a steer to the live turn (docs/design/steer-and-interruptions.md §2.4): the text is pushed as an immediate
+   * user message the run owns. Returns the pushed message's id, or false when it was not pushed (the run ended first,
+   * or the steer must wait): the caller hands it back.
+   *
+   * - A steer the orchestrator released (no foreground tool): each foreground subagent `options.subagents` names is
+   *   moved to the background first, by its own id (a steer aborts the stream, which would end it). Only that subagent
+   *   moves: the call with no id also moves a running command, which then never ends for the person (#874). A subagent
+   *   that cannot be moved (the call throws, answers false or does not answer in time) is reported
+   *   (`options.notMovable`) and the steer is not pushed: it waits for that subagent. Right before the push,
+   *   `options.mayCut` is asked again; a tool that started meanwhile keeps the steer waiting.
+   * - `options.forced` (Send now): pushed at once, with no move; then the foreground tools are stopped, since an
+   *   immediate message waits for a running command on Claude Code (spike S1). Each is stopped as its task
+   *   (`stopTask`) when Claude Code reported one for every call (`task_started`, about 3 s after a command starts);
+   *   otherwise the turn is interrupted, which ends the command and leaves the pushed steer queued, so it runs once.
+   *   With no call left to stop (the command ended as the click came), the push alone is the cut.
+   * - A subagent call Claude Code has not started a task for yet is not moved (`options.subagents` leaves it out): the
+   *   push alone drops a call whose input still streams (spike S1).
+   *
    * Pushed is not read, and taken (`run.read`, a `started` lifecycle) is not read either: `run.answered` and `onRead`
    * say when the model answers it, and `unreadFate` what became of one it had not answered when the turn ended.
    * `pushed` is told the id at the moment of the push, before anything else can run.
    */
-  async steer(run: LiveRun, text: string, pushed?: (id: string) => void): Promise<string | false> {
+  async steer(run: LiveRun, text: string, pushed?: (id: string) => void, options: SteerOptions = {}): Promise<string | false> {
     const query = this.query
     if (!query || run.settled || run.abandoned || this.dead) return false
     run.steerInFlight++
     try {
-      const moved = (query as { backgroundTasks?: () => Promise<boolean> }).backgroundTasks?.()
-      if (moved) {
-        let timer: ReturnType<typeof setTimeout> | undefined
-        await Promise.race([
-          moved.catch(() => false),
-          new Promise((resolve) => {
-            timer = setTimeout(resolve, this.timings.backgroundMoveMs)
-          })
-        ])
-        if (timer) clearTimeout(timer)
+      if (!options.forced) {
+        for (const callId of options.subagents ?? []) {
+          if (await this.moveToBackground(query, callId)) {
+            options.moved?.(callId)
+            continue
+          }
+          options.notMovable?.(callId)
+          return false
+        }
       }
       // The turn's result may have arrived while the foreground work moved; settling waited for this
       // steer, but a steer never starts a turn the run no longer owns: it is the next queued turn.
@@ -921,6 +965,8 @@ export class LiveSession<Turn = unknown> {
       for (;;) {
         await this.afterCancel()
         if (run.settled || run.resultSeen || run.abandoned || this.dead || this.query !== query) return false
+        // The check at dispatch: nothing may run between it and the push.
+        if (!options.forced && options.mayCut && !options.mayCut()) return false
         try {
           id = this.push(run, {
             type: 'user',
@@ -938,6 +984,7 @@ export class LiveSession<Turn = unknown> {
       run.deferredResult = undefined
       run.steerIds.add(id)
       pushed?.(id)
+      if (options.forced) this.stopForeground(run, query, id, options.foreground?.() ?? [])
       return id
     } finally {
       run.steerInFlight--
@@ -948,6 +995,56 @@ export class LiveSession<Turn = unknown> {
         this.endAtResult(run, deferred, true)
       }
     }
+  }
+
+  /** Moves the foreground subagent `callId` to the background. False: it could not be moved (it stays in the foreground). */
+  private async moveToBackground(query: Query, callId: string): Promise<boolean> {
+    const move = (query as { backgroundTasks?: (toolUseId?: string) => Promise<boolean> }).backgroundTasks
+    if (typeof move !== 'function') return false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      // Background tasks turned off for the session throw at once (spike S1).
+      return await Promise.race([
+        Promise.resolve(move.call(query, callId)).then((moved) => moved === true, () => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), this.timings.backgroundMoveMs)
+        })
+      ])
+    } catch {
+      return false
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Send now, after the steer `id` is pushed: ends the tools the turn waits for. Each by its task when Claude Code named
+   * one for every call; otherwise one interrupt, which ends the command and keeps the pushed steer queued (spike S1).
+   * Not awaited: the steer is already in place.
+   * - No call left to stop (the command ended on its own meanwhile): nothing more. The push alone cuts the next
+   *   request, and an interrupt would also stop the turn's background agents and shells.
+   * - Never an interrupt once Claude Code took the steer (`run.read`, a `started` lifecycle): it would end the steer's
+   *   own request, whose aborted result the run waits past (a steered run ends at the steer's own result), so the run
+   *   would never end.
+   */
+  private stopForeground(run: LiveRun, query: Query, id: string, calls: ReadonlyArray<{ callId: string; taskId?: string; toolName?: string }>): void {
+    // WebFetch and WebSearch end at the push itself (spike S1): an interrupt would only stop background work too.
+    const stoppable = calls.filter((call) => !call.toolName || !PUSH_ENDS_TOOLS.has(call.toolName))
+    if (stoppable.length === 0) return
+    const stopTask = (query as { stopTask?: (taskId: string) => Promise<void> }).stopTask
+    // At most one interrupt, whichever task stops failed.
+    let interrupted = false
+    const interrupt = (): void => {
+      if (interrupted || run.read.has(id) || run.settled || run.abandoned || this.dead || this.query !== query) return
+      interrupted = true
+      run.interruptedFor.add(id)
+      void Promise.resolve(query.interrupt()).catch(() => undefined)
+    }
+    if (typeof stopTask === 'function' && stoppable.every((call) => call.taskId)) {
+      for (const call of stoppable) void Promise.resolve(stopTask.call(query, call.taskId!)).catch(interrupt)
+      return
+    }
+    interrupt()
   }
 
   /**
@@ -1760,7 +1857,9 @@ export class LiveSession<Turn = unknown> {
     // Not cleared above: a cut-off turn's aborted result says nothing about it.
     this.stray = undefined
     // The turn a steer interrupted ends at the steer's own result, not at the abort.
-    if (isAbortResult(message) && target.steered) return void target.deliver(message)
+    // Unless Send now's interrupt aborted the steer's own request (Claude Code had taken it): no result of its own will
+    // come. The run ends here; the steer is read if the model answered it, and handed back once if not.
+    if (isAbortResult(message) && target.steered && !this.interruptAbortedSteer(target)) return void target.deliver(message)
     // A steer that has not been echoed yet starts a turn this run owns.
     const queued = (message as { queued_turn_count?: number }).queued_turn_count ?? 0
     if (target.owned.size > 0 && queued > 0) return void target.deliver(message)
@@ -1793,6 +1892,17 @@ export class LiveSession<Turn = unknown> {
    * A Claude Code that cannot say (no per-message cancel) is not waited for: the run ends, and the steer is handed back.
    * Stop cancels a held run like any other.
    */
+  /**
+   * Send now's interrupt landed after Claude Code took the steer for its next request: the aborted result is that
+   * request's. (In the normal order the interrupt ends the command first, and its aborted result comes before Claude
+   * Code takes the queued steer.) Answered or not, no result of the steer's own will follow: one the model answered
+   * is read; one it did not is handed back once by the turn's end (`unreadFate`).
+   */
+  private interruptAbortedSteer(run: LiveRun): boolean {
+    for (const id of run.interruptedFor) if (run.read.has(id)) return true
+    return false
+  }
+
   private endAtResult(run: LiveRun, result: SDKResultMessage, delivered = false): void {
     // Already held at its result: Claude Code is asked once, and one wait runs.
     if (run.atResult) return

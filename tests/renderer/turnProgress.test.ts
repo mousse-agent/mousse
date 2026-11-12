@@ -295,6 +295,17 @@ describe('the line under Working', () => {
     expect(line()!.title).toBe('npm test -- --run slow.test.ts')
   })
 
+  it('5. while a steer waits for the command, the line still reads Running <tool>…, and its tooltip says when the steer goes in', () => {
+    render([ask(), reply('c1', tool('Bash', 'input-available', { command: 'sleep 15' }))], 'streaming', { phase: 'tool_running', steerHeld: true })
+    expectLive('Running Bash…')
+    expect(line()!.title).toBe('sleep 15\nYour steer goes in when it finishes.')
+    // Nothing held: the tooltip is the command alone.
+    render([ask(), reply('c1', tool('Bash', 'input-available', { command: 'sleep 15' }))], 'streaming', { phase: 'tool_running' })
+    expect(line()!.title).toBe('sleep 15')
+    // A line that is not a tool's adds nothing.
+    expect(describeTurnProgress({ state: { phase: 'streaming', steerHeld: true }, messages: [reply('c1', text('so far'))], now: NOW.valueOf() })?.title).toBeUndefined()
+  })
+
   it('5. an MCP tool running is named by its tool', () => {
     render([ask(), reply('c1', tool('mcp__github__get_issue', 'input-available', { issue: 12 }))], 'streaming', { phase: 'tool_running' })
     expectLive('Running Get Issue…')

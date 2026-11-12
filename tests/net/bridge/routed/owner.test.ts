@@ -569,6 +569,23 @@ describe('a routed call runs as a person on another computer', () => {
     vi.restoreAllMocks()
   }, 60_000)
 
+  it('Send now from another computer reaches the owner as a person\'s, only for a run of that thread', async () => {
+    const { ok, call, thread, f } = await owner()
+    const t = thread()
+    const other = thread('Another thread')
+    const runs: Record<string, string> = { 'run-1': t.id, 'run-other': other.id }
+    vi.spyOn(f.mms.runEngine, 'getRun').mockImplementation(((runId: string) => (runs[runId] ? { runId, threadId: runs[runId] } : null)) as never)
+    const steerNow = vi
+      .spyOn(f.mms.orchestrator, 'steerNow')
+      .mockResolvedValue({ status: 'accepted', runId: 'run-1', sequence: 1, replayed: false })
+    expect(await ok('orchestrator.steerNow', { threadId: t.id, runId: 'run-1', holdGeneration: 2, itemIds: ['item-1'], clientRequestId: 'click-1' })).toMatchObject({ ok: true })
+    expect(steerNow).toHaveBeenCalledExactlyOnceWith({ threadId: t.id, runId: 'run-1', holdGeneration: 2, itemIds: ['item-1'], clientRequestId: 'click-1' })
+    // A run of another thread is not this thread's to force.
+    expect(await call('orchestrator.steerNow', { threadId: t.id, runId: 'run-other', holdGeneration: 2, itemIds: [] })).toMatchObject({ ok: false, error: { code: 'run_not_found' } })
+    expect(steerNow).toHaveBeenCalledTimes(1)
+    vi.restoreAllMocks()
+  }, 60_000)
+
   it('is refused the things only a window of this computer may do', async () => {
     const { call, f } = await owner()
     // Nothing for a local window is reachable: not routed, so not registered.

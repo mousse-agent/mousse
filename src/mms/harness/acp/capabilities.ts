@@ -10,6 +10,8 @@ import type { AcpRpc } from './connection'
  */
 export const ACP_BASE_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
+  // Until the ACP adapter adopts the hold (PR 3), a steer cuts in at once.
+  steerBoundary: 'none',
   interrupt: true,
   rollback: 'none',
   fork: 'portable',

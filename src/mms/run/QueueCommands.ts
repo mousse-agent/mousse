@@ -11,7 +11,7 @@ import type { AgentActor } from './types'
  * (`stopGeneration.ts`): small functions over the run database.
  */
 
-export type QueueOp = 'enqueue' | 'edit' | 'remove' | 'reorder' | 'promote'
+export type QueueOp = 'enqueue' | 'edit' | 'remove' | 'reorder' | 'promote' | 'steer_now'
 
 export type QueueCommandStatus = 'pending' | 'effects_pending' | 'applied' | 'failed'
 
@@ -48,6 +48,11 @@ export interface QueueIntent {
   abandonWorkflowInvocationId?: string
   /** The agent-supplied fields of the command (not the revision it read): a request id reused for other fields is not a retry. */
   fingerprint?: string
+  /**
+   * steer_now: Send now on a held steer (`RunCommand` `steer_now`). The items it names get `steerNow` when they are still
+   * `steering` and bound to `runId`; none qualifying is a stale request.
+   */
+  steerNow?: { runId: string; holdGeneration: number; itemIds: string[]; requestId: string }
 }
 
 export interface QueueCommandRow {
@@ -75,8 +80,13 @@ function toRow(row: Record<string, unknown>): QueueCommandRow {
 }
 
 /** What is kept of a change once it is applied: enough to tell a retry from a reused request id, no text. */
-function compact(intent: QueueIntent): Pick<QueueIntent, 'op' | 'threadId' | 'itemId' | 'cancelRunIds' | 'releaseInboxIds' | 'fingerprint'> {
-  return { op: intent.op, threadId: intent.threadId, itemId: intent.itemId, cancelRunIds: [], releaseInboxIds: [], ...(intent.fingerprint ? { fingerprint: intent.fingerprint } : {}) }
+function compact(intent: QueueIntent): Pick<QueueIntent, 'op' | 'threadId' | 'itemId' | 'cancelRunIds' | 'releaseInboxIds' | 'fingerprint' | 'steerNow'> {
+  return {
+    op: intent.op, threadId: intent.threadId, itemId: intent.itemId, cancelRunIds: [], releaseInboxIds: [],
+    ...(intent.fingerprint ? { fingerprint: intent.fingerprint } : {}),
+    // Ids only, no text: the owner's poll reads it while it holds.
+    ...(intent.steerNow ? { steerNow: intent.steerNow } : {})
+  }
 }
 
 export class QueueCommands {

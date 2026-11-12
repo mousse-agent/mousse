@@ -220,8 +220,18 @@ export type ClaudeSubscriptionChatInput = {
   returnSteer?: (text: string, token?: string) => void
   /** A drained steer was pushed to Claude: its token is spent. */
   steerTaken?: (token?: string) => void
-  /** `drainSteer` with a token that `returnSteer` gets back, so several steers in flight are returned each with its own rows. */
-  drainSteerEntry?: () => { text: string; token: string } | undefined
+  /**
+   * `drainSteer` with a token that `returnSteer` gets back, so several steers in flight are returned each with its own
+   * rows. With `expect`, it takes only when the orchestrator's decision is that one (`TurnControl.drainSteerEntry`);
+   * `forced`: Send now asked for it, so the running tool is stopped.
+   */
+  drainSteerEntry?: (opts?: { expect?: 'cut' }) => { text: string; token: string; forced?: boolean } | undefined
+  /** What a drain now would do, without taking anything (`TurnControl.peekSteer`): only `cut` is drained here. */
+  peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
+  /** The check right before the cut is sent (`TurnControl.mayCut`): false hands the drain back, and the hold resumes. */
+  mayCut?: (token: string) => boolean
+  /** A person is asked about the call `callId` (an approval or a question) and it waits for them, or no longer does. */
+  onToolAwaiting?: (callId: string, waiting: boolean) => void
   onTool?: (event: ProviderToolEvent) => void
 }
 /**
@@ -2174,6 +2184,11 @@ export class ClaudeSubscriptionProviderService {
         }
         const childDenial = claudeChildToolDenial(input.child, toolName)
         if (childDenial) return { behavior: 'deny', message: childDenial }
+        // While a person is asked about the call it does not run: a steer does not wait for it (it answers it).
+        const asking = <T>(ask: () => Promise<T>): Promise<T> => {
+          input.onToolAwaiting?.(context.toolUseID, true)
+          return ask().finally(() => input.onToolAwaiting?.(context.toolUseID, false))
+        }
         // Mousse's own tools are scoped by the run's credential (mode ceiling, caller thread);
         // the server refuses what the run may not do, so they need no extra prompt.
         if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
@@ -2210,7 +2225,7 @@ export class ClaudeSubscriptionProviderService {
               native.some((item) => typeof item.question !== 'string')
             )
               return { behavior: 'deny', message: 'Invalid Claude question' }
-            const answers = await this.questions.requestAnswers(
+            const answers = await asking(() => this.questions.requestAnswers(
               native.map((item, index) => ({
                 id: String(index),
                 prompt: item.question,
@@ -2222,7 +2237,7 @@ export class ClaudeSubscriptionProviderService {
                 }))
               })),
               input.threadId
-            )
+            ))
             if (controller.signal.aborted || context.signal.aborted)
               return { behavior: 'deny', message: 'Turn cancelled' }
             return {
@@ -2260,7 +2275,7 @@ export class ClaudeSubscriptionProviderService {
             : unskippable
               ? `Claude Code asks for this itself and does not allow it to be remembered${context.decisionReason ? `: ${context.decisionReason.slice(0, 300)}` : '.'}`
               : ''
-          const answer = await this.questions.requestAnswers(
+          const answer = await asking(() => this.questions.requestAnswers(
             [
               {
                 id: 'permission',
@@ -2285,7 +2300,7 @@ export class ClaudeSubscriptionProviderService {
                 ...(reason ? { reason } : {})
               }
             }
-          )
+          ))
           if (
             controller.signal.aborted ||
             context.signal.aborted ||
@@ -2447,6 +2462,8 @@ export class ClaudeSubscriptionProviderService {
       this.save()
     }
     const frames = new TurnFrames(input, metrics)
+    // A Stop cancels the turn's controller: what its aborted result drops reads as stopped.
+    frames.stopped = () => controller.signal.aborted
     let success = false
     /** The id of the prompt this turn pushed (none for a turn Claude started). */
     let promptId: string | undefined
@@ -2540,9 +2557,16 @@ export class ClaudeSubscriptionProviderService {
     const collectSteer = () => {
       if (controller.signal.aborted) return
       if (liveRun && (liveRun.settled || liveRun.abandoned || liveRun.resultSeen)) return
-      const drained = input.drainSteerEntry ? input.drainSteerEntry() : undefined
-      const steer = (drained ? drained.text : input.drainSteer?.())?.trim()
+      // The hold (docs/design/steer-and-interruptions.md §2.4): while a foreground tool is announced or running, nothing
+      // is drained; a steer goes in as a cut once it has its result, or at once on Send now.
+      const holds = Boolean(input.peekSteer && input.drainSteerEntry)
+      if (holds && input.peekSteer!()?.delivery !== 'cut') return
+      const drained = input.drainSteerEntry ? input.drainSteerEntry(holds ? { expect: 'cut' } : undefined) : undefined
+      const steer = (drained ? drained.text : holds ? undefined : input.drainSteer?.())?.trim()
       if (!steer) return
+      const forced = drained?.forced === true
+      // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting.
+      const mayCut = (): boolean => !drained || !input.mayCut || input.mayCut(drained.token)
       // Accepted by its drain's token, when the drain has one (`TurnSink.steerAccepted`).
       const steered = (): void => {
         if (drained) input.onSteer?.(steer, drained.token)
@@ -2551,16 +2575,35 @@ export class ClaudeSubscriptionProviderService {
       if (live && liveRun) {
         // A live turn is steered without interrupting it: the text joins the stream as an immediate
         // message, and background helpers keep running.
-        this.questions.autoRejectPendingForThread(input.threadId)
         // Known from the moment of the push, so the turn's end settles it whenever it comes.
         const pushed = (id: string): void => {
+          // The steer answers what the person is being asked; only once it is really pushed (it may still wait).
+          this.questions.autoRejectPendingForThread(input.threadId)
           input.steerTaken?.(drained?.token)
           pushedSteers.set(id, { text: steer, ...(drained ? { token: drained.token } : {}), steered, settled: false, placed: false })
           frames.atNextMessage(() => steerPlace(id))
         }
-        void live.steer(liveRun, steer, pushed).then((id) => {
+        void live.steer(liveRun, steer, pushed, {
+          forced,
+          subagents: frames.foregroundSubagents(),
+          // Moved once: a later steer does not ask again.
+          moved: (callId) => frames.markBackgrounded(callId),
+          // Waited for from now on: the next peek holds, without trying the move again.
+          notMovable: (callId) => {
+            frames.markNotMovable(callId)
+            const title = frames.tools.get(callId) ?? 'Agent'
+            input.onTool?.({ phase: 'update', callId, title, toolName: title, activity: { notMovable: true } })
+          },
+          mayCut,
+          foreground: () => frames.foregroundCalls()
+        }).then((id) => {
           if (id === false) input.returnSteer?.(steer, drained?.token)
         }, () => cancel())
+        return
+      }
+      // The check at dispatch, right before the interrupt that cuts: a tool announced meanwhile keeps the steer waiting.
+      if (!forced && !mayCut()) {
+        input.returnSteer?.(steer, drained?.token)
         return
       }
       // Taken, not accepted: it is accepted only once the restarted query reads it, and handed back if the turn ends first.

@@ -62,6 +62,7 @@ export const GIT_ACCESS = {
   'orchestrator.send': 'owned',
   'orchestrator.abort': 'owned',
   'orchestrator.steer': 'owned',
+  'orchestrator.steerNow': 'owned',
   'orchestrator.retry': 'owned',
   'orchestrator.isTurnActive': 'none',
   'orchestrator.contextUsage': 'none',

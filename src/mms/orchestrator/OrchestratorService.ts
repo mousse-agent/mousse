@@ -78,7 +78,7 @@ import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '.
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
-import { stopStrategy } from '../run/CommandPolicy'
+import { STEER_SETTLE_MS, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
@@ -91,6 +91,7 @@ import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManage
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
+import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../run/mcp/attachment'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
 import { DevGuiTools } from '../devgui/DevGuiTools'
@@ -122,7 +123,7 @@ import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeIt
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
+import { nestedUnderSubagentOrBackground, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
@@ -176,6 +177,7 @@ import {
   type TurnPhase,
   type TurnStep,
   type TurnState,
+  type HeldSteer,
   type TurnStateSnapshot,
   type UserQuestion,
   type UserQuestionAnswers,
@@ -294,6 +296,7 @@ import {
   releaseStopHold,
   removeQueuedMessage,
   reorderQueuedMessages,
+  withoutSteerNow,
   type QueuedMessagePatch
 } from '../queue/ThreadMessageQueue'
 import {
@@ -332,6 +335,7 @@ import {
   runDurableQueueCommand
 } from '../queue/durableQueue'
 import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
+import { SteerHold, type PendingSteerFacts } from './steerHold'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { AppError, errorCauseText, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
@@ -632,6 +636,11 @@ export interface RemoteTurnOptions {
   /** Ends the turn; without one, only the profile's shutdown does. */
   signal?: AbortSignal
   drainSteer?: () => string | undefined
+  /**
+   * What `drainSteer` would return now, without taking it. Without it a person's steer cannot wait for a running tool
+   * (the hold could not see the steer without taking it), so the whole turn cuts in at once, as before the hold.
+   */
+  peekSteer?: () => string | undefined
   /** The mode the sender chose; agent when absent. */
   mode?: ChatMode
   images?: ChatImageAttachment[]
@@ -1800,6 +1809,10 @@ export class OrchestratorService extends EventEmitter {
   private startupDrainScheduled = new Set<string>()
   private featureFlags: MousseFeatureFlags = { ...DEFAULT_FEATURE_FLAGS }
   private turnStates = new Map<string, TurnState>()
+  /** The steer hold of each run whose turn runs in this process (`SteerHold`), for Send now. */
+  private readonly steerHolds = new Map<string, SteerHold>()
+  /** The release window after a foreground tool on a `start` provider (`STEER_SETTLE_MS`; tests lengthen it). */
+  private steerSettleMs = STEER_SETTLE_MS
   /** Each thread's running `/compact`, so a Stop can end it (`stopCompaction`). */
   private readonly compactions = new Map<string, AbortController>()
   /** Running compactions whose result was taken: a Stop or Send now comes too late for them. */
@@ -1839,6 +1852,8 @@ export class OrchestratorService extends EventEmitter {
     else delete state.uncertain
     // A step is only part of the phase it was given with (`setTurnStep`).
     if (patch?.step && isTurnActivePhase(phase)) state.step = patch.step
+    // A held steer stays shown through the turn's phases (a tool ends, the model writes) until its hold changes.
+    if (existing?.heldSteer && isTurnActivePhase(phase) && state.turnId === existing.turnId) state.heldSteer = existing.heldSteer
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) state.startedAt = now
     if (phase !== 'idle' && !state.startedAt) state.startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
@@ -1858,6 +1873,22 @@ export class OrchestratorService extends EventEmitter {
     if (!step && !existing.step) return
     if (step && existing.step && JSON.stringify(step) === JSON.stringify(existing.step)) return
     this.setTurnPhase(threadId, existing.phase, step ? { step } : undefined)
+  }
+
+  /**
+   * What a held steer waits for (`TurnState.heldSteer`), or undefined once nothing is held. Only an active turn holds;
+   * the state's other fields and its `updatedAt` are kept, so a retry's countdown is not restarted by it.
+   */
+  private setHeldSteer(threadId: string, held: HeldSteer | undefined): void {
+    const existing = this.turnStates.get(threadId)
+    if (!existing || !isTurnActivePhase(existing.phase)) return
+    if (!held && !existing.heldSteer) return
+    if (held && existing.heldSteer && JSON.stringify(held) === JSON.stringify(existing.heldSteer)) return
+    const state: TurnState = { ...existing }
+    if (held) state.heldSteer = held
+    else delete state.heldSteer
+    this.turnStates.set(threadId, state)
+    this.emit('turn-state', state)
   }
 
   /** Liveness touch for an engine run (SPEC §12.4 rule 2), at most once per throttle window. */
@@ -3353,7 +3384,7 @@ export class OrchestratorService extends EventEmitter {
       // A person on another computer carries that computer's limit with the text, wherever it ends up.
       const limit = actor ? ceiling ?? 'ask' : deviceLimit
       this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin, permissionMode: limit } : deviceLimit ? { deviceLimit } : {}), ...(sentFrom && !origin ? { sentFrom } : {}) }, () => {
-        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, origin ? undefined : sentFrom)) {
+        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, origin ? undefined : sentFrom, { durable: !origin })) {
           console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
         }
       })
@@ -4785,7 +4816,8 @@ export class OrchestratorService extends EventEmitter {
     // The rows stay the steer's until the model reads the text (`drainSteerForSession`) or the turn ends
     // without reading it, when the follow-up turn it leaves takes them.
     const run = engine.getRun(runId)
-    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit, undefined, sentFrom)) return
+    // A person's run-bound steer is saved with the queue while it waits (`durable`); a notice or an agent's steer is not.
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit, undefined, sentFrom, { durable: true })) return
     this.enqueueLateSteer(threadId, content, carried, notice, runId, origin, limit, sentFrom)
   }
 
@@ -8356,6 +8388,43 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A held steer's transcript copies stay after the newest row of the turn (docs/design/steer-and-interruptions.md
+   * §2.10): the reply the agent writes while the steer waits (a strict release's text, a tool row) reads above the
+   * Steer block, and the block sits where the steer went in once it does. Rows that only grow in place (the reply being
+   * streamed when the steer was sent) stay above it. The copies keep their order; nothing moves while they are already
+   * last.
+   */
+  private keepHeldEchoesLast(session: ThreadSession, entries: readonly SteerEntry[]): void {
+    const echoIds = new Set(entries.flatMap((entry) => (entry.echoId ? [entry.echoId] : [])))
+    const itemIds = new Set(entries.flatMap((entry) => (entry.itemId ? [entry.itemId] : [])))
+    if (!echoIds.size && !itemIds.size) return
+    const isEcho = (message: ChatMessage): boolean =>
+      message.role === 'user' && message.steered === true && !message.hidden && (echoIds.has(message.id) || (message.steerItemId !== undefined && itemIds.has(message.steerItemId)))
+    const echoes = session.messages.filter(isEcho)
+    if (!echoes.length) return
+    const time = (message: ChatMessage): number => Date.parse(message.timestamp) || 0
+    // Windows order rows by their timestamp. Only a row shown at the turn's top level can land below the block: a
+    // subagent's or a background call's rows are drawn nested under their call, wherever their time puts them.
+    const byId = new Map(session.messages.map((message) => [message.id, message]))
+    const newest = session.messages.reduce(
+      (latest, message) => (message.hidden || isEcho(message) || nestedUnderSubagentOrBackground(message, (id) => byId.get(id)) ? latest : Math.max(latest, time(message))),
+      0
+    )
+    // Already after every top-level row: nothing to do.
+    if (echoes.every((message) => time(message) > newest)) return
+    // The copies take times after the newest row's, in their order. They stay where they are in the list (the thread
+    // database keeps rows in their stored order and would write a moved row again), and only they are sent: windows
+    // and Bridge streams re-sort a row whose time changed.
+    const base = Math.max(Date.now(), newest + 1)
+    const stamped = new Map(echoes.map((message, index) => [message.id, { ...message, timestamp: new Date(base + index).toISOString() }]))
+    session.messages = session.messages.map((message) => stamped.get(message.id) ?? message)
+    this.sessionAls.run(session, () => {
+      for (const message of stamped.values()) this.emitMessageUpdated(message)
+      this.persist()
+    })
+  }
+
+  /**
    * Queued messages handed to a turn that was stopped before it read them: their copies in the turn go, and they are
    * back first in the queue at once, pending and shown there, in the order they were sent. Nothing runs them until the
    * person sends or sends now again. Best-effort: a Stop must not fail.
@@ -8644,7 +8713,20 @@ export class OrchestratorService extends EventEmitter {
           payload: { ...entry.details, action: entry.action, actorThreadId: intent.actor.threadId, actorRunId: intent.actor.runId, toolCallId: intent.actor.toolCallId }
         })
       },
-      scheduleRepair: (threadId) => this.scheduleQueueRepair(threadId)
+      scheduleRepair: (threadId) => this.scheduleQueueRepair(threadId),
+      steerNowStale: (intent) => {
+        const request = intent.steerNow
+        if (!request) return
+        // The run's own process forces it from memory (held text with no queue row): not stale there.
+        if (this.steerHolds.get(request.runId)?.forcePending(request.requestId)) return
+        engine.store.appendEvent({
+          threadId: intent.threadId,
+          runId: request.runId,
+          type: 'steer.now_stale',
+          payload: { runId: request.runId, holdGeneration: request.holdGeneration, requestId: request.requestId }
+        })
+        engine.store.db.afterCommit(() => this.emit('steer-now', { threadId: intent.threadId, requestId: request.requestId, outcome: 'stale' }))
+      }
     }
   }
 
@@ -10128,7 +10210,7 @@ export class OrchestratorService extends EventEmitter {
    * `item`: the queue item this steer is (a promotion), and the run it was checked against. A steer for another
    * run than `item.runId` is refused, so a promotion never reaches a turn it was not checked against.
    */
-  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string; mode?: ChatMode; images?: ChatImageAttachment[]; byAgent?: boolean }, sentFrom?: { node: string }): boolean {
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string; mode?: ChatMode; images?: ChatImageAttachment[]; byAgent?: boolean }, sentFrom?: { node: string }, opts?: { durable?: boolean }): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     // Nothing is steered into a bot's turn: it runs exactly what its dispatch sent.
@@ -10148,6 +10230,16 @@ export class OrchestratorService extends EventEmitter {
         ...(origin || permissionMode ? { permissionMode: permissionMode ?? 'ask' } : {}),
         ...(sentFrom ? { sentFrom } : {})
       }
+      // A person's steer sent where a window's would be a queue item (`opts.durable`: a device's limited steer, a
+      // run-bound `orchestrator.steer`) gets one now, bound to this run: it may wait for a running tool for as long as
+      // the tool runs, and a crash in that time must return it once (`returnOrphanedSteers`) rather than lose it while
+      // its Steer block shows. It still joins the turn at the turn's mode, and the row keeps the device's limit for a
+      // turn of its own; unread at the turn's end it is the queued message a window's steer would be. Plain text steered
+      // in process keeps its own follow-up (a queued run from the start, SPEC §14.7).
+      if (opts?.durable && !item && !origin && !carried && !subagentNotice) {
+        const durable = this.persistItemlessSteer(session, threadId, trimmed, permissionMode, sentFrom)
+        if (durable) entry.itemId = durable
+      }
       session.activeTurn.pendingSteer.push(entry)
       if (carried) {
         (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
@@ -10159,7 +10251,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin, item?.id).id
+        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin, entry.itemId).id
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -10172,6 +10264,29 @@ export class OrchestratorService extends EventEmitter {
       return true
     }
     return false
+  }
+
+  /**
+   * A durable queue row for a person's steer that came with none: added and marked `steering` for the turn's run in one
+   * write, so it is never pending (nothing else runs it) and never needs a run of its own. Returns its id, or undefined
+   * when there is no thread store, no engine run, or the write fails (the steer then lives in memory, as before).
+   */
+  private persistItemlessSteer(session: ThreadSession, threadId: string, text: string, permissionMode?: PermissionMode, sentFrom?: { node: string }): string | undefined {
+    const runId = session.activeTurn?.runId
+    if (!this.threadStore || threadId === '__unbound__' || !runId) return undefined
+    try {
+      let id: string | undefined
+      session.queue = mutateDurableQueue(this.threadStore, threadId, (items) => {
+        const added = enqueueMessage(items, { threadId, content: text, intent: 'steer', source: 'steer', ...(permissionMode ? { permissionMode } : {}), ...(sentFrom ? { sentFrom } : {}) })
+        const promoted = promoteQueuedMessageToSteer(added.items, added.item.id, { steerRunId: runId })
+        id = promoted.item.id
+        return promoted.items
+      })
+      return id
+    } catch (error) {
+      console.warn('a steer could not be saved with the queue; it waits in memory only', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
+    }
   }
 
   /**
@@ -10203,7 +10318,7 @@ export class OrchestratorService extends EventEmitter {
       }
       return { steered: false, queued: true, item }
     }
-    if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom)) {
+    if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom, { durable: Boolean(opts?.permissionMode) })) {
       return { steered: true, queued: false }
     }
     if (this.isThreadLeaseHeldExternally(threadId)) {
@@ -10794,6 +10909,8 @@ export class OrchestratorService extends EventEmitter {
       externalSignal?: AbortSignal
       /** Steers a remote turn collected: plain text, or entries that keep the queue items they came from. */
       externalDrainSteer?: () => string | SteerEntry[] | undefined
+      /** `externalDrainSteer`'s non-taking form; without it the turn keeps the behaviour from before the hold. */
+      externalPeekSteer?: () => string | SteerEntry[] | undefined
       modelOverride?: ModelOverride
       /** Who the turn runs for, when it is not the thread's own (a scheduled job). */
       origin?: TurnOrigin
@@ -11094,6 +11211,7 @@ export class OrchestratorService extends EventEmitter {
       suppressAutoQueueDrain?: boolean
       externalSignal?: AbortSignal
       externalDrainSteer?: () => string | SteerEntry[] | undefined
+      externalPeekSteer?: () => string | SteerEntry[] | undefined
       modelOverride?: ModelOverride
       origin?: TurnOrigin
       schedule?: ScheduledTurnRef
@@ -11670,6 +11788,8 @@ export class OrchestratorService extends EventEmitter {
       })
       this.persist(true)
     }
+    // The turn's steer hold, once its provider is known; the turn's end clears it.
+    let turnHold: { hold: SteerHold; runId?: string } | undefined
     try {
       // Instance id → driver → adapter; an unknown or disabled instance, or a blank explicit
       // override, fails the turn here.
@@ -11763,15 +11883,101 @@ export class OrchestratorService extends EventEmitter {
       const drainScope = `${turnId}:${randomUUID().slice(0, 8)}`
       let drains = 0
       let returnedAhead = 0
+      // The steer hold (docs/design/steer-and-interruptions.md §2.2): a person's steer waits for a foreground tool and
+      // goes in once it has its result. A remote source that cannot be read without taking keeps the whole turn on the
+      // behaviour from before the hold: the peek could not see its steers.
+      const assembler = this.transcript
+      const hold = new SteerHold({
+        caps: opts?.externalDrainSteer && !opts.externalPeekSteer ? { ...instance.caps, steerBoundary: 'none' } : instance.caps,
+        strict: this.settingsStore.get().runs.steerRelease?.[instance.instanceId] === 'strict',
+        // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
+        // waits, Mousse's own calls that ask the person do not hold.
+        foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
+        settleMs: this.steerSettleMs
+      })
+      if (engineRunId) this.steerHolds.set(engineRunId, hold)
+      turnHold = { hold, runId: engineRunId }
+      const steerKeys = new WeakMap<SteerEntry, string>()
+      let steerKeySeq = 0
+      // An entry's identity in a hold: its queue item, or one it keeps for as long as it exists (a hand-back restores the
+      // same entry, so the hold it left resumes).
+      const keyOf = (entry: SteerEntry): string => {
+        if (entry.itemId) return entry.itemId
+        let key = steerKeys.get(entry)
+        if (!key) steerKeys.set(entry, (key = `entry:${++steerKeySeq}`))
+        return key
+      }
+      /** The entries the last peek saw, for the transcript copies of a held batch (`keepHeldEchoesLast`). */
+      let pendingEntries: SteerEntry[] = []
+      /** What a drain now would take, without taking it: a remote turn's steers, then the thread's own. */
+      const pendingFacts = (): PendingSteerFacts | undefined => {
+        const raw = opts?.externalPeekSteer?.()
+        const external: SteerEntry[] = typeof raw === 'string' ? (raw.trim() ? [{ text: raw.trim() }] : []) : (raw ?? [])
+        // The journal is read only while a steer is held: a Send now names a hold windows were shown.
+        const own = this.peekSteerForSession(session, turn, hold.holdGeneration !== undefined)
+        const notices = new Set((turn.carriedSteers ?? []).map((entry) => entry.text.trim()))
+        const entries = [
+          ...external.map((entry, index) => ({ entry, key: entry.itemId ?? `remote:${index}:${entry.text.trim()}` })),
+          ...own.map((entry) => ({ entry, key: keyOf(entry) }))
+        ].filter(({ entry }) => entry.text.trim())
+        pendingEntries = entries.map(({ entry }) => entry)
+        if (entries.length === 0) return undefined
+        return {
+          person: entries.some(({ entry }) => !entry.origin && !entry.byAgent && !notices.has(entry.text.trim())),
+          keys: entries.map(({ key }) => key),
+          itemIds: [...new Set(entries.flatMap(({ entry }) => (entry.itemId ? [entry.itemId] : [])))]
+        }
+      }
+      /**
+       * The decision for what is pending now. While it is `hold`, windows show what the steer waits for; a Send now
+       * request for the hold (a queue item's `steerNow`, or one made in this process) forces it once.
+       */
+      const decideSteer = (): { delivery: SteerDelivery; holdGeneration?: number; forced: boolean } | undefined => {
+        const facts = pendingFacts()
+        if (!facts) {
+          hold.clear()
+          this.setHeldSteer(session.threadId, undefined)
+          return undefined
+        }
+        let decision = hold.decide(facts)!
+        if (hold.adopted) {
+          // Windows show the wait line and Send now only for a person's steer: an agent's steer or a notice that waits for
+          // a tool is never forced (§2.2), so a click on it would do nothing.
+          if (decision.delivery === 'hold') {
+            const shown = hold.hold(facts, decision.tools, engineRunId)
+            this.setHeldSteer(session.threadId, facts.person ? shown : undefined)
+            // What the agent writes while the steer waits reads above it: the Steer block stays after the newest row,
+            // so it sits where the steer went in once it does.
+            this.keepHeldEchoesLast(session, pendingEntries)
+          }
+          this.collectSteerNow(session, engineRunId, hold)
+          const settled = hold.settleForces(facts.person)
+          if (settled.applied.length || settled.stale.length) this.settleSteerNow(session, engineRunId, settled)
+          if (settled.applied.length) decision = hold.decide(facts)!
+        }
+        if (decision.delivery !== 'hold') this.setHeldSteer(session.threadId, undefined)
+        return { delivery: decision.delivery, forced: decision.forced, ...(decision.holdGeneration !== undefined ? { holdGeneration: decision.holdGeneration } : {}) }
+      }
       // The turn's own thread and async context, whichever context the runtime calls from (`inTurn`). A late call,
       // made while a newer turn runs in the thread, would land in that turn's rows: it is dropped.
       const turnSink = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
-        text: (event) => this.handleStreamingTextEvent(event),
-        thinking: (event) => this.handleStreamingThinkingEvent(event),
+        text: (event) => {
+          hold.modelOutput(event.phase)
+          this.handleStreamingTextEvent(event)
+        },
+        thinking: (event) => {
+          hold.modelOutput(event.phase)
+          this.handleStreamingThinkingEvent(event)
+        },
         tool: (event) => {
           if (event.kind !== 'skill_loaded') conversationToolsUsed = true
           this.handleStreamingToolEvent(event)
+          // After the assembler: the call's row is open (or closed) when the window restarts. Only the turn's own calls
+          // restart it (§2.3): a subagent's or a background call's events say nothing about the turn's next tool.
+          if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
         },
+        toolAwaiting: (callId, waiting) => hold.awaiting(callId, waiting),
+        boundary: () => hold.boundary(),
         nativeMessages: (nativeMessages, checkpoint) => {
           // A completed-turn measurement becomes stale as soon as the live loop
           // appends or compacts native history. Estimate until the final provider
@@ -11882,7 +12088,15 @@ export class OrchestratorService extends EventEmitter {
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }, { dropLate: true })
-      const drainEntry = (): { text: string; token: string; cut: boolean } | undefined => {
+      const drainEntry = (drainOpts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut: boolean; forced?: boolean } | undefined => {
+        // An adapter on the hold takes only what it can deliver now: nothing while a steer is held.
+        let forced = false
+        if (drainOpts?.expect !== undefined) {
+          const decision = decideSteer()
+          const expected = Array.isArray(drainOpts.expect) ? drainOpts.expect : [drainOpts.expect]
+          if (!decision || !expected.includes(decision.delivery)) return undefined
+          forced = decision.forced
+        }
         // A remote turn's steers, then the thread's own (and the durable queue's).
         const raw = opts?.externalDrainSteer?.()
         const external: SteerEntry[] = typeof raw === 'string' ? (raw.trim() ? [{ text: raw.trim() }] : []) : (raw ?? [])
@@ -11897,12 +12111,26 @@ export class OrchestratorService extends EventEmitter {
         // A person's message must reach the model now; subagent results and an agent's steer may wait for its next step.
         const notices = new Set((own?.carried ?? []).map((entry) => entry.text.trim()))
         const cut = entries.some((steer) => !steer.origin && !steer.byAgent && !notices.has(steer.text.trim()))
-        return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut }
+        // A held batch goes in here: its Steer block moves after what the agent wrote while it waited (since the last poll).
+        if (hold.holdGeneration !== undefined) this.keepHeldEchoesLast(session, entries)
+        // The hold is over; the same steers handed back resume it in the same generation.
+        hold.drained(token, forced)
+        this.setHeldSteer(session.threadId, undefined)
+        return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut, ...(forced ? { forced: true } : {}) }
       }
       // A late drain would take the newer turn's steers into this one: dropped, as a late sink call is.
       const turnControl = this.inTurn<TurnControl>(session, turn, turnId, 'control', {
         drainSteer: () => drainEntry()?.text,
         drainSteerEntry: drainEntry,
+        // Only for a turn on the hold: an adapter without it drains as before the hold, and so does a turn whose remote
+        // source cannot be read without taking (the peek would not see its steers, so they would never be drained).
+        ...(hold.adopted ? {
+          peekSteer: () => {
+            const decision = decideSteer()
+            return decision ? { delivery: decision.delivery, ...(decision.holdGeneration !== undefined ? { holdGeneration: decision.holdGeneration } : {}) } : undefined
+          },
+          mayCut: (token: string) => hold.mayCut(token)
+        } : {}),
         // Only a note that the provider has the text: the drain is kept, whole, until `steerAccepted` saves it or
         // `returnSteer` hands it back.
         steerTaken: (token) => {
@@ -12063,6 +12291,13 @@ export class OrchestratorService extends EventEmitter {
         assistantText = `[${providerError.code}] ${providerError.message}`
       }
     } finally {
+      // Nothing is held once the provider's turn is over: what is still pending is an unread steer, and the turn's end
+      // handles it like any other (a follow-up turn, or back in the queue after a Stop).
+      if (turnHold) {
+        turnHold.hold.clear()
+        if (turnHold.runId && this.steerHolds.get(turnHold.runId) === turnHold.hold) this.steerHolds.delete(turnHold.runId)
+        this.setHeldSteer(session.threadId, undefined)
+      }
       appTurn?.drop()
       if (compactionNote) onCompaction('unchanged')
       if (turn.abort.signal.aborted) aborted = true
@@ -12463,6 +12698,155 @@ export class OrchestratorService extends EventEmitter {
     }
 
     return entries.length || carried.length ? { entries, carried } : undefined
+  }
+
+  /**
+   * What `drainSteerForSession` would take now, without taking anything (docs/design/steer-and-interruptions.md §2.2,
+   * "What the peek reads"): the turn's own pending steers under the same question rule, and the durable queue's steer
+   * rows, read from disk, so a row another process promoted for this run counts. A Send now another process asked for
+   * and did not finish (its journal entry is still pending) is finished first, so the poll sees its field.
+   */
+  private peekSteerForSession(
+    session: ThreadSession,
+    turn: { runId?: string; pendingSteer: SteerEntry[] },
+    /** A steer is held, so a Send now for it may be pending in the journal. Without a hold no click can apply. */
+    held = true
+  ): SteerEntry[] {
+    const asking = this.questions.listPendingForThread(session.threadId).length > 0
+    const own = asking ? turn.pendingSteer.filter((entry) => !entry.origin && !entry.byAgent) : [...turn.pendingSteer]
+    const store = this.threadStore
+    if (held && store && session.threadId !== '__unbound__') {
+      try {
+        if (store.getQueueJournal()?.commands.listUnfinished(session.threadId).some((row) => row.intent.op === 'steer_now')) repairQueueJournal(store, session.threadId)
+      } catch (error) {
+        logDebug('OrchestratorService', 'a pending Send now could not be finished by the held poll', error, { threadId: session.threadId })
+      }
+    }
+    this.refreshSessionQueueFromDisk(session)
+    const disk = listPendingQueue(session.queue).filter(
+      (item) =>
+        item.intent === 'steer' &&
+        (item.state === 'pending' || item.state === 'steering') &&
+        !session.drainedExternalSteerIds.has(item.id) &&
+        !turn.pendingSteer.some((entry) => entry.itemId === item.id) &&
+        !(asking && item.origin?.kind === 'agent') &&
+        // A row bound to another run is reverted by the drain, never delivered here.
+        (!item.steerRunId || this.mayTakePromotedItem(item, turn.runId))
+    )
+    return [
+      ...own,
+      ...disk.map((item): SteerEntry => ({ text: item.content, itemId: item.id, ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {}) }))
+    ]
+  }
+
+  /**
+   * While the thread has a question pending, which of the turn's calls may be the one asking it: Mousse's own tools
+   * that ask the person (`asksUser`: `ask_user`, a quick action's approval), the ones that ask before they edit
+   * (`editsWorkspace`), and the relay's (its approvals). A Mousse tool the registry does not know counts too. Such a
+   * call does not hold a steer, which answers the question, as it answers one the provider asks. Undefined while no
+   * question waits: every call holds as usual.
+   */
+  private mousseCallsAskingPerson(threadId: string): ((toolName: string) => boolean) | undefined {
+    if (this.questions.listPendingForThread(threadId).length === 0) return undefined
+    const registry = this.mcpRegistry
+    return (toolName) => {
+      if (toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return true
+      const prefixed = toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
+      const tool = registry?.get(prefixed ? toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) : toolName)
+      if (!tool) return prefixed
+      return Boolean(tool.asksUser) || tool.access === 'editsWorkspace'
+    }
+  }
+
+  /** Send now requests on held rows of `runId` (`QueuedMessage.steerNow`), handed to the run's hold to check. */
+  private collectSteerNow(session: ThreadSession, runId: string | undefined, hold: SteerHold): void {
+    if (!runId) return
+    const requests = new Map<string, { holdGeneration: number; itemIds: string[] }>()
+    for (const item of session.queue) {
+      const request = item.steerNow
+      if (!request || item.state !== 'steering' || request.runId !== runId) continue
+      const entry = requests.get(request.requestId) ?? { holdGeneration: request.holdGeneration, itemIds: [] }
+      entry.itemIds.push(item.id)
+      requests.set(request.requestId, entry)
+    }
+    for (const [requestId, request] of requests) hold.requestForce({ requestId, ...request })
+  }
+
+  /**
+   * Send now requests the hold settled: the field leaves each held row under the queue lock, and each request gets its
+   * event (`steer.now_applied`: the hold goes in now; `steer.now_stale`: it matched nothing). Windows hear both.
+   */
+  private settleSteerNow(session: ThreadSession, runId: string | undefined, settled: { applied: Array<{ requestId: string; holdGeneration: number }>; stale: Array<{ requestId: string; holdGeneration: number }> }): void {
+    const ids = new Set([...settled.applied, ...settled.stale].map((force) => force.requestId))
+    const strip = (items: QueuedMessage[]): QueuedMessage[] => items.map((item) => (item.steerNow && ids.has(item.steerNow.requestId) ? withoutSteerNow(item) : item))
+    try {
+      session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, strip) : strip(session.queue)
+    } catch (error) {
+      // The field is honoured once only: a later poll finds the generation consumed and records it stale.
+      console.warn('a Send now request could not be cleared from the queue', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    const outcomes: Array<[{ requestId: string; holdGeneration: number }, 'applied' | 'stale']> = [
+      ...settled.applied.map((force) => [force, 'applied'] as [typeof force, 'applied']),
+      ...settled.stale.map((force) => [force, 'stale'] as [typeof force, 'stale'])
+    ]
+    for (const [force, outcome] of outcomes) this.recordSteerNow(session.threadId, runId ?? null, force, outcome)
+  }
+
+  /** A Send now request's outcome: its event in the run database, and the windows told. */
+  private recordSteerNow(threadId: string, runId: string | null, force: { requestId: string; holdGeneration: number }, outcome: 'applied' | 'stale'): void {
+    try {
+      this.runEngine?.store.appendEvent({
+        threadId,
+        runId,
+        type: outcome === 'applied' ? 'steer.now_applied' : 'steer.now_stale',
+        payload: { runId, holdGeneration: force.holdGeneration, requestId: force.requestId }
+      })
+    } catch (error) {
+      console.warn('a Send now outcome could not be recorded', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    this.emit('steer-now', { threadId, requestId: force.requestId, outcome })
+  }
+
+  /**
+   * Send now on a held steer (docs/design/steer-and-interruptions.md §2.9): the run's hold `holdGeneration` goes in at
+   * once, and the provider stops the tool it waits for. Only the people who may steer the thread call it. The request
+   * is committed with its receipt (a repeated `clientRequestId` replays it), then marked on the held rows; the run
+   * that holds them forces the hold at its next poll, in this process or another. A run that is not the thread's
+   * active one is `ignored` (`run_not_active`).
+   */
+  async steerNow(input: { threadId: string; runId: string; holdGeneration: number; itemIds: string[]; clientRequestId: string }): Promise<CommandResult> {
+    const engine = this.requireRunEngine()
+    // The run's own process: remembered before the journal applies, so a request about held text with no queue row
+    // (only this process can force that) is not announced stale.
+    const local = this.steerHolds.get(input.runId)
+    // Not applied until its command is recorded below (`ready`).
+    const force = { requestId: input.clientRequestId, holdGeneration: input.holdGeneration, itemIds: [...input.itemIds], ready: false }
+    const added = local?.requestForce(force) === true
+    let result: CommandResult
+    try {
+      result = await engine.dispatch({ kind: 'steer_now', threadId: input.threadId, clientRequestId: input.clientRequestId, runId: input.runId, holdGeneration: input.holdGeneration, itemIds: [...input.itemIds] })
+    } catch (error) {
+      // Nothing was recorded (no receipt, journal entry or audit event): the click must not stop the command either.
+      if (added) local?.dropForce(input.clientRequestId)
+      throw error
+    }
+    if (result.status !== 'accepted') {
+      if (added) local?.dropForce(input.clientRequestId)
+      return result
+    }
+    // Recorded: the run's next decision may apply it.
+    local?.readyForce(input.clientRequestId)
+    if (this.threadStore) {
+      try {
+        const queue = repairQueueJournal(this.threadStore, input.threadId)
+        const session = this.sessions.get(input.threadId)
+        if (session) session.queue = queue
+      } catch (error) {
+        // Finished by the next change to the queue, boot repair or the owner's poll.
+        console.warn('a Send now request could not be applied to the queue yet', { threadId: input.threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return result
   }
 
   /** A promoted item joins only the run it was checked against, and only while that run's mode is no looser than the item allows. */
@@ -14355,6 +14739,7 @@ export class OrchestratorService extends EventEmitter {
           externalSignal: signal,
           runId,
           externalDrainSteer: opts?.drainSteer,
+          ...(opts?.peekSteer ? { externalPeekSteer: opts.peekSteer } : {}),
           modelOverride: opts?.modelOverride,
           onUserInputAccepted: opts?.onUserInputAccepted,
           onTurnSettled: (aborted) => {

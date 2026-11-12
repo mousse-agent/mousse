@@ -12,9 +12,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
-import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { mutateDurableQueue, readDurableQueue } from '../../src/mms/queue/durableQueue'
-import { promoteQueuedMessageToSteer } from '../../src/mms/queue/ThreadMessageQueue'
+import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
+import { ProjectManager } from '../../src/mms/data/ProjectManager'
+import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
+import { mutateDurableQueue, readDurableQueue, repairQueueJournal } from '../../src/mms/queue/durableQueue'
+import { markSteerNow, promoteQueuedMessageToSteer } from '../../src/mms/queue/ThreadMessageQueue'
+import { STEER_SETTLE_MS, type SteerDelivery } from '../../src/mms/run/CommandPolicy'
+import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { QueueCommands } from '../../src/mms/run/QueueCommands'
+import { RunEngine, steerNowCommandKey } from '../../src/mms/run/RunEngine'
+import { RunStore } from '../../src/mms/run/RunStore'
+import type { ActivityPatch } from '../../src/shared/agentActivity'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -1083,5 +1091,858 @@ describe('A steer is accepted by its own drain token', () => {
     expect(w.adapter.prompts).toEqual(['first', 'B'])
     expect(w.adapter.accepted).toEqual(['A'])
     expect(w.inContext('A')).toBe(1)
+  })
+})
+
+// ------------------------------------------------------------------------------------------------------------------
+// The hold (docs/design/steer-and-interruptions.md §2): a person's steer waits for a foreground tool's result.
+// ------------------------------------------------------------------------------------------------------------------
+
+/**
+ * A provider on the hold: it reports its tool calls, and on each poll it drains only when the orchestrator says the
+ * steer goes in now (`peekSteer`, `drainSteerEntry({ expect })`), checking `mayCut` right before its cut. The log says
+ * what happened, in order, so a test can assert that a cut came after (or before) a tool's result.
+ */
+class HoldingAdapter implements ProviderAdapter {
+  readonly driver = 'claude' as const
+  readonly capabilities: ProviderCapabilities
+  readonly prompts: string[] = []
+  readonly log: string[] = []
+  /** Runs once, between the drain and `mayCut`: something that happens while the cut is on its way. */
+  beforeCut: (() => void) | undefined
+  /** The deliveries the poll drains. */
+  expect: SteerDelivery[] = ['cut']
+  private turn: { sink: TurnSink; ctl: TurnControl; run: (fn: () => unknown) => unknown; end: () => void; runId: string } | undefined
+
+  constructor(boundary: 'announce' | 'start') {
+    this.capabilities = { ...CLAUDE_SUBSCRIPTION_CAPABILITIES, steerBoundary: boundary }
+  }
+
+  configured(): boolean {
+    return true
+  }
+
+  get runId(): string | undefined {
+    return this.turn?.runId
+  }
+
+  async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+    this.prompts.push(input.prompt)
+    const providerRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
+    sink.providerRef(providerRef)
+    let aborted = false
+    const inTurn = AsyncResource.bind((fn: () => unknown) => fn())
+    await new Promise<void>((resolve) => {
+      const timer = setInterval(() => this.poll(), 5)
+      const done = (): void => {
+        clearInterval(timer)
+        if (this.turn?.end === done) this.turn = undefined
+        resolve()
+      }
+      this.turn = { sink, ctl, run: inTurn, end: done, runId: input.runId }
+      if (input.signal.aborted) {
+        aborted = true
+        done()
+      } else input.signal.addEventListener('abort', () => { aborted = true; done() }, { once: true })
+    })
+    const text = aborted ? '' : `reply to ${input.prompt}`
+    if (!aborted) {
+      sink.text({ phase: 'complete', content: text, contentIndex: 0 })
+      host.context.nativeHistoryAfterTurn(text)
+    }
+    return { text, aborted, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'scripted', nativeMessages: [], providerRef }
+  }
+
+  async interrupt(): Promise<'interrupted' | 'not_active'> {
+    if (!this.turn) return 'not_active'
+    this.turn.end()
+    return 'interrupted'
+  }
+
+  private poll(): void {
+    const turn = this.turn
+    if (!turn) return
+    const peek = turn.ctl.peekSteer?.()
+    if (!peek || !this.expect.includes(peek.delivery)) return
+    const entry = turn.ctl.drainSteerEntry!({ expect: this.expect })
+    if (!entry) return
+    const before = this.beforeCut
+    this.beforeCut = undefined
+    before?.()
+    if (!turn.ctl.mayCut!(entry.token)) {
+      this.log.push(`held again:${entry.text}`)
+      turn.ctl.returnSteer!(entry.text, entry.token)
+      return
+    }
+    this.log.push(`${entry.forced ? 'forced' : peek.delivery}:${entry.text}`)
+    turn.ctl.steerTaken!(entry.token)
+    turn.sink.steerAccepted(entry.text, entry.token)
+  }
+
+  /** In the running turn's context, as the provider's own events arrive. */
+  private emit(fn: (sink: TurnSink) => void): void {
+    const turn = this.turn!
+    turn.run(() => fn(turn.sink))
+  }
+
+  toolStart(callId: string, name = 'Bash', activity?: ActivityPatch, parentCallId?: string): void {
+    this.log.push(`start:${callId}`)
+    this.emit((sink) => sink.tool({
+      kind: 'mcp_tool_call', phase: 'start', callId, title: name, summary: '', details: [],
+      activity: activity ?? ({ toolName: name, kind: 'command', command: `sleep 30 # ${callId}` } as ActivityPatch),
+      ...(parentCallId ? { parentCallId } : {})
+    }))
+  }
+
+  toolDone(callId: string, name = 'Bash'): void {
+    this.log.push(`result:${callId}`)
+    this.emit((sink) => sink.tool({ kind: 'mcp_tool_result', phase: 'complete', callId, title: name, summary: '', details: [], response: 'ok' }))
+  }
+
+  /** A running call's own output: never model output. */
+  toolOutput(callId: string, name = 'Bash'): void {
+    this.emit((sink) => sink.tool({ kind: 'mcp_tool_call', phase: 'update', callId, title: name, summary: '', details: [], activity: { output: 'tick\n' } }))
+  }
+
+  /** The model starts a new response and writes. */
+  writes(text: string): void {
+    this.emit((sink) => {
+      sink.text({ phase: 'start', content: '', contentIndex: 0 })
+      sink.text({ phase: 'delta', content: text, contentIndex: 0 })
+    })
+  }
+
+  awaiting(callId: string, waiting: boolean): void {
+    this.emit((sink) => sink.toolAwaiting?.(callId, waiting))
+  }
+
+  boundary(): void {
+    this.emit((sink) => sink.boundary?.())
+  }
+
+  end(): void {
+    this.turn?.end()
+  }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+describe('a person\'s steer waits for a running tool, then goes in once (the hold)', () => {
+  let home: string | undefined
+  let previousHome: string | undefined
+  const daemons: Phase6Daemon[] = []
+  const extra: Array<() => void> = []
+
+  afterEach(async () => {
+    for (const close of extra.splice(0)) close()
+    for (const daemon of daemons.splice(0).reverse()) await daemon.stop().catch(() => undefined)
+    if (previousHome === undefined) delete process.env.MOUSSE_HOME
+    else process.env.MOUSSE_HOME = previousHome
+    if (home) rmSync(home, { recursive: true, force: true })
+    home = undefined
+  })
+
+  const world = async (boundary: 'announce' | 'start' = 'announce', options: { strict?: boolean } = {}) => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-steer-hold-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    mkdirSync(join(home, 'project'))
+    const adapter = new HoldingAdapter(boundary)
+    const d = phase6Daemon(home, [adapter])
+    daemons.push(d)
+    const project = d.projects.openProject(join(home, 'project'))
+    const thread = d.store.createThread('Hold', project.id)
+    d.orch.setThreadModelOverride(thread.id, MODEL)
+    let sends = 0
+    const send = (text: string) => d.orch.send(text, false, { threadId: thread.id, clientRequestId: `send-${++sends}` })
+    if (options.strict) {
+      // Strict release is set per instance and read when a turn starts: a first turn names the instance.
+      const warmup = send('warmup')
+      await waitFor(() => adapter.runId !== undefined, 'warmup running')
+      const instanceId = d.engine.bindingForRun(adapter.runId!)!.instanceId
+      adapter.end()
+      await warmup
+      await waitFor(() => d.engine.getActiveRun(thread.id) === null, 'warmup ended')
+      d.settings.runs.steerRelease = { [instanceId]: 'strict' }
+    }
+    const first = send('first')
+    await waitFor(() => adapter.runId !== undefined, 'first turn running')
+    const runId = adapter.runId!
+    /** A person's message sent into the running turn (queued, then Steer): its queue item id. */
+    const steer = async (text: string): Promise<string> => {
+      const queued = await send(text)
+      expect(queued.queued).toBe(true)
+      expect(d.orch.promoteQueueItem(thread.id, queued.queueItem!.id)).toEqual({ ok: true })
+      return queued.queueItem!.id
+    }
+    const held = () => d.orch.getTurnState(thread.id).heldSteer
+    const delivered = () => adapter.log.filter((entry) => /^(cut|forced|native):/.test(entry))
+    const inContext = (text: string) => d.orch.getOrCreateSession(thread.id).nativeContext.messages.filter((message) => message.role === 'user' && JSON.stringify(message.content).includes(text)).length
+    const events = (type: string) => d.engine.listEvents(thread.id).filter((event) => event.type === type)
+    const finish = async () => {
+      adapter.end()
+      await first
+      await waitFor(() => !d.orch.isActiveTurnRunning(thread.id) && d.engine.getActiveRun(thread.id) === null && readDurableQueue(d.store, thread.id).length === 0, 'idle')
+      await sleep(80)
+    }
+    return { d, adapter, thread, runId, first, send, steer, held, delivered, inContext, events, finish }
+  }
+
+  // -------- Hold and release --------
+
+  it('a steer during a running command is not drained; it goes in once, right after the command\'s result', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    const item = await w.steer('use pnpm')
+    await waitFor(() => w.held() !== undefined, 'held')
+    expect(w.held()).toMatchObject({ waitsFor: 'Bash', detail: 'sleep 30 # b1', tools: 1, itemIds: [item], runId: w.runId })
+    await sleep(200)
+    expect(w.delivered()).toEqual([])
+    expect(w.inContext('use pnpm')).toBe(0)
+
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(w.adapter.log).toEqual(['start:b1', 'result:b1', 'cut:use pnpm'])
+    expect(w.held()).toBeUndefined()
+    await w.finish()
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.inContext('use pnpm')).toBe(1)
+  })
+
+  it('while the model writes and no tool runs, a steer cuts in at once', async () => {
+    const w = await world()
+    w.adapter.writes('thinking out loud')
+    await w.steer('stop and listen')
+    await waitFor(() => w.delivered().length > 0, 'cut')
+    expect(w.delivered()).toEqual(['cut:stop and listen'])
+    expect(w.held()).toBeUndefined()
+    await w.finish()
+  })
+
+  it('announce: two calls of one response hold the steer until the second has its result too', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    w.adapter.toolStart('b2')
+    await w.steer('later')
+    await waitFor(() => w.held()?.tools === 2, 'held for two')
+    // The oldest names the hold; the tooltip lists both.
+    expect(w.held()?.waitsFor).toBe('Bash')
+    expect(w.held()?.toolList?.map((tool) => tool.detail)).toEqual(['sleep 30 # b1', 'sleep 30 # b2'])
+    w.adapter.toolDone('b1')
+    await sleep(150)
+    expect(w.delivered()).toEqual([])
+    expect(w.held()?.tools).toBe(1)
+    w.adapter.toolDone('b2')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(w.adapter.log).toEqual(['start:b1', 'start:b2', 'result:b1', 'result:b2', 'cut:later'])
+    await w.finish()
+  })
+
+  it('a tool that starts between the drain and the cut keeps the steer held, in the same hold', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('wait for it')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const generation = w.held()!.holdGeneration
+    // b1 ends; the drain is made, and b2 starts before the cut is sent.
+    w.adapter.beforeCut = () => w.adapter.toolStart('b2')
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.adapter.log.includes('held again:wait for it'), 'handed back')
+    await waitFor(() => w.held()?.detail === 'sleep 30 # b2', 'held for b2')
+    expect(w.held()!.holdGeneration).toBe(generation)
+    expect(w.delivered()).toEqual([])
+    w.adapter.toolDone('b2')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(w.delivered()).toEqual(['cut:wait for it'])
+    await w.finish()
+    expect(w.inContext('wait for it')).toBe(1)
+  })
+
+  it('start: the steer is held through the release window after the result, then goes in', async () => {
+    const w = await world('start')
+    w.adapter.toolStart('b1')
+    await w.steer('after the window')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    const done = Date.now()
+    await waitFor(() => w.delivered().length > 0, 'released after the window')
+    // Not before the window closed: a second command of the same response would start inside it.
+    expect(Date.now() - done).toBeGreaterThanOrEqual(STEER_SETTLE_MS - 20)
+    expect(w.adapter.log).toEqual(['start:b1', 'result:b1', 'cut:after the window'])
+    await w.finish()
+  })
+
+  it('start: a tool\'s own output never closes the window, and any tool event starts it again', async () => {
+    const w = await world('start')
+    w.adapter.toolStart('b1')
+    w.adapter.toolStart('b2')
+    await w.steer('patience')
+    w.adapter.toolDone('b1')
+    // b2 runs on and writes output for longer than the window: still held.
+    for (let i = 0; i < 6; i++) {
+      w.adapter.toolOutput('b2')
+      await sleep(STEER_SETTLE_MS / 2)
+    }
+    expect(w.delivered()).toEqual([])
+    w.adapter.toolDone('b2')
+    // A later tool event inside the window starts it again.
+    await sleep(STEER_SETTLE_MS / 2)
+    w.adapter.toolOutput('b2')
+    const restarted = Date.now()
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(Date.now() - restarted).toBeGreaterThanOrEqual(STEER_SETTLE_MS - 20)
+    await w.finish()
+  })
+
+  it('start: only the turn\'s own calls restart the window; a subagent\'s calls working on do not keep the steer held', async () => {
+    const w = await world('start')
+    w.adapter.toolStart('agent', 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'research' } as ActivityPatch)
+    w.adapter.toolStart('child', 'Bash', undefined, 'agent')
+    w.adapter.toolStart('b1')
+    await w.steer('not for the subagent')
+    await waitFor(() => w.held() !== undefined, 'held for b1')
+    w.adapter.toolDone('b1')
+    const done = Date.now()
+    // The subagent's command writes output more often than the window lasts, for as long as the steer waits.
+    let ticking = true
+    const ticks = (async () => {
+      while (ticking) {
+        w.adapter.toolOutput('child')
+        await sleep(STEER_SETTLE_MS / 3)
+      }
+    })()
+    await waitFor(() => w.delivered().length > 0, 'released while the subagent works on')
+    ticking = false
+    await ticks
+    expect(Date.now() - done).toBeLessThan(STEER_SETTLE_MS * 4)
+    expect(w.delivered()).toEqual(['cut:not for the subagent'])
+    w.adapter.toolDone('child')
+    w.adapter.toolDone('agent', 'Agent')
+    await w.finish()
+  })
+
+  it('start: text between two commands closes the window and the steer cuts (the documented best-effort window)', async () => {
+    const w = await world('start')
+    // A long window, so only the model's output can close it within the test.
+    ;(w.d.orch as unknown as { steerSettleMs: number }).steerSettleMs = 3_000
+    w.adapter.end()
+    await w.first
+    const second = w.send('second')
+    await waitFor(() => w.adapter.prompts.includes('second') && w.adapter.runId !== undefined, 'a turn with the long window')
+    w.adapter.toolStart('b1')
+    await w.steer('cut after text')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    await sleep(300)
+    // The window is open: still held.
+    expect(w.delivered()).toEqual([])
+    const wrote = Date.now()
+    w.adapter.writes('Now the second command:')
+    await waitFor(() => w.delivered().length > 0, 'cut by model output')
+    // Long before the window would have closed on its own.
+    expect(Date.now() - wrote).toBeLessThan(1_500)
+    expect(w.adapter.log).toEqual(['start:b1', 'result:b1', 'cut:cut after text'])
+    w.adapter.end()
+    await second
+    await w.finish()
+  })
+
+  it('start, strict release: a held steer waits past the window and the model\'s text, until the provider\'s turn ends', async () => {
+    const w = await world('start', { strict: true })
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('b1')
+    await w.steer('strictly after')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    w.adapter.writes('More text')
+    // A delayed start: the next command runs before Mousse hears of it. Strict never releases early.
+    await sleep(STEER_SETTLE_MS * 2)
+    expect(w.delivered()).toEqual([])
+    expect(w.held()).toBeDefined()
+    w.adapter.boundary()
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    expect(w.delivered()).toEqual(['native:strictly after'])
+    await w.finish()
+    expect(w.inContext('strictly after')).toBe(1)
+  })
+
+  it('a subagent working while the steer waits sends no transcript rebuild: its rows are nested, and a real move sends the one row, in place', async () => {
+    const w = await world()
+    w.adapter.toolStart('agent', 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'research' } as ActivityPatch)
+    w.adapter.toolStart('b1')
+    const item = await w.steer('after the command')
+    await waitFor(() => w.held() !== undefined, 'held for b1')
+    const session = w.d.orch.getOrCreateSession(w.thread.id)
+    const echo = () => session.messages.find((message) => message.steered && message.steerItemId === item)!
+    const replaces: unknown[] = []
+    const echoUpdates: string[] = []
+    const onMessages = (event: { threadId: string; replace?: boolean }) => {
+      if (event.threadId === w.thread.id && event.replace) replaces.push(event)
+    }
+    const onUpdated = (event: { threadId: string; message: ChatMessage }) => {
+      if (event.threadId === w.thread.id && event.message.id === echo().id) echoUpdates.push(event.message.timestamp)
+    }
+    w.d.orch.on('thread-messages', onMessages)
+    w.d.orch.on('thread-message-updated', onUpdated)
+    try {
+      // Twenty calls of the subagent while the steer waits, with polls between them.
+      for (let i = 0; i < 20; i++) {
+        w.adapter.toolStart(`child-${i}`, 'Bash', undefined, 'agent')
+        w.adapter.toolDone(`child-${i}`)
+        if (i % 4 === 3) await sleep(120)
+      }
+      await sleep(200)
+      expect(w.held()).toBeDefined()
+      expect(replaces).toEqual([])
+      expect(echoUpdates).toEqual([])
+      // A row at the turn's top level after the Steer row: the row moves once, by its time, and stays in its place in
+      // the list (the thread database writes it in place), with no rebuild.
+      const index = session.messages.indexOf(echo())
+      w.adapter.writes('A note while the command runs.')
+      await waitFor(() => echoUpdates.length > 0, 'the Steer row moved after the note')
+      await sleep(250)
+      expect(echoUpdates).toHaveLength(1)
+      expect(replaces).toEqual([])
+      expect(session.messages.indexOf(echo())).toBe(index)
+      const note = session.messages.find((message) => message.role === 'assistant' && message.content.includes('A note while the command runs.'))!
+      expect(echo().timestamp > note.timestamp).toBe(true)
+    } finally {
+      w.d.orch.off('thread-messages', onMessages)
+      w.d.orch.off('thread-message-updated', onUpdated)
+    }
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    w.adapter.toolDone('agent', 'Agent')
+    await w.finish()
+  })
+
+  it('start, strict release: the reply the agent writes while the steer waits reads above the Steer block, and stays there once the steer goes in', async () => {
+    const w = await world('start', { strict: true })
+    w.adapter.expect = ['cut', 'native']
+    w.adapter.toolStart('b1')
+    const item = await w.steer('after your reply')
+    await waitFor(() => w.held() !== undefined, 'held')
+    w.adapter.toolDone('b1')
+    w.adapter.writes('Here is what I found.')
+    // In the order a window shows them: by timestamp, the service's own order for ties (a stable sort, as the app
+    // store's `sortMessagesDeterministic` does).
+    const shown = () => [...w.d.orch.getOrCreateSession(w.thread.id).messages.filter((message) => !message.hidden)]
+      .sort((a, b) => (a.timestamp === b.timestamp ? 0 : a.timestamp < b.timestamp ? -1 : 1))
+    const order = () => {
+      const messages = shown()
+      return {
+        steer: messages.findIndex((message) => message.steered && message.steerItemId === item),
+        reply: messages.findIndex((message) => message.role === 'assistant' && message.content.includes('Here is what I found.')),
+        last: messages.length - 1
+      }
+    }
+    // While held: the Steer block stays after the newest row.
+    await waitFor(() => order().reply >= 0 && order().steer === order().last, 'the Steer block after the reply while held')
+    expect(w.held()).toBeDefined()
+    w.adapter.boundary()
+    await waitFor(() => w.delivered().length > 0, 'delivered at the boundary')
+    // Where it went in: below the reply written before it.
+    expect(order().steer).toBeGreaterThan(order().reply)
+    await w.finish()
+    expect(order().steer).toBeGreaterThan(order().reply)
+  })
+
+  it('start, best effort: with no output after the command, the steer goes in after the window (a late start can still be cut)', async () => {
+    const w = await world('start')
+    w.adapter.toolStart('b1')
+    await w.steer('best effort')
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    // The next command started at the provider before its start reached Mousse: it is cut. Stated, not prevented.
+    w.adapter.toolStart('b2-late')
+    expect(w.adapter.log).toEqual(['start:b1', 'result:b1', 'cut:best effort', 'start:b2-late'])
+    w.adapter.toolDone('b2-late')
+    await w.finish()
+  })
+
+  // -------- Ownership and who is asked --------
+
+  it('a subagent\'s own command never holds; the turn\'s own command does, and the steer goes in when it ends', async () => {
+    const w = await world()
+    w.adapter.toolStart('agent', 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'research' } as ActivityPatch)
+    w.adapter.toolStart('child', 'Bash', undefined, 'agent')
+    w.adapter.toolStart('root')
+    await w.steer('only the root')
+    await waitFor(() => w.held()?.tools === 1, 'held for the root command only')
+    expect(w.held()?.detail).toBe('sleep 30 # root')
+    w.adapter.toolDone('root')
+    await waitFor(() => w.delivered().length > 0, 'released while the subagent runs on')
+    expect(w.adapter.log).toEqual(['start:agent', 'start:child', 'start:root', 'result:root', 'cut:only the root'])
+    w.adapter.toolDone('child')
+    w.adapter.toolDone('agent', 'Agent')
+    await w.finish()
+  })
+
+  it('a call a person is asked about does not hold; a pending approval for one call never releases another that runs', async () => {
+    const w = await world()
+    w.adapter.toolStart('asks')
+    w.adapter.awaiting('asks', true)
+    w.adapter.toolStart('runs')
+    await w.steer('answer it')
+    await waitFor(() => w.held() !== undefined, 'held for the running call')
+    expect(w.held()).toMatchObject({ tools: 1, detail: 'sleep 30 # runs' })
+    w.adapter.toolDone('runs')
+    await waitFor(() => w.delivered().length > 0, 'cut while only the asking call is open')
+    expect(w.delivered()).toEqual(['cut:answer it'])
+    w.adapter.toolDone('asks')
+    await w.finish()
+  })
+
+  it('an approval granted while the steer is on its way makes the call run: the steer is held again', async () => {
+    const w = await world()
+    w.adapter.toolStart('asks')
+    w.adapter.awaiting('asks', true)
+    w.adapter.beforeCut = () => w.adapter.awaiting('asks', false)
+    await w.steer('not now')
+    await waitFor(() => w.adapter.log.includes('held again:not now'), 'handed back')
+    await waitFor(() => w.held() !== undefined, 'held')
+    expect(w.delivered()).toEqual([])
+    w.adapter.toolDone('asks')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(w.delivered()).toEqual(['cut:not now'])
+    await w.finish()
+  })
+
+  // -------- Peek coverage --------
+
+  it('a steer another process promoted during a command is held, listed, and released once', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    const queued = await w.send('from the CLI')
+    // Another process marks it a steer into this run, on disk only.
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => promoteQueuedMessageToSteer(items, queued.queueItem!.id, { steerRunId: w.runId }).items)
+    await waitFor(() => w.held()?.itemIds.includes(queued.queueItem!.id) === true, 'held, from disk')
+    await sleep(100)
+    expect(w.delivered()).toEqual([])
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(w.delivered()).toEqual(['cut:from the CLI'])
+    await w.finish()
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.inContext('from the CLI')).toBe(1)
+  })
+
+  // -------- Ends --------
+
+  it('three steers during a command join one hold: one line, one input', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    const ids = [await w.steer('one'), await w.steer('two'), await w.steer('three')]
+    await waitFor(() => w.held()?.itemIds.length === 3, 'one hold of three')
+    expect(w.held()!.itemIds).toEqual(ids)
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(w.delivered()).toEqual(['cut:one' + NL + 'two' + NL + 'three'])
+    await w.finish()
+    expect(w.adapter.prompts).toEqual(['first'])
+  })
+
+  it('a steer joining the hold raises its generation; the tool changing does not', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('one')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const g1 = w.held()!.holdGeneration
+    w.adapter.toolStart('b2')
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.held()?.detail === 'sleep 30 # b2', 'waits for b2')
+    expect(w.held()!.holdGeneration).toBe(g1)
+    await w.steer('two')
+    await waitFor(() => w.held()?.itemIds.length === 2, 'joined')
+    expect(w.held()!.holdGeneration).toBeGreaterThan(g1)
+    w.adapter.toolDone('b2')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    expect(w.delivered()).toEqual(['cut:one' + NL + 'two'])
+    await w.finish()
+  })
+
+  it('Stop while a steer is held: it comes back first in the queue, once, and nothing runs it', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    const later = await w.send('queued later')
+    const item = await w.steer('held then stopped')
+    await waitFor(() => w.held() !== undefined, 'held')
+    await w.d.orch.abortRun(w.runId, 'stop-held', w.thread.id)
+    await w.first
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped')
+    expect(w.d.orch.listQueue(w.thread.id).map((entry) => [entry.id, entry.content, entry.state])).toEqual([
+      [item, 'held then stopped', 'pending'],
+      [later.queueItem!.id, 'queued later', 'pending']
+    ])
+    expect(w.d.orch.getTurnState(w.thread.id).heldSteer).toBeUndefined()
+    await sleep(150)
+    expect(w.adapter.prompts).toEqual(['first'])
+    expect(w.delivered()).toEqual([])
+    expect(w.inContext('held then stopped')).toBe(0)
+  })
+
+  it('the turn ends while a steer is held: it runs once, as the next turn', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('after the end')
+    await waitFor(() => w.held() !== undefined, 'held')
+    // The provider's turn ends without the call's result (it ended the turn itself).
+    w.adapter.end()
+    await w.first
+    await waitFor(() => w.adapter.prompts.length === 2, 'the steer runs as a turn')
+    expect(w.adapter.prompts).toEqual(['first', 'after the end'])
+    w.adapter.end()
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id) && w.d.engine.getActiveRun(w.thread.id) === null, 'idle')
+    expect(w.delivered()).toEqual([])
+    expect(w.inContext('after the end')).toBe(1)
+  })
+
+  // -------- Send now --------
+
+  const sendNow = (w: Awaited<ReturnType<typeof world>>, request: Partial<{ holdGeneration: number; itemIds: string[]; clientRequestId: string; runId: string }> = {}) => {
+    const held = w.held()!
+    return w.d.orch.steerNow({
+      threadId: w.thread.id,
+      runId: request.runId ?? held.runId!,
+      holdGeneration: request.holdGeneration ?? held.holdGeneration,
+      itemIds: request.itemIds ?? held.itemIds,
+      clientRequestId: request.clientRequestId ?? 'now-1'
+    })
+  }
+
+  it('Send now forces the hold: the steer goes in at once, before the command\'s result', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('right now')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const generation = w.held()!.holdGeneration
+    expect(await sendNow(w)).toMatchObject({ status: 'accepted' })
+    await waitFor(() => w.delivered().length > 0, 'forced')
+    expect(w.adapter.log).toEqual(['start:b1', 'forced:right now'])
+    expect(w.events('steer.now_requested')).toHaveLength(1)
+    expect(w.events('steer.now_applied').map((event) => event.payload)).toEqual([{ runId: w.runId, holdGeneration: generation, requestId: 'now-1' }])
+    expect(w.events('steer.now_stale')).toHaveLength(0)
+    // The field is honoured once and gone.
+    expect(readDurableQueue(w.d.store, w.thread.id).some((entry) => entry.steerNow)).toBe(false)
+    w.adapter.toolDone('b1')
+    await w.finish()
+    expect(w.inContext('right now')).toBe(1)
+  })
+
+  it('Send now whose command cannot be recorded (the run database throws) forces nothing: no command is stopped without a record', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('not recorded')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const dispatch = vi.spyOn(w.d.engine, 'dispatch').mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'))
+    await expect(sendNow(w)).rejects.toThrow('SQLITE_BUSY')
+    dispatch.mockRestore()
+    // Several polls: still held, nothing forced, no record of a Send now.
+    await sleep(350)
+    expect(w.delivered()).toEqual([])
+    expect(w.held()).toBeDefined()
+    expect(w.events('steer.now_requested')).toHaveLength(0)
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released at the result')
+    expect(w.delivered()).toEqual(['cut:not recorded'])
+    await w.finish()
+  })
+
+  it('Send now is not applied before its command is recorded: a poll while the run database is busy forces nothing yet', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('after the record')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const real = w.d.engine.dispatch.bind(w.d.engine)
+    let release!: () => void
+    const busy = new Promise<void>((resolve) => { release = resolve })
+    const dispatch = vi.spyOn(w.d.engine, 'dispatch').mockImplementationOnce(async (...args: Parameters<typeof real>) => {
+      await busy
+      return real(...args)
+    })
+    const click = sendNow(w)
+    // Polls run while the command waits for the database: the force is known here, but not recorded.
+    await sleep(350)
+    expect(w.delivered()).toEqual([])
+    release()
+    expect(await click).toMatchObject({ status: 'accepted' })
+    dispatch.mockRestore()
+    await waitFor(() => w.delivered().length > 0, 'forced once recorded')
+    expect(w.delivered()).toEqual(['forced:after the record'])
+    expect(w.events('steer.now_requested')).toHaveLength(1)
+    w.adapter.toolDone('b1')
+    await w.finish()
+  })
+
+  it('a Send now click for an older hold is stale: nothing is forced', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('one')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const old = w.held()!.holdGeneration
+    await w.steer('two')
+    await waitFor(() => w.held()?.itemIds.length === 2, 'joined: a new hold')
+    const stale = new Promise<{ outcome: string }>((resolve) => w.d.orch.on('steer-now', resolve))
+    expect(await sendNow(w, { holdGeneration: old })).toMatchObject({ status: 'accepted' })
+    expect(await stale).toMatchObject({ outcome: 'stale', requestId: 'now-1' })
+    await sleep(150)
+    expect(w.delivered()).toEqual([])
+    expect(w.events('steer.now_stale')).toHaveLength(1)
+    expect(w.held()).toBeDefined()
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released normally')
+    expect(w.delivered()).toEqual(['cut:one' + NL + 'two'])
+    await w.finish()
+  })
+
+  it('two Send now clicks with different ids force once; the same id again replays its receipt', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('once')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const request = { holdGeneration: w.held()!.holdGeneration, itemIds: w.held()!.itemIds }
+    const [a, b] = await Promise.all([sendNow(w, { ...request, clientRequestId: 'a' }), sendNow(w, { ...request, clientRequestId: 'b' })])
+    expect([a.status, b.status]).toEqual(['accepted', 'accepted'])
+    await waitFor(() => w.delivered().length > 0, 'forced')
+    expect(await sendNow(w, { ...request, clientRequestId: 'a', runId: w.runId })).toMatchObject({ status: 'accepted', replayed: true })
+    await sleep(100)
+    expect(w.delivered()).toEqual(['forced:once'])
+    expect(w.events('steer.now_requested')).toHaveLength(2)
+    expect(w.events('steer.now_stale')).toHaveLength(0)
+    w.adapter.toolDone('b1')
+    await w.finish()
+    expect(w.inContext('once')).toBe(1)
+  })
+
+  it('Send now from another process: the command never ends, and the cut reaches the provider before any result', async () => {
+    const w = await world()
+    w.adapter.toolStart('forever')
+    const item = await w.steer('from elsewhere')
+    await waitFor(() => w.held() !== undefined, 'held')
+    // Another process: its own run engine on the same profile database and its own view of the queue files.
+    const otherEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home! })), pid: 2 })
+    extra.push(() => otherEngine.store.db.close())
+    const otherStore = new ThreadDataStore(new ProjectManager())
+    otherStore.setQueueJournal({
+      commands: new QueueCommands(otherEngine.store.db),
+      effects: { activeRunId: (threadId) => otherEngine.getActiveRun(threadId)?.runId ?? null, applyEffects: () => undefined, abandonWorkflow: () => undefined, audit: () => undefined, scheduleRepair: () => undefined }
+    })
+    const result = await otherEngine.dispatch({ kind: 'steer_now', threadId: w.thread.id, clientRequestId: 'elsewhere', runId: w.runId, holdGeneration: w.held()!.holdGeneration, itemIds: [item] })
+    expect(result.status).toBe('accepted')
+    repairQueueJournal(otherStore, w.thread.id)
+    await waitFor(() => w.delivered().length > 0, 'forced across processes')
+    expect(w.adapter.log).toEqual(['start:forever', 'forced:from elsewhere'])
+    expect(w.adapter.log.some((entry) => entry.startsWith('result:'))).toBe(false)
+    expect(w.events('steer.now_applied')).toHaveLength(1)
+    w.adapter.toolDone('forever')
+    await w.finish()
+    expect(w.inContext('from elsewhere')).toBe(1)
+  })
+
+  it('a crash between the database commit and the queue file write: the owner\'s poll finishes it', async () => {
+    const w = await world()
+    w.adapter.toolStart('forever')
+    const item = await w.steer('recovered')
+    await waitFor(() => w.held() !== undefined, 'held')
+    // The other process committed its intent and died before it touched the queue file.
+    const otherEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home! })), pid: 2 })
+    extra.push(() => otherEngine.store.db.close())
+    await otherEngine.dispatch({ kind: 'steer_now', threadId: w.thread.id, clientRequestId: 'crashed', runId: w.runId, holdGeneration: w.held()!.holdGeneration, itemIds: [item] })
+    expect(readDurableQueue(w.d.store, w.thread.id).some((entry) => entry.steerNow)).toBe(false)
+    await waitFor(() => w.delivered().length > 0, 'forced by the owner\'s poll')
+    expect(w.delivered()).toEqual(['forced:recovered'])
+    expect(new QueueCommands(w.d.engine.store.db).get(steerNowCommandKey(w.thread.id, 'crashed'))?.status).toBe('applied')
+    w.adapter.toolDone('forever')
+    await w.finish()
+  })
+
+  it('a crash after the queue file write and before the applied mark: finished once, never written twice', async () => {
+    const w = await world()
+    w.adapter.toolStart('forever')
+    const item = await w.steer('half done')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const generation = w.held()!.holdGeneration
+    const otherEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home! })), pid: 2 })
+    extra.push(() => otherEngine.store.db.close())
+    // The other process wrote the field and died before marking the entry applied. The owner may not have polled yet.
+    const pause = vi.spyOn(w.d.store, 'getQueueJournal').mockReturnValue(undefined)
+    await otherEngine.dispatch({ kind: 'steer_now', threadId: w.thread.id, clientRequestId: 'half', runId: w.runId, holdGeneration: generation, itemIds: [item] })
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => markSteerNow(items, { runId: w.runId, holdGeneration: generation, requestId: 'half', itemIds: [item] }, w.runId).items)
+    pause.mockRestore()
+    await waitFor(() => w.delivered().length > 0, 'forced')
+    expect(w.delivered()).toEqual(['forced:half done'])
+    await waitFor(() => new QueueCommands(w.d.engine.store.db).get(steerNowCommandKey(w.thread.id, 'half'))?.status === 'applied', 'entry finished')
+    await sleep(100)
+    expect(w.events('steer.now_applied')).toHaveLength(1)
+    w.adapter.toolDone('forever')
+    await w.finish()
+    expect(w.inContext('half done')).toBe(1)
+  })
+
+  it('a steering item with no run of its own, held in the active run, can be sent now', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    const queued = await w.send('unbound')
+    // Promoted with no run named (the composer's steer while the run was starting).
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => promoteQueuedMessageToSteer(items, queued.queueItem!.id, {}).items)
+    await waitFor(() => w.held()?.itemIds.includes(queued.queueItem!.id) === true, 'held')
+    expect(await sendNow(w)).toMatchObject({ status: 'accepted' })
+    await waitFor(() => w.delivered().length > 0, 'forced')
+    expect(w.delivered()).toEqual(['forced:unbound'])
+    w.adapter.toolDone('b1')
+    await w.finish()
+  })
+
+  it('Send now for a run that already ended is ignored, and a recovered request for it is stale: nothing is forced', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    const item = await w.steer('too late')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const generation = w.held()!.holdGeneration
+    const oldRun = w.runId
+    // The other process committed a request, then the run ended before anyone applied it.
+    const otherEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home! })), pid: 2 })
+    extra.push(() => otherEngine.store.db.close())
+    const pause = vi.spyOn(w.d.store, 'getQueueJournal').mockReturnValue(undefined)
+    await otherEngine.dispatch({ kind: 'steer_now', threadId: w.thread.id, clientRequestId: 'late', runId: oldRun, holdGeneration: generation, itemIds: [item] })
+    w.adapter.end()
+    await w.first
+    pause.mockRestore()
+    await waitFor(() => w.adapter.prompts.length === 2, 'the steer runs as its own turn')
+    // Recovered now: its item is no longer held for that run.
+    repairQueueJournal(w.d.store, w.thread.id)
+    expect(w.events('steer.now_stale').map((event) => event.payload)).toEqual([{ runId: oldRun, holdGeneration: generation, requestId: 'late' }])
+    expect(await w.d.orch.steerNow({ threadId: w.thread.id, runId: oldRun, holdGeneration: generation, itemIds: [item], clientRequestId: 'after' })).toMatchObject({ status: 'ignored', reason: 'run_not_active' })
+    w.adapter.end()
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id) && w.d.engine.getActiveRun(w.thread.id) === null, 'idle')
+    expect(w.delivered()).toEqual([])
+    expect(w.adapter.prompts).toEqual(['first', 'too late'])
+  })
+
+  it('Send now, then Stop before the owner\'s poll, then the item steered into a new run with a held tool: nothing is forced and the field is gone', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    const item = await w.steer('re-steered')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const generation = w.held()!.holdGeneration
+    // The field lands on the item, and the Stop comes before the owner reads it.
+    mutateDurableQueue(w.d.store, w.thread.id, (items) => markSteerNow(items, { runId: w.runId, holdGeneration: generation, requestId: 'old', itemIds: [item] }, w.runId).items)
+    await w.d.orch.abortRun(w.runId, 'stop-1', w.thread.id)
+    await w.first
+    await waitFor(() => !w.d.orch.isActiveTurnRunning(w.thread.id), 'stopped')
+    expect(readDurableQueue(w.d.store, w.thread.id).find((entry) => entry.id === item)?.steerNow).toBeUndefined()
+    // A new run, with a held tool, and the same item steered into it.
+    const second = w.send('second')
+    await waitFor(() => w.adapter.prompts.includes('second') && w.adapter.runId !== undefined && w.adapter.runId !== w.runId, 'second run')
+    w.adapter.toolStart('b2')
+    expect(w.d.orch.promoteQueueItem(w.thread.id, item)).toEqual({ ok: true })
+    await waitFor(() => w.held() !== undefined, 'held in the new run')
+    await sleep(150)
+    expect(w.delivered()).toEqual([])
+    w.adapter.toolDone('b2')
+    await waitFor(() => w.delivered().length > 0, 'released normally')
+    expect(w.delivered()).toEqual(['cut:re-steered'])
+    w.adapter.end()
+    await second
   })
 })

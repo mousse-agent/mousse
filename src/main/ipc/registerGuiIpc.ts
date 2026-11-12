@@ -1364,6 +1364,17 @@ export function registerGuiIpc(
     return res.ok
   })
 
+  registerHandler('orchestrator:steerNow', async (_e, request: { threadId: string; runId: string; holdGeneration: number; itemIds: string[]; clientRequestId: string }) => {
+    const res = await guiMms.request<{ ok: boolean; reason?: string }>('orchestrator.steerNow', {
+      threadId: String(request?.threadId ?? ''),
+      runId: String(request?.runId ?? ''),
+      holdGeneration: Number(request?.holdGeneration),
+      itemIds: Array.isArray(request?.itemIds) ? request.itemIds.map(String) : [],
+      clientRequestId: String(request?.clientRequestId ?? '')
+    })
+    return { ok: res.ok === true, ...(res.reason ? { reason: res.reason } : {}) }
+  })
+
   registerHandler('orchestrator:isTurnActive', async (_e, threadId?: string) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false

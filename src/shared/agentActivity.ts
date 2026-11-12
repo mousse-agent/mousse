@@ -25,6 +25,11 @@ interface ActivityBase {
   endedAt?: string
   runId?: string
   interruptedBy?: ActivityInterruptedBy
+  /**
+   * A subagent call the provider could not move to the background: a person's steer waits for it like any foreground
+   * tool, instead of trying the move again and again.
+   */
+  notMovable?: boolean
 }
 
 export interface ActivityFileChange {

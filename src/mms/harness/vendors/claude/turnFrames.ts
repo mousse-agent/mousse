@@ -62,8 +62,21 @@ export class TurnFrames {
   private readonly handedOff = new Set<string>()
   /** A task's end that arrived before its call's placeholder result, kept until that result says whether it is the call's end. */
   private readonly earlyEnds = new Map<string, Record<string, unknown>>()
+  /** The task Claude Code runs an open call as (`task_started`): Send now stops it by this id. */
+  private readonly taskIds = new Map<string, string>()
+  /** Open subagent calls Claude Code moved to the background, or that could not be moved there. */
+  private readonly backgrounded = new Set<string>()
+  private readonly unmovable = new Set<string>()
+  /**
+   * Open root calls whose whole `assistant` message arrived: their input is complete, so Claude Code runs them. One
+   * that is still open without it when the next root message starts, or an aborted result comes, was dropped before it
+   * ran (an immediate message cut its input as it streamed, spike S1): no result will ever come for it.
+   */
+  private readonly inputComplete = new Set<string>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
+  /** The turn was stopped (the caller's cancel): a call a Stop's aborted result drops reads as stopped. */
+  stopped: () => boolean = () => false
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
   readonly rateLimits = new RejectedWindows()
   /** A frame of this turn arrived. */
@@ -122,6 +135,46 @@ export class TurnFrames {
     return false
   }
 
+  private isSubagent(callId: string): boolean {
+    const name = this.tools.get(callId)
+    return this.contexts.get(callId)?.kind === 'subagent' || name === 'Agent' || name === 'Task'
+  }
+
+  /**
+   * The turn's own subagent calls still in the foreground that Claude Code runs as a task (open, `task_started` seen,
+   * not handed off, not moved): a steer moves each to the background by its id before it is pushed. One that could not
+   * be moved is waited for instead. A subagent call with no task yet is left out: Claude Code cannot move it
+   * (`backgroundTasks` answers false), and the push drops it while its input still streams (spike S1).
+   */
+  foregroundSubagents(): string[] {
+    return [...this.tools.keys()].filter((callId) =>
+      !this.parents.get(callId) && this.isSubagent(callId) && this.taskIds.has(callId) && !this.handedOff.has(callId) && !this.backgrounded.has(callId) && !this.unmovable.has(callId))
+  }
+
+  /** Claude Code moved the subagent call `callId` to the background: a later steer does not move it again. */
+  markBackgrounded(callId: string): void {
+    if (this.tools.has(callId)) this.backgrounded.add(callId)
+  }
+
+  /**
+   * The turn's own calls it waits for (Send now stops them): open root calls that are not subagents, or subagents that
+   * could not be moved, with the task each runs as when Claude Code named one.
+   */
+  foregroundCalls(): Array<{ callId: string; taskId?: string; toolName: string }> {
+    return [...this.tools.keys()]
+      .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)))
+      .map((callId) => {
+        const taskId = this.taskIds.get(callId)
+        const toolName = this.tools.get(callId)!
+        return taskId ? { callId, taskId, toolName } : { callId, toolName }
+      })
+  }
+
+  /** Claude Code could not move the subagent call `callId` to the background: the turn waits for it. */
+  markNotMovable(callId: string): void {
+    if (this.tools.has(callId)) this.unmovable.add(callId)
+  }
+
   /** A steer cut the turn here: what follows is a new paragraph. */
   breakParagraph(): void {
     if (this.text) this.text += '\n\n'
@@ -141,7 +194,10 @@ export class TurnFrames {
     // the turn places nothing: what follows it, if anything, is a later turn's, which starts with a message of its own
     // (or the steer's read places it). A break placed there would end the reply with an empty paragraph, which the
     // turn's result text then fills in again (issue #919).
-    if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || isAbortedResult(message)) this.flushNextMessage()
+    if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || isAbortedResult(message)) {
+      this.closeDropped(message.type === 'result')
+      this.flushNextMessage()
+    }
     this.waiting()
     if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
     if (message.type === 'stream_event') {
@@ -196,6 +252,7 @@ export class TurnFrames {
         const name = this.tools.get(block.id)!
         const input = record(block.input) ?? {}
         const isRoot = !this.parents.get(block.id)
+        if (isRoot) this.inputComplete.add(block.id)
         // The arguments are known now: a subagent call's row names its subagent before the call returns,
         // and every other call gets the typed fields its arguments carry.
         const subagentRecord = recordSubagentCall(block.name, block.input, {})
@@ -265,6 +322,32 @@ export class TurnFrames {
     this.parents.delete(callId)
     this.handedOff.delete(callId)
     this.earlyEnds.delete(callId)
+    this.taskIds.delete(callId)
+    this.backgrounded.delete(callId)
+    this.unmovable.delete(callId)
+    this.inputComplete.delete(callId)
+  }
+
+  /**
+   * Root calls the message being written announced that never got their whole `assistant` message: the message ended
+   * (the next root message starts, or an aborted result came) with their input cut off, so Claude Code never ran them
+   * and no result will come. They close as without a result; left open, a held steer would wait for them until the
+   * turn ends.
+   */
+  private closeDropped(atAbortedResult: boolean): void {
+    // A Stop's aborted result dropped it: it reads as stopped, like every other call the Stop ended.
+    const reason: Extract<ActivityInterruptedBy, 'stop' | 'no_result'> = atAbortedResult && this.stopped() ? 'stop' : 'no_result'
+    for (const [callId, title] of [...this.tools]) {
+      if (this.parents.get(callId) || this.inputComplete.has(callId) || this.handedOff.has(callId) || this.taskIds.has(callId)) continue
+      this.sink.onTool?.({
+        phase: 'complete',
+        callId,
+        title,
+        toolName: title,
+        activity: { status: 'interrupted', interruptedBy: reason, summary: INTERRUPTED_SUMMARY[reason] }
+      })
+      this.forget(callId)
+    }
   }
 
   /**
@@ -282,6 +365,10 @@ export class TurnFrames {
     if (frame.subtype === 'task_started') {
       const taskId = typeof frame.task_id === 'string' ? frame.task_id : undefined
       const background = frame.is_backgrounded === true && kind === 'subagent'
+      if (taskId) this.taskIds.set(callId, taskId)
+      if (background) this.backgrounded.add(callId)
+      // A task now: Claude Code can move it, so a steer tries again rather than wait for it.
+      if (this.unmovable.delete(callId)) this.sink.onTool?.({ phase: 'update', callId, title, toolName: title, activity: { notMovable: false } as ActivityPatch })
       if ((kind !== 'subagent' && kind !== 'command') || (!taskId && !background)) return
       this.sink.onTool?.({
         phase: 'update',

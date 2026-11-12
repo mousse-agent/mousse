@@ -257,6 +257,7 @@ export const PROTOCOL_METHODS = [
   'orchestrator.send',
   'orchestrator.abort',
   'orchestrator.steer',
+  'orchestrator.steerNow',
   'orchestrator.retry',
   'orchestrator.isTurnActive',
   'orchestrator.contextUsage',
@@ -538,6 +539,7 @@ export type ProtocolEventType =
   | 'turn.aborted'
   | 'turn.paused'
   | 'turn.steered'
+  | 'steer.now'
   | 'connection.failed'
   | 'activity'
   | 'activity.snapshot'

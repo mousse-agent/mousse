@@ -189,6 +189,10 @@ describe('P3 real MMS remote Bridge', () => {
     expect(exposed.filter((method) => /permission/i.test(method))).toEqual([])
   })
 
+  it('never exposes Send now: a phone steers or stops only its own runs, which never hold a steer', () => {
+    expect(Object.keys(BRIDGE_REMOTE_METHODS)).not.toContain('orchestrator.steerNow')
+  })
+
   it('never exposes a thread\'s "Always for this thread" rules: a remote client can answer a request, not list or revoke the rules', () => {
     const exposed = Object.keys(BRIDGE_REMOTE_METHODS)
     expect(exposed).not.toContain('threads.approvalRules')

@@ -568,6 +568,9 @@ describe('what a private stream carries', () => {
         threadId: t.id,
         error: 'no model'
       })
+      // A Send now click's outcome, for the window on another computer that clicked it.
+      f.mms.orchestrator.emit('steer-now', { threadId: t.id, requestId: 'click-1', outcome: 'stale' })
+      f.mms.orchestrator.emit('steer-now', { threadId: 'other', requestId: 'click-2', outcome: 'applied' })
       // A save or an Undo, raised through the protocol server for this thread; another thread's is not heard.
       f.mms.events.broadcast('thread:event', {
         type: 'actions.updated',
@@ -588,10 +591,12 @@ describe('what a private stream carries', () => {
         'tasks.updated',
         'pullRequests.updated',
         'thread.title-generation-failed',
+        'steer.now',
         'actions.updated'
       ])
     )
     expect(heard(private_).filter((type) => type === 'actions.updated')).toHaveLength(1)
+    expect(heard(private_).filter((type) => type === 'steer.now')).toHaveLength(1)
     // A phone's stream carries none of them.
     expect(heard(shared)).toEqual([])
   }, 60_000)

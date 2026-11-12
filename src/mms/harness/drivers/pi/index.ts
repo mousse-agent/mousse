@@ -22,6 +22,7 @@ function noRuntimeAdapter(): ProviderAdapter {
     driver: 'pi',
     capabilities: {
       steer: PI_RPC_CAPS.steer,
+      steerBoundary: PI_RPC_CAPS.steerBoundary,
       interrupt: PI_RPC_CAPS.interrupt,
       rollback: PI_RPC_CAPS.rollback,
       fork: PI_RPC_CAPS.fork,

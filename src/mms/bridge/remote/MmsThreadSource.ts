@@ -166,6 +166,10 @@ export class MmsThreadSource implements ThreadSourcePort {
     on(s.orchestrator, 'thread-title-generation-failed', (payload: { threadId?: string }) => {
       if (payload?.threadId === threadId) deliver('thread.title-generation-failed', payload, true)
     })
+    // A Send now click's outcome, for the window on another computer that clicked it (`orchestrator.steerNow`).
+    on(s.orchestrator, 'steer-now', (payload: { threadId?: string; requestId?: string; outcome?: string }) => {
+      if (payload?.threadId === threadId) deliver('steer.now', { requestId: payload.requestId, outcome: payload.outcome }, true)
+    })
     // Saves, Undo and workspace changes raise these through the protocol server, whichever window or computer asked.
     on(s.events, 'thread:event', (event: { type?: string; data?: unknown; threadId?: string }) => {
       if (event?.threadId !== threadId) return
