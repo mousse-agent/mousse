@@ -4,14 +4,16 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatStatusFromTurn, mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
-import { collectNativeSubagentCards } from '../src/renderer/chat/adapters/nativeSubagents'
+import { collectNativeSubagentCards, nativeSubagentState, nativeSubagentsOfMessages } from '../src/renderer/chat/adapters/nativeSubagents'
 import { collectSubagentCalls, joinSubagentCards, type SubagentCardModel } from '../src/renderer/chat/adapters/subagentCards'
 import { MessageList } from '../src/renderer/chat/components/agent-elements/message-list'
 import { SubagentCardsContext } from '../src/renderer/chat/components/agent-elements/tools/subagent-cards-context'
 import { describeTurnProgress } from '../src/renderer/chat/components/agent-elements/turn-progress'
-import type { AgentActivityItem } from '../src/shared/agentActivity'
+import { useBackgroundLive } from '../src/renderer/hooks/useNativeSubagents'
+import { useAppStore } from '../src/renderer/stores/appStore'
+import { BACKGROUND_SUMMARY, type AgentActivityItem } from '../src/shared/agentActivity'
 import type { SubagentSummary } from '../src/shared/subagents'
-import type { ChatMessage } from '../src/shared/types'
+import type { ChatMessage, ThreadActivityState, TurnPhase } from '../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -243,5 +245,63 @@ describe('a thread whose agent starts subagents', () => {
     const view = await show([...intro, agent('a1', 2, { status: 'done' }), reply('r2', 9, 'Done.')], false)
     expect(view.cards).toHaveLength(1)
     expect(view.progress).toEqual([])
+  })
+})
+
+describe('Lineage leaves a native subagent out until it has started', () => {
+  const lineage = (messages: ChatMessage[], turnActive: boolean) => nativeSubagentsOfMessages(messages, turnActive, turnActive).map((card) => card.title)
+
+  it('lists no subagent of the running turn that has no name or has not started', () => {
+    expect(lineage([user('u1', 0, 'go'), agent('a1', 1, {})], true)).toEqual([])
+    expect(lineage([user('u1', 0, 'go'), agent('a1', 1, named)], true)).toEqual([])
+  })
+
+  it('lists it by name once it has a task id or a call of its own', () => {
+    expect(lineage([user('u1', 0, 'go'), agent('a1', 1, { ...named, nativeId: 'task-1' })], true)).toEqual(['Map the scroll code'])
+    expect(lineage([user('u1', 0, 'go'), agent('a1', 1, named), nested('c1', 2, 'a1')], true)).toEqual(['Map the scroll code'])
+  })
+
+  it('lists one that failed to start, and every subagent of a finished turn', () => {
+    expect(lineage([user('u1', 0, 'go'), agent('a1', 1, { ...named, status: 'failed', summary: 'Agent type not found' })], true)).toEqual(['Map the scroll code'])
+    expect(lineage([user('u1', 0, 'go'), agent('a1', 1, {})], false)).toEqual(['Subagent'])
+  })
+})
+
+describe('a background subagent stays working through its turn\'s end', () => {
+  let host: HTMLDivElement
+  let root: Root
+  const seen: string[] = []
+  // The row a settled turn left for an agent still running in the background.
+  const row = { state: 'output-available', output: { summary: BACKGROUND_SUMMARY } }
+  function Probe() {
+    seen.push(nativeSubagentState(row, useBackgroundLive('t1')))
+    return null
+  }
+  const apply = (phase: TurnPhase, activity: ThreadActivityState) =>
+    act(() => useAppStore.setState({ turnStates: { t1: { threadId: 't1', turnId: RUN, phase, updatedAt: at(9) } }, threadActivity: { t1: activity } }))
+
+  beforeEach(() => {
+    seen.length = 0
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+    useAppStore.setState({ turnStates: {}, threadActivity: {} })
+  })
+
+  it('never shows done while the turn has ended but the thread has not yet turned Waiting', () => {
+    apply('tool_running', 'processing')
+    act(() => root.render(createElement(Probe)))
+    // The turn's end reaches the window first, the thread's Waiting just after.
+    apply('completed', 'processing')
+    apply('completed', 'waiting')
+    expect(seen.every((state) => state === 'working')).toBe(true)
+    // The background work ends: the thread is Done and the row with it.
+    apply('completed', 'completed')
+    expect(seen.at(-1)).toBe('done')
   })
 })
