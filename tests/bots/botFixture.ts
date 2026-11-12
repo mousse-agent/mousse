@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import type { BotDispatchEnd, BotJournalInput, BotModelProblem } from '../../src/mms/bots/seams'
+import type { BotDispatchEnd, BotJournalInput, BotModelProblem, BotPickMiss } from '../../src/mms/bots/seams'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -18,7 +18,7 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
 import type { BotChip } from '../../src/shared/bots/personal/chat'
-import type { BotModelChoice } from '../../src/shared/bots/personal/definition'
+import type { BotDepth, BotModelPick } from '../../src/shared/bots/personal/definition'
 import type { ProviderSelection } from '../../src/shared/harness/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
@@ -49,7 +49,10 @@ export interface BotFixture {
   limited: Map<string, string>
   /** What the resolver answers instead of a candidate, when set. */
   problem: { problem: BotModelProblem; until?: string; instanceId?: string } | undefined
-  resolved: Array<{ choice: BotModelChoice; override?: BotModelChoice }>
+  /** What each resolve was asked: the turn's pick (null: Automatic) and depth. */
+  resolved: Array<{ pick: BotModelPick | null; depth: BotDepth }>
+  /** A pick that can't run, and why (the resolver then answers with Automatic and `missed`). */
+  pickMiss?: (pick: BotModelPick) => BotPickMiss | undefined
   journal: BotJournalInput[]
   /** Journal rows written outside a transaction (must stay empty). */
   outsideTx: BotJournalInput[]
@@ -107,17 +110,22 @@ export function botFixture(): BotFixture {
     },
     models: {
       resolve: async (input) => {
-        fixture.resolved.push({ choice: input.choice, ...(input.override ? { override: input.override } : {}) })
+        fixture.resolved.push({ pick: input.pick, depth: input.depth })
         if (fixture.problem) return fixture.problem
         const free = fixture.candidates.filter((candidate) => {
           const until = fixture.limited.get(candidate.instanceId)
           return !until || Date.parse(until) <= clock.now
         })
-        const depth = (input.override ?? input.choice).depth
+        const depth = input.depth
         if (!free.length) {
           const until = [...fixture.limited.values()].sort()[0]
           return { problem: 'all_limited', ...(until ? { until } : {}), instanceId: fixture.candidates[0]?.instanceId }
         }
+        // A pick that can't run: Automatic (the first free candidate), and why.
+        const missed = input.pick ? fixture.pickMiss?.(input.pick) : undefined
+        if (missed) return { selection: { ...free[0]! }, missed }
+        // A pick on its entry runs as picked; otherwise the depth's effort on the first free candidate.
+        if (input.pick?.instanceId) return { selection: { instanceId: input.pick.instanceId, model: input.pick.model, ...(input.pick.effort ? { effort: input.pick.effort } : {}) } }
         return { selection: { ...free[0]!, ...(depth === 'deep' ? { effort: 'high' } : depth === 'quick' ? { effort: 'low' } : {}) } }
       },
       markLimited: (instanceId, until) => { fixture.limited.set(instanceId, until) }

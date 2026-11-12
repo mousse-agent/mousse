@@ -100,23 +100,22 @@ describe('the bots\' model choice with a Settings default', () => {
 
   it('an automatic bot runs on the default, at the effort its depth gives', async () => {
     const chooser = resolver({ instanceId: 'pi:openai', model: 'gpt-5.1-mini' })
-    expect(await chooser.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'medium' } })
-    expect(await chooser.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'quick' }, policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'low' } })
-    expect(await chooser.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'deep' }, policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'high' } })
+    expect(await chooser.resolve({ botId: 'b', pick: null, depth: 'normal', policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'medium' } })
+    expect(await chooser.resolve({ botId: 'b', pick: null, depth: 'quick', policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'low' } })
+    expect(await chooser.resolve({ botId: 'b', pick: null, depth: 'deep', policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'high' } })
   })
 
-  it('a named choice in the definition, and the bot\'s own override, come before the default', async () => {
+  it('a row picked by hand, or the activation\'s own pick, comes before the default', async () => {
     const chooser = resolver({ instanceId: 'pi:openai', model: 'gpt-5.1-mini' })
-    expect(await chooser.resolve({ botId: 'b', choice: { mode: 'named', model: 'Big 2', depth: 'normal' }, policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'medium' } })
-    // `use_model` named: the override wins over an automatic definition and the default.
-    expect(await chooser.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, override: { mode: 'named', model: 'mid', depth: 'deep' }, policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'high' } })
-    // `set_depth` on an automatic bot: still the default, at the new depth.
-    expect(await chooser.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, override: { mode: 'auto', depth: 'quick' }, policy })).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1-mini', effort: 'low' } })
+    // An older bot's model by name.
+    expect(await chooser.resolve({ botId: 'b', pick: { model: 'Big 2' }, depth: 'normal', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-big-2', effort: 'medium' } })
+    // A pick on its entry, Default reasoning: the depth gives it.
+    expect(await chooser.resolve({ botId: 'b', pick: { instanceId: 'claude', model: 'acme-mid-2' }, depth: 'deep', policy })).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'high' } })
   })
 
   it('falls back to automatic at the same depth when the default cannot run the bot', async () => {
     const auto = { selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' } }
-    const normal = { botId: 'b', choice: { mode: 'auto' as const, depth: 'normal' as const }, policy }
+    const normal = { botId: 'b', pick: null, depth: 'normal' as const, policy }
     // Refused by `canHoldBot`.
     expect(await resolver({ instanceId: 'pi:refused', model: 'gpt-5.1' }).resolve(normal)).toEqual(auto)
     // Removed entry, or a model it no longer lists.
@@ -131,7 +130,7 @@ describe('the bots\' model choice with a Settings default', () => {
 
   it('a default at its usage limit falls back to automatic; with every model limited the bot pauses', async () => {
     const chooser = resolver({ instanceId: 'pi:openai', model: 'gpt-5.1' })
-    const normal = { botId: 'b', choice: { mode: 'auto' as const, depth: 'normal' as const }, policy }
+    const normal = { botId: 'b', pick: null, depth: 'normal' as const, policy }
     chooser.markLimited('pi:openai', '2030-06-01T12:00:00.000Z')
     expect(await chooser.resolve(normal)).toEqual({ selection: { instanceId: 'claude', model: 'acme-mid-2', effort: 'medium' } })
     chooser.markLimited('claude', '2030-06-01T13:00:00.000Z')

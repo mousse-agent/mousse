@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import { BOT_DEPTHS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotSchedule } from '../../../../shared/bots/personal/definition'
+import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotSchedule } from '../../../../shared/bots/personal/definition'
+import { workLevelOf } from '../../../../shared/bots/personal/modelSlots'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
 import type { BotActivityContext, BotActivitySink, BotToolHost } from '../../../bots/seams'
@@ -16,7 +17,8 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
  *   `bots.db`; the job scheduler's tools already own the `schedule_*` names);
  * - `set_profile` renames it or changes its description;
  * - `set_depth` and `use_model` change how much time it takes and, in words the owner used, its
- *   model. Their effects never reach the UI.
+ *   model (#673: a level, and a pick among the Runs on choices); a model change shows as a chip
+ *   and on About → Runs on, and never names the model in the chat.
  * The bot and the lane always come from the engine (`BotToolHost.activationOf`), never from
  * arguments. An unattended run may look at its schedules and change its depth for itself, but only
  * the owner's chat changes the bot for good.
@@ -87,7 +89,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'set_depth',
-    description: 'Take more time to think (deep), be quicker (quick) or go back to normal. Use it when the owner asks you to think harder or be faster, or when a task needs it.',
+    description: 'Take more time to think (deep), be quicker (quick) or go back to normal. now: this conversation, or the rest of this run. always: from now on, which is also the level of work, scheduled runs and reminders that name none. Use it when the owner asks you to think harder or be faster.',
     parameters: Type.Object({
       depth: Type.Union(BOT_DEPTHS.map((depth) => Type.Literal(depth))),
       scope: SCOPE
@@ -95,10 +97,11 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'use_model',
-    description: 'Only when the owner names a model: use it, as they said it. If it is not available here, say so plainly and carry on.',
+    description: 'Only when the owner names a model: use it, as they said it. now: for this conversation. always: from now on, for talking, for work, or both (all). If it is not available here, say so plainly and carry on.',
     parameters: Type.Object({
       model: Type.String({ description: 'The model, in the owner\'s words.' }),
-      scope: SCOPE
+      scope: SCOPE,
+      for: Type.Optional(Type.Union([Type.Literal('talk'), Type.Literal('work'), Type.Literal('all')], { description: 'With always: talk (this chat), work, or all (the default).' }))
     })
   },
   {
@@ -106,7 +109,8 @@ export const BOT_TOOLS: Tool[] = [
     description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Work runs one at a time; later work waits its turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
-      brief: Type.String({ description: 'The whole task, standing on its own.' })
+      brief: Type.String({ description: 'The whole task, standing on its own.' }),
+      level: Type.Optional(Type.Union(BOT_WORK_LEVELS.map((level) => Type.Literal(level)), { description: 'How hard it is: light for a quick lookup or a small routine job, medium for most work, hard for research, a long or difficult problem, or when the owner asks you to think harder. Left out: your usual level.' }))
     })
   },
   {
@@ -161,8 +165,8 @@ export interface BotAppToolDeps {
   host: BotToolHost
   /** Outcome chips: new schedules, renames, depth. */
   activity?: BotActivitySink
-  /** `use_model`: whether the owner's words name a model a bot can run here (`BotModelChooser.namedAvailable`). */
-  models?: { namedAvailable(model: string): Promise<boolean> }
+  /** `use_model`: the Runs on choice the owner's words name, among the same ones the picker offers (`BotModelChooser.pickFor`). */
+  models?: { pickFor(model: string): Promise<{ instanceId: string; model: string } | undefined> }
 }
 
 const NOT_A_BOT = 'Only a bot can use this.'
@@ -361,8 +365,10 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const brief = typeof args.brief === 'string' ? args.brief.trim().slice(0, MAX_WORK_BRIEF_CHARS) : ''
         if (!brief) return error('work_start needs a brief that stands on its own.')
         const title = typeof args.title === 'string' ? args.title : ''
+        const level = workLevelOf(args.level)
+        if (args.level !== undefined && !level) return error('level is light, medium or hard.')
         try {
-          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}` })
+          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}) })
           const result = { ...started, note: started.status === 'queued' ? `It starts after: ${started.ahead.join('; ')}. Tell the owner it is next in line.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running. Tell the owner you are on it; its report reaches them by itself.' }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
@@ -471,14 +477,19 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (!model) return error('use_model needs the model, as the owner said it.')
         const scope = args.scope === 'always' ? 'always' : args.scope === 'now' ? 'now' : undefined
         if (!scope) return error('scope is now or always.')
-        const available = call.deps.models ? await call.deps.models.namedAvailable(model) : false
-        if (!available) return json({ ok: false, reason: 'That model is not available here. You stay on automatic; tell the owner plainly, without naming other models.' })
+        const rows = args.for === undefined ? 'all' : args.for === 'talk' || args.for === 'work' || args.for === 'all' ? args.for : undefined
+        if (!rows) return error('for is talk, work or all.')
+        // Only among the choices About → Runs on offers, each on its own entry; the owner sees the change there and as a chip.
+        const pick = call.deps.models ? await call.deps.models.pickFor(model) : undefined
+        if (!pick) return json({ ok: false, reason: 'That model is not available here. You stay as you were; tell the owner plainly, without naming other models.' })
         try {
-          call.deps.host.setModel(call.botId, call.activationId, scope, { mode: 'named', model })
+          call.deps.host.setModel(call.botId, call.activationId, scope, { pick, ...(scope === 'always' ? { rows } : {}) })
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
         }
-        return json({ ok: true })
+        const result = { ok: true as const, scope, ...(scope === 'always' ? { for: rows } : {}) }
+        call.deps.activity?.onAppResult(call.activity, 'use_model', result)
+        return json(result)
       }
     })
   ]

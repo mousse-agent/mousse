@@ -1,5 +1,6 @@
 import type { BotChip } from '../../shared/bots/personal/chat'
-import type { BotLane, BotModelChoice, BotSchedule } from '../../shared/bots/personal/definition'
+import type { BotDepth, BotLane, BotModelPick, BotSchedule, BotWorkLevel } from '../../shared/bots/personal/definition'
+import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
 import type { BotStoreTx } from './store/BotStore'
@@ -28,10 +29,20 @@ export interface BotProcessSupervision {
 /** Why no model could be chosen. Never shown as such: it becomes a `BotError` in plain words. */
 export type BotModelProblem = 'no_provider' | 'named_unavailable' | 'all_limited'
 
-/** The hidden model choice (§5.6). WP3 implements; WP2's engine calls at the first dispatch of each activation. */
+/** A pick that could not run (#673), and why: the chat says so once (`modelSlots.ts`). */
+export type { BotPickMiss, BotPickReason } from '../../shared/bots/personal/modelSlots'
+
+export type BotModelResolution =
+  | { selection: ProviderSelection; missed?: BotPickMiss }
+  | { problem: BotModelProblem; until?: string; instanceId?: string; missed?: BotPickMiss }
+
+/** The model choice (§5.6, #673). WP3 implements; WP2's engine calls at the first dispatch of each activation. */
 export interface BotModelResolver {
-  resolve(input: { botId: string; choice: BotModelChoice; override?: BotModelChoice; policy: RunPolicy }):
-    Promise<{ selection: ProviderSelection } | { problem: BotModelProblem; until?: string; instanceId?: string }>
+  /**
+   * A turn's model: `pick` on its entry, at its reasoning level (Default: the one `depth` gives), or, with no pick or
+   * one that can't run now, Automatic at `depth` (`missed` then says why the pick could not run).
+   */
+  resolve(input: { botId: string; pick: BotModelPick | null; depth: BotDepth; policy: RunPolicy }): Promise<BotModelResolution>
   /** A bot turn on `instanceId` hit its usage limit; skip it until `until`. */
   markLimited(instanceId: string, until: string): void
 }
@@ -57,14 +68,18 @@ export interface BotToolHost {
     list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
   }
   setProfile(botId: string, p: { name?: string; description?: string }): void
-  /** `now`: this activation only, by a reload; `always`: the definition's `main.model`, with no re-approval. */
-  setModel(botId: string, activationId: string, scope: 'now' | 'always', choice: Partial<BotModelChoice>): void
+  /**
+   * `set_depth` and `use_model` (#673). `now`: this activation only, by a reload; `always`: saved as a revision with no
+   * re-approval. A depth is the activation's level (`now`) or the bot's standing level (`always`); a pick is one of the
+   * Runs on choices, on this chat (`now`) or on `rows` (`always`).
+   */
+  setModel(botId: string, activationId: string, scope: 'now' | 'always', change: BotModelChange): void
   /**
    * The chat's work (docs/plans/bot-always-free.md): runs beside the chat that report back. `from` is the chat
-   * activation that hands it off; `key` makes a repeated call start nothing new.
+   * activation that hands it off; `key` makes a repeated call start nothing new; `level` is how hard the job is (#673).
    */
   work: {
-    start(botId: string, from: string, input: { title: string; brief: string; key: string }): Promise<BotWorkStarted>
+    start(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel }): Promise<BotWorkStarted>
     list(botId: string): BotWorkList
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
@@ -77,6 +92,9 @@ export interface BotToolHost {
     cancel(botId: string, reminderId: string): boolean
   }
 }
+
+/** What `set_depth` (a depth) or `use_model` (a pick among the Runs on choices, and with `always` the rows it goes on) changes. */
+export type BotModelChange = { depth: BotDepth } | { pick: { instanceId: string; model: string }; rows?: BotModelRows }
 
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {

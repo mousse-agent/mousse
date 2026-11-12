@@ -43,7 +43,9 @@ import {
   type BotDefinition,
   type BotLane,
   type BotManifest,
-  type BotModelChoice,
+  type BotModelOverride,
+  type BotModelSlots,
+  type BotWorkLevel,
   type BotPermissionLine,
   type BotSchedule,
   type BotSummaryV1 as BotSummary,
@@ -51,6 +53,8 @@ import {
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { missingAfter, pickMissText, slotsOf, slotsWith, startDepthOf, turnModelOf, withSlots, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
+import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { botAllowedOf, type BotAllowed } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -63,7 +67,7 @@ import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type 
 import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread } from '../grants/compile'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
-import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMemoryAdmin, BotModelProblem, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkStarted } from '../seams'
+import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkStarted } from '../seams'
 import { workWaits, type BotActivationRow, type BotDispatchRow, type BotEscalationRow, type BotMessageRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
@@ -166,8 +170,8 @@ export interface BotEngineHost {
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
   providerLabel?(instanceId: string): string
-  /** The models the owner may pick by hand in About and on the create row (#673). */
-  modelChoices?(): Promise<Array<{ model: string; label: string }>>
+  /** The models the owner may pick by hand in About and on the create row (#673): each entry's models, with their reasoning levels. */
+  modelOptions?(): Promise<BotModelOption[]>
   /** This computer's name, the one computer a bot runs on for now. */
   computerName?(): string
   /** The person's other computers (About lists them; a bot runs on the computer that holds it). */
@@ -426,7 +430,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       store: host.store,
       ...(host.memory ? { memory: host.memory } : {}),
       now: () => this.now(),
-      ...(host.modelChoices ? { modelChoices: host.modelChoices } : {}),
+      ...(host.modelOptions ? { modelOptions: host.modelOptions } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),
       ...(host.otherComputers ? { otherComputers: host.otherComputers } : {})
     })
@@ -1267,15 +1271,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const grant = this.store.activeGrant(row.botId)
     if (!definition || !grant) return true // prepare refuses it with the reason
     if (!row.selection || row.reloadPending) {
-      const resolved = await this.resolveModel(row, definition, grant.manifest)
+      const turn = turnModelOf(definition.main, row)
+      const resolved = await this.resolveModel(row, definition, grant.manifest, turn)
       if ('problem' in resolved) {
         this.modelProblem(row, resolved)
         return false
       }
-      const previous = this.store.registry(row.botId)?.model?.selection
+      const registry = this.store.registry(row.botId)?.model
+      const previous = registry?.selection
+      // A picked row that can't run (#673): the turn runs on Automatic, and the chat says so once while it lasts.
+      const missing = missingAfter(registry?.missing, turn.pick, resolved.missed)
       const saved = this.recorded(row, () => {
         this.store.setActivationSelection(row.id, resolved.selection)
-        this.store.setModel(row.botId, { selection: resolved.selection, activationId: row.id })
+        this.store.setModel(row.botId, { selection: resolved.selection, activationId: row.id, ...(missing.length ? { missing } : {}) })
+        if (resolved.missed && !registry?.missing?.includes(resolved.missed.key))
+          this.chat.post({ id: `bm_${row.id}_missed_d${dispatch.n}`, botId: row.botId, author: 'bot', kind: 'notice', text: pickMissText(resolved.missed), activationId: row.id, lane: row.lane })
         if (!previous || previous.instanceId !== resolved.selection.instanceId || previous.model !== resolved.selection.model || previous.effort !== resolved.selection.effort)
           this.journalInTx({
             botId: row.botId, kind: 'model_change', lane: row.lane, activationId: row.id, sourceKey: `act:${row.id}:model:${dispatch.n}`, who: 'mousse',
@@ -1302,21 +1312,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return true
   }
 
-  /** The model for an activation: its own override first, else the definition's choice; an unavailable named model falls back to auto. */
-  private async resolveModel(row: BotActivationRow, definition: BotDefinition, grant: BotManifest): Promise<{ selection: ProviderSelection } | { problem: BotModelProblem; until?: string; instanceId?: string }> {
+  /**
+   * The model for an activation (#673): its lane's row (Talk, or the work level's), or its own pick; a pick that can't
+   * run leaves it on Automatic at the same depth, and `missed` says why.
+   */
+  private async resolveModel(row: BotActivationRow, definition: BotDefinition, grant: BotManifest, turn: BotTurnModel): Promise<BotModelResolution> {
     const models = this.host.models
     if (!models) return { problem: 'no_provider' }
     const effective = this.effectiveManifest(row, definition.permissions, grant)
     const compiled = this.compileNeutral(definition.main, effective, { escalate: true, consult: definition.context.length > 0, memory: true }, row.botId)
     if (!compiled.ok) return { problem: 'no_provider' }
     const policy: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
-    const choice = definition.main.model
-    const override = row.modelOverride ?? undefined
-    const first = await models.resolve({ botId: row.botId, choice, ...(override ? { override } : {}), policy })
-    if (!('problem' in first) || first.problem !== 'named_unavailable') return first
-    // "I can't use that model here": the bot stays on auto at the same depth.
-    const depth = (override ?? choice).depth
-    return models.resolve({ botId: row.botId, choice: { mode: 'auto', depth }, policy })
+    return models.resolve({ botId: row.botId, pick: turn.pick, depth: turn.depth, policy })
   }
 
   /** No model could run the activation: it ends, and the bot says why in plain words, with one action. */
@@ -4544,7 +4551,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const call = (async () => {
       const compiled = this.compileNeutral({ key: 'main', title: 'Main', agent: { instructions: '' }, model: { mode: 'auto', depth: 'normal' } }, starterManifest(), { escalate: true, consult: false, memory: true }, botId)
       if (!compiled.ok) return undefined
-      const resolved = await models.resolve({ botId, choice: { mode: 'auto', depth: 'quick' }, policy: { mode: 'default', origin: 'bot', ...compiled.policy } })
+      const resolved = await models.resolve({ botId, pick: null, depth: 'quick', policy: { mode: 'default', origin: 'bot', ...compiled.policy } })
       if ('problem' in resolved || signal.aborted) return undefined
       return oneShot({ selection: resolved.selection, prompt, signal })
     })().catch(() => undefined)
@@ -4654,12 +4661,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `work_start`: the chat hands work off. It runs in the run lane (one at a time, after what runs or waits there),
    * beside the chat, and reports to the owner, answering the message that asked for it.
    */
-  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string }): Promise<BotWorkStarted> {
+  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel }): Promise<BotWorkStarted> {
     const brief = input.brief.trim()
     if (!brief) throw new BotEngineError('invalid_params', 'work_start needs a brief.')
     const title = input.title.replace(/\s+/g, ' ').trim().slice(0, MAX_WORK_TITLE_CHARS) || summarise(brief)
     const replyTo = this.ownerMessageOf(from)
-    const summary = await this.enqueue(botId, `work:${input.key}`, { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from }, 'run')
+    // Its level picks its Work row (#673); absent, the bot's standing level.
+    const summary = await this.enqueue(botId, `work:${input.key}`, { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from, ...(input.level ? { level: input.level } : {}) }, 'run')
     const row = this.store.activation(summary.id)!
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return { workId: row.id, status: 'ended', ahead: [] }
     if (row.status !== 'queued') return { workId: row.id, status: 'started', ahead: [] }
@@ -4948,41 +4956,43 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The owner picks the bot's model by hand in About (#673): a named model, or `null` for by usage (automatic). Saved
-   * as a revision with the same grant, so no approval is needed; the depth stays.
+   * The owner's rows by hand (#673: About → Runs on, New bot): Talk and the work levels, each a pick or Automatic.
+   * Saved as a revision with the same grant, so no approval is needed; the standing level stays.
    */
-  setOwnerModel(botId: string, model: string | null): void {
+  setOwnerSlots(botId: string, slots: BotModelSlots): void {
     this.entry(botId)
-    const current = this.published(botId).main.model
-    const choice: BotModelChoice = model ? { mode: 'named', model, depth: current.depth } : { mode: 'auto', depth: current.depth }
-    this.publishProfile(botId, (next) => ({ ...next, main: { ...next.main, model: choice } }))
+    this.publishProfile(botId, (next) => ({ ...next, main: withSlots(next.main, slots) }))
   }
 
-  /** The bot's model as the owner set it: by usage, or a named model. */
-  ownerModel(botId: string): string | null {
-    const model = this.published(botId).main.model
-    return model.mode === 'named' ? model.model : null
+  /** The bot's rows, upgraded on read (`slotsOf`): a bot from before rows has its one model on each. */
+  ownerSlots(botId: string): BotModelSlots {
+    return slotsOf(this.published(botId).main)
   }
 
   /**
-   * `set_depth`/`use_model` (§5.6). `now`: this activation's next dispatch runs on the new choice
-   * (the dispatch ends at its next call or turn end and continues). `always`: the definition's
-   * `main.model`, through a revision with the same manifest, so no approval is needed.
+   * `set_depth`/`use_model` (§5.6, #673). `now`: this activation's next dispatch runs on the change (the dispatch ends
+   * at its next call or turn end and continues): a depth is this activation's level, a pick replaces its row (chat
+   * only). `always`: saved as a revision with the same manifest, so no approval is needed: a depth is the standing level
+   * (Automatic rows, and work that names no level), a pick goes on `rows`.
    */
-  setModel(botId: string, activationId: string, scope: 'now' | 'always', choice: Partial<BotModelChoice>): void {
-    const definition = this.published(botId)
-    const row = this.store.activation(activationId)
-    const current = scope === 'now' && row?.modelOverride ? row.modelOverride : definition.main.model
-    const merged = mergeChoice(current, choice)
-    if (!merged) throw new BotEngineError('invalid_model', 'That is not a model choice.')
+  setModel(botId: string, activationId: string, scope: 'now' | 'always', change: BotModelChange): void {
+    if ('depth' in change && !BOT_DEPTHS.includes(change.depth)) throw new BotEngineError('invalid_model', 'That is not a model choice.')
+    if ('pick' in change && (!change.pick.instanceId || !change.pick.model)) throw new BotEngineError('invalid_model', 'That is not a model choice.')
     if (scope === 'always') {
-      this.publishProfile(botId, (next) => ({ ...next, main: { ...next.main, model: merged } }))
+      this.publishProfile(botId, (next) => 'depth' in change
+        ? { ...next, main: { ...next.main, model: { ...next.main.model, depth: change.depth } } }
+        : { ...next, main: withSlots(next.main, slotsWith(slotsOf(next.main), change.rows ?? 'all', { ...change.pick })) })
       return
     }
+    const row = this.store.activation(activationId)
     if (!row || row.botId !== botId || ENDED_ACTIVATION_STATUSES.has(row.status)) throw new BotEngineError('activation_not_found', 'This work has ended.')
     // A run may change its depth, never its model: only the owner names one, in the chat.
-    if (row.lane === 'run' && choice.mode === 'named') throw new BotEngineError('invalid_model', 'Only the owner can change this, in your chat.')
-    this.store.setModelOverride(activationId, merged)
+    if (row.lane === 'run' && 'pick' in change) throw new BotEngineError('invalid_model', 'Only the owner can change this, in your chat.')
+    const definition = this.host.definitions.revision(botId, row.revision) ?? this.published(botId)
+    const current: BotModelOverride = row.modelOverride ?? { mode: 'auto', depth: startDepthOf(definition.main, row) }
+    this.store.setModelOverride(activationId, 'depth' in change
+      ? { ...current, depth: change.depth }
+      : { mode: 'named', model: change.pick.model, instanceId: change.pick.instanceId, depth: current.depth })
   }
 
   /**
@@ -5311,14 +5321,4 @@ function failureText(reason: string): string {
 /** An ask in plain words where no card title was stored (rows of an older build). */
 function permissionTextOf(request: BotAskRequest): string {
   return isSpecialAsk(request) ? 'save its memory to a folder' : permissionText(request)
-}
-
-/** `current` changed by `change` (`set_depth` keeps the mode, `use_model` names one); undefined when not a choice. */
-function mergeChoice(current: BotModelChoice, change: Partial<BotModelChoice>): BotModelChoice | undefined {
-  const depth = change.depth ?? current.depth
-  if (!BOT_DEPTHS.includes(depth)) return undefined
-  const mode = change.mode ?? current.mode
-  if (mode === 'auto') return { mode: 'auto', depth }
-  const model = 'model' in change && typeof change.model === 'string' ? change.model.trim() : current.mode === 'named' ? current.model : ''
-  return mode === 'named' && model && model.length <= 200 ? { mode: 'named', model, depth } : undefined
 }

@@ -85,24 +85,72 @@ export type BotDepth = 'quick' | 'normal' | 'deep'
 export const BOT_DEPTHS: readonly BotDepth[] = ['quick', 'normal', 'deep']
 
 /**
- * What a bot thread runs on. Never shown: `auto` is resolved per activation from the owner's ready
- * providers; `named` is a model the owner asked for in words (a catalog id, the instance's model
- * id, or a family word), used only while it is available.
+ * How hard a piece of work is (#673): the bot gives each job a level (`work_start`), and a level picks its Work model.
+ * Light, medium and hard are the depths quick, normal and deep.
+ */
+export type BotWorkLevel = 'light' | 'medium' | 'hard'
+export const BOT_WORK_LEVELS: readonly BotWorkLevel[] = ['light', 'medium', 'hard']
+export const LEVEL_DEPTH: Readonly<Record<BotWorkLevel, BotDepth>> = { light: 'quick', medium: 'normal', hard: 'deep' }
+export const DEPTH_LEVEL: Readonly<Record<BotDepth, BotWorkLevel>> = { quick: 'light', normal: 'medium', deep: 'hard' }
+
+/**
+ * What a bot thread runs on, as format 2 writes it. `auto` is resolved per activation from the owner's ready providers;
+ * `named` is a model by name (a catalog id, the instance's model id, or a family word), matched across entries. `depth`
+ * is the bot's standing level: Automatic rows resolve at it, and work that names no level runs at it. Older builds
+ * run every turn on this choice; this build reads `slots` beside it (`slotsOf`).
  */
 export type BotModelChoice =
   | { mode: 'auto'; depth: BotDepth }
   | { mode: 'named'; model: string; depth: BotDepth }
 
+/**
+ * One activation's own choice (`set_depth` and `use_model` with `now`, an automation's model by hand): a depth, and a
+ * named pick that replaces its row for that activation. `auto` changes the depth only.
+ */
+export type BotModelOverride =
+  | { mode: 'auto'; depth: BotDepth }
+  | { mode: 'named'; model: string; depth: BotDepth; instanceId?: string; effort?: string }
+
 /** A new bot's model: automatic, at normal depth. */
 export const DEFAULT_BOT_MODEL: BotModelChoice = { mode: 'auto', depth: 'normal' }
+
+/**
+ * A model the owner picked for a row (#673): a provider entry, its model and a reasoning level. The entry is kept, so a
+ * model picked on a subscription never runs through another entry, such as a paid API key.
+ */
+export interface BotModelPick {
+  /** The provider entry. Absent only on a pick from an older bot that no single entry offers: matched by name, as before. */
+  instanceId?: string
+  model: string
+  /** One of the model's reasoning levels; absent is Default (set by how hard the job is, `effortFor`). */
+  effort?: string
+}
+
+/**
+ * A bot's models (#673): Talk for every chat turn, and one per work level. null is Automatic (by usage). The simple view
+ * shows Talk and Work, where Work is all three levels on one pick; Advanced shows the levels apart.
+ */
+export interface BotModelSlots {
+  talk: BotModelPick | null
+  light: BotModelPick | null
+  medium: BotModelPick | null
+  hard: BotModelPick | null
+}
+export type BotModelSlotKey = keyof BotModelSlots
+export const BOT_MODEL_SLOT_KEYS: readonly BotModelSlotKey[] = ['talk', 'light', 'medium', 'hard']
 
 /** The thread a bot works in: who it is (an agent definition or plain instructions) and what it runs on. */
 export interface BotThreadSpec {
   key: string
   title: string
   agent: { definitionId: string; pinRevision: string } | { instructions: string }
-  /** Replaces format 1's fixed `selection`. */
+  /** Replaces format 1's fixed `selection`. Mirrors the Talk row while `slots` is written (`withSlots`). */
   model: BotModelChoice
+  /**
+   * The rows by hand (#673), written only when `model` alone can't say them. Older builds ignore it and run on `model`;
+   * when one changes `model`, the rows no longer match it and `model` is read again (`slotsOf`).
+   */
+  slots?: BotModelSlots
   /** Removes permissions for this thread only; never adds any. */
   narrow?: Partial<Pick<BotManifest, 'tools' | 'mcp' | 'skills' | 'workspace'>>
 }
@@ -200,9 +248,9 @@ export type BotActivationTrigger =
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
    * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
-   * reminder that started it.
+   * reminder that started it. `level`: how hard the bot judged it (#673); absent, the bot's standing level.
    */
-  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string }
+  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string; level?: BotWorkLevel }
 
 /** The default active time of one activation: an hour. */
 export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000

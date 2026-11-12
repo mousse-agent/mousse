@@ -1,7 +1,7 @@
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
-import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelChoice, BotSchedule } from '../../../shared/bots/personal/definition'
+import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelOverride, BotSchedule } from '../../../shared/bots/personal/definition'
 import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
@@ -353,8 +353,11 @@ export interface BotRegistryRow {
   failureStreak: number
   error: BotStoredError | null
   readSeq: number
-  /** The last resolved selection (internal; never in a UI payload). */
-  model: { selection: ProviderSelection; activationId: string } | null
+  /**
+   * The last resolved selection (internal; never in a UI payload), and the picks by hand the chat has said it can't use
+   * (#673, `missingAfter`), so it says so once. Older builds rewrite it without `missing`; the line is then said again once.
+   */
+  model: { selection: ProviderSelection; activationId: string; missing?: string[] } | null
 }
 
 function registryOf(row: Row): BotRegistryRow {
@@ -502,7 +505,7 @@ export interface BotActivationRow {
   /** `chat`: the owner's chat on the home thread; `run`: a run on its own thread. */
   lane: BotLane
   /** `set_depth`/`use_model` for this activation only (internal). */
-  modelOverride: BotModelChoice | null
+  modelOverride: BotModelOverride | null
   /** The model changed for this activation: its next dispatch resolves it again. */
   reloadPending: boolean
   /** The model this activation runs on, resolved at its first dispatch (internal; never in a payload). */
@@ -634,7 +637,7 @@ function activationOf(row: Row): BotActivationRow {
     endedAt: str(row.ended_at),
     endReason: str(row.end_reason),
     lane: (str(row.lane) ?? 'run') as BotLane,
-    modelOverride: json<BotModelChoice>(row.model_override_json),
+    modelOverride: json<BotModelOverride>(row.model_override_json),
     reloadPending: num(row.reload_pending) === 1,
     selection: json<ProviderSelection>(row.selection_json),
     offline: row.status === 'running' && row.end_reason === BOT_OFFLINE_REASON
@@ -878,7 +881,7 @@ export class BotStore {
   }
 
   /** `set_depth`/`use_model` with scope `now`: this activation's next dispatch runs on the new choice. */
-  setModelOverride(id: string, choice: BotModelChoice): void {
+  setModelOverride(id: string, choice: BotModelOverride): void {
     this.run('UPDATE bot_activations SET model_override_json = ?, reload_pending = 1 WHERE id = ?', JSON.stringify(choice), id)
   }
 

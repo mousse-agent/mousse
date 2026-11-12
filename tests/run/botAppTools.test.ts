@@ -5,12 +5,12 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
-import type { BotToolHost } from '../../src/mms/bots/seams'
+import type { BotModelChange, BotToolHost } from '../../src/mms/bots/seams'
 import { createAppToolRegistry } from '../../src/mms/run/mcp/appTools'
 import { botTools, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools/bots'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
-import type { BotLane, BotModelChoice, BotSchedule } from '../../src/shared/bots/personal/definition'
+import type { BotLane, BotSchedule } from '../../src/shared/bots/personal/definition'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { botScheduleLabel } from '../../src/shared/scheduleLabel'
 import { fakeAppToolHost } from './appToolsFixture'
@@ -18,8 +18,9 @@ import { fakeAppToolHost } from './appToolsFixture'
 function fakeBots(lane: BotLane = 'chat') {
   const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string }> = []
   const profiles: Array<{ name?: string; description?: string }> = []
-  const models: Array<{ scope: 'now' | 'always'; choice: Partial<BotModelChoice> }> = []
-  const host: BotToolHost = {
+  const models: Array<{ scope: 'now' | 'always'; choice: BotModelChange }> = []
+  const works: Array<{ title: string; brief: string; key: string; level?: string }> = []
+  const host = {
     activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
     schedules: {
       add: (_botId, s) => {
@@ -40,10 +41,20 @@ function fakeBots(lane: BotLane = 'chat') {
     },
     setModel: (_botId, _activationId, scope, choice) => {
       models.push({ scope, choice })
+    },
+    work: {
+      start: async (_botId, _from, input) => {
+        works.push(input)
+        return { workId: 'w1', status: 'started' as const, ahead: [] }
+      },
+      list: () => ({ now: [], recent: [] }),
+      stop: async () => 'stopped' as const,
+      note: () => 'noted' as const
     }
-  }
+  } as BotToolHost
   const activity = createBotActivitySink({ emit: () => {} })
-  const deps: BotAppToolDeps = { host, activity, models: { namedAvailable: async (model) => /opus|sonnet/i.test(model) } }
+  // Only the Runs on choices: Opus on the Claude entry.
+  const deps: BotAppToolDeps = { host, activity, models: { pickFor: async (model) => (/opus/i.test(model) ? { instanceId: 'claude', model: 'claude-opus-4-6' } : undefined) } }
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
   const ctx = (threadId = 'home', activationId = 'a1'): ToolCallContext => ({
     caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
@@ -56,7 +67,7 @@ function fakeBots(lane: BotLane = 'chat') {
     const outcome = await (tools.get(name) as MousseTool).handler(args, context)
     return { ...outcome, value: outcome.isError ? undefined : JSON.parse(outcome.text) }
   }
-  return { schedules, profiles, models, activity, call, ctx }
+  return { schedules, profiles, models, works, activity, call, ctx }
 }
 
 describe('schedule tools', () => {
@@ -128,13 +139,35 @@ describe('set_depth and use_model', () => {
     expect(bots.models).toEqual([])
   })
 
-  it('use_model takes a model the owner named when it is there, and says plainly when it is not', async () => {
+  it('use_model takes a Runs on choice the owner named, on its own entry, for the rows they said, with a chip; it says plainly when there is none (#673)', async () => {
     const bots = fakeBots()
-    expect((await bots.call('use_model', { model: 'Opus', scope: 'always' })).value).toEqual({ ok: true })
-    expect(bots.models).toEqual([{ scope: 'always', choice: { mode: 'named', model: 'Opus' } }])
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'use_model', input: { model: 'Opus', scope: 'always' } })
+    expect((await bots.call('use_model', { model: 'Opus', scope: 'always' })).value).toEqual({ ok: true, scope: 'always', for: 'all' })
+    // The owner sees the change, never the model's name.
+    expect(bots.activity.drain('d1')).toEqual([{ icon: 'think', text: 'switched models', highlight: 'from now on' }])
+    expect((await bots.call('use_model', { model: 'opus', scope: 'always', for: 'work' })).value).toMatchObject({ ok: true, for: 'work' })
+    expect((await bots.call('use_model', { model: 'opus', scope: 'now', for: 'work' })).value).toEqual({ ok: true, scope: 'now' })
+    const pick = { instanceId: 'claude', model: 'claude-opus-4-6' }
+    expect(bots.models).toEqual([
+      { scope: 'always', choice: { pick, rows: 'all' } },
+      { scope: 'always', choice: { pick, rows: 'work' } },
+      { scope: 'now', choice: { pick } }
+    ])
+    // Not among the choices: nothing changes.
     const missing = await bots.call('use_model', { model: 'grok', scope: 'now' })
     expect(missing.value).toMatchObject({ ok: false, reason: expect.stringContaining('not available') })
-    expect(bots.models).toHaveLength(1)
+    expect(await bots.call('use_model', { model: 'opus', scope: 'always', for: 'images' })).toMatchObject({ isError: true })
+    expect(bots.models).toHaveLength(3)
+  })
+})
+
+describe('work_start levels (#673)', () => {
+  it('takes light, medium or hard, or none (the bot\'s usual level), and refuses anything else', async () => {
+    const bots = fakeBots()
+    expect((await bots.call('work_start', { title: 'Look up', brief: 'Find the opening hours.', level: 'light' })).value).toMatchObject({ status: 'started' })
+    expect((await bots.call('work_start', { title: 'Research', brief: 'Compare three vacuums.' })).value).toMatchObject({ status: 'started' })
+    expect(await bots.call('work_start', { title: 'Odd', brief: 'Something.', level: 'max' })).toMatchObject({ isError: true, text: 'level is light, medium or hard.' })
+    expect(bots.works.map((work) => work.level)).toEqual(['light', undefined])
   })
 })
 

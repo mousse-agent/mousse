@@ -50,6 +50,11 @@ const LEVEL = new Map<string, number>(REASONING_LEVELS.map((level, index) => [le
 const byLevel = (efforts: readonly string[]) =>
   [...efforts].filter((effort) => effort !== 'none' && effort !== 'off').sort((a, b) => (LEVEL.get(a) ?? 99) - (LEVEL.get(b) ?? 99))
 
+/** The reasoning levels a model offers for a pick by hand (#673), lowest first: every one it lists but `off`. */
+export function offeredEfforts(efforts: readonly string[]): string[] {
+  return [...new Set(efforts)].filter((effort) => effort !== 'off').sort((a, b) => (LEVEL.get(a) ?? 99) - (LEVEL.get(b) ?? 99))
+}
+
 /**
  * The effort a depth runs at: `quick` low (else the lowest offered), `deep` high (else the
  * highest offered), `normal` the model's default. Absent: the model's own default.
