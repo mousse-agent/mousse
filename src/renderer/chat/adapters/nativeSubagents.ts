@@ -161,9 +161,13 @@ type SavedMessage = Pick<ChatMessage, 'id' | 'role' | 'hidden' | 'timestamp' | '
 /**
  * The native subagents a thread's saved messages started, in order, as card models (the call's message id
  * is the card's). Only calls at the top of the conversation: a subagent's own subagent stays under it.
+ * `turnActive`: the thread's turn is running, so a subagent of it may still be starting; one that is (no
+ * name, or not started yet) is left out, as its card is in the conversation.
  */
-export function nativeSubagentsOfMessages(messages: readonly SavedMessage[], backgroundLive: boolean): SubagentCardModel[] {
+export function nativeSubagentsOfMessages(messages: readonly SavedMessage[], backgroundLive: boolean, turnActive = false): SubagentCardModel[] {
   const out: SubagentCardModel[] = []
+  // A subagent that made a call of its own has started.
+  const withCalls = new Set(messages.flatMap((message) => (message.activity?.parentId ? [message.activity.parentId] : [])))
   for (const message of messages) {
     const activity = message.activity
     if (message.hidden || activity?.kind !== 'subagent' || activity.parentId) continue
@@ -187,7 +191,8 @@ export function nativeSubagentsOfMessages(messages: readonly SavedMessage[], bac
               endedAt: activity.endedAt
             }
     }
-    out.push(nativeSubagentModel(part, message.timestamp, backgroundLive))
+    const card = nativeSubagentModel(part, message.timestamp, backgroundLive, turnActive, withCalls.has(message.id))
+    if (!card.spawning) out.push(card)
   }
   return out
 }

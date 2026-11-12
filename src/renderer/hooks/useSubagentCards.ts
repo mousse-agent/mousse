@@ -4,6 +4,7 @@ import { collectSubagentCalls, joinSubagentCards, type SubagentCardModel } from 
 import { collectNativeSubagentCards } from '../chat/adapters/nativeSubagents'
 import { isTurnActivePhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import { useBackgroundLive } from './useNativeSubagents'
 import { useSubagents } from './useSubagents'
 
 const NONE: ReadonlyMap<string, SubagentCardModel> = new Map()
@@ -18,7 +19,7 @@ export function useSubagentCardModels(threadId: string | null | undefined, messa
   const loaded = useAppStore((s) => (threadId ? s.subagentsByParent[threadId] !== undefined : false))
   const turnActive = useAppStore((s) => (threadId ? isTurnActivePhase(s.turnStates[threadId]?.phase ?? 'idle') : false))
   // Background agents a settled turn left running are still going while the thread waits on background work.
-  const backgroundLive = useAppStore((s) => (threadId ? s.threadActivity[threadId] === 'waiting' : false)) || turnActive
+  const backgroundLive = useBackgroundLive(threadId)
   const previous = useRef<ReadonlyMap<string, SubagentCardModel>>(NONE)
   const cards = useMemo(() => {
     const calls = collectSubagentCalls(messages)
