@@ -1242,11 +1242,10 @@ export class ClaudeSubscriptionProviderService {
     const live = this.settings.models
     // Never listed: the CLI aliases. Listed but empty (every model needs a newer Mousse): older ones only.
     if (!live || !this.listedByClaude()) return FALLBACK_MODELS
-    const results = this.settings.olderModels?.results
-    if (!results || !Object.keys(results).length) return live
+    const results = this.settings.olderModels?.results ?? {}
     const listed = new Set(live.map((model) => model.id))
     const found = claudeOlderModelOptions(claudeOlderCandidates(this.catalog(), listed), results).filter((model) => !listed.has(model.id))
-    return found.length ? claudeModelListing(live, found, this.catalog(), this.settings.modelRoutes ?? {}) : live
+    return claudeModelListing(live, found, this.catalog(), this.settings.modelRoutes ?? {})
   }
   /** The model catalog; one that cannot be read offers no older models. */
   private catalog(): ModelCatalog {

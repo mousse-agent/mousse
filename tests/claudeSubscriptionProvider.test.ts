@@ -1309,6 +1309,18 @@ describe('older Claude models', () => {
       ])
     })
 
+    it('folds the older one when Claude Code lists both', async () => {
+      const listedNew = { value: 'ember-new', displayName: 'Ember', description: 'Ember 10 · test model' }
+      const check = olderQuery({ 'ember-runs': { refuse: true }, 'other-live': { refuse: true } }, [listedNew, live])
+      const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => newer })
+      await service.refreshModels(home)
+      await service.olderCheck
+      expect(service.models().map((model) => [model.id, model.older ?? false])).toEqual([
+        ['ember-new', false],
+        ['ember', true]
+      ])
+    })
+
     it('leaves the listed model in the main list when the account cannot run the newer one', async () => {
       const check = olderQuery({ 'ember-new': { refuse: true }, 'ember-runs': {} }, [live, other])
       const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => newer })
