@@ -197,7 +197,7 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
   return <article className={`chat-participant-message from-agent${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}`} data-message-id={message.id} title={botFullTime(message.at)}>
     {/* Transcript faces are still: one baked pose per look, shared by every message. */}
     {starts
-      ? <BotFace look={bot.look} state="idle" size={40} view="head" className="bot-message-face" still />
+      ? <BotFace look={bot.look} state="idle" size={36} view="head" className="bot-message-face" still />
       : <div className="bot-message-gutter"><ReplyButton onReply={() => onReply(message)} /></div>}
     <div className="chat-participant-message-body">
       {starts && <div className="chat-message-meta"><strong>{bot.name}</strong>{label && <span className="bot-message-label">{label}</span>}<ReplyButton onReply={() => onReply(message)} /></div>}
@@ -215,7 +215,7 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
 }, sameBotMessage)
 
 /**
- * A bot's chat (bot-ui §4.4): the header with its face, name, description and one menu; the
+ * A bot's chat (bot-ui §4.4): the header with its face, name (what it does is in About) and one menu; the
  * owner's bubbles and the bot's messages with chips, ask cards and error lines; one status line
  * while it works; and the thread composer without a thread's run settings: text, attach (also by
  * dropping or pasting), dictation, and send or Stop.
@@ -319,8 +319,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     <section className="chat-conversation bot-conversation" style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={() => useBotsStore.setState({ aboutOpen: !aboutOpen })}>
-          <BotFace look={bot.look} state={botFaceState(bot, happy)} size={40} view="head" />
-          <div><h1>{bot.name}</h1><span>{offline ? OFFLINE_TEXT : bot.description}</span></div>
+          <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
+          <div><h1>{bot.name}</h1></div>
         </button>
         <BotMenu bot={bot} />
       </header>

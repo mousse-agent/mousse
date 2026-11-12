@@ -260,9 +260,8 @@ describe('while it works', () => {
     expect(button('Send message')?.disabled).toBe(false)
   })
 
-  it('says Waiting for internet in the header and the status line, with no spinner, and still offers Stop', async () => {
+  it('says Waiting for internet in the status line, with no spinner, and still offers Stop', async () => {
     await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
-    expect(host.querySelector('.chat-conversation-header span')?.textContent).toBe('Waiting for internet')
     const status = transcript().querySelector('.chat-run-status')!
     expect(status.textContent).toBe('Waiting for internet')
     expect(status.querySelector('.chat-spin')).toBeNull()
@@ -425,8 +424,11 @@ describe('the menu', () => {
     expect(host.querySelector('[role="menu"]')).toBeNull()
   })
 
-  it('opens About from the header too', async () => {
+  it('shows only the name in the header, and opens About from it', async () => {
     await open()
+    // What the bot does is in About, not under the name.
+    expect(host.querySelector('.bot-header-about > div')?.textContent).toBe('Inbox helper')
+    expect(host.querySelector('.chat-conversation-header')?.textContent).not.toContain('Tells me which emails need a reply.')
     await click(button('About Inbox helper'))
     expect(host.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
   })
