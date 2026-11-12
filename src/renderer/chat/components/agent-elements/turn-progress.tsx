@@ -7,6 +7,7 @@ import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { parseMcpToolType } from "./tools/tool-registry";
 import { isCompactionRow } from "./utils/assistant-blocks";
 import { ThinkingIcon } from "../../../lib/icons";
+import { ToolIcon } from "./tools/tool-icon";
 import { countRender } from "./render-counts";
 import "./turn-progress.css";
 
@@ -61,6 +62,8 @@ export type TurnProgress = {
   title?: string;
   /** A retry's start (ms): the label counts down to it. */
   until?: number;
+  /** The running tool's part type: the line shows its icon, pulsing, instead of the dots. */
+  tool?: string;
 };
 
 export type TurnProgressInput = {
@@ -120,7 +123,7 @@ function toolProgress(part: Part): TurnProgress {
     return { kind: "running-tool", label: "Running subagent…", title: detail };
   }
   // A tool search loads tools for the model: the line says what its row says.
-  if (part.type === "tool-ToolSearch") return { kind: "running-tool", label: "Loading tools…", title: detail };
+  if (part.type === "tool-ToolSearch") return { kind: "running-tool", label: "Loading tools…", title: detail, tool: part.type };
   const name = toolName(part.type!);
   // A call whose arguments are still streaming in: the model is writing it (a runtime that opens the row at the
   // call's start, before its arguments, shows it running with none).
@@ -128,8 +131,8 @@ function toolProgress(part: Part): TurnProgress {
     // A command row carries its working folder and a placeholder label before its command arrives.
     ([key, value]) => PLACEHOLDER_INPUT_KEYS.has(key) || value === undefined || value === null || value === "",
   ));
-  if (part.state === "input-streaming" || noInput) return { kind: "preparing-tool", label: `Preparing ${name}…`, title: detail };
-  return { kind: "running-tool", label: `Running ${name}…`, title: detail };
+  if (part.state === "input-streaming" || noInput) return { kind: "preparing-tool", label: `Preparing ${name}…`, title: detail, tool: part.type };
+  return { kind: "running-tool", label: `Running ${name}…`, title: detail, tool: part.type };
 }
 
 /** How long a sighting is kept: longer than any retry's wait. */
@@ -259,8 +262,8 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
 
 /**
  * The live line at the end of a running turn, under its Working: a short label for what the turn does
- * now, details in its tooltip. While the turn thinks it shows the thinking icon; for anything else
- * (a tool, a retry, a stop), three small dots. Both move by transform or opacity only, so the line
+ * now, details in its tooltip. While the turn thinks it shows the thinking icon; while a tool runs, that tool's
+ * icon, pulsing; for anything else (a retry, a stop), three small dots. Both move by transform or opacity only, so the line
  * costs no layout or paint while it animates. It reads the thread's turn from context,
  * so a memoised turn row still follows it.
  */
@@ -296,8 +299,11 @@ export function TurnProgressRow({
         <span className="turn-progress-icon" aria-hidden="true">
           <ThinkingIcon size={18} active />
         </span>
+      ) : progress.tool ? (
+        // A tool running: its own icon, pulsing gently.
+        <ToolIcon type={progress.tool} state="running" />
       ) : (
-        // Running a tool, retrying, stopping, writing, subagents: no thought, so no thinking icon.
+        // Retrying, stopping, writing, subagents: no thought, so no thinking icon.
         <span className="turn-progress-dots" aria-hidden="true">
           <span />
           <span />

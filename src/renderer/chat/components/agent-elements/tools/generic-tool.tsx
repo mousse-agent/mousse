@@ -2,7 +2,7 @@ import React, { memo } from "react";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
-import { IconX } from "../../../../lib/icons";
+import { Wrench } from "../../../../lib/icons";
 
 export type GenericToolRowProps = {
   step: Extract<TimelineStep, { type: "tool-call" }>;
@@ -49,19 +49,14 @@ export const GenericTool = memo(function GenericTool({
   isPending,
   isError = false,
 }: GenericToolProps) {
-  const Icon = icon;
+  const Icon = icon ?? Wrench;
   const failed = isError && !isPending;
   const label = failed ? (failedTitle ?? title) : title;
 
   return (
     <ToolRowBase
-      icon={
-        failed ? (
-          <IconX size={16} strokeWidth={2.5} className="shrink-0 text-[var(--danger)]" />
-        ) : Icon ? (
-          <Icon size={18} className="shrink-0 text-muted-foreground" />
-        ) : undefined
-      }
+      // The tool's own icon in every state; a failed call tints it (ToolRowBase).
+      icon={<Icon size={18} className="shrink-0" />}
       shimmerLabel={title}
       completeLabel={label}
       isAnimating={isPending}

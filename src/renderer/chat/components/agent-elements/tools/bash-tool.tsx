@@ -1,8 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { commandLabel } from "../../../../../shared/agentActivity";
-import { IconChevronRight, IconTerminal2, IconX } from "../../../../lib/icons";
-import { TextShimmer } from "../text-shimmer";
-import { Collapse } from "../../../../components/ui/Collapse";
+import { IconTerminal2 } from "../../../../lib/icons";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { cn } from "../utils/cn";
@@ -14,13 +12,14 @@ import {
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
 import { bashOutputLines } from "../utils/bash-output";
 import { CopyIconButton } from "./copy-icon-button";
+import { ToolRowBase } from "./tool-row-base";
 
-export type BashToolTerminalCardProps = {
+export type BashToolRowProps = {
   step: Extract<TimelineStep, { type: "tool-call" }>;
   state: StepState;
   onComplete: () => void;
   approval?: ToolApproval;
-  /** Failed command: red hue on the card. */
+  /** Failed command: the row's icon and label in the danger colour. */
   isError?: boolean;
 };
 
@@ -42,30 +41,34 @@ function formatBytes(bytes: number): string {
 }
 
 // Geist Mono's ligatures draw "--" as one dash over the space before it ("test.ts --sequence" reads
-// "test.ts--sequence"), so the command shows its characters as typed.
-const COMMAND_TEXT = "font-mono text-[12.5px] [font-variant-ligatures:none]";
+// "test.ts--sequence"), so a command shows its characters as typed.
+const MONO = "font-mono [font-variant-ligatures:none]";
 
-export function BashToolTerminalCard({
+/**
+ * A command the agent ran, as one quiet line like the other tool rows: the terminal icon, "Ran" and the command on
+ * one line (cut by the row's width, the whole command in its tooltip). It opens to the full command, the folder it ran
+ * in and its output, in a plain block. A command waiting for approval keeps its approval footer.
+ */
+export function BashToolRow({
   step,
   state,
   onComplete,
   approval,
   isError = false,
-}: BashToolTerminalCardProps) {
+}: BashToolRowProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
   const [expanded, setExpanded] = useState(false);
   const isPending = state === "animating";
   const isInterrupted = step.bashInterrupted === true;
   const command = step.bashCommand ?? step.toolDetail;
-  // The command (without its shell wrapper) fills the row in mono, cut by the row's width rather than a character count.
-  // Derived from the command as run, with its spacing: a tool's label can differ from it.
+  // The command without its shell wrapper, with its spacing; derived from the command as run, since a tool's label
+  // can differ from it.
   const summary = command
     ? commandLabel(command)
     : (step.bashLabel ?? "").replace(/\s+/g, " ").trim();
-  // Expanded, the body shows the full `$ command`, so the header does not repeat it.
-  const hideSummary = expanded && Boolean(command);
   const hasExitCode = typeof step.bashExitCode === "number";
   const exitFailed = hasExitCode && step.bashExitCode !== 0;
+  const failed = isError && !isInterrupted;
 
   // While the command runs the output follows its tail, unless the user scrolled up.
   const outputRef = useRef<HTMLDivElement | null>(null);
@@ -82,126 +85,61 @@ export function BashToolTerminalCard({
       element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_SLACK_PX;
   };
 
-  const meta: string[] = [];
-  if (hasExitCode) meta.push(`exit ${step.bashExitCode}`);
-  if (typeof step.bashDurationMs === "number") meta.push(formatDuration(step.bashDurationMs));
+  const verb = isPending
+    ? "Running"
+    : isInterrupted
+      ? (step.bashSummary ?? "Interrupted")
+      : failed
+        ? "Failed"
+        : "Ran";
+  const label = summary ? verb : `${verb} command`;
+  const hasBody = Boolean(command || step.bashOutput || step.bashCwd || step.bashTruncated || hasExitCode);
 
-  return (
-    <div
-      className={cn(
-        "an-tool-chrome an-bash-card rounded-an-tool-border-radius border border-an-border-color bg-an-tool-background overflow-hidden",
-        isError && "border-red-500/50",
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => setExpanded((prev) => !prev)}
-        aria-expanded={expanded}
-        aria-label={expanded ? "Collapse command details" : "Expand command details"}
-        title={expanded ? "Collapse command details" : "Expand command details"}
-        className="flex items-center gap-1.5 pl-2.5 pr-2 h-7 min-w-0 w-full text-left cursor-pointer"
+  const row = (
+    <div className="an-bash-row" data-status={isPending ? "running" : failed ? "failed" : isInterrupted ? "interrupted" : "done"}>
+      <ToolRowBase
+        icon={<IconTerminal2 size={18} />}
+        shimmerLabel={label}
+        completeLabel={label}
+        isAnimating={isPending}
+        failed={failed}
+        detail={summary || undefined}
+        detailTitle={summary || undefined}
+        detailClassName={cn("an-bash-row-command text-[13px]", MONO)}
+        badge={exitFailed && !expanded ? (
+          <span className="text-[12.5px] text-[var(--danger)]">exit {step.bashExitCode}</span>
+        ) : undefined}
+        expandable={hasBody}
+        expanded={expanded}
+        onToggleExpand={() => setExpanded((open) => !open)}
       >
-        {isPending ? (
-          <>
-            <svg
-              className="w-4 h-4 text-an-tool-color-muted animate-spin shrink-0"
-              viewBox="0 0 16 16"
-              fill="none"
-            >
-              <circle
-                cx="8"
-                cy="8"
-                r="6"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeDasharray="28"
-                strokeDashoffset="7"
-                strokeLinecap="round"
-              />
-            </svg>
-            <TextShimmer
-              as="span"
-              duration={1.2}
-              className={cn(
-                "flex items-center m-0 truncate flex-1 min-w-0",
-                summary ? COMMAND_TEXT : "text-xs",
-              )}
-            >
-              {hideSummary ? "" : summary ? `Running ${summary}` : "Running command"}
-            </TextShimmer>
-          </>
-        ) : (
-          <>
-            <IconTerminal2 size={18} className="text-an-tool-color-muted shrink-0" />
-            {isError && !isInterrupted && (
-              <IconX className="w-4 h-4 text-[var(--danger)] shrink-0" strokeWidth={2.5} />
-            )}
-            <span
-              className={cn(
-                "truncate flex-1 min-w-0",
-                summary ? COMMAND_TEXT : "text-xs",
-                isError && !isInterrupted ? "text-[var(--danger)]" : "text-an-tool-color-muted",
-              )}
-              title={hideSummary ? undefined : summary || undefined}
-            >
-              {hideSummary ? null : isInterrupted
-                ? `${step.bashSummary ?? "Interrupted"}${summary ? `: ${summary}` : ""}`
-                : summary
-                  ? isError
-                    ? `Failed ${summary}`
-                    : summary
-                  : isError
-                    ? "Failed command"
-                    : "Ran command"}
-            </span>
-            {exitFailed && !expanded && (
-              <span className="text-[11px] text-[var(--danger)] shrink-0">
-                exit {step.bashExitCode}
-              </span>
-            )}
-          </>
-        )}
-        <IconChevronRight
-          className="ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted"
-          data-open={expanded || undefined}
-        />
-      </button>
-      <Collapse open={expanded} className="border-t border-an-border-color px-2.5 py-1.5 font-sans text-[12px] leading-[16px] overflow-hidden bg-an-background">
+        <div className={cn("an-bash-body rounded-md bg-an-tool-background px-2.5 py-2 text-[12px] leading-[17px]", MONO)}>
           {command && (
             <div className="flex items-start gap-1">
               <div className="flex-1 min-w-0 max-h-[160px] overflow-y-auto break-words whitespace-pre-wrap">
-                <span className="text-amber-600 dark:text-amber-400 select-none">
-                  ${" "}
-                </span>
+                <span className="text-an-tool-color-muted select-none">${" "}</span>
                 <span className="text-an-tool-color">{command}</span>
               </div>
               <CopyIconButton text={command} label="Copy command" />
             </div>
           )}
           {step.bashCwd && (
-            <div className="mt-0.5 text-an-tool-color-muted truncate" title={step.bashCwd}>
+            <div className="mt-0.5 font-sans text-an-tool-color-muted truncate" title={step.bashCwd}>
               in {step.bashCwd}
             </div>
           )}
           {step.bashTruncated && (
-            <div className="mt-1 text-an-tool-color-muted italic">
+            <div className="mt-1.5 font-sans text-an-tool-color-muted italic">
               Earlier output not shown
-              {typeof step.bashBytes === "number"
-                ? ` (${formatBytes(step.bashBytes)} total)`
-                : ""}
+              {typeof step.bashBytes === "number" ? ` (${formatBytes(step.bashBytes)} total)` : ""}
             </div>
           )}
           {step.bashOutput && (
-            <div
-              className={cn(
-                "flex items-start gap-1",
-                (command || step.bashTruncated) && "mt-1",
-              )}
-            >
+            <div className={cn("flex items-start gap-1", (command || step.bashTruncated) && "mt-1.5")}>
               <div
                 ref={outputRef}
                 onScroll={handleOutputScroll}
-                className="flex-1 min-w-0 text-an-tool-color-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto"
+                className="an-bash-output flex-1 min-w-0 text-an-tool-color-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto"
               >
                 {bashOutputLines(step.bashOutput).map((line, index) => (
                   <span key={index} className={cn(line.failed && "text-[var(--danger)]")}>
@@ -213,19 +151,26 @@ export function BashToolTerminalCard({
               {!isPending && <CopyIconButton text={step.bashOutput} label="Copy output" />}
             </div>
           )}
-          {(meta.length > 0 || isInterrupted) && (
-            <div className="mt-1 flex gap-2 text-[11px] text-an-tool-color-muted">
+          {(hasExitCode || typeof step.bashDurationMs === "number" || isInterrupted) && (
+            <div className="mt-1.5 flex gap-2 font-sans text-[11px] text-an-tool-color-muted">
               {hasExitCode && (
                 <span className={cn(exitFailed && "text-[var(--danger)]")}>exit {step.bashExitCode}</span>
               )}
-              {typeof step.bashDurationMs === "number" && (
-                <span>{formatDuration(step.bashDurationMs)}</span>
-              )}
+              {typeof step.bashDurationMs === "number" && <span>{formatDuration(step.bashDurationMs)}</span>}
               {isInterrupted && <span>{step.bashSummary ?? "Interrupted"}</span>}
             </div>
           )}
-      </Collapse>
-      {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
+        </div>
+      </ToolRowBase>
+    </div>
+  );
+
+  // A command waiting for approval keeps its approval footer, boxed with the row it answers.
+  if (!approval) return row;
+  return (
+    <div className="an-bash-approval rounded-an-tool-border-radius border border-an-border-color overflow-hidden">
+      <div className="px-2.5 py-1">{row}</div>
+      <ToolApprovalFooter isPending={isPending} {...approval} />
     </div>
   );
 }
@@ -250,7 +195,7 @@ export const BashTool = memo(function BashTool({ part }: BashToolProps) {
   const noop = () => {};
 
   return (
-    <BashToolTerminalCard
+    <BashToolRow
       step={step}
       state={stepState}
       onComplete={noop}

@@ -1,6 +1,7 @@
-import { memo, useMemo } from "react";
+import { memo } from "react";
 import { CheckIcon, IconArrowRight } from "../icons";
-import { TextShimmer } from "../text-shimmer";
+import { IconChecklist } from "../../../../lib/icons";
+import { ToolRowBase } from "./tool-row-base";
 import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import { cn } from "../utils/cn";
 
@@ -14,52 +15,6 @@ export type TodoToolProps = {
   part: any;
   chatStatus?: string;
 };
-
-export type TodoChange = {
-  todo: TodoItem;
-  oldStatus?: TodoItem["status"];
-  newStatus: TodoItem["status"];
-  index: number;
-};
-
-type ChangeType = "creation" | "single" | "multiple";
-
-export type DetectedChanges = {
-  type: ChangeType;
-  items: TodoChange[];
-};
-
-function detectChanges(
-  oldTodos: TodoItem[],
-  newTodos: TodoItem[],
-): DetectedChanges {
-  if (!oldTodos || oldTodos.length === 0) {
-    return {
-      type: "creation",
-      items: newTodos.map((todo, index) => ({
-        todo,
-        newStatus: todo.status,
-        index,
-      })),
-    };
-  }
-
-  const changes: TodoChange[] = [];
-  newTodos.forEach((newTodo, index) => {
-    const oldTodo = oldTodos[index];
-    if (!oldTodo || oldTodo.status !== newTodo.status) {
-      changes.push({
-        todo: newTodo,
-        oldStatus: oldTodo?.status,
-        newStatus: newTodo.status,
-        index,
-      });
-    }
-  });
-
-  if (changes.length === 1) return { type: "single", items: changes };
-  return { type: "multiple", items: changes };
-}
 
 const TodoStatusIcon = ({
   status,
@@ -123,81 +78,61 @@ const TodoListItem = memo(function TodoListItem({
   );
 });
 
+/** "2 of 3 done", for the row's detail. */
+function todoProgress(todos: TodoItem[]): string {
+  const done = todos.filter((todo) => todo.status === "completed").length;
+  return `${done} of ${todos.length} done`;
+}
+
+/**
+ * A to-do list call: one row like the other tool rows (the checklist icon, what changed and how far the list is),
+ * open by default to the list itself.
+ */
 export const TodoTool = memo(function TodoTool({
   part,
   chatStatus,
 }: TodoToolProps) {
-  const { isPending } = getToolStatus(part, chatStatus);
+  const { isPending, isError } = getToolStatus(part, chatStatus);
 
   const isStreaming = part.state === "input-streaming";
   const oldTodos: TodoItem[] = part.output?.oldTodos || [];
   const newTodos: TodoItem[] = part.input?.todos || part.output?.newTodos || [];
-
   const isCreation = oldTodos.length === 0;
-  const changes = useMemo(
-    () => detectChanges(oldTodos, newTodos),
-    [oldTodos, newTodos],
-  );
+  const failed = isError && !isPending;
 
   // A finished call that sent an empty list cleared the to-dos; nothing is being generated.
-  if (
+  const cleared =
     !isStreaming &&
     newTodos.length === 0 &&
     part.state === "output-available" &&
-    Array.isArray(part.input?.todos)
-  ) {
-    return (
-      <div className="text-base leading-relaxed text-an-foreground/60">
-        To-dos cleared
-      </div>
-    );
-  }
+    Array.isArray(part.input?.todos);
+  const empty = isStreaming || newTodos.length === 0;
 
-  // Streaming placeholder — always shimmer while in this transient state.
-  if (isStreaming || newTodos.length === 0) {
-    return (
-      <div className="space-y-2 text-base leading-relaxed text-an-foreground/80">
-        <div className="text-an-foreground/60">
-          <TextShimmer
-            as="span"
-            duration={1.2}
-            className="flex items-center text-base m-0"
-          >
-            {isCreation ? "Creating to-do list..." : "Updating to-dos..."}
-          </TextShimmer>
-        </div>
-      </div>
-    );
-  }
+  const running = isCreation ? "Creating to-do list" : "Updating to-dos";
+  const label = cleared
+    ? "To-dos cleared"
+    : failed
+      ? (isCreation ? "Failed to create to-do list" : "Failed to update to-dos")
+      : isCreation
+        ? "Created to-do list"
+        : "Updated to-dos";
 
-  // Single update - show full list for clarity
-  if (changes.type === "single") {
-    return (
-      <div className="space-y-2 text-base leading-relaxed text-an-foreground/80">
-        {newTodos.map((todo, idx) => (
-          <TodoListItem key={idx} todo={todo} isPending={isPending} />
-        ))}
-      </div>
-    );
-  }
-
-  // Multiple updates - show full list for clarity
-  if (changes.type === "multiple") {
-    return (
-      <div className="space-y-2 text-base leading-relaxed text-an-foreground/80">
-        {newTodos.map((todo, idx) => (
-          <TodoListItem key={idx} todo={todo} isPending={isPending} />
-        ))}
-      </div>
-    );
-  }
-
-  const displayTodos = newTodos;
   return (
-    <div className="space-y-2 text-base leading-relaxed text-an-foreground/80">
-      {displayTodos.map((todo, idx) => (
-        <TodoListItem key={idx} todo={todo} isPending={isPending} />
-      ))}
-    </div>
+    <ToolRowBase
+      icon={<IconChecklist size={18} />}
+      shimmerLabel={running}
+      completeLabel={label}
+      isAnimating={!cleared && (isPending || empty)}
+      failed={failed}
+      detail={empty ? undefined : todoProgress(newTodos)}
+      expandable={!empty}
+      defaultOpen
+    >
+      <div className="space-y-2 pl-[26px] text-base leading-relaxed text-an-foreground/80">
+        {newTodos.map((todo, idx) => (
+          <TodoListItem key={idx} todo={todo} isPending={isPending} />
+        ))}
+      </div>
+    </ToolRowBase>
   );
 }, areToolPropsEqual);

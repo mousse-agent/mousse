@@ -114,14 +114,17 @@ describe('the line under Working', () => {
     expect(line()!.title).toBe("Waiting for the model's first output")
   })
 
-  it('the line is the thinking icon, turning, while the turn thinks, and the small dots for anything else', () => {
+  it("the line is the thinking icon, turning, while the turn thinks, the running tool's icon while a tool runs, and the small dots for anything else", () => {
     for (const kind of ['starting', 'waiting', 'reasoning'] as const) {
       render([ask()], 'streaming', { phase: 'thinking', step: { kind } })
       expect(line()!.querySelector('svg.thinking-icon')?.classList.contains('is-thinking')).toBe(true)
       expect(line()!.querySelector('.turn-progress-dots')).toBeNull()
     }
+    render([ask(), reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], 'streaming', { phase: 'tool_running' })
+    expect(line()!.querySelector('svg.thinking-icon')).toBeNull()
+    expect(line()!.querySelector('.turn-progress-dots')).toBeNull()
+    expect(line()!.querySelector('.an-tool-icon[data-state="running"] svg')).not.toBeNull()
     for (const [messages, state] of [
-      [[ask(), reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], { phase: 'tool_running' }],
       [[ask()], { phase: 'thinking', step: { kind: 'retrying', attempt: 1 } }],
       [[ask(), reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], { phase: 'tool_running', stopping: true }],
       [[ask(), reply('a1', text('The'))], { phase: 'streaming' }]

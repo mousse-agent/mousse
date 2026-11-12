@@ -1,8 +1,9 @@
 import { memo } from "react";
 import type { TimelineStep, StepState } from "../types/timeline";
 import type { SourceType } from "../icons/source-icons";
-import { IconFileText, IconFolderSearch, IconSearch } from "../../../../lib/icons";
+import { IconFileText } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
+import { toolIconFor } from "./tool-icon";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import {
   mapPartStateToInvocationState,
@@ -22,6 +23,8 @@ export type SearchGroupRichProps = {
   /** How many a code or file search found, when it has no result list to show. */
   resultCount?: number;
   defaultOpen?: boolean;
+  /** The search failed: the row says so in the danger colour. */
+  failed?: boolean;
 };
 
 export function SearchGroupRich({
@@ -31,17 +34,17 @@ export function SearchGroupRich({
   results = [],
   resultCount,
   defaultOpen,
+  failed = false,
 }: SearchGroupRichProps) {
   const anyAnimating = toolSteps.some((s) => stepStates[s.id] === "animating");
   const rawQuery = toolSteps.find((s) => s.searchQuery)?.searchQuery;
-  const searchQuery = rawQuery ?? "searching...";
   const totalResults = results.length > 0 ? results.length : (resultCount ?? 0);
   const toolLabel = toolSteps.find((s) => s.toolName)?.toolName;
-  const { completeLabel, detail } = formatSearchRowLabels(
-    toolLabel,
-    rawQuery,
-    totalResults,
-  );
+  const labels = formatSearchRowLabels(toolLabel, rawQuery, totalResults);
+  const completeLabel = failed && !anyAnimating ? `Failed ${toolLabel?.trim() || "search"}` : labels.completeLabel;
+  // A failed row names the tool in its label, so its detail is the query alone.
+  const detail = failed && !anyAnimating && rawQuery?.trim() ? `\u201C${rawQuery.trim()}\u201D` : labels.detail;
+  const Icon = toolIconFor(toolLabel ? `tool-${toolLabel}` : "tool-WebSearch");
   // Only expose the expand affordance once there is something useful to show.
   // While the search is still streaming we have no results yet and the panel
   // header is just "Searched for <same query>" — redundant with the row
@@ -65,28 +68,18 @@ export function SearchGroupRich({
         <CompleteTracker key={step.id} step={step} />
       ))}
       <ToolRowBase
-        icon={
-          toolLabel === "Glob" ? (
-            <IconFolderSearch size={18} />
-          ) : (
-            <IconSearch size={18} />
-          )
-        }
+        icon={<Icon size={18} />}
         shimmerLabel="Searching..."
         completeLabel={completeLabel}
         detail={detail}
         isAnimating={anyAnimating}
+        failed={failed}
         expandable={hasExpandableContent}
         defaultOpen={defaultOpen}
       >
-        <div className="rounded-an-tool-border-radius overflow-hidden bg-an-tool-background border border-border">
-          <div className="flex items-center px-2.5 py-0 border-b border-an-tool-border-color h-7 text-sm gap-1">
-            <span className="text-foreground font-medium">Searched for</span>{" "}
-            <span className="text-muted-foreground truncate">
-              &ldquo;{searchQuery}&rdquo;
-            </span>
-          </div>
-          <div className="max-h-[200px] overflow-y-auto bg-background">
+        {/* A plain block like a command's output: the row above already names the query. */}
+        <div className="an-search-results rounded-md overflow-hidden bg-an-tool-background">
+          <div className="max-h-[200px] overflow-y-auto">
             <div className="flex flex-col gap-1 p-1">
               {results.map((result, i) => (
                 <div
@@ -180,6 +173,7 @@ export const SearchTool = memo(function SearchTool({
       }
       resultCount={searchResultCount(part.output ?? part.result)}
       defaultOpen={defaultOpen}
+      failed={part.state === "output-error"}
     />
   );
 });
