@@ -545,6 +545,11 @@ export interface HarnessDriver {
    */
   botApprovals?(config: InstanceConfig): boolean
   /**
+   * The granted neutral tools a bot turn on the entry would not be offered now (a locked Claude entry withholds `shell`
+   * where its sandbox can't run), read with the installed version. Absent or empty: every granted tool is offered.
+   */
+  botWithheldTools?(config: InstanceConfig, installedVersion?: string, instanceId?: string): readonly NeutralTool[]
+  /**
    * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
    * locked Claude entry's organisation policy). The gateway calls it before every bot check point:
    * approval, dispatch and turn admission.

@@ -182,6 +182,11 @@ export interface HarnessGateway {
    */
   nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
   /**
+   * The granted neutral tools a bot turn on the instance would not be offered now (`HarnessDriver.botWithheldTools`);
+   * empty for an unknown instance.
+   */
+  botWithheldTools(instanceId: string): readonly NeutralTool[]
+  /**
    * The permission mode `bind` would record for a thread asking for `requested` (the mode itself, a
    * stricter fallback with the reason, or a refusal). Reads, binds nothing; used to tell the agent
    * about a change before the turn is admitted.
@@ -1242,6 +1247,12 @@ export class Harness implements HarnessGateway {
     if (mapped.ok) return mapped
     const reason = `${this.displayName(record)} has no tool for ${mapped.unmapped.join(', ')}.`
     return { ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } }
+  }
+
+  botWithheldTools(instanceId: string): readonly NeutralTool[] {
+    const record = this.recordOrUndefined(instanceId)
+    if (!record?.driver.botWithheldTools) return []
+    return record.driver.botWithheldTools(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, record.instanceId)
   }
 
   async refreshPolicyFacts(instanceId: string): Promise<void> {
