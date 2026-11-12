@@ -1,0 +1,14 @@
+{"kind":"transcript","adapter":"cursor","scenario":"steer-mid-tool","boundary":"Cursor host NDJSON on the host process: requests out; replies, run updates and exits in","recordedAt":"hand-authored","basis":"1.0.35","version":1}
+{"dir":"out","frame":{"kind":"request","method":"create","params":{"apiKey":"replay-key","model":{"id":"default"},"mode":"agent","settingSources":["project","user","team","mdm","plugins"],"autoReview":true}}}
+{"dir":"in","frame":{"kind":"reply","method":"create","result":{"agentId":"agent-1"}}}
+{"dir":"out","frame":{"kind":"request","method":"send","params":{"agentId":"agent-1","text":"Run the tests","model":{"id":"default"},"mode":"agent"}}}
+{"dir":"in","frame":{"kind":"reply","method":"send","result":{"runId":"run-1"}}}
+{"dir":"in","frame":{"kind":"delta","runId":"run-1","update":{"type":"tool-call-started","callId":"call-1","toolCall":{"type":"shell","args":{"command":"npm test"}}}}}
+{"dir":"cue","frame":{"action":"steer","text":"Use pnpm","exclusive":true}}
+{"dir":"in","frame":{"kind":"delta","runId":"run-1","update":{"type":"tool-call-completed","callId":"call-1","toolCall":{"type":"shell","args":{"command":"npm test"},"result":{"status":"success","value":{"exitCode":0,"stdout":"12 passed\n"}}}}}}
+{"dir":"in","frame":{"kind":"delta","runId":"run-1","update":{"type":"text-delta","text":"Tests pass"}}}
+{"dir":"in","frame":{"kind":"run_end","runId":"run-1","status":"finished"}}
+{"dir":"out","frame":{"kind":"request","method":"send","params":{"agentId":"agent-1","text":"Use pnpm","model":{"id":"default"},"mode":"agent"}}}
+{"dir":"in","frame":{"kind":"reply","method":"send","result":{"runId":"run-2"}}}
+{"dir":"in","frame":{"kind":"delta","runId":"run-2","update":{"type":"text-delta","text":"Switched to pnpm"}}}
+{"dir":"in","frame":{"kind":"run_end","runId":"run-2","status":"finished"}}

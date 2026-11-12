@@ -115,12 +115,23 @@ export class AcpAdapter implements ProviderAdapter {
       orchestrationInstructions: host.bridge?.sessionInstructions || undefined,
       ...(host.bridge?.permission ? { prompter: host.bridge.permission } : {}),
       drainSteer: () => ctl.drainSteer(),
-      onSteer: (steer) => {
+      // Per drain, with its token (docs/design/steer-and-interruptions.md §2.6, §2.7): read only once the prompt that
+      // carries it reached the agent, handed back otherwise.
+      ...(ctl.drainSteerEntry ? { drainSteerEntry: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => ctl.drainSteerEntry!(opts) } : {}),
+      // The hold: offered only for a turn on it.
+      ...(ctl.peekSteer ? { peekSteer: () => ctl.peekSteer!() } : {}),
+      ...(ctl.mayCut ? { mayCut: (token: string) => ctl.mayCut!(token) } : {}),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
+      onSteer: (steer, token) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.
         streams.thinking.break()
         streams.text.break()
-        sink.steerAccepted(steer)
+        sink.steerAccepted(steer, token)
       },
       onText: (content) => {
         progress()
@@ -131,6 +142,8 @@ export class AcpAdapter implements ProviderAdapter {
         // A note that came before this call keeps its own row, above it; the next one starts below.
         if (event.phase === 'start' && !event.parentCallId) streams.text.break()
         if (event.phase === 'start') toolCalls.set(event.callId, 'running')
+        // A running call's progress: it still runs (and has not failed).
+        else if (event.phase === 'update') toolCalls.set(event.callId, toolCalls.get(event.callId) ?? 'running')
         else toolCalls.set(event.callId, event.status === 'completed' ? 'completed' : 'failed')
         sink.tool(runtimeToolEvent(withClosure(event, input.signal.aborted)))
       },

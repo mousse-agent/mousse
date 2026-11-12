@@ -76,9 +76,34 @@ export function steerDelivery(caps: Pick<ProviderCapabilities, 'steer' | 'steerB
 /**
  * How long the release window stays open after the last foreground tool's result on a `start`
  * provider, when the model shows nothing (§2.3): twice the largest gap spike S4 measured on Codex
- * between a result and the next start of the same response, plus 100 ms.
+ * between a result and the next start of the same response, plus 100 ms. A provider declares its
+ * own (`steerSettleMs`); this is the window of a hold built without one.
  */
 export const STEER_SETTLE_MS = 232
+
+/**
+ * The longest window best effort may use (§6, the S4 pass rule): a provider whose measured window would be longer, or
+ * whose gap was never measured, ships strict release instead. Such a provider still holds a steer that arrives within
+ * this long of a tool's result, so a second command of the same response is not cut either.
+ */
+export const MAX_STEER_SETTLE_MS = 1_000
+
+/**
+ * How a held steer is released on an instance (§2.3.2): the instance's strict setting, and the window after a tool.
+ * A `start` provider with a measured window (`caps.steerSettleMs`) releases best effort unless the instance asks for
+ * strict; one without (never measured, or over the cap) is always strict, with the window at the cap. Other providers
+ * have no window: an `announce` provider knows every tool before it runs.
+ */
+export function steerReleaseWindow(
+  caps: Pick<ProviderCapabilities, 'steerBoundary' | 'steerSettleMs'>,
+  setting: 'best_effort' | 'strict' | undefined
+): { strict: boolean; settleMs: number } {
+  if (caps.steerBoundary !== 'start') return { strict: setting === 'strict', settleMs: 0 }
+  // Caps saved before the key existed have no window: strict.
+  const measured = typeof caps.steerSettleMs === 'number' && caps.steerSettleMs > 0 && caps.steerSettleMs <= MAX_STEER_SETTLE_MS ? caps.steerSettleMs : undefined
+  if (measured === undefined) return { strict: true, settleMs: MAX_STEER_SETTLE_MS }
+  return { strict: setting === 'strict', settleMs: measured }
+}
 
 /**
  * `interrupt` asks the provider to stop the live turn; `settle_locally` ends the run without

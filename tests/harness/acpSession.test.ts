@@ -11,6 +11,12 @@ import { interruptWithDeadline } from '../../src/mms/harness/supervise'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import type { LlmModelOption } from '../../src/shared/settings'
+import type { HarnessCaps } from '../../src/shared/harness/types'
+import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
+import { AcpAdapter } from '../../src/mms/harness/drivers/acp/adapter'
+import { GENERIC_ACP_CAPS } from '../../src/mms/harness/acp/presets/generic'
+import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
+import { holdControl } from '../support/steerHoldControl'
 
 const sessionsUnderTest: AcpSessions[] = []
 afterEach(() => {
@@ -24,7 +30,7 @@ interface AgentScript {
   /** Slash commands the agent advertises (`available_commands_update`) when it opens a session. */
   commands?: string[]
   /** Runs one prompt; resolves with its stop reason. `blocks` is the text of every block of the prompt. */
-  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string>
+  prompt?: (text: string, context: { notify: (text: string) => Promise<void>; update: (update: Record<string, unknown>) => Promise<void>; cancelled: Promise<void>; blocks: string[]; askPermission: () => Promise<unknown> }) => Promise<string>
 }
 
 const DEFAULT_SESSION = { configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fast', options: [{ value: 'fast', name: 'Fast' }, { value: 'deep', name: 'Deep' }] }] }
@@ -60,6 +66,7 @@ function scriptedAgent(script: AgentScript) {
         const blocks = c.params.prompt.map((block) => (block as { text?: string }).text ?? '')
         const stopReason = await (script.prompt ?? (async (prompt, ctx) => { await ctx.notify(`echo: ${prompt}`); return 'end_turn' }))(text, {
           notify,
+          update: (update) => c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update } as never),
           cancelled,
           blocks,
           askPermission: () => c.client.request(methods.client.session.requestPermission, {
@@ -496,6 +503,444 @@ describe('ACP sessions', () => {
       expect(agent.connections).toHaveLength(2)
       expect(agent.calls.map((call) => call.method)).toEqual(['initialize', 'session/new', 'session/prompt'])
       expect((agent.calls[2].params as { prompt: Array<{ text: string }> }).prompt[0].text).toContain('Previous conversation')
+    })
+  })
+
+  describe("the hold: a person's steer waits for a running tool (docs/design/steer-and-interruptions.md §2.7)", () => {
+    const STEER = 'Use pnpm, not npm'
+    const gate = () => {
+      let open!: () => void
+      const opened = new Promise<void>((resolve) => { open = resolve })
+      return { opened, open }
+    }
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    const toolCall = (id: string, title = 'npm test') => ({ sessionUpdate: 'tool_call', toolCallId: id, title, kind: 'execute', status: 'in_progress' })
+    const toolDone = (id: string) => ({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed' })
+
+    /** A turn through the ACP adapter and the real session core, on the hold. */
+    function holdTurn(agent: ReturnType<typeof scriptedAgent>, caps: HarnessCaps = GENERIC_ACP_CAPS, options: { signal?: AbortSignal } = {}) {
+      const { sessions, questions } = core(agent.connect)
+      // As in the orchestrator: a question pending in the thread means the turn waits for a person.
+      const hold = holdControl(caps, { questions: { pending: () => questions.listPendingForThread('t').length > 0 } })
+      const prompts = () => agent.calls.filter((call) => call.method === 'session/prompt').map((call) => (call.params as { prompt: Array<{ text: string }> }).prompt[0].text)
+      // What the agent had been sent when each steer was saved as read.
+      const promptsWhenAccepted: string[][] = []
+      const sink = hold.wrap({
+        text: () => {},
+        thinking: () => {},
+        tool: () => {},
+        progress: () => {},
+        providerRef: () => {},
+        usage: () => {},
+        steerAccepted: () => void promptsWhenAccepted.push(prompts())
+      } as unknown as TurnSink)
+      const adapter = new AcpAdapter(() => ({ chat: (input) => sessions.chat(input), commitConversation: () => {}, configured: () => true }), { driver: 'acp', label: 'Fake agent', capabilities: caps })
+      const input = { threadId: 't', instanceId: 'acp:fake', llmProvider: '', model: 'default', mode: 'agent', prompt: 'work', cwd: process.cwd(), signal: options.signal ?? new AbortController().signal } as unknown as TurnInput
+      const result = adapter.startTurn(input, sink, hold.ctl, { context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as AdapterHost)
+      const events = () => hold.log.map(([event, detail]) => `${event}:${detail}`)
+      return { hold, sink, result, prompts, promptsWhenAccepted, events, questions }
+    }
+    /** Each step happens, in this order (each found after the one before). */
+    const order = (events: string[], ...steps: string[]) => {
+      let from = 0
+      for (const step of steps) {
+        const at = events.indexOf(step, from)
+        expect(at, `${step} after ${JSON.stringify(events.slice(0, from))} in ${JSON.stringify(events)}`).toBeGreaterThanOrEqual(0)
+        from = at + 1
+      }
+    }
+
+    it('strict boundary drain: a steer held during a tool goes in as the next prompt when the prompt ends, and nothing is cancelled', async () => {
+      const toolStarted = gate()
+      const finishTool = gate()
+      const endPrompt = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update(toolCall('call-1'))
+          toolStarted.open()
+          await finishTool.opened
+          await ctx.update(toolDone('call-1'))
+          await ctx.notify('All 12 passed.')
+          await endPrompt.opened
+          return 'end_turn'
+        }
+      })
+      const turn = holdTurn(agent)
+      await toolStarted.opened
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      finishTool.open()
+      // The tool ended and the agent wrote: an agent whose gaps were never measured still holds (strict release).
+      await vi.waitFor(() => expect(turn.events()).toContain('text:All 12 passed.'))
+      await sleep(300)
+      expect(turn.hold.held()).toBe(true)
+      expect(turn.hold.drained()).toEqual([])
+      endPrompt.open()
+      expect((await turn.result).text).toBe('All 12 passed.\n\nthen Use pnpm, not npm')
+      expect(agent.cancels).toEqual([])
+      expect(turn.prompts()).toEqual(['work', STEER])
+      order(turn.events(), 'tool:complete:call-1', 'boundary:', `drain:${STEER}`, 'providerTurn:', 'taken:drain-1', `accepted:${STEER}@drain-1`)
+      expect(turn.events().filter((event) => event.startsWith('mayCut'))).toEqual([])
+      // Read only once the prompt that carries it reached the agent.
+      expect(turn.promptsWhenAccepted).toEqual([['work', STEER]])
+    })
+
+    it('a steer while the agent writes cuts at once, and is read only once the prompt that carries it reached the agent', async () => {
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.notify('working')
+          await ctx.cancelled
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent)
+      await vi.waitFor(() => expect(turn.events()).toContain('text:working'))
+      turn.hold.steer(STEER)
+      expect((await turn.result).text).toBe('working\n\nthen Use pnpm, not npm')
+      expect(agent.cancels).toEqual(['native-1'])
+      order(turn.events(), `drain:${STEER}`, 'mayCut:true', 'taken:drain-1', `accepted:${STEER}@drain-1`)
+      expect(turn.promptsWhenAccepted).toEqual([['work', STEER]])
+    })
+
+    it('a tool that starts between the drain and the cancel keeps the steer: it is handed back, held, and goes in at the boundary', async () => {
+      const endPrompt = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.notify('working')
+          await endPrompt.opened
+          return 'end_turn'
+        }
+      })
+      const turn = holdTurn(agent)
+      await vi.waitFor(() => expect(turn.events()).toContain('text:working'))
+      // The tool's start arrives while the cut is on its way.
+      turn.hold.beforeMayCut = () => turn.sink.tool({ kind: 'mcp_tool_call', phase: 'start', callId: 'late', title: 'npm test', summary: '', details: [] })
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.events()).toContain(`returned:${STEER}`))
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      turn.sink.tool({ kind: 'mcp_tool_result', phase: 'complete', callId: 'late', title: 'npm test', summary: '', details: [] })
+      endPrompt.open()
+      await turn.result
+      expect(agent.cancels).toEqual([])
+      order(turn.events(), 'mayCut:false', `returned:${STEER}`, 'boundary:', `drain:${STEER}`)
+      expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-2`])
+    })
+
+    it('Send now during a tool cancels at once, and the steer goes in once', async () => {
+      const toolStarted = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update(toolCall('call-1', 'sleep 20'))
+          toolStarted.open()
+          await ctx.cancelled
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent)
+      await toolStarted.opened
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      turn.hold.sendNow()
+      await turn.result
+      expect(agent.cancels).toEqual(['native-1'])
+      expect(turn.prompts()).toEqual(['work', STEER])
+      expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
+
+    it('a steer whose re-prompt fails is handed back, never read', async () => {
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') throw new Error('agent crashed')
+          await ctx.notify('working')
+          await ctx.cancelled
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent)
+      await vi.waitFor(() => expect(turn.events()).toContain('text:working'))
+      turn.hold.steer(STEER)
+      await expect(turn.result).rejects.toThrow()
+      expect(turn.events().filter((event) => event.startsWith('returned:'))).toEqual([`returned:${STEER}`])
+      expect(turn.events().filter((event) => event.startsWith('accepted:') || event.startsWith('taken:'))).toEqual([])
+    })
+
+    it('a call waiting for a person\'s permission does not hold: the steer cuts and answers it', async () => {
+      const asking = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update(toolCall('tool-1', 'Run the tool'))
+          asking.open()
+          // The steer settles the ask as the person's answer.
+          await ctx.askPermission().catch(() => undefined)
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent)
+      await asking.opened
+      await vi.waitFor(() => expect(turn.events()).toContain('awaiting:tool-1:true'))
+      turn.hold.steer(STEER)
+      await turn.result
+      expect(agent.cancels).toEqual(['native-1'])
+      order(turn.events(), 'awaiting:tool-1:true', `drain:${STEER}`, 'awaiting:tool-1:false')
+    })
+
+    it('strict release: a steer already held for a tool does not wait for a person\'s answer to the next call: it cuts and answers it', async () => {
+      const toolStarted = gate()
+      const finishTool = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update(toolCall('call-1'))
+          toolStarted.open()
+          await finishTool.opened
+          await ctx.update(toolDone('call-1'))
+          await ctx.update(toolCall('tool-1', 'Run the tool'))
+          await ctx.askPermission().catch(() => undefined)
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent)
+      await toolStarted.opened
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      finishTool.open()
+      await turn.result
+      expect(agent.cancels).toEqual(['native-1'])
+      order(turn.events(), 'tool:complete:call-1', 'awaiting:tool-1:true', `drain:${STEER}`, `accepted:${STEER}@drain-1`)
+    })
+
+    it('Grok, with its measured window: the steer goes in about 100 ms after the tool\'s result when the agent shows nothing', async () => {
+      const toolStarted = gate()
+      const finishTool = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update(toolCall('call-1'))
+          toolStarted.open()
+          await finishTool.opened
+          await ctx.update(toolDone('call-1'))
+          await ctx.cancelled
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent, GROK_CAPS)
+      await toolStarted.opened
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      finishTool.open()
+      await turn.result
+      expect(agent.cancels).toEqual(['native-1'])
+      expect(turn.hold.at('drain')! - turn.hold.at('tool', 'complete:call-1')!).toBeGreaterThanOrEqual(100 - 10)
+      expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
+
+    it('Grok\'s subagent call is never waited on: a steer while only the subagent runs cuts', async () => {
+      const subagentStarted = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'sub-1', title: 'research', name: 'start_subagent', status: 'in_progress' })
+          subagentStarted.open()
+          await ctx.cancelled
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent, GROK_CAPS)
+      await subagentStarted.opened
+      turn.hold.steer(STEER)
+      await turn.result
+      expect(agent.cancels).toEqual(['native-1'])
+      expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
+
+    it('Grok: a subagent reporting progress does not keep a steer held after the turn\'s own tool ends', async () => {
+      const toolStarted = gate()
+      const finishTool = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'sub-1', title: 'research', name: 'start_subagent', status: 'in_progress' })
+          await ctx.update(toolCall('call-1'))
+          toolStarted.open()
+          await finishTool.opened
+          await ctx.update(toolDone('call-1'))
+          // The subagent reports progress every 40 ms for a second, longer than Grok's 100 ms window many times over.
+          let cancelled = false
+          void ctx.cancelled.then(() => { cancelled = true })
+          for (let tick = 0; tick < 25 && !cancelled; tick++) {
+            await ctx.update({ sessionUpdate: 'tool_call_update', toolCallId: 'sub-1', status: 'in_progress', content: [{ type: 'content', content: { type: 'text', text: `step ${tick}` } }] })
+            await sleep(40)
+          }
+          await ctx.cancelled
+          return 'cancelled'
+        }
+      })
+      const turn = holdTurn(agent, GROK_CAPS)
+      await toolStarted.opened
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      finishTool.open()
+      await turn.result
+      expect(agent.cancels).toEqual(['native-1'])
+      // About Grok's window after the tool's result, never the subagent's second of progress.
+      expect(turn.hold.at('drain')! - turn.hold.at('tool', 'complete:call-1')!).toBeLessThan(500)
+      expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+    })
+
+    describe.each([
+      ['as Claude Code names MCP calls', 'mcp__mousse__ask_user'],
+      ['as some agents title them', 'ask_user (mousse MCP Server)'],
+      ['a relayed tool waiting for its approval, named with capitals', 'mousse-relay/github__createIssue']
+    ])("Mousse's ask_user over MCP (%s): the steer cuts and answers it, on an agent whose window was never measured (strict)", (_name, title) => {
+      const asks = (held: boolean) => {
+        const toolStarted = gate()
+        const finishTool = gate()
+        const asking = gate()
+        const agent = scriptedAgent({
+          prompt: async (text, ctx) => {
+            if (text !== 'work') {
+              await ctx.notify(`then ${text}`)
+              return 'end_turn'
+            }
+            if (held) {
+              await ctx.update(toolCall('call-1'))
+              toolStarted.open()
+              await finishTool.opened
+              await ctx.update(toolDone('call-1'))
+            }
+            await ctx.update({ sessionUpdate: 'tool_call', toolCallId: 'ask-1', title, kind: 'other', status: 'in_progress' })
+            asking.open()
+            await ctx.cancelled
+            return 'cancelled'
+          }
+        })
+        return { agent, toolStarted, finishTool, asking }
+      }
+      const ask = (questions: UserQuestionService) => {
+        const answer = questions.requestAnswers([{ id: 'q', prompt: 'Which package manager?', options: [{ id: 'npm', label: 'npm' }, { id: 'skip', label: 'Skip' }] }], 't')
+        answer.catch(() => undefined)
+        return answer
+      }
+
+      it('a steer held for a tool goes in once Mousse asks the person', async () => {
+        const script = asks(true)
+        const turn = holdTurn(script.agent)
+        await script.toolStarted.opened
+        turn.hold.steer(STEER)
+        await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+        script.finishTool.open()
+        await script.asking.opened
+        const answer = ask(turn.questions)
+        expect((await turn.result).text).toBe('then Use pnpm, not npm')
+        expect(script.agent.cancels).toEqual(['native-1'])
+        await expect(answer).resolves.toEqual({ q: 'skip' })
+        expect(turn.events().filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+      })
+
+      it('a steer while Mousse asks the person goes in at once', async () => {
+        const script = asks(false)
+        const turn = holdTurn(script.agent)
+        await script.asking.opened
+        await vi.waitFor(() => expect(turn.events()).toContain('tool:start:ask-1'))
+        const answer = ask(turn.questions)
+        turn.hold.steer(STEER)
+        await turn.result
+        expect(script.agent.cancels).toEqual(['native-1'])
+        await expect(answer).resolves.toEqual({ q: 'skip' })
+        // Not after the 1 s window an unmeasured agent waits after a tool.
+        expect(turn.hold.at('drain')! - turn.hold.at('tool', 'start:ask-1')!).toBeLessThan(800)
+      })
+    })
+
+    it.each(['mousse/docs', 'Mousse.md'])('a call titled %s is no Mousse question: it holds a steer while a question is pending, like any call', async (title) => {
+      const toolStarted = gate()
+      const finishTool = gate()
+      const agent = scriptedAgent({
+        prompt: async (text, ctx) => {
+          if (text !== 'work') {
+            await ctx.notify(`then ${text}`)
+            return 'end_turn'
+          }
+          await ctx.update(toolCall('docs-1', title))
+          toolStarted.open()
+          await finishTool.opened
+          await ctx.update(toolDone('docs-1'))
+          await ctx.notify('read it')
+          return 'end_turn'
+        }
+      })
+      const turn = holdTurn(agent)
+      await toolStarted.opened
+      const answer = turn.questions.requestAnswers([{ id: 'q', prompt: 'Which one?', options: [{ id: 'a', label: 'A' }] }], 't')
+      answer.catch(() => undefined)
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      await sleep(300)
+      expect(turn.hold.drained()).toEqual([])
+      expect(turn.hold.heldSteer()).toMatchObject({ tools: 1 })
+      turn.questions.dismissAllForThread('t')
+      finishTool.open()
+      await turn.result
+      expect(agent.cancels).toEqual([])
+      expect(turn.prompts()).toEqual(['work', STEER])
+    })
+
+    it('strict release with a tool the agent never reports complete: the steer is never cut in, and stays for the follow-up', async () => {
+      const toolStarted = gate()
+      const endPrompt = gate()
+      const agent = scriptedAgent({
+        prompt: async (_text, ctx) => {
+          await ctx.update(toolCall('call-1'))
+          toolStarted.open()
+          await ctx.notify('done, I think')
+          await endPrompt.opened
+          return 'end_turn'
+        }
+      })
+      const turn = holdTurn(agent)
+      await toolStarted.opened
+      turn.hold.steer(STEER)
+      await vi.waitFor(() => expect(turn.hold.held()).toBe(true))
+      endPrompt.open()
+      expect((await turn.result).text).toBe('done, I think')
+      expect(agent.cancels).toEqual([])
+      expect(turn.prompts()).toEqual(['work'])
+      // Never drained: the queue still has it, so it runs once as the next turn.
+      expect(turn.hold.drained()).toEqual([])
+      expect(turn.hold.pendingTexts()).toEqual([STEER])
+      expect(turn.events()).toContain('tool:complete:call-1')
     })
   })
 

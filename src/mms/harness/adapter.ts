@@ -38,6 +38,13 @@ export interface ProviderCapabilities {
    * cuts in at once as before. Setting an adapter back to `none` is the per-provider rollback.
    */
   steerBoundary: 'announce' | 'start' | 'none'
+  /**
+   * `CommandPolicy.steerReleaseWindow`: on a `start` provider, how long a held steer still waits after the last tool's
+   * result when the model shows nothing (spike S4: twice the largest gap seen between a result and the next start of
+   * the same response, plus 100 ms). `null` on other providers, and on a `start` provider whose gap was never
+   * measured: a held steer there waits for the provider's own turn to end (strict release), whatever the setting.
+   */
+  steerSettleMs: number | null
   /** `CommandPolicy.stopStrategy`. */
   interrupt: boolean
   /** `featureGates.canUndoNatively` (Phase 6). */
@@ -194,10 +201,15 @@ export interface TurnSink {
   toolAwaiting?(callId: string, waiting: boolean): void
   /**
    * The provider's own turn ended inside the Mousse turn (Pi's `turn_end`, Codex's `turn/completed`) and no tool
-   * runs: a held steer goes in natively, as the next provider turn, with no cut. Holds until the next model output
-   * or tool event.
+   * runs: a held steer goes in natively, as the next provider turn, with no cut. Holds until the next model output,
+   * tool event or provider turn (`providerTurn`).
    */
   boundary?(): void
+  /**
+   * The provider began another turn of its own inside the Mousse turn (a Codex `turn/start` accepted, an ACP prompt
+   * or a Cursor run sent): the boundary `boundary()` reported is over, so a steer now cuts or waits again.
+   */
+  providerTurn?(): void
   /**
    * Token usage; the orchestrator adds it to the usage statistics, attributed to the latest
    * `providerMetrics` model.

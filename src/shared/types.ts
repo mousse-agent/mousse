@@ -1607,6 +1607,11 @@ export interface HeldSteer {
   waitsFor: string
   /** That tool's first input line (its command, a path). */
   detail?: string
+  /**
+   * No tool runs any more: strict release keeps the steer until the provider's turn ends (`waitsFor` is `turn`).
+   * The line says so instead of naming a tool that already finished.
+   */
+  untilTurnEnd?: true
   /** How many foreground tools run. */
   tools: number
   /** Every foreground tool, for the tooltip. */

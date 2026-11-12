@@ -1,12 +1,12 @@
 # Steer waits for commands, Pi cuts in, and cut-off turns are marked
 
-Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). PR 1 (acceptance per token) and PR C (the mark) are built; PR 2 (the hold on Claude Code, Send now) builds §2.2–§2.4 and §2.9–§2.11, with §2.4 updated to spike S1. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
+Status: design, revision 4 (final), after council rounds 1–3 (responses in §8, §9 and §10). PR 1 (acceptance per token) and PR C (the mark) are built; PR 2 (the hold on Claude Code, Send now) builds §2.2–§2.4 and §2.9–§2.11, with §2.4 updated to spike S1. PR 3 (Codex, ACP agents and Cursor) builds §2.5 and §2.7, with the per-provider windows and defaults in §6, item 4. Code references are checked against `master` at `6d846d9ec`. The orchestrator is `src/mms/orchestrator/OrchestratorService.ts`; "`OS.ts:N`" below means that file.
 
 ## Summary
 
 Three related changes to how a running turn takes a person's message:
 
-1. **A steer waits for a running command (best effort by default, strict as an option).**
+1. **A steer waits for a running command (best effort where the provider's window was measured, strict otherwise and as an option).**
    - While the model writes or thinks, Steer still cuts in at once (#873).
    - While a foreground tool of the turn's own agent is announced or running (Bash, an edit, an MCP call), the steer is held until the tool's result is recorded, then goes in.
    - Background shells, subagents and everything a subagent runs are never waited on.
@@ -161,7 +161,7 @@ The decision and the cut are separate steps: the adapter sends the cut after the
    - Pi: before `abort` (§3.2).
    - ACP agents and Cursor: before `session/cancel` / `active.cancel()` (§2.7).
 
-#### 2.3.1 The best-effort guarantee (default)
+#### 2.3.1 The best-effort guarantee (the default on Codex and Grok)
 
 **Mousse never sends a cut while it knows of a foreground tool that is announced or running, or while the release window is open.** That is the whole promise. It is best effort, because what remains is a tool the provider runs that Mousse does not know of when the cut reaches the provider:
 
@@ -179,11 +179,13 @@ Send now and Stop end tools by design; the guarantee is about steers only.
 #### 2.3.2 Strict release (an option per provider instance)
 
 - **What it does.** With strict release on, a held steer on a `start` provider is released only at a boundary that excludes running tools: the provider's own turn end (`boundary()` above), or Send now. It is never released on output or a timer.
-  - The steer then goes in as the next provider turn of the same Mousse turn, with no cut. On Codex this is the existing `undelivered` path (`CodexProviderService.ts:3058-3082`); on ACP agents it is the guidance re-prompt after the prompt's response; on Cursor, the next run with the guidance.
+  - The steer then goes in as the next provider turn of the same Mousse turn, with no cut. On Codex it is carried by the next `turn/start` through the cut path (`waiting`), never by `turn/steer`; on ACP agents it is the guidance re-prompt after the prompt's response; on Cursor, the next run with the guidance. A turn Codex starts on its own while the run waits for its helpers (an adopted turn) is a provider turn too: its end is a boundary.
+  - The one exception: a held steer stops waiting when the only open call of the turn's own agent waits for a person's answer (an approval, a question, Mousse's `ask_user`). Nothing can start until they answer, so the steer cuts and answers it (§2.1). A question a subagent's call asks does not count.
 - **What it costs.** A steer held during a command waits for the agent's whole turn to end, which can be many commands and a long answer. Send now is the escape.
 - **What it does not change.** Strict only keeps a steer that is already held held. A steer sent while the model writes, with no tool known and the window closed, still cuts at once, with the writing-case window stated above.
-- **Where it is set.** It is a per-instance setting, `runs.steerRelease[<instanceId>]: 'best_effort' | 'strict'`, read when the turn starts and passed to `steerDelivery` as `strict`. It is `best_effort` by default and has no UI in this design. On `announce` providers it changes nothing.
-- **Why both ship.** The two modes differ only in how `releaseOpen` ends, so either can become the default without a redesign. Best effort is the chosen default (§7).
+- **Where it is set.** It is a per-instance setting, `runs.steerRelease[<instanceId>]: 'best_effort' | 'strict'`, read when the turn starts and passed to `steerDelivery` as `strict`. Unset, it is best effort on a provider with a measured window (Codex, Grok) and strict on every other `start` provider, whatever the setting (`steerReleaseWindow`). It has no UI in this design. On `announce` providers it changes nothing.
+- **Why both ship.** The two modes differ only in how `releaseOpen` ends, so either can become the default without a redesign. Best effort is the chosen default where the window was measured (§7).
+- **What windows show.** While no call of the turn runs, the Steer block reads "Waits for the turn to end", and a running tool's progress line (a subagent's, a background call's) says the steer goes in when the turn ends.
 
 ### 2.4 Claude Code
 
@@ -245,8 +247,10 @@ Until then, PR 2 holds and then pushes `now` after `mayCut`. On 2.1.322 the push
 
 ### 2.5 Codex: the hold from the start
 
-- **Mechanism.** `steerBoundary: 'start'`. A person's steer is held while a command, MCP call or web search runs, and while the release window is open. Then the existing #873 cut runs: `mayCut`, `turn/interrupt`, and the next `turn/start` carries the text. It counts as taken only when that start is accepted (`cutHeld`, `cutStarting`, `handBack`). The command's output is already in Codex's history by then.
-- **Strict release** waits for `turn/completed`, then starts the next turn of the run with the text (`undelivered`). There is no interrupt.
+- **Mechanism.** `steerBoundary: 'start'`. A person's steer is held while a command, MCP call or web search runs, and while the release window is open. Then the existing #873 cut runs: `mayCut`, `turn/interrupt`, and the next `turn/start` carries the text. It counts as taken only when that start is accepted (`waiting`, `handBack`). The command's output is already in Codex's history by then. Cut messages and steers that wait for the next turn share one list, in the order they were drained, so two steers around a cut reach the next turn in the order they were sent. A cut taken while the run only waits for its helpers starts the next turn and does not cut it.
+- **Strict release** waits for `turn/completed`, then starts the next turn of the run with the text (`waiting`). There is no interrupt.
+- **Never `turn/steer` for a person's steer.** A person's steer drained at a boundary (`native`) goes through the cut path, not `turn/steer` (S2: Codex can drop a steered input it has not read). If the next turn opened meanwhile (a `turn/start` was on its way), that turn is cut and the next one carries the steer.
+- **Questions.** Codex's approvals and `item/tool/requestUserInput` report `toolAwaiting` for their item, so the call that asks never holds a steer: the steer cuts and answers it. A helper's events (its commands' output included) never restart the release window.
 - **Send now.** A forced drain goes through the same cut while the command runs, so `turn/interrupt` ends it. There is no new state.
 - **Agents' steers and notices** keep today's `turn/steer` path, unchanged.
 - **Cost.** One `turn/interrupt` and `turn/start` round trip after the command, and the start of the model's next request is wasted.
@@ -288,10 +292,12 @@ This change does not change behaviour, and it lands first (§6). Tests:
   - acceptance (`onSteer` → `sink.steerAccepted(text, token)`) only once the re-prompt carrying the text is accepted: the ACP prompt request is accepted, or the next Cursor run starts. Today it is accepted before the cancel (`acp/session.ts:791-793`);
   - **the boundary drain:** at the end of a provider turn (the ACP prompt's response, or the Cursor run's end), the adapter reports `boundary()` and drains with `drainSteerEntry({ expect: 'native' })`. A drained steer goes in as the guidance re-prompt (ACP) or the next run (Cursor), with no cancel, and is accepted by its token as above. This is the path strict release uses. Each adapter gets a strict-boundary test: a steer held during a tool, the provider turn ends, the steer goes in as the next prompt, and nothing is cancelled.
 
-  Until PR 3 they stay at `steerBoundary: 'none'`, on the tokenless path.
+  Until PR 3 they stay at `steerBoundary: 'none'`, on the tokenless path. PR 3 moves them; the tokenless path stays only for a caller that offers no `drainSteerEntry`.
+- **Read by the carrying prompt only.** A carried steer counts as read at the first work update of the prompt that carries it, or at that prompt's reply. A Grok prompt a steer cancelled whose `prompt_complete` did not come within `PROMPT_COMPLETE_WAIT_MS` may still send updates while the next prompt runs; from then on an update counts only when it names the prompt in flight (`_meta.promptId`), and otherwise the reply reads the steers. If that prompt fails, they are handed back.
 - **Hand-back limits.** After the cancel is sent, the text is not handed back if the agent ends the turn or the session dies. In that case it goes in the next re-prompt or the follow-up turn, as for any drained, unaccepted steer when the turn ends. A cancel the agent ignores ends the turn (`steerFailure`, `acp/session.ts`); the steer then runs as the follow-up.
 - **Sparse events.** An ACP agent that never sends `completed` for a call keeps the steer held until the turn ends, when it runs as a follow-up turn, or until Send now. The hold never outlives the turn.
-- **Subagents.** Only Grok marks subagent calls ("subagent: …", `acp/session.ts:684`). Other ACP calls count as foreground.
+- **Subagents.** Only Grok marks subagent calls ("subagent: …", `acp/session.ts:684`). Other ACP calls count as foreground. A subagent call's own progress updates do not restart the release window (§2.3).
+- **Questions.** An ACP permission request and Grok's `ask_user_question` (by its `toolCallId`) report `toolAwaiting`, so the call that asks never holds a steer, and the steer cuts and answers it.
 
 ### 2.8 Exactly once across every end
 
@@ -779,6 +785,10 @@ Spikes come first, then small PRs in order. Each run-engine PR is Tier 5 and goe
 
    The other providers stay at `steerBoundary: 'none'` (today's behaviour) until their PR.
 4. **PR 3: Codex, ACP agents and Cursor** on the hold (`start`, the release window, strict release, `mayCut`). The ACP and Cursor token migration (§2.7), the Codex fixture, and SPEC §13.6.
+   - **Windows and defaults, by the pass rule.** Each adapter declares its window (`steerSettleMs`, read by `steerReleaseWindow`): Codex 232 ms and Grok 100 ms (S4), best effort by default, strict per instance. Cursor, Antigravity and other ACP agents were not measured, so they ship **strict as their default**, which the setting cannot loosen, rather than staying at `none`: a steer during their commands waits for the agent's turn to end, or Send now, instead of ending the command. Their window is the 1 s cap, so a steer that arrives within 1 s of a tool's result is held too.
+   - **Two rules the adapters needed.** The provider's turn end closes the release window (no call of that turn can start any more), so a command that ends right before the turn does still lets the held steer start the next turn of the same run. And while the only open call waits for a person's answer, a held steer stops waiting, also under strict release: nothing can start until they answer, so it cuts and answers the ask (§2.1).
+   - **Codex's plan row** (`turn/plan/updated`) stays open for the whole provider turn and runs nothing: it is not a foreground tool.
+   - **Acceptance.** ACP: the steer is read once the agent works on the prompt that carries it (its first update) or answers it. Cursor: once the run that carries it starts. Codex: unchanged (#927). Any earlier end hands it back by its token.
 5. **PR 4: Pi cut-in** (§3) on top of PR 2, with Pi at `announce`. Closes #368.
 6. **PR C: the mark** (§4). Independent, so it can land first. Tier 4.
 7. **Later, each gated on its spike:** Claude `'next'` during a hold (S1), and Codex native `turn/steer` (S2).
@@ -883,11 +893,11 @@ Every event was timestamped when read from the CLI's stdout: Codex's through Mou
 
 ## 7. Decisions
 
-1. **Best effort is the default for Codex, ACP agents and Cursor** (decided 2026-11-11, after the spike results).
-   - **Best effort:** a held steer goes in shortly after a command (`STEER_SETTLE_MS`: 232 ms on Codex, 100 ms on Grok) when the model shows nothing, or as soon as it writes. A command that starts inside that window, or whose start Mousse has not heard of yet, can still be cut.
-   - **Strict:** a held steer waits until the agent's whole turn ends, or Send now. It never cuts a command it held for, but it can wait a long time.
+1. **Best effort is the default where the window was measured: Codex and Grok** (decided 2026-11-11, after the spike results). Every other `start` provider (Cursor, ACP agents other than Grok, Antigravity) is strict until its gaps are measured and pass the §6 rule.
+   - **Best effort:** a held steer goes in shortly after a command (`steerSettleMs`: 232 ms on Codex, 100 ms on Grok) when the model shows nothing, or as soon as it writes. A command that starts inside that window, or whose start Mousse has not heard of yet, can still be cut.
+   - **Strict:** a held steer waits until the agent's whole turn ends, or Send now. It never cuts a command it held for, but it can wait a long time. Once no command runs, the Steer block reads "Waits for the turn to end".
 
-   Both ship as a per-instance setting. A provider whose gaps were not measured (Cursor, until it can be run) still follows the §6 pass rule before best effort ships for it.
+   Both ship as a per-instance setting (`runs.steerRelease`). Setting best effort on a provider with no measured window changes nothing: it stays strict.
 
 Kept from earlier rounds: the progress line keeps "Running Bash…" and the wait shows on the Steer block; no Send now shortcut; agents cannot Send now another thread's command; the marks read "Stopped" and "Interrupted".
 

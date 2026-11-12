@@ -306,6 +306,12 @@ describe('the line under Working', () => {
     expect(describeTurnProgress({ state: { phase: 'streaming', steerHeld: true }, messages: [reply('c1', text('so far'))], now: NOW.valueOf() })?.title).toBeUndefined()
   })
 
+  it('5. under strict release, once no call of the turn runs, a tool the line shows (a subagent\'s) is not what the steer waits for: its tooltip says the turn\'s end', () => {
+    render([ask(), reply('c1', tool('Agent', 'input-available', { description: 'research' }))], 'streaming', { phase: 'tool_running', steerHeld: 'turn_end' })
+    expect(line()!.title).toMatch(/Your steer goes in when the turn ends\.$/)
+    expect(line()!.title).not.toMatch(/when it finishes/)
+  })
+
   it('5. an MCP tool running is named by its tool', () => {
     render([ask(), reply('c1', tool('mcp__github__get_issue', 'input-available', { issue: 12 }))], 'streaming', { phase: 'tool_running' })
     expectLive('Running Get Issue…')

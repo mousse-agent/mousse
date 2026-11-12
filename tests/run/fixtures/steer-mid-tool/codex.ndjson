@@ -1,0 +1,28 @@
+{"kind":"transcript","adapter":"codex","scenario":"steer-mid-tool","boundary":"Codex app-server JSON-RPC on stdio: client messages out; server responses, notifications and requests in","recordedAt":"hand-authored","basis":"0.167.0","version":1}
+{"dir":"out","frame":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"mousse","title":"Mousse","version":"0.1.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}}
+{"dir":"in","frame":{"id":1,"result":{"userAgent":"mousse/0.167.0","codexHome":"/home/replay/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","frame":{"method":"initialized"}}
+{"dir":"out","frame":{"id":2,"method":"account/read","params":{"refreshToken":false}}}
+{"dir":"in","frame":{"id":2,"result":{"account":{"type":"chatgpt","email":"replay@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
+{"dir":"out","frame":{"id":3,"method":"thread/list","params":{"parentThreadId":"00000000-0000-0000-0000-000000000000","ancestorThreadId":"00000000-0000-0000-0000-000000000000","limit":1}}}
+{"dir":"in","frame":{"id":3,"result":{"data":[],"nextCursor":null}}}
+{"dir":"out","frame":{"id":4,"method":"thread/start","params":{"approvalPolicy":"never","sandbox":"danger-full-access","model":"gpt-replay-codex","modelProvider":"openai","config":{"model_provider":"openai"}}}}
+{"dir":"in","frame":{"id":4,"result":{"thread":{"id":"thr-replay"},"model":"gpt-replay-codex","modelProvider":"openai","cwd":"/replay"}}}
+{"dir":"out","frame":{"id":5,"method":"turn/start","params":{"threadId":"thr-replay","input":[{"type":"text","text":"Run the tests","text_elements":[]}],"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"model":"gpt-replay-codex","summary":"auto"}}}
+{"dir":"in","frame":{"id":5,"result":{"turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"userMessage","id":"item-user-1","content":[{"type":"text","text":"Run the tests","text_elements":[]}]}}}}
+{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"userMessage","id":"item-user-1","content":[{"type":"text","text":"Run the tests","text_elements":[]}]}}}}
+{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"npm test","cwd":"/replay","processId":"4242","status":"inProgress","commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null}}}}
+{"dir":"cue","frame":{"action":"steer","text":"Use pnpm","exclusive":true}}
+{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"npm test","cwd":"/replay","processId":"4242","status":"completed","commandActions":[],"aggregatedOutput":"12 passed\n","exitCode":0,"durationMs":3000}}}}
+{"dir":"out","frame":{"id":6,"method":"turn/interrupt","params":{"threadId":"thr-replay","turnId":"turn-1"}}}
+{"dir":"in","frame":{"id":6,"result":{}}}
+{"dir":"in","frame":{"method":"turn/completed","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"interrupted","error":null,"items":[]}}}}
+{"dir":"out","frame":{"id":7,"method":"turn/start","params":{"threadId":"thr-replay","input":[{"type":"text","text":"Use pnpm","text_elements":[]}],"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"model":"gpt-replay-codex","summary":"auto"}}}
+{"dir":"in","frame":{"id":7,"result":{"turn":{"id":"turn-2","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-replay","turn":{"id":"turn-2","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-2","item":{"type":"agentMessage","id":"msg-2","text":"","phase":null}}}}
+{"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-2","itemId":"msg-2","delta":"Switched to pnpm"}}}
+{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-2","item":{"type":"agentMessage","id":"msg-2","text":"Switched to pnpm","phase":null}}}}
+{"dir":"in","frame":{"method":"turn/completed","params":{"threadId":"thr-replay","turn":{"id":"turn-2","status":"completed","error":null,"items":[]}}}}

@@ -73,6 +73,11 @@ export async function answerXaiQuestions(questions: UserQuestionService, scope: 
 export interface XaiHooks {
   questions: UserQuestionService
   scope: AcpRequestScope
+  /**
+   * The running turn's `TurnSink.toolAwaiting`, read once when Grok asks: its call waits for a person's answer, so a
+   * steer answers it and never waits for it.
+   */
+  awaiting?: () => ((callId: string, waiting: boolean) => void) | undefined
   /** `session/prompt_complete` for a prompt Mousse tagged, with its params (`stopReason`, an error). */
   promptComplete(promptId: string, params: Record<string, unknown>): void
 }
@@ -102,7 +107,16 @@ export function xaiStopFailure(label: string, outcome: unknown): Error | undefin
 export function xaiHandlers(hooks: XaiHooks): Pick<AcpClientHandlers, 'extRequests' | 'extNotifications'> {
   return {
     extRequests: {
-      ...both('ask_user_question', (params: unknown) => answerXaiQuestions(hooks.questions, hooks.scope, params)),
+      ...both('ask_user_question', async (params: unknown) => {
+        const callId = xaiParams(params).toolCallId
+        const awaiting = typeof callId === 'string' && callId ? hooks.awaiting?.() : undefined
+        awaiting?.(callId as string, true)
+        try {
+          return await answerXaiQuestions(hooks.questions, hooks.scope, params)
+        } finally {
+          awaiting?.(callId as string, false)
+        }
+      }),
       // Mousse runs no Grok plan mode: a request to leave one never blocks the turn.
       ...both('exit_plan_mode', async () => ({ outcome: 'abandoned' }))
     },

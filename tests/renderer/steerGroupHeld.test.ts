@@ -118,6 +118,14 @@ describe('the Steer block of a held steer', () => {
     expect(wait()!.textContent).toBe('Waits for Bash')
   })
 
+  it('under strict release with no call running, the line says the steer waits for the turn to end, not for a finished tool', () => {
+    show({ threadId: 't1', held: hold({ waitsFor: 'turn', detail: undefined, tools: 0, untilTurnEnd: true }) })
+    expect(wait()!.textContent).toBe('Waits for the turn to end')
+    expect(wait()!.getAttribute('title')).toBe('Goes in when the turn ends')
+    expect(button()!.getAttribute('aria-label')).toBe('Send now: does not wait for the turn to end')
+    expect(button()!.textContent).toBe('Send now')
+  })
+
   it('Send now names the run, the hold and its items, reads "Sending…", and the line clears once the steer goes in', async () => {
     show({ threadId: 't1', held: hold() })
     await act(async () => button()!.click())

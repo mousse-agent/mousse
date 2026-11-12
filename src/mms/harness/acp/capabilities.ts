@@ -10,8 +10,10 @@ import type { AcpRpc } from './connection'
  */
 export const ACP_BASE_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
-  // Until the ACP adapter adopts the hold (PR 3), a steer cuts in at once.
-  steerBoundary: 'none',
+  // An agent reports a tool when it starts. A preset whose gaps were measured declares its window (Grok); for any
+  // other agent a held steer waits for the prompt to end, or Send now (strict release).
+  steerBoundary: 'start',
+  steerSettleMs: null,
   interrupt: true,
   rollback: 'none',
   fork: 'portable',

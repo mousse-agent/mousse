@@ -78,7 +78,7 @@ import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '.
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
-import { STEER_SETTLE_MS, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
+import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
@@ -91,7 +91,7 @@ import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManage
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
-import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../run/mcp/attachment'
+import { mousseCallAsksPerson } from '../run/mcp/attachment'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
 import { DevGuiTools } from '../devgui/DevGuiTools'
@@ -1811,8 +1811,8 @@ export class OrchestratorService extends EventEmitter {
   private turnStates = new Map<string, TurnState>()
   /** The steer hold of each run whose turn runs in this process (`SteerHold`), for Send now. */
   private readonly steerHolds = new Map<string, SteerHold>()
-  /** The release window after a foreground tool on a `start` provider (`STEER_SETTLE_MS`; tests lengthen it). */
-  private steerSettleMs = STEER_SETTLE_MS
+  /** Replaces every instance's release window after a foreground tool (`steerReleaseWindow`); tests lengthen it. */
+  private steerSettleMs: number | undefined
   /** Each thread's running `/compact`, so a Stop can end it (`stopCompaction`). */
   private readonly compactions = new Map<string, AbortController>()
   /** Running compactions whose result was taken: a Stop or Send now comes too late for them. */
@@ -11887,13 +11887,22 @@ export class OrchestratorService extends EventEmitter {
       // goes in once it has its result. A remote source that cannot be read without taking keeps the whole turn on the
       // behaviour from before the hold: the peek could not see its steers.
       const assembler = this.transcript
+      // The instance's release: its own measured window, and strict where it asked for it or no window was measured.
+      const release = steerReleaseWindow(instance.caps, this.settingsStore.get().runs.steerRelease?.[instance.instanceId])
       const hold = new SteerHold({
         caps: opts?.externalDrainSteer && !opts.externalPeekSteer ? { ...instance.caps, steerBoundary: 'none' } : instance.caps,
-        strict: this.settingsStore.get().runs.steerRelease?.[instance.instanceId] === 'strict',
+        strict: release.strict,
         // A question Mousse itself asks (`ask_user`, an approval) is answered by the steer, as a provider's is: while one
         // waits, Mousse's own calls that ask the person do not hold.
         foreground: (waiting) => assembler.foregroundTools(waiting, this.mousseCallsAskingPerson(session.threadId)),
-        settleMs: this.steerSettleMs
+        // Such a question, asked by one of the turn's own calls, means the turn waits for a person, as a provider's own
+        // does: the steer goes in and answers it, and neither the window nor strict release keeps it back. A question a
+        // subagent's call asks does not: the steer never answers it.
+        asking: () => {
+          const asksPerson = this.mousseCallsAskingPerson(session.threadId)
+          return asksPerson !== undefined && assembler.ownCallMayAsk(asksPerson)
+        },
+        settleMs: this.steerSettleMs ?? release.settleMs
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
       turnHold = { hold, runId: engineRunId }
@@ -11978,6 +11987,7 @@ export class OrchestratorService extends EventEmitter {
         },
         toolAwaiting: (callId, waiting) => hold.awaiting(callId, waiting),
         boundary: () => hold.boundary(),
+        providerTurn: () => hold.providerTurn(),
         nativeMessages: (nativeMessages, checkpoint) => {
           // A completed-turn measurement becomes stale as soon as the live loop
           // appends or compacts native history. Estimate until the final provider
@@ -12749,13 +12759,8 @@ export class OrchestratorService extends EventEmitter {
   private mousseCallsAskingPerson(threadId: string): ((toolName: string) => boolean) | undefined {
     if (this.questions.listPendingForThread(threadId).length === 0) return undefined
     const registry = this.mcpRegistry
-    return (toolName) => {
-      if (toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) return true
-      const prefixed = toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
-      const tool = registry?.get(prefixed ? toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) : toolName)
-      if (!tool) return prefixed
-      return Boolean(tool.asksUser) || tool.access === 'editsWorkspace'
-    }
+    // Every runtime names an MCP call its own way (`mousseServerToolOf`).
+    return (toolName) => mousseCallAsksPerson(toolName, (tool) => registry?.get(tool))
   }
 
   /** Send now requests on held rows of `runId` (`QueuedMessage.steerNow`), handed to the run's hold to check. */

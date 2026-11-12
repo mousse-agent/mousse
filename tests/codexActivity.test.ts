@@ -26,6 +26,8 @@ import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
 import { ACTIVITY_DIFF_CAP_BYTES, diffSides, ACTIVITY_OUTPUT_CAP_BYTES, type AgentActivityItem, type ProviderToolEvent } from '../src/shared/agentActivity'
 import type { ChatMessage } from '../src/shared/types'
 import type { StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
+import { CODEX_CAPS } from '../src/mms/harness/drivers/codex'
+import { holdControl } from './support/steerHoldControl'
 
 const item = (value: Record<string, unknown>): ThreadItem => value as unknown as ThreadItem
 const eventOf = (value: Record<string, unknown>, phase: 'start' | 'complete') => codexToolEvent(item(value), phase)!
@@ -395,7 +397,12 @@ describe('Codex activity against a scripted app-server', () => {
   })
 
   /** An app-server stand-in: a signed-in account, and whatever `onTurnStart` writes after a turn starts. */
-  function server(options: { onTurnStart?: (send: (value: unknown) => void) => void; onInterrupt?: (send: (value: unknown) => void, params: Record<string, unknown>) => void } = {}) {
+  function server(options: {
+    onTurnStart?: (send: (value: unknown) => void) => void
+    onInterrupt?: (send: (value: unknown) => void, params: Record<string, unknown>) => void
+    /** Answers a request before the defaults: a JSON-RPC `{ result }` or `{ error }`, or undefined for the default. */
+    respond?: (message: Message) => { result?: unknown; error?: unknown } | undefined
+  } = {}) {
     const messages: Message[] = []
     let latest: PassThrough | undefined
     const launch = (): CodexProcess => {
@@ -425,6 +432,13 @@ describe('Codex activity against a scripted app-server', () => {
           pending = pending.slice(end + 1)
           messages.push(message)
           if (message.id === undefined || !message.method) continue
+          const custom = options.respond?.(message)
+          if (custom) {
+            send({ id: message.id, ...custom })
+            if (message.method === 'turn/interrupt') options.onInterrupt?.(send, message.params ?? {})
+            if (message.method === 'turn/start') options.onTurnStart?.(send)
+            continue
+          }
           const result =
             message.method === 'initialize' ? { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' }
             : message.method === 'account/read' ? { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true }
@@ -642,6 +656,226 @@ describe('Codex activity against a scripted app-server', () => {
     harness.feed(events)
     for (const entry of itemsOf(harness.rows)) expect(entry, entry.callId).toMatchObject({ status: 'interrupted', interruptedBy: 'stop' })
     expect(itemsOf(harness.rows)).toHaveLength(4)
+  })
+
+  it('a helper\'s commands and their output are not the turn\'s own calls: they never restart a held steer\'s window', async () => {
+    const events: ProviderToolEvent[] = []
+    const s = server({
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          send(spawn())
+          send(helperTurn())
+          send(itemFrame('started', PARENT, 'turn-1', cmd('own-1')))
+          send(itemFrame('started', HELPER, 'h-turn-1', cmd('hc1')))
+          for (const text of ['a\n', 'b\n', 'c\n']) send(delta(HELPER, 'h-turn-1', 'hc1', text))
+          send(itemFrame('completed', PARENT, 'turn-1', cmd('own-1', { status: 'completed', aggregatedOutput: '', exitCode: 0 })))
+          send(turnDone(PARENT, 'turn-1'))
+        })
+    })
+    await chat(create(s, { helperIdleCapMs: 40, helperPinCapMs: 40 }), events)
+    const helperEvents = events.filter((event) => event.callId === `${HELPER}:hc1`)
+    expect(helperEvents.map((event) => event.phase)).toEqual(expect.arrayContaining(['start', 'update']))
+    const harness = assembled()
+    // Each event as the orchestrator sees it: its row exists (or has just closed) when the hold is told.
+    for (const event of events) {
+      harness.feed([event])
+      if (event.callId === `${HELPER}:hc1` || event.callId === `helper:${HELPER}`) expect(harness.assembler.ownsForegroundCall(event.callId), `${event.phase} ${event.callId}`).toBe(false)
+      if (event.callId === 'own-1') expect(harness.assembler.ownsForegroundCall(event.callId)).toBe(true)
+    }
+  })
+
+  it('a cut steer taken while the run waits for its helpers starts the next turn, and never interrupts it', async () => {
+    const events: ProviderToolEvent[] = []
+    let turns = 0
+    const interrupted: string[] = []
+    const s = server({
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          turns += 1
+          if (turns === 1) {
+            send(spawn())
+            send(helperTurn())
+            send(turnDone(PARENT, 'turn-1'))
+            return
+          }
+          // The steer's turn: the helper ends, and so does the turn.
+          send(itemFrame('completed', PARENT, 'turn-1', { type: 'subAgentActivity', id: 'sub-1', kind: 'completed', agentThreadId: HELPER, agentPath: '/' }))
+          send(turnDone(HELPER, 'h-turn-1'))
+          send(turnDone(PARENT, 'turn-1'))
+        }),
+      onInterrupt: (send, params) => {
+        interrupted.push(params.threadId as string)
+        interruptReply(send, params)
+      }
+    })
+    let ready = false
+    let steer: { text: string; token: string; cut: boolean } | undefined = { text: 'use pnpm', token: 'drain-1', cut: true }
+    const accepted: string[] = []
+    const returned: string[] = []
+    const result = chat(create(s), events, {
+      // Taken once the first turn has completed and only the helper runs.
+      drainSteerEntry: () => {
+        if (!ready) return undefined
+        const entry = steer
+        steer = undefined
+        return entry
+      },
+      steerTaken: () => undefined,
+      onSteer: (text, token) => void accepted.push(`${text}@${token}`),
+      returnSteer: (text) => void returned.push(text),
+      onTool: (event) => {
+        events.push(event)
+        if (event.callId === `helper:${HELPER}` && event.phase === 'start') setTimeout(() => (ready = true), 100)
+      }
+    })
+    await expect(result).resolves.toBeDefined()
+    expect(turns).toBe(2)
+    expect(interrupted.filter((thread) => thread === PARENT)).toEqual([])
+    expect(accepted).toEqual(['use pnpm@drain-1'])
+    expect(returned).toEqual([])
+  })
+
+  it('strict release: a turn Codex starts on its own during the helper wait is a provider turn; a steer held for its command goes in at its end, not when the helpers end', async () => {
+    const events: ProviderToolEvent[] = []
+    let turns = 0
+    const interrupted: string[] = []
+    let helperActive = true
+    const s = server({
+      // The process lists the thread's helper tree (tree mode), with the helper active until the steer's turn.
+      respond: (message) => {
+        const params = (message.params ?? {}) as Record<string, unknown>
+        if (message.method === 'thread/list' && params.parentThreadId && params.ancestorThreadId) return { error: { code: -32602, message: 'parentThreadId and ancestorThreadId are mutually exclusive' } }
+        if (message.method === 'thread/list' && params.ancestorThreadId === PARENT)
+          return { result: { data: [{ id: HELPER, parentThreadId: PARENT, createdAt: 0, status: { type: helperActive ? 'active' : 'idle' } }], nextCursor: null } }
+        if (message.method === 'thread/read') return { result: { thread: { id: params.threadId, status: { type: params.threadId === HELPER && helperActive ? 'active' : 'idle' } } } }
+        return undefined
+      },
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          turns += 1
+          if (turns === 1) {
+            send(spawn())
+            send(helperTurn())
+            send(turnDone(PARENT, 'turn-1'))
+            return
+          }
+          // The steer's turn: the helper ends, and so does the turn.
+          helperActive = false
+          send(itemFrame('completed', PARENT, 'turn-1', { type: 'subAgentActivity', id: 'sub-1', kind: 'completed', agentThreadId: HELPER, agentPath: '/' }))
+          send(turnDone(HELPER, 'h-turn-1'))
+          send(turnDone(PARENT, 'turn-1'))
+        }),
+      onInterrupt: (send, params) => {
+        interrupted.push(params.threadId as string)
+        interruptReply(send, params)
+      }
+    })
+    const hold = holdControl(CODEX_CAPS, { strict: true })
+    const sink = hold.wrap({ text: () => {}, thinking: () => {}, tool: () => {}, progress: () => {}, providerRef: () => {}, usage: () => {}, steerAccepted: () => {} } as unknown as TurnSink)
+    const ctl = hold.ctl
+    const result = chat(create(s), events, {
+      peekSteer: () => ctl.peekSteer!(),
+      drainSteerEntry: (opts) => ctl.drainSteerEntry!(opts),
+      mayCut: (token) => ctl.mayCut!(token),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token!),
+      onSteer: (text, token) => sink.steerAccepted(text, token),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
+      onTool: (event) => {
+        events.push(event)
+        sink.tool(runtimeToolEvent(event))
+      }
+    })
+    await vi.waitFor(() => expect(events.some((event) => event.callId === `helper:${HELPER}`)).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    // A helper's message wakes the thread: Codex starts a turn of its own, and it runs a command.
+    s.emit(note('turn/started', { threadId: PARENT, turn: { id: 'turn-a', status: 'inProgress', error: null } }))
+    s.emit(itemFrame('started', PARENT, 'turn-a', cmd('adopted-1')))
+    await vi.waitFor(() => expect(hold.log.some(([event, detail]) => event === 'tool' && detail === 'start:adopted-1')).toBe(true))
+    hold.steer('use pnpm')
+    await vi.waitFor(() => expect(hold.held()).toBe(true))
+    s.emit(itemFrame('completed', PARENT, 'turn-a', cmd('adopted-1', { status: 'completed', aggregatedOutput: '', exitCode: 0 })))
+    s.emit(turnDone(PARENT, 'turn-a'))
+    // At the adopted turn's end the steer goes in, as the next turn, while the helper still runs.
+    await vi.waitFor(() => expect(turns, JSON.stringify(hold.log.map(([e, d]) => `${e}:${d}`))).toBe(2), { timeout: 3_000 })
+    await expect(result).resolves.toBeDefined()
+    const log = hold.log.map(([event, detail]) => `${event}:${detail}`)
+    expect(log.filter((entry) => entry === 'providerTurn:').length).toBeGreaterThanOrEqual(2)
+    expect(log.indexOf('tool:complete:adopted-1')).toBeLessThan(log.indexOf('drain:use pnpm'))
+    expect(log.filter((entry) => entry.startsWith('accepted:'))).toEqual(['accepted:use pnpm@drain-1'])
+    expect(interrupted.filter((thread) => thread === PARENT)).toEqual([])
+  })
+
+  it('a person\'s steer that cuts a turn Codex started on its own during the helper wait does not fail the run: the steer goes in as the next turn', async () => {
+    const events: ProviderToolEvent[] = []
+    let turns = 0
+    let helperActive = true
+    const interrupted: string[] = []
+    const s = server({
+      // Tree mode: the process lists the helper, active until the steer's turn.
+      respond: (message) => {
+        const params = (message.params ?? {}) as Record<string, unknown>
+        if (message.method === 'thread/list' && params.parentThreadId && params.ancestorThreadId) return { error: { code: -32602, message: 'parentThreadId and ancestorThreadId are mutually exclusive' } }
+        if (message.method === 'thread/list' && params.ancestorThreadId === PARENT)
+          return { result: { data: [{ id: HELPER, parentThreadId: PARENT, createdAt: 0, status: { type: helperActive ? 'active' : 'idle' } }], nextCursor: null } }
+        if (message.method === 'thread/read') return { result: { thread: { id: params.threadId, status: { type: params.threadId === HELPER && helperActive ? 'active' : 'idle' } } } }
+        return undefined
+      },
+      onTurnStart: (send) =>
+        setImmediate(() => {
+          turns += 1
+          if (turns === 1) {
+            send(spawn())
+            send(helperTurn())
+            send(turnDone(PARENT, 'turn-1'))
+            return
+          }
+          helperActive = false
+          send(itemFrame('completed', PARENT, 'turn-1', { type: 'subAgentActivity', id: 'sub-1', kind: 'completed', agentThreadId: HELPER, agentPath: '/' }))
+          send(turnDone(HELPER, 'h-turn-1'))
+          send(turnDone(PARENT, 'turn-1'))
+        }),
+      onInterrupt: (send, params) => {
+        interrupted.push(`${params.threadId}:${params.turnId}`)
+        // The adopted turn ends interrupted, as Codex reports a turn it was asked to stop.
+        if (params.turnId === 'turn-a') send(turnDone(PARENT, 'turn-a', 'interrupted'))
+        else interruptReply(send, params)
+      }
+    })
+    const hold = holdControl(CODEX_CAPS)
+    const sink = hold.wrap({ text: () => {}, thinking: () => {}, tool: () => {}, progress: () => {}, providerRef: () => {}, usage: () => {}, steerAccepted: () => {} } as unknown as TurnSink)
+    const ctl = hold.ctl
+    const result = chat(create(s), events, {
+      peekSteer: () => ctl.peekSteer!(),
+      drainSteerEntry: (opts) => ctl.drainSteerEntry!(opts),
+      mayCut: (token) => ctl.mayCut!(token),
+      steerTaken: (token) => ctl.steerTaken?.(token),
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token!),
+      onSteer: (text, token) => sink.steerAccepted(text, token),
+      onBoundary: () => sink.boundary?.(),
+      onProviderTurn: () => sink.providerTurn?.(),
+      onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
+      onTool: (event) => {
+        events.push(event)
+        sink.tool(runtimeToolEvent(event))
+      }
+    })
+    result.catch(() => undefined)
+    await vi.waitFor(() => expect(events.some((event) => event.callId === `helper:${HELPER}`)).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    // A helper's message wakes the thread: Codex starts a turn of its own, and the model writes in it.
+    s.emit(note('turn/started', { threadId: PARENT, turn: { id: 'turn-a', status: 'inProgress', error: null } }))
+    await vi.waitFor(() => expect(hold.log.filter(([event]) => event === 'providerTurn').length).toBe(2))
+    // The person steers: the adopted turn is cut.
+    hold.steer('use pnpm')
+    await vi.waitFor(() => expect(interrupted).toContain(`${PARENT}:turn-a`))
+    await expect(result).resolves.toBeDefined()
+    expect(turns).toBe(2)
+    const log = hold.log.map(([event, detail]) => `${event}:${detail}`)
+    expect(log.filter((entry) => entry.startsWith('accepted:'))).toEqual(['accepted:use pnpm@drain-1'])
+    expect(log.filter((entry) => entry.startsWith('returned:'))).toEqual([])
   })
 
   it('a turn that completes after Stop was requested leaves the plan to Stop: it ends stopped, not done', async () => {

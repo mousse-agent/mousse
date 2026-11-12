@@ -16,6 +16,7 @@ import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, 
 import { CursorHostClient, type CursorHostTransport } from '../../src/mms/harness/cursor/hostClient'
 import { CursorSessions, type SavedCursorAgent } from '../../src/mms/harness/cursor/session'
 import { CursorAdapter } from '../../src/mms/harness/drivers/cursor/adapter'
+import { CURSOR_CAPS } from '../../src/mms/harness/drivers/cursor'
 import type { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { FakeCursorHost } from '../harness/fakeCursorHost'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
@@ -184,6 +185,8 @@ describe("Cursor's one host shared by threads", () => {
   let orch: OrchestratorService
   let host: FakeCursorHost
   let client: CursorHostClient
+  /** A run whose prompt is named here streams only what the test emits, and ends when the test ends it. */
+  const scripted = new Map<string, (runId: string) => void>()
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-shared-cursor-'))
@@ -195,6 +198,11 @@ describe("Cursor's one host shared by threads", () => {
       send: (params, fake) => {
         const runId = `run-${fake.calls('send').length}`
         const prompt = String(params.text ?? '')
+        const script = scripted.get(prompt)
+        if (script) {
+          setTimeout(() => script(runId), 2)
+          return { runId }
+        }
         setTimeout(() => fake.emit({ event: 'delta', runId, update: { type: 'thinking-delta', text: `Thinking about ${prompt}` } }), 2)
         setTimeout(() => fake.emit({ event: 'delta', runId, update: { type: 'text-delta', text: `Reply to ${prompt}` } }), 3)
         setTimeout(() => fake.emit({ event: 'run_end', runId, status: 'finished' }), 5)
@@ -231,7 +239,8 @@ describe("Cursor's one host shared by threads", () => {
     // The real Cursor adapter, served under the test's default model; a thread without a project runs in `home`.
     const served: ProviderAdapter = {
       driver: 'pi',
-      capabilities: PI_TEST_CAPABILITIES,
+      // On the steer hold as Cursor is: tools reported at their start, no measured window (strict release).
+      capabilities: { ...PI_TEST_CAPABILITIES, steer: CURSOR_CAPS.steer, steerBoundary: CURSOR_CAPS.steerBoundary, steerSettleMs: CURSOR_CAPS.steerSettleMs },
       configured: () => true,
       startTurn: (input, sink, ctl, adapterHost) => cursor.startTurn({ ...input, cwd: input.cwd ?? home }, sink, ctl, adapterHost),
       interrupt: (id) => cursor.interrupt(id)
@@ -240,6 +249,7 @@ describe("Cursor's one host shared by threads", () => {
   })
 
   afterEach(() => {
+    scripted.clear()
     client.stop()
     rmSync(home, { recursive: true, force: true })
     delete process.env.MOUSSE_HOME
@@ -260,5 +270,34 @@ describe("Cursor's one host shared by threads", () => {
     expect(texts(b.id).some((text) => text.includes('Thinking about first in B'))).toBe(true)
     expect(texts(a.id).filter((text) => text.includes('first in B'))).toEqual([])
     expect(texts(b.id).filter((text) => text.includes('first in A'))).toEqual([])
+  })
+
+  it("holds a second thread's steer during its own command on the shared host, and delivers it once, in that thread", async () => {
+    const a = store.createThread('A')
+    const b = store.createThread('B')
+    await orch.send('first in A', false, { threadId: a.id })
+    let runB: string | undefined
+    scripted.set('work in B', (runId) => {
+      runB = runId
+      host.emit({ event: 'delta', runId, update: { type: 'tool-call-started', callId: 'cmd-b', toolCall: { type: 'shell', args: { command: 'npm test' } } } } as never)
+    })
+    const turnB = orch.send('work in B', false, { threadId: b.id })
+    await waitFor(() => orch.getMessages(b.id).some((message) => message.activity?.callId === 'cmd-b'), "B's command running")
+    expect(orch.steerThreadOrEnqueueExternal(b.id, 'use pnpm')).toMatchObject({ steered: true })
+    await waitFor(() => orch.getTurnState(b.id).heldSteer !== undefined, "B's steer held")
+    expect(orch.getTurnState(b.id).heldSteer).toMatchObject({ waitsFor: 'Bash', tools: 1 })
+    expect(orch.getTurnState(a.id).heldSteer).toBeUndefined()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(host.calls('cancel')).toEqual([])
+    // The command ends, and then the run: the steer goes in as B's next run, with no cancel.
+    host.emit({ event: 'delta', runId: runB!, update: { type: 'tool-call-completed', callId: 'cmd-b', toolCall: { type: 'shell', args: { command: 'npm test' }, result: { status: 'success', value: { exitCode: 0 } } } } } as never)
+    host.emit({ event: 'run_end', runId: runB!, status: 'finished' } as never)
+    await turnB
+    await waitFor(() => !orch.isTurnActive(b.id), 'B ended')
+    expect(host.transports).toHaveLength(1)
+    expect(host.calls('send').map((params) => params.text).filter((text) => text === 'use pnpm')).toHaveLength(1)
+    expect(host.calls('cancel')).toEqual([])
+    expect(texts(b.id).filter((text) => text.includes('Reply to use pnpm'))).toHaveLength(1)
+    expect(texts(a.id).filter((text) => text.includes('pnpm'))).toEqual([])
   })
 })

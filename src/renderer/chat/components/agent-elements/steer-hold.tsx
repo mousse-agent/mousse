@@ -18,6 +18,15 @@ export function useHeldSteer(): HeldSteerState | null {
 
 /** The wait line's words and tooltips: terse on the line, what it waits for in the tooltip. */
 export function describeHeldSteer(held: HeldSteer): { label: string; title: string; action: string; actionLabel: string } {
+  // Strict release after the last tool finished: the steer waits for the agent's turn to end, not for a tool.
+  if (held.untilTurnEnd) {
+    return {
+      label: "Waits for the turn to end",
+      title: "Goes in when the turn ends",
+      action: "Send now without waiting for the turn to end",
+      actionLabel: "Send now: does not wait for the turn to end",
+    };
+  }
   const many = held.tools > 1;
   const what = many ? `${held.tools} tools` : held.waitsFor;
   const list = held.toolList?.map((tool) => (tool.detail ? `${tool.name}: ${tool.detail}` : tool.name)).join("\n");

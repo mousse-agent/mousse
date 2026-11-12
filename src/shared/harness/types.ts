@@ -27,6 +27,13 @@ export interface HarnessCaps {
    * the hold (a steer cuts in at once). Caps from before the key existed read as `none`.
    */
   steerBoundary: 'announce' | 'start' | 'none'
+  /**
+   * The release window after a tool on a `start` provider (`CommandPolicy.steerReleaseWindow`): twice the largest
+   * gap measured between a tool's result and the next start of the same response, plus 100 ms. `null`: no window
+   * applies (`announce`, `none`), or the gap was never measured, and then a held steer waits for the provider's turn
+   * to end (strict release), whatever the instance's setting. Caps from before the key existed read as `null`.
+   */
+  steerSettleMs: number | null
   /** The live turn can be interrupted natively (`CommandPolicy.stopStrategy`). */
   interrupt: boolean
   rollback: 'native' | 'none'
@@ -84,11 +91,11 @@ export interface HarnessCaps {
  */
 export type RunCapabilities = Pick<
   HarnessCaps,
-  'steer' | 'steerBoundary' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp' | 'childPolicy'
+  'steer' | 'steerBoundary' | 'steerSettleMs' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp' | 'childPolicy'
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'steerBoundary', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
+  'steer', 'steerBoundary', 'steerSettleMs', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */

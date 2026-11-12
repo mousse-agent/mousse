@@ -10,6 +10,10 @@ import { GROK_PRESET } from '../../src/mms/harness/acp/presets/grok'
 import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/session'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
+import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
+import { AcpAdapter } from '../../src/mms/harness/drivers/acp/adapter'
+import { GROK_CAPS } from '../../src/mms/harness/acp/presets/grok'
+import { holdControl } from '../support/steerHoldControl'
 
 const sessionsUnderTest: AcpSessions[] = []
 afterEach(() => {
@@ -252,5 +256,87 @@ describe('Grok sessions', () => {
     await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'again', history: 'h', onText: vi.fn() })
     expect(agent.connections).toHaveLength(2)
     expect(agent.calls.filter((call) => call.method === 'session/resume')).toHaveLength(1)
+  })
+
+  describe('steers', () => {
+    const STEER = 'Use pnpm, not npm'
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    const complete = (c: Parameters<Prompt>[0], stopReason: string) =>
+      c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, stopReason })
+
+    it('Grok\'s ask_user_question does not hold a steer: the steer cancels the prompt and answers the question', async () => {
+      let asked: unknown
+      const agent = grokAgent(async (c, cancelled) => {
+        if (c.params.prompt[0]?.text !== 'work') {
+          await c.client.notify(methods.client.session.update, text(c.params.sessionId, `then ${c.params.prompt[0]?.text}`))
+          return { stopReason: 'end_turn' }
+        }
+        await c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'q1', title: 'Ask the user', name: 'ask_user_question', status: 'in_progress' } })
+        asked = await c.client.request('_x.ai/ask_user_question', {
+          method: 'x.ai/ask_user_question',
+          params: { sessionId: c.params.sessionId, toolCallId: 'q1', questions: [{ question: 'Strict or loose?', multiSelect: null, options: [{ label: 'Strict' }, { label: 'Loose' }] }] }
+        })
+        await cancelled
+        await complete(c, 'cancelled')
+        return { stopReason: 'cancelled' }
+      })
+      const { sessions, questions } = core(agent.connect)
+      const hold = holdControl(GROK_CAPS, { questions: { pending: () => questions.listPendingForThread('t').length > 0 } })
+      const sink = hold.wrap({ text: () => {}, thinking: () => {}, tool: () => {}, progress: () => {}, providerRef: () => {}, usage: () => {}, steerAccepted: () => {} } as unknown as TurnSink)
+      const adapter = new AcpAdapter(() => ({ chat: (input) => sessions.chat(input), commitConversation: () => {}, configured: () => true }), { driver: 'acp', label: 'Grok', capabilities: GROK_CAPS })
+      const input = { threadId: 't', instanceId: 'grok:work', llmProvider: '', model: 'default', mode: 'agent', prompt: 'work', cwd: process.cwd(), signal: new AbortController().signal } as unknown as TurnInput
+      const result = adapter.startTurn(input, sink, hold.ctl, { context: { nativeHistoryAfterTurn: (value: string) => value } } as unknown as AdapterHost)
+      await vi.waitFor(() => expect(questions.listPendingForThread('t')).toHaveLength(1))
+      hold.steer(STEER)
+      expect((await result).text).toBe(`then ${STEER}`)
+      const events = hold.log.map(([event, detail]) => `${event}:${detail}`)
+      expect(events).toContain('awaiting:q1:true')
+      expect(events).toContain('awaiting:q1:false')
+      expect(events.indexOf('awaiting:q1:true')).toBeLessThan(events.indexOf(`drain:${STEER}`))
+      expect(events.filter((event) => event.startsWith('accepted:'))).toEqual([`accepted:${STEER}@drain-1`])
+      // Answered as the person (the steer): nothing picked.
+      expect(asked).toEqual({ outcome: 'cancelled' })
+      expect(questions.listPendingForThread('t')).toEqual([])
+    })
+
+    it('a late update of the prompt a steer cancelled does not mark the steer read: when the next prompt fails, the steer is handed back', async () => {
+      let prompts = 0
+      let late: (() => Promise<void>) | undefined
+      const agent = grokAgent(async (c, cancelled) => {
+        prompts += 1
+        if (prompts === 1) {
+          await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'working'))
+          await cancelled
+          // Its reply comes, its prompt_complete never does, and one more update of it arrives during the next prompt.
+          late = () => c.client.notify(methods.client.session.update, text(c.params.sessionId, ' (late)'))
+          return { stopReason: 'cancelled' }
+        }
+        await late!()
+        await sleep(30)
+        throw new Error('agent crashed')
+      })
+      const { sessions } = core(agent.connect)
+      let wrote = false
+      let steer: { text: string; token: string } | undefined = { text: STEER, token: 'drain-1' }
+      const read: string[] = []
+      const returned: string[] = []
+      const turn = sessions.chat({
+        threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi',
+        onText: (value) => { if (value.includes('working')) wrote = true },
+        drainSteerEntry: () => {
+          if (!wrote) return undefined
+          const entry = steer
+          steer = undefined
+          return entry
+        },
+        steerTaken: () => {},
+        onSteer: (value, token) => void read.push(`${value}@${token}`),
+        returnSteer: (value, token) => void returned.push(`${value}@${token}`)
+      })
+      await expect(turn).rejects.toThrow()
+      expect(prompts).toBe(2)
+      expect(read).toEqual([])
+      expect(returned).toEqual([`${STEER}@drain-1`])
+    }, 20_000)
   })
 })

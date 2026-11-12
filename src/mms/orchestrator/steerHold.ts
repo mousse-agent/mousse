@@ -39,6 +39,12 @@ export interface SteerHoldOptions {
   strict: boolean
   /** The turn's foreground tools now, leaving out the calls a person is asked about. */
   foreground: (waitingOnPerson: ReadonlySet<string>) => ForegroundTool[]
+  /**
+   * One of the turn's own (root) calls asks the person a question no call reported (`awaiting`): Mousse asks it for
+   * its own tools (`ask_user`, a quick action's or a relayed tool's approval). Like a reported one, it means the turn
+   * waits for a person, so a steer goes in and answers it. A subagent's question never counts.
+   */
+  asking?: () => boolean
   /** The release window after the last foreground tool (`start` providers). */
   settleMs?: number
   now?: () => number
@@ -115,6 +121,11 @@ export class SteerHold {
     this.atBoundary = true
   }
 
+  /** The provider began another turn of its own (`TurnSink.providerTurn`): the boundary is over. */
+  providerTurn(): void {
+    this.atBoundary = false
+  }
+
   /** A person is asked about `callId`: it is not a foreground tool while they are. */
   awaiting(callId: string, waiting: boolean): void {
     if (waiting) this.waitingOnPerson.add(callId)
@@ -127,7 +138,8 @@ export class SteerHold {
 
   /** The window after the last foreground tool's result is still open (`start` providers only). */
   releaseOpen(): boolean {
-    if (this.options.caps.steerBoundary !== 'start' || this.lastToolEventAt === undefined || this.outputSinceTool) return false
+    // At the provider's turn end no call of that turn can start any more: there is nothing left to wait out.
+    if (this.options.caps.steerBoundary !== 'start' || this.lastToolEventAt === undefined || this.outputSinceTool || this.atBoundary) return false
     return this.now() - this.lastToolEventAt < this.settleMs
   }
 
@@ -205,11 +217,14 @@ export class SteerHold {
     if (!pending) return undefined
     const tools = this.adopted ? this.foregroundTools() : []
     const forced = this.forcedGeneration !== undefined && this.forcedGeneration === this.generation && this.heldKeys !== undefined
+    // The turn waits for a person's answer and no other tool runs: nothing can start until they answer, so neither the
+    // window nor strict release keeps the steer back. It cuts, and answers the ask (§2.1).
+    const asking = this.askingOnly(tools)
     const delivery = steerDelivery(this.options.caps, {
       foreground: tools.length,
-      releaseOpen: this.adopted && this.releaseOpen(),
+      releaseOpen: this.adopted && !asking && this.releaseOpen(),
       strict: this.options.strict,
-      held: this.heldKeys !== undefined,
+      held: this.heldKeys !== undefined && !asking,
       atBoundary: this.atBoundary,
       forced
     }, { person: pending.person })
@@ -232,10 +247,13 @@ export class SteerHold {
     this.heldKeys = new Set(pending.keys)
     const oldest = tools[0]
     if (oldest) this.lastWaitsFor = { name: oldest.toolName, ...(oldest.detail ? { detail: oldest.detail } : {}) }
+    // No call of the turn runs and the window after the last one has closed: strict release keeps the steer for the
+    // provider's turn end, so the line says that, not the name of a tool that finished.
+    const turnEnd = tools.length === 0 && !this.releaseOpen()
     const waits = this.lastWaitsFor ?? { name: 'tool' }
     return {
-      waitsFor: waits.name,
-      ...(waits.detail ? { detail: waits.detail } : {}),
+      waitsFor: turnEnd ? 'turn' : waits.name,
+      ...(turnEnd ? { untilTurnEnd: true } : waits.detail ? { detail: waits.detail } : {}),
       tools: tools.length,
       ...(tools.length > 1 ? { toolList: tools.map((tool) => ({ name: tool.toolName, ...(tool.detail ? { detail: tool.detail } : {}) })) } : {}),
       since: this.heldSince ?? new Date(this.now()).toISOString(),
@@ -267,6 +285,12 @@ export class SteerHold {
   mayCut(token: string): boolean {
     if (this.forcedTokens.has(token)) return true
     if (!this.adopted) return true
-    return this.foregroundTools().length === 0 && !this.releaseOpen()
+    const tools = this.foregroundTools()
+    return tools.length === 0 && (this.askingOnly(tools) || !this.releaseOpen())
+  }
+
+  /** A person is asked about a call (or Mousse asks them for one of its own tools), and no foreground tool runs besides. */
+  private askingOnly(tools: ForegroundTool[]): boolean {
+    return tools.length === 0 && (this.waitingOnPerson.size > 0 || this.options.asking?.() === true)
   }
 }

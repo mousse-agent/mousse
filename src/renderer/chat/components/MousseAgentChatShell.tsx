@@ -104,8 +104,12 @@ function TurnProgressProvider({ threadId, children }: { threadId?: string | null
   const turnStep = useAppStore(state => (threadId ? state.turnStates[threadId]?.step : undefined))
   const stopping = useAppStore(state => Boolean(threadId && state.stopRequests[threadId]))
   const turnUpdatedAt = useAppStore(state => (threadId ? state.turnStates[threadId]?.updatedAt : undefined))
-  // A steer waits for the running tool: the line's tooltip says when it goes in.
-  const steerHeld = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.heldSteer))
+  // A steer waits for the running tool, or (strict release, nothing of the turn running) for the turn's end: the line's
+  // tooltip says when it goes in.
+  const steerHeld = useAppStore((state): boolean | 'turn_end' => {
+    const held = threadId ? state.turnStates[threadId]?.heldSteer : undefined
+    return held?.untilTurnEnd ? 'turn_end' : Boolean(held)
+  })
   const turnProgress = useMemo<TurnProgressState>(
     () => ({ phase: turnPhase, step: turnStep, stopping, threadId, updatedAt: turnUpdatedAt, steerHeld }),
     [turnPhase, turnStep, stopping, threadId, turnUpdatedAt, steerHeld]

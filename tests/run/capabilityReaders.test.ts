@@ -16,7 +16,8 @@ const DECLARATION_DIRS = ['src/mms/harness/drivers/', 'src/mms/harness/vendors/'
 /** Each key of `HarnessCaps` and the reader functions that read it; `satisfies` keeps it exact. */
 const READERS = {
   steer: ['steerStrategy', 'steerDelivery'],
-  steerBoundary: ['steerDelivery'],
+  steerBoundary: ['steerDelivery', 'steerReleaseWindow'],
+  steerSettleMs: ['steerReleaseWindow'],
   interrupt: ['stopStrategy'],
   rollback: ['canUndoNatively'],
   fork: ['forkStrategy'],

@@ -45,6 +45,8 @@ export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.fre
   steer: 'interrupt_restart',
   // A tool call streams its `tool_use` block before it runs: a person's steer waits from there to its result.
   steerBoundary: 'announce',
+  // Every call is known before it runs: no window after a result.
+  steerSettleMs: null,
   interrupt: true,
   // An undo or an edit cuts Claude's session at the next turn (issue #360), not as part of the undo.
   rollback: 'none',
