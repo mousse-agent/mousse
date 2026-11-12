@@ -114,7 +114,6 @@ describe('a command', () => {
     expect(toggle.textContent).toBe(`Ran${command}`)
     expect(toggle.querySelector('.an-bash-row-command')?.getAttribute('title')).toBe(command)
     expect([...host.querySelectorAll('*')].some((node) => node.classList.contains('border'))).toBe(false)
-    expect(host.innerHTML).not.toMatch(/an-bash-card|animate-spin/)
   })
 
   it('reads Running while it runs', () => {

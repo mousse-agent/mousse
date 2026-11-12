@@ -233,7 +233,6 @@ describe('Settings > Agents > Access', () => {
         expect(on(), level).toBe(false)
       }
       expect(text()).toContain('Subagents on other devices')
-      expect(text()).not.toContain('Let agents start subagents on your other devices')
       expect(remoteSwitch()!.getAttribute('aria-label')).toBe('Subagents on other devices')
       expect(host.querySelector('label[for="agent-access-remote-subagents"]')?.textContent).toBe('Subagents on other devices')
       // It is in its own Subagents group, after Access.

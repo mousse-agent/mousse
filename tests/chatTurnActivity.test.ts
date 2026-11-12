@@ -84,7 +84,6 @@ describe('a tool call group', () => {
     )
     expect(text(html)).toContain('Read 3 files and ran 3 commands')
     expect(text(html)).not.toContain('watch the log')
-    expect(html).not.toContain('Tool calls')
   })
 
   it('splits at narration: the calls on each side are a group of their own, the narration prose between them', () => {

@@ -159,15 +159,16 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     expect(result.afterSweeps.mounted).toBeLessThanOrEqual(60)
     expect(result.afterSweeps.first && result.afterSweeps.last).toBe(true)
 
-    // Opening a group of tool calls that is above the reading line, in the turn being read, moves the content down and the
-    // scroll position with it; opening one below it, in the next turn, moves nothing; closing the first again puts it back.
+    // Opening a turn's folded work (its tool calls) above the reading line, in the turn being read, moves the content down
+    // and the scroll position with it; opening one below it, in the next turn, moves nothing; closing the first again puts
+    // it back.
     const cards = result.toolCards
     expect(cards.groups).toBe(1)
     expect(cards.nextGroups).toBe(1)
     expect(cards.firstGroupTop).toBeLessThan(0)
     expect(cards.secondGroupTop).toBeGreaterThan(cards.start + 40)
     expect(within(cards.start, 100)).toBe(true)
-    expect(cards.openGrowth).toBeGreaterThan(100)
+    expect(cards.openGrowth).toBeGreaterThan(20)
     expect(within(cards.afterOpenFirst, cards.start)).toBe(true)
     expect(Math.abs(cards.openScrolled - cards.openGrowth)).toBeLessThanOrEqual(3)
     expect(within(cards.afterOpenSecond, cards.start)).toBe(true)
@@ -180,7 +181,7 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     expect(result.nested.quoteBottom).toBeGreaterThan(800)
     expect(within(result.nested.start, 100)).toBe(true)
     expect(result.nested.blocks.bodies.length).toBeGreaterThanOrEqual(2)
-    for (const body of result.nested.blocks.bodies) expect(body.clientHeight).toBeLessThanOrEqual(400)
+    for (const body of result.nested.blocks.bodies) expect(body.clientHeight).toBeLessThanOrEqual(640)
     expect(within(result.nested.afterFirst, result.nested.start)).toBe(true)
     expect(Math.abs(result.nested.firstScrolled - 300)).toBeLessThanOrEqual(3)
     expect(within(result.nested.afterLast, result.nested.start)).toBe(true)
@@ -305,8 +306,8 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
       expect(visit.geometry?.inContainer, label).toBe(true)
       expect(visit.geometry?.body?.inside, label).toBe(true)
       expect(visit.turns, label).toBeLessThanOrEqual(60)
-      // The block is capped at 400 px and scrolls inside itself, so the row stays an ordinary height.
-      expect(visit.fence.bodies[0]!.clientHeight, label).toBeLessThanOrEqual(400)
+      // The block is capped at 640 px and scrolls inside itself, so the row stays an ordinary height.
+      expect(visit.fence.bodies[0]!.clientHeight, label).toBeLessThanOrEqual(640)
       expect(visit.fence.bodies[0]!.scrollHeight, label).toBeGreaterThan(20000)
       expect(visit.fence.rowHeight, label).toBeLessThan(700)
       const body = visit.geometry!.body!

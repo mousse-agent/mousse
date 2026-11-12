@@ -322,7 +322,6 @@ describe('settleFinishedTurn', () => {
     return {
       order: settled.order.map((index) => messages[index]!.id),
       grouped: settled.order.filter((index) => settled.analyses[index]!.toolsOnly).map((index) => messages[index]!.id),
-      notes: settled.analyses.flatMap((analysis) => analysis.toolItems.filter((item) => item.part.type === 'tool-Note').map((item) => item.part.input)),
     }
   }
 
@@ -330,7 +329,6 @@ describe('settleFinishedTurn', () => {
     const turn = settle([said('n1', 'Checking.'), step('c1'), said('n2', ' Reading the log. '), step('c2'), said('a1', 'Done.'), step('t1', 'tool-Thinking')])
     expect(turn.order).toEqual(['n1', 'c1', 'n2', 'c2', 't1', 'a1'])
     expect(turn.grouped).toEqual(['c1', 'c2', 't1'])
-    expect(turn.notes).toEqual([])
   })
 
   it('keeps a turn without reply text, and what is not activity, where it was', () => {
@@ -339,10 +337,9 @@ describe('settleFinishedTurn', () => {
     expect(errored.order).toEqual(['c1', 'c2', 'a1', 'e1'])
   })
 
-  it('never takes a steer for the answer or a note', () => {
+  it('never takes a steer for the answer', () => {
     const turn = settle([said('a1', 'Started.'), step('c1'), said('s1', 'Also check the docs', 'user')])
     expect(turn.order).toEqual(['c1', 'a1', 's1'])
-    expect(turn.notes).toEqual([])
   })
 
   it('moves the one reply row of an older turn below the work that came after it', () => {
@@ -351,26 +348,23 @@ describe('settleFinishedTurn', () => {
   })
 
   it('keeps a stopped turn in the order it ran when its last text came before its last command', () => {
-    // "Running the build." then a command the Stop cut off: the text is a note, not an answer.
+    // "Running the build." then a command the Stop cut off: the text is narration, not an answer.
     const turn = settle([said('n1', 'Running the build.'), step('c1')], true)
     expect(turn.order).toEqual(['n1', 'c1'])
-    expect(turn.notes).toEqual([])
     const steer = { id: 's1', role: 'user', parts: [], metadata: { steerGroup: [said('m1', 'Also check the docs', 'user')] } }
     const steered = settle([said('a1', 'Started.'), step('c0'), steer, said('n1', 'Checking the docs.'), step('c1'), step('t1', 'tool-Thinking')], true)
     expect(steered.order).toEqual(['a1', 'c0', 's1', 'n1', 'c1', 't1'])
   })
 
-  it('leaves a model switch marker where it is, never as the answer or a note', () => {
+  it('leaves a model switch marker where it is, never as the answer', () => {
     const marker = { id: 'h1', role: 'assistant', parts: [{ type: 'text', text: 'Claude Opus 5.5 → Claude Sonnet 5.5' }], metadata: { contextHandoff: { from: { model: 'opus' }, to: { model: 'sonnet' } } } }
     const turn = settle([marker, step('t1', 'tool-Thinking'), said('a1', 'Done.')])
     expect(turn.order).toEqual(['h1', 't1', 'a1'])
     expect(turn.grouped).toEqual(['t1'])
-    expect(turn.notes).toEqual([])
   })
 
   it('still ends a stopped turn on text written after its work', () => {
     const turn = settle([said('n1', 'Checking.'), step('c1'), said('a1', 'Half an ans')], true)
     expect(turn.order).toEqual(['n1', 'c1', 'a1'])
-    expect(turn.notes).toEqual([])
   })
 })
