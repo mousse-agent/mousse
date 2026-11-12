@@ -48,6 +48,8 @@ export function failedToolTitle(title: string, toolName: string): string {
  */
 function AgentTool({ part, nestedTools, chatStatus }: { part: any; nestedTools?: any[]; chatStatus?: string }) {
   const card = useSubagentCard(part.toolCallId);
+  // Still starting: the turn's progress line says so until the card has a name and a task.
+  if (card?.spawning) return null;
   if (card?.native) return <NativeSubagentCard card={card} nestedTools={nestedTools ?? []} chatStatus={chatStatus} />;
   const labelBase = part.type === "tool-Agent" ? "Agent" : "Task";
   return (

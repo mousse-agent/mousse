@@ -23,7 +23,7 @@ export function useSubagentCardModels(threadId: string | null | undefined, messa
   const cards = useMemo(() => {
     const calls = collectSubagentCalls(messages)
     const joined = calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current, turnActive })
-    const native = collectNativeSubagentCards(messages, backgroundLive)
+    const native = collectNativeSubagentCards(messages, backgroundLive, turnActive)
     const next = native.size === 0 ? joined : new Map([...joined, ...native])
     // A streamed delta changes no card: the same map keeps every row that reads it from rendering again.
     return sameCards(previous.current, next) ? previous.current : next

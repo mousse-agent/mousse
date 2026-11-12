@@ -62,12 +62,25 @@ export function nativeSubagentState(part: Pick<Part, 'state' | 'output'>, backgr
   return 'done'
 }
 
-/** The card of a native subagent call. */
-export function nativeSubagentModel(part: Part & { toolCallId: string }, createdAt: unknown, backgroundLive: boolean): SubagentCardModel {
+/**
+ * The card of a native subagent call. `live`: the call belongs to the turn running now. `hasCalls`: the
+ * subagent has made a call of its own. A live call is still spawning until it has a name (its description or
+ * agent type) and the runtime has started its task (a task id, a call of its own, or a result).
+ */
+export function nativeSubagentModel(
+  part: Part & { toolCallId: string },
+  createdAt: unknown,
+  backgroundLive: boolean,
+  live = false,
+  hasCalls = false
+): SubagentCardModel {
   const input = record(part.input) ?? {}
   const output = record(part.output)
   const state = nativeSubagentState(part, backgroundLive)
   const agentType = text(input.subagent_type)
+  const named = text(input.description) !== null || agentType !== null
+  const started = text(input.task_id) !== null || hasCalls || part.state === 'output-available' || part.state === 'output-error'
+  const spawning = live && state === 'working' && !(named && started)
   const startedAt = timeOf(output?.startedAt) ?? timeOf(createdAt)
   const duration = typeof output?.totalDurationMs === 'number' && Number.isFinite(output.totalDurationMs) ? output.totalDurationMs : null
   // A background row's end is when its turn settled, not when the agent finished: only its reported duration counts.
@@ -91,18 +104,37 @@ export function nativeSubagentModel(part: Part & { toolCallId: string }, created
     createdAt: startedAt,
     completedAt: state === 'working' ? null : ended,
     ...(state === 'failed' && reported ? { error: reported } : {}),
+    ...(spawning ? { spawning: true } : {}),
     native: { agentType, taskId: text(input.task_id), result: state === 'done' ? reported : null }
   }
 }
 
-/** The native subagent cards of a transcript, by the call that started each. */
-export function collectNativeSubagentCards(messages: readonly UIMessage[], backgroundLive: boolean): Map<string, SubagentCardModel> {
+/**
+ * The native subagent cards of a transcript, by the call that started each. `turnActive`: the thread's turn
+ * is running, so a call of its last turn may still be spawning.
+ */
+export function collectNativeSubagentCards(messages: readonly UIMessage[], backgroundLive: boolean, turnActive = false): Map<string, SubagentCardModel> {
   const cards = new Map<string, SubagentCardModel>()
-  for (const message of messages) {
+  // A steer is a user message inside a running turn, not the start of a new one.
+  const lastUser = turnActive
+    ? messages.reduce((found, message, index) => (message.role === 'user' && !(message.metadata as { steered?: unknown } | undefined)?.steered ? index : found), -1)
+    : messages.length
+  for (const [index, message] of messages.entries()) {
     if (message.role !== 'assistant') continue
-    for (const part of message.parts ?? []) {
+    const parts = message.parts ?? []
+    // Work a subagent started is nested under its root as `<root>:<call>`.
+    const withCalls = new Set(
+      parts.flatMap((part) => {
+        const id = (part as Part).toolCallId
+        return typeof id === 'string' && id.includes(':') ? [id.slice(0, id.indexOf(':'))] : []
+      })
+    )
+    for (const part of parts) {
       if (!isNativeSubagentPart(part)) continue
-      cards.set(part.toolCallId, nativeSubagentModel(part, (message as { createdAt?: unknown }).createdAt, backgroundLive))
+      cards.set(
+        part.toolCallId,
+        nativeSubagentModel(part, (message as { createdAt?: unknown }).createdAt, backgroundLive, index > lastUser, withCalls.has(part.toolCallId))
+      )
     }
   }
   return cards

@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useState } from "react";
 import type { UIMessage } from "ai";
 import type { TurnPhase, TurnStep } from "../../../../shared/types";
 import { isWaitingPermissionRequest } from "./tools/permission-request";
+import { useSubagentCards } from "./tools/subagent-cards-context";
+import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { parseMcpToolType } from "./tools/tool-registry";
 import { isCompactionRow } from "./utils/assistant-blocks";
 import { ThinkingIcon } from "../../../lib/icons";
@@ -69,12 +71,14 @@ export type TurnProgressInput = {
   stepSince?: number;
   /** The turn ended, and subagents it started still work. */
   awaitingSubagents?: boolean;
+  /** How many subagents the turn is still starting (no name or no task yet): their cards are not drawn. */
+  spawningSubagents?: number;
   /** Nothing else of the turn is shown (it has no output yet): the line says everything, a compaction too. */
   standalone?: boolean;
   now: number;
 };
 
-type Part = { type?: string; state?: string; input?: unknown; text?: string; subagentTool?: unknown };
+type Part = { type?: string; state?: string; input?: unknown; text?: string; subagentTool?: unknown; toolCallId?: string };
 
 /** Fields a call's row has before its arguments arrive; they say nothing about what it will do. */
 const PLACEHOLDER_INPUT_KEYS = new Set(["label", "cwd"]);
@@ -183,7 +187,17 @@ export function describeTurnProgress(input: TurnProgressInput): TurnProgress | n
   return progress;
 }
 
-function describeProgress({ state, messages, stepSince, awaitingSubagents, standalone, now }: TurnProgressInput): TurnProgress | null {
+/** The calls in `messages` whose subagent card is still starting. */
+export function countSpawningSubagents(messages: readonly UIMessage[], cards: ReadonlyMap<string, SubagentCardModel>): number {
+  if (cards.size === 0) return 0;
+  let count = 0;
+  for (const message of messages)
+    for (const part of (message.parts ?? []) as Part[])
+      if (typeof part.toolCallId === "string" && cards.get(part.toolCallId)?.spawning) count += 1;
+  return count;
+}
+
+function describeProgress({ state, messages, stepSince, awaitingSubagents, spawningSubagents, standalone, now }: TurnProgressInput): TurnProgress | null {
   const phase = state?.phase;
   const step = state?.step;
   if (state?.stopping) return { kind: "stopping", label: "Stopping…" };
@@ -202,6 +216,11 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, stand
     return seconds > 0
       ? { kind: "retrying", label: `Retrying in ${seconds}s…`, title, until }
       : { kind: "retrying", label: "Retrying…", title };
+  }
+
+  // Subagents still starting have no card yet: the line stands for them until each has a name and a task.
+  if (spawningSubagents && spawningSubagents > 0) {
+    return { kind: "preparing-tool", label: spawningSubagents === 1 ? "Starting subagent…" : `Starting ${spawningSubagents} subagents…` };
   }
 
   // What the end of the turn shows live: its last part, or any tool still running.
@@ -256,11 +275,12 @@ export function TurnProgressRow({
 }) {
   countRender("TurnProgressRow");
   const state = useTurnProgressState();
+  const spawningSubagents = countSpawningSubagents(messages, useSubagentCards());
   // The clock is read as the line renders, so a countdown that starts shows its right second at once; the timer
   // only renders the line again each second while one runs.
   const [, setTick] = useState(0);
   const now = Date.now();
-  const progress = describeTurnProgress({ state, messages, stepSince: stepSeenAt(state, now), awaitingSubagents, standalone, now });
+  const progress = describeTurnProgress({ state, messages, stepSince: stepSeenAt(state, now), awaitingSubagents, spawningSubagents, standalone, now });
   const until = progress?.until;
   useEffect(() => {
     if (until == null) return;
