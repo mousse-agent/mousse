@@ -557,6 +557,8 @@ export type OrchestratorSendInput = string | OrchestratorSendRequest
 export interface OrchestratorContextUsageRequest {
   draftInput?: string
   mode?: ChatMode
+  /** The thread the window shows; without it, the window's active thread. */
+  threadId?: string
 }
 
 export type OrchestratorContextUsageInput = string | OrchestratorContextUsageRequest

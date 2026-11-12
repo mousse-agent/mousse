@@ -91,15 +91,19 @@ export function idleCompactionChip(input: {
 
 /**
  * The time now, renewed every minute while `enabled` (and whenever `since` changes), so cache lines count
- * down without a new snapshot.
+ * down without a new snapshot. A new `since` (another thread opened, a turn ended) reads the clock in that
+ * same render: a time kept from before would show the thread's cache as it stood then for one frame, and the
+ * Full/Compact chip would come a frame after the rest of the thread.
  */
 export function useMinuteClock(enabled: boolean, since?: number): number {
-  const [now, setNow] = useState(() => Date.now())
+  const [tick, setTick] = useState(() => ({ now: Date.now(), since, enabled }))
+  const current = tick.since === since && tick.enabled === enabled && Date.now() - tick.now < 60_000 ? tick.now : Date.now()
   useEffect(() => {
+    const renew = () => setTick({ now: Date.now(), since, enabled })
+    renew()
     if (!enabled) return
-    setNow(Date.now())
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000)
+    const timer = window.setInterval(renew, 60_000)
     return () => window.clearInterval(timer)
   }, [enabled, since])
-  return now
+  return current
 }

@@ -1295,7 +1295,10 @@ export function registerGuiIpc(
   registerHandler(
     'orchestrator:getContextUsage',
     async (_e, request?: OrchestratorContextUsageInput) => {
-      const threadId = currentPresentation().getActiveThreadId()
+      // The thread the window shows, named by the window: right after a switch the active thread here may
+      // still be the one before.
+      const named = typeof request === 'object' && typeof request?.threadId === 'string' && request.threadId ? request.threadId : undefined
+      const threadId = named ?? currentPresentation().getActiveThreadId()
       const body =
         typeof request === 'string'
           ? { draftInput: request, threadId }

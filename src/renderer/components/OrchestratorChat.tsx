@@ -35,6 +35,7 @@ import {
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { contextTokens } from '../lib/promptCache'
+import { cachedContextUsage, contextUsageKey, rememberContextUsage } from '../lib/threadContextUsage'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
   ComposerQuestionModal,
@@ -92,7 +93,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
+import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
@@ -361,7 +362,30 @@ export function OrchestratorChat() {
     []
   )
   const [contextOpen, setContextOpen] = useState(false)
-  const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
+  // The open thread's context, as last measured. A thread opened again shows its own ring and Full/Compact chip
+  // in the same frame as its transcript, and never the ones of the thread shown before; a thread not measured
+  // yet shows neither until its measurement arrives.
+  const contextKey = contextUsageKey(profileId, activeThreadId)
+  const contextVersion = useAppStore((s) => (s.activeThreadId ? s.threads.find((thread) => thread.id === s.activeThreadId)?.updatedAt : undefined))
+  const [measuredContext, setMeasuredContext] = useState<{ key: string; usage: ContextUsageSnapshot }>()
+  const contextUsage = useMemo(
+    () => (measuredContext?.key === contextKey ? measuredContext.usage : cachedContextUsage(contextKey, contextVersion) ?? EMPTY_CONTEXT_USAGE),
+    [measuredContext, contextKey, contextVersion]
+  )
+  // Only the newest measurement asked for is shown: an older one that answers later is dropped.
+  const contextRequest = useRef(0)
+  const measureContext = useCallback((threadId: string | null, key: string, version: string | undefined, draftInput: string) => {
+    const request = ++contextRequest.current
+    void window.mousse.orchestrator
+      .getContextUsage({ draftInput, mode: chatMode, ...(threadId && !isPendingRowId(threadId) ? { threadId } : {}) })
+      .then((usage) => {
+        if (request !== contextRequest.current) return
+        rememberContextUsage(key, usage, version)
+        setMeasuredContext({ key, usage })
+      }, () => undefined)
+  }, [chatMode])
+  /** The thread measured last; a thread opened since is measured at once, without the typing debounce. */
+  const measuredContextKey = useRef<string | undefined>(undefined)
   const [contextCompactionSetting, setContextCompactionSetting] = useState<ContextSettings>()
   // The open thread's agent questions; a question from another thread never shows or takes a message here.
   const [pendingQuestions, setPendingQuestions] = usePendingQuestions(activeThreadId)
@@ -813,23 +837,21 @@ export function OrchestratorChat() {
   }, [activeThreadId, activeThreadActivity, turnState, refreshTurnActive])
 
   useEffect(() => {
-    let cancelled = false
     const draft = buildMessageContent()
     // Debounce context metering: typing and stream deltas used to fire an IPC
     // on every keystroke/token and stalled thread switches + model changes.
+    // A thread just opened is measured at once, so its ring and chip come with its transcript.
     const timer = window.setTimeout(() => {
-      void window.mousse.orchestrator
-        .getContextUsage({ draftInput: draft, mode: chatMode })
-        .then((usage) => {
-          if (!cancelled) setContextUsage(usage)
-        })
-    }, 350)
+      measuredContextKey.current = contextKey
+      measureContext(activeThreadId, contextKey, contextVersion, draft)
+    }, measuredContextKey.current === contextKey ? 350 : 0)
 
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
+    return () => window.clearTimeout(timer)
   }, [
+    activeThreadId,
+    contextKey,
+    contextVersion,
+    measureContext,
     messages,
     input,
     attachedFiles,
@@ -846,20 +868,10 @@ export function OrchestratorChat() {
   // even when streaming updates keep resetting the normal message-change debounce.
   useEffect(() => {
     if (!loading) return
-    let cancelled = false
-    const refresh = () => {
-      void window.mousse.orchestrator
-        .getContextUsage({ draftInput: buildMessageContent(), mode: chatMode })
-        .then((usage) => {
-          if (!cancelled) setContextUsage(usage)
-        })
-    }
+    const refresh = () => measureContext(activeThreadId, contextKey, contextVersion, buildMessageContent())
     const interval = window.setInterval(refresh, 5_000)
-    return () => {
-      cancelled = true
-      window.clearInterval(interval)
-    }
-  }, [loading, chatMode, buildMessageContent])
+    return () => window.clearInterval(interval)
+  }, [loading, activeThreadId, contextKey, contextVersion, measureContext, buildMessageContent])
 
   // Prefer the closed-over file list so a post-send `clearComposer(false)` +
   // success-path revoke still frees the object URLs that were staged for that send
