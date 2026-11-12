@@ -256,6 +256,10 @@ const MAX_USAGE_RETRIES = 2
  * stopped goes on, schedules run), and pauses again for as long if the limit still holds.
  */
 export const USAGE_RECHECK_MS = 30 * 60_000
+/** Work that waited longer than this for more room is not carried on by an Allow: it ends, and can be asked again. */
+export const MAX_ROOM_WAIT_MS = 24 * 60 * 60_000
+/** Work that waits to go on (for room or a usage limit) ends after this long, whatever it waits for (`maintain`). */
+export const MAX_WORK_WAIT_MS = 7 * 24 * 60 * 60_000
 /**
  * Continuations after a dispatch reached its runtime's cap on model turns, per activation. Each one worked up to the
  * cap (300 turns on Claude Code), so this only stops a runtime that reaches the cap at once, again and again.
@@ -962,11 +966,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.db.afterCommit(() => this.changed({ botId }))
   }
 
-  /** Cancels the oldest waiting activations of a lane beyond the queue's size (inside a transaction); how many. */
+  /**
+   * Cancels the oldest waiting activations of a lane beyond the queue's size (inside a transaction); how many. In the run
+   * lane, work that waits to go on counts toward the size too, and is dropped the same way when it is the oldest.
+   */
   private dropOverQueue(botId: string, lane: BotLane = 'run'): number {
     const queued = this.store.laneActivations(botId, lane, ['queued'])
-    const over = queued.slice(0, Math.max(0, queued.length - MAX_QUEUED_ACTIVATIONS))
+    const waiting = lane === 'run' ? this.store.laneActivations(botId, 'run', ['blocked']).filter(workWaits) : []
+    const all = [...queued, ...waiting].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+    const over = all.slice(0, Math.max(0, all.length - MAX_QUEUED_ACTIVATIONS))
     for (const activation of over) {
+      if (activation.status === 'blocked') {
+        const ended = this.endWaitingInTx(activation, 'queue_full', `I had too much waiting, so I dropped "${this.workTitle(activation)}". Ask me again when I'm less busy.`)
+        if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
+        continue
+      }
       if (!this.store.moveActivation(activation.id, ['queued'], 'cancelled', { endReason: 'queue_full' })) continue
       // The owner's message is never dropped without a word: its chat says so. Nor is work the chat took on.
       if (lane === 'chat')
@@ -2375,6 +2389,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const row of this.store.activationsIn(botId, ['blocked'])) {
       if (!workWaits(row) || row.endReason !== 'budget_exhausted') continue
       if ((waiting.has(row.id) ? waiting.get(row.id) : this.waitingOn(row)) !== key) continue
+      // Work that waited more than a day is not picked up again by an Allow: what it had is old, and it can be asked again.
+      if (allowed && this.now() - this.waitingSince(row) > MAX_ROOM_WAIT_MS) {
+        const ended = this.endWaitingInTx(row, 'waited_too_long', waitedTooLong(this.workTitle(row)))
+        if (ended) settled.ended.push(ended)
+        continue
+      }
       if (allowed && this.hasRoom(row)) {
         if (this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'room_allowed' })) settled.continued.push(row.id)
         continue
@@ -2417,6 +2437,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private settleStrandedWork(): void {
     for (const row of this.store.activationsWith(['blocked']).filter(workWaits)) {
       try {
+        // Nothing waits more than a week, whatever it waits for.
+        if (this.now() - this.waitingSince(row) > MAX_WORK_WAIT_MS) {
+          const ended = this.recorded(row, () => this.endWaitingInTx(row, 'waited_too_long', waitedTooLong(this.workTitle(row))))
+          if (ended) this.afterEnd(ended)
+          continue
+        }
         let stranded = false
         if (row.endReason === 'budget_exhausted') {
           const key = this.waitingOn(row)
@@ -2432,6 +2458,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('waiting bot work could not be checked', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       }
     }
+  }
+
+  /** When work started to wait: its last turn's end (or start), else when it was asked for (its first turn never went out). */
+  private waitingSince(row: BotActivationRow): number {
+    const main = this.store.lastMainDispatch(row.id)
+    if (main?.endedAt) return Date.parse(main.endedAt)
+    return main?.startedAt ?? Date.parse(row.createdAt)
   }
 
   /** Whether waiting work has room to go on under what it may use now: no limit used up, spend limits included. */
@@ -5115,6 +5148,11 @@ function contextKey(stored: string): [string, number] {
   const at = stored.lastIndexOf(':')
   const gen = at > 0 ? Number(stored.slice(at + 1)) : 1
   return at > 0 && Number.isSafeInteger(gen) ? [stored.slice(0, at), gen] : [stored, 1]
+}
+
+/** The one line work that waited too long to go on ends with. */
+function waitedTooLong(title: string): string {
+  return `"${title}" waited too long, so I stopped it. Ask me again if you still want it.`
 }
 
 /** What work that ran out of room says with its ask: that it stopped short and goes on when allowed, then what it had. */

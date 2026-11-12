@@ -44,6 +44,8 @@ export interface BotAskCard {
    * continues with the permission), or, for a limit, work that waits on it goes on.
    */
   carriesOn?: true
+  /** How many pieces of work an allowed limit carried on, when more than one. */
+  carried?: number
   /** A run's ask allowed while none of the bot's runs was running or waiting: the bot has it from its next run. */
   idle?: true
 }

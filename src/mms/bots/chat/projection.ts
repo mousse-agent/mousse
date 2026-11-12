@@ -216,7 +216,7 @@ export class BotChatProjection {
    * that work on while some of it still waits; allowed, it says so only for work this answer really carried on (waiting
    * its turn, or gone on since). Work that ended without going on, or failed before this build, carries nothing on.
    */
-  private limitOutcome(escalation: BotEscalationRow): { carriesOn?: true } {
+  private limitOutcome(escalation: BotEscalationRow): { carriesOn?: true; carried?: number } {
     if (!('budget' in escalation.permission)) return {}
     const linked = this.waitingOnAsk(escalation)
     if (escalation.status === 'open') return linked.some(({ row }) => workWaits(row) && row.endReason === 'budget_exhausted') ? { carriesOn: true } : {}
@@ -224,7 +224,7 @@ export class BotChatProjection {
     const answered = Date.parse(escalation.answeredAt ?? this.store.now())
     const carried = linked.filter(({ row, n }) => (row.endReason === 'room_allowed' && workWaits(row)) ||
       this.store.dispatches(row.id).some((dispatch) => dispatch.kind === 'continue' && dispatch.n > n && (dispatch.startedAt === null || dispatch.startedAt >= answered)))
-    return carried.length ? { carriesOn: true } : {}
+    return carried.length ? { carriesOn: true, ...(carried.length > 1 ? { carried: carried.length } : {}) } : {}
   }
 
   /**

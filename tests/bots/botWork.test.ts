@@ -780,6 +780,95 @@ describe('long work', () => {
       expect(f.store.dispatches(workId)).toHaveLength(1)
     })
 
+    /** Work asked for with `id` that runs its hour out (as `outOfTime`), while the run lane was free. */
+    async function outOfTimeAs(text: string, id: string) {
+      const work = await asked(text, id)
+      const turn = await start(f, work.workId)
+      f.clock.now += 60 * MIN
+      turn.prepared.authority.check(call)
+      deadline()
+      await finish(f, turn.payload, 'interrupted', { text: `What ${id} had.`, outcome: { interruptedBy: 'bot_wall' } })
+      expect(f.store.activation(work.workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+      return work.workId
+    }
+
+    it('one Allow carries on every piece that waits on that limit, one after the other, and the card says how many', async () => {
+      const first = await outOfTimeAs('First job', 'm1')
+      const second = await outOfTimeAs('Second job', 'm2')
+      const ask = f.store.openAsks(botId)[0]!
+      expect(ask.activationId).toBe(second)
+      await f.bots.service.answer(botId, ask.id, 'allow')
+      await flush()
+      expect(f.store.activation(first)).toMatchObject({ status: 'running' })
+      expect(f.store.activation(second)).toMatchObject({ status: 'blocked', endReason: 'room_allowed' })
+      await runDispatch(f, first, 2, { text: 'First done.' })
+      expect(f.store.activation(second)).toMatchObject({ status: 'running' })
+      await runDispatch(f, second, 2, { text: 'Second done.' })
+      const card = chatOf(f, botId).find((row) => row.ask?.askId === ask.id)!.ask!
+      expect(card).toMatchObject({ status: 'allowed', carriesOn: true, carried: 2 })
+    })
+
+    it('an Allow carries on only work that waits on that same limit: a spend limit waits for its own answer', async () => {
+      f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxInputTokens: 1_000 } }))
+      const spend = await asked('Spend job', 'm1')
+      const turn = await start(f, spend.workId)
+      expect(turn.prepared.authority.spend!.reserve({ inputBound: 1_500, wireCap: 500, floor: 256, price: { input: 0, output: 0 } }, {})).toMatchObject({ ok: false })
+      await finish(f, turn.payload, 'interrupted', { text: 'Half of it.', outcome: { interruptedBy: 'bot_wall' } })
+      const time = await outOfTimeAs('Time job', 'm2')
+      const timeAsk = f.store.openAsks(botId).find((ask) => 'budget' in ask.permission && ask.permission.budget.key === 'maxActiveMs')!
+      await f.bots.service.answer(botId, timeAsk.id, 'allow')
+      await flush()
+      expect(f.store.activation(time)).toMatchObject({ status: 'running' })
+      expect(f.store.activation(spend.workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+      expect(f.store.dispatches(spend.workId)).toHaveLength(1)
+      // Its own answer gives it room: twice the tokens.
+      await runDispatch(f, time, 2, { text: 'Time done.' })
+      const spendAsk = f.store.openAsks(botId).find((ask) => 'budget' in ask.permission && ask.permission.budget.key === 'maxInputTokens')!
+      await f.bots.service.answer(botId, spendAsk.id, 'allow')
+      await flush()
+      expect(f.store.activation(spend.workId)).toMatchObject({ status: 'running' })
+    })
+
+    it('work that waited more than a day is not carried on by an Allow: it ends with one line and can be asked again', async () => {
+      const { workId, message } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      f.clock.now += 25 * 60 * MIN
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'waited_too_long' })
+      expect(f.store.dispatches(workId)).toHaveLength(1)
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: '"Vacuums" waited too long, so I stopped it. Ask me again if you still want it.', replyTo: { id: message.id } })
+      // The wider limit stays for later work.
+      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(120 * MIN)
+    })
+
+    it('work that waits more than a week ends at the next tick, whatever it waits for', async () => {
+      const { workId } = await outOfTime()
+      f.clock.now += 6 * 24 * 60 * MIN
+      await f.bots.maintain(new Date(f.clock.now))
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked' })
+      f.clock.now += 2 * 24 * 60 * MIN
+      await f.bots.maintain(new Date(f.clock.now))
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'waited_too_long' })
+      expect(chatOf(f, botId).at(-1)!.text).toBe('"Vacuums" waited too long, so I stopped it. Ask me again if you still want it.')
+    })
+
+    it('waiting work counts toward the run lane\'s 20: the oldest is dropped with a line when more is queued', async () => {
+      const { workId } = await outOfTime()
+      for (let i = 0; i < 20; i += 1) {
+        f.clock.now += 1_000
+        await f.bots.activate({ botId, input: `Run ${i}`, clientRequestId: `q${i}` })
+      }
+      // One runs; nineteen wait in the queue, and the waiting work is the twentieth.
+      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(19)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked' })
+      f.clock.now += 1_000
+      await f.bots.activate({ botId, input: 'Run 20', clientRequestId: 'q20' })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
+      expect(f.store.laneActivations(botId, 'run', ['queued'])).toHaveLength(20)
+      expect(chatOf(f, botId).at(-1)!.text).toBe('I had too much waiting, so I dropped "Vacuums". Ask me again when I\'m less busy.')
+    })
+
     it('the card says it carries the work on only when this answer really did', async () => {
       const { workId } = await outOfTime()
       const askId = chatOf(f, botId).at(-1)!.ask!.askId

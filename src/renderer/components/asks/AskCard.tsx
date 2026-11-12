@@ -62,7 +62,7 @@ export function AskCard({ line, lineText, note, answered, layout = 'card', onAns
 export function askAnswerLine(ask: BotAskData, fromRun = false): string {
   if (ask.status === 'allowed') {
     if (ask.kind === 'export_memory') return 'Saved its memory to the folder you picked'
-    if (ask.carriesOn) return `Allowed: ${ask.title}. It carries on with this now.`
+    if (ask.carriesOn) return (ask.carried ?? 0) > 1 ? `Allowed: ${ask.title}. ${ask.carried} pieces of work carry on now.` : `Allowed: ${ask.title}. It carries on with this now.`
     if (!fromRun) return `Allowed: ${ask.title}`
     return ask.idle ? `Allowed: ${ask.title}. Nothing is running now; it has this from now on.` : `Allowed: ${ask.title}. It uses it from the next run.`
   }
