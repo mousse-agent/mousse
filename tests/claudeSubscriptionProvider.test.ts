@@ -1281,6 +1281,47 @@ describe('older Claude models', () => {
     })
   })
 
+  describe('a newer catalog model Claude Code does not list yet', () => {
+    // Claude Code still lists Ember 9 (now older in the catalog); the catalog's current Ember is 10.
+    const newer = parseModelCatalog({
+      format: 1,
+      revision: 2,
+      models: [
+        entry('ember-new', '2031-06-01'),
+        entry('ember-live', '2031-01-01', { older: true }),
+        entry('other-live', '2031-02-01', { family: 'other' }),
+        entry('ember-runs', '2030-04-01', { older: true })
+      ]
+    })
+    const other = { value: 'other', resolvedModel: 'other-live', displayName: 'Other', description: 'Other 1 · test model' }
+
+    it('shows it in place of the older one, which folds behind Show more but stays listed', async () => {
+      const check = olderQuery({ 'ember-runs': {} }, [live, other])
+      const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => newer })
+      await service.refreshModels(home)
+      await service.olderCheck
+      // The listed Ember 9 stays offered, so a thread that uses it keeps it selected.
+      expect(service.models().map((model) => [model.id, model.older ?? false])).toEqual([
+        ['ember-new', false],
+        ['ember', true],
+        ['other', false],
+        ['ember-runs', true]
+      ])
+    })
+
+    it('leaves the listed model in the main list when the account cannot run the newer one', async () => {
+      const check = olderQuery({ 'ember-new': { refuse: true }, 'ember-runs': {} }, [live, other])
+      const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => newer })
+      await service.refreshModels(home)
+      await service.olderCheck
+      expect(service.models().map((model) => [model.id, model.older ?? false])).toEqual([
+        ['ember', false],
+        ['other', false],
+        ['ember-runs', true]
+      ])
+    })
+  })
+
   it('runs an older model at a level its catalog entry lists', async () => {
     const captured: Options[] = []
     const check = olderQuery(standard)
