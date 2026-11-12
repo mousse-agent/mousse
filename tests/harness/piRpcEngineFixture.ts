@@ -39,6 +39,8 @@ export interface SetupOptions {
   testEnv?: Record<`MOUSSE_PI_TEST_${string}`, string>
   adjustLaunch?: PiRpcEngineOptions['adjustLaunch']
   holdTurn?: PiRpcEngineOptions['holdTurn']
+  /** How long a cut's abort and its settlement may take, and how long Stop waits for a continuation's answer. */
+  interruptDeadlineMs?: number
   mousseTools?: PiRpcEngineOptions['mousseTools']
   userMcpTools?: PiRpcEngineOptions['userMcpTools']
   /** The mock provider's models instead of the one OpenAI-compatible model (`url`: the recorder's). */
@@ -94,6 +96,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     ...(options.compaction ? { compaction: options.compaction } : {}),
     ...(options.adjustLaunch ? { adjustLaunch: options.adjustLaunch } : {}),
     ...(options.holdTurn ? { holdTurn: options.holdTurn } : {}),
+    ...(options.interruptDeadlineMs ? { interruptDeadlineMs: options.interruptDeadlineMs } : {}),
     ...(options.mousseTools ? { mousseTools: options.mousseTools } : {}),
     ...(options.userMcpTools ? { userMcpTools: options.userMcpTools } : {}),
     ...(options.onBotProcess ? { onBotProcess: options.onBotProcess } : {}),

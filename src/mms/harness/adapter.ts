@@ -202,9 +202,10 @@ export interface TurnSink {
   /**
    * The provider's own turn ended inside the Mousse turn (Pi's `turn_end`, Codex's `turn/completed`) and no tool
    * runs: a held steer goes in natively, as the next provider turn, with no cut. Holds until the next model output,
-   * tool event or provider turn (`providerTurn`).
+   * tool event or provider turn (`providerTurn`). `false`: the provider's next request started (Pi's `turn_start`, a
+   * retry or a compaction), so the boundary is over.
    */
-  boundary?(): void
+  boundary?(at?: boolean): void
   /**
    * The provider began another turn of its own inside the Mousse turn (a Codex `turn/start` accepted, an ACP prompt
    * or a Cursor run sent): the boundary `boundary()` reported is over, so a steer now cuts or waits again.

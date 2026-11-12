@@ -11986,7 +11986,7 @@ export class OrchestratorService extends EventEmitter {
           if (assembler.ownsForegroundCall(event.callId)) hold.toolEvent()
         },
         toolAwaiting: (callId, waiting) => hold.awaiting(callId, waiting),
-        boundary: () => hold.boundary(),
+        boundary: (at) => hold.boundary(at),
         providerTurn: () => hold.providerTurn(),
         nativeMessages: (nativeMessages, checkpoint) => {
           // A completed-turn measurement becomes stale as soon as the live loop
@@ -12012,7 +12012,11 @@ export class OrchestratorService extends EventEmitter {
             heartbeatExecutionLease(session.executionLease)
           }
         },
-        compaction: onCompaction,
+        compaction: (phase) => {
+          // A person's steer waits for a compaction the provider runs inside the turn ("Waits for compaction").
+          hold.compacting(phase === 'start')
+          onCompaction(phase)
+        },
         // The line under Working says it; nothing is saved to the transcript.
         retry: (attempt, detail) => this.setTurnStep(session.threadId, {
           kind: 'retrying', attempt,

@@ -33,8 +33,10 @@ import { piInstanceRuntime, type PiCredentials } from '../instance'
  */
 export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   steer: 'native',
-  // Until Pi cuts in (PR 4), its steers keep their next-step path.
-  steerBoundary: 'none',
+  // An assistant message ends with its tool calls before Pi runs them: a person's steer waits from there to their
+  // results, and cuts in while Pi writes (docs/design/steer-and-interruptions.md §3). No release window: it is for
+  // `start` providers.
+  steerBoundary: 'announce',
   steerSettleMs: null,
   interrupt: true,
   rollback: 'none',
