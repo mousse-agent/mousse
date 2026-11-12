@@ -1,14 +1,16 @@
 /* The chat's thinking icon (ThinkingIcon in lib/icons.tsx). While the model thinks (`.is-thinking`) the icon
    turns: 2s a turn at Normal speed, scaled by Settings > Animation speed (`--ui-motion-scale`). The whole icon
    turns, not its orbit group: the centre is a circle at the middle, so it looks the same, and a transform on the
-   icon's own box is drawn by the compositor (one inside the SVG would lay the SVG out on every frame). It turns in
-   24 steps a turn, about 12 a second, like the other idle motion (#821), and has no colour animation, which would
-   paint every frame. With motion off (that setting or the OS reduced-motion setting), and once the thought is done,
-   the icon is still. */
+   icon's own box, on its own layer, is drawn by the compositor (one inside the SVG would lay the SVG out on every
+   frame). It turns smoothly at the display's rate: a stepped turn (24 steps, about 12 a second) read as a laggy
+   spin. A small icon's layer costs the compositor next to nothing per frame, and the main thread does no work for
+   it, so streamed text does not slow it. It has no colour animation, which would paint every frame. With motion off
+   (that setting or the OS reduced-motion setting), and once the thought is done, the icon is still. */
 
 .thinking-icon.is-thinking {
-  animation: thinking-icon-turn calc(2s * var(--ui-motion-scale, 1)) steps(24, end) infinite;
+  animation: thinking-icon-turn calc(2s * var(--ui-motion-scale, 1)) linear infinite;
   transform-origin: 50% 50%;
+  will-change: transform;
 }
 
 @keyframes thinking-icon-turn {
