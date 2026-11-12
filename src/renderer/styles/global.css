@@ -530,6 +530,12 @@ html.platform-darwin .overlay-titlebar {
   overflow: hidden;
 }
 
+/* At opacity 0 a browser guest still counts as on screen, so its page keeps rendering every frame. Hidden, it
+   keeps its layout, document and viewport but stops drawing. A tab an agent drives stays drawn for its screenshots. */
+.keep-mounted-layout-inactive .browser-webview:not([data-agent-controlled]) {
+  visibility: hidden;
+}
+
 /* A split-out page or panel whose chunk did not load (lib/lazyComponent.tsx). */
 .lazy-load-failed {
   padding: 12px 14px;

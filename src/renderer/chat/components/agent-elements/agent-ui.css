@@ -218,8 +218,12 @@
   unicode-bidi: isolate;
 }
 
+/* Indicators that loop while agents work move in steps, about 15 a second, not on every frame. Each update makes
+   Chromium redraw the whole window, at a fixed cost however small the indicator: one smooth 7px pulse kept an
+   integrated GPU about 7% busy, the same pulse in steps under 2%. The other looping indicators and spinners follow
+   the same rule (tests/renderer/loopingIndicatorSteps.test.ts). */
 .an-text-shimmer--active {
-  animation: an-shimmer var(--an-shimmer-duration, 2s) linear infinite;
+  animation: an-shimmer var(--an-shimmer-duration, 2s) steps(18) infinite;
 }
 
 .an-ellipsis {
