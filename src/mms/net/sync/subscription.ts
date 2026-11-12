@@ -102,6 +102,9 @@ export class SubscriptionReceiver {
   }
 
   snapshotChunk(target: StreamHead, records: StoredRecord[], done: boolean): void {
+    // No snapshot was asked for: the end of a chunk still being written for a subscription of this stream
+    // that was let go of. Discard it without staging, as `receive` discards stale bulk events.
+    if (!this.snapshotTarget) return
     if (
       !this.snapshotTarget ||
       target.epoch !== this.snapshotTarget.epoch ||

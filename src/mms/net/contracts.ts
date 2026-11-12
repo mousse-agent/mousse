@@ -673,12 +673,27 @@ export interface MuxMessage {
   parts: Uint8Array[]
 }
 
+export interface MuxSendOptions {
+  /**
+   * A softer cancel than `signal`. When it aborts, a message not yet started is withdrawn at once, and one
+   * whose first bytes are already written is finished, so the connection stays up. The caller checks it
+   * afterwards and starts nothing new. `signal` still closes the connection when it aborts a started
+   * message, since the peer cannot resynchronize after half a message.
+   */
+  stop?: AbortSignal
+}
+
 /**
  * Three lanes (control, bulk, tunnel) with independent credit windows. Control is always scheduled first;
  * bulk and tunnel take turns.
  */
 export interface Mux {
-  send(lane: Lane, message: MuxMessage, signal?: AbortSignal): Promise<void>
+  send(
+    lane: Lane,
+    message: MuxMessage,
+    signal?: AbortSignal,
+    options?: MuxSendOptions
+  ): Promise<void>
   onMessage(listener: (lane: Lane, message: MuxMessage) => void): () => void
   onClose(listener: (error?: Error) => void): () => void
   /** Bytes queued and not yet written, per lane. */
