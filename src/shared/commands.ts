@@ -50,6 +50,7 @@ export type CommandId =
   | 'editor.save'
   | 'git.commit'
   | 'composer.steer'
+  | 'composer.switchSendMode'
 
 /** Where a command is meant to run. A scoped command only exists while its surface is mounted. */
 export type CommandScope = 'global' | 'surface-picker' | 'model-picker' | 'workflow-editor'
@@ -515,9 +516,10 @@ export const COMMANDS: readonly CommandDefinition[] = [
   },
   {
     // The composer and the queued messages handle this key themselves (`lib/steerKey.ts`): while a reply runs it
-    // sends the composer's text, or the focused queued message, into the reply now. Enter alone queues.
+    // does what Enter does not. In a thread set to Queue it sends the composer's text into the reply now; in one set
+    // to Steer it queues it. On a focused queued message it sends that message now.
     id: 'composer.steer',
-    title: 'Steer: send into the running reply',
+    title: 'Steer: send into the running reply (queues in Steer mode)',
     category: 'Thread',
     searchTerms: ['steer', 'send now', 'queue'],
     defaultBinding: `${MOD}+Enter`,
@@ -526,6 +528,20 @@ export const COMMANDS: readonly CommandDefinition[] = [
     terminal: 'deny',
     guest: 'deny',
     fixed: true
+  },
+  {
+    // While a reply runs, switches what Enter does in the open thread's composer: Queue or Steer. Its handler is
+    // enabled only while the composer shows the mode button. It never sends.
+    id: 'composer.switchSendMode',
+    title: 'Switch send mode (Queue or Steer)',
+    category: 'Thread',
+    searchTerms: ['steer', 'queue', 'enter', 'send mode'],
+    defaultBinding: `${MOD}+Shift+Enter`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: approvalTarget
   }
 ]
 

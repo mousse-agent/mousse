@@ -555,11 +555,21 @@ describe('the command table', () => {
 
   it('has no default key for Deny, and keeps one the user sets', () => {
     expect(defaultBindingFor('approval.deny', 'win32')).toBeNull()
-    expect(resolve('Ctrl+Shift+Enter')).toBeNull()
-    expect(resolve('Ctrl+Shift+Enter', context(), { 'approval.deny': 'CommandOrControl+Shift+Enter' })).toBe('approval.deny')
+    expect(resolve('Ctrl+Alt+Enter')).toBeNull()
+    expect(resolve('Ctrl+Alt+Enter', context(), { 'approval.deny': 'CommandOrControl+Alt+Enter' })).toBe('approval.deny')
     // Unbound is its default already: nothing is stored.
     expect(normalizeShortcuts({ 'approval.deny': null }, 'win32')).toEqual({})
-    expect(normalizeShortcuts({ 'approval.deny': 'Ctrl+Shift+Enter' }, 'win32')).toEqual({ 'approval.deny': 'Ctrl+Shift+Enter' })
+    expect(normalizeShortcuts({ 'approval.deny': 'Ctrl+Alt+Enter' }, 'win32')).toEqual({ 'approval.deny': 'Ctrl+Alt+Enter' })
+  })
+
+  it('switches the send mode with Ctrl+Shift+Enter (Cmd+Shift+Enter on a Mac), a key no other command has', () => {
+    expect(defaultBindingFor('composer.switchSendMode', 'win32')).toBe('CommandOrControl+Shift+Enter')
+    expect(resolve('Ctrl+Shift+Enter')).toBe('composer.switchSendMode')
+    expect(resolve('Meta+Shift+Enter', context({ platform: 'darwin' }))).toBe('composer.switchSendMode')
+    expect(findConflicts({}, 'win32')).toEqual([])
+    expect(findConflicts({}, 'darwin')).toEqual([])
+    // A key the person gave Deny before wins over the new default.
+    expect(resolve('Ctrl+Shift+Enter', context(), { 'approval.deny': 'CommandOrControl+Shift+Enter' })).toBe('approval.deny')
   })
 })
 

@@ -27,7 +27,8 @@ import {
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
 import { ComposerFooter, STEER_BINDING, isSteerKey, type ComposerRunProps } from './ComposerFooter'
-import { markSteerKey } from '../lib/steerKey'
+import { markSteerKey, steersOnEnter, type SendMode } from '../lib/steerKey'
+import { useThreadSendMode } from '../lib/sendMode'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
@@ -87,7 +88,7 @@ export interface ChatComposerProps {
   /**
    * Receives the inline `@skill` token (if any) so the parent can send this
    * prompt in skill mode without flipping the global chat mode. `steer` is set
-   * when Alt+Enter sent the text during a run: it goes into the running turn.
+   * when the text was sent as a steer during a run: it goes into the running turn.
    */
   onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
   /** What the send button says it does, when the parent sends somewhere other than the thread (see `ComposerFooter`). */
@@ -108,6 +109,12 @@ export interface ChatComposerProps {
   mentionScope?: { scopeKey: string; threadId?: string; projectId?: string }
   /** The thread's permission mode and how to change it (see `ComposerFooter`). */
   permission?: ComponentProps<typeof ComposerFooter>['permission']
+  /**
+   * The thread whose send mode (Queue or Steer, `lib/sendMode.ts`) Enter follows while a reply runs; the mode
+   * button left of send shows and switches it. Absent (a bot's chat, which never steers): Enter queues and there is
+   * no button.
+   */
+  sendModeThreadId?: string
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 120
@@ -170,11 +177,19 @@ export function ChatComposer({
   banner,
   searchMentions,
   mentionScope,
-  permission
+  permission,
+  sendModeThreadId
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  // The send mode is a choice only while a reply runs: idle, Enter just sends. A card that takes the message (an open
+  // question, a waiting approval: `sendLabel`) keeps Enter for itself.
+  const [threadSendMode, setThreadSendMode] = useThreadSendMode(sendModeThreadId)
+  const sendModeShown = Boolean(sendModeThreadId) && loading && !sendLabel
+  const sendMode: SendMode = sendModeShown ? threadSendMode : 'queue'
+  const switchSendMode = () => setThreadSendMode(sendMode === 'steer' ? 'queue' : 'steer')
+  useCommand('composer.switchSendMode', switchSendMode, () => sendModeShown && !disabled && isShown(composerInputRef.current))
   // The prompt Up brought back, until it is sent or edited: Escape clears it again.
   const recalledRef = useRef<string | null>(null)
   // Two composers can be mounted at once (the local thread behind a remote one): the shown one answers.
@@ -649,11 +664,11 @@ export function ChatComposer({
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      // Ctrl+Enter (Cmd+Enter on macOS) during a run steers the running turn; otherwise it sends like Enter.
-      // Alt+Enter, the earlier steer key, still steers.
-      const steer = loading && (isSteerKey(e, platform) || (e.altKey && !e.ctrlKey && !e.metaKey))
+      // During a run Enter follows the thread's send mode and Ctrl+Enter (Cmd+Enter on macOS) does the other one;
+      // Alt+Enter, the earlier steer key, still steers. With no run every Enter sends.
+      const steer = loading && steersOnEnter(e, platform, sendMode)
       // The chord pressed again a moment later finds an empty composer: it must not answer an approval then.
-      if (steer) markSteerKey()
+      if (loading && (steer || isSteerKey(e, platform))) markSteerKey()
       submit(steer ? { steer: true } : undefined)
     }
   }
@@ -778,7 +793,9 @@ export function ChatComposer({
           onFocus={resizeDraft}
           placeholder={
             placeholder ?? (loading
-              ? `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
+              ? sendMode === 'steer'
+                ? `Steer the reply · ${formatBinding(STEER_BINDING, platform)} queues`
+                : `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
               : 'Ask anything · @ files · / commands')
           }
           rows={3}
@@ -886,13 +903,14 @@ export function ChatComposer({
         isRecording={isRecording}
         recordingPending={recordingPending}
         transcribing={transcribing}
-        onSend={() => submit()}
+        onSend={() => submit(sendMode === 'steer' ? { steer: true } : undefined)}
         sendLabel={sendLabel}
         onStop={handleStop}
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}
         allowAttachWhileLoading
         permission={permission}
+        {...(sendModeShown ? { sendMode: { mode: sendMode, onSwitch: switchSendMode } } : {})}
       />
     </div>
   )

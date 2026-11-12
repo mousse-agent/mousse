@@ -783,14 +783,34 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
   box-shadow: 0 2px 10px rgba(var(--accent-rgb), 0.35);
 }
 
-/* The send slot (Send, Queue, Stop, Stop recording), the Stop beside Queue and the mic are circles of
-   the same 30px. Keyboard focus is the shared focus fill over the circle; a filled Send keeps its own
-   light and glow under it. */
-.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn) {
+/* The send slot (Send, Queue, Stop, Stop recording), the Stop beside Queue, the send mode and the mic are
+   circles of the same 30px. Keyboard focus is the shared focus fill over the circle; a filled Send keeps
+   its own light and glow under it. */
+.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-send-mode-btn, .composer-dictate-btn) {
   border-radius: 50%;
 }
 
-.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn):focus-visible {
+/* The send mode's fill (Steer, hover, focus) is a 26px circle inside the 30px button, so it never touches the
+   send circle beside it. Steer gets a soft fill so the mode reads at a glance; Queue is a plain icon. */
+.app .chat-input-area .composer-send-mode-btn {
+  padding: 2px;
+}
+
+.app .chat-input-area .composer-send-mode-btn,
+.app .chat-input-area .composer-send-mode-btn:hover:not(:disabled) {
+  background-clip: content-box;
+}
+
+.app .chat-input-area .composer-send-mode-btn.is-steer {
+  background-color: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  color: var(--text-primary);
+}
+
+.app .chat-input-area .composer-send-mode-btn.is-steer:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--text-primary) 14%, transparent);
+}
+
+.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-send-mode-btn, .composer-dictate-btn):focus-visible {
   outline: none;
   background-image: var(--ui-focus-layer);
 }
