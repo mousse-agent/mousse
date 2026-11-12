@@ -294,7 +294,8 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
 
     // Find inside a 5,000-line fenced block (a row of ordinary height with its own scroller) that is not mounted: the first line,
     // a 400-column line and the last line are each shown inside the block and inside the transcript, going forward, around the
-    // end and backward. The block's scroller moves vertically to the line and, for the wide one, horizontally to the match.
+    // end and backward. The block's scroller moves vertically to the line. Long lines wrap by default, so the wide one needs no
+    // sideways scroll (scrolling a block sideways to a match is covered in findInThreadDom.test.ts).
     expect(find.fence.map(visit => visit.count)).toEqual(['1 of 3', '2 of 3', '3 of 3', '1 of 3', '3 of 3', '2 of 3', '1 of 3'])
     for (const [index, visit] of find.fence.entries()) {
       const label = `visit ${index} (${visit.count})`
@@ -306,15 +307,16 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
       expect(visit.geometry?.inContainer, label).toBe(true)
       expect(visit.geometry?.body?.inside, label).toBe(true)
       expect(visit.turns, label).toBeLessThanOrEqual(60)
-      // The block is capped at 640 px and scrolls inside itself, so the row stays an ordinary height.
+      // The block is capped at 640 px and scrolls inside itself, so the row stays an ordinary height: the block, the prompt,
+      // the text around the block and the toolbar.
       expect(visit.fence.bodies[0]!.clientHeight, label).toBeLessThanOrEqual(640)
       expect(visit.fence.bodies[0]!.scrollHeight, label).toBeGreaterThan(20000)
-      expect(visit.fence.rowHeight, label).toBeLessThan(700)
+      expect(visit.fence.rowHeight, label).toBeLessThan(640 + 300)
       const body = visit.geometry!.body!
       if (visit.count === '1 of 3') expect(body.scrollTop, label).toBeLessThanOrEqual(1)
       if (visit.count === '2 of 3') {
         expect(body.scrollTop, label).toBeGreaterThan(10000)
-        expect(body.scrollLeft, label).toBeGreaterThan(0)
+        expect(body.scrollLeft, label).toBe(0)
       }
       if (visit.count === '3 of 3') expect(body.scrollHeight - body.scrollTop - body.clientHeight, label).toBeLessThanOrEqual(40)
     }
