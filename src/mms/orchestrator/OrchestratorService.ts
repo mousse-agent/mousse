@@ -1,5 +1,5 @@
 import { profilerService } from '../diagnostics/profilerService'
-import { contextHandoff, previousTurnModel } from './contextHandoff'
+import { contextHandoff, modelChangeNote, previousTurnModel } from './contextHandoff'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
 import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
@@ -2858,6 +2858,24 @@ export class OrchestratorService extends EventEmitter {
     } catch {
       return undefined
     }
+  }
+
+  /**
+   * The model-change note for this turn (`modelChangeNote`), from its own message: the one it admitted, or, for a
+   * run of a message already in the transcript (a retry, a run started again after a restart), that message.
+   */
+  private modelChangeNoteFor(messages: readonly ChatMessage[], admittedFrom: number, turnId: string, reused: boolean): string | undefined {
+    const own = (message: ChatMessage): boolean => message.role === 'user' && !message.hidden && !message.steered
+    const lastIndex = (test: (message: ChatMessage) => boolean): number => {
+      for (let at = messages.length - 1; at >= 0; at -= 1) if (test(messages[at])) return at
+      return -1
+    }
+    let index = reused
+      ? lastIndex((message) => own(message) && message.turnId === turnId)
+      : messages.findIndex((message, at) => at >= admittedFrom && own(message))
+    if (index < 0 && reused) index = lastIndex(own)
+    if (index < 0) return undefined
+    return modelChangeNote(messages, index, (provider) => this.harness.providerName(provider))
   }
 
   /** The conversation branch a thread is on now, as its workspace record says; `main` when it has none. */
@@ -11834,6 +11852,9 @@ export class OrchestratorService extends EventEmitter {
         content: userContent, images, mode, modelOverride, planning
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
+      // The first turn on a different model: the agent is told which model it is and which wrote the earlier replies.
+      const modelNote = displayUserMessage ? this.modelChangeNoteFor(session.messages, turnPresentationStart, turnId, reuseLastUser) : undefined
+      const prompted = modelNote ? `${modelNote}\n\n${userContent}` : userContent
       const activeMessages = getActiveMessages(this.nativeContext)
       const turnInput: TurnInput = {
         runId: engineRunId ?? turnId,
@@ -11854,7 +11875,7 @@ export class OrchestratorService extends EventEmitter {
         child: this.childTurnPolicy(session),
         ...(opts?.source === 'provider-continuation' ? { continuation: true, continuationId: opts.continuationId } : {}),
         ...(opts?.agent ? { fromAgent: true as const } : {}),
-        prompt: (editNote ? `${editNote}\n\n` : '') + (handoffs ? handoffs.prompt(userContent) : userContent),
+        prompt: (editNote ? `${editNote}\n\n` : '') + (handoffs ? handoffs.prompt(prompted) : prompted),
         messages: handoffs ? handoffs.messages(activeMessages) : activeMessages,
         // A switch handoff stands in for the transcript, including its compaction memory.
         contextSummary: handoffs?.replaceHistory ? undefined : getCompactionSummary(this.nativeContext),
