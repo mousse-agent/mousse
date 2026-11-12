@@ -110,7 +110,8 @@
 .bot-images[data-count='1'] > .bot-image { height: 195px; }
 .bot-image.is-inline { display: inline-block; width: 260px; height: 180px; margin: 6px 0; vertical-align: top; }
 button.bot-image { cursor: zoom-in; }
-button.bot-image:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Keyboard focus is a fill: the picture dims a little, as the rest of the app highlights. */
+button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-image > img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .bot-image.is-failed { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 8px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); text-align: center; }
 .bot-image.is-inline.is-failed { display: inline-flex; }
