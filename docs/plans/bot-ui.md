@@ -128,14 +128,15 @@ Checked open PRs, issues created since 3 Nov, and PRs merged since 4 Nov (5 Nov 
 
 ### 4.2 New bot (mockup 02)
 
-One small dialog in the Chats dialog style (`chat-dialog`):
+One small dialog in the Chats dialog style (`chat-dialog`), in three short steps shown with the same numbered step bar as Add provider (`ui/WizardSteps`). All of it on one screen was too much at once.
 
-1. **Pick a look.** The dialog opens with one already picked: a colour and accessory the owner's other bots don't use yet (§4.3). A large live preview sits on the left. On the right are the eight colours and the 12 accessories, each accessory shown on the mouse. **Shuffle** under the preview picks both. Most owners will not touch any of it.
-2. **Name.** One line, optional. The placeholder says "Optional. Leave it empty and the bot names itself."
-3. **What should it do?** One text box. The placeholder gives an example: "every morning, tell me which emails need a reply."
-4. **Create bot.** It is enabled once the sentence is written.
+1. **Look.** The dialog opens with one already picked: a colour and accessory the owner's other bots don't use yet (§4.3), so Next works at once. A large live preview sits on the left with **Shuffle** and the character under it. On the right are the eight colours, the eye shapes and the 12 accessories, each shown on the chosen character. Most owners will not touch any of it.
+2. **What it does.** **Name**: one line, optional; the placeholder says "Optional. Leave it empty and the bot names itself." **What should it do?**: one text box; the placeholder gives an example, "every morning, tell me which emails need a reply." Next waits for the sentence.
+3. **Runs on.** This computer, and By usage or a model picked by hand (#673). **Create bot** is here. An older service without `bots.model.choices` has no Runs on step, so Create bot is on step 2.
 
-If the name is left empty, the bot names itself from the sentence ("Inbox helper"). Either way it can be renamed from its menu or by asking. There are no model, permission, schedule or device fields.
+Back and Next move between the steps; a finished step in the bar can be clicked to return to it. Every step has the same height, so the dialog and its buttons never move. Enter in the name moves on, Cmd/Ctrl+Enter is Next or Create bot, Escape closes, and focus lands on each step's first control. What was put in, and the step, are a draft that survives moving between steps, closing and reopening; once anything is put in, a click beside the dialog no longer closes it. A refused create shows its message on the step that can fix it: a model no longer offered on Runs on, a refused name or sentence on What it does. From Automations the dialog opens on What it does with the automation's words.
+
+If the name is left empty, the bot names itself from the sentence ("Inbox helper"). Either way it can be renamed from its menu or by asking. There are no permission, schedule or device fields, and no model is named until one is picked by hand on Runs on.
 
 The chat opens at once. The bot's first message:
 
@@ -352,7 +353,7 @@ No new Fable round was held for this revision.
 ### Phase 1
 
 - [ ] The Chats tab shows **Bots** where Roster was, with a + button that opens New bot.
-- [ ] New bot has three inputs (a look, already picked and changeable by colour, accessory and Shuffle; an optional name; a description) and one button. Create bot is disabled until the description is written.
+- [ ] New bot has three steps: Look (already picked and changeable by colour, accessory and Shuffle), What it does (an optional name and a description; Next waits for the description) and Runs on, with Create bot. Moving between steps or closing keeps what was put in.
 - [ ] After Create, the bot appears in Bots and Recent with its face and the given or generated name, and its chat opens with the bot's first message.
 - [ ] No screen in the bot flow names a model: not the dialog, header, composer, messages or About.
 - [ ] The composer in a bot chat has only text, attach and send/stop.
