@@ -120,6 +120,8 @@ const FRAME_TURN_WAIT_MS = 2_000
 export const BROWSER_TURN_HOLD_MS = 5 * 60_000
 /** The limit on the owner's picture of a tab, and on closing an ended activation's tab: both are quick or broken. */
 export const BROWSER_SIDE_CALL_MS = 15_000
+/** How long the owner's input waits for the call under way before it is refused as busy. */
+const OWNER_INPUT_WAIT_MS = 30_000
 
 /**
  * One call at a time on a bot's browser, in the order the calls came, across all its activations. A browser without a
@@ -146,7 +148,7 @@ export class BrowserTurns {
    * Runs `work` when its turn comes; a wait longer than `waitMs`, a full queue or `signal` refuses it. It holds the turn
    * at most `holdMs`: then its signal ends it and it fails with a timeout, and the next waiter goes.
    */
-  async run<T>(work: (held: AbortSignal) => Promise<T>, options: { signal?: AbortSignal; tab?: string; waitMs?: number; holdMs?: number; busy?: () => Error } = {}): Promise<T> {
+  async run<T>(work: (held: AbortSignal) => Promise<T>, options: { signal?: AbortSignal; tab?: string; waitMs?: number; holdMs?: number; busy?: () => Error; first?: boolean } = {}): Promise<T> {
     if (this.holder || this.waiting.length) {
       const busy = options.busy ?? (() => new BrowserAutomationError({ code: 'timeout', message: 'Your browser is busy with your other work right now. Try this again in a moment, or carry on without it.' }))
       if (this.waiting.length >= MAX_BROWSER_WAITERS) throw busy()
@@ -168,7 +170,9 @@ export class BrowserTurns {
         }
         if (options.signal?.aborted) return onAbort()
         options.signal?.addEventListener('abort', onAbort, { once: true })
-        this.waiting.push(entry)
+        // The owner's input goes ahead of the calls that wait: it waits only for the one under way.
+        if (options.first) this.waiting.unshift(entry)
+        else this.waiting.push(entry)
       })
     }
     this.holder = options.tab ? { tab: options.tab } : {}
@@ -323,7 +327,9 @@ export class BotBrowsers implements BotBrowserHost {
 
   /**
    * The owner's click, scroll, typing or navigation, while they hold the browser: to the tab they took only, never the
-   * one in front (another run's call may have just brought its own forward). Refused when that tab has gone.
+   * one in front (another run's call may have just brought its own forward). It takes the next turn, ahead of the runs'
+   * waiting calls, so no call pulls another tab forward while it lands (the worker brings its tab forward). Refused
+   * when that tab has gone.
    */
   async input(botId: string, input: BotBrowserInput): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
@@ -331,7 +337,10 @@ export class BotBrowsers implements BotBrowserHost {
     const tabId = state.follow
     const gone = (): BrowserAutomationError => new BrowserAutomationError({ code: 'stale_ref', message: 'The tab you took over has closed. Give the browser back, then take it over again.' })
     if (!tabId && this.held(state)) throw gone()
-    await this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input, ...(tabId ? { tabId } : {}) })).catch((error: unknown) => {
+    await state.turns.run(
+      (held) => this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input, ...(tabId ? { tabId } : {}) }), held),
+      { first: true, waitMs: OWNER_INPUT_WAIT_MS, busy: () => new BrowserAutomationError({ code: 'timeout', message: 'The bot\'s browser is busy finishing a step of its work. Try again in a moment.' }), ...(tabId ? { tab: tabId } : {}) }
+    ).catch((error: unknown) => {
       throw error instanceof BrowserAutomationError && error.code === 'stale_ref' ? gone() : error
     })
     state.lastFrame = undefined

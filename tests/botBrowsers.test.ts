@@ -99,6 +99,18 @@ describe('turns on a bot\'s browser (BrowserTurns)', () => {
     await long
   })
 
+  it("the owner's input goes ahead of the calls that wait: it waits only for the one under way", async () => {
+    const turns = new BrowserTurns()
+    const order: string[] = []
+    let release!: () => void
+    const under = turns.run(() => new Promise<void>((resolve) => { release = resolve }))
+    const runs = [turns.run(async () => { order.push('run b') }), turns.run(async () => { order.push('run c') })]
+    const owner = turns.run(async () => { order.push('owner') }, { first: true })
+    release()
+    await Promise.all([under, owner, ...runs])
+    expect(order).toEqual(['owner', 'run b', 'run c'])
+  })
+
   it('a holder that never returns is stopped at its limit: its call fails, its signal ends, and the next call goes', async () => {
     expect(BROWSER_TURN_HOLD_MS).toBeGreaterThan(4 * 60_000)
     const turns = new BrowserTurns()
@@ -251,14 +263,15 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     // The owner takes over the tab they see.
     expect((await bots.control(BOT_A, 'owner')).control).toBe('owner')
     const field = opened.observation!.elements.find((element) => element.role === 'textbox' && element.name?.trim() === 'Name')!
-    // Meanwhile the second run opens a tab and reads its pages, bringing its own tabs forward between the owner's input.
+    // Meanwhile the second run opens a tab and reads its pages, bringing its own tabs forward before and while the owner
+    // types: a tab in the back takes no input, so each input takes its turn and brings the owner's tab forward.
     await call(second, 'browser_tabs', { operation: 'new', url: `${origin}/nav-a.html` })
     await call(second, 'browser_observe', {})
-    await bots.input(BOT_A, { kind: 'click', x: field.bounds!.x + 5, y: field.bounds!.y + 5 })
+    await Promise.all([bots.input(BOT_A, { kind: 'click', x: field.bounds!.x + 5, y: field.bounds!.y + 5 }), call(second, 'browser_observe', {}), call(second, 'browser_observe', {})])
     await call(second, 'browser_observe', {})
-    await bots.input(BOT_A, { kind: 'type', text: 'Ada' })
+    await Promise.all([call(second, 'browser_observe', {}), bots.input(BOT_A, { kind: 'type', text: 'Ada' }), call(second, 'browser_observe', {})])
     await call(second, 'browser_observe', {})
-    await bots.input(BOT_A, { kind: 'key', key: 'Enter' })
+    await Promise.all([bots.input(BOT_A, { kind: 'key', key: 'Enter' }), call(second, 'browser_observe', {})])
     await call(second, 'browser_observe', {})
     // The view stayed on the owner's tab throughout.
     expect(await bots.view(BOT_A, { frame: true })).toMatchObject({ control: 'owner', activationId: 'act-r1', tab: { url: `${origin}/form.html` } })
