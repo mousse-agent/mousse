@@ -1,3 +1,5 @@
+import { accessSync, constants, realpathSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
 import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
@@ -403,6 +405,11 @@ export interface HarnessDriver {
   readonly knownBroken?: readonly KnownBrokenVersions[]
   /** Where the newest published version is known from; none for an agent whose releases Mousse cannot see. */
   readonly latestVersion?: LatestVersionSource
+  /**
+   * The Homebrew formula or cask of this CLI. A copy Homebrew installed is compared with the version
+   * its tap offers (`brew info`), not the npm one, since `brew upgrade` can only reach that.
+   */
+  readonly brewName?: string
   /** The driver can run several instances (Add dialog); others have only their built-in one. */
   readonly multiInstance: boolean
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */
@@ -591,13 +598,72 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (source === 'managed') return 'managed'
   if (!path) return 'unknown'
   const normalized = path.replace(/\\/g, '/').toLowerCase()
-  if (normalized.includes('/homebrew/') || normalized.includes('/cellar/') || normalized.includes('/linuxbrew/')) return 'brew'
+  if (normalized.includes('/homebrew/') || normalized.includes('/cellar/') || normalized.includes('/caskroom/') || normalized.includes('/linuxbrew/')) return 'brew'
   if (normalized.includes('/pnpm/')) return 'pnpm'
   if (normalized.includes('/.bun/')) return 'bun'
   if (normalized.includes('/node_modules/') || normalized.includes('/npm/') || normalized.endsWith('.cmd')) return 'npm'
   if (normalized.includes('/winget/')) return 'winget'
   if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/')) return 'standalone'
   return 'unknown'
+}
+
+function realPathOf(path: string): string | undefined {
+  try {
+    return realpathSync(path)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The install owner of the executable a link on PATH leads to, else of the link itself.
+ * `/usr/local/bin/codex` is npm's when it links into `lib/node_modules`; `/opt/homebrew/bin/claude`
+ * is Homebrew's cask; `~/.local/bin/claude` is the native installer's.
+ */
+export function installOwnerOf(
+  path: string | undefined,
+  source: 'path' | 'managed' | 'override' | 'bundled',
+  realpath: (path: string) => string | undefined = realPathOf
+): InstallOwner {
+  if (source === 'managed' || !path) return installOwner(path, source)
+  const target = realpath(path)
+  const owner = target && target !== path ? installOwner(target, source) : 'unknown'
+  return owner !== 'unknown' ? owner : installOwner(path, source)
+}
+
+/** The folder a package manager writes when it updates the executable at `target`. */
+function installRoot(target: string): string {
+  const parts = target.split(/[\\/]/)
+  for (const marker of ['node_modules', 'Cellar', 'Caskroom']) {
+    const at = parts.indexOf(marker)
+    if (at > 0) return parts.slice(0, at + 1).join('/') || '/'
+  }
+  return dirname(target)
+}
+
+function writable(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Updating the executable needs rights this user lacks: the folder of the link on PATH or the
+ * package manager's folder is not writable (an npm prefix owned by root). Mousse never runs sudo;
+ * such an update is shown to run by hand. Windows folder rights cannot be read this way.
+ */
+export function updateNeedsElevation(
+  path: string | undefined,
+  owner: InstallOwner | undefined,
+  options: { platform?: NodeJS.Platform; realpath?: (path: string) => string | undefined; canWrite?: (path: string) => boolean } = {}
+): boolean {
+  if (!path || !owner || owner === 'managed' || owner === 'unknown' || (options.platform ?? process.platform) === 'win32') return false
+  const canWrite = options.canWrite ?? writable
+  const target = (options.realpath ?? realPathOf)(path) ?? path
+  return !canWrite(dirname(path)) || !canWrite(installRoot(target))
 }
 
 /** A driver's Add option (`HarnessDriver.addOptions`); the gateway adds whether it is added already. */

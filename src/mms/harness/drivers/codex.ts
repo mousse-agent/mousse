@@ -284,6 +284,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     binaryNames: cliNames('codex'),
     ...compatibilityFields('codex'),
     latestVersion: { kind: 'npm', package: '@openai/codex' },
+    brewName: 'codex',
     multiInstance: true,
     privateHome: true,
     // A managed entry always has a home of its own; an entry on the user's own Codex CLI may (another account).
@@ -313,6 +314,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     nativeToolNames: (neutral) => CODEX_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @openai/codex@latest'
+      if (owner === 'pnpm') return 'pnpm add -g @openai/codex@latest'
+      if (owner === 'bun') return 'bun add -g @openai/codex@latest'
       if (owner === 'brew') return 'brew upgrade codex'
       return undefined
     },

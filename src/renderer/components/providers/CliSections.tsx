@@ -231,6 +231,17 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
       />
     )
   }
+  if (update.kind === 'advisory' && update.manual) {
+    return (
+      <SettingsRow
+        className="prov-update is-advisory"
+        title={target ? `Update to ${target}` : 'Update available'}
+        description="Needs administrator rights. Run it yourself in a terminal:"
+      >
+        <CommandBox command={update.command} label="Copy update command" />
+      </SettingsRow>
+    )
+  }
   const advisory = update.kind === 'advisory'
   const idleText = advisory ? 'Mousse runs this, or run it yourself in a terminal:' : 'Mousse updates it the way it was installed.'
   return (

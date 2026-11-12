@@ -479,7 +479,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                 name={snapshot.displayName}
                 version={formatVersion(snapshot.binary?.version)}
                 update={
-                  snapshot.update && snapshot.update.kind !== 'notice'
+                  snapshot.update && snapshot.update.kind !== 'notice' && !(snapshot.update.kind === 'advisory' && snapshot.update.manual)
                     ? {
                         label: `Update ${snapshot.displayName}${snapshot.update.latestVersion ? ` to ${formatVersion(snapshot.update.latestVersion)}` : ''}`,
                         busy: snapshot.install.state === 'installing',

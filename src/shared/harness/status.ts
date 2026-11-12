@@ -25,14 +25,20 @@ export interface InstanceBinary {
   version?: string
   source: BinarySource
   owner?: InstallOwner
+  /** Updating it needs rights this user lacks (a root-owned npm prefix); Mousse never runs sudo. */
+  needsElevation?: boolean
 }
 
+/** `untested`: `latestVersion` is newer than the versions Mousse was tested with. */
 export type UpdateAffordance =
-  | { kind: 'one_click'; owner: InstallOwner; latestVersion?: string }
-  /** Installed by its owner (npm, brew, the CLI's own installer): Update runs `command`, which can also be copied. */
-  | { kind: 'advisory'; command: string; latestVersion?: string }
+  | { kind: 'one_click'; owner: InstallOwner; latestVersion?: string; untested?: boolean }
+  /**
+   * Installed by its owner (npm, brew, the CLI's own installer): Update runs `command`, which can
+   * also be copied. `manual`: the command needs rights Mousse does not have, so it is only shown.
+   */
+  | { kind: 'advisory'; command: string; latestVersion?: string; untested?: boolean; manual?: boolean }
   /** A newer version is known, but Mousse cannot say how this copy was installed: no command, no action. */
-  | { kind: 'notice'; latestVersion: string }
+  | { kind: 'notice'; latestVersion: string; untested?: boolean }
 
 export type NextStepAction =
   | 'enable'
@@ -267,7 +273,7 @@ function updateStep(snapshot: InstanceSnapshot): NextStep | null {
   if (!update) return null
   if (update.kind === 'one_click') return step(snapshot, 'update')
   if (update.kind === 'notice') return null
-  return { action: 'update', label: 'Update', command: update.command }
+  return { action: 'update', label: update.manual ? 'Update manually' : 'Update', command: update.command }
 }
 
 function withLabel(headline: string, label: string | undefined): string {

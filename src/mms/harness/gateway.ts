@@ -42,8 +42,8 @@ import type { TurnSettlement } from '../run/mcp/McpCredentials'
 import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
+import { dirname, join } from 'node:path'
+import type { InstanceBinary, InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
@@ -63,7 +63,7 @@ import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeC
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
 import type { SetVendorSettingInput, VendorSettingsView } from '../../shared/harness/vendorSettings'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
-import { LatestVersionCache } from './latest'
+import { LatestVersionCache, type LatestVersionSource } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
 import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
@@ -572,6 +572,21 @@ export const PROBE_TTL_MS = 10 * 60_000
 const RETIRED_BOT_RUNNER = { id: 'claude:bots', name: 'Claude for bots' } as const
 /** How long a probe waits for the login-shell PATH before searching the inherited PATH only. */
 const SHELL_PATH_WAIT_MS = 3_000
+/** How often the newest published versions are asked for; `LATEST_TTL_MS` limits real lookups. */
+const LATEST_CHECK_INTERVAL_MS = 60 * 60_000
+
+/**
+ * Where the newest version of an instance's CLI is read: Homebrew's own tap for a copy Homebrew
+ * installed (the version `brew upgrade` reaches), else the driver's source.
+ */
+export function latestSourceFor(driver: Pick<HarnessDriver, 'latestVersion' | 'brewName'>, binary: InstanceBinary | undefined): LatestVersionSource | undefined {
+  if (binary?.owner === 'brew' && driver.brewName) {
+    const brew = binary.path ? join(dirname(binary.path), 'brew') : undefined
+    return { kind: 'brew', name: driver.brewName, ...(brew && existsSync(brew) ? { brew } : {}) }
+  }
+  return driver.latestVersion
+}
+
 /** Every enabled, signed-in instance's model list is refreshed this often (`startModelRefreshSchedule`). */
 export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
 /** The first scheduled pass runs this long after start-up, once the app is up and quiet. */
@@ -881,7 +896,7 @@ export class Harness implements HarnessGateway {
   private readonly modelRefreshes = new Map<string, Promise<void>>()
   private modelSlots = 0
   private readonly modelWaiting: Array<() => void> = []
-  private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; intervalMs: number }
+  private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; latest: ReturnType<typeof setInterval>; intervalMs: number }
 
   constructor(private readonly options: HarnessGatewayOptions) {
     this.instanceMap = options.instanceMap
@@ -2527,7 +2542,7 @@ export class Harness implements HarnessGateway {
   private updateFor(record: InstanceRecord): UpdateAffordance | undefined {
     const good = this.probes.get(record.instanceId)?.lastGood
     if (!good) return undefined
-    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(record.driver.latestVersion)
+    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(latestSourceFor(record.driver, good.binary))
     return updateAffordance(record.driver, good.binary, good.compatibility, latest)
   }
 
@@ -2542,9 +2557,11 @@ export class Harness implements HarnessGateway {
     const packages = new Set<string>()
     for (const instanceId of instanceIds) {
       const entry = entries[instanceId]
-      const source = entry?.enabled ? this.drivers.get(entry.driver)?.latestVersion : undefined
-      if (source?.kind !== 'npm' || packages.has(source.package)) continue
-      packages.add(source.package)
+      const driver = entry?.enabled ? this.drivers.get(entry.driver) : undefined
+      const source = driver ? latestSourceFor(driver, this.probes.get(instanceId)?.lastGood?.binary) : undefined
+      const key = source?.kind === 'npm' ? source.package : source?.kind === 'brew' ? `brew:${source.name}` : undefined
+      if (!source || !key || packages.has(key)) continue
+      packages.add(key)
       void this.latest.refresh(source).then((changed) => {
         if (changed && !this.stopped) this.changed(instanceId)
       })
@@ -3676,9 +3693,12 @@ export class Harness implements HarnessGateway {
     }
     const interval = setInterval(() => pass(intervalMs / 2), intervalMs)
     const startup = setTimeout(() => pass(intervalMs), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
+    // Newest published versions, for the update button: the cache decides when a lookup is due.
+    const latest = setInterval(() => this.refreshLatest(Object.keys(this.instanceMap.list())), LATEST_CHECK_INTERVAL_MS)
     interval.unref?.()
     startup.unref?.()
-    this.modelSchedule = { interval, startup, intervalMs }
+    latest.unref?.()
+    this.modelSchedule = { interval, startup, latest, intervalMs }
   }
 
   /** A probe found another program than before: list its models now, when the instance qualifies. */
@@ -3771,6 +3791,8 @@ export class Harness implements HarnessGateway {
     if (update?.kind === 'one_click') return this.install(instanceId, 'update')
     if (update?.kind === 'notice')
       return harnessFail('unsupported', `Mousse cannot tell how this CLI was installed, so it cannot update it. Version ${update.latestVersion} is available.`, instanceId)
+    if (update?.kind === 'advisory' && update.manual)
+      return harnessFail('unsupported', `Updating needs administrator rights. Run this in a terminal: ${update.command}`, instanceId)
     // Not Mousse's install: its owner's own update command, the one the editor shows to copy.
     if (update?.kind === 'advisory') return this.install(instanceId, 'update', update.command)
     return harnessFail('unsupported', 'No update is available.', instanceId)
@@ -3968,6 +3990,7 @@ export class Harness implements HarnessGateway {
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
+      clearInterval(this.modelSchedule.latest)
       clearTimeout(this.modelSchedule.startup)
       this.modelSchedule = undefined
     }
