@@ -91,6 +91,11 @@ export const SESSION_MAX_SPACE_PROOFS = 8
  */
 export const SESSION_MAX_LIVE_QUEUE_RECORDS = 1280
 export const SESSION_MAX_LIVE_QUEUE_BYTES = 64 * 1024 * 1024
+/**
+ * How long a new request for a stream waits for that stream's stopped snapshot chunk to finish writing
+ * before the owner cuts the chunk and closes the connection, retryably.
+ */
+export const SNAPSHOT_FINISH_DEADLINE_MS = 5_000
 export const SPACE_PROOF_DEADLINE_MS = 30_000
 export const SPACE_DISCOVERY_MAX_CONTROLS = 64
 export const SPACE_DISCOVERY_MAX_CONTROL_BYTES = 128 * 1024

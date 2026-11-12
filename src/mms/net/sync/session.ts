@@ -44,6 +44,7 @@ import {
   SESSION_MAX_LIVE_QUEUE_RECORDS,
   SESSION_MAX_SUBSCRIPTIONS,
   SESSION_PING_INTERVAL_MS,
+  SNAPSHOT_FINISH_DEADLINE_MS,
   SESSION_MAX_SPACE_PROOFS,
   SPACE_PROOF_DEADLINE_MS
 } from '../../../shared/net/limits'
@@ -245,6 +246,12 @@ export class NetSyncSession implements SyncSession, TunnelLink {
    * the new transfer.
    */
   private finishing = new Map<StreamId, Promise<void>>()
+  /** The one request per stream that waits for that stream's finishing chunk (see `holdRequest`). */
+  private held = new Map<StreamId, { ready: Promise<void>; release(): void }>()
+  /** Per stream with a held request: when the finishing chunk is given up and the connection cut. */
+  private finishDeadlines = new Map<StreamId, { cancel(): void }>()
+  /** How long a held request waits for a finishing chunk before the connection closes, retryably. */
+  private finishDeadlineMs = SNAPSHOT_FINISH_DEADLINE_MS
   private sendingUploads = new Map<BlobId, { stream: StreamId; controller: AbortController }>()
   private blobJobs = new Map<BlobId, { stream: StreamId; controller: AbortController }>()
   private snapshotWaiting = new Set<StreamId>()
@@ -287,18 +294,17 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         clock: this.clock,
         onBytesReceived: (count) => this.recordPreauthBytes(count)
       })
+    const caps: SessionCapability[] = options.capabilities ?? [
+      'streams.v1' as const,
+      ...(options.blobs ? ['blobs.v1' as const] : []),
+      ...(options.rpc ? ['rpc.v1' as const] : []),
+      ...(options.tunnels ? ['tunnel.v1' as const] : []),
+      ...(options.discovery || options.spaceIdentity ? ['space.discovery.v1' as const] : [])
+    ]
+    // Added before duplicates are removed: a caller that lists it too still offers it once.
     this.localCaps = [
-      ...new Set(
-        options.capabilities ?? [
-          'streams.v1' as const,
-          ...(options.blobs ? ['blobs.v1' as const] : []),
-          ...(options.rpc ? ['rpc.v1' as const] : []),
-          ...(options.tunnels ? ['tunnel.v1' as const] : []),
-          ...(options.discovery || options.spaceIdentity ? ['space.discovery.v1' as const] : [])
-        ]
-      )
+      ...new Set([...caps, ...(caps.includes('streams.v1') ? ['snapshot.stale.v1' as const] : [])])
     ].filter((cap) => cap !== 'presence.v1' || !!options.verifyPresence)
-    if (this.localCaps.includes('streams.v1')) this.localCaps.push('snapshot.stale.v1')
     this.opened = new Promise((resolve, reject) => {
       this.openResolve = resolve
       this.openReject = reject
@@ -728,7 +734,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       this.authorizedRead(stream)
     } catch (error) {
       if (!this.readLost(error)) throw error
-      void this.failServingStream(stream, 'forbidden').catch((cause) => this.failCarrier(cause))
+      void this.endForbidden(stream)
       return
     }
     // One delta per session is written at a time, so deltas never hold more than one message in
@@ -755,10 +761,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         // The read right may have gone while the delta waited; it is dropped, and the stream ends.
         this.authorizedRead(next.stream)
       } catch (error) {
-        if (this.readLost(error))
-          void this.failServingStream(next.stream, 'forbidden').catch((cause) =>
-            this.failCarrier(cause)
-          )
+        if (this.readLost(error)) void this.endForbidden(next.stream)
         continue
       }
       this.deltaSending = true
@@ -862,7 +865,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       // A caught-up reader that lost the right to read the stream (its `read` capability removed, removed
       // from the space) is told on that stream alone. Without this it stays live on both sides and
       // nothing more arrives. None of the record is sent.
-      await this.failServingStream(stream, 'forbidden')
+      await this.endForbidden(stream)
     }
   }
 
@@ -896,7 +899,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       this.authorizedRead(stream)
     } catch (error) {
       // A stream fenced or a session closing sends nothing; its own teardown ends the subscription.
-      if (this.readLost(error)) await this.failServingStream(stream, 'forbidden')
+      if (this.readLost(error)) await this.endForbidden(stream)
       return
     }
     await this.requireSnapshot(stream)
@@ -913,35 +916,84 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   }
 
   /**
-   * Waits for a stopped snapshot chunk of `stream` that is still being written, so everything that
-   * answers a new request for the stream goes out after it. False when the session closed meanwhile.
+   * Holds a `subscribe` or `snapshot.get` for a stream whose stopped chunk is still being written, so
+   * nothing that answers it can overtake that chunk. Undefined when nothing is finishing. One request per
+   * stream waits: a newer one replaces it and an `unsubscribe` drops it, unanswered either way, since the
+   * reader no longer wants it. If the chunk is not out within `finishDeadlineMs` (a reader that stopped
+   * taking bulk data), the connection closes, retryably, which also cuts the chunk. The caller checks
+   * `takeHeld` once the hold is released, and starts serving without awaiting anything in between.
    */
-  private async afterFinishing(stream: StreamId): Promise<boolean> {
-    const finishing = this.finishing.get(stream)
-    if (!finishing) return true
-    await finishing
-    return this.currentState === 'open'
+  private holdRequest(stream: StreamId): { ready: Promise<void>; release(): void } | undefined {
+    if (!this.finishing.has(stream)) return undefined
+    this.dropHeld(stream)
+    let release!: () => void
+    const ready = new Promise<void>((resolve) => (release = resolve))
+    const held = { ready, release }
+    this.held.set(stream, held)
+    if (!this.finishDeadlines.has(stream))
+      this.finishDeadlines.set(
+        stream,
+        this.clock.setTimeout(() => {
+          this.finishDeadlines.delete(stream)
+          if (this.finishing.has(stream))
+            this.fail(
+              new NetError('route_unreachable', 'A stopped snapshot chunk did not finish in time.')
+            )
+        }, this.finishDeadlineMs)
+      )
+    return held
+  }
+  /** Whether `held` is still the request to answer for `stream`; it is no longer held afterwards. */
+  private takeHeld(stream: StreamId, held: { ready: Promise<void> }): boolean {
+    if (this.held.get(stream) !== held || this.currentState !== 'open') return false
+    this.held.delete(stream)
+    return true
+  }
+  private dropHeld(stream: StreamId): void {
+    const held = this.held.get(stream)
+    if (!held) return
+    this.held.delete(stream)
+    held.release()
+  }
+  /** Once a stream's finishing chunk is out: its deadline stops and its held request goes ahead. */
+  private finished(stream: StreamId): void {
+    this.finishDeadlines.get(stream)?.cancel()
+    this.finishDeadlines.delete(stream)
+    this.held.get(stream)?.release()
+  }
+  /**
+   * Ends the subscription on `stream` with `forbidden`, or with none answers the request alone, the same
+   * bytes a block sends. A `forbidden` refused by a full carrier closes the connection, retryably, so the
+   * reader is never left subscribed with nothing arriving.
+   */
+  private endForbidden(stream: StreamId): Promise<void> {
+    return (
+      this.serving.has(stream)
+        ? this.failServingStream(stream, 'forbidden')
+        : this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
+    ).catch((error) => this.failCarrier(error))
   }
   /**
    * Answers a request for a stream the peer may not read with `forbidden` on that stream, the same
    * answer a block gets, and keeps the connection up. A subscription it still holds there ends with it.
+   * Undefined, without waiting for anything, when the peer may read it.
    */
-  private async refuseUnreadable(stream: StreamId): Promise<boolean> {
+  private refuseUnreadable(stream: StreamId): Promise<void> | undefined {
     try {
       this.authorizedRead(stream)
-      return false
+      return undefined
     } catch (error) {
       if (!this.readLost(error)) throw error
     }
-    if (this.serving.has(stream)) await this.failServingStream(stream, 'forbidden')
-    else await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
-    return true
+    return this.endForbidden(stream)
   }
-  /** Answers a request for a stream the peer is blocked from with `forbidden`, on that stream only. */
-  private async refuseBlocked(stream: StreamId): Promise<boolean> {
-    if (!this.options.isStreamBlocked?.(stream, this.peer)) return false
-    await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
-    return true
+  /**
+   * Answers a request for a stream the peer is blocked from with `forbidden`, on that stream only.
+   * Undefined, without waiting for anything, when it is not blocked.
+   */
+  private refuseBlocked(stream: StreamId): Promise<void> | undefined {
+    if (!this.options.isStreamBlocked?.(stream, this.peer)) return undefined
+    return this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
   }
   /**
    * Ends everything this session serves to its peer, as a block on the peer does: each live
@@ -1066,6 +1118,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         this.serving.delete(stream)
         this.cancelSnapshot(stream)
       }
+    for (const stream of [...this.held.keys()]) if (selected({ stream })) this.dropHeld(stream)
     for (const [stream, receiver] of this.subscriptions)
       if (selected({ stream })) {
         receiver.close()
@@ -1190,14 +1243,23 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         return // Hint only. Independently verified roster controls teardown.
       case 'subscribe':
         this.requireCap('streams.v1')
-        if (!(await this.afterFinishing(h.stream))) return
-        if (await this.refuseBlocked(h.stream)) return
-        if (await this.refuseUnreadable(h.stream)) return
-        await this.serve(h.stream, h.after, signal)
+        {
+          const held = this.holdRequest(h.stream)
+          if (held) {
+            await held.ready
+            if (!this.takeHeld(h.stream, held)) return
+          }
+          // Nothing is awaited from here until serving starts, so an `unsubscribe` behind this request
+          // cannot run first and leave the stream served.
+          const refused = this.refuseBlocked(h.stream) ?? this.refuseUnreadable(h.stream)
+          if (refused) return await refused
+          await this.serve(h.stream, h.after, signal)
+        }
         return
       case 'unsubscribe':
         this.serving.get(h.stream) && (this.serving.get(h.stream)!.cancelled = true)
         this.serving.delete(h.stream)
+        this.dropHeld(h.stream)
         this.cancelSnapshot(h.stream)
         return
       case 'subscribed':
@@ -1220,10 +1282,18 @@ export class NetSyncSession implements SyncSession, TunnelLink {
         return
       case 'snapshot.get':
         this.requireCap('streams.v1')
-        if (!(await this.afterFinishing(h.stream))) return
-        if (await this.refuseBlocked(h.stream)) return
-        if (await this.refuseUnreadable(h.stream)) return
-        await this.serveSnapshot(h.stream, signal)
+        {
+          const held = this.holdRequest(h.stream)
+          if (held) {
+            await held.ready
+            if (!this.takeHeld(h.stream, held)) return
+          }
+          // Nothing is awaited from here until serving starts, so an `unsubscribe` behind this request
+          // cannot run first and leave the stream served.
+          const refused = this.refuseBlocked(h.stream) ?? this.refuseUnreadable(h.stream)
+          if (refused) return await refused
+          await this.serveSnapshot(h.stream, signal)
+        }
         return
       case 'snapshot.chunk':
         this.requireCap('streams.v1')
@@ -1739,7 +1809,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       }
     } catch (error) {
       if (!this.readLost(error)) throw error
-      if (this.serving.get(stream) === attempt) await this.failServingStream(stream, 'forbidden')
+      if (this.serving.get(stream) === attempt) await this.endForbidden(stream)
       // A newer subscription replaced this one. It may be caught up already, and then nothing checks
       // its read right until a record is published, so it is checked now.
       else await this.endIfReadLost(stream)
@@ -1751,7 +1821,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     try {
       this.authorizedRead(stream)
     } catch (error) {
-      if (this.readLost(error)) await this.failServingStream(stream, 'forbidden')
+      if (this.readLost(error)) await this.endForbidden(stream)
     }
   }
   /** One replay page, or undefined when the store no longer holds the history after `cursor`. */
@@ -1797,7 +1867,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     )
     this.finishing.set(stream, settled)
     void settled.then(() => {
-      if (this.finishing.get(stream) === settled) this.finishing.delete(stream)
+      if (this.finishing.get(stream) !== settled) return
+      this.finishing.delete(stream)
+      this.finished(stream)
     })
   }
   private async serveSnapshot(stream: StreamId, signal?: AbortSignal): Promise<void> {
@@ -1847,9 +1919,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       // Whatever subscription holds the stream now ends: the one this transfer was for, or a newer one
       // whose own snapshot request joined this transfer and would otherwise wait for chunks forever.
       // With none, the request alone is answered. Either way the reader gets one `forbidden`.
-      if (this.serving.has(stream)) await this.failServingStream(stream, 'forbidden')
-      else if (!attempt)
-        await this.send({ t: 'error', re: stream, error: wireError(new NetError('forbidden')) })
+      if (this.serving.has(stream) || !attempt) await this.endForbidden(stream)
     } finally {
       if (this.snapshotJobs.get(stream) === job) {
         this.snapshotJobs.delete(stream)
@@ -2390,6 +2460,9 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     this.serving.clear()
     this.deltas.clear()
     for (const stream of [...this.snapshotJobs.keys()]) this.cancelSnapshot(stream)
+    for (const stream of [...this.held.keys()]) this.dropHeld(stream)
+    for (const deadline of this.finishDeadlines.values()) deadline.cancel()
+    this.finishDeadlines.clear()
     this.snapshotWaiting.clear()
     this.snapshotReceiving.clear()
     for (const job of this.jobs.values()) job.controller?.abort()
