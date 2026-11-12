@@ -116,7 +116,7 @@ function provider(): ProviderWithStatus {
   }
 }
 
-function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; setting?: IdleCompactionSetting; compacting?: boolean; loading?: boolean } = {}) {
+function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; setting?: IdleCompactionSetting; compacting?: boolean; loading?: boolean; contextHidden?: boolean } = {}) {
   const onCompactNow = vi.fn()
   const onContextOpenChange = vi.fn()
   const props: ComposerFooterProps = {
@@ -133,7 +133,8 @@ function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; s
       contextOpen: options.open ?? false,
       onContextOpenChange,
       onCompactNow,
-      compacting: options.compacting ?? false
+      compacting: options.compacting ?? false,
+      ...(options.contextHidden ? { contextHidden: true } : {})
     },
     loading: options.loading ?? false,
     onAttachClick: vi.fn()
@@ -179,6 +180,18 @@ describe('the composer chip', () => {
     expect(chipButton()).toBeNull()
     render(usage(182_000, 2 * HOUR, HOUR), { loading: true })
     expect(chipButton()).toBeNull()
+  })
+
+  it("never shows, nor the ring or its popover, on a bot's own thread, with the ring on and a cold cache", () => {
+    render(usage(182_000, 2 * HOUR, HOUR), { open: true, contextHidden: true })
+    expect(chipButton()).toBeNull()
+    expect(document.querySelector('.composer-context-anchor, .context-usage-popover, .context-usage-cache')).toBeNull()
+    render(usage(182_000, 2 * HOUR, HOUR), { compacting: true, contextHidden: true })
+    expect(chipButton()).toBeNull()
+    // The same footer on an ordinary thread has both.
+    render(usage(182_000, 2 * HOUR, HOUR))
+    expect(chipButton()?.textContent).toBe('Full · 182K')
+    expect(document.querySelector('.composer-context-anchor')).not.toBeNull()
   })
 })
 

@@ -1822,7 +1822,8 @@ export function OrchestratorChat() {
                 contextOpen,
                 onContextOpenChange: setContextOpen,
                 ...(!newChat && activeThreadId ? { onCompactNow: handleCompactNow } : {}),
-                compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId)
+                compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId),
+                ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}
               loading={turnActive || loading}
               stoppable={turnActive || loading || turnStoppable}
