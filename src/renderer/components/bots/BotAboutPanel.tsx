@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Bell, Clock, Shield, X } from '../../lib/icons'
+import { Bell, Brain, Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotMemoryEntry } from '../../../shared/bots/personal/memory'
 import type { BotComputerChoice, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
 import { useAppStore } from '../../stores/appStore'
@@ -79,8 +80,42 @@ function RunsOn({ botId, name }: { botId: string; name: string }) {
 }
 
 /**
+ * What the bot remembers: the entries every turn carries, each with Remove. Read again whenever the bot's detail
+ * reloads (after each of its turns), so an entry it just saved shows up.
+ */
+function Memory({ botId, detail }: { botId: string; detail: unknown }) {
+  const [entries, setEntries] = useState<BotMemoryEntry[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const client = botsClient()
+  useEffect(() => {
+    let live = true
+    client.memory(botId).then((listing) => { if (live) setEntries(listing.entries.filter((entry) => entry.status === 'active' && entry.text)) }, (cause) => { if (live) setError(errorText(cause)) })
+    return () => { live = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [botId, detail])
+  const remove = async (entry: BotMemoryEntry) => {
+    setError(null)
+    try {
+      await client.forgetMemory(botId, entry.id)
+      setEntries((current) => current?.filter((item) => item.id !== entry.id) ?? null)
+    } catch (cause) {
+      setError(errorText(cause))
+    }
+  }
+  return <>
+    {entries?.length
+      ? entries.map((entry) => <div className="bot-about-row" key={entry.id} data-testid="bot-about-memory">
+        <Brain size={14} aria-hidden /><span title={entry.text ?? undefined}><span className="bot-about-clamp">{entry.text}</span></span>
+        <button type="button" aria-label={`Remove memory: ${entry.text}`} onClick={() => void remove(entry)}>Remove</button>
+      </div>)
+      : entries || !error ? <p className="bot-about-empty">{entries ? 'Nothing yet. Tell it what to remember.' : 'Loading…'}</p> : null}
+    {error ? <p className="bot-about-empty" role="alert">{error}</p> : null}
+  </>
+}
+
+/**
  * About this bot (bot-ui §4.8): the whole mouse, the name and the description; what it can use and
- * when it runs, each with Remove; what it runs on, by hand or by usage (#673); Pause and Delete.
+ * when it runs, each with Remove; what it remembers, each with Remove; what it runs on, by hand or by usage (#673); Pause and Delete.
  */
 export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const detail = useBotsStore((s) => s.details[bot.id])
@@ -121,6 +156,8 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
         {`Runs ${detail.runs.length} ${detail.runs.length === 1 ? 'automation' : 'automations'}`}
       </button>
       : null}
+    <h3>MEMORY</h3>
+    <Memory botId={bot.id} detail={detail} />
     <h3>RUNS ON</h3>
     <RunsOn botId={bot.id} name={bot.name} />
     <div className="bot-about-foot">

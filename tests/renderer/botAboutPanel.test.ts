@@ -6,7 +6,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClient'
+import { AT, fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClient'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -69,7 +69,7 @@ describe('About this bot', () => {
     expect(face.getAttribute('data-colour')).toBe('green')
     expect(head.querySelector('h2')?.textContent).toBe('Inbox helper')
     expect(head.querySelector('p')?.textContent).toBe('Tells me which emails need a reply.')
-    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS', 'RUNS ON'])
+    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS', 'MEMORY', 'RUNS ON'])
   })
 
   it('runs by usage until the owner picks a model by hand, on this computer (#673)', async () => {
@@ -140,8 +140,31 @@ describe('About this bot', () => {
     await show()
     expect([...host.querySelectorAll('.bot-about-empty')].map((element) => element.textContent)).toEqual([
       'Nothing yet. It asks in the chat the first time it needs something.',
-      'Only when you message it. Ask it to run on a schedule.'
+      'Only when you message it. Ask it to run on a schedule.',
+      'Nothing yet. Tell it what to remember.'
     ])
+  })
+
+  it('lists what it remembers and forgets one with Remove', async () => {
+    const entry = (id: string, text: string, status: 'active' | 'expired' = 'active') => ({ id, version: 1, ref: id, kind: 'owner' as const, text, since: AT, learnedAt: AT, by: 'you said' as const, status })
+    fake.memory.b1 = [entry('m1', 'The owner wants no em dashes in my messages.'), entry('m2', 'The owner lives in London.'), entry('m3', 'On leave until 1 Nov 2026.', 'expired')]
+    await show()
+    // Only what every turn carries: an expired entry is not listed.
+    expect(rows('MEMORY')).toEqual(['The owner wants no em dashes in my messages.', 'The owner lives in London.'])
+    await click(button('Remove memory: The owner wants no em dashes in my messages.'))
+    expect(fake.calls).toContainEqual(['forgetMemory', 'b1', 'm1'])
+    expect(rows('MEMORY')).toEqual(['The owner lives in London.'])
+  })
+
+  it('reads its memory again when the bot changes, so an entry it just saved shows up', async () => {
+    await show()
+    expect(rows('MEMORY')).toEqual([])
+    fake.memory.b1 = [{ id: 'm1', version: 1, ref: 'm1', kind: 'owner', text: 'Call the owner Sam.', since: AT, learnedAt: AT, by: 'you said', status: 'active' }]
+    // A detail read over the bridge is a new object each time.
+    fake.details.b1 = { ...fake.details.b1! }
+    await act(async () => { await useBotsStore.getState().loadDetail('b1') })
+    await act(async () => {})
+    expect(rows('MEMORY')).toEqual(['Call the owner Sam.'])
   })
 
   it('pauses, resumes and asks before deleting', async () => {

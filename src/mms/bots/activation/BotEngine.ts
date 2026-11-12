@@ -1183,7 +1183,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       })
       if (!saved) return false
     }
-    // Read at each main dispatch: the provider freezes the pack per activation, and a forget drops it.
+    // Read at each main dispatch: the provider freezes the pack per activation, and a memory save or forget drops it.
     if (this.host.context) {
       try {
         const pack = row.lane === 'chat'

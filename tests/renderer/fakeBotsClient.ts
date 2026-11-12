@@ -4,6 +4,7 @@
  */
 import { vi } from 'vitest'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
+import type { BotMemoryEntry } from '../../src/shared/bots/personal/memory'
 import type { PersonalBotsClient, PersonalBotsEvents } from '../../src/renderer/services/personalBotsClient'
 
 export const AT = '2026-11-07T09:00:00.000Z'
@@ -26,6 +27,8 @@ export interface FakeBots {
   chats: Record<string, BotChatMessage[]>
   details: Record<string, BotDetail>
   live: Record<string, { activationId: string; chip?: BotChip }>
+  /** Each bot's memory entries, as `bots.memory.list` returns them. */
+  memory: Record<string, BotMemoryEntry[]>
   calls: Array<[string, ...unknown[]]>
   emit: {
     changed(botId: string): void
@@ -34,13 +37,14 @@ export interface FakeBots {
   }
 }
 
-export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail> } = {}): FakeBots {
+export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail>; memory?: Record<string, BotMemoryEntry[]> } = {}): FakeBots {
   const listeners = { changed: new Set<(e: { botId?: string }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null }) => void>() }
   const fake: FakeBots = {
     bots: [...(initial.bots ?? [])],
     chats: { ...(initial.chats ?? {}) },
     details: { ...(initial.details ?? {}) },
     live: {},
+    memory: { ...(initial.memory ?? {}) },
     calls: [],
     client: undefined as unknown as PersonalBotsClient,
     events: {
@@ -119,7 +123,9 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       fake.details[botId] = next
       return next
     })),
-    exportMemory: vi.fn((botId, dir) => record('exportMemory', [botId, dir], () => ({ files: [`${dir}/memory.md`] })))
+    exportMemory: vi.fn((botId, dir) => record('exportMemory', [botId, dir], () => ({ files: [`${dir}/memory.md`] }))),
+    memory: vi.fn((botId) => record('memory', [botId], () => ({ entries: (fake.memory[botId] ?? []).map((entry) => ({ ...entry })), gauge: 'core 0/2,000' }))),
+    forgetMemory: vi.fn((botId, id) => record('forgetMemory', [botId, id], () => { fake.memory[botId] = (fake.memory[botId] ?? []).filter((entry) => entry.id !== id) }))
   }
   return fake
 }

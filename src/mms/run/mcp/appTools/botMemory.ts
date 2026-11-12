@@ -68,7 +68,7 @@ export const BOT_MEMORY_TOOL_DEFINITIONS: Record<BotMemoryTool, Tool> = {
   },
   memory_save: {
     name: 'memory_save',
-    description: `Save something to remember in every later turn. One fact or note an entry, under ${MAX_BOT_MEMORY_TEXT_CHARS} characters, with absolute dates ("12 Nov 2026", never "tomorrow"). kind owner: a fact about the owner, only from what the owner said; kind note: your own standing note. When it changes or contradicts an entry, pass replaces with that entry's ref (m12, or m12v2 for its second version). When memory is full, the save fails with the current list: merge or replace entries first. In a run, saves become run notes.`,
+    description: `Save something to remember in every later turn. Save the owner's wishes and corrections ("don't…", "always…", "call me Sam") as kind owner the moment they say them; every later turn follows them. One fact or note an entry, under ${MAX_BOT_MEMORY_TEXT_CHARS} characters, with absolute dates ("12 Nov 2026", never "tomorrow"). kind owner: a fact about the owner, only from what the owner said; kind note: your own standing note. When it changes or contradicts an entry, pass replaces with that entry's ref (m12, or m12v2 for its second version). When memory is full, the save fails with the current list: merge or replace entries first. In a run, saves become run notes.`,
     parameters: Type.Object({
       text: Type.String(),
       kind: Type.Union([Type.Literal('owner'), Type.Literal('note')]),
