@@ -131,7 +131,7 @@ describe('About this bot', () => {
       expect(saves().at(-1)).toEqual({ slots: { talk: { instanceId: 'claude', model: 'haiku' } } })
       // Read again after the save: what the service has now.
       await act(async () => {})
-      expect(picker('Work')?.getAttribute('aria-label')).toBe('Inbox helper\'s Work model: Opus · Low')
+      expect(picker('Work')?.getAttribute('aria-label')).toBe('Inbox helper\'s Work model: Opus · Low on Anthropic API')
     })
 
     it('Advanced shows each kind of work from Work\'s pick, opens by itself when they differ, and closing puts Medium work on all work', async () => {
@@ -140,7 +140,7 @@ describe('About this bot', () => {
       await show()
       await click(host.querySelector('.bot-model-advanced [role="switch"]') ?? undefined)
       expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work'])
-      expect(picker('Hard work')?.getAttribute('aria-label')).toBe('Inbox helper\'s Hard work model: Opus · Medium')
+      expect(picker('Hard work')?.getAttribute('aria-label')).toBe('Inbox helper\'s Hard work model: Opus · Medium on Claude Code')
       // Opening it saves nothing.
       expect(saves()).toEqual([])
       // What the service holds once the pick is saved, which About reads back.

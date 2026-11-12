@@ -25,6 +25,7 @@ export function SettingsModelPicker({
   ariaLabel = 'Model',
   id,
   title,
+  entry,
   disabled
 }: {
   providers: LlmProviderOption[]
@@ -41,6 +42,11 @@ export function SettingsModelPicker({
   id?: string
   /** The button's tooltip; absent, its label. */
   title?: string
+  /**
+   * The entry the choice runs on, shown muted after the model as the menu shows it under a model ("Opus 5.5 · Team
+   * Claude"): for a caller with two entries of one provider. The whole label is cut with an ellipsis, never wrapped.
+   */
+  entry?: string
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -56,6 +62,7 @@ export function SettingsModelPicker({
   const named = selected ? getGroupedModelButtonParts(providerId, pickerId, providers, false, instanceId) : [placeholder]
   const parts = faster ? [named[0]!.replace(/\s*\((?:ultra)?fast\)$/i, ''), ...named.slice(1)] : named
   const label = [...parts, selected ? runLevelText(selection) : '', faster].filter(Boolean).join(' · ')
+  const where = selected && entry ? entry : ''
 
   useEffect(() => {
     if (!open) return
@@ -93,13 +100,13 @@ export function SettingsModelPicker({
         className={`settings-model-btn${open ? ' open' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={`${ariaLabel}: ${label}`}
-        title={title ?? label}
+        aria-label={`${ariaLabel}: ${label}${where ? ` on ${where}` : ''}`}
+        title={title ?? (where ? `${label} on ${where}` : label)}
         disabled={disabled || providers.length === 0}
         onClick={() => setOpen((current) => !current)}
       >
         {selected && <ProviderIcon providerId={providerId} size={14} />}
-        <span className="settings-model-btn-label">{label}</span>
+        <span className="settings-model-btn-label">{label}{where ? <span className="settings-model-btn-entry"> · {where}</span> : null}</span>
         <ChevronDown size={12} aria-hidden="true" />
       </button>
       {open && !disabled && (

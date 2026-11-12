@@ -74,12 +74,22 @@ describe('a bot\'s model rows', () => {
     expect(onPick).toHaveBeenLastCalledWith(['light', 'medium', 'hard'], { instanceId: 'claude', model: 'opus' })
   })
 
-  it('shows a pick with its level, its entry in the tooltip; one not offered now says so', () => {
+  it('shows a pick with its level, and its entry beside it while two entries offer models; one not offered now says so', () => {
     render({ talk: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, light: { instanceId: 'pi:gone', model: 'opus' }, medium: { instanceId: 'pi:gone', model: 'opus' }, hard: { instanceId: 'pi:gone', model: 'opus' } })
-    expect(pickerOf('Talk').getAttribute('aria-label')).toBe('Pip\'s Talk model: Opus 5.5 · High')
+    expect(pickerOf('Talk').getAttribute('aria-label')).toBe('Pip\'s Talk model: Opus 5.5 · High on Anthropic API')
+    // The entry is in the closed control, muted, inside the one label that is cut with an ellipsis.
+    const label = pickerOf('Talk').querySelector('.settings-model-btn-label')!
+    expect(label.textContent).toBe('Opus 5.5 · High · Anthropic API')
+    expect(label.querySelector('.settings-model-btn-entry')!.textContent).toBe(' · Anthropic API')
     expect(pickerOf('Talk').title).toBe('Opus 5.5 on Anthropic API')
     expect(pickerOf('Work').getAttribute('aria-label')).toBe('Pip\'s Work model: opus · not available')
     expect(pickerOf('Work').title).toBe('Not available now. Pick another model.')
+  })
+
+  it('with one entry, a closed row shows the model alone', () => {
+    act(() => root.render(createElement(BotModelRows, { name: 'Pip', providers: [PROVIDERS[0]!], slots: { talk: { instanceId: 'claude', model: 'opus' }, light: null, medium: null, hard: null }, onPick: vi.fn(), onOneWork: vi.fn() })))
+    expect(pickerOf('Talk').getAttribute('aria-label')).toBe('Pip\'s Talk model: Opus 5.5 · Medium')
+    expect(pickerOf('Talk').querySelector('.settings-model-btn-entry')).toBeNull()
   })
 
   it('on a bot from before picks, Pick a model says Mousse chooses until then', () => {
@@ -94,7 +104,7 @@ describe('a bot\'s model rows', () => {
     const advanced = () => host.querySelector<HTMLButtonElement>('[role="switch"]')!
     act(() => advanced().click())
     expect(rows().map((row) => row.querySelector('.bot-model-row-label')!.textContent)).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work'])
-    expect(pickerOf('Hard work').getAttribute('aria-label')).toBe('Pip\'s Hard work model: Opus 5.5 · Medium')
+    expect(pickerOf('Hard work').getAttribute('aria-label')).toBe('Pip\'s Hard work model: Opus 5.5 · Medium on Claude Code')
     // Rows the same as Medium's: closing changes nothing.
     act(() => advanced().click())
     expect(onOneWork).not.toHaveBeenCalled()

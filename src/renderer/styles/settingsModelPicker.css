@@ -35,6 +35,11 @@
   text-overflow: ellipsis;
 }
 
+/* The entry after the model, muted as the menu's subtitle; cut with the label, never wrapped. */
+.settings-model-btn-entry {
+  color: var(--text-secondary);
+}
+
 .settings-model-btn svg {
   flex-shrink: 0;
 }

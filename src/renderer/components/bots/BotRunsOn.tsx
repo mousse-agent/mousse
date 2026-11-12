@@ -60,6 +60,11 @@ export function offeredListing(providers: readonly LlmProviderOption[], pick: Bo
   return listing?.models.some((model) => model.id === pick.model) ? listing : undefined
 }
 
+/** Whether more than one entry offers models to this bot: then a closed row names its entry beside the model. */
+export function severalEntries(providers: readonly LlmProviderOption[]): boolean {
+  return new Set(providers.filter((provider) => provider.models.length > 0).map((provider) => provider.instanceId ?? provider.id)).size > 1
+}
+
 /** A row's tooltip: the model on its entry, why it can't be picked again, or who chooses until it is picked. */
 export function botRowTitle(providers: readonly LlmProviderOption[], pick: BotModelPick | null, named?: string): string | undefined {
   const listing = offeredListing(providers, pick)
@@ -110,6 +115,8 @@ export function BotModelRows({ name, providers, slots, named, onPick, onOneWork,
   // Rows that came to differ elsewhere (`use_model`, another window) open it.
   useEffect(() => { if (differ) setAdvanced(true) }, [differ])
   const rows = advanced ? ADVANCED_ROWS : SIMPLE_ROWS
+  // With two or more entries offering models, each row names its entry too, or two entries of one provider look alike.
+  const entries = severalEntries(providers)
   // Closing puts Medium work's pick on all work: there must be one.
   const cannotClose = advanced && differ && !isPinned(slots.medium)
   const toggle = (next: boolean) => {
@@ -133,6 +140,7 @@ export function BotModelRows({ name, providers, slots, named, onPick, onOneWork,
           effort={shown?.effort}
           placeholder={isPinned(pick) && !listing ? `${shortModelName(pick.model)} · not available` : PICK_A_MODEL}
           title={botRowTitle(providers, pick, named?.[row.key === 'work' ? 'medium' : row.key])}
+          entry={entries && listing ? listing.label : undefined}
           disabled={disabled}
           // Every pick is sent, also the one the row has: saving it again accepts an entry whose sign-in changed.
           onSelect={(_providerId, choice, instanceId) => {
