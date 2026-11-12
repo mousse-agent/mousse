@@ -1252,6 +1252,11 @@ export interface ContextUsageSnapshot {
   source: 'measured' | 'estimated' | 'legacy-estimated'
   categories: ContextUsageCategory[]
   /**
+   * A measured snapshot's last request, split by the provider's prompt cache: `cached` read from it, `uncached`
+   * sent anew (written to the cache or not cached at all). Absent for an estimate.
+   */
+  request?: { cached: number; uncached: number }
+  /**
    * The agent runtime compacts this context itself, near its window (Pi), so the Compact context
    * size does not apply. Absent: Mousse compacts it at that size.
    */
@@ -1804,6 +1809,19 @@ export interface NativeLlmContext {
   lastTurnUsage?: NativeLastTurnUsage
   /** The provider's prompt cache after the last turn; it holds only while `revision` is unchanged. */
   promptCache?: NativePromptCache
+  /**
+   * What the last measured request carried beyond the thread's messages: the runtime's system prompt and tools,
+   * the instructions it and Mousse add, and the gap between the messages' estimate and their real size. Unlike
+   * `lastTurnUsage`, it outlives a change of the history, so the gauge still counts it while a turn runs, after
+   * Stop, or after an undo, until the next measurement replaces it.
+   */
+  contextBase?: NativeContextBase
+}
+
+export interface NativeContextBase {
+  /** `${llmProvider}:${model}` it was measured on; another model has its own system prompt and tools. */
+  modelKey: string
+  tokens: number
 }
 
 /**

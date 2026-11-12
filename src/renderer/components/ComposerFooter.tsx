@@ -11,6 +11,7 @@ import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown, type ContextCacheLine } from './ContextUsagePopover'
 import { IdleCompactionChip } from './IdleCompactionChip'
+import { useContextRingInComposer } from '../lib/contextRingSetting'
 import { cacheGoneCold, contextTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
 import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
@@ -299,10 +300,12 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
 }
 
 /**
- * The context ring and its popover, while the context's fill is known, and left of it the Full/Compact chip
- * once the prompt cache has gone cold.
+ * The context ring and its popover, while the context's fill is known and the ring is turned on (Settings ›
+ * Appearance › Composer), and left of it the Full/Compact chip once the prompt cache has gone cold. The chip
+ * shows with the ring off too.
  */
 function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runActive: boolean }) {
+  const ringOn = useContextRingInComposer()
   const { providers, selectedProviderId, contextUsage, contextCompactionSetting, contextOpen, onContextOpenChange, onCompactNow, compacting = false } = run
   const cache = contextUsage.promptCache
   const now = useMinuteClock(Boolean(cache), cache?.lastRequestAt)
@@ -314,8 +317,8 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
   const compaction = contextCompactionSetting ? contextCompaction(contextCompactionSetting, contextUsage) : undefined
   // The popover goes with the ring, so it does not reopen by itself when the ring comes back.
   useEffect(() => {
-    if (!contextShown && contextOpen) onContextOpenChange(false)
-  }, [contextShown, contextOpen, onContextOpenChange])
+    if (!(contextShown && ringOn) && contextOpen) onContextOpenChange(false)
+  }, [contextShown, ringOn, contextOpen, onContextOpenChange])
   if (!contextShown) return null
   const cacheState = cache ? promptCacheState(cache, now) : undefined
   const canCompact = Boolean(onCompactNow)
@@ -336,23 +339,25 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
         onCompact={() => onCompactNow?.()}
       />
     ) : null}
-    <div className="composer-context-anchor">
-      <ContextUsageRing
-        usage={contextUsage}
-        onClick={() => onContextOpenChange(!contextOpen)}
-        active={contextOpen}
-        ref={contextBtnRef}
-      />
-      <ContextUsagePopover
-        open={contextOpen}
-        onClose={() => onContextOpenChange(false)}
-        usage={contextUsage}
-        compaction={compaction}
-        providerId={selectedProviderId}
-        anchorRef={contextBtnRef}
-        cache={cacheLine}
-      />
-    </div>
+    {ringOn ? (
+      <div className="composer-context-anchor">
+        <ContextUsageRing
+          usage={contextUsage}
+          onClick={() => onContextOpenChange(!contextOpen)}
+          active={contextOpen}
+          ref={contextBtnRef}
+        />
+        <ContextUsagePopover
+          open={contextOpen}
+          onClose={() => onContextOpenChange(false)}
+          usage={contextUsage}
+          compaction={compaction}
+          providerId={selectedProviderId}
+          anchorRef={contextBtnRef}
+          cache={cacheLine}
+        />
+      </div>
+    ) : null}
   </>)
 }
 

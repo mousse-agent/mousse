@@ -9,6 +9,7 @@ import type {
   ChatMessage,
   NativeCompactionCheckpoint,
   NativeCompactionDirective,
+  NativeContextBase,
   NativeLastTurnUsage,
   NativeLlmContext,
   NativePromptCache
@@ -82,6 +83,13 @@ export function isNativeLastTurnUsage(value: unknown): value is NativeLastTurnUs
       (Number.isInteger(usage.contextRevision) && usage.contextRevision >= 0)) &&
     (usage.modelKey === undefined || typeof usage.modelKey === 'string')
   )
+}
+
+export function isNativeContextBase(value: unknown): value is NativeContextBase {
+  if (!value || typeof value !== 'object') return false
+  const base = value as Partial<NativeContextBase>
+  return typeof base.modelKey === 'string' && base.modelKey.length > 0 &&
+    typeof base.tokens === 'number' && Number.isFinite(base.tokens) && base.tokens >= 0
 }
 
 export function isNativePromptCache(value: unknown): value is NativePromptCache {

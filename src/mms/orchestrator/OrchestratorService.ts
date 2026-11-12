@@ -219,7 +219,8 @@ import {
   readHostBrowserRuntime,
   snapshotBrowserExecutionBinding
 } from './browser'
-import { computeContextUsage } from './contextUsage'
+import { computeContextUsage, contextBaseTokens } from './contextUsage'
+import { estimateMessage } from './contextEstimate'
 import { getToolCallDisplay } from '../../shared/toolCallDisplay'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ProviderAuthService } from '../providers/ProviderAuthService'
@@ -9309,9 +9310,17 @@ export class OrchestratorService extends EventEmitter {
     this.lastMeasuredCacheWrite = usage.cacheWrite
     this.lastMeasuredContextSignature = usage.signature
     this.measuredAtHistoryLength = usage.measuredAtHistoryLength
+    // What the request carried beyond the messages (system prompt, tools, added instructions): it stays counted
+    // while the history moves on and no new measurement fits it yet.
+    const measuredMessages = getActiveMessages(this.nativeContext).slice(0, usage.measuredAtHistoryLength)
+    const contextBase = {
+      modelKey: usage.modelKey ?? usage.signature,
+      tokens: contextBaseTokens(usage.input + usage.cacheRead + usage.cacheWrite, measuredMessages.map((message) => estimateMessage(message)), getCompactionSummary(this.nativeContext))
+    }
     this.nativeContext = {
       ...this.nativeContext,
-      lastTurnUsage: { ...usage }
+      lastTurnUsage: { ...usage },
+      contextBase
     }
   }
 
@@ -9361,6 +9370,10 @@ export class OrchestratorService extends EventEmitter {
       const storedKey = stored?.modelKey ?? ''
       const matches = stored !== undefined && storedKey.startsWith(prefix) && measured(storedKey.slice(prefix.length)) && stored.contextRevision === (this.nativeContext.revision ?? 0)
       const limit = measured(capacity?.selectedModel) ? capacity!.contextWindow ?? 0 : 0
+      // Without a measurement of the history as it is now, the last one's system prompt, tools and instructions
+      // still count, when it was taken on this model.
+      const baseRecord = this.nativeContext.contextBase
+      const base = !matches && baseRecord?.modelKey.startsWith(prefix) && measured(baseRecord.modelKey.slice(prefix.length)) ? baseRecord.tokens : null
       // A copy read for the gauge brings its messages' estimates from the read worker instead of the messages.
       const estimates = this.session.gaugeEstimates
       const usage = computeContextUsage({
@@ -9369,6 +9382,7 @@ export class OrchestratorService extends EventEmitter {
         lastMeasuredInput: matches ? stored.input : null,
         lastMeasuredCacheRead: matches ? stored.cacheRead : null,
         lastMeasuredCacheWrite: matches ? stored.cacheWrite : null,
+        baseTokens: base,
         measuredAtMessageLength: matches ? stored.measuredAtHistoryLength : 0,
         summaryText: getCompactionSummary(this.nativeContext),
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'

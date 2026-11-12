@@ -74,6 +74,8 @@ export interface AppearanceSettings {
   frostedComposerBlur: number
   /** Frosted composer saturation multiplier (shown as "Color boost"). */
   frostedComposerSaturation: number
+  /** The composer shows the context ring (how full the model's context is). Off by default. */
+  contextRingInComposer: boolean
 }
 
 export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
@@ -832,7 +834,8 @@ export function getDefaultSettings(): MousseSettings {
       frostedComposer: false,
       frostedComposerOpacity: FROSTED_COMPOSER_RANGES.frostedComposerOpacity.default,
       frostedComposerBlur: FROSTED_COMPOSER_RANGES.frostedComposerBlur.default,
-      frostedComposerSaturation: FROSTED_COMPOSER_RANGES.frostedComposerSaturation.default
+      frostedComposerSaturation: FROSTED_COMPOSER_RANGES.frostedComposerSaturation.default,
+      contextRingInComposer: false
     },
     notifications: {
       threadCompletionSound: true,
@@ -965,7 +968,9 @@ export function normalizeAppearance(
     frostedComposer: typeof raw.frostedComposer === 'boolean' ? raw.frostedComposer : defaults.frostedComposer,
     frostedComposerOpacity: clampFrostedComposer('frostedComposerOpacity', raw.frostedComposerOpacity),
     frostedComposerBlur: clampFrostedComposer('frostedComposerBlur', raw.frostedComposerBlur),
-    frostedComposerSaturation: clampFrostedComposer('frostedComposerSaturation', raw.frostedComposerSaturation)
+    frostedComposerSaturation: clampFrostedComposer('frostedComposerSaturation', raw.frostedComposerSaturation),
+    contextRingInComposer:
+      typeof raw.contextRingInComposer === 'boolean' ? raw.contextRingInComposer : defaults.contextRingInComposer
   }
 }
 
