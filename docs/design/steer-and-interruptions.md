@@ -212,7 +212,9 @@ Send now and Stop end tools by design; the guarantee is about steers only.
   - when Claude Code has named a task for every one of them (`task_started`, about 3 s after a command starts), `stopTask(taskId)` for each (SDK 0.3.291 `Query.stopTask`). The command ends, and the steer is read once in the same turn;
   - otherwise one `interrupt()`. It ends the command, and the pushed steer stays queued and runs once, as the turn's next request. An interrupt also stops background agents, so the task stop is preferred when it is possible;
   - nothing, when no foreground call is left (the command ended on its own as the click came): the push alone cuts the next request, and an interrupt would only stop background work;
-  - never an interrupt once Claude Code took the steer (a `started` lifecycle): it would end the steer's own request, whose aborted result the run waits past, so the run would never end.
+  - never an interrupt once Claude Code took the steer (a `started` lifecycle): it would end the steer's own request. If the interrupt still lands after the take (the command ended as the click came, before Mousse saw it), the aborted result that follows is the steer's own request: the run ends there instead of waiting for a result that never comes, and the steer is read if the model had begun to answer it, or handed back once if not;
+  - at most one interrupt, however many task stops fail;
+  - none for WebFetch or WebSearch: the push alone ends them (S1), and an interrupt would also stop background agents.
 - The push comes first, so the steer is already queued when the command ends: it cannot be lost to the interrupt, and it is never sent twice.
 
 **No live session:** the same hold through `drainEntry`, and `mayCut` before `query.interrupt()`.
@@ -358,7 +360,9 @@ heldSteer?: { waitsFor: string; detail?: string; tools: number; since: string; h
    - On `applied`, the hold line clears as the steer goes in.
    - On `stale`, the button goes back to "Send now" for whatever hold is shown then, or the line is gone.
    - The button also leaves "Sending…" whenever `heldSteer` clears or its `holdGeneration` changes. Stop, `returnOrphanedSteers` and a turn's end strip the field without either event, so no ordering of writes can leave the button stuck.
-   - A held entry with no queue item (text a provider handed back, a steer from a device with a permission limit, a run-bound `orchestrator.steer`) can be forced only by the owning process. Windows show its wait line on the newest Steer block. A click about it from another process is recorded `stale` at once, so it never hangs on "Sending…".
+   - A person's steer that comes with no queue item (a steer from a device with a permission limit, a run-bound `orchestrator.steer`) is given one as it joins the turn: a row added and marked `steering` for the run in one write, with the device's limit. It still joins the turn at the turn's mode, but a crash while it waits for a tool returns it once (`returnOrphanedSteers`), a Stop returns it to the queue like any held steer, and an unread one becomes the queued message it would have been. Plain text steered in process (`steerThread` with no item, as tests and older callers do) keeps its own follow-up: a queued run from the start (SPEC §14.7).
+   - A held entry with no queue item left (text a provider handed back, or a steer whose row could not be written) can be forced only by the owning process. Windows show its wait line on the newest Steer block. A click about it from another process is recorded `stale` at once, so it never hangs on "Sending…".
+   - The owner's own click is applied only once its command is recorded (receipt, journal entry, audit event). If the run database refuses the command, the click forces nothing.
    - Only a held batch with a person's steer shows the wait line and Send now. An agent's steer or a subagent notice that waits for a tool is never forced (§2.2), so `heldSteer` is not published for it, and a click that names such a hold is `stale`.
    - A repeated `clientRequestId` replays the receipt and changes nothing: the owner's hold remembers every request id it was given, so a replayed click neither forces again nor gets a second outcome.
 
@@ -392,6 +396,7 @@ The Steer block (`steer-group.tsx`) gets one line while the turn's `heldSteer` n
 - "Waits for Bash" is muted, in the existing `.steer-group-label` style. Its tooltip reads "Goes in when Bash finishes" and gives the command (`npm test`). With several tools: "Waits for 2 tools", and the tooltip lists them.
 - "Send now" is a quiet text button like `.chat-run-interrupted-action` (no fill, hover background). Tooltip: "Stop Bash and send now". After the click it reads "Sending…" until `steer.now_applied` or `steer.now_stale` arrives, or the hold clears or changes generation (§2.9).
 - When the steer goes in, the line clears and the reply continues below the block. There is no "Delivered" state.
+- While a steer waits, its block stays below what the agent writes at the turn's top level: when a new top-level row comes after it, the Steer row takes a time after that row's. Windows order rows by time, so the row is re-stamped in place, not moved (the thread database would write a moved row again), and only that row is sent, as an update. A subagent's or a background call's rows are drawn nested under their call, so they never move it.
 - No edge bars, no accent fill, no new colour. The button is focusable, with the accessible name "Send now: stops Bash" (it starts with the visible words), and its description (`aria-describedby`) gives what it waits for and the command. While it sends it is `aria-disabled`, not `disabled`, so keyboard focus stays on it. There is no keyboard shortcut.
 - A held steer is `steering`, which the queue list already hides (`useThreadQueue.ts:448-452`). The composer's "Steered" notice (`OrchestratorChat.tsx:461-481`) is unchanged.
 

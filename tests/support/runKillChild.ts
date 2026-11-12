@@ -18,6 +18,8 @@
  *   and id are saved, before its queue row is dropped. What was saved then is written to `at-kill.json`;
  * - `steer-held`: as `tool`, on a provider on the hold (it peeks, and drains only a cut, as Claude does); `next` is
  *   steered and held for the running tool, never drained. A drain would be written to `cuts.log`;
+ * - `steer-held-device`: as `steer-held`, but `next` is a steer with no queue item of its own (a device's limited
+ *   steer, `steerThread` with a permission limit): it is held for the running tool when the process dies;
  * - `approval`: the provider waits for a saved approval;
  * - `question`: the provider waits for an answer to a question.
  *
@@ -37,7 +39,7 @@ import { isOpenActivityRow } from '../../src/mms/run/restartNote'
 import type { ChatMessage } from '../../src/shared/types'
 import { phase6Daemon } from '../run/phase6Fixture'
 
-type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'steer-two-drains' | 'steer-two-drains-ack' | 'steer-held' | 'approval' | 'question'
+type Scenario = 'starting' | 'accepted' | 'streaming' | 'tool' | 'uncertain' | 'steer' | 'steer-taken' | 'steer-two-drains' | 'steer-two-drains-ack' | 'steer-held' | 'steer-held-device' | 'approval' | 'question'
 const [mode, home, scenario] = process.argv.slice(2) as ['first' | 'restart', string, Scenario | undefined]
 const twoDrains = scenario === 'steer-two-drains' || scenario === 'steer-two-drains-ack'
 process.env.MOUSSE_HOME = home
@@ -70,7 +72,7 @@ class KillAdapter implements ProviderAdapter {
       sink.text({ phase: 'start', content: '', contentIndex: 0 })
       sink.text({ phase: 'delta', content: 'partial reply', contentIndex: 0 })
       sink.progress()
-      if (scenario === 'tool' || scenario === 'uncertain' || scenario === 'steer-held') {
+      if (scenario === 'tool' || scenario === 'uncertain' || scenario === 'steer-held' || scenario === 'steer-held-device') {
         host.tools.toolLedger?.start({ id: 'call-read', name: scenario === 'uncertain' ? 'bash' : 'read_file', arguments: { path: 'a.txt' } } as never)
         sink.tool({
           kind: 'mcp_tool_call', phase: 'start', callId: 'call-read', title: 'Read', summary: 'Read a.txt', details: [],
@@ -78,7 +80,7 @@ class KillAdapter implements ProviderAdapter {
         } as never)
       }
       if (scenario === 'approval' || scenario === 'question') this.ask?.(input.threadId, scenario === 'approval')
-      if (scenario === 'steer-held') {
+      if (scenario === 'steer-held' || scenario === 'steer-held-device') {
         // On the hold, as Claude's poll: only a cut is drained, and none may come while the tool runs.
         setInterval(() => {
           if (ctl.peekSteer?.()?.delivery !== 'cut') return
@@ -195,6 +197,15 @@ async function first(): Promise<void> {
   void d.orch.send('cut', false, { threadId: thread.id, clientRequestId: 'c-1' })
   await waitFor(() => existsSync(marker('at-point')), 'the turn at its point')
   if (scenario === 'approval' || scenario === 'question') await waitFor(() => d.questions.listPendingForThread(thread.id).length === 1, 'the pending question')
+  if (scenario === 'steer-held-device') {
+    // A device's limited steer: no queue item of its own when it is sent. It is held for the running tool.
+    if (!d.orch.steerThreadOrEnqueueExternal(thread.id, 'next', { permissionMode: 'ask' }).steered) throw new Error('the steer was refused')
+    await waitFor(() => d.orch.getTurnState(thread.id).heldSteer !== undefined, 'the steer held')
+    await new Promise<void>((resolve) => setTimeout(resolve, 200))
+    d.save(thread.id)
+    writeFileSync(marker('killed'), '')
+    die()
+  }
   const queued = await d.orch.send('next', false, { threadId: thread.id, clientRequestId: 'c-2' })
   if (!queued.queued || readDurableQueue(d.store, thread.id).length !== 1) throw new Error('nothing was queued')
   if (scenario === 'steer') {

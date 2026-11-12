@@ -123,7 +123,7 @@ import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeIt
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
+import { nestedUnderSubagentOrBackground, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
@@ -3384,7 +3384,7 @@ export class OrchestratorService extends EventEmitter {
       // A person on another computer carries that computer's limit with the text, wherever it ends up.
       const limit = actor ? ceiling ?? 'ask' : deviceLimit
       this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin, permissionMode: limit } : deviceLimit ? { deviceLimit } : {}), ...(sentFrom && !origin ? { sentFrom } : {}) }, () => {
-        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, origin ? undefined : sentFrom)) {
+        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, origin ? undefined : sentFrom, { durable: !origin })) {
           console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
         }
       })
@@ -4816,7 +4816,8 @@ export class OrchestratorService extends EventEmitter {
     // The rows stay the steer's until the model reads the text (`drainSteerForSession`) or the turn ends
     // without reading it, when the follow-up turn it leaves takes them.
     const run = engine.getRun(runId)
-    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit, undefined, sentFrom)) return
+    // A person's run-bound steer is saved with the queue while it waits (`durable`); a notice or an agent's steer is not.
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried, origin, limit, undefined, sentFrom, { durable: true })) return
     this.enqueueLateSteer(threadId, content, carried, notice, runId, origin, limit, sentFrom)
   }
 
@@ -8401,16 +8402,26 @@ export class OrchestratorService extends EventEmitter {
       message.role === 'user' && message.steered === true && !message.hidden && (echoIds.has(message.id) || (message.steerItemId !== undefined && itemIds.has(message.steerItemId)))
     const echoes = session.messages.filter(isEcho)
     if (!echoes.length) return
-    // Already last (hidden rows aside): nothing to move.
-    const shown = session.messages.filter((message) => !message.hidden)
-    if (shown.slice(-echoes.length).every((message, index) => message === echoes[index])) return
-    // Windows order rows by their timestamp: the copies take times after the newest row's, in their order.
-    const rest = session.messages.filter((message) => !isEcho(message))
-    const newest = rest.reduce((latest, message) => Math.max(latest, Date.parse(message.timestamp) || 0), 0)
+    const time = (message: ChatMessage): number => Date.parse(message.timestamp) || 0
+    // Windows order rows by their timestamp. Only a row shown at the turn's top level can land below the block: a
+    // subagent's or a background call's rows are drawn nested under their call, wherever their time puts them.
+    const byId = new Map(session.messages.map((message) => [message.id, message]))
+    const newest = session.messages.reduce(
+      (latest, message) => (message.hidden || isEcho(message) || nestedUnderSubagentOrBackground(message, (id) => byId.get(id)) ? latest : Math.max(latest, time(message))),
+      0
+    )
+    // Already after every top-level row: nothing to do.
+    if (echoes.every((message) => time(message) > newest)) return
+    // The copies take times after the newest row's, in their order. They stay where they are in the list (the thread
+    // database keeps rows in their stored order and would write a moved row again), and only they are sent: windows
+    // and Bridge streams re-sort a row whose time changed.
     const base = Math.max(Date.now(), newest + 1)
-    session.messages = [...rest, ...echoes.map((message, index) => ({ ...message, timestamp: new Date(base + index).toISOString() }))]
-    this.sessionAls.run(session, () => this.persist(true))
-    this.emitThreadMessages(session.threadId, session.messages, true)
+    const stamped = new Map(echoes.map((message, index) => [message.id, { ...message, timestamp: new Date(base + index).toISOString() }]))
+    session.messages = session.messages.map((message) => stamped.get(message.id) ?? message)
+    this.sessionAls.run(session, () => {
+      for (const message of stamped.values()) this.emitMessageUpdated(message)
+      this.persist()
+    })
   }
 
   /**
@@ -10199,7 +10210,7 @@ export class OrchestratorService extends EventEmitter {
    * `item`: the queue item this steer is (a promotion), and the run it was checked against. A steer for another
    * run than `item.runId` is refused, so a promotion never reaches a turn it was not checked against.
    */
-  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string; mode?: ChatMode; images?: ChatImageAttachment[]; byAgent?: boolean }, sentFrom?: { node: string }): boolean {
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }, origin?: AgentOrigin, permissionMode?: PermissionMode, item?: { id: string; runId?: string; mode?: ChatMode; images?: ChatImageAttachment[]; byAgent?: boolean }, sentFrom?: { node: string }, opts?: { durable?: boolean }): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     // Nothing is steered into a bot's turn: it runs exactly what its dispatch sent.
@@ -10219,6 +10230,16 @@ export class OrchestratorService extends EventEmitter {
         ...(origin || permissionMode ? { permissionMode: permissionMode ?? 'ask' } : {}),
         ...(sentFrom ? { sentFrom } : {})
       }
+      // A person's steer sent where a window's would be a queue item (`opts.durable`: a device's limited steer, a
+      // run-bound `orchestrator.steer`) gets one now, bound to this run: it may wait for a running tool for as long as
+      // the tool runs, and a crash in that time must return it once (`returnOrphanedSteers`) rather than lose it while
+      // its Steer block shows. It still joins the turn at the turn's mode, and the row keeps the device's limit for a
+      // turn of its own; unread at the turn's end it is the queued message a window's steer would be. Plain text steered
+      // in process keeps its own follow-up (a queued run from the start, SPEC §14.7).
+      if (opts?.durable && !item && !origin && !carried && !subagentNotice) {
+        const durable = this.persistItemlessSteer(session, threadId, trimmed, permissionMode, sentFrom)
+        if (durable) entry.itemId = durable
+      }
       session.activeTurn.pendingSteer.push(entry)
       if (carried) {
         (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
@@ -10230,7 +10251,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin, item?.id).id
+        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin, entry.itemId).id
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -10243,6 +10264,29 @@ export class OrchestratorService extends EventEmitter {
       return true
     }
     return false
+  }
+
+  /**
+   * A durable queue row for a person's steer that came with none: added and marked `steering` for the turn's run in one
+   * write, so it is never pending (nothing else runs it) and never needs a run of its own. Returns its id, or undefined
+   * when there is no thread store, no engine run, or the write fails (the steer then lives in memory, as before).
+   */
+  private persistItemlessSteer(session: ThreadSession, threadId: string, text: string, permissionMode?: PermissionMode, sentFrom?: { node: string }): string | undefined {
+    const runId = session.activeTurn?.runId
+    if (!this.threadStore || threadId === '__unbound__' || !runId) return undefined
+    try {
+      let id: string | undefined
+      session.queue = mutateDurableQueue(this.threadStore, threadId, (items) => {
+        const added = enqueueMessage(items, { threadId, content: text, intent: 'steer', source: 'steer', ...(permissionMode ? { permissionMode } : {}), ...(sentFrom ? { sentFrom } : {}) })
+        const promoted = promoteQueuedMessageToSteer(added.items, added.item.id, { steerRunId: runId })
+        id = promoted.item.id
+        return promoted.items
+      })
+      return id
+    } catch (error) {
+      console.warn('a steer could not be saved with the queue; it waits in memory only', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
+    }
   }
 
   /**
@@ -10274,7 +10318,7 @@ export class OrchestratorService extends EventEmitter {
       }
       return { steered: false, queued: true, item }
     }
-    if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom)) {
+    if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom, { durable: Boolean(opts?.permissionMode) })) {
       return { steered: true, queued: false }
     }
     if (this.isThreadLeaseHeldExternally(threadId)) {
@@ -12775,13 +12819,23 @@ export class OrchestratorService extends EventEmitter {
     // The run's own process: remembered before the journal applies, so a request about held text with no queue row
     // (only this process can force that) is not announced stale.
     const local = this.steerHolds.get(input.runId)
-    const force = { requestId: input.clientRequestId, holdGeneration: input.holdGeneration, itemIds: [...input.itemIds] }
-    local?.requestForce(force)
-    const result = await engine.dispatch({ kind: 'steer_now', threadId: input.threadId, clientRequestId: input.clientRequestId, runId: input.runId, holdGeneration: input.holdGeneration, itemIds: [...input.itemIds] })
+    // Not applied until its command is recorded below (`ready`).
+    const force = { requestId: input.clientRequestId, holdGeneration: input.holdGeneration, itemIds: [...input.itemIds], ready: false }
+    const added = local?.requestForce(force) === true
+    let result: CommandResult
+    try {
+      result = await engine.dispatch({ kind: 'steer_now', threadId: input.threadId, clientRequestId: input.clientRequestId, runId: input.runId, holdGeneration: input.holdGeneration, itemIds: [...input.itemIds] })
+    } catch (error) {
+      // Nothing was recorded (no receipt, journal entry or audit event): the click must not stop the command either.
+      if (added) local?.dropForce(input.clientRequestId)
+      throw error
+    }
     if (result.status !== 'accepted') {
-      local?.dropForce(input.clientRequestId)
+      if (added) local?.dropForce(input.clientRequestId)
       return result
     }
+    // Recorded: the run's next decision may apply it.
+    local?.readyForce(input.clientRequestId)
     if (this.threadStore) {
       try {
         const queue = repairQueueJournal(this.threadStore, input.threadId)

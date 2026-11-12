@@ -136,6 +136,23 @@ function isBackgroundOrSubagent(message: ChatMessage): boolean {
   return subagentToolName(toolNameOf(message)) !== null
 }
 
+/**
+ * The row's parent chain reaches a subagent call or a background call: windows draw it nested under that call, never
+ * at the turn's top level. A chain that cannot be resolved counts as not nested.
+ */
+export function nestedUnderSubagentOrBackground(message: ChatMessage, getMessage: (id: string) => ChatMessage | undefined): boolean {
+  const seen = new Set<string>([message.id])
+  let parentId = message.activity?.parentId
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId)
+    const parent = getMessage(parentId)
+    if (!parent) return false
+    if (isBackgroundOrSubagent(parent)) return true
+    parentId = parent.activity?.parentId
+  }
+  return false
+}
+
 const DETAIL_CHARS = 120
 
 function firstLine(text: string | undefined): string | undefined {

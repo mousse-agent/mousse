@@ -117,6 +117,8 @@ export class FakeClaudeProcess {
   /** The options of each `interrupt()` call. */
   readonly interruptOptions: Array<{ cancelQueued?: boolean } | undefined> = []
   stoppedTasks: string[] = []
+  /** `stopTask` rejects (the task ended or is unknown to Claude Code). */
+  stopTaskFails = false
   /** The ids `cancelAsyncMessage` was asked to drop, in order. */
   readonly cancelAsyncCalls: string[] = []
   /** Whether the process has `cancelAsyncMessage` (an older Claude Code has no per-message cancel). */
@@ -358,6 +360,7 @@ export class FakeClaudeProcess {
       },
       stopTask: async (taskId: string) => {
         this.stoppedTasks.push(taskId)
+        if (this.stopTaskFails) throw new Error(`no task ${taskId}`)
       },
       // Like the real process: a message still in the queue is dropped (true); one a turn already took is not (false).
       cancelAsyncMessage: async (uuid: string) => {

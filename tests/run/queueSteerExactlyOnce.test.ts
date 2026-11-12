@@ -1466,6 +1466,56 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     expect(w.inContext('strictly after')).toBe(1)
   })
 
+  it('a subagent working while the steer waits sends no transcript rebuild: its rows are nested, and a real move sends the one row, in place', async () => {
+    const w = await world()
+    w.adapter.toolStart('agent', 'Agent', { toolName: 'Agent', kind: 'subagent', description: 'research' } as ActivityPatch)
+    w.adapter.toolStart('b1')
+    const item = await w.steer('after the command')
+    await waitFor(() => w.held() !== undefined, 'held for b1')
+    const session = w.d.orch.getOrCreateSession(w.thread.id)
+    const echo = () => session.messages.find((message) => message.steered && message.steerItemId === item)!
+    const replaces: unknown[] = []
+    const echoUpdates: string[] = []
+    const onMessages = (event: { threadId: string; replace?: boolean }) => {
+      if (event.threadId === w.thread.id && event.replace) replaces.push(event)
+    }
+    const onUpdated = (event: { threadId: string; message: ChatMessage }) => {
+      if (event.threadId === w.thread.id && event.message.id === echo().id) echoUpdates.push(event.message.timestamp)
+    }
+    w.d.orch.on('thread-messages', onMessages)
+    w.d.orch.on('thread-message-updated', onUpdated)
+    try {
+      // Twenty calls of the subagent while the steer waits, with polls between them.
+      for (let i = 0; i < 20; i++) {
+        w.adapter.toolStart(`child-${i}`, 'Bash', undefined, 'agent')
+        w.adapter.toolDone(`child-${i}`)
+        if (i % 4 === 3) await sleep(120)
+      }
+      await sleep(200)
+      expect(w.held()).toBeDefined()
+      expect(replaces).toEqual([])
+      expect(echoUpdates).toEqual([])
+      // A row at the turn's top level after the Steer row: the row moves once, by its time, and stays in its place in
+      // the list (the thread database writes it in place), with no rebuild.
+      const index = session.messages.indexOf(echo())
+      w.adapter.writes('A note while the command runs.')
+      await waitFor(() => echoUpdates.length > 0, 'the Steer row moved after the note')
+      await sleep(250)
+      expect(echoUpdates).toHaveLength(1)
+      expect(replaces).toEqual([])
+      expect(session.messages.indexOf(echo())).toBe(index)
+      const note = session.messages.find((message) => message.role === 'assistant' && message.content.includes('A note while the command runs.'))!
+      expect(echo().timestamp > note.timestamp).toBe(true)
+    } finally {
+      w.d.orch.off('thread-messages', onMessages)
+      w.d.orch.off('thread-message-updated', onUpdated)
+    }
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released')
+    w.adapter.toolDone('agent', 'Agent')
+    await w.finish()
+  })
+
   it('start, strict release: the reply the agent writes while the steer waits reads above the Steer block, and stays there once the steer goes in', async () => {
     const w = await world('start', { strict: true })
     w.adapter.expect = ['cut', 'native']
@@ -1677,6 +1727,51 @@ describe('a person\'s steer waits for a running tool, then goes in once (the hol
     w.adapter.toolDone('b1')
     await w.finish()
     expect(w.inContext('right now')).toBe(1)
+  })
+
+  it('Send now whose command cannot be recorded (the run database throws) forces nothing: no command is stopped without a record', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('not recorded')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const dispatch = vi.spyOn(w.d.engine, 'dispatch').mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'))
+    await expect(sendNow(w)).rejects.toThrow('SQLITE_BUSY')
+    dispatch.mockRestore()
+    // Several polls: still held, nothing forced, no record of a Send now.
+    await sleep(350)
+    expect(w.delivered()).toEqual([])
+    expect(w.held()).toBeDefined()
+    expect(w.events('steer.now_requested')).toHaveLength(0)
+    w.adapter.toolDone('b1')
+    await waitFor(() => w.delivered().length > 0, 'released at the result')
+    expect(w.delivered()).toEqual(['cut:not recorded'])
+    await w.finish()
+  })
+
+  it('Send now is not applied before its command is recorded: a poll while the run database is busy forces nothing yet', async () => {
+    const w = await world()
+    w.adapter.toolStart('b1')
+    await w.steer('after the record')
+    await waitFor(() => w.held() !== undefined, 'held')
+    const real = w.d.engine.dispatch.bind(w.d.engine)
+    let release!: () => void
+    const busy = new Promise<void>((resolve) => { release = resolve })
+    const dispatch = vi.spyOn(w.d.engine, 'dispatch').mockImplementationOnce(async (...args: Parameters<typeof real>) => {
+      await busy
+      return real(...args)
+    })
+    const click = sendNow(w)
+    // Polls run while the command waits for the database: the force is known here, but not recorded.
+    await sleep(350)
+    expect(w.delivered()).toEqual([])
+    release()
+    expect(await click).toMatchObject({ status: 'accepted' })
+    dispatch.mockRestore()
+    await waitFor(() => w.delivered().length > 0, 'forced once recorded')
+    expect(w.delivered()).toEqual(['forced:after the record'])
+    expect(w.events('steer.now_requested')).toHaveLength(1)
+    w.adapter.toolDone('b1')
+    await w.finish()
   })
 
   it('a Send now click for an older hold is stale: nothing is forced', async () => {

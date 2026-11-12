@@ -2462,6 +2462,8 @@ export class ClaudeSubscriptionProviderService {
       this.save()
     }
     const frames = new TurnFrames(input, metrics)
+    // A Stop cancels the turn's controller: what its aborted result drops reads as stopped.
+    frames.stopped = () => controller.signal.aborted
     let success = false
     /** The id of the prompt this turn pushed (none for a turn Claude started). */
     let promptId: string | undefined

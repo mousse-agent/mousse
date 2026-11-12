@@ -26,6 +26,11 @@ export interface SteerForce {
   requestId: string
   /** The held items the click named; every one must still be held. Empty: an owner-process click about entries with no item. */
   itemIds: string[]
+  /**
+   * False while the request is not recorded yet (this process's click, before its command committed): it is kept and
+   * never applied, so a command is never stopped without a receipt, a journal entry and its audit event.
+   */
+  ready?: boolean
 }
 
 export interface SteerHoldOptions {
@@ -138,12 +143,23 @@ export class SteerHold {
   /**
    * A Send now request for this turn. It is checked at the next decision against the hold then. Idempotent: a request
    * id the hold already has (pending, or settled once) changes nothing, so a replayed click neither forces again nor
-   * is reported a second time.
+   * is reported a second time. Returns whether the request was new. A recorded copy of a request still waiting to be
+   * recorded here (the queue field the journal wrote) makes it ready.
    */
-  requestForce(force: SteerForce): void {
-    if (this.requestIds.has(force.requestId)) return
+  requestForce(force: SteerForce): boolean {
+    if (this.requestIds.has(force.requestId)) {
+      if (force.ready !== false) this.readyForce(force.requestId)
+      return false
+    }
     this.requestIds.add(force.requestId)
     this.forces.push(force)
+    return true
+  }
+
+  /** The request is recorded (its command committed): the next decision may apply it. */
+  readyForce(requestId: string): void {
+    const force = this.forces.find((entry) => entry.requestId === requestId)
+    if (force) force.ready = true
   }
 
   /** The request was not accepted (its run is not the active one): it forces nothing. */
@@ -167,7 +183,11 @@ export class SteerHold {
   settleForces(person = true): { applied: SteerForce[]; stale: SteerForce[] } {
     const applied: SteerForce[] = []
     const stale: SteerForce[] = []
-    for (const force of this.forces.splice(0)) {
+    // A request not recorded yet waits; it is checked once its command committed.
+    const unrecorded = this.forces.filter((force) => force.ready === false)
+    const recorded = this.forces.filter((force) => force.ready !== false)
+    this.forces.splice(0, this.forces.length, ...unrecorded)
+    for (const force of recorded) {
       const valid = person && this.heldKeys !== undefined && force.holdGeneration === this.generation && force.itemIds.every((id) => this.heldKeys!.has(id))
       if (valid && this.forcedGeneration !== this.generation) {
         this.forcedGeneration = this.generation

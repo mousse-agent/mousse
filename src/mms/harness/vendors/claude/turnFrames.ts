@@ -75,6 +75,8 @@ export class TurnFrames {
   private readonly inputComplete = new Set<string>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
+  /** The turn was stopped (the caller's cancel): a call a Stop's aborted result drops reads as stopped. */
+  stopped: () => boolean = () => false
   /** The plan windows Claude Code rejected during this turn (a one-shot query; a live run keeps its own). */
   readonly rateLimits = new RejectedWindows()
   /** A frame of this turn arrived. */
@@ -158,12 +160,13 @@ export class TurnFrames {
    * The turn's own calls it waits for (Send now stops them): open root calls that are not subagents, or subagents that
    * could not be moved, with the task each runs as when Claude Code named one.
    */
-  foregroundCalls(): Array<{ callId: string; taskId?: string }> {
+  foregroundCalls(): Array<{ callId: string; taskId?: string; toolName: string }> {
     return [...this.tools.keys()]
       .filter((callId) => !this.parents.get(callId) && !this.handedOff.has(callId) && (!this.isSubagent(callId) || this.unmovable.has(callId)))
       .map((callId) => {
         const taskId = this.taskIds.get(callId)
-        return taskId ? { callId, taskId } : { callId }
+        const toolName = this.tools.get(callId)!
+        return taskId ? { callId, taskId, toolName } : { callId, toolName }
       })
   }
 
@@ -192,7 +195,7 @@ export class TurnFrames {
     // (or the steer's read places it). A break placed there would end the reply with an empty paragraph, which the
     // turn's result text then fills in again (issue #919).
     if ((message.type === 'stream_event' && message.event.type === 'message_start' && !message.parent_tool_use_id) || isAbortedResult(message)) {
-      this.closeDropped()
+      this.closeDropped(message.type === 'result')
       this.flushNextMessage()
     }
     this.waiting()
@@ -331,7 +334,9 @@ export class TurnFrames {
    * and no result will come. They close as without a result; left open, a held steer would wait for them until the
    * turn ends.
    */
-  private closeDropped(): void {
+  private closeDropped(atAbortedResult: boolean): void {
+    // A Stop's aborted result dropped it: it reads as stopped, like every other call the Stop ended.
+    const reason: Extract<ActivityInterruptedBy, 'stop' | 'no_result'> = atAbortedResult && this.stopped() ? 'stop' : 'no_result'
     for (const [callId, title] of [...this.tools]) {
       if (this.parents.get(callId) || this.inputComplete.has(callId) || this.handedOff.has(callId) || this.taskIds.has(callId)) continue
       this.sink.onTool?.({
@@ -339,7 +344,7 @@ export class TurnFrames {
         callId,
         title,
         toolName: title,
-        activity: { status: 'interrupted', interruptedBy: 'no_result', summary: INTERRUPTED_SUMMARY.no_result }
+        activity: { status: 'interrupted', interruptedBy: reason, summary: INTERRUPTED_SUMMARY[reason] }
       })
       this.forget(callId)
     }
