@@ -7,6 +7,7 @@ import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '..
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botAppToolRefusal } from '../../../../shared/bots/personal/walls'
+import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -255,8 +256,15 @@ export class ToolRegistry {
       if (listing.readOnly && tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe) return false
       if (listing.modeCeiling === 'plan' && tool.access === 'startsThreads') return false
       if (tool.minLevel && !levelAtLeast(listing.accessLevel ?? 'lineage', tool.minLevel)) return false
+      // A bot's thread lists only what a bot can hold: the model is never shown delegation, threads or queues it can't use.
+      if (listing.botRole && !botMayBeOffered(tool.name)) return false
       return tool.listed?.(listing) ?? true
     })
+  }
+
+  /** Whether `threadId` is a personal bot's thread. */
+  isBotThread(threadId: string): boolean {
+    return this.botListing(threadId).botRole !== undefined
   }
 
   /**

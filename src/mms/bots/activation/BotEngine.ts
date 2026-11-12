@@ -50,7 +50,8 @@ import {
   type BotThreadCheck,
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
-import { addedPermissions, intersectManifest, manifestSubset } from '../../../shared/bots/personal/manifest'
+import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { botAllowedOf, type BotAllowed } from '../instructions'
 import type { Enforceability, HarnessError, ProviderSelection, RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
@@ -154,10 +155,11 @@ export interface BotEngineHost {
   /** One model call on a selection (`harness.oneShot`): naming a new bot. */
   oneShot?(input: { selection: ProviderSelection; prompt: string; signal: AbortSignal }): Promise<string>
   /**
-   * The bot's system text (WP3's `botInstructions`): who it is, its files folder and the base
-   * instructions. Built at each dispatch, never stored, so a rename applies at the next turn.
+   * The bot's system text (WP3's `botInstructions`): who it is, its files folder, the base
+   * instructions and what its owner allows now (`allowed`). Built at each dispatch, never stored, so
+   * a rename or a changed permission applies at the next turn.
    */
-  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane }): string
+  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean }): string
   /** A schedule in plain words ("every weekday · 09:00"; WP3's `describeSchedule`). */
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
@@ -1481,7 +1483,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dispatchN: dispatch.n,
       // A leading `/` never runs a command: the trigger is text for the model.
       prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
-      ...this.instructionsOf(definition, definition.main, row.lane),
+      // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
+      // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
+      ...this.instructionsOf(definition, definition.main, row.lane, {
+        allowed: botAllowedOf(narrowManifest(effective, definition.main.narrow)),
+        ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
+      }),
       selection: { ...selection },
       policy: compiled.policy,
       authority,
@@ -1524,10 +1531,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * the base instructions), its role when that says more than its description (a bot made before the
    * Bot UI), then the thread's own. Built at each dispatch, so a rename applies at the next turn.
    */
-  private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane): { instructions?: string } {
+  private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; browserOffline?: boolean }): { instructions?: string } {
     let system: string | undefined
     try {
-      system = this.host.instructions?.({ name: definition.name, description: definition.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}) })
+      system = this.host.instructions?.({ name: definition.name, description: definition.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}), ...permissions })
     } catch {
       system = undefined
     }
@@ -1594,7 +1601,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       activationId: row.id,
       dispatchN: dispatch.n,
       prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
-      ...this.instructionsOf(definition, spec),
+      ...this.instructionsOf(definition, spec, undefined, { allowed: botAllowedOf(narrowManifest(effective, spec.narrow)) }),
       selection: { ...selection },
       policy: compiled.policy,
       authority,
