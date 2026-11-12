@@ -6,8 +6,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { applyChatWidth, chatColumnWidth, useChatWidth } from '../../src/renderer/lib/chatWidth'
 import { searchSettings } from '../../src/renderer/lib/settingsSearch'
-import { AppearanceSettings } from '../../src/renderer/components/settings/AppearanceSettings'
-import { getDefaultSettings, THEME_OPTIONS, type SettingsOptions } from '../../src/shared/settings'
+import { ChatSettings } from '../../src/renderer/components/settings/ChatSettings'
+import { getDefaultSettings } from '../../src/shared/settings'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -53,31 +53,25 @@ describe('chat width', () => {
     expect(chatColumnWidth('full')).toBe(Infinity)
   })
 
-  it('is a Normal / Wide / Full choice in the Chat group of Appearance, and the search finds it', () => {
+  it('is a Normal / Wide / Full choice in Chat → Conversation, and the search finds it', () => {
     const onUpdate = vi.fn(async () => {})
-    const options = { themes: THEME_OPTIONS, accentColors: [] } as unknown as SettingsOptions
-    act(() => root.render(createElement(AppearanceSettings, {
+    act(() => root.render(createElement(ChatSettings, {
       settings: getDefaultSettings(),
-      options,
       onUpdate,
-      restartRequired: false,
-      onRestart: () => {},
-      onPreviewAcrylicIntensity: () => {},
-      onCommitAcrylicIntensity: () => {},
       onPreviewFrostedComposer: () => {},
       onCommitFrostedComposer: () => {}
     })))
-    const group = host.querySelector('[data-settings-anchor="appearance-chat"]')
-    expect(group?.querySelector('[data-settings-anchor="appearance-chat-width"]')?.textContent).toContain('Chat width')
-    // Reply pacing, math and the changed-files line sit with it in the Chat group.
+    const group = host.querySelector('[data-settings-anchor="chat-conversation"]')
+    expect(group?.querySelector('[data-settings-anchor="chat-width"]')?.textContent).toContain('Chat width')
+    // Reply pacing, math and the changed-files line sit with it in Conversation, before the Composer group.
     const text = host.textContent ?? ''
     const chat = text.indexOf('Chat width')
-    const composer = text.indexOf('Context ring in composer')
-    for (const title of ['Render math', 'Show replies a paragraph at a time', 'Changed files after each turn']) {
+    const composer = text.indexOf('Context ring')
+    for (const title of ['Render math', 'Replies by paragraph', 'Changed files after each turn']) {
       expect(text.indexOf(title)).toBeGreaterThan(chat)
       expect(text.indexOf(title)).toBeLessThan(composer)
     }
-    expect(searchSettings('chat width', [{ id: 'appearance', label: 'Appearance', keywords: [] }])[0])
-      .toMatchObject({ title: 'Chat width', section: 'appearance', anchor: 'appearance-chat-width' })
+    expect(searchSettings('chat width', [{ id: 'chat', label: 'Chat', keywords: [] }])[0])
+      .toMatchObject({ title: 'Chat width', section: 'chat', anchor: 'chat-width' })
   })
 })

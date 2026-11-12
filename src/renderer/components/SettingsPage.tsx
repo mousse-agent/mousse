@@ -2,7 +2,7 @@ import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { applyFrostedComposer, createFrostedComposerSaver } from '../lib/frostedComposer'
-import { Activity, ArrowLeft, Bot, FlaskConical, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
+import { Activity, ArrowLeft, Bot, FlaskConical, Keyboard, Laptop, MessagesSquare, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import { DelayedLoader } from './ui/DelayedLoader'
@@ -28,6 +28,7 @@ import { AgentsSettings } from './settings/AgentsSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
 import { LabsSettings } from './settings/LabsSettings'
 import { AppearanceSettings } from './settings/AppearanceSettings'
+import { ChatSettings } from './settings/ChatSettings'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { SkillsMcpSettings } from './settings/SkillsMcpSettings'
@@ -39,7 +40,8 @@ import '../styles/settings.css'
 
 const SETTINGS_SECTIONS = [
   { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'App', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
-  { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'App', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'math', 'latex', 'project colors', 'tint'] },
+  { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'App', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'project colors', 'tint', 'font', 'window', 'motion', 'animation'] },
+  { id: 'chat', label: 'Chat', icon: MessagesSquare, hue: 5, group: 'App', keywords: ['chat', 'conversation', 'composer', 'width', 'replies', 'streaming', 'math', 'latex'] },
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'App', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'App', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
   { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Agents', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login', 'sign in', 'account', 'cache', 'update', 'telemetry'] },
@@ -497,6 +499,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               onRestart={handleRestart}
               onPreviewAcrylicIntensity={previewAcrylicIntensity}
               onCommitAcrylicIntensity={commitAcrylicIntensity}
+            />
+          )}
+          {activeSection === 'chat' && (
+            <ChatSettings
+              settings={settings}
+              onUpdate={updateSettings}
               onPreviewFrostedComposer={previewFrostedComposer}
               onCommitFrostedComposer={commitFrostedComposer}
             />

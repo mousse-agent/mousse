@@ -4,7 +4,7 @@ import { shortcutAnchor, shortcutRowTitle } from '../commands/shortcutEditing'
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
-export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'connections', 'storage', 'activity', 'labs'] as const
+export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'connections', 'storage', 'activity', 'labs'] as const
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number]
 
 /**
@@ -34,17 +34,18 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Thread path in title bar', section: 'appearance', anchor: 'appearance-thread-path', keywords: ['breadcrumb', 'back', 'forward', 'history', 'navigation', 'subagent', 'parent'] },
   { title: 'Acrylic glass', section: 'appearance', anchor: 'appearance-acrylic', keywords: ['translucent', 'transparent', 'blur', 'window'] },
   { title: 'Glass intensity', section: 'appearance', anchor: 'appearance-glass-intensity', keywords: ['acrylic', 'blur', 'opacity'] },
-  { title: 'Context ring', section: 'appearance', anchor: 'appearance-context-ring', keywords: ['context', 'tokens', 'usage', 'gauge', 'window', 'composer'] },
-  { title: 'Frosted composer', section: 'appearance', anchor: 'appearance-frosted-composer', keywords: ['glass', 'blur', 'translucent', 'transparent', 'opacity', 'color boost'] },
-  { title: 'Chat width', section: 'appearance', anchor: 'appearance-chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
-  { title: 'Render math', section: 'appearance', anchor: 'appearance-render-math', keywords: ['latex', 'equations'] },
-  { title: 'Replies by paragraph', section: 'appearance', anchor: 'appearance-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade', 'paragraph at a time'] },
+  { title: 'Animation speed', section: 'appearance', anchor: 'appearance-animation-speed', keywords: ['motion', 'reduce motion', 'transitions', 'fast', 'slow'] },
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
-  { title: 'Chat', section: 'appearance', anchor: 'appearance-chat', keywords: ['conversation', 'replies', 'math'] },
-  { title: 'Composer', section: 'appearance', anchor: 'appearance-composer', keywords: ['context ring', 'frosted'] },
-  { title: 'Changed files after each turn', section: 'appearance', anchor: 'appearance-turn-changed-files', keywords: ['edits', 'summary', 'diff'] },
+  { title: 'Conversation', section: 'chat', anchor: 'chat-conversation', keywords: ['transcript', 'replies'] },
+  { title: 'Chat width', section: 'chat', anchor: 'chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
+  { title: 'Render math', section: 'chat', anchor: 'chat-render-math', keywords: ['latex', 'equations'] },
+  { title: 'Replies by paragraph', section: 'chat', anchor: 'chat-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade', 'paragraph at a time'] },
+  { title: 'Changed files after each turn', section: 'chat', anchor: 'chat-turn-changed-files', keywords: ['edits', 'summary', 'diff'] },
+  { title: 'Composer', section: 'chat', anchor: 'chat-composer', keywords: ['context ring', 'frosted'] },
+  { title: 'Context ring', section: 'chat', anchor: 'chat-context-ring', keywords: ['context', 'tokens', 'usage', 'gauge', 'window', 'composer'] },
+  { title: 'Frosted composer', section: 'chat', anchor: 'chat-frosted-composer', keywords: ['glass', 'blur', 'translucent', 'transparent', 'opacity', 'color boost'] },
   { title: 'Default permission mode', section: 'general', anchor: 'general-permission-mode', keywords: ['permissions', 'approvals', 'ask'] },
   { title: 'Resume after usage limits reset', section: 'general', anchor: 'general-resume', keywords: ['rate limit', 'paused', 'continue'] },
   { title: 'Finished', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'when a thread finishes', 'completion sound', 'toast', 'system notification', 'done'] },
@@ -171,7 +172,17 @@ export function searchIndex(mousseIdAvailable: boolean): readonly SettingsSearch
  * Anchors of settings that moved, mapped to where they are now, so a link or landing that still names
  * the old anchor reaches the setting. Add the old anchor here whenever a setting's anchor changes.
  */
-export const SETTINGS_ANCHOR_ALIASES: Readonly<Record<string, string>> = {}
+export const SETTINGS_ANCHOR_ALIASES: Readonly<Record<string, string>> = {
+  // Moved from Appearance to the Chat page.
+  'appearance-chat': 'chat-conversation',
+  'appearance-chat-width': 'chat-width',
+  'appearance-render-math': 'chat-render-math',
+  'appearance-reply-pacing': 'chat-reply-pacing',
+  'appearance-turn-changed-files': 'chat-turn-changed-files',
+  'appearance-composer': 'chat-composer',
+  'appearance-context-ring': 'chat-context-ring',
+  'appearance-frosted-composer': 'chat-frosted-composer'
+}
 
 /** The anchor a setting has now: `anchor` itself, or where it moved to. */
 export function currentSettingsAnchor(anchor: string, aliases: Readonly<Record<string, string>> = SETTINGS_ANCHOR_ALIASES): string {
