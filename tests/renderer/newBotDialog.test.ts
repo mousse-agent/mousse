@@ -161,7 +161,7 @@ describe('New bot', () => {
     expect(document.activeElement).toBe(modelPicker())
   })
 
-  it('runs by usage on this computer when Runs on is left alone, and on a model picked by hand otherwise (#673)', async () => {
+  it('with a service from before rows: one Model picker, by usage when left alone, or a model picked by hand (#673)', async () => {
     await open([])
     await toRunsOn('Remind me to water the plants.')
     await click(modelPicker())
@@ -450,5 +450,98 @@ describe('New bot keeps what was put in', () => {
     expect(stepNow()).toBe('look')
     await click(nextButton())
     expect([nameBox().value, textBox().value]).toEqual(['', ''])
+  })
+})
+
+describe('Runs on with rows (#673)', () => {
+  /** The same model on a subscription and on a paid API key, as `bots.model.choices` gives them to the picker. */
+  const PROVIDERS = [
+    { id: 'claude', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium', thinkingOff: false }] },
+    { id: 'pi', instanceId: 'pi:key', label: 'Anthropic API', models: [{ id: 'opus', label: 'Opus', efforts: ['low', 'high'], thinkingOff: false }] }
+  ]
+  const SUB = { instanceId: 'claude', model: 'opus' }
+  const KEY = { instanceId: 'pi:key', model: 'opus' }
+  const withRows = (extra: object = {}, providers: object[] = PROVIDERS) => vi.mocked(fake.client.modelChoices).mockImplementation(async () => ({ models: [], providers, computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }], ...extra }) as never)
+  const rowPicker = (label: string) => dialog()!.querySelector<HTMLButtonElement>(`button[aria-label^="New bot's ${label} model"]`) ?? undefined
+  const labels = () => [...dialog()!.querySelectorAll('.bot-new-row > span:first-child, .bot-model-row-label')].map((element) => element.textContent)
+  const menu = () => document.querySelector('[role="listbox"][aria-label="Select model"]')
+  async function pick(label: string, entry: string) {
+    await click(rowPicker(label))
+    const option = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.title.includes(entry))
+    if (!option()) await click(document.querySelector<HTMLElement>(`[role="tab"][aria-label="${entry}"]`) ?? undefined)
+    await click(option())
+  }
+
+  it('shows Computer, then Talk and Work, each one picker; the first bot starts empty and Create bot waits for both', async () => {
+    withRows()
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    expect(labels()).toEqual(['Computer', 'Talk', 'Work'])
+    expect(rowPicker('Talk')?.getAttribute('aria-label')).toBe('New bot\'s Talk model: Pick a model')
+    // The step's first focusable control: Talk's picker (one computer is plain text).
+    expect(document.activeElement).toBe(rowPicker('Talk'))
+    expect(createButton()?.disabled).toBe(true)
+    expect(createButton()?.title).toBe('Pick a model for Talk and Work')
+    await pick('Talk', 'Claude Code')
+    expect(createButton()?.disabled).toBe(true)
+    await pick('Work', 'Anthropic API')
+    expect(createButton()?.disabled).toBe(false)
+    await click(createButton())
+    await act(async () => {})
+    expect(creates()[0]![1]).toMatchObject({ slots: { talk: SUB, light: KEY, medium: KEY, hard: KEY } })
+    expect(creates()[0]![1]).not.toHaveProperty('model')
+  })
+
+  it('Escape in an open model menu closes the menu, not New bot', async () => {
+    withRows()
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    await click(rowPicker('Talk'))
+    expect(menu()).not.toBeNull()
+    await keyDown((document.activeElement as HTMLElement | null) ?? document.body, { key: 'Escape' })
+    expect(menu()).toBeNull()
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('Advanced fits in the step: each kind of work, starting from Work\'s pick', async () => {
+    withRows()
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    await pick('Talk', 'Claude Code')
+    await pick('Work', 'Claude Code')
+    await click(dialog()!.querySelector<HTMLElement>('.bot-model-advanced [role="switch"]') ?? undefined)
+    expect(labels()).toEqual(['Computer', 'Talk', 'Light work', 'Medium work', 'Hard work'])
+    expect(rowPicker('Hard work')?.getAttribute('aria-label')).toBe('New bot\'s Hard work model: Opus · Medium')
+    await pick('Hard work', 'Anthropic API')
+    await click(createButton())
+    await act(async () => {})
+    expect(creates()[0]![1]).toMatchObject({ slots: { talk: SUB, light: SUB, medium: SUB, hard: KEY } })
+  })
+
+  it('a later bot starts from the owner\'s last picks that are still offered; one no longer offered is empty', async () => {
+    withRows({ last: { talk: SUB, light: { instanceId: 'pi:gone', model: 'opus' }, medium: { instanceId: 'pi:gone', model: 'opus' }, hard: { instanceId: 'pi:gone', model: 'opus' } } })
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    expect(rowPicker('Talk')?.getAttribute('aria-label')).toBe('New bot\'s Talk model: Opus · Medium')
+    expect(rowPicker('Work')?.getAttribute('aria-label')).toBe('New bot\'s Work model: Pick a model')
+    expect(createButton()?.disabled).toBe(true)
+  })
+
+  it('a pick refused by Create bot returns to Runs on with the message, and that row is empty again', async () => {
+    withRows()
+    await open([])
+    await toRunsOn('Remind me to water the plants.')
+    await pick('Talk', 'Claude Code')
+    await pick('Work', 'Anthropic API')
+    vi.mocked(fake.client.create).mockRejectedValueOnce(Object.assign(new Error('The model you picked is not available now. Pick another one.'), { code: 'model_unavailable' }))
+    // The key is gone by then.
+    withRows({}, [PROVIDERS[0]!])
+    await click(createButton())
+    await act(async () => {})
+    expect(stepNow()).toBe('runsOn')
+    expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('The model you picked is not available now. Pick another one.')
+    expect(rowPicker('Work')?.getAttribute('aria-label')).toBe('New bot\'s Work model: Pick a model')
+    expect(rowPicker('Talk')?.getAttribute('aria-label')).toBe('New bot\'s Talk model: Opus · Medium')
+    expect(createButton()?.disabled).toBe(true)
   })
 })

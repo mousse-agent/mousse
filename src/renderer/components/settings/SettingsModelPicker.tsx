@@ -24,6 +24,7 @@ export function SettingsModelPicker({
   placeholder = 'Select model',
   ariaLabel = 'Model',
   id,
+  title,
   disabled
 }: {
   providers: LlmProviderOption[]
@@ -38,6 +39,8 @@ export function SettingsModelPicker({
   placeholder?: string
   ariaLabel?: string
   id?: string
+  /** The button's tooltip; absent, its label. */
+  title?: string
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -91,7 +94,7 @@ export function SettingsModelPicker({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`${ariaLabel}: ${label}`}
-        title={label}
+        title={title ?? label}
         disabled={disabled || providers.length === 0}
         onClick={() => setOpen((current) => !current)}
       >

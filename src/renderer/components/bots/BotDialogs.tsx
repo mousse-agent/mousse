@@ -21,7 +21,10 @@ export function BotDialogFrame({ title, onClose, busy = false, keepOnBackdrop = 
   }, [])
   return <div className="chat-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy && !keepOnBackdrop) onClose() }}>
     <div ref={dialog} className="chat-dialog bot-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} style={width ? { width: `min(${width}px, calc(100vw - 40px))` } : undefined} onKeyDown={(event) => {
-      if (event.key === 'Escape' && !busy) onClose()
+      // Escape for an open menu (its button, or the menu itself in a portal) closes the menu, not the dialog.
+      const target = event.target as HTMLElement
+      const menu = !dialog.current?.contains(target) || Boolean(target.closest?.('[aria-expanded="true"]'))
+      if (event.key === 'Escape' && !busy && !menu) onClose()
       if (event.key === 'Tab') {
         const items = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input, textarea')
         if (!items?.length) return

@@ -1,23 +1,26 @@
 import { useEffect, useId, useState } from 'react'
-import type { BotModelPick, BotModelSlotKey, BotModelSlots } from '../../../shared/bots/personal/definition'
-import type { BotComputerChoice, BotModelOption, BotRunsOnChoices } from '../../../shared/bots/personal/methods'
-import { slotsWith, workRowsDiffer } from '../../../shared/bots/personal/modelSlots'
+import type { BotModelPick, BotModelSlotKey } from '../../../shared/bots/personal/definition'
+import type { BotComputerChoice, BotRunsOnChoices, BotShownRows } from '../../../shared/bots/personal/methods'
+import { isPinned, workRowsDiffer } from '../../../shared/bots/personal/modelSlots'
+import { modelLabel } from '../../../shared/modelChoice'
 import { shortModelName } from '../../../shared/modelNames'
-import { reasoningLevelLabel } from '../../../shared/modelVariants'
+import type { LlmProviderOption } from '../../../shared/settings'
+import { resolveModelChoice } from '../../lib/modelChoice'
+import { SettingsModelPicker } from '../settings/SettingsModelPicker'
 import { Switch } from '../settings/SettingsRow'
 import { Select, type SelectOption } from '../ui/Select'
 
 /**
  * What a bot runs on, by hand (#673): the model and computer pickers About → Runs on and New bot share. A bot's models
- * are rows: Talk and Work, or with Advanced, Light, Medium and Hard work. Each row is Automatic (the default) or an
- * entry's model at a reasoning level; the computer is this one, with the person's other computers listed but greyed.
- * These pickers are the only bot screens that name models.
+ * are rows: Talk and Work, or with Advanced, Light, Medium and Hard work. Each row is the app's model picker
+ * (`SettingsModelPicker`): an entry's model and its reasoning level, as one choice. The computer is this one, with the
+ * person's other computers listed but greyed. These pickers are the only bot screens that name models.
  */
 
 /** Said on the model control of a single picker (an older service, before rows). */
 export const BY_USAGE_TITLE = 'By usage picks a ready model each run'
-/** Said on each row's model control. */
-export const AUTOMATIC_TITLE = 'Automatic picks a ready model each time'
+/** A row with no pick yet. */
+export const PICK_A_MODEL = 'Pick a model'
 
 /**
  * The Computer picker's options for a bot: this computer, then the person's other computers, which a bot cannot be
@@ -50,56 +53,20 @@ export function BotComputerSelect({ ariaLabel, title, choices }: { ariaLabel: st
 
 // -- Rows (#673) ------------------------------------------------------------------------------------------------------
 
-/** A pick as a picker value: '' is Automatic. */
-export function botPickValue(pick: Pick<BotModelPick, 'instanceId' | 'model'> | null): string {
-  return pick ? JSON.stringify([pick.instanceId ?? '', pick.model]) : ''
+/** The listing that offers a pick now, and the model on it; undefined when it is not offered now. */
+export function offeredListing(providers: readonly LlmProviderOption[], pick: BotModelPick | null): LlmProviderOption | undefined {
+  if (!isPinned(pick)) return undefined
+  const listing = providers.find((provider) => provider.instanceId === pick.instanceId)
+  return listing?.models.some((model) => model.id === pick.model) ? listing : undefined
 }
 
-function pickOfValue(value: string): { instanceId?: string; model: string } | null {
-  if (!value) return null
-  const [instanceId, model] = JSON.parse(value) as [string, string]
-  return { ...(instanceId ? { instanceId } : {}), model }
-}
-
-/** The option a pick names, when it is offered now. */
-export function botOptionOf(options: readonly BotModelOption[], pick: BotModelPick | null): BotModelOption | undefined {
-  return pick?.instanceId ? options.find((option) => option.instanceId === pick.instanceId && option.model === pick.model) : undefined
-}
-
-/** A model's name as the composer shows it ("Opus 5.5"). */
-const nameOf = (option: Pick<BotModelOption, 'label'>) => shortModelName(option.label)
-
-/** Whether another entry offers a model of the same name. */
-function hasTwin(options: readonly BotModelOption[], option: BotModelOption): boolean {
-  return options.some((other) => other !== option && other.label === option.label && other.instanceId !== option.instanceId)
-}
-
-/** A model's name, with its entry's when another entry offers a model of the same name. */
-function optionName(options: readonly BotModelOption[], option: BotModelOption): string {
-  return hasTwin(options, option) ? `${nameOf(option)} · ${option.entry}` : nameOf(option)
-}
-
-/**
- * A row's model choices: Automatic, then every entry's models under the entry's name. A pick that is not offered now
- * stays, marked so.
- */
-export function botPickOptions(options: readonly BotModelOption[], pick: BotModelPick | null): SelectOption[] {
-  // Each entry's models together, entries in the order they first come.
-  const entries = [...new Set(options.map((option) => option.instanceId))]
-  const byEntry = entries.flatMap((instanceId) => options.filter((option) => option.instanceId === instanceId))
-  const choices: SelectOption[] = [
-    { value: '', label: 'Automatic' },
-    ...byEntry.map((option) => ({ value: botPickValue(option), label: nameOf(option), textValue: optionName(options, option), group: option.entry }))
-  ]
-  if (pick && !botOptionOf(options, pick)) choices.push({ value: botPickValue(pick), label: pick.model, description: pick.instanceId ? 'Not available now' : 'On any entry that offers it' })
-  return choices
-}
-
-/** A row's reasoning levels: Default (set by how hard the job is), then the ones its model offers. */
-export function botLevelOptions(options: readonly BotModelOption[], pick: BotModelPick): SelectOption[] {
-  const efforts = botOptionOf(options, pick)?.efforts ?? []
-  const levels = pick.effort && !efforts.includes(pick.effort) ? [...efforts, pick.effort] : efforts
-  return [{ value: '', label: 'Default' }, ...levels.map((effort) => ({ value: effort, label: reasoningLevelLabel(effort) }))]
+/** A row's tooltip: the model on its entry, why it can't be picked again, or who chooses until it is picked. */
+export function botRowTitle(providers: readonly LlmProviderOption[], pick: BotModelPick | null, named?: string): string | undefined {
+  const listing = offeredListing(providers, pick)
+  if (listing && pick) return `${shortModelName(modelLabel(resolveModelChoice({ instanceId: pick.instanceId, provider: listing.id, model: pick.model }, providers), { effort: false }))} on ${listing.label}`
+  if (isPinned(pick)) return 'Not available now. Pick another model.'
+  if (named) return `Mousse runs ${shortModelName(named)} by name, on any entry, until you pick one.`
+  return undefined
 }
 
 interface RowSpec {
@@ -117,18 +84,24 @@ const ADVANCED_ROWS: readonly RowSpec[] = [
   { key: 'medium', label: 'Medium work', hint: 'Most work' },
   { key: 'hard', label: 'Hard work', hint: 'Research, and long or difficult problems' }
 ]
+const ROWS_OF: Record<RowSpec['key'], readonly BotModelSlotKey[]> = { talk: ['talk'], work: ['light', 'medium', 'hard'], light: ['light'], medium: ['medium'], hard: ['hard'] }
 
 /**
  * A bot's model rows (#673), for About → Runs on and New bot: Talk and Work, and with Advanced, Light, Medium and Hard
- * work. Each row is a model (Automatic, or an entry's model) and, for a model, a reasoning level. Advanced starts open
- * when the work rows differ; closing it puts Medium work's pick on all work. Controlled: `onChange` gets the whole rows.
+ * work, each the app's model picker fed the bot's choices (each ready entry's models that can hold a bot). A row with no
+ * pick says Pick a model; on a bot from before picks its tooltip says Mousse chooses until then. Advanced starts open
+ * when the work rows differ; closing it puts Medium work's pick on all work (`onOneWork`), and is refused while Medium
+ * work has no pick and the rows differ. Controlled: `onPick` gets the rows a pick goes on (Work is all three).
  */
-export function BotModelRows({ name, options, slots, onChange, disabled }: {
+export function BotModelRows({ name, providers, slots, named, onPick, onOneWork, disabled }: {
   /** The bot's name for the controls' labels ("Pip's Talk model"); New bot passes "New bot". */
   name: string
-  options: readonly BotModelOption[]
-  slots: BotModelSlots
-  onChange: (slots: BotModelSlots) => void
+  providers: readonly LlmProviderOption[]
+  slots: BotShownRows
+  /** Rows of a bot from before picks that run a model by name. */
+  named?: Partial<Record<BotModelSlotKey, string>>
+  onPick: (rows: readonly BotModelSlotKey[], pick: BotModelPick & { instanceId: string }) => void
+  onOneWork: () => void
   disabled?: boolean
 }) {
   const differ = workRowsDiffer(slots)
@@ -137,61 +110,41 @@ export function BotModelRows({ name, options, slots, onChange, disabled }: {
   // Rows that came to differ elsewhere (`use_model`, another window) open it.
   useEffect(() => { if (differ) setAdvanced(true) }, [differ])
   const rows = advanced ? ADVANCED_ROWS : SIMPLE_ROWS
-  const pickOf = (key: RowSpec['key']) => slots[key === 'work' ? 'medium' : key]
-  const set = (key: RowSpec['key'], pick: BotModelPick | null) =>
-    onChange(key === 'work' ? slotsWith(slots, 'work', pick) : { ...slots, [key]: pick })
+  // Closing puts Medium work's pick on all work: there must be one.
+  const cannotClose = advanced && differ && !isPinned(slots.medium)
   const toggle = (next: boolean) => {
+    if (!next && cannotClose) return
     setAdvanced(next)
-    // One Work model again: Medium work's, on all work.
-    if (!next && differ) onChange(slotsWith(slots, 'work', slots.medium))
+    if (!next && differ) onOneWork()
   }
   return <div className="bot-model-picker" data-testid="bot-model-rows"><div className="bot-model-rows">
     {rows.map((row) => {
-      const pick = pickOf(row.key)
-      const option = botOptionOf(options, pick)
-      // A model with no reasoning levels to pick shows none.
-      const levels = pick ? botLevelOptions(options, pick) : []
+      const pick = slots[row.key === 'work' ? 'medium' : row.key]
+      const listing = offeredListing(providers, pick)
+      const shown = listing && pick ? pick : null
       return <div className="bot-model-row" key={row.key} data-testid={`bot-model-row-${row.key}`}>
         <span className="bot-model-row-label" title={row.hint}>{row.label}</span>
-        <Select
+        <SettingsModelPicker
           ariaLabel={`${name}'s ${row.label} model`}
-          size="small"
-          className="bot-model-row-model"
-          value={botPickValue(pick)}
-          options={botPickOptions(options, pick)}
-          title={option ? `${option.label} on ${option.entry}` : pick ? pick.model : AUTOMATIC_TITLE}
-          // The model's name; its entry under it when another entry offers the same model, so the two stay apart.
-          renderValue={(selected) => (option
-            ? <span className="bot-model-pick"><span>{nameOf(option)}</span>{hasTwin(options, option) ? <small>{option.entry}</small> : null}</span>
-            : selected?.label ?? 'Automatic')}
+          providers={providers as LlmProviderOption[]}
+          providerId={listing?.id ?? ''}
+          instanceId={shown?.instanceId}
+          modelId={shown?.model ?? ''}
+          effort={shown?.effort}
+          placeholder={isPinned(pick) && !listing ? `${shortModelName(pick.model)} · not available` : PICK_A_MODEL}
+          title={botRowTitle(providers, pick, named?.[row.key === 'work' ? 'medium' : row.key])}
           disabled={disabled}
-          onChange={(value) => {
-            const next = pickOfValue(value)
-            // A new model starts at Default; the same one keeps its level.
-            set(row.key, next ? { ...next, ...(pick?.effort && next.model === pick.model && next.instanceId === pick.instanceId ? { effort: pick.effort } : {}) } : null)
+          // Every pick is sent, also the one the row has: saving it again accepts an entry whose sign-in changed.
+          onSelect={(_providerId, choice, instanceId) => {
+            if (instanceId) onPick(ROWS_OF[row.key], { instanceId, model: choice.model, ...(choice.effort ? { effort: choice.effort } : {}) })
           }}
         />
-        {pick && levels.length > 1
-          ? <Select
-            ariaLabel={`${name}'s ${row.label} reasoning level`}
-            size="small"
-            className="bot-model-row-level"
-            value={pick.effort ?? ''}
-            options={levels}
-            title="Reasoning level. Default follows how hard the job is"
-            disabled={disabled}
-            onChange={(effort) => {
-              const { effort: _was, ...model } = pick
-              set(row.key, effort ? { ...model, effort } : model)
-            }}
-          />
-          : <span className="bot-model-row-level" aria-hidden />}
       </div>
     })}
   </div>
     <div className="bot-model-advanced">
-      <span id={advancedId} title="A model for each kind of work">Advanced</span>
-      <Switch checked={advanced} onChange={toggle} labelledBy={advancedId} disabled={disabled} />
+      <span id={advancedId} title={cannotClose ? 'Pick a model for Medium work first' : 'A model for each kind of work'}>Advanced</span>
+      <Switch checked={advanced} onChange={toggle} labelledBy={advancedId} disabled={disabled || cannotClose} />
     </div>
   </div>
 }

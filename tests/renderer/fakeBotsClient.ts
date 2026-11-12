@@ -113,7 +113,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     addSchedule: vi.fn((botId, when, prompt, model) => record('addSchedule', [botId, when, prompt, model], () => detail(botId))),
     model: vi.fn((botId) => record('model', [botId], () => ({ model: null, models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
     setModel: vi.fn((botId, model) => record('setModel', [botId, model], () => detail(botId).summary)),
-    setSlots: vi.fn((botId, slots) => record('setSlots', [botId, slots], () => detail(botId).summary)),
+    setSlots: vi.fn((botId, change) => record('setSlots', [botId, change], () => detail(botId).summary)),
     modelChoices: vi.fn(() => record('modelChoices', [], () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
     removeSchedule: vi.fn((botId, scheduleId) => record('removeSchedule', [botId, scheduleId], () => {
       const next = { ...detail(botId), runs: detail(botId).runs.filter((item) => item.id !== scheduleId) }
