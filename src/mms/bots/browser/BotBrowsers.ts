@@ -69,6 +69,8 @@ interface BotBrowserState {
   sessionId?: string
   opening?: Promise<OpenedSession>
   activations: Map<string, ActivationTabs>
+  /** Whose call drives the browser now, and who waits: one call at a time, in the order they came (`BrowserTurns`). */
+  turns: BrowserTurns
   /** Activations that used the browser, oldest first (bounded). */
   used: string[]
   /** The tab the owner's view follows. */
@@ -99,6 +101,73 @@ const WATCHING_MS = 30_000
 /** Activations remembered per bot for its previews. */
 const MAX_USED = 50
 const LIVE_LIFECYCLES: ReadonlySet<BrowserSessionRecord['lifecycle']> = new Set(['ready', 'agent-controlled', 'human-controlled', 'waiting-approval'])
+/** Calls that may wait their turn on one bot's browser at once; one more is refused as busy. */
+export const MAX_BROWSER_WAITERS = 24
+/** The longest one call waits for its turn on the bot's browser before it is refused as busy. */
+export const BROWSER_TURN_WAIT_MS = 5 * 60_000
+/** How long the owner's view waits for a turn to take a fresh picture of another tab; past it, the last one shows. */
+const FRAME_TURN_WAIT_MS = 2_000
+
+/**
+ * One call at a time on a bot's browser, in the order the calls came, across all its activations. A browser without a
+ * window paints only its front tab, and both an action and a picture bring their tab to the front; the session also
+ * takes one action at a time. So when several activations browse at once, each call waits for the one before it to end
+ * instead of failing or pulling the other's tab away mid-action. The queue is bounded (`MAX_BROWSER_WAITERS`), each
+ * wait too (`BROWSER_TURN_WAIT_MS`), and a stopped turn leaves it at once.
+ */
+export class BrowserTurns {
+  private holder: { tab?: string } | undefined
+  private readonly waiting: Array<{ go(): void; tab?: string }> = []
+
+  /** The tab the call that holds the browser works on, when it named one. */
+  get holderTab(): string | undefined {
+    return this.holder?.tab
+  }
+
+  get busy(): boolean {
+    return this.holder !== undefined
+  }
+
+  /** Runs `work` when its turn comes; a wait longer than `waitMs`, a full queue or `signal` refuses it. */
+  async run<T>(work: () => Promise<T>, options: { signal?: AbortSignal; tab?: string; waitMs?: number; busy?: () => Error } = {}): Promise<T> {
+    if (this.holder || this.waiting.length) {
+      const busy = options.busy ?? (() => new BrowserAutomationError({ code: 'timeout', message: 'Your browser is busy with your other work right now. Try this again in a moment, or carry on without it.' }))
+      if (this.waiting.length >= MAX_BROWSER_WAITERS) throw busy()
+      await new Promise<void>((resolve, reject) => {
+        const entry = { go: () => { cleanup(); resolve() }, ...(options.tab ? { tab: options.tab } : {}) }
+        const leave = (error: Error): void => {
+          const at = this.waiting.indexOf(entry)
+          if (at < 0) return
+          this.waiting.splice(at, 1)
+          cleanup()
+          reject(error)
+        }
+        const timer = setTimeout(() => leave(busy()), options.waitMs ?? BROWSER_TURN_WAIT_MS)
+        timer.unref?.()
+        const onAbort = (): void => leave(new BrowserAutomationError({ code: 'cancelled', message: 'This run of the bot has ended.' }))
+        const cleanup = (): void => {
+          clearTimeout(timer)
+          options.signal?.removeEventListener('abort', onAbort)
+        }
+        if (options.signal?.aborted) return onAbort()
+        options.signal?.addEventListener('abort', onAbort, { once: true })
+        this.waiting.push(entry)
+      })
+    }
+    this.holder = options.tab ? { tab: options.tab } : {}
+    try {
+      return await work()
+    } finally {
+      this.holder = undefined
+      // The next in line goes; it takes the browser before anything that comes later.
+      const next = this.waiting.shift()
+      if (next) {
+        this.holder = next.tab ? { tab: next.tab } : {}
+        next.go()
+      }
+    }
+  }
+}
 
 const defaultTimer = (fn: () => void, ms: number): { clear(): void } => {
   const timer = setTimeout(fn, ms)
@@ -169,9 +238,10 @@ export class BotBrowsers implements BotBrowserHost {
       const tabs = [...activation.tabs]
       activation.tabs.clear()
       activation.current = undefined
+      // In the browser's turn: closing a tab while another activation acts would move its front tab.
       void (async () => {
         for (const tabId of tabs) {
-          await this.ownerCall(state, (context) => this.service().sessions.tabs(context, sessionId, { operation: 'close', tabId })).catch(() => undefined)
+          await state.turns.run(() => this.ownerCall(state, (context) => this.service().sessions.tabs(context, sessionId, { operation: 'close', tabId }))).catch(() => undefined)
           if (state.follow === tabId) state.follow = undefined
         }
       })()
@@ -281,14 +351,25 @@ export class BotBrowsers implements BotBrowserHost {
       signal: original.signal ? AbortSignal.any([original.signal, turnSignal]) : turnSignal
     }
     const params = { ...(args as Record<string, unknown>) }
+    if (name === 'browser_open' && Object.keys(params).some((key) => key !== 'url')) throw new BrowserAutomationError({ code: 'invalid_action', message: 'browser_open takes only a url' })
     this.markUsed(state, activationId)
     state.idle?.clear()
     state.idle = undefined
+    // Opening the session (and a first use's install) is shared and needs no turn: the open is made once.
+    const url = name === 'browser_open' && typeof params.url === 'string' ? params.url : undefined
+    const opened = name === 'browser_open' ? await this.ensureSession(state, context, url) : undefined
+    // Each call drives the browser on its own, in its turn: another activation's call never pulls its tab away mid-way.
+    const tab = typeof params.tabId === 'string' ? params.tabId : activation.current
+    return state.turns.run(async () => {
+      if (activation.ended || turnSignal.aborted) throw new BrowserAutomationError({ code: 'cancelled', message: 'This run of the bot has ended.' })
+      return this.dispatchInTurn(state, activation, context, name, params, opened, url)
+    }, { signal: context.signal ?? turnSignal, ...(tab ? { tab } : {}) })
+  }
+
+  /** One of the bot's tool calls, while it holds the browser (`BrowserTurns`). */
+  private async dispatchInTurn(state: BotBrowserState, activation: ActivationTabs, context: BrowserToolContext, name: BrowserAutomationTool, params: Record<string, unknown>, opened: OpenedSession | undefined, url: string | undefined): Promise<BrowserToolOutput> {
     let result: BrowserToolOutput
-    if (name === 'browser_open') {
-      if (Object.keys(params).some((key) => key !== 'url')) throw new BrowserAutomationError({ code: 'invalid_action', message: 'browser_open takes only a url' })
-      const url = typeof params.url === 'string' ? params.url : undefined
-      const opened = await this.ensureSession(state, context, url)
+    if (opened) {
       let tabId: string | undefined
       if (opened.opened) tabId = opened.opened.observation?.tabId
       else if (url || !activation.current) tabId = await this.newTab(context, opened.sessionId, url)
@@ -436,11 +517,20 @@ export class BotBrowsers implements BotBrowserHost {
     await this.ownerCall(state, (context) => this.service().sessions.close(context, sessionId))
   }
 
+  /**
+   * A fresh picture of the followed tab. While a call of the bot works on that same tab, the picture is taken beside it
+   * (the tab is in front already). Of another tab, it waits its turn briefly, so it never pulls that call's tab away;
+   * past the wait the view keeps the last picture.
+   */
   private async takeFrame(state: BotBrowserState): Promise<void> {
     const sessionId = this.liveSession(state)
     if (!sessionId) return
-    const frame = await this.ownerCall(state, (context) => this.service().sessions.frame(context, { sessionId, ...(state.follow ? { tabId: state.follow } : {}), maxWidth: 960 }))
-    state.lastFrame = { frame, at: this.now() }
+    const take = async (): Promise<void> => {
+      const frame = await this.ownerCall(state, (context) => this.service().sessions.frame(context, { sessionId, ...(state.follow ? { tabId: state.follow } : {}), maxWidth: 960 }))
+      state.lastFrame = { frame, at: this.now() }
+    }
+    if (state.turns.busy && state.follow !== undefined && state.turns.holderTab === state.follow) return take()
+    await state.turns.run(take, { waitMs: FRAME_TURN_WAIT_MS, ...(state.follow ? { tab: state.follow } : {}) })
   }
 
   /** After the last activation, the browser closes once nobody has watched or held it for a while. */
@@ -527,7 +617,7 @@ export class BotBrowsers implements BotBrowserHost {
   private state(botId: string, homeThreadId: string): BotBrowserState {
     const known = this.bots.get(botId)
     if (known && known.homeThreadId === homeThreadId) return known
-    const state: BotBrowserState = { botId, homeThreadId, activations: new Map(), used: [], lastViewedAt: 0 }
+    const state: BotBrowserState = { botId, homeThreadId, activations: new Map(), turns: new BrowserTurns(), used: [], lastViewedAt: 0 }
     this.bots.set(botId, state)
     return state
   }
