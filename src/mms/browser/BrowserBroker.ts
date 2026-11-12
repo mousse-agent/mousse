@@ -12,6 +12,7 @@ import { runBrowserWorkerHost } from '../../browser-worker/ipc/host'
 import type { CapabilityReport } from '../../browser-worker/session/SessionManager'
 import { fail } from '../../browser-worker/errors'
 import { stopOwnedPid } from '../../browser-worker/lifecycle/process'
+import { WORKER_WARNING_PREFIX } from '../../browser-worker/util'
 import {
   rootOnlyTree,
   stopOwnedProcessTree,
@@ -281,7 +282,13 @@ export class BrowserBroker {
     if (child.pid) {
       this.workerTree = rootOnlyTree(child.pid, { parentHandleAlive: child.exitCode === null, executablePath: process.execPath })
     }
-    child.stderr?.on('data', () => undefined)
+    // The worker's own warnings (a page it closed because it could not be marked) reach the log; nothing else does.
+    let stderrTail = ''
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const lines = (stderrTail + chunk.toString('utf8')).split('\n')
+      stderrTail = (lines.pop() ?? '').slice(-4096)
+      for (const line of lines) if (line.startsWith(WORKER_WARNING_PREFIX)) console.warn(line.slice(0, 4096))
+    })
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk))
     child.once('exit', () => this.onDisconnect(child))
     child.once('error', () => this.onDisconnect(child))

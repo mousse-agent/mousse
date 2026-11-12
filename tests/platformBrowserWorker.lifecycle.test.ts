@@ -7,7 +7,7 @@ import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/bro
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { createInProcessBroker, ensureManagedChrome, startFixtureSite, workerRequest } from './fixtures/browser/harness'
-import { chromeLaunchArgs } from '../src/browser-worker/cdp/launch'
+import { chromeLaunchArgs, windowedChromeUserAgent } from '../src/browser-worker/cdp/launch'
 import { ManagedSession } from '../src/browser-worker/session/Session'
 
 const chrome = await ensureManagedChrome()
@@ -44,6 +44,27 @@ describe('managed browser setup_required', () => {
     expect(chromeLaunchArgs({ ...base, extraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] }))
       .toContain('--host-resolver-rules=MAP foo.test 127.0.0.1')
     expect(() => chromeLaunchArgs({ ...base, extraArgs: ['--user-data-dir=C:\\shared-profile'] })).toThrow(/profile or debugging isolation/)
+  })
+
+  it('names a browser without a window as the Chrome it is, not HeadlessChrome', () => {
+    const base = { executablePath: 'chrome', userDataDir: '/isolated-browser-profile', browserVersion: '153.0.8010.36' }
+    const agent = chromeLaunchArgs(base).find((arg) => arg.startsWith('--user-agent='))
+    expect(agent).toBe(`--user-agent=${windowedChromeUserAgent('153.0.8010.36')}`)
+    expect(agent).toContain(' Chrome/153.0.0.0 ')
+    expect(agent).not.toContain('Headless')
+    // A browser with a window, or one whose version is unknown, keeps its own.
+    expect(chromeLaunchArgs({ ...base, headless: false }).some((arg) => arg.startsWith('--user-agent='))).toBe(false)
+    expect(chromeLaunchArgs({ ...base, browserVersion: undefined }).some((arg) => arg.startsWith('--user-agent='))).toBe(false)
+    expect(windowedChromeUserAgent('153.0.8010.36', 'darwin')).toBe('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36')
+    expect(windowedChromeUserAgent('153.0.8010.36', 'win32')).toBe('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36')
+    expect(windowedChromeUserAgent('153.0.8010.36', 'linux')).toBe('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36')
+    expect(windowedChromeUserAgent('1')).toBeUndefined()
+  })
+
+  it('starts without the automation mark only when the session marks each page itself', () => {
+    const base = { executablePath: 'chrome', userDataDir: '/isolated-browser-profile' }
+    expect(chromeLaunchArgs(base)).not.toContain('--disable-blink-features=AutomationControlled')
+    expect(chromeLaunchArgs({ ...base, automationMarkedPerPage: true })).toContain('--disable-blink-features=AutomationControlled')
   })
 
   it('fails closed with setup_required when no certified binary exists', async () => {

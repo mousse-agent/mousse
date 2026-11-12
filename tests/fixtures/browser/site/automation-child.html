@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Automation child</title>
+  <script>window.firstMark = String(navigator.webdriver)</script>
+</head>
+<body>
+  <p id="child-first"></p>
+  <p id="child-now"></p>
+  <script>
+    document.getElementById('child-first').textContent = 'child-first:' + window.firstMark
+    setInterval(() => { document.getElementById('child-now').textContent = 'child-now:' + navigator.webdriver }, 50)
+  </script>
+</body>
+</html>
