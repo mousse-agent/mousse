@@ -108,6 +108,8 @@ export class ManagedSession {
   private frontTargetId = ''
   /** The screencast of the tab a person watches (`frame()`), started on the first picture asked for. */
   private screencast: TabScreencast | null = null
+  /** CDP sessions of pages and frames carrying the automation mark (`markAutomation`). */
+  private readonly markedSessions = new Set<string>()
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -172,6 +174,8 @@ export class ManagedSession {
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
       headless: true,
+      browserVersion: this.config.browserVersion,
+      automationMarkedPerPage: true,
       extraArgs: this.config.chromeExtraArgs,
       signal
     })
@@ -179,30 +183,14 @@ export class ManagedSession {
     this.chrome.cdp.on('disconnect', () => {
       if (!this.closed && !this.closing) this.lifecycle = 'disconnected'
     })
+    // Every target Chromium attaches on its own waits until `onAttached` marks it and lets it run.
+    this.chrome.cdp.on('Target.attachedToTarget', (params: unknown) => { void this.onAttached(params) })
     await this.chrome.cdp.send('Target.setDiscoverTargets', { discover: true }, { signal })
     await this.chrome.cdp.send('Target.setAutoAttach', {
       autoAttach: true,
-      waitForDebuggerOnStart: false,
+      waitForDebuggerOnStart: true,
       flatten: true
     }, { signal })
-    this.chrome.cdp.on('Target.attachedToTarget', (params: unknown) => {
-      if (this.closed || this.closing) return
-      const record = params as { sessionId?: string; targetInfo?: { type?: string; targetId?: string; parentFrameId?: string; url?: string } }
-      if (record.targetInfo?.type !== 'iframe' || !record.sessionId || !record.targetInfo.targetId) return
-      this.frames.set(record.sessionId, {
-        sessionId: record.sessionId,
-        frameId: record.targetInfo.targetId,
-        parentFrameId: record.targetInfo.parentFrameId,
-        targetId: record.targetInfo.targetId,
-        url: sanitizeUrl(record.targetInfo.url ?? '')
-      })
-      const sessionId = record.sessionId
-      const work = this.enableFrame(sessionId)
-      this.frameEnables.set(sessionId, work)
-      void work.finally(() => {
-        if (this.frameEnables.get(sessionId) === work) this.frameEnables.delete(sessionId)
-      })
-    })
     await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true }, { signal })
     this.chrome.cdp.on('Browser.downloadWillBegin', (params: unknown) => {
       if (this.closed || this.closing) return
@@ -221,11 +209,6 @@ export class ManagedSession {
     })
     const created = await this.chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' }, { signal })
     const attached = await this.chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true }, { signal })
-    await this.chrome.cdp.send('Target.setAutoAttach', {
-      autoAttach: true,
-      waitForDebuggerOnStart: false,
-      flatten: true
-    }, { sessionId: attached.sessionId, signal })
     const tabId = 'tab_' + randomUUID()
     const tab: TabState = {
       publicId: tabId,
@@ -272,6 +255,7 @@ export class ManagedSession {
     this.chrome.cdp.on('Target.detachedFromTarget', (params: unknown) => {
       if (this.closed || this.closing) return
       const sessionId = (params as { sessionId?: string })?.sessionId
+      if (sessionId) this.markedSessions.delete(sessionId)
       if (sessionId && this.frames.has(sessionId)) {
         const child = this.frames.get(sessionId)!
         this.frames.delete(sessionId)
@@ -328,6 +312,7 @@ export class ManagedSession {
     }
     this.chrome = null
     this.frames.clear()
+    this.markedSessions.clear()
     this.frameLoaders.clear()
     this.tabs.clear()
     if (this.downloadDir) this.clearDownloadQuarantine()
@@ -358,7 +343,8 @@ export class ManagedSession {
   async newTab(url?: string, signal?: AbortSignal): Promise<BrowserTab> {
     const chrome = this.requireChrome()
     this.throwIfUnavailable(signal)
-    const created = await chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: url ?? 'about:blank' }, { signal })
+    // The tab opens blank and loads `url` once its frames from other sites wait for their mark (`enableTab`).
+    const created = await chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' }, { signal })
     const attached = await chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true }, { signal })
     const tabId = 'tab_' + randomUUID()
     const tab: TabState = {
@@ -374,6 +360,7 @@ export class ManagedSession {
     try {
       await this.enableTab(tab, signal)
       this.throwIfUnavailable(signal)
+      if (url) await chrome.cdp.send('Page.navigate', { url }, { sessionId: tab.cdpSessionId, signal })
       this.tabs.set(tabId, tab)
       this.activeTabId = tabId
       // A new tab opens in front.
@@ -777,10 +764,13 @@ export class ManagedSession {
         return this.trackOp(signal, (opSignal) => this.act(params, opSignal, true))
       case 'frame': return this.trackOp(signal, () => this.frame(params))
       case 'human.input': return this.trackOp(signal, (opSignal) => this.humanInput(params, opSignal))
-      case 'control.take': return this.takeControl(params.owner === 'human' ? 'human' : 'agent')
+      case 'control.take': {
+        const taken = this.takeControl(params.owner === 'human' ? 'human' : 'agent')
+        return this.markAllAutomation().then(() => taken)
+      }
       case 'control.release':
         this.releaseControl(requiredId(params.controlLeaseId))
-        return { ok: true, lifecycle: this.lifecycle }
+        return this.markAllAutomation().then(() => ({ ok: true, lifecycle: this.lifecycle }))
       default:
         fail('unsupported', 'Unsupported method')
     }
@@ -793,12 +783,16 @@ export class ManagedSession {
     if (delayMs) await sleep(delayMs, signal ?? this.sessionAbort.signal)
     this.throwIfUnavailable(signal)
     const cdp = this.requireChrome().cdp
+    this.markedSessions.add(tab.cdpSessionId)
     await Promise.all([
       cdp.send('Page.enable', {}, { sessionId: tab.cdpSessionId, signal }),
       cdp.send('DOM.enable', {}, { sessionId: tab.cdpSessionId, signal }),
       cdp.send('Runtime.enable', {}, { sessionId: tab.cdpSessionId, signal }),
       cdp.send('Accessibility.enable', {}, { sessionId: tab.cdpSessionId, signal }),
-      cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: tab.cdpSessionId, signal })
+      cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: tab.cdpSessionId, signal }),
+      this.markAutomation(tab.cdpSessionId, signal),
+      // Frames from other sites in this tab attach, and wait for their mark, before they run.
+      cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, { sessionId: tab.cdpSessionId, signal })
     ])
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 1280,
@@ -806,6 +800,61 @@ export class ManagedSession {
       deviceScaleFactor: 1,
       mobile: false
     }, { sessionId: tab.cdpSessionId, signal })
+  }
+
+  /**
+   * `navigator.webdriver` on one page or frame: true while the agent holds the browser, false only
+   * while a person holds it (`control.take` as human), so a site's check sees what is driving it.
+   */
+  private async markAutomation(sessionId: string, signal?: AbortSignal): Promise<unknown> {
+    return this.requireChrome().cdp.send('Emulation.setAutomationOverride', { enabled: this.controlOwner !== 'human' }, { sessionId, signal })
+  }
+
+  private async markAllAutomation(): Promise<void> {
+    if (!this.chrome) return
+    await Promise.allSettled([...this.markedSessions].map((sessionId) => this.markAutomation(sessionId)))
+  }
+
+  /**
+   * A target Chromium attached on its own: a frame from another site, a page a site opened, a worker.
+   * Auto-attach holds it before its first script; a page or frame gets its automation mark (and the
+   * same hold for frames inside it) before it runs. Every held target is let go, whatever fails.
+   */
+  private async onAttached(params: unknown): Promise<void> {
+    const record = params as { sessionId?: string; waitingForDebugger?: boolean; targetInfo?: { type?: string; targetId?: string; parentFrameId?: string; openerId?: string; url?: string } }
+    const sessionId = record.sessionId
+    const cdp = this.chrome?.cdp
+    if (!sessionId || !cdp) return
+    const type = record.targetInfo?.type
+    const live = !this.closed && !this.closing
+    if (live && type === 'iframe' && record.targetInfo?.targetId) {
+      this.frames.set(sessionId, {
+        sessionId,
+        frameId: record.targetInfo.targetId,
+        parentFrameId: record.targetInfo.parentFrameId,
+        targetId: record.targetInfo.targetId,
+        url: sanitizeUrl(record.targetInfo.url ?? '')
+      })
+      const work = this.enableFrame(sessionId)
+      this.frameEnables.set(sessionId, work)
+      void work.finally(() => {
+        if (this.frameEnables.get(sessionId) === work) this.frameEnables.delete(sessionId)
+      })
+    }
+    try {
+      if (live && (type === 'page' || type === 'iframe')) {
+        this.markedSessions.add(sessionId)
+        await this.markAutomation(sessionId)
+        // The session's own tabs set this when they open; a page a site opened has an opener.
+        if (type === 'iframe' || record.targetInfo?.openerId) {
+          await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, { sessionId })
+        }
+      }
+    } catch {
+      // The target went away while it was held.
+    } finally {
+      if (record.waitingForDebugger) await cdp.send('Runtime.runIfWaitingForDebugger', {}, { sessionId }).catch(() => undefined)
+    }
   }
 
   private async enableFrame(sessionId: string): Promise<void> {

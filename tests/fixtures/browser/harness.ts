@@ -112,11 +112,13 @@ export async function startCrossOriginFixtureSite(): Promise<{ parentOrigin: str
   const childOrigin = `http://foo.test:${childAddress.port}`
   const parentServer: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    if (url.pathname === '/frame-parent.html') {
-      serveFile(res, '/frame-parent.html', readFileSync(join(SITE_DIR, 'frame-parent.html'), 'utf8').replace('__CHILD_ORIGIN__', childOrigin))
+    const pathname = url.pathname === '/' ? '/form.html' : url.pathname
+    const page = join(SITE_DIR, pathname.replace(/^\/+/, ''))
+    if (pathname.endsWith('.html') && page.startsWith(SITE_DIR) && existsSync(page)) {
+      serveFile(res, pathname, readFileSync(page, 'utf8').replaceAll('__CHILD_ORIGIN__', childOrigin))
       return
     }
-    serveFile(res, url.pathname === '/' ? '/form.html' : url.pathname)
+    serveFile(res, pathname)
   })
   await new Promise<void>((resolvePromise) => parentServer.listen(0, '127.0.0.1', resolvePromise))
   const parentAddress = parentServer.address() as AddressInfo
