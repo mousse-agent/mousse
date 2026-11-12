@@ -19,7 +19,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../../adapter'
-import { readUsageLimit } from '../../../orchestrator/providerErrors'
+import { providerStatusError, readProviderStatus, readUsageLimit } from '../../../orchestrator/providerErrors'
 import { isMousseServerTool } from '../../../run/mcp/attachment'
 import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
@@ -65,13 +65,28 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
   if (kind === 'unauthorized' || status === 401)
     return fail('auth_expired', 'ChatGPT did not accept this sign-in. Sign in again in Settings → Providers.')
   if (kind === 'usageLimitExceeded' || status === 429) return codexUsageLimitHarnessError(instanceId)
-  if (status === 403)
-    return fail('not_eligible', "ChatGPT refused this request for this account or plan. Check the plan, or sign in with another account.")
-  if (kind === 'serverOverloaded' || status === 503)
+  // Any other refusal with a status (a plan that cannot use this, a bad request, an outage): the provider's status
+  // and message. A busy server stays one to try again.
+  const refused = codexProviderError(error)
+  if (refused) return refused
+  if (kind === 'serverOverloaded')
     return fail('service_unavailable', 'ChatGPT is unavailable or busy right now. Try again in a moment.')
-  if (kind === 'badRequest' || status === 400)
-    return fail('unsupported', 'ChatGPT did not accept this request.')
+  if (kind === 'badRequest') return fail('unsupported', 'ChatGPT did not accept this request.')
   return fail('protocol', `Codex ended the turn with an error: ${error.message}`)
+}
+
+/**
+ * A turn Codex ended on the provider's HTTP error (`unexpected status 400 Bad Request: …, url: …`, or a status in
+ * `codexErrorInfo`) as the provider's status and message, for the transcript. Undefined for a failure with no error
+ * status, and for a context overflow, which the overflow recovery reads as it is. The message is already redacted.
+ */
+export function codexProviderError(error: CodexTurnFailure): AppError | undefined {
+  if (codexErrorKind(error.codexErrorInfo) === 'contextWindowExceeded') return undefined
+  const read = readProviderStatus(error.message)
+  const status = error.httpStatus ?? read?.status
+  if (status === undefined || status < 400) return undefined
+  const busy = status === 503 || codexErrorKind(error.codexErrorInfo) === 'serverOverloaded'
+  return providerStatusError(status, read?.body ?? error.message, { provider: 'codex', cause: error, ...(busy ? { errorInfo: { category: 'unavailable', retryable: true } } : {}) })
 }
 
 /**
@@ -280,6 +295,8 @@ export class CodexAdapter implements ProviderAdapter {
         }
         throw codexHarnessError(error, input.instanceId)
       }
+      // The provider refused the request: the transcript shows its status and message.
+      if (error instanceof CodexTurnFailure && !input.signal.aborted) throw codexProviderError(error) ?? error
       throw error
     }
     const totalResponseTimeMs = Date.now() - startedAt
