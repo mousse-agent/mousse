@@ -1168,6 +1168,14 @@ export interface QueuedMessage {
    * every item of the queue when the next turn of the thread starts.
    */
   heldAfterStop?: true
+  /**
+   * The item was queued only because the thread's execution lease was held (a git operation, a workspace restore,
+   * work in another process) and waits for it to be free. Saved so that a restart into a queue a Stop held runs it
+   * first, as the running app would have, and leaves what was only added after the Stop waiting for the person. Kept
+   * on a pending item only: claiming it, or a Stop holding it, clears it. Older builds drop it, which leaves the item
+   * waiting for Send now after such a restart.
+   */
+  waitsForLease?: true
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /** The other computer of the user this message was sent or last edited from (a routed call); absent for this computer's own. */

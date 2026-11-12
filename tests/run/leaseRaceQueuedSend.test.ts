@@ -310,6 +310,8 @@ describe('a send that lost the race for the thread lease', () => {
     const result = await orch.send('LEASE-FR before the restart', false, { threadId: thread.id })
     expect(result.queued).toBe(true)
     expect(result.queueItem?.heldAfterStop).toBeUndefined()
+    // Saved as queued behind the lease: that is what lets it go first after the restart.
+    expect(store.loadMessageQueue(thread.id).find((item) => item.id === result.queueItem?.id)?.waitsForLease).toBe(true)
 
     // The old process dies holding it: the new one finds a dead owner's lease, reclaims it, and the lease is free.
     await orch.shutdown(5_000)
@@ -342,6 +344,91 @@ describe('a send that lost the race for the thread lease', () => {
     const pending = listPendingQueue(store.loadMessageQueue(thread.id))
     expect(pending.map((item) => [item.content, item.heldAfterStop])).toEqual([['HELD-ONLY queued before the Stop', true]])
   })
+
+  it('runs nothing after a restart into a queue a Stop held when a message was only added after the Stop', async () => {
+    const thread = store.createThread('Added after the Stop')
+    orch.enqueueForThread(thread.id, 'HELD-OLD before the Stop')
+    mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+    // Queued from another window or computer after the Stop: nothing drains it while the app runs.
+    orch.enqueueForThread(thread.id, 'ADDED after the Stop')
+    await settle(400)
+    expect(adapter.turns).toHaveLength(0)
+
+    await orch.shutdown(5_000)
+    orch = createOrchestrator(home, store, [adapter])
+    orch.recoverAndDrainPendingQueues()
+    orch.scheduleStartupQueueRecovery()
+    await settle(600)
+
+    expect(adapter.turns).toHaveLength(0)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+    const pending = listPendingQueue(store.loadMessageQueue(thread.id))
+    expect(pending.map((item) => [item.content, item.heldAfterStop])).toEqual([['HELD-OLD before the Stop', true], ['ADDED after the Stop', undefined]])
+  })
+
+  it('runs nothing added after a Stop when another process holds the lease at restart and then lets go', async () => {
+    const thread = store.createThread('Added after the Stop, peer at restart')
+    orch.enqueueForThread(thread.id, 'HELD-OLD before the Stop')
+    mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+    orch.enqueueForThread(thread.id, 'ADDED after the Stop')
+
+    await orch.shutdown(5_000)
+    const leasePath = holdAsPeer(thread.id)
+    orch = createOrchestrator(home, store, [adapter])
+    orch.recoverAndDrainPendingQueues()
+    orch.scheduleStartupQueueRecovery()
+    await settle(200)
+    expect(leaseWaits().has(thread.id)).toBe(false)
+
+    unlinkSync(leasePath)
+    await settle(800)
+    expect(adapter.turns).toHaveLength(0)
+    expect(listPendingQueue(store.loadMessageQueue(thread.id)).map((item) => item.content)).toEqual(['HELD-OLD before the Stop', 'ADDED after the Stop'])
+  })
+
+  it('drains threads whose lease wait began at startup a few at a time', async () => {
+    // Every thread has a Stop-held queue and a message that waited for the lease of the old process.
+    const threads = Array.from({ length: 5 }, (_, index) => store.createThread(`Startup lease wait ${index}`))
+    const now = new Date().toISOString()
+    for (const [index, thread] of threads.entries()) {
+      orch.enqueueForThread(thread.id, `HELD-OLD-${index}`)
+      mutateDurableQueue(store, thread.id, holdQueueAfterStop)
+      const leasePath = getExecutionLeasePath(store.getThreadDir(thread.id))
+      writeFileSync(leasePath, JSON.stringify({ pid: process.ppid, token: `old-${index}`, processInstanceId: 'old-instance', acquiredAt: now, heartbeatAt: now, source: 'git-operation' }))
+      await orch.send(`LEASE-C${index}`, false, { threadId: thread.id })
+      writeFileSync(leasePath, JSON.stringify({ pid: 2_147_000_124, token: `old-${index}`, processInstanceId: 'old-instance', acquiredAt: now, heartbeatAt: now, source: 'git-operation' }))
+    }
+    await orch.shutdown(5_000)
+
+    let running = 0
+    let most = 0
+    const gates: Array<() => void> = []
+    const gated = piAdapter(() => {
+      running++
+      most = Math.max(most, running)
+      return new Promise<string>((resolve) => gates.push(() => { running--; resolve('ok') }))
+    })
+    orch = createOrchestrator(home, store, [gated])
+    orch.recoverAndDrainPendingQueues()
+    orch.scheduleStartupQueueRecovery()
+    await waitFor(() => gates.length >= 2, 'the first startup turns', 3_000)
+    await settle(400)
+    expect(running).toBe(2)
+
+    // Let every turn end as it comes, until each thread ran its own message and then its held one.
+    const deadline = Date.now() + 10_000
+    while (gated.turns.length < 10 || running > 0) {
+      if (Date.now() > deadline) throw new Error(`timed out with ${gated.turns.length} turns`)
+      gates.splice(0).forEach((open) => open())
+      await settle(20)
+    }
+    await settle(200)
+    expect(most).toBe(2)
+    for (const index of threads.keys()) {
+      const order = gated.turns.map((turn) => turn.prompt).filter((prompt) => prompt.includes(`HELD-OLD-${index}`) || prompt.includes(`LEASE-C${index}`))
+      expect(order.map((prompt) => (prompt.includes('LEASE') ? 'B' : 'OLD'))).toEqual(['B', 'OLD'])
+    }
+  }, 20_000)
 
   it('waits for the lease when another process takes it between the startup look and the startup drain', async () => {
     const thread = store.createThread('Lease taken before the startup drain')
