@@ -121,6 +121,8 @@ export interface BrowserActionResult {
   message?: string
   artifactIds: string[]
   artifacts?: BrowserArtifactMetadata[]
+  /** For navigate, back, forward and reload: whether the page is ready or still loading, and what it needs. */
+  navigation?: import('./navigation').BrowserNavigation
 }
 export interface BrowserResolvedArtifact {
   artifactId: string
@@ -175,6 +177,10 @@ export interface BrowserViewerUpdate {
   viewport: { width: number; height: number }
   /** The tab is not the one in front: Chromium does not paint it, so its picture is a still. */
   behind: boolean
+  /** The page is still loading. */
+  loading?: boolean
+  /** What the tab's last navigation ran into, or what its opened page needs (a sign-in, a human check). */
+  problem?: import('./navigation').BrowserProblem
   frameSeq: number
   stateSeq: number
   /** A JPEG in base64; `sharp` when taken at full quality once the page was still. */
@@ -186,6 +192,7 @@ export interface BrowserViewerUpdate {
 }
 
 export type BrowserErrorCode = 'setup_required' | 'profile_mismatch' | 'session_closed' | 'stale_generation' | 'stale_observation' | 'stale_ref' | 'invalid_geometry' | 'not_actionable' | 'policy_denied' | 'approval_required' | 'human_controlled' | 'timeout' | 'cancelled' | 'worker_disconnected' | 'unsupported' | 'invalid_action' | 'no_progress' | 'download_failed' | 'artifact_denied'
+  | import('./navigation').BrowserProblemCode
 
 /** Private broker envelope: validated by MMS; never exposed to page or model JS. */
 export interface BrowserWorkerRequest {
@@ -200,5 +207,6 @@ export interface BrowserWorkerResponse {
   id: string
   ok: boolean
   result?: unknown
-  error?: { code: BrowserErrorCode; message: string }
+  /** `details.problem`: a failed navigation's class and Chromium's own code (`BrowserProblem`). */
+  error?: { code: BrowserErrorCode; message: string; details?: { problem?: import('./navigation').BrowserProblem } }
 }

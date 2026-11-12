@@ -64,6 +64,26 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
       setTimeout(() => res.end('<!doctype html><title>Viewer slow fixture</title><main>slow fixture</main>'), 5_000)
       return
     }
+    // A page whose document is ready at once and that never finishes loading: one image is never answered.
+    if (req.method === 'GET' && url.pathname === '/never-loads.html') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end('<!doctype html><title>Never loads</title><main><h1>Ready, still loading</h1><img src="/hang.png" alt=""></main>')
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/hang.png') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'image/png')
+      res.flushHeaders()
+      return
+    }
+    // A sign-in wall: 401 and a password field.
+    if (req.method === 'GET' && url.pathname === '/sign-in.html') {
+      res.statusCode = 401
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end('<!doctype html><title>Sign in</title><main><form><label>Email <input name="email"></label><label>Password <input type="password" name="password"></label><button>Sign in</button></form></main>')
+      return
+    }
     const relative = url.pathname === '/' ? '/form.html' : url.pathname
     const file = join(SITE_DIR, relative.replace(/^\/+/, ''))
     if (!file.startsWith(SITE_DIR) || !existsSync(file)) {
@@ -78,7 +98,11 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
   const address = server.address() as AddressInfo
   return {
     origin: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise((resolvePromise, reject) => server.close((error) => (error ? reject(error) : resolvePromise()))),
+    close: () => new Promise((resolvePromise, reject) => {
+      server.close((error) => (error ? reject(error) : resolvePromise()))
+      // The never-answered image would hold the server open.
+      server.closeAllConnections()
+    }),
     submitCount: () => submitRequests
   }
 }

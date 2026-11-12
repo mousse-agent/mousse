@@ -1,4 +1,14 @@
 import type { BrowserAction, BrowserHumanInput } from '../../shared/browser/types'
+import {
+  BROWSER_PROBLEM_CODES,
+  browserProblemMessage,
+  classifyNavigationError,
+  classifyOpenedPage,
+  hostOf,
+  type BrowserNavigation,
+  type BrowserPageSigns,
+  type BrowserProblem
+} from '../../shared/browser/navigation'
 import type { CdpTransport } from '../cdp/transport'
 import { BrowserWorkerError, fail } from '../errors'
 import { browserNavigationUrl } from '../../shared/browser/validation'
@@ -221,44 +231,200 @@ export async function dispatchHumanInput(cdp: CdpTransport, cdpSessionId: string
   }
 }
 
-/** Wait for the navigation we dispatch, never a replay from about:blank or a child frame. */
-export async function navigateAndWaitForLoad(cdp: CdpTransport, cdpSessionId: string, url: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+/**
+ * How long this computer's recent navigations took to reach a ready document. The ceiling a
+ * navigation call waits for its page scales with it: four times the median of the last 20 (the
+ * slow ones of a slow computer or connection fit), never under 10 s nor over 45 s, and 15 s until
+ * there are 5 to go by. Past the ceiling a page is reported as still loading, never as failed.
+ */
+export class NavigationPace {
+  private readonly samples: number[] = []
+  record(ms: number): void {
+    if (!Number.isFinite(ms) || ms < 0) return
+    this.samples.push(ms)
+    if (this.samples.length > 20) this.samples.shift()
+  }
+
+  ceilingMs(): number {
+    if (this.samples.length < 5) return 15_000
+    const sorted = [...this.samples].sort((a, b) => a - b)
+    const median = sorted[Math.floor(sorted.length / 2)]!
+    return Math.min(45_000, Math.max(10_000, Math.round(median * 4)))
+  }
+}
+
+/** The pace of this worker's navigations, across its sessions. */
+export const navigationPace = new NavigationPace()
+
+/** How long a ready page is given to finish loading before the call answers that it is still loading. */
+export const LOAD_GRACE_MS = 1_500
+
+export interface NavigationOptions {
+  signal?: AbortSignal
+  pace?: NavigationPace
+  /** Overrides the pace's ceiling (tests). */
+  ceilingMs?: number
+  loadGraceMs?: number
+  /** Reads what the opened page shows of a refusal or of needing a person (`readPageSigns`). */
+  signs?: (frameId: string) => Promise<BrowserPageSigns | undefined>
+  /** Answer at the commit (a person's own navigation: their view shows it loading from there). */
+  untilCommit?: boolean
+}
+
+/**
+ * Navigates a tab and answers once its page has committed and its document is ready: `ready` when
+ * it also loaded within a moment, `loading` when it did not, or when the site had not answered (or
+ * the document was not ready) by the ceiling. Neither is a failure: the page goes on loading. A
+ * failure Chromium reports (`net::ERR_…`) fails with its class (`site_unreachable`,
+ * `site_blocked`), its plain message and Chromium's code in the problem's details. Only this
+ * navigation is waited for, never a replay from about:blank or a child frame.
+ */
+export async function navigateTab(cdp: CdpTransport, cdpSessionId: string, url: string, options: NavigationOptions = {}): Promise<BrowserNavigation> {
   const targetUrl = browserNavigationUrl(url)
-  await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: cdpSessionId, signal })
-  await new Promise<void>((resolve, reject) => {
-    const loaded = new Set<string>()
-    let expected: { frameId: string; loaderId?: string } | undefined
+  // The command answers with this navigation's own loader: only that one counts.
+  return followNavigation(cdp, cdpSessionId, targetUrl, options, false, async () => {
+    const result = await cdp.send<{ frameId: string; loaderId?: string; errorText?: string }>('Page.navigate', { url: targetUrl }, { sessionId: cdpSessionId, timeoutMs: 120_000, signal: options.signal })
+    return result
+  })
+}
+
+/** Back, forward or reload in a tab, followed like `navigateTab` (`url` is where it was). */
+export async function navigateHistory(cdp: CdpTransport, cdpSessionId: string, kind: 'back' | 'forward' | 'reload', url: string, options: NavigationOptions = {}): Promise<BrowserNavigation> {
+  // No answer names the loader: the next commit of the tab's main frame is this one.
+  return followNavigation(cdp, cdpSessionId, url, options, true, async () => {
+    await dispatchAction(cdp, cdpSessionId, { type: kind }, undefined, options.signal)
+    return undefined
+  })
+}
+
+interface StartedNavigation { frameId: string; loaderId?: string; errorText?: string }
+
+async function followNavigation(cdp: CdpTransport, cdpSessionId: string, url: string, options: NavigationOptions, commitByEvent: boolean, start: () => Promise<StartedNavigation | undefined>): Promise<BrowserNavigation> {
+  const pace = options.pace ?? navigationPace
+  const ceilingMs = options.ceilingMs ?? pace.ceilingMs()
+  const graceMs = options.loadGraceMs ?? LOAD_GRACE_MS
+  const startedAt = Date.now()
+  await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: cdpSessionId, signal: options.signal })
+  const outcome = await new Promise<BrowserNavigation & { frameId?: string }>((resolve, reject) => {
+    /** Lifecycle events seen, by frame, loader and name: one may come before the command's answer. */
+    const seen = new Set<string>()
+    let committed: { frameId: string; loaderId?: string; url: string } | undefined
+    let ready = false
     let settled = false
-    const finish = (error?: unknown) => {
+    let grace: ReturnType<typeof setTimeout> | undefined
+    const host = hostOf(url)
+    const finish = (value?: BrowserNavigation & { frameId?: string }, error?: unknown) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
-      cdp.off('Page.lifecycleEvent', onEvent)
-      signal?.removeEventListener('abort', onAbort)
+      clearTimeout(ceiling)
+      if (grace) clearTimeout(grace)
+      cdp.off('Page.lifecycleEvent', onLifecycle)
+      cdp.off('Page.frameNavigated', onNavigated)
+      cdp.off('Page.navigatedWithinDocument', onWithinDocument)
+      options.signal?.removeEventListener('abort', onAbort)
       if (error) reject(error)
-      else resolve()
+      else resolve(value!)
     }
-    const onEvent = (params: unknown, sessionId?: string) => {
+    const failure = (errorText: string) => {
+      const kind = classifyNavigationError(errorText)
+      // A download, or a newer navigation: nothing failed.
+      if (!kind) return finish({ url, state: 'ready' })
+      const problem: BrowserProblem = { kind, code: errorText, ...(host ? { host } : {}) }
+      finish(undefined, new BrowserWorkerError(BROWSER_PROBLEM_CODES[kind], browserProblemMessage(problem), problem))
+    }
+    const has = (name: string) => committed?.loaderId !== undefined && seen.has(`${committed.frameId}:${committed.loaderId}:${name}`)
+    const advance = () => {
+      if (settled || !committed) return
+      if (!committed.loaderId) return finish({ url: committed.url, state: 'ready', frameId: committed.frameId })
+      if (options.untilCommit) return finish({ url: committed.url, state: has('load') ? 'ready' : 'loading' })
+      if (has('load')) {
+        if (!ready) pace.record(Date.now() - startedAt)
+        return finish({ url: committed.url, state: 'ready', frameId: committed.frameId })
+      }
+      if (!ready && has('DOMContentLoaded')) {
+        ready = true
+        pace.record(Date.now() - startedAt)
+        // A moment for it to finish loading; past that it is still loading, and the call answers.
+        grace = setTimeout(() => finish({ url: committed!.url, state: 'loading', frameId: committed!.frameId }), graceMs)
+      }
+    }
+    const onLifecycle = (params: unknown, sessionId?: string) => {
       if (sessionId !== cdpSessionId) return
       const event = params as { name?: string; frameId?: string; loaderId?: string }
-      if (event.name !== 'load' || !event.frameId || !event.loaderId) return
-      const key = `${event.frameId}:${event.loaderId}`
-      if (expected && key === `${expected.frameId}:${expected.loaderId}`) finish()
-      else if (!expected && loaded.size < 128) loaded.add(key)
+      if (!event.frameId || !event.loaderId || !event.name) return
+      if (seen.size < 512) seen.add(`${event.frameId}:${event.loaderId}:${event.name}`)
+      advance()
     }
-    const onAbort = () => finish(new BrowserWorkerError('cancelled', 'Navigation cancelled'))
-    const timer = setTimeout(() => finish(new BrowserWorkerError('timeout', 'Navigation did not finish loading')), timeoutMs)
-    cdp.on('Page.lifecycleEvent', onEvent)
-    signal?.addEventListener('abort', onAbort, { once: true })
-    if (signal?.aborted) { onAbort(); return }
-    void cdp.send<{ frameId: string; loaderId?: string; errorText?: string }>('Page.navigate', { url: targetUrl }, { sessionId: cdpSessionId, timeoutMs, signal }).then((result) => {
-      if (settled) return
-      if (result.errorText) { finish(new BrowserWorkerError('not_actionable', `Navigation failed: ${result.errorText}`)); return }
-      expected = result
-      // Same-document navigation has no new loader and the command confirms its commit.
-      if (!result.loaderId || loaded.has(`${result.frameId}:${result.loaderId}`)) finish()
-    }, finish)
+    const onNavigated = (params: unknown, sessionId?: string) => {
+      if (!commitByEvent || sessionId !== cdpSessionId || committed) return
+      const frame = (params as { frame?: { id?: string; parentId?: string; loaderId?: string; url?: string; unreachableUrl?: string } })?.frame
+      if (!frame?.id || frame.parentId) return
+      // Chromium's error page: the page the history step went to could not be loaded.
+      if (frame.unreachableUrl) return failure('net::ERR_FAILED')
+      committed = { frameId: frame.id, loaderId: frame.loaderId, url: frame.url ?? url }
+      advance()
+    }
+    const onWithinDocument = (params: unknown, sessionId?: string) => {
+      if (!commitByEvent || sessionId !== cdpSessionId || committed) return
+      const event = params as { frameId?: string; url?: string }
+      if (!event.frameId) return
+      committed = { frameId: event.frameId, url: event.url ?? url }
+      advance()
+    }
+    const onAbort = () => finish(undefined, new BrowserWorkerError('cancelled', 'Navigation cancelled'))
+    // The site has not answered, or the document is not ready, by the ceiling: it is still loading.
+    const ceiling = setTimeout(() => finish({ url: committed?.url ?? url, state: 'loading', ...(committed ? { frameId: committed.frameId } : {}) }), ceilingMs)
+    cdp.on('Page.lifecycleEvent', onLifecycle)
+    cdp.on('Page.frameNavigated', onNavigated)
+    cdp.on('Page.navigatedWithinDocument', onWithinDocument)
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (options.signal?.aborted) { onAbort(); return }
+    void start().then((result) => {
+      if (settled || !result) return
+      if (result.errorText) return failure(result.errorText)
+      // The command answers at the commit: same-document navigation has no new loader.
+      committed = { frameId: result.frameId, url, ...(result.loaderId ? { loaderId: result.loaderId } : {}) }
+      advance()
+    }, (error) => {
+      // A command that timed out on its own is a site that has not answered: still loading.
+      if (error instanceof BrowserWorkerError) return finish(undefined, error)
+      if (/timed out|timeout/i.test(String((error as Error)?.message ?? error))) return finish({ url, state: 'loading' })
+      finish(undefined, error)
+    })
   })
+  const { frameId, ...navigation } = outcome
+  // A page that opened may still need a person (a sign-in, a human check) or refuse this browser: a hint, not a failure.
+  if (frameId && options.signs) {
+    const signs = await options.signs(frameId).catch(() => undefined)
+    const problem = signs ? classifyOpenedPage({ ...signs, url: signs.url ?? navigation.url }) : undefined
+    if (problem) return { ...navigation, problem }
+  }
+  return navigation
+}
+
+/**
+ * What an opened page shows of a refusal or of needing a person, read in a world of its own (the
+ * page's scripts can't see it): its HTTP status, title, and whether a human check, a password field
+ * or a consent wall is on it.
+ */
+export async function readPageSigns(cdp: CdpTransport, cdpSessionId: string, frameId: string): Promise<BrowserPageSigns | undefined> {
+  const world = await cdp.send<{ executionContextId?: number }>('Page.createIsolatedWorld', { frameId, worldName: 'mousse-page-signs' }, { sessionId: cdpSessionId, timeoutMs: 2_000 })
+  if (!world.executionContextId) return undefined
+  const read = await cdp.send<{ result?: { value?: BrowserPageSigns } }>('Runtime.evaluate', {
+    contextId: world.executionContextId,
+    returnByValue: true,
+    expression: `(() => {
+      const nav = performance.getEntriesByType('navigation')[0]
+      const status = nav && typeof nav.responseStatus === 'number' ? nav.responseStatus : 0
+      const frames = [...document.querySelectorAll('iframe[src]')].map((frame) => frame.src)
+      const humanCheck = frames.some((src) => /challenges\\.cloudflare\\.com|google\\.com\\/recaptcha|recaptcha\\.net|hcaptcha\\.com|arkoselabs\\.com/i.test(src))
+        || !!document.querySelector('#challenge-form, #challenge-running, #cf-challenge-running, .cf-turnstile, .g-recaptcha, .h-captcha')
+      const consent = /^consent\\./i.test(location.hostname)
+        || !!document.querySelector('#onetrust-consent-sdk [role=dialog], #didomi-popup, #qc-cmp2-container, iframe[id^="sp_message_iframe"]')
+      return { status, title: document.title, url: location.href, humanCheck, password: !!document.querySelector('input[type=password]'), consent }
+    })()`
+  }, { sessionId: cdpSessionId, timeoutMs: 2_000 })
+  return read.result?.value
 }
 
 export async function waitForLoad(cdp: CdpTransport, cdpSessionId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {

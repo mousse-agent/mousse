@@ -1,4 +1,5 @@
 import type { CdpEventListener, CdpTransport } from '../cdp/transport'
+import type { BrowserProblem } from '../../shared/browser/navigation'
 
 /**
  * The pictures of a managed tab a person watches (a bot's browser view), for every viewer at once.
@@ -65,6 +66,10 @@ export interface ViewerUpdate {
   viewport: { width: number; height: number }
   /** The tab is not the one in front: Chromium does not paint it, so its picture is a still. */
   behind: boolean
+  /** The page is still loading. */
+  loading: boolean
+  /** What its last navigation ran into, or what the opened page needs. */
+  problem?: BrowserProblem
   /** Pass back as `afterFrame` / `afterState`. */
   frameSeq: number
   stateSeq: number
@@ -86,6 +91,10 @@ export interface ViewerNextRequest {
 export interface ViewerCapturesOptions {
   /** Whether the tab is not the one in front (Chromium paints only that one). */
   behind(cdpSessionId: string): boolean
+  /** Whether the tab's page is still loading when its capture starts. */
+  loading?(cdpSessionId: string): boolean
+  /** What the tab's last navigation ran into when its capture starts. */
+  problem?(cdpSessionId: string): BrowserProblem | undefined
   now?: () => number
   settleMs?: number
   leaseMs?: number
@@ -142,6 +151,10 @@ interface TabCapture {
   /** Screencast pictures not acknowledged yet. */
   held: number[]
   behind: boolean
+  /** The page is still loading. */
+  loading: boolean
+  /** What its last navigation ran into, or what the opened page needs. */
+  problem?: BrowserProblem
   settle?: ReturnType<typeof setTimeout>
   settling?: Promise<void>
   watchers: Set<Watcher>
@@ -326,6 +339,24 @@ export class ViewerCaptures {
 
   // -- watchers and captures
 
+  /** The tab's page is loading (or stopped loading). */
+  loading(cdpSessionId: string, loading: boolean): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || capture.loading === loading) return
+    capture.loading = loading
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
+  /** What the tab's last navigation ran into (or needs), or nothing. */
+  problem(cdpSessionId: string, problem: BrowserProblem | undefined): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || JSON.stringify(capture.problem) === JSON.stringify(problem)) return
+    capture.problem = problem
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
   /** The tab's address and title as the session knows them (it follows every commit and title). */
   private describe(capture: TabCapture, info: ViewerTabInfo): void {
     if (capture.info.url === info.url && capture.info.title === info.title && capture.info.tabId === info.tabId) return
@@ -343,7 +374,9 @@ export class ViewerCaptures {
     if (!watcher) {
       let capture = this.captures.get(info.cdpSessionId)
       if (!capture) {
-        capture = { info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, quality: MOVING_QUALITY, sharpenUntil: 0, frameSeq: 0, stateSeq: this.bump(), held: [], behind: false, watchers: new Set() }
+        capture = { info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, quality: MOVING_QUALITY, sharpenUntil: 0, frameSeq: 0, stateSeq: this.bump(), held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false, watchers: new Set() }
+        const problem = this.options.problem?.(info.cdpSessionId)
+        if (problem) capture.problem = problem
         this.captures.set(info.cdpSessionId, capture)
       }
       watcher = { key, capture, maxWidth: 960, minIntervalMs: 0, lastPictureAt: 0, seenAt: this.now(), fresh: true }
@@ -604,6 +637,8 @@ export class ViewerCaptures {
       title: capture.info.title,
       viewport: { ...capture.viewport },
       behind: capture.behind,
+      loading: capture.loading,
+      ...(capture.problem ? { problem: capture.problem } : {}),
       frameSeq: picture ? capture.frameSeq : waiting.afterFrame,
       stateSeq: capture.stateSeq,
       ...(picture && capture.latest ? { picture: capture.latest } : {}),

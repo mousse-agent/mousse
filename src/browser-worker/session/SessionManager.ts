@@ -1,6 +1,7 @@
 import type { BrowserWorkerRequest } from '../../shared/browser/types'
 import { resolveCertifiedBrowser } from '../binary/resolver'
-import { fail } from '../errors'
+import { BrowserWorkerError, fail, failProblem, isBrowserWorkerError } from '../errors'
+import { BROWSER_PROBLEM_CODES, browserProblemMessage } from '../../shared/browser/navigation'
 import { optionalBoolean, optionalString, requiredId } from '../util'
 import { browserNavigationUrl } from '../../shared/browser/validation'
 import { ManagedSession } from './Session'
@@ -182,7 +183,8 @@ export class SessionManager {
         await session.close()
         fail('cancelled', 'Session open cancelled')
       }
-      return { session: record, observation }
+      // How the first page went: a slow or failed page leaves the session open.
+      return { session: record, observation, ...(session.firstNavigation ? { navigation: session.firstNavigation } : {}) }
     } catch (error) {
       this.opening.delete(session)
       this.sessions.delete(session.id)
@@ -192,8 +194,20 @@ export class SessionManager {
         this.sessions.set(session.id, session)
         throw closeError
       }
-      if (error instanceof WorkspaceLockBusyError) fail('policy_denied', error.message)
-      throw error
+      if (error instanceof WorkspaceLockBusyError) failProblem({ kind: 'cannot-start', cause: 'its profile is open in another browser session' })
+      throw cannotStart(error)
     }
   }
+}
+
+/**
+ * Why the browser could not start, in its class (`browser_cannot_start`) with the cause: Chromium
+ * failed to launch or exited, or its pipe broke. A stop and a refused request keep their own code.
+ */
+function cannotStart(error: unknown): unknown {
+  if (isBrowserWorkerError(error) && ['cancelled', 'session_closed', 'invalid_action', 'policy_denied'].includes(error.code)) return error
+  if (isBrowserWorkerError(error) && error.problem) return error
+  const cause = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 300)
+  const problem = { kind: 'cannot-start' as const, cause: cause || 'Chromium did not start' }
+  return new BrowserWorkerError(BROWSER_PROBLEM_CODES['cannot-start'], browserProblemMessage(problem), problem)
 }
