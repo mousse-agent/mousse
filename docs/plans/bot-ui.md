@@ -30,7 +30,7 @@ Every later decision in this plan follows these five rules.
 
 1. **One place.** Bots live in the Agents tab (called Chats until early November 2026), in the section now called Roster, renamed **Bots**. No new page, tab or rail icon.
 2. **Little to fill in.** A look (a clay mouse in a colour with one accessory, already picked for you), an optional name and one sentence. Without a name, the bot names itself.
-3. **No model anywhere.** Not in the dialog, not in the composer, not in the header, not in About. Mousse picks it.
+3. **No model anywhere.** Not in the dialog, not in the composer, not in the header, not in About. Mousse picks it. *(Changed by #673: Runs on, in About and New bot, picks models by hand; see §4.7.)*
 4. **Everything else by asking.** What it does, when it runs, what it may use, its name: the user says it in the chat, and the bot confirms in plain words with one chip.
 5. **One menu, one panel.** The bot's ⋯ menu (About this bot, Rename, Change look, Pause, Delete) and the About panel are the only extra surfaces.
 
@@ -212,6 +212,7 @@ The Chats layout, as in the reference image:
 - **Hidden.** Mousse picks the model from the user's signed-in subscriptions (Bot Architecture's automatic choice). It never appears in the UI.
 - **No subscription signed in:** the bot's first message says so in plain words, with a **Sign in** button that opens Settings → Providers. It does not name models.
 - **Asking** ("think harder", "be quicker", "use Opus") is accepted and acted on without showing a model name. The bot replies "Okay, I'll take more time on this", not "Switched to …".
+- **Runs on (#673, added later).** Automatic stays the default, and nothing is needed to make a bot. About → Runs on (and New bot, once its steps host the same picker, `BotModelRows`) shows the bot's models as rows: **Talk** and **Work**, and with **Advanced**, **Light work**, **Medium work** and **Hard work**. Each row is a model, listed under its provider entry's name, and its reasoning level (Default, then the model's own levels). A row on a model only one entry offers shows its name; when two entries offer it, the entry shows under the name. No explanatory text, no usage meters; details are in tooltips. Advanced is open while the work rows differ, and closing it puts Medium work's model on all work. There is no Images row (no image path a bot can use yet). These pickers are the only bot screens that name a model, apart from one chat line when a picked model can't run ("I can't use Haiku 5.5 on Team Claude (API key): it's turned off, so I'm using Automatic for now."), said once while the problem lasts. `use_model` shows a chip ("switched models · for work") that never names the model.
 
 ### 4.8 The menu and About this bot
 
