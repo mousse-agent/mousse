@@ -142,7 +142,7 @@ The bot engine (grants, walls, crash-safe dispatch, spend ledgers) is built. Fiv
    - Subscription credentials are preferred.
    - A usage limit tries the next candidate, then pauses the bot until the reset time.
    - The internal tools `set_depth` and `use_model` change the choice. Their effects never reach the UI.
-   - **Since #673 the choice is rows** (`docs/bots.md`, Model and depth): Talk for the chat lane, and Light, Medium and Hard work for the run lane, each Automatic (the above) or a pick of a provider entry, a model and a reasoning level that runs only on that entry. `work_start` names a level per job, and `set_depth` `always` sets the standing level for work that names none. A pick that can't run runs that activation on Automatic, and the chat says so once. `main.model` stays and mirrors Talk, so the definition is still format 2; the rows sit beside it in `main.slots`. `use_model` now picks only among the Runs on choices and shows a chip.
+   - **Since #673 the choice is rows** (`docs/bots.md`, Model and depth): Talk for the chat lane, and Light, Medium and Hard work for the run lane, each a pick of a provider entry, a model and a reasoning level that runs only on that entry, never chosen by Mousse. `work_start` names a level per job, and `set_depth` `always` sets the standing level for work that names none. A pick at its usage limit waits for the reset; one that can't run for another reason leaves the bot stuck with Pick a model. Bots made before picks keep the automatic choice above until their owner picks. `main.model` stays as a mirror older builds run, so the definition is still format 2; the rows sit beside it in `main.slots`. `use_model` picks only among the Runs on choices, `always` only when the owner's message names the model, and shows a chip.
 8. **Chips are made by Mousse, never by the model.**
    - Every call the authority allows produces a live chip worded as an attempt ("searching the web"). These are rolled up when the dispatch settles ("searched the web · 3").
    - App tools, whose results pass through Mousse, may produce outcome chips ("every weekday · 09:00").
@@ -178,7 +178,7 @@ This plan follows the Bot UI:
 
 The usage-window reserve is deferred to Phase 2, and a computer other than this one to Phase 3.
 
-**Update (#673, #769, #996, rows):** by hand was added after all. About → Runs on and New bot pick a model by hand, and since rows a bot has one per situation: Talk, and Work (Light, Medium and Hard work under Advanced), each Automatic or an entry's model at a reasoning level. These pickers, and the one chat line about a pick that can't run, are the only places a bot names a model. See `docs/bots.md`, Model and depth.
+**Update (#673, #769, #996, rows):** by hand was added after all, and replaced the automatic choice for new bots. About → Runs on and New bot pick a model by hand, one per situation: Talk, and Work (Light, Medium and Hard work under Advanced), each an entry's model at a reasoning level. These pickers, and the one chat line for the owner about a pick that can't run, are the only places a bot names a model. See `docs/bots.md`, Model and depth.
 
 **Action for the orchestrating thread:** update #673's "Done when" to match, or reopen the UI decision. This plan writes nothing to GitHub.
 
