@@ -2,7 +2,7 @@ import { memo, useMemo } from "react";
 import { Streamdown } from "streamdown";
 import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import type { McpToolInfo } from "./tool-registry";
-import { IconX, Plug } from "../../../../lib/icons";
+import { Plug } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
 import { codeHighlighter } from "../code-highlighter";
 
@@ -216,13 +216,7 @@ export const McpTool = memo(function McpTool({
   return (
     <div className="an-tool-mcp">
       <ToolRowBase
-        icon={
-          failed ? (
-            <IconX size={16} strokeWidth={2.5} className="text-[var(--danger)]" />
-          ) : (
-            <Plug size={18} />
-          )
-        }
+        icon={<Plug size={18} />}
         shimmerLabel={title}
         completeLabel={title}
         isAnimating={isPending}
@@ -233,7 +227,8 @@ export const McpTool = memo(function McpTool({
         defaultOpen={defaultOpen}
       >
         {codeBlock && (
-          <div className="an-markdown text-[14px]">
+          // The output in the same plain block as a command's: no header bar, no border.
+          <div className="an-markdown an-tool-quiet-output text-[14px]">
             <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }}>
               {codeBlock}
             </Streamdown>

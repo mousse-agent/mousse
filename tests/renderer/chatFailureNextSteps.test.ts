@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { ToolRenderer } from '../../src/renderer/chat/components/agent-elements/tools/tool-renderer'
 import { ToolCallsGroup } from '../../src/renderer/chat/components/agent-elements/tools/tool-calls-group'
-import { BashToolTerminalCard } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
+import { BashToolRow } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { ErrorMessage } from '../../src/renderer/chat/components/agent-elements/error-message'
 import { createTurnActions, TurnActionsContext, type TurnActions } from '../../src/renderer/chat/components/agent-elements/turn-actions'
 import { chatStatusFromPhase, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
@@ -84,11 +84,11 @@ describe('a tool call group with failures', () => {
   })
 })
 
-describe('the command card', () => {
+describe('the command row', () => {
   const step = (patch: Partial<Extract<TimelineStep, { type: 'tool-call' }>>) =>
     ({ id: 'b1', type: 'tool-call', toolName: 'Bash', bashCommand: 'npm test', ...patch }) as Extract<TimelineStep, { type: 'tool-call' }>
   const card = (patch: Partial<Extract<TimelineStep, { type: 'tool-call' }>>, isError = false) =>
-    createElement(BashToolTerminalCard, { step: step(patch), state: 'complete', onComplete: () => {}, isError })
+    createElement(BashToolRow, { step: step(patch), state: 'complete', onComplete: () => {}, isError })
 
   it('shows no status for a successful command', () => {
     render(card({ bashExitCode: 0 }))
@@ -98,15 +98,15 @@ describe('the command card', () => {
 
   it('shows the exit code of a failed command without expanding', () => {
     render(card({ bashExitCode: 2 }, true))
-    expect(text()).toContain('Failed npm')
+    expect(text()).toMatch(/^Failed\s*npm test/)
     expect(text()).toContain('exit 2')
   })
 
-  it('copies the command and the output from the expanded card', async () => {
+  it('copies the command and the output from the expanded row', async () => {
     const writeText = vi.fn(async () => {})
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     render(card({ bashExitCode: 0, bashOutput: 'all passed' }))
-    act(() => button('Expand command details')!.click())
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click())
     await act(async () => button('Copy command')!.click())
     await act(async () => button('Copy output')!.click())
     expect(writeText.mock.calls).toEqual([['npm test'], ['all passed']])

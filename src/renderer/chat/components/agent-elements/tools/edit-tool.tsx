@@ -17,6 +17,7 @@ import { openTurnInChanges } from "../../../../components/changes/openChanges";
 import { useAppStore } from "../../../../stores/appStore";
 import { lazyNamed } from "../../../../lib/lazyComponent";
 import { TurnIdContext } from "../turn-context";
+import { ToolStateIcon } from "./tool-icon";
 
 /** What one file's diff is drawn from. */
 export type DiffSource =
@@ -318,15 +319,7 @@ function EditLine({
           title={title}
           onClick={canOpen ? onToggle : undefined}
         >
-          <span
-            className={cn(
-              "flex items-center justify-center size-[18px] shrink-0",
-              isFailed && "text-red-400",
-            )}
-            aria-hidden="true"
-          >
-            {icon}
-          </span>
+          <ToolStateIcon state={isPending ? "running" : isFailed ? "failed" : "done"}>{icon}</ToolStateIcon>
           {isPending ? (
             <TextShimmer as="span" duration={1.2} className="flex items-center gap-2 min-w-0 m-0">
               {text}
@@ -366,7 +359,7 @@ function useRowOpen(failed: boolean): [boolean, () => void] {
 }
 
 function fileIcon(verb: FileVerb): React.ReactNode {
-  return verb === "create" ? <FilePlus size={16} /> : <Pencil size={16} />;
+  return verb === "create" ? <FilePlus size={18} /> : <Pencil size={18} />;
 }
 
 /** One file's row: "Edited <name> +N −M", opening to its diff, with Changes and Files actions on hover. */

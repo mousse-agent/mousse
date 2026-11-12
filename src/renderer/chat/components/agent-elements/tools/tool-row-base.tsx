@@ -3,6 +3,7 @@ import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
+import { ToolStateIcon } from "./tool-icon";
 
 /** How often a thought being written is read out to a screen reader. */
 const ANNOUNCE_MS = 5000;
@@ -48,7 +49,12 @@ export type ToolRowBaseProps = {
    */
   liveDetail?: boolean;
   detailTitle?: string;
-  /** Whether a running row's label shimmers (it paints every frame). A thinking row turns its icon instead. */
+  /** Classes for the detail (a command shows in mono). */
+  detailClassName?: string;
+  /**
+   * Whether a running row's label shimmers (it paints every frame). A thinking row turns its icon instead. A row that
+   * shimmers also shows its icon's state: a gentle pulse while it runs, dimmed once done, the danger colour on failure.
+   */
   shimmer?: boolean;
   /** Short status after the detail (a failure count); never truncated. */
   badge?: ReactNode;
@@ -71,6 +77,7 @@ export function ToolRowBase({
   detail,
   liveDetail = false,
   detailTitle,
+  detailClassName,
   shimmer = true,
   badge,
   trailingContent,
@@ -99,11 +106,15 @@ export function ToolRowBase({
         // One sweep period for the label's shimmer.
         style={{ "--an-shimmer-duration": `${SHIMMER_DURATION_S}s` } as CSSProperties}
       >
-        {icon && (
+        {icon && (shimmer ? (
+          <ToolStateIcon state={failed && !isAnimating ? "failed" : isAnimating ? "running" : "done"}>
+            {icon}
+          </ToolStateIcon>
+        ) : (
           <span className="flex items-center justify-center size-[18px] shrink-0">
             {icon}
           </span>
-        )}
+        ))}
         <span
           className={cn(
             "font-[450] whitespace-nowrap",
@@ -129,7 +140,7 @@ export function ToolRowBase({
             <bdi>{detail}</bdi>
           </span>
         ) : detail && (
-          <span className="font-normal truncate min-w-0 flex-1 text-an-foreground-muted/60" title={detailTitle}>
+          <span className={cn("font-normal truncate min-w-0 flex-1 text-an-foreground-muted/60", detailClassName)} title={detailTitle}>
             {detail}
           </span>
         )}

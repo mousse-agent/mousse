@@ -1,12 +1,12 @@
 import type React from "react";
 import {
   IconSearch as Search,
-  IconEye as Eye,
   IconFolderSearch as FolderSearch,
   IconGitBranch as GitBranch,
   IconTerminal2 as Terminal,
   IconCircleX as XCircle,
-  IconFileCode as FileCode2,
+  IconFileText as FileText,
+  Pencil,
   ThinkingIcon,
   IconSparkles as Sparkles,
   IconGlobe as Globe,
@@ -215,7 +215,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Read": {
-    icon: Eye,
+    icon: FileText,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -229,7 +229,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Edit": {
-    icon: FileCode2,
+    icon: Pencil,
     title: (part) => {
       const filePath = getFilePathInput(part.input);
       if (!filePath) return "Edit";
@@ -313,7 +313,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-WebSearch": {
-    icon: Search,
+    icon: Globe,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -370,7 +370,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-NotebookEdit": {
-    icon: FileCode2,
+    icon: Pencil,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";

@@ -1,0 +1,40 @@
+/* A tool row's icon (tool-icon.tsx). Running, it pulses gently: opacity only, which the compositor draws, scaled by
+   Settings > Animation speed (`--ui-motion-scale`) and still with motion off or the OS reduced-motion setting. Done,
+   it is still and a step dimmer than its label. Failed, it takes the danger colour. */
+
+.an-tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.an-tool-icon[data-state='running'] {
+  animation: an-tool-icon-pulse calc(1.6s * var(--ui-motion-scale, 1)) ease-in-out infinite;
+  will-change: opacity;
+}
+
+.an-tool-icon[data-state='done'] {
+  opacity: 0.75;
+}
+
+.an-tool-icon[data-state='failed'] {
+  color: var(--danger);
+}
+
+@keyframes an-tool-icon-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+[data-motion='off'] .an-tool-icon[data-state='running'] {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .an-tool-icon[data-state='running'] {
+    animation: none !important;
+  }
+}

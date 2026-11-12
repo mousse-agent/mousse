@@ -195,15 +195,28 @@ html[data-theme='light'] {
   opacity: inherit;
   margin-block: 0;
 }
-/* A command inside a tool call group is one row like its neighbours: the
-   card keeps its outline but takes the row height (22px) and type size. */
-.an-message-list .an-tool-group-rows .an-bash-card > button {
-  height: 22px;
-  padding-inline: 6px 4px;
+/* A tool's output shown as a code block (an MCP call's result) sits in the same plain block as a command's output:
+   no header bar, no border, the tool background, 12px. */
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block"] {
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 6px;
+  background: var(--an-tool-background);
 }
-.an-message-list .an-tool-group-rows .an-bash-card > button svg {
-  width: 14px;
-  height: 14px;
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-header"] {
+  display: none;
+}
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-body"] {
+  border: 0;
+  background: transparent;
+  padding: 8px 10px !important;
+  max-height: 240px;
+}
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-body"] pre,
+.an-markdown.an-tool-quiet-output [data-streamdown="code-block-body"] code {
+  font-size: 12px;
 }
 /* Chat convention: a single newline is an intended line break (verses,
    addresses, signatures). Spec markdown would join them into prose.
