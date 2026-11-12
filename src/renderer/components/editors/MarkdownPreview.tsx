@@ -1,6 +1,6 @@
-import { memo, useEffect, useState, type ReactNode } from 'react'
-import type { Components } from 'react-markdown'
-import ReactMarkdown from 'react-markdown'
+import { memo, useEffect, useState, type ComponentType, type ReactNode } from 'react'
+import type { Components, UrlTransform } from 'react-markdown'
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { Element, Root } from 'hast'
 import type rehypeHighlight from 'rehype-highlight'
 import remarkGfm from 'remark-gfm'
@@ -17,6 +17,11 @@ export interface MarkdownPreviewProps {
   className?: string
   /** When true, relative image paths are left as-is. Default false to avoid origin fetches. */
   allowRelativeImages?: boolean
+  /**
+   * Draws the text's images instead of the default policy. Its `src` arrives as written (a `data:` or `file:` URL
+   * included), so the component alone decides what may show. Keep it stable (module scope).
+   */
+  renderImage?: ComponentType<{ src?: string; alt?: string }>
 }
 
 function PreviewLink({
@@ -57,6 +62,9 @@ function PreviewImage({
   }
   return <img src={safeSrc} alt={alt ?? ''} />
 }
+
+/** Links keep react-markdown's safe URLs; an image's `src` is left as written for a `renderImage` to judge. */
+const keepImageSrc: UrlTransform = (url, key) => (key === 'src' ? url : defaultUrlTransform(url))
 
 const remarkPlugins = [remarkGfm]
 const remarkPluginsWithMath = [remarkGfm, remarkMousseMath]
@@ -142,16 +150,17 @@ const mathComponents: Components = {
 export const MarkdownPreview = memo(function MarkdownPreview({
   value,
   className = 'files-text-preview chat-markdown',
-  allowRelativeImages = false
+  allowRelativeImages = false,
+  renderImage: RenderImage
 }: MarkdownPreviewProps) {
   const math = useRenderMath() && mayContainMath(value)
   const rehypePlugins = useHighlightPlugins()
   const components: Components = {
     ...(math ? mathComponents : {}),
     a: ({ href, children }) => <PreviewLink href={href}>{children}</PreviewLink>,
-    img: ({ src, alt }) => (
-      <PreviewImage src={src} alt={alt} allowRelativeImages={allowRelativeImages} />
-    )
+    img: ({ src, alt }) => RenderImage
+      ? <RenderImage src={typeof src === 'string' ? src : undefined} alt={alt} />
+      : <PreviewImage src={src} alt={alt} allowRelativeImages={allowRelativeImages} />
   }
 
   return (
@@ -161,6 +170,7 @@ export const MarkdownPreview = memo(function MarkdownPreview({
         remarkPlugins={math ? remarkPluginsWithMath : remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={components}
+        {...(RenderImage ? { urlTransform: keepImageSrc } : {})}
       >
         {value}
       </ReactMarkdown>
