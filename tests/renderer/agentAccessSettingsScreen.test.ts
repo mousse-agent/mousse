@@ -69,7 +69,7 @@ const pickLevel = (label: string) => {
   click(option)
 }
 
-describe('Settings > Agents > Agent access', () => {
+describe('Settings > Agents > Access', () => {
   it('shows the saved level with its explanation in plain words', () => {
     for (const { value, label, summary } of AGENT_ACCESS_LEVELS) {
       show({ level: value })
@@ -175,7 +175,7 @@ describe('Settings > Agents > Agent access', () => {
   })
 
   describe('answering approvals on other threads', () => {
-    const answerSwitch = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Agents may answer approvals on other threads"]')
+    const answerSwitch = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Answer approvals on other threads"]')
     const on = () => answerSwitch()!.getAttribute('aria-checked') === 'true'
 
     it('is offered only at the Manage level, off for a profile that never touched it, with a clear warning', () => {
@@ -232,10 +232,13 @@ describe('Settings > Agents > Agent access', () => {
         expect(remoteSwitch(), level).not.toBeNull()
         expect(on(), level).toBe(false)
       }
-      expect(text()).toContain('Let agents start subagents on your other devices')
-      expect(text()).not.toContain('Allow agents to create Subagents on other Devices')
-      expect(remoteSwitch()!.getAttribute('aria-label')).toBe('Let agents start subagents on your other devices')
-      expect(host.querySelector('label[for="agent-access-remote-subagents"]')?.textContent).toBe('Let agents start subagents on your other devices')
+      expect(text()).toContain('Subagents on other devices')
+      expect(text()).not.toContain('Let agents start subagents on your other devices')
+      expect(remoteSwitch()!.getAttribute('aria-label')).toBe('Subagents on other devices')
+      expect(host.querySelector('label[for="agent-access-remote-subagents"]')?.textContent).toBe('Subagents on other devices')
+      // It is in its own Subagents group, after Access.
+      expect(remoteSwitch()!.closest('section.settings-group')?.querySelector('h3')?.textContent?.trim()).toBe('Subagents')
+      expect(trigger().closest('section.settings-group')?.querySelector('h3')?.textContent?.trim()).toBe('Access')
       expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).remoteSubagents).toBe(false)
     })
 

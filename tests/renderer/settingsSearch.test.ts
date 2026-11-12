@@ -56,6 +56,32 @@ describe('the settings search', () => {
     expect(searchSettings('', PAGES)).toEqual([])
   })
 
+  it('finds the Agents groups, the automation limits and the read-only rows', () => {
+    for (const title of ['Models', 'Context', 'Access', 'Subagents', 'Automations']) {
+      expect(searchSettings(title, PAGES).find((result) => result.section === 'agents')?.title, title).toBe(title)
+    }
+    expect(searchSettings('at most', PAGES)[0]).toEqual({ title: 'At most', section: 'agents', anchor: 'agents-automations-active' })
+    expect(searchSettings('minutes apart', PAGES)[0]).toMatchObject({ title: 'At least', anchor: 'agents-automations-interval' })
+    expect(searchSettings('end after', PAGES)[0]).toMatchObject({ title: 'End after', anchor: 'agents-automations-lifetime' })
+    expect(searchSettings('cache time', PAGES)[0]).toMatchObject({ title: 'Cache time', anchor: 'agents-cache-time' })
+    expect(searchSettings('capped', PAGES)[0]).toMatchObject({ title: 'Capped threads', anchor: 'agents-capped-threads' })
+    // Old titles still find the renamed rows.
+    expect(searchSettings('agent access', PAGES)[0]).toMatchObject({ anchor: 'agents-access' })
+    expect(searchSettings('own worktree', PAGES)[0]).toMatchObject({ title: 'Worktree per subagent' })
+  })
+
+  it('lands on each automation limit', () => {
+    const host = document.createElement('div')
+    const root = createRoot(host)
+    document.body.append(host)
+    act(() => root.render(createElement(AgentsSettings, { settings: getDefaultSettings(), options: { themes: [], accentColors: [], llmProviders: [], agentTypes: [] }, projects: [], updateSettings: async () => {} })))
+    for (const anchor of ['agents-automations-active', 'agents-automations-interval', 'agents-automations-lifetime', 'agents-automations', 'agents-subagents', 'agents-capped-threads']) {
+      expect(revealSettingsAnchor(host, anchor), anchor).toBe(true)
+    }
+    act(() => root.unmount())
+    host.remove()
+  })
+
   it('has one anchor per setting, on a page that exists, and each anchor is on a row or group in the app', () => {
     const anchors = SETTINGS_SEARCH_INDEX.map((entry) => entry.anchor)
     expect(new Set(anchors).size).toBe(anchors.length)

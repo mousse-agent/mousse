@@ -7,12 +7,13 @@ import {
 import type { ScheduledSettings, ScheduledSettingsUpdate } from '../../../shared/types'
 
 /** Each limit reads as a sentence: "At most [10] active", "At least [15] minutes apart", "End after [7] days". */
-const FIELDS: ReadonlyArray<{ key: AgentJobLimitKey; label: string; unit: string; name: string; help: string }> = [
+const FIELDS: ReadonlyArray<{ key: AgentJobLimitKey; label: string; unit: string; name: string; help: string; anchor: string }> = [
   {
     key: 'maxActive',
     label: 'At most',
     unit: 'active',
     name: 'Most active automations',
+    anchor: 'agents-automations-active',
     help: 'How many active automations agents may have in this profile at once. Lowering it never pauses or deletes one that exists: it only refuses new ones until there is room.'
   },
   {
@@ -20,6 +21,7 @@ const FIELDS: ReadonlyArray<{ key: AgentJobLimitKey; label: string; unit: string
     label: 'At least',
     unit: 'minutes apart',
     name: 'Fewest minutes between runs',
+    anchor: 'agents-automations-interval',
     help: 'The fewest minutes between runs of an automation an agent adds or changes. It applies to the next add or change; existing ones keep their schedule.'
   },
   {
@@ -27,6 +29,7 @@ const FIELDS: ReadonlyArray<{ key: AgentJobLimitKey; label: string; unit: string
     label: 'End after',
     unit: 'days',
     name: 'Days before an automation ends',
+    anchor: 'agents-automations-lifetime',
     help: 'How long an automation an agent adds lasts unless you extend it. It applies to ones added or extended from now on; an existing end date does not change.'
   }
 ]
@@ -38,8 +41,8 @@ interface Props {
 }
 
 /**
- * The limits on automations agents add: rows under "Automations agents add" in Settings → Agent access, shown whether it is
- * on or off. A value is saved when the field is left or Enter is pressed; one that is not a whole number in range is
+ * The limits on automations agents add: the rows of Settings → Agents → Automations. A value is
+ * saved when the field is left or Enter is pressed; one that is not a whole number in range is
  * refused with the range.
  */
 export function AgentJobLimitFields({ settings, save }: Props) {
@@ -70,13 +73,13 @@ export function AgentJobLimitFields({ settings, save }: Props) {
 
   return (
     <>
-      {FIELDS.map(({ key, label, unit, name, help }) => {
+      {FIELDS.map(({ key, label, unit, name, help, anchor }) => {
         const setting = AGENT_JOB_LIMIT_SETTINGS[key]
         const { min, max } = AGENT_JOB_LIMIT_RANGES[key]
         const id = `${idPrefix}-${key}`
         const invalid = problem?.key === key
         return (
-          <div key={key} className="settings-item agent-job-limit" title={`${help} Whole number from ${min} to ${max}.`}>
+          <div key={key} className="settings-item agent-job-limit" data-settings-anchor={anchor} title={`${help} Whole number from ${min} to ${max}.`}>
             <div className="settings-item-text">
               <label className="settings-item-title" htmlFor={id}>{label}</label>
               {invalid && problem ? (
