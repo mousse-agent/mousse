@@ -6,6 +6,7 @@ import { rollUpActivities, visibleThreads, isLocalOnlyThread } from '../../../sh
 import { MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { mmsJson } from './jsonOutput'
 import { remoteBotSummary } from './RemoteBots'
+import type { BotsSharingPort } from '../../protocol/botsSharingPort'
 
 /**
  * The reserved display "thread" that carries a computer's sidebar lists. Real thread ids never
@@ -88,7 +89,7 @@ export interface ListsSnapshot {
   /** Threads that are not idle, by id. */
   status: Record<string, ListsStatus>
   chats: ListsChat[]
-  /** Oldest first; empty when the profile's bots are unavailable. */
+  /** Oldest first; empty when the profile's bots are unavailable or this computer does not share them. */
   bots: ListsBot[]
 }
 
@@ -109,6 +110,8 @@ export type ListsServices = Pick<
     chats: { snapshot(): { chats: ChatSummary[] }; onChange(listener: () => void): () => void }
   }
   personalBots?: ListsBotsPort | null
+  /** "Share bots with other devices": while it refuses, the lists carry no bots. */
+  botsSharing?: BotsSharingPort
 }
 
 interface Emitter {
@@ -245,7 +248,8 @@ export class MmsListsSource {
     if (this.watchers === 0 || this.botsStale || !this.bots) {
       const engine = this.services.personalBots
       try {
-        this.bots = engine ? engine.service.list().bots.map((bot) => botOf(bot, engine.liveActivity(bot.id))) : []
+        // Off: "Share bots with other devices" is off on this computer.
+        this.bots = engine && !this.services.botsSharing?.refusal() ? engine.service.list().bots.map((bot) => botOf(bot, engine.liveActivity(bot.id))) : []
       } catch {
         // A profile whose bots cannot be read still lists everything else.
         this.bots = []
@@ -440,6 +444,8 @@ export class MmsListsSource {
         bots.on(event, botsChanged)
         disposers.push(() => bots.off(event, botsChanged))
       }
+    const sharing = s.botsSharing
+    if (sharing) disposers.push(sharing.onChange(botsChanged))
     const reconcile = this.timers.setInterval(() => {
       this.botsStale = true
       chatsChanged()

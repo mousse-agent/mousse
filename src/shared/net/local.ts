@@ -64,6 +64,7 @@ export const NET_LOCAL_METHODS = [
   'bridge.setKind',
   'bridge.policy',
   'bridge.workOnThreads',
+  'bridge.shareBots',
   'bridge.editorServer',
   'net.authority.transfer',
   'net.authority.status',
@@ -131,6 +132,8 @@ export interface NetStatus {
   features?: import('../featureFlags').NetFeatureFlags
   /** Whether other computers of the user may work on this computer's threads (`bridge.workOnThreads`). On by default. */
   workOnThreads?: boolean
+  /** Whether this computer shares its personal bots with the user's other devices (`bridge.shareBots`). On by default. */
+  shareBots?: boolean
   /**
    * Which SSH server answers editor connections from other computers (`bridge.editorServer`): `system` is the
    * owner's choice "Use this computer's SSH server", and `available` says whether Mousse's own endpoint can

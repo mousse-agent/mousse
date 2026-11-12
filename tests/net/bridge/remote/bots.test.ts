@@ -3,6 +3,9 @@
  * no paths or instance ids in what they return) and the bots in the lists stream.
  */
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NetError } from '../../../../src/shared/net'
 import type { RpcContext, RpcMethod } from '../../../../src/mms/net/contracts'
@@ -66,6 +69,26 @@ describe('bot method params', () => {
     bad('bots.personal.pause', { botId: BOT, extra: true })
   })
 
+  it('checks the About and image methods', () => {
+    const REM = 'rem_00000000-0000-0000-0000-000000000000'
+    expect(validateRemoteBotParams('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, offset: 40_960 })).toBeTruthy()
+    expect(validateRemoteBotParams('bots.update', { botId: BOT, name: 'Pip' })).toBeTruthy()
+    expect(validateRemoteBotParams('bots.reminders.cancel', { botId: BOT, reminderId: REM })).toBeTruthy()
+    expect(validateRemoteBotParams('bots.schedules.remove', { botId: BOT, scheduleId: 'daily-1' })).toBeTruthy()
+    expect(validateRemoteBotParams('bots.memory.forget', { botId: BOT, id: 'm12' })).toBeTruthy()
+    bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 10 })
+    bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, offset: -1 })
+    bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, path: '/etc/passwd' })
+    bad('bots.memory.list', { botId: BOT, history: true })
+    bad('bots.update', { botId: BOT })
+    bad('bots.update', { botId: BOT, name: ' ' })
+    bad('bots.update', { botId: BOT, look: { colour: 'teal' } })
+    bad('bots.reminders.cancel', { botId: BOT, reminderId: 'r1' })
+    bad('bots.schedules.remove', { botId: BOT, scheduleId: '../x' })
+    bad('bots.permissions.revoke', { botId: BOT, permissionId: '' })
+    bad('bots.memory.forget', { botId: BOT, id: 'all' })
+  })
+
   it('refuses attachments, an empty or oversized message and a bad request id', () => {
     bad('bots.chat.send', { botId: BOT, text: 'Hi', clientRequestId: 'r1', attachments: [{ name: 'a.txt', path: '/a.txt' }] })
     bad('bots.chat.send', { botId: BOT, text: '  ', clientRequestId: 'r1' })
@@ -86,7 +109,19 @@ describe('bot method params', () => {
     const methods = remoteBotMethods({ bots: () => undefined })
     expect(methods.map((entry) => entry.method).sort()).toEqual(Object.keys(REMOTE_BOT_METHODS).sort())
     // A read's result (the chat) is never kept in the request ledger.
-    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.chat.list', 'bots.get'])
+    expect(methods.filter((entry) => entry.ephemeral).map((entry) => entry.method).sort()).toEqual(['bots.chat.attachment', 'bots.chat.list', 'bots.get', 'bots.memory.list'])
+    expect(REMOTE_BOT_METHODS).toMatchObject({
+      'bots.chat.attachment': { capability: 'read', mutating: false },
+      'bots.memory.list': { capability: 'read', mutating: false },
+      'bots.update': { capability: 'write', mutating: true },
+      'bots.reminders.cancel': { capability: 'write', mutating: true },
+      'bots.schedules.remove': { capability: 'write', mutating: true },
+      'bots.permissions.revoke': { capability: 'write', mutating: true },
+      'bots.memory.forget': { capability: 'write', mutating: true }
+    })
+    // Nothing a remote device must not do: no delete, no model, no memory export, no new schedule.
+    for (const name of ['bots.delete', 'bots.model.get', 'bots.model.set', 'bots.memory.export', 'bots.schedules.add', 'bots.personal.list'])
+      expect(Object.keys(REMOTE_BOT_METHODS)).not.toContain(name)
   })
 })
 
@@ -98,7 +133,9 @@ describe('what a phone sees of a bot', () => {
       error: { text: 'Sign in again', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } }
     }
     const seen = remoteBotMessage(message)
-    expect(seen.attachments).toEqual([{ name: 'list.txt' }])
+    expect(seen.attachments).toEqual([{ name: 'list.txt', mime: 'text/plain' }])
+    expect(remoteBotMessage({ ...message, attachments: [{ name: 'Shot.PNG', path: '/home/me/bots/files/Shot.PNG' }, { name: 'x.svg', path: '/x.svg' }] }).attachments)
+      .toEqual([{ name: 'Shot.PNG', mime: 'image/png', image: true }, { name: 'x.svg', mime: 'image/svg+xml' }])
     expect(seen.error).toEqual({ text: 'Sign in again', action: { kind: 'sign_in', label: 'Sign in' } })
     expect(JSON.stringify(seen)).not.toMatch(/home\/me|claude:bots/)
     const summary = { id: BOT, name: 'Penny', error: { text: 'e', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } } } as BotSummary
@@ -183,7 +220,7 @@ describe('bot methods on a real bot', () => {
     expect(chatOf(f, botId).at(-1)!.ask!.status).toBe('open')
     // An ask that is not there is a plain refusal too.
     const missing = await refused(() => call(methods, 'bots.asks.answer', { botId, askId: ASK, answer: 'allow' }))
-    expect(missing.code).toBe('conflict')
+    expect(missing.code).toBe('stream_unknown')
   })
 
   it('answers a permission ask', async () => {
@@ -241,3 +278,182 @@ describe('bot methods on a real bot', () => {
     expect(f.bots.events.listenerCount('activity')).toBe(0)
   })
 })
+
+describe('"Share bots with other devices"', () => {
+  it('while it is off, every method refuses before it reads anything', async () => {
+    let reads = 0
+    const port = new Proxy({}, { get: () => () => { reads++; return {} } }) as RemoteBotsPort
+    const methods = remoteBotMethods({ bots: () => port, refusal: () => "Desk doesn't share its bots with other devices." })
+    const params: Record<RemoteBotMethod, unknown> = {
+      'bots.get': { botId: BOT },
+      'bots.chat.list': { botId: BOT },
+      'bots.chat.attachment': { botId: BOT, messageId: 'm1', index: 0 },
+      'bots.memory.list': { botId: BOT },
+      'bots.chat.send': { botId: BOT, text: 'Hi', clientRequestId: 'r1' },
+      'bots.chat.stop': { botId: BOT },
+      'bots.work.stop': { botId: BOT, workId: 'act_00000000-0000-0000-0000-000000000000' },
+      'bots.chat.markRead': { botId: BOT, seq: 1 },
+      'bots.asks.answer': { botId: BOT, askId: ASK, answer: 'allow' },
+      'bots.personal.pause': { botId: BOT },
+      'bots.personal.resume': { botId: BOT },
+      'bots.create': { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1' },
+      'bots.update': { botId: BOT, name: 'Pip' },
+      'bots.reminders.cancel': { botId: BOT, reminderId: 'rem_00000000-0000-0000-0000-000000000000' },
+      'bots.schedules.remove': { botId: BOT, scheduleId: 'daily' },
+      'bots.permissions.revoke': { botId: BOT, permissionId: 'p1' },
+      'bots.memory.forget': { botId: BOT, id: 'm1' }
+    }
+    for (const name of Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]) {
+      const error = await refused(() => call(methods, name, params[name]))
+      expect(error).toMatchObject({ code: 'forbidden', message: "Desk doesn't share its bots with other devices.", details: { reason: 'setting_off' } })
+      // The handler refuses too, for a call admitted just before the switch went off.
+      await expect(methods.find((entry) => entry.method === name)!.handle(params[name], context)).rejects.toMatchObject({ code: 'forbidden' })
+    }
+    expect(reads).toBe(0)
+  })
+
+  it('while it is off, the lists carry no bots, and turning it on or off pushes them again', async () => {
+    const f = botFixture()
+    try {
+      const { botId } = await createBot(f, { name: 'Penny', reply: 'Hello.' })
+      let off = false
+      const listeners = new Set<() => void>()
+      const services = listsServices(f.bots, {
+        refusal: () => (off ? "Desk doesn't share its bots with other devices." : undefined),
+        onChange: (listener: () => void) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        }
+      })
+      const timeouts: Array<() => void> = []
+      const lists = new MmsListsSource(services, fakeTimers(timeouts))
+      expect(lists.snapshot().bots.map((bot) => bot.id)).toEqual([botId])
+      let pushes = 0
+      const stop = lists.watch(() => pushes++)
+      off = true
+      for (const listener of listeners) listener()
+      timeouts.splice(0).forEach((run) => run())
+      expect(pushes).toBe(1)
+      expect(lists.snapshot()).toMatchObject({ version: 1, bots: [] })
+      off = false
+      for (const listener of listeners) listener()
+      timeouts.splice(0).forEach((run) => run())
+      expect(pushes).toBe(2)
+      expect(lists.snapshot().bots).toHaveLength(1)
+      stop()
+      expect(listeners.size).toBe(0)
+    } finally {
+      f.close()
+    }
+  })
+})
+
+describe('images and About from another device', () => {
+  let f: BotFixture
+  let botId: string
+  let methods: RpcMethod[]
+  let dir: string
+  beforeEach(async () => {
+    f = botFixture()
+    botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
+    methods = remoteBotMethods({ bots: () => f.bots.service })
+    dir = mkdtempSync(join(tmpdir(), 'remote-bot-files-'))
+  })
+  afterEach(() => {
+    f.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const png = (size: number): Buffer => {
+    const data = Buffer.alloc(size, 7)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(data)
+    return data
+  }
+  const sendWith = async (files: Array<{ name: string; data: Buffer }>): Promise<BotChatMessage> => {
+    const attachments = files.map((file) => {
+      const path = join(dir, file.name)
+      writeFileSync(path, file.data)
+      return { name: file.name, path }
+    })
+    const { message } = await f.bots.service.chatSend({ botId, text: 'Look', attachments, clientRequestId: `img-${files.length}-${files[0]!.name}` })
+    return message
+  }
+
+  it('reads an image of the chat in parts, never its path', async () => {
+    const data = png(100 * 1024)
+    const message = await sendWith([{ name: 'shot.png', data }, { name: 'notes.txt', data: Buffer.from('hi') }])
+    const page = (await call(methods, 'bots.chat.list', { botId })) as { messages: Array<{ id: string; attachments?: unknown }> }
+    const row = page.messages.find((entry) => entry.id === message.id)!
+    expect(row.attachments).toEqual([{ name: 'shot.png', mime: 'image/png', image: true }, { name: 'notes.txt', mime: 'text/plain' }])
+    expect(JSON.stringify(page)).not.toContain(dir)
+    expect(JSON.stringify(page)).not.toContain('attachments/')
+    const parts: Buffer[] = []
+    for (let offset = 0; ;) {
+      const part = (await call(methods, 'bots.chat.attachment', { botId, messageId: message.id, index: 0, offset })) as { name: string; mime: string; size: number; offset: number; dataB64: string }
+      expect(part).toMatchObject({ name: 'shot.png', mime: 'image/png', size: data.length, offset })
+      expect(Buffer.byteLength(JSON.stringify(part))).toBeLessThan(63 * 1024)
+      const bytes = Buffer.from(part.dataB64, 'base64')
+      parts.push(bytes)
+      offset += bytes.length
+      if (offset >= part.size) break
+    }
+    expect(parts.length).toBe(3)
+    expect(Buffer.concat(parts).equals(data)).toBe(true)
+    // A file that is not an image, and a file past the list, are refused.
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: message.id, index: 1 }))).code).toBe('conflict')
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: message.id, index: 2 }))).code).toBe('stream_unknown')
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: 'nope', index: 0 }))).code).toBe('stream_unknown')
+  })
+
+  it('refuses an image that is too large, not what its name says, or outside the bot\'s files', async () => {
+    const big = await sendWith([{ name: 'big.png', data: png(1536 * 1024 + 1) }])
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: big.id, index: 0 }))).code).toBe('too_large')
+    const fake = await sendWith([{ name: 'fake.png', data: Buffer.from('<svg onload="x()"/>') }])
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: fake.id, index: 0 }))).code).toBe('conflict')
+    // A row that names a file anywhere else (it never does) is not read.
+    const outside = join(dir, 'outside.png')
+    writeFileSync(outside, png(100))
+    f.store.run('UPDATE bot_messages SET attachments_json = ? WHERE id = ?', JSON.stringify([{ name: 'outside.png', path: outside }]), fake.id)
+    expect((await refused(() => call(methods, 'bots.chat.attachment', { botId, messageId: fake.id, index: 0 }))).code).toBe('stream_unknown')
+  })
+
+  it('renames a bot, lists its memory, and refuses to remove what it does not have before anything changes', async () => {
+    expect(await call(methods, 'bots.update', { botId, name: 'Pip' })).toMatchObject({ bot: { id: botId, name: 'Pip' } })
+    const memory = (await call(methods, 'bots.memory.list', { botId })) as { entries: unknown[]; gauge: string }
+    expect(memory).toMatchObject({ entries: expect.any(Array), gauge: expect.any(String) })
+    for (const [name, params] of [
+      ['bots.reminders.cancel', { botId, reminderId: 'rem_00000000-0000-0000-0000-000000000000' }],
+      ['bots.schedules.remove', { botId, scheduleId: 'nope' }],
+      ['bots.permissions.revoke', { botId, permissionId: 'nope' }],
+      ['bots.memory.forget', { botId, id: 'm999' }]
+    ] as const) {
+      const method = methods.find((entry) => entry.method === name)!
+      // Refused by \`authorizeNew\`, before the dispatcher admits the call, so it is never an uncertain outcome.
+      expect(() => method.authorizeNew!(params, context)).toThrow(NetError)
+      expect((await refused(() => call(methods, name, params))).code).toBe('stream_unknown')
+    }
+  })
+})
+
+function fakeTimers(timeouts: Array<() => void>) {
+  return {
+    setTimeout: (run: () => void) => timeouts.push(run),
+    clearTimeout: () => undefined,
+    setInterval: () => 0,
+    clearInterval: () => undefined
+  }
+}
+
+function listsServices(bots: unknown, botsSharing?: unknown): ListsServices {
+  return {
+    threads: Object.assign(new EventEmitter(), { listAllThreads: () => [] }),
+    projects: { listProjects: () => [] },
+    orchestrator: Object.assign(new EventEmitter(), { getTurnSnapshot: () => ({}) }),
+    threadRuntimes: Object.assign(new EventEmitter(), { getActivitySnapshot: () => ({}) }),
+    questions: new EventEmitter(),
+    events: new EventEmitter(),
+    platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } },
+    personalBots: bots,
+    ...(botsSharing ? { botsSharing } : {})
+  } as unknown as ListsServices
+}

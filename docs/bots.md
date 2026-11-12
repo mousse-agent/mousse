@@ -157,15 +157,17 @@ States are idle, working ("Waiting for internet" while it waits for it), needs y
 - **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, waiting for the internet, stops and chat failures never count.
 - **Resume** (`bots.personal.resume`) clears every pause, the failure count and the stuck error.
 
-## On a phone
+## On a phone and other devices
 
-The owner's phones see and use the bots of a computer they reach through Bridge. Bots are the owner's, and so are the phones, so both the shared and the private lists stream carry them.
+The owner's phones and other computers see and use the bots of a computer they reach through Bridge. Bots are the owner's, and so are those devices, so both the shared and the private lists stream carry them.
 
-- **Lists.** `bridge.lists.open` pushes `bots` beside `chats` (`ListsBot` in `src/mms/bridge/remote/MmsListsSource.ts`): each bot's summary as the Bots list has it, plus `activity`, the live chip of its chat activation (gone when the chip clears). The stream pushes again, debounced, on `bots.changed`, `bots.message` and `bots.activity`. Bots are listed whether or not there are chats; a computer whose bots can't be read lists none.
-- **Methods** (`src/mms/bridge/remote/RemoteBots.ts`, deny-default, exact keys): `bots.get` and `bots.chat.list` (read); `bots.chat.send`, `bots.chat.stop`, `bots.work.stop`, `bots.chat.markRead` and `bots.asks.answer` (chat); `bots.personal.pause`, `bots.personal.resume` and `bots.create` (write). Each calls the same `BotChatService` method as the desktop, with the same params and results.
-- **What a phone does not get.** No model, no instance id (an error's action keeps its kind and label; Sign in happens on the computer), no paths (an attachment keeps its name). A phone can't attach files, and a memory export ask is refused with "Answer this on the computer." because it needs a folder picker there.
-- **Sizes.** A phone's message is at most 32 KiB. A chat page is cut to the newest messages that fit one reply; the phone pages back with `beforeSeq`.
-- **Refusals.** An unknown bot, an ask that is gone, answered or not ready yet, and a memory export ask are plain errors, checked before anything changes, never an uncertain outcome. A message to a working bot queues as on the desktop; stopping work the bot no longer has returns `{ stopped: false }`.
+- **Share bots with other devices.** A switch on each computer (Settings, Devices; `mousse-cli bridge bots on|off`), on by default and stored on that computer. While it is off, its lists carry `bots: []` and every `bots.*` call from another device is refused with `forbidden` and the reason `setting_off`; the device says "<Computer> doesn't share its bots with other devices." Turning it on or off pushes the lists again.
+- **Lists.** `bridge.lists.open` pushes `bots` beside `chats` (`ListsBot` in `src/mms/bridge/remote/MmsListsSource.ts`): each bot's summary as the Bots list has it, plus `activity`, the live chip of its chat activation (gone when the chip clears). The stream pushes again, debounced, on `bots.changed`, `bots.message` and `bots.activity`. Bots are listed whether or not there are chats; a computer whose bots can't be read lists none. `version` stays 1.
+- **Methods** (`src/mms/bridge/remote/RemoteBots.ts`, deny-default, exact keys). Read: `bots.get`, `bots.chat.list`, `bots.chat.attachment`, `bots.memory.list`. Chat: `bots.chat.send`, `bots.chat.stop`, `bots.work.stop`, `bots.chat.markRead`, `bots.asks.answer`. Write: `bots.personal.pause`, `bots.personal.resume`, `bots.create`, `bots.update`, `bots.reminders.cancel`, `bots.schedules.remove`, `bots.permissions.revoke`, `bots.memory.forget`. Each calls the same `BotChatService` method as the desktop, with the same params and results. Delete, the model and computer pickers, new schedules and memory export stay on the computer.
+- **Images.** A message's files keep their name and type (`{ name, mime, image? }`). `bots.chat.attachment` reads an image (PNG, JPEG, GIF or WebP, checked by its first bytes; never SVG) of up to 1.5 MiB from the bot's files folder only, in parts of 40 KiB (`offset`), so each part fits one reply.
+- **What another device does not get.** No model, no instance id (an error's action keeps its kind and label; Sign in happens on the computer), no paths. It can't attach files, and a memory export ask is refused because it needs a folder picker on the computer.
+- **Sizes.** A message from another device is at most 32 KiB. A chat page is cut to the newest messages that fit one reply; the device pages back with `beforeSeq`.
+- **Refusals.** An unknown bot; an ask that is gone, answered or not ready yet; a memory export ask; and a reminder, schedule, permission or memory that is no longer there: all are checked before anything changes, so they are plain errors and never an uncertain outcome. A message to a working bot queues as on the desktop; stopping work the bot no longer has returns `{ stopped: false }`. An error's own words stay on the computer (only its code crosses the wire).
 
 ## Runtimes that can hold a bot
 
@@ -206,7 +208,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Engine: activations, lanes, dispatch, walls and asks, usage pauses, waiting for the internet, delete | `src/mms/bots/activation/BotEngine.ts`, `src/mms/bots/activation/connectivity.ts` |
 | Bot UI daemon side: create, chat, About, and what clients see | `src/mms/bots/chat/` |
 | Daemon methods (`bots.personal.v2`) | `src/mms/bots/registerMethods.ts`, `src/shared/bots/personal/methods.ts` |
-| Phone methods and the bots in a phone's lists | `src/mms/bridge/remote/RemoteBots.ts`, `src/mms/bridge/remote/MmsListsSource.ts` |
+| Methods of other devices, and the bots in their lists | `src/mms/bridge/remote/RemoteBots.ts`, `src/mms/bridge/remote/MmsListsSource.ts` |
 | Store, `bots.db` migrations | `src/mms/bots/store/BotStore.ts` |
 | Grant compile, authority | `src/mms/bots/grants/compile.ts`, `src/mms/bots/authority/botAuthority.ts` |
 | Model choice | `src/mms/bots/model/` |

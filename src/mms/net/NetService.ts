@@ -165,6 +165,12 @@ interface NetConfiguration {
    */
   workOnThreads?: boolean
   /**
+   * "Share bots with other devices": the owner's personal bots of this computer are listed for, and used from, the
+   * user's phones and other computers unless this is turned off (on when absent). Read on every call and every lists
+   * push, so turning it off also ends what an open lists stream shows.
+   */
+  shareBots?: boolean
+  /**
    * "Use this computer's SSH server" for editor connections from other computers: the owner's choice for this
    * computer. Off when absent: Mousse's own SSH endpoint answers. It is written only while it is on, so a profile
    * that never used it stays readable by an earlier version.
@@ -322,6 +328,7 @@ export class NetService {
   /** The tunnels `mousse-cli net ssh-proxy` holds on this computer's local connections. */
   private localTunnelStore?: LocalEditorTunnels
   private readonly editorFirstOpen = new Set<(node: NodeId) => void>()
+  private readonly shareBotsListeners = new Set<() => void>()
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
   /** The optional Mousse ID module; absent in builds and tests that leave it out. */
@@ -404,6 +411,8 @@ export class NetService {
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
+          throw new NetError('storage_corrupt')
+        if (cfg.shareBots !== undefined && typeof cfg.shareBots !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.editorSystemSsh !== undefined && typeof cfg.editorSystemSsh !== 'boolean')
           throw new NetError('storage_corrupt')
@@ -1044,6 +1053,19 @@ export class NetService {
             this.emit()
           }
           return { enabled: this.config.workOnThreads !== false }
+        }
+        case 'bridge.shareBots': {
+          // "Share bots with other devices". Any computer sets it for itself; the bot methods and the lists read it
+          // on every call and push, so turning it off takes effect at once.
+          this.requireEnrolled()
+          if (params.enabled !== undefined) {
+            const was = this.config.shareBots !== false
+            this.config = { ...this.config, shareBots: params.enabled === true }
+            this.saveConfig()
+            if (was !== (params.enabled === true)) for (const listener of [...this.shareBotsListeners]) listener()
+            this.emit()
+          }
+          return { enabled: this.config.shareBots !== false }
         }
         case 'bridge.editorServer': {
           // "Use this computer's SSH server" for editor connections from other computers. Any computer sets it
@@ -2922,6 +2944,7 @@ export class NetService {
         enabled: this.config.enabled,
         features: { ...this.config.features! },
         workOnThreads: this.config.workOnThreads !== false,
+        shareBots: this.config.shareBots !== false,
         editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
@@ -2960,6 +2983,15 @@ export class NetService {
     ) {
       throw new NetError('disabled')
     }
+  }
+  /** "Share bots with other devices" (on unless this computer turned it off). */
+  sharesBots(): boolean {
+    return this.config.shareBots !== false
+  }
+  /** Called when "Share bots with other devices" turns on or off. */
+  onShareBotsChanged(listener: () => void): () => void {
+    this.shareBotsListeners.add(listener)
+    return () => this.shareBotsListeners.delete(listener)
   }
   featureEnabled(feature: keyof NetFeatureFlags): boolean {
     return (
