@@ -646,6 +646,108 @@ describe('long work', () => {
       expect(notices).toMatchObject([{ kind: 'notice', text: roomText(''), ask: { status: 'open' } }])
     })
 
+    /** A chat turn that runs out of its hour too: it waits at a wall for the same limit, with the bot's one card for it. */
+    async function chatOutOfTime(text: string, id: string) {
+      const turn = await chat(text, id)
+      f.clock.now += 60 * MIN
+      turn.prepared.authority.check(call)
+      deadline()
+      await finish(f, turn.payload, 'interrupted', { text: 'Let me check.', outcome: { interruptedBy: 'bot_wall' } })
+      expect(f.store.activation(turn.activation.id)).toMatchObject({ status: 'waiting_grant' })
+      return turn
+    }
+
+    it('a chat turn at the same limit takes the work\'s card; a message sent instead of answering ends the work too', async () => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      const turn = await chatOutOfTime('How long will it take?', 'm2')
+      expect(f.store.escalation(askId)).toMatchObject({ activationId: turn.activation.id, mode: 'wall', status: 'open' })
+      await f.bots.service.chatSend({ botId, text: 'Never mind, skip it.', clientRequestId: 'm3' })
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'budget_denied' })
+      expect(summary().work).toBeUndefined()
+    })
+
+    it('Allow on that chat wall carries the work on too', async () => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      await chatOutOfTime('How long will it take?', 'm2')
+      await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+      expect(f.store.dispatch(workId, 2)).toMatchObject({ kind: 'continue' })
+    })
+
+    it('an answer through respond settles the work that shares the wall', async () => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      await chatOutOfTime('How long will it take?', 'm2')
+      await f.bots.respond({ escalationId: askId, answer: 'deny' })
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'budget_denied' })
+    })
+
+    it('work that runs out while a chat waits at a wall for that limit shows the wall\'s card, and its answer settles it', async () => {
+      const { workId } = await asked()
+      const work = await start(f, workId)
+      const turn = await chatOutOfTime('Sort my notes', 'm0')
+      const wall = f.store.openAsks(botId)[0]!
+      expect(wall).toMatchObject({ activationId: turn.activation.id, mode: 'wall' })
+      work.prepared.authority.check(call)
+      f.timers.filter((timer) => timer.ms === 60 * MIN).at(-2)!.fn()
+      await finish(f, work.payload, 'interrupted', { text: 'Two picks so far: Roborock Q7 and Dyson V8.', outcome: { interruptedBy: 'bot_wall' } })
+      expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+      const notice = chatOf(f, botId).filter((row) => row.activationId === workId).at(-1)!
+      expect(notice).toMatchObject({ kind: 'notice', text: roomText('Two picks so far: Roborock Q7 and Dyson V8.'), ask: { askId: wall.id, status: 'open' } })
+      await f.bots.service.answer(botId, wall.id, 'not_now')
+      await flush()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'budget_denied' })
+    })
+
+    it('Not now on a spend limit ends every piece of work that waits on it, not only the card\'s own', async () => {
+      f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxInputTokens: 1_000 } }))
+      const big = { inputBound: 5_000, wireCap: 500, floor: 256, price: { input: 0, output: 0 } }
+      const spendOut = async (text: string, id: string) => {
+        const work = await asked(text, id)
+        const turn = await start(f, work.workId)
+        expect(turn.prepared.authority.spend!.reserve(big, {})).toMatchObject({ ok: false })
+        await finish(f, turn.payload, 'interrupted', { text: `Partial ${id}.`, outcome: { interruptedBy: 'bot_wall' } })
+        expect(f.store.activation(work.workId)).toMatchObject({ status: 'blocked', endReason: 'budget_exhausted' })
+        return work.workId
+      }
+      const first = await spendOut('First', 'm1')
+      const second = await spendOut('Second', 'm2')
+      const ask = f.store.openAsks(botId)[0]!
+      expect(ask).toMatchObject({ activationId: second, permission: { budget: { key: 'maxInputTokens' } } })
+      await f.bots.service.answer(botId, ask.id, 'not_now')
+      await flush()
+      expect(f.store.activation(first)).toMatchObject({ status: 'failed', endReason: 'budget_denied' })
+      expect(f.store.activation(second)).toMatchObject({ status: 'failed', endReason: 'budget_denied' })
+    })
+
+    it('waiting work whose ask was answered without it hearing (a crash in between) ends with a line at the next tick', async () => {
+      const { workId, message } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      // The answer is recorded, but the work was never moved on (Mousse stopped in between, on an older build).
+      f.store.answerEscalation(askId, 'denied')
+      await f.bots.maintain()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'nothing_to_wait_for' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I stopped "Vacuums": nothing could let it carry on any more. Ask me again if you still want it.', replyTo: { id: message.id } })
+      // Once: later ticks say nothing more.
+      const rows = chatOf(f, botId).length
+      await f.bots.maintain()
+      expect(chatOf(f, botId)).toHaveLength(rows)
+    })
+
+    it('the startup pass ends waiting work that nothing would wake', async () => {
+      const { workId } = await outOfTime()
+      f.store.answerEscalation(chatOf(f, botId).at(-1)!.ask!.askId, 'denied')
+      f.bots.close()
+      f.bots = new BotEngine(f.host)
+      await f.bots.reconcileOnStartup()
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'nothing_to_wait_for' })
+    })
+
     it('a scheduled run that runs out of room ends as before: failed, with an ask for later runs', async () => {
       const activation = await f.bots.activate({ botId, input: 'Top science news', clientRequestId: 'r1' })
       const { prepared } = await start(f, activation.id)

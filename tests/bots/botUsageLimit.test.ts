@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { botFixture, chatOf, createBot, flush, PI, runDispatch, type BotFixture } from './botFixture'
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BotEngine, USAGE_RECHECK_MS } from '../../src/mms/bots/activation/BotEngine'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 
 let f: BotFixture
@@ -220,6 +220,29 @@ describe('work a usage limit stopped', () => {
     await f.bots.service.resume(botId)
     await flush()
     expect(f.store.dispatch(workId, 3)!.runId).not.toBeNull()
+    expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
+  })
+
+  it('with no reset time given it says so, and tries again every 30 minutes until it goes through', async () => {
+    await f.bots.reconcileOnStartup()
+    const { workId } = await work()
+    // Every model is at its limit and none says when it resets.
+    f.problem = { problem: 'all_limited', instanceId: 'claude:main' }
+    await runDispatch(f, workId, 1, { status: 'failed', outcome: { error: 'provider_usage_limit', usageLimitUntil: new Date(f.clock.now + HOUR).toISOString() } })
+    await flush()
+    expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'usage_limit' })
+    const retryAt = new Date(f.clock.now + USAGE_RECHECK_MS).toISOString()
+    expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'usage_limit', pausedUntil: retryAt })
+    expect(errors()).toMatchObject([{ error: { text: 'Paused (your Claude usage limit, with no reset time given). I\'ll try this again every 30 minutes until it goes through.' } }])
+    expect(JSON.stringify(chatOf(f, botId))).not.toContain('once it resets')
+    // Still limited at the first retry: it waits another 30 minutes, with no second line.
+    await f.tickSchedules(new Date(Date.parse(retryAt) + 1_000))
+    expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'usage_limit' })
+    expect(Date.parse(f.store.registry(botId)!.pausedUntil!)).toBe(Date.parse(retryAt) + 1_000 + USAGE_RECHECK_MS)
+    expect(errors()).toHaveLength(1)
+    // The limit is gone at the next retry: the work goes on.
+    f.problem = undefined
+    await f.tickSchedules(new Date(Date.parse(retryAt) + 1_000 + USAGE_RECHECK_MS + 1_000))
     expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
   })
 

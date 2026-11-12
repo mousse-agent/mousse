@@ -251,8 +251,11 @@ const REMINDER_LATE_MS = 2 * 60_000
 const REPLY_WAIT_MS = 5_000
 /** Retries on another model after usage limits, per activation. */
 const MAX_USAGE_RETRIES = 2
-/** How long work a usage limit stopped waits before it tries again, when its provider gave no reset time. */
-const USAGE_RECHECK_MS = 60_000
+/**
+ * How long a usage pause lasts when the provider gave no reset time: the bot tries again then (work a usage limit
+ * stopped goes on, schedules run), and pauses again for as long if the limit still holds.
+ */
+export const USAGE_RECHECK_MS = 30 * 60_000
 /**
  * Continuations after a dispatch reached its runtime's cap on model turns, per activation. Each one worked up to the
  * cap (300 turns on Claude Code), so this only stops a runtime that reaches the cap at once, again and again.
@@ -273,6 +276,12 @@ export const BOT_OFFLINE_POLL_MS = 15_000
 export const BOT_OFFLINE_POLL_MAX_MS = 60_000
 /** How often a live dispatch's last call is written to `bots.db` at most (`checkpoint_at`). */
 export const BOT_CHECKPOINT_EVERY_MS = 1_000
+
+/** What an answer to a limit ask did to the work that waited on it (`settleRoomInTx`). */
+interface RoomSettled {
+  ended: BotActivationRow[]
+  continued: string[]
+}
 
 interface LiveDispatch {
   controller: AbortController
@@ -325,6 +334,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * again. Not kept across a restart, where it tries once at the start (`usageResumable`).
    */
   private readonly usageWaits = new Map<string, { botId: string; at: number }>()
+  /**
+   * The limit work that ran out of room waits on, from `budgetEnd` until it stops waiting: what `waitingOn` reads before
+   * the work's notice (with the ask's card) is posted. After a restart that notice, or its own ask, says it.
+   */
+  private readonly roomKeys = new Map<string, BotBudgetWallKey>()
   /**
    * `changed` with `{botId?, activationId?}` after every change (`bots.changed`), `message` with
    * `{botId, message}` for every new or changed chat row (`bots.message`), `activity` with
@@ -1039,6 +1053,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('a bot\'s usage pause could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
+    // Waiting work that nothing would wake or end ends now, with a line.
+    this.settleStrandedWork()
     for (const botId of this.waitingBots()) {
       try {
         await this.pump(botId)
@@ -1278,7 +1294,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private usagePause(row: BotActivationRow, until: string | undefined, instanceId: string | undefined): void {
     const family = instanceId ? this.providerLabel(instanceId) : undefined
     const waits = row.lane === 'run' && row.trigger.kind === 'work'
-    const text = `${until ? `Paused until ${clockTime(until)}` : 'Paused'} (${family ? `your ${family} usage limit` : 'a usage limit'})${waits ? `. I'll carry on with this ${until ? 'then' : 'once it resets'}.` : ''}`
+    const limit = family ? `your ${family} usage limit` : 'a usage limit'
+    // Without a reset time the pause lasts `USAGE_RECHECK_MS`, and the line says so: never "once it resets".
+    const retryAt = until ?? new Date(this.now() + USAGE_RECHECK_MS).toISOString()
+    const text = until
+      ? `Paused until ${clockTime(until)} (${limit})${waits ? '. I\'ll carry on with this then.' : ''}`
+      : `Paused (${limit}, with no reset time given). ${waits ? `I'll try this again every ${USAGE_RECHECK_MS / 60_000} minutes until it goes through.` : `I'll try again at ${clockTime(retryAt)}.`}`
     const error: BotError = { text, action: { kind: 'resume', label: 'Resume' } }
     let pauses = false
     const ended = this.recorded(row, () => {
@@ -1288,7 +1309,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const paused = this.store.registry(row.botId)?.pausedReason
       pauses = !paused || paused === 'usage_limit'
       if (pauses) {
-        this.store.setPaused(row.botId, 'usage_limit', until)
+        this.store.setPaused(row.botId, 'usage_limit', retryAt)
         this.store.setError(row.botId, { code: 'usage_limit', error })
       }
       this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_limit` })
@@ -1300,7 +1321,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const after = this.store.activation(row.id) ?? row
     if (!waits) return this.afterEnd(after)
     // Under the owner's own pause there is no usage pause to end: the work waits for the reset time itself.
-    if (!pauses) this.usageWaits.set(row.id, { botId: row.botId, at: until ? Date.parse(until) : this.now() + USAGE_RECHECK_MS })
+    if (!pauses) this.usageWaits.set(row.id, { botId: row.botId, at: Date.parse(retryAt) })
     this.letGoOfBrowser(after)
     this.packs.delete(row.id)
     this.clearLiveChip(after)
@@ -2191,7 +2212,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A run reached a limit (§5.7): nobody is there to allow more now. Work the owner asked for (`work`, a reminder's
    * work) waits for the answer: it is `blocked` with `budget_exhausted`, which frees the run lane, and what it had so far
    * is posted with the ask that lets it go on (by its dispatch's reply when the turn ends, else at once). Allow carries
-   * it on in the same thread (`allowRoom`, `resumeWork`); Not now ends it with what was posted (`endWaitingWork`). After
+   * it on in the same thread (`settleRoomInTx`, `resumeWork`); Not now ends it with what was posted. After
    * a Not now in the last day, and for any other run, the run ends failed (a schedule's counts toward the failure
    * streak) with one ask that offers the higher limit for later runs ("work for up to 2 hours per run"). `stuck`: the run
    * made no call in its whole time, with the internet there; it ends failed with an error row and no ask (more time
@@ -2216,8 +2237,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('no_progress') }, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
         } else if (waits) {
           // The bot's one open ask for this limit is the one this work waits on: a run's is taken over, or one is written.
+          // A chat waiting at a wall for the same limit keeps its card, and the work waits on that card too: its notice
+          // carries it, and its answer settles the work (`settleRoomInTx`).
           if (open?.mode === 'ask') this.store.moveAsk(open.id, row.id, input.dispatchN)
           else if (!open) this.insertLimitAsk(row, input)
+          if ('budget' in input.permission) this.roomKeys.set(row.id, input.permission.budget.key)
           if (!replyComes) this.postRoom(this.store.activation(row.id)!, input.dispatchN)
         } else if (!open && !cooling) {
           const ask = this.insertLimitAsk(row, input)
@@ -2256,9 +2280,45 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { id, title: text.title }
   }
 
-  /** The open limit ask that work waiting for room goes on with (`budgetEnd` gave it to the work). */
+  /** The open limit ask that work waiting for room owns (`budgetEnd` gave it to the work). */
   private roomAsk(row: BotActivationRow): BotEscalationRow | undefined {
     return this.store.escalations({ activationId: row.id, status: 'open' }).find((ask) => ask.kind === 'budget' && ask.mode === 'ask')
+  }
+
+  /**
+   * The open ask work waiting for room goes on with: its own, else the bot's open ask for the limit it waits on (taken
+   * over by later work, or a chat's wall for the same limit). None when nothing is open for it (`settleStrandedWork`).
+   */
+  private roomAskOf(row: BotActivationRow): BotEscalationRow | undefined {
+    const own = this.roomAsk(row)
+    if (own) return own
+    const key = this.waitingOn(row)
+    return key ? this.store.openAsk(row.botId, askFingerprintOf({ budget: { key } })) : undefined
+  }
+
+  /**
+   * The limit work that waits for room waits on: the one `budgetEnd` recorded, else that of its own open ask, else that
+   * of the newest limit card on its messages since its last turn started (a card it shares), else the first limit it
+   * has used up. Spend limits are known only from the first three.
+   */
+  private waitingOn(row: BotActivationRow): BotBudgetWallKey | undefined {
+    const kept = this.roomKeys.get(row.id)
+    if (kept) return kept
+    const own = this.roomAsk(row)
+    if (own && 'budget' in own.permission) return own.permission.budget.key
+    const since = this.store.lastMainDispatch(row.id)?.startedAt ?? 0
+    for (const entry of this.store.all('SELECT id FROM bot_messages WHERE activation_id = ? AND ask_id IS NOT NULL ORDER BY seq DESC', row.id)) {
+      const message = this.store.message(entry.id as string)
+      if (!message?.askId || Date.parse(message.at) < since) break
+      const ask = this.store.escalation(message.askId)
+      if (ask && 'budget' in ask.permission) return ask.permission.budget.key
+    }
+    return this.exhaustedLimit(row)
+  }
+
+  /** The limit each piece of the bot's work that waits for room waits on, read before an answer widens the grant. */
+  private waitingKeys(botId: string): Map<string, BotBudgetWallKey | undefined> {
+    return new Map(this.store.activationsIn(botId, ['blocked']).filter((row) => workWaits(row) && row.endReason === 'budget_exhausted').map((row) => [row.id, this.waitingOn(row)]))
   }
 
   /**
@@ -2267,7 +2327,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * same with what the turn had (`postReply`); either is posted once per dispatch.
    */
   private postRoom(row: BotActivationRow, dispatchN: number, body = ''): void {
-    const ask = this.roomAsk(row)
+    const ask = this.roomAskOf(row)
     this.chat.post({
       id: `bm_${row.id}_room_d${dispatchN}`, botId: row.botId, author: 'bot', kind: 'notice', text: roomText(body),
       ...(ask ? { askId: ask.id } : {}),
@@ -2289,38 +2349,85 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The owner allowed more (a limit ask): every piece of work that waits for room and has it now under the wider grant
-   * goes on when the run lane is free (`room_allowed`, then `pump`). Time, turns and tool calls are checked here; a
-   * spend limit is checked by the work's first request, which waits again if it is still short.
+   * An ask for more room was answered, in the answer's own transaction (Allow, Not now, a message that counts as Not
+   * now, `respond`, a chat wall's answer): every piece of work that waits on that limit (`waiting`, read before the
+   * answer widened the grant) is settled, so none is left waiting on an ask that is gone. After an Allow, work that has
+   * room now goes on when the run lane is free (`room_allowed`, then `pump`); work that still has none ends with a line
+   * that says so. After Not now it ends with what it posted: the card says Not now.
    */
-  private allowRoom(botId: string): void {
-    this.store.db.transaction(() => {
-      for (const row of this.store.activationsIn(botId, ['blocked']))
-        if (workWaits(row) && row.endReason === 'budget_exhausted' && !this.exhaustedLimit(row))
-          this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'room_allowed' })
-    })
+  private settleRoomInTx(botId: string, key: BotBudgetWallKey, allowed: boolean, waiting: ReadonlyMap<string, BotBudgetWallKey | undefined>): RoomSettled {
+    const settled: RoomSettled = { ended: [], continued: [] }
+    for (const row of this.store.activationsIn(botId, ['blocked'])) {
+      if (!workWaits(row) || row.endReason !== 'budget_exhausted') continue
+      if ((waiting.has(row.id) ? waiting.get(row.id) : this.waitingOn(row)) !== key) continue
+      if (allowed && this.hasRoom(row)) {
+        if (this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'room_allowed' })) settled.continued.push(row.id)
+        continue
+      }
+      const ended = this.endWaitingInTx(row, 'budget_denied', allowed ? `I couldn't carry on with "${this.workTitle(row)}": it still has no room. Ask me again if you still want it.` : undefined)
+      if (ended) settled.ended.push(ended)
+    }
+    return settled
   }
 
   /**
-   * The owner said Not now to a limit ask: the work that waited on it ends, with what it posted (the ask's own work, and
-   * any other that waits for the same limit). Nothing new is posted; the card says Not now.
+   * Ends work that waits to go on (inside the caller's transaction): failed with `reason`, journaled, and, when `line`
+   * is given, one plain chat line that says why, answering the message that asked for it.
    */
-  private endWaitingWork(botId: string, ask: BotEscalationRow): void {
-    const key = 'budget' in ask.permission ? ask.permission.budget.key : undefined
-    const ended: BotActivationRow[] = []
-    this.store.db.transaction(() => {
-      for (const row of this.store.activationsIn(botId, ['blocked'])) {
-        if (!workWaits(row) || row.endReason !== 'budget_exhausted') continue
-        if (row.id !== ask.activationId && (key === undefined || this.exhaustedLimit(row) !== key)) continue
-        if (!this.store.moveActivation(row.id, ['blocked'], 'failed', { endReason: 'budget_denied' })) continue
-        this.journalEnd(row, 'budget_exhausted')
-        ended.push(row)
-      }
+  private endWaitingInTx(row: BotActivationRow, reason: string, line?: string): BotActivationRow | undefined {
+    if (!this.store.moveActivation(row.id, ['blocked'], 'failed', { endReason: reason })) return undefined
+    this.roomKeys.delete(row.id)
+    this.usageWaits.delete(row.id)
+    if (line) this.chat.post({
+      id: `bm_${row.id}_ended`, botId: row.botId, author: 'bot', kind: 'notice', text: line,
+      ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}),
+      activationId: row.id, lane: 'run'
     })
-    for (const row of ended) this.afterEnd(this.store.activation(row.id) ?? row)
+    this.journalEnd(row, reason === 'budget_denied' ? 'budget_exhausted' : reason)
+    return this.store.activation(row.id)
   }
 
-  /** The first limit the activation has used up under what it may use now (its grant and overlays); none when it has room. */
+  /** After `settleRoomInTx` committed: ended work lets go of what it held; work allowed to go on starts when the lane is free. */
+  private afterRoom(botId: string, settled: RoomSettled | undefined): void {
+    if (!settled) return
+    for (const row of settled.ended) this.afterEnd(row)
+    if (settled.continued.length) this.changed({ botId })
+  }
+
+  /**
+   * Waiting work that nothing would wake or end (`maintain` and the startup pass): work that waits for room with no open
+   * ask for its limit (its answer was lost), or for a usage limit's reset with no reset time to wait for. It ends with
+   * one plain line, so no work waits forever.
+   */
+  private settleStrandedWork(): void {
+    for (const row of this.store.activationsWith(['blocked']).filter(workWaits)) {
+      try {
+        let stranded = false
+        if (row.endReason === 'budget_exhausted') {
+          const key = this.waitingOn(row)
+          stranded = !key || !this.store.openAsk(row.botId, askFingerprintOf({ budget: { key } }))
+        } else if (row.endReason === 'usage_limit') {
+          const registry = this.store.registry(row.botId)
+          stranded = registry?.pausedReason === 'usage_limit' && !registry.pausedUntil
+        }
+        if (!stranded) continue
+        const ended = this.recorded(row, () => this.endWaitingInTx(row, 'nothing_to_wait_for', `I stopped "${this.workTitle(row)}": nothing could let it carry on any more. Ask me again if you still want it.`))
+        if (ended) this.afterEnd(ended)
+      } catch (error) {
+        console.warn('waiting bot work could not be checked', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }
+
+  /** Whether waiting work has room to go on under what it may use now: no limit used up, spend limits included. */
+  private hasRoom(row: BotActivationRow): boolean {
+    return this.exhaustedLimit(row) === undefined
+  }
+
+  /**
+   * The first limit the activation has used up under what it may use now (its grant and overlays); none when it has room.
+   * A spend limit counts as used up once what was spent and is held reaches it.
+   */
   private exhaustedLimit(row: BotActivationRow): BotBudgetWallKey | undefined {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
@@ -2330,6 +2437,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (budget.maxActiveMs - counters.activeMs < ACTIVE_TIME_CHUNK_MS) return 'maxActiveMs'
     if (budget.maxTurns !== undefined && counters.requests >= budget.maxTurns) return 'maxTurns'
     if (budget.maxToolCalls !== undefined && counters.toolCalls >= budget.maxToolCalls) return 'maxToolCalls'
+    if (budget.maxInputTokens === undefined && budget.maxOutputTokens === undefined && budget.maxUsd === undefined) return undefined
+    const spent = new BotSpendScope(this.store, row.id).used()
+    if (budget.maxInputTokens !== undefined && spent.input >= budget.maxInputTokens) return 'maxInputTokens'
+    if (budget.maxOutputTokens !== undefined && spent.output >= budget.maxOutputTokens) return 'maxOutputTokens'
+    if (budget.maxUsd !== undefined && spent.usd >= budget.maxUsd) return 'maxUsd'
     return undefined
   }
 
@@ -2599,12 +2711,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const problem = this.answerProblem(row, escalation.permission as BotPermissionRequest, amount)
       if (problem) throw new BotEngineError('invalid_answer', problem)
     }
+    // A limit: the work that waits on it, read before the answer widens the grant.
+    const limit = 'budget' in escalation.permission ? escalation.permission.budget.key : undefined
+    const waiting = limit ? this.waitingKeys(row.botId) : undefined
     if (input.answer === 'allow_bot' && !special) this.allowForBot(row.botId, escalation.permission as BotPermissionRequest, amount)
     const status = input.answer === 'deny' ? 'denied' : input.answer === 'allow_bot' ? 'allowed_bot' : 'allowed_once'
+    let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, status, amount)) return false
       if (!special && (input.answer === 'allow_once' || input.answer === 'allow_more')) this.store.putOverlay(row.id, escalation.id, escalation.permission, amount)
       this.journalAnswer(escalation, status === 'denied' ? 'not_now' : 'allow')
+      // Work that waits on the same limit is settled with the answer: an overlay for this activation gives it no room.
+      if (limit) settled = this.settleRoomInTx(row.botId, limit, status !== 'denied', waiting!)
       return true
     })
     if (!answered) throw new BotEngineError('escalation_answered', 'This request was already answered or has expired.')
@@ -2612,9 +2730,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.expiryTimers.delete(escalation.id)
     this.republishAsk(escalation.id)
     const held = input.answer === 'allow_bot' && !special ? this.settleHeldAsks(row.botId) : []
+    this.afterRoom(row.botId, settled)
     this.changed({ botId: row.botId, activationId: row.id })
     await this.advance(row.id)
     for (const activationId of held) if (activationId !== row.id) await this.advance(activationId)
+    if (settled?.continued.length) await this.pump(row.botId)
     return { escalation: this.escalationSummary(this.store.escalation(escalation.id)!), activation: this.activationSummary(this.store.activation(row.id)!) }
   }
 
@@ -2632,6 +2752,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (escalation.mode === 'wall' && this.store.activation(escalation.activationId)?.status === 'running')
       throw new BotEngineError('ask_not_ready', 'Wait until the bot finishes its message.')
     const special = isSpecialAsk(escalation.permission)
+    // A limit: the work that waits on it, read before the answer widens the grant.
+    const limit = 'budget' in escalation.permission ? escalation.permission.budget.key : undefined
+    const waiting = limit ? this.waitingKeys(botId) : undefined
     let amount: number | undefined
     if (answer === 'allow' && !special) {
       const permission = escalation.permission as BotPermissionRequest
@@ -2641,23 +2764,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.allowForBot(botId, permission, amount)
     }
     const cooldown = answer === 'not_now' && escalation.mode === 'ask' ? new Date(this.now() + BOT_ASK_DENY_COOLDOWN_MS).toISOString() : undefined
+    let settled: RoomSettled | undefined
     const answered = this.store.db.transaction(() => {
       if (!this.store.answerEscalation(escalation.id, answer === 'allow' ? 'allowed_bot' : 'denied', amount, cooldown)) return false
       this.journalAnswer(escalation, answer)
+      // Work that waits for room goes on with the wider grant, or ends with what it posted, with the answer.
+      if (limit) settled = this.settleRoomInTx(botId, limit, answer === 'allow', waiting!)
       return true
     })
     if (!answered) throw new BotEngineError('ask_answered', 'This was already answered.')
     const message = this.republishAsk(escalation.id)
     const held = answer === 'allow' ? this.settleHeldAsks(botId) : []
-    // A limit: work that waits for room goes on with the wider grant, or ends with what it posted.
-    if ('budget' in escalation.permission) {
-      if (answer === 'allow') this.allowRoom(botId)
-      else this.endWaitingWork(botId, escalation)
-    }
+    this.afterRoom(botId, settled)
     this.changed({ botId, activationId: escalation.activationId })
     if (escalation.mode === 'wall') await this.advance(escalation.activationId)
     for (const activationId of held) if (activationId !== escalation.activationId) await this.advance(activationId)
-    if ('budget' in escalation.permission && answer === 'allow') await this.pump(botId)
+    if (settled?.continued.length) await this.pump(botId)
     return message
   }
 
@@ -2740,17 +2862,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const activationId = walls[0]!.activationId
     // A limit answered Not now ends the walled turn: the message starts a chat of its own.
     const limit = walls.some((wall) => wall.activationId === activationId && 'budget' in wall.permission)
+    const waiting = limit ? this.waitingKeys(botId) : undefined
+    const settled: RoomSettled[] = []
     const answered = this.store.db.transaction(() => {
       let any = false
       for (const wall of walls.filter((entry) => entry.activationId === activationId))
         if (this.store.answerEscalation(wall.id, 'denied')) {
           this.journalAnswer(wall, 'not_now')
+          // Work that waits on the same limit as this wall ends with it: the message counts as Not now for it too.
+          if ('budget' in wall.permission) settled.push(this.settleRoomInTx(botId, wall.permission.budget.key, false, waiting!))
           any = true
         }
       return any
     })
     if (!answered) return false
     for (const wall of walls) this.republishAsk(wall.id)
+    for (const entry of settled) this.afterRoom(botId, entry)
     this.changed({ botId, activationId })
     if (limit) {
       await this.advance(activationId)
@@ -3059,7 +3186,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!body && !chips.length && !asks.length && !report && !waiting) return
     const kind = row.lane === 'chat' ? 'text' : report ? 'run_report' : 'notice'
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
-    const room = waiting ? this.roomAsk(row) : undefined
+    const room = waiting ? this.roomAskOf(row) : undefined
     const [first, ...more] = room ? [room] : asks
     // What the message answers: the owner's message a chat turn holds, or the one that asked for the work.
     const replyTo = row.lane === 'chat' ? this.ownerMessageOf(row.id) : row.trigger.kind === 'work' ? row.trigger.replyTo : undefined
@@ -3728,6 +3855,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.refusedAsks.delete(row.id)
+    this.roomKeys.delete(row.id)
     // Its browser tabs close too, and the bot's browser once nothing else uses it.
     try {
       this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
@@ -3914,6 +4042,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('an owner message could not be answered at startup', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       })
     }
+    // Waiting work whose answer was lost (Mousse stopped between it and the work's own update) ends with a line.
+    this.settleStrandedWork()
     for (const botId of this.waitingBots()) this.pumpLater(botId)
   }
 
@@ -3927,7 +4057,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * without the turn's last words, which only its thread kept.
    */
   private repostRoom(row: BotActivationRow): void {
-    const ask = this.roomAsk(row)
+    const ask = this.roomAskOf(row)
     const main = this.store.lastMainDispatch(row.id)
     if (!ask || !main || this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id)) return
     this.recorded(row, () => this.postRoom(row, main.n))
