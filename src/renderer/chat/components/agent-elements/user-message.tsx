@@ -3,6 +3,8 @@ import type { UIMessage } from "ai";
 import { cn } from "./utils/cn";
 import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
+import { useImageGallery } from "./image-gallery";
+import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 
@@ -27,49 +29,6 @@ function isTextPart(part: MessagePart): part is { type: "text"; text: string } {
     part.type === "text" &&
     typeof (part as { text?: unknown }).text === "string"
   );
-}
-
-/** The file name an attached image part carries, if any. */
-function getImageNameFromPart(part: unknown): string | undefined {
-  if (!isRecord(part)) return undefined;
-  const name = part.filename ?? part.name ?? part.fileName;
-  return typeof name === "string" && name.trim() ? name : undefined;
-}
-
-function getImageUrlFromPart(part: unknown): string | null {
-  if (!isRecord(part)) return null;
-  const type = part.type;
-  if (typeof type !== "string") return null;
-
-  if (type === "image") {
-    const imagePart = part as { url?: string; image?: string };
-    return imagePart.url ?? imagePart.image ?? null;
-  }
-
-  if (type === "data-image") {
-    const dataPart = part as { data?: { url?: string } };
-    return dataPart.data?.url ?? null;
-  }
-
-  if (type === "file") {
-    const filePart = part as {
-      mimeType?: string;
-      mediaType?: string;
-      url?: string;
-      data?: string;
-    };
-    // The adapter emits AI SDK standard `mediaType`; be lenient and accept
-    // legacy `mimeType` too.
-    const mimeType = filePart.mimeType ?? filePart.mediaType;
-    if (mimeType?.startsWith("image/")) {
-      if (filePart.url) return filePart.url;
-      if (filePart.data) {
-        return `data:${mimeType};base64,${filePart.data}`;
-      }
-    }
-  }
-
-  return null;
 }
 
 type FilePart = {
@@ -130,6 +89,7 @@ export const UserMessage = memo(function UserMessage({
   enableImagePreview = true,
 }: UserMessageProps) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const gallery = useImageGallery();
   const [expanded, setExpanded] = useState(false);
   const textRef = useRef<HTMLParagraphElement>(null);
   const textParts = message.parts?.filter(isTextPart) ?? [];
@@ -137,7 +97,7 @@ export const UserMessage = memo(function UserMessage({
   const foldable = useTallEnoughToFold(textRef, text);
   const folded = foldable && !expanded;
 
-  const images: Array<{ url: string; name?: string }> = [];
+  const images = userMessageImageTiles(message);
   const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
   const references: ChatReference[] = [];
   for (const part of message.parts ?? []) {
@@ -145,21 +105,8 @@ export const UserMessage = memo(function UserMessage({
       const reference = parseChatReference(part.data);
       if (reference) references.push(reference);
     }
-    const imageUrl = getImageUrlFromPart(part);
-    if (imageUrl) images.push({ url: imageUrl, name: getImageNameFromPart(part) });
     const file = getFileFromPart(part);
     if (file) files.push(file);
-  }
-  if (isRecord(message) && Array.isArray(message.experimental_attachments)) {
-    for (const att of message.experimental_attachments as Array<{
-      contentType?: string;
-      url?: string;
-      name?: string;
-    }>) {
-      if (att.contentType?.startsWith("image/") && att.url) {
-        images.push({ url: att.url, name: att.name || undefined });
-      }
-    }
   }
 
   if (!text && images.length === 0 && files.length === 0 && references.length === 0) return null;
@@ -168,11 +115,9 @@ export const UserMessage = memo(function UserMessage({
   const sentFromName = (message.metadata as { sentFrom?: { name?: unknown } } | undefined)?.sentFrom?.name;
   const sentFrom = typeof sentFromName === "string" && sentFromName ? sentFromName : undefined;
 
-  const lightboxImages = images.map(({ url, name }, i) => ({
-    id: `${message.id}-img-${i}`,
-    url,
-    filename: name ?? `Image ${i + 1}`,
-  }));
+  const lightboxImages = userMessageImages(message);
+  // In a conversation its one preview steps through all of the conversation's images; alone, through this prompt's.
+  const openImage = (i: number) => (gallery ? gallery.open(lightboxImages[i]!) : setLightboxIndex(i));
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
@@ -197,7 +142,7 @@ export const UserMessage = memo(function UserMessage({
               className={cn(tileClass, "cursor-pointer")}
               aria-label={name ? `Open ${name}` : `Open image ${i + 1}`}
               title={name}
-              onClick={() => setLightboxIndex(i)}
+              onClick={() => openImage(i)}
             >
               {image}
             </button>
@@ -208,7 +153,7 @@ export const UserMessage = memo(function UserMessage({
           );
         })}
       </div>}
-      {enableImagePreview && lightboxImages.length > 0 && (
+      {enableImagePreview && !gallery && lightboxImages.length > 0 && (
         <ImageLightbox
           open={lightboxIndex !== null}
           onClose={() => setLightboxIndex(null)}
