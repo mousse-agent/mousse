@@ -7,6 +7,7 @@ import { chatStatusFromTurn, mousseToUIMessages } from '../src/renderer/chat/ada
 import { collectNativeSubagentCards, nativeSubagentState, nativeSubagentsOfMessages } from '../src/renderer/chat/adapters/nativeSubagents'
 import { collectSubagentCalls, joinSubagentCards, type SubagentCardModel } from '../src/renderer/chat/adapters/subagentCards'
 import { MessageList } from '../src/renderer/chat/components/agent-elements/message-list'
+import { SubagentCardView } from '../src/renderer/chat/components/agent-elements/tools/SubagentCard'
 import { SubagentCardsContext } from '../src/renderer/chat/components/agent-elements/tools/subagent-cards-context'
 import { describeTurnProgress } from '../src/renderer/chat/components/agent-elements/turn-progress'
 import { useBackgroundLive } from '../src/renderer/hooks/useNativeSubagents'
@@ -245,6 +246,44 @@ describe('a thread whose agent starts subagents', () => {
     const view = await show([...intro, agent('a1', 2, { status: 'done' }), reply('r2', 9, 'Done.')], false)
     expect(view.cards).toHaveLength(1)
     expect(view.progress).toEqual([])
+  })
+
+  const line = () => [...host.querySelectorAll('.subagent-card-line')].map((node) => node.textContent)
+
+  it('a running row says Working on its one line', async () => {
+    await show([...intro, agent('a1', 2, { ...named, nativeId: 'task-1' })], true)
+    expect(line()).toEqual(['Working…'])
+    expect(host.querySelector('.subagent-card')?.getAttribute('data-state')).toBe('working')
+  })
+
+  it('a finished row shows its result as one plain line, and opens on the whole result', async () => {
+    const summary = '**All good.** The key is built in `src/cache.ts`.'
+    await show([...intro, agent('a1', 2, { ...named, nativeId: 'task-1', status: 'done', summary, durationMs: 3000 }), reply('r2', 9, 'Done.')], false)
+    expect(line()).toEqual(['All good. The key is built in src/cache.ts.'])
+    expect(host.querySelector('.subagent-card')?.getAttribute('data-state')).toBe('done')
+    const row = host.querySelector<HTMLButtonElement>('button.subagent-card')!
+    expect(row.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => row.click())
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    expect(host.querySelector('.subagent-card-full')?.textContent).toBe('All good. The key is built in src/cache.ts.')
+  })
+
+  it('a failed row says Failed, tinted, then why', async () => {
+    await show([...intro, agent('a1', 2, { ...named, status: 'failed', summary: 'Agent type `nope` not found' })], true)
+    expect(line()).toEqual(['Failed · Agent type nope not found'])
+    expect(host.querySelector('.subagent-card-note')?.getAttribute('data-tone')).toBe('failed')
+    expect(host.querySelector('.subagent-card')?.getAttribute('data-state')).toBe('failed')
+  })
+
+  it('clicking a Mousse subagent row opens its thread', async () => {
+    const opened: string[] = []
+    const [card] = joinSubagentCards(collectSubagentCalls([prompt, delegate('c1', 'output-available', { title: 'Map the scroll code', recordVersion: 1 }, { delegationId: 'd1' })]), [listed], { loaded: true, turnActive: false }).values()
+    await act(async () => {
+      root.render(createElement(SubagentCardView, { card: card!, now: T0 + 5000, result: 'Read `a.ts`.', onOpen: (id: string) => opened.push(id) }))
+    })
+    expect(line()).toEqual(['Read a.ts.'])
+    await act(async () => host.querySelector<HTMLButtonElement>('button.subagent-card')!.click())
+    expect(opened).toEqual(['child-1'])
   })
 })
 
