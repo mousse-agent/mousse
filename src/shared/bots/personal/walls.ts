@@ -1,5 +1,6 @@
 import type { BotAuthority, BotCheck, BotCheckDenied, NormalisedCall, WallReason } from './authority'
 import { neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../harness/tools'
+import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
 
 /** Walls in plain words, and the built-in check a runtime's gate makes (PR 6 §4). Browser-safe. */
 
@@ -62,7 +63,7 @@ export function botTurnOffers(bot: Pick<BotAuthority, 'appTools'> | undefined, n
  * Why a bot may not run the Mousse app tool `name` with `args` (its wall in plain words), or
  * undefined when its grant holds the call. The registry checks this on every call of a bot turn.
  */
-export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills'>, name: string, args: Record<string, unknown>): string | undefined {
+export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | 'escalate'>, name: string, args: Record<string, unknown>): string | undefined {
   if (SKILL_TOOLS.has(name)) {
     // The skill tools come with granted skills. Which skill loads is held by the turn itself: a
     // bot turn's skills are only its granted ones (by id), whether `load_skill` names one by id or name.
@@ -72,5 +73,22 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills'>, n
     return undefined
   }
   const decided = bot.check({ kind: 'app', tool: name, args })
-  return decided.ok ? undefined : checkMessage(decided)
+  if (decided.ok) return undefined
+  return BROWSER_TOOL_NAMES.has(name) && !('refused' in decided) && decided.wall.kind === 'tool' ? botBrowserNotAllowed(bot) : checkMessage(decided)
+}
+
+const BROWSER_TOOL_NAMES: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
+
+/**
+ * What a bot's call of a browser tool returns when its turn does not hold the browser (a bot's thread lists the browser
+ * tools whatever it holds): not allowed, and where the turn can ask, to ask with escalate. In the chat, whose work may
+ * hold the browser, escalate answers to hand the job to work_start.
+ */
+export function botBrowserNotAllowed(bot: Pick<BotAuthority, 'escalate'>): string {
+  return `Not allowed: you may not use the browser on this turn.${bot.escalate ? ' If you need it, ask your owner with escalate (tool "browser").' : ''}`
+}
+
+/** Whether a bot's call of the Mousse app tool `name` is a browser tool its owner has not allowed. */
+export function botBrowserWithheld(bot: Pick<BotAuthority, 'appTools'>, name: string): boolean {
+  return BROWSER_TOOL_NAMES.has(name) && !bot.appTools.has(name)
 }

@@ -111,6 +111,18 @@ export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffli
   return lines.join('\n')
 }
 
+/** The "Run commands" line when the owner allows them, and what it becomes where they can't run (`botShellWithheld`). */
+const BOT_SHELL_YES = /^- Run commands: yes$/m
+export const BOT_SHELL_WITHHELD_LINE = "- Run commands: allowed, but not available on this computer (it has no sandbox for a bot's commands), so asking won't help"
+
+/**
+ * A bot's system text for a runtime that withholds commands although the owner allows them (a Claude Code instance
+ * locked for bots, with no proven sandbox here): its "Run commands" line says so, instead of "yes".
+ */
+export function botShellWithheld(text: string): string {
+  return text.replace(BOT_SHELL_YES, BOT_SHELL_WITHHELD_LINE)
+}
+
 /**
  * A bot's whole system text: who it is, where its files folder is, `BOT_BASE_INSTRUCTIONS`, then what its lane asks of
  * it, then what its owner allows now (`allowed`). Built at each dispatch, so a rename, a new description or a changed

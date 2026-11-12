@@ -3,8 +3,15 @@
  * the chat (front desk) hears what its work holds, a run what it holds itself, and a change in About or an Allow shows
  * at the next turn. A bot's thread lists only Mousse tools a bot can hold.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { botAllowedOf, botAllowedText, botInstructions, type BotAllowed } from '../../src/mms/bots/instructions'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { BOT_SHELL_WITHHELD_LINE, botAllowedOf, botAllowedText, botInstructions, botShellWithheld, type BotAllowed } from '../../src/mms/bots/instructions'
+import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { RunCounters } from '../../src/mms/harness/budget'
+import { claudeLockedTools, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { ClaudeSubscriptionAdapter } from '../../src/mms/harness/drivers/claudeCode/adapter'
+import { botAppToolRefusal } from '../../src/shared/bots/personal/walls'
+import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { delegationFixture } from '../run/delegationFixture'
 import { compileBotThread, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { ToolRegistry } from '../../src/mms/run/mcp/appTools/registry'
@@ -163,6 +170,36 @@ describe('the stated permissions match the tools a run is given', () => {
       'Use what is allowed without asking. Ask with escalate only for something marked no.'
     ])
   })
+
+  it('a locked Claude Code turn with no sandbox is told commands are allowed but not available, and is offered no Bash', async () => {
+    const shell = withPermission(botStarterManifest(), { tool: 'shell' })
+    const system = botInstructions({ name: 'Pip', description: 'Look things up for me.', lane: 'run', allowed: botAllowedOf(shell) })
+    expect(line(system, 'Run commands')).toBe('- Run commands: yes')
+    const authority = createBotAuthority({
+      activationId: 'act-1', role: 'activation', permissions: { tools: ['shell'], appTools: [], mcp: [], skills: [], workspace: null },
+      waiting: () => false, counters: new RunCounters(), time: { deadline: () => 0, signal: new AbortController().signal }, spend: null
+    })
+    const lockedTurn = async (shellContained: boolean) => {
+      const service = { standaloneWorkspace: () => '/mousse/standalone/bot-home', chat: vi.fn(async () => 'done'), commitConversation: vi.fn(), configured: () => true }
+      // The admission says whether the sandbox is proven here; the turn itself is not refused for lacking one.
+      const adapter = new ClaudeSubscriptionAdapter(() => service as never, () => null, { admit: async () => ({ ok: true as const, shellContained }) })
+      const input = { runId: 'run-1', threadId: 'bot-home', instanceId: 'claude-bot', llmProvider: 'claude-subscription', model: 'sonnet', prompt: 'go', cwd: '/mousse/standalone/bot-home', signal: new AbortController().signal, permissionMode: 'ask' } as never
+      const host = { tools: {}, bot: authority, bridge: { mcp: null, turnToken: 't', sessionInstructions: system, turnPreamble: '', userMcp: 'native' }, context: { prepareNativeContext: () => undefined, recoverOverflow: () => null, nativeHistoryAfterTurn: () => '' } } as never
+      await adapter.startTurn(input, new Proxy({}, { get: () => () => undefined }) as never, { heartbeat: () => undefined, drainSteer: () => undefined } as never, host).catch(() => undefined)
+      const locked = (service.chat.mock.calls[0] as unknown as [{ locked: ClaudeLockedTurn }])[0].locked
+      return { prompt: locked.systemPrompt, tools: claudeLockedTools(locked, false).tools }
+    }
+    const withheld = await lockedTurn(false)
+    expect(withheld.tools).not.toContain('Bash')
+    expect(line(withheld.prompt, 'Run commands')).toBe(BOT_SHELL_WITHHELD_LINE)
+    expect(withheld.prompt.replace(BOT_SHELL_WITHHELD_LINE, '- Run commands: yes')).toBe(system)
+    const sandboxed = await lockedTurn(true)
+    expect(sandboxed.tools).toContain('Bash')
+    expect(sandboxed.prompt).toBe(system)
+    // A bot not allowed commands keeps its "no".
+    const none = botInstructions({ name: 'Pip', description: 'x', lane: 'run', allowed: botAllowedOf(botStarterManifest()) })
+    expect(botShellWithheld(none)).toBe(none)
+  })
 })
 
 describe("a bot's thread lists only tools a bot can hold", () => {
@@ -176,6 +213,32 @@ describe("a bot's thread lists only tools a bot can hold", () => {
     expect(registry.listForThread('other').map((entry) => entry.name).sort()).toEqual([...names].sort())
     expect(registry.isBotThread('bot-home')).toBe(true)
     expect(registry.isBotThread('other')).toBe(false)
+  })
+
+  it('a browser tool the owner has not allowed says so and how to ask, on every path a call takes', async () => {
+    const authority = (appTools: string[]) => ({
+      ...createBotAuthority({
+        activationId: 'act-1', role: 'activation', permissions: { tools: [], appTools, mcp: [], skills: [], workspace: null },
+        waiting: () => false, counters: new RunCounters(), time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+      }),
+      escalate: () => 'asked'
+    })
+    const NOT_ALLOWED = 'Not allowed: you may not use the browser on this turn. If you need it, ask your owner with escalate (tool "browser").'
+    // The runtime's own gate (locked Claude Code, Pi) and the Mousse server both answer it.
+    expect(botAppToolRefusal(authority(['escalate']), 'browser_open', { url: 'https://example.com' })).toBe(NOT_ALLOWED)
+    expect(botAppToolRefusal(authority(['escalate', ...BOT_BROWSER_TOOLS]), 'browser_open', { url: 'https://example.com' })).toBeUndefined()
+    const fx = delegationFixture()
+    try {
+      const run = await fx.runningRun('bot-home')
+      const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host)
+      turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: authority(['escalate']) }))
+      // Not "Browser tools are not bound for this turn": the bot is told it is not allowed, and to escalate.
+      expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual({ text: NOT_ALLOWED, isError: true })
+      // Any other tool outside the grant keeps its wall.
+      expect(await registry.call('ask_user', { questions: [] }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual({ text: 'This bot is not allowed to use ask_user.', isError: true })
+    } finally {
+      fx.dispose()
+    }
   })
 
   it('a bot can hold every grantable tool, the browser tools and the work tools', () => {

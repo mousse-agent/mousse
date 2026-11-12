@@ -6,7 +6,7 @@ import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../../../shared/settings'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
-import { botAppToolRefusal } from '../../../../shared/bots/personal/walls'
+import { botAppToolRefusal, botBrowserNotAllowed, botBrowserWithheld } from '../../../../shared/bots/personal/walls'
 import { botMayBeOffered } from '../../../../shared/bots/personal/manifest'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
@@ -402,6 +402,9 @@ export class ToolRegistry {
     if (!tool) return this.callUserMcp(name, args, { threadId, active, turn, credential, boundToken, request })
     // Scope and level are checked first: a refused call asks nobody anything and leaves no ledger row.
     const scope = this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
+    // A bot's thread lists the browser tools whatever it holds: one its owner has not allowed says so, and how to ask,
+    // not that no browser is bound to the turn.
+    if (turn.bot && botBrowserWithheld(turn.bot, name)) return { text: botBrowserNotAllowed(turn.bot), isError: true }
     const availability = tool.available?.(turn) ?? true
     if (availability !== true) return { text: availability, isError: true }
     const unattended = unattendedRefusal(tool, turn)

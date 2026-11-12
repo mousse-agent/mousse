@@ -19,6 +19,7 @@ import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptR
 import { AppError } from '../../../../shared/errors'
 import type { ClaudeLockedTurn } from '../../claude/locked'
 import { systemTempDirs } from '../../../bots/grants/compile'
+import { botShellWithheld } from '../../../bots/instructions'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
 
 /**
@@ -126,7 +127,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       cwd: bot.workspace?.scratch ?? service.standaloneWorkspace(input.threadId),
       shellContained,
       temps: systemTempDirs(),
-      systemPrompt: host.bridge?.sessionInstructions ?? '',
+      // Bash is withheld without a proven sandbox (`claudeLockedTools`): the bot is told so, not "Run commands: yes".
+      systemPrompt: shellContained ? host.bridge?.sessionInstructions ?? '' : botShellWithheld(host.bridge?.sessionInstructions ?? ''),
       ...(onProcess ? { onProcess: (pid: number) => onProcess(pid, input.threadId) } : {}),
       ...(policyAppeared ? { policyAppeared } : {})
     }
