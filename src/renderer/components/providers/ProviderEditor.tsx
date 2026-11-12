@@ -7,7 +7,7 @@ import { ProviderIcon } from '../../lib/providerIcons'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { useAppStore } from '../../stores/appStore'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
-import { AccountRow, ArgsRow, EnvRow, ExecutableRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
+import { AccountRow, ArgsRow, EnvRow, ExecutableRow, PromptCacheHourRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderInfoSection, agentInfoRows, apiInfoRows } from './ProviderInfo'
 import { VendorSettingsSection } from './VendorSettings'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
@@ -182,6 +182,7 @@ export function AgentEditor({
         <AdvancedList note={deviceWideNote(snapshot)}>
           <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
           <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
+          <PromptCacheHourRow snapshot={snapshot} onSave={(promptCacheHour) => actions.configure({ promptCacheHour })} />
           {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set. */}
           {!info.bundled && (
             <>

@@ -373,6 +373,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             saveLaunch: (patch: CliProviderConfigPatch) => live().saveLaunch(patch),
             // The entry's telemetry switch, from its newest revision.
             telemetryEnv: () => live().env.enforced,
+            // An API-key entry pays per token: its prompt cache is never kept for an hour.
+            ...(onKey ? { paysPerToken: true } : {}),
             signInCommand,
             ...(credential ? credential.serviceOptions : {})
           }
@@ -566,7 +568,9 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         : undefined,
       // The owner's entry: a bot's Bash runs in Claude Code's sandbox when bubblewrap and socat (Linux)
       // or Seatbelt (macOS) are here, read as each bot turn starts.
-      lockedEntry ? undefined : () => claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available')
+      lockedEntry ? undefined : () => claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available',
+      // The user's choice for this entry (Settings → Providers), read as each turn starts.
+      () => context.config.promptCacheHour)
       const runtime: DriverRuntime = {
         adapter,
         configured: () => service.configured(),
@@ -584,6 +588,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         identity: async () => service.accountSubject(),
         // Claude Code refuses `bypassPermissions` when the user's settings say so.
         permissionLimits: (cwd) => service.permissionLimits(cwd),
+        promptCacheHour: () => {
+          void service.refreshProxySeats()
+          return service.promptCacheHour(undefined, undefined, context.config.promptCacheHour)
+        },
         refreshModels: async (cwd) => {
           await service.status()
           await service.refreshModels(cwd)

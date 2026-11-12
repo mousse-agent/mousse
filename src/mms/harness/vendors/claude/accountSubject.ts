@@ -154,6 +154,41 @@ export function claudeAutoModeDisabled(env: NodeJS.ProcessEnv, options: AccountS
   })
 }
 
+/**
+ * A variable as a turn in `options.cwd` sees it: `claudeEffectiveVariable`, with the `env` of that
+ * folder's `.claude/settings.json` and `settings.local.json` over the user's (managed settings still
+ * win). Undefined when unset or blank.
+ */
+export function claudeTurnVariable(env: NodeJS.ProcessEnv, name: string, options: AccountSubjectOptions & { cwd?: string } = {}): string | undefined {
+  const { json, effective } = readClaudeSettings(env, options)
+  const managed = managedSettingsPaths(options.platform ?? process.platform).map(json)
+  const fromSettings = (entry: Json | undefined) => (isRecord(entry?.env) && typeof entry.env[name] === 'string' ? (entry.env[name] as string).trim() || undefined : undefined)
+  const project = options.cwd ? [json(join(options.cwd, '.claude', 'settings.local.json')), json(join(options.cwd, '.claude', 'settings.json'))] : []
+  for (const entry of [...managed, ...project]) {
+    const value = fromSettings(entry)
+    if (value) return value
+  }
+  return effective[name]?.trim() || undefined
+}
+
+/** Claude Code's variables that choose the prompt cache lifetime (the first wins over its `promptCacheTtl` setting). */
+export const CLAUDE_CACHE_TTL_VARIABLES = ['CLAUDE_CODE_PROMPT_CACHE_TTL', 'ENABLE_PROMPT_CACHING_1H'] as const
+
+/**
+ * Whether the user already chose Claude Code's prompt cache lifetime: one of
+ * `CLAUDE_CACHE_TTL_VARIABLES` in its environment, or `promptCacheTtl` or one of those variables in
+ * any settings file it reads for a turn in `options.cwd` (the files of `claudeBypassDisabled`).
+ * Mousse then sets nothing, since its variable would override that choice.
+ */
+export function claudeChoosesCacheTtl(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string } = {}): boolean {
+  if (CLAUDE_CACHE_TTL_VARIABLES.some((name) => env[name]?.trim())) return true
+  return anyClaudeSettings(env, options, (settings) => {
+    if (settings.promptCacheTtl !== undefined) return true
+    const vars = settings.env
+    return isRecord(vars) && CLAUDE_CACHE_TTL_VARIABLES.some((name) => typeof vars[name] === 'string' && (vars[name] as string).trim() !== '')
+  })
+}
+
 /** Whether `test` holds for any settings file Claude Code reads for a turn in `options.cwd`; an unreadable file holds nothing. */
 function anyClaudeSettings(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string }, test: (settings: Record<string, unknown>) => boolean): boolean {
   const readText = options.readText ?? ((path: string) => readFileSync(path, 'utf8'))

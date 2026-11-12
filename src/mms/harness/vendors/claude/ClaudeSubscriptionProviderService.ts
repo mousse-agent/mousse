@@ -17,7 +17,7 @@ import type {
   UsageProxyKeyResult
 } from '../../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../../shared/settings'
-import type { CredentialKind } from '../../../../shared/harness/status'
+import { promptCacheHourOn, type CredentialKind, type PromptCacheHour } from '../../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../../shared/types'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
 import { parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
@@ -51,7 +51,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnVariable } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -59,7 +59,7 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
-import { checkProxyKey, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, type ProxyUsage, type ProxyUsageOptions } from './localProxyUsage'
+import { checkProxyKey, listedProxySeats, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, readLocalProxySeats, type ProxyUsage, type ProxyUsageOptions } from './localProxyUsage'
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
@@ -197,6 +197,8 @@ export type ClaudeSubscriptionChatInput = {
   systemPromptAppend?: string
   /** Claude Code compacts its session just below this many tokens (`claudeAutoCompactEnv`); absent keeps its default. */
   autoCompactTokens?: number
+  /** The user's choice to keep the prompt cache for an hour on this entry (`promptCacheHourOn`); absent: the automatic default. */
+  promptCacheHour?: boolean
   /**
    * `never`: a tool call that needs the user's approval, and `AskUserQuestion`, are denied without
    * asking (`RunPolicy.approvals`): nobody answers this run.
@@ -303,6 +305,8 @@ type Dependencies = {
   proxyAccountsPreview?: (options: ProxyUsageOptions) => Promise<ProxyUsage | undefined>
   /** One proxy sign-in's usage (default `readLocalProxyClaudeAccount`; tests). */
   proxyAccount?: (options: ProxyUsageOptions, accountId: string) => Promise<UsageAccount | undefined>
+  /** Lists a local proxy's seats (default `readLocalProxySeats`; tests). */
+  proxySeats?: (options: ProxyUsageOptions) => Promise<unknown>
   /** Checks a proxy key before it is saved (default `checkProxyKey`; tests). */
   checkProxyKey?: (options: { baseUrl: string | undefined; key: string; signal?: AbortSignal }) => Promise<UsageProxyKeyResult>
   /** Where proxy keys entered in Mousse are kept, encrypted (tests: a scratch file and codec). */
@@ -359,6 +363,8 @@ type Dependencies = {
    * what the instance runs on, read without starting Claude Code.
    */
   probe?: (env: NodeJS.ProcessEnv) => AuthProbe
+  /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is never kept for an hour. */
+  paysPerToken?: boolean
   /** What a turn says when the instance is not signed in (default: run the sign-in command). */
   signedOutMessage?: () => string
   /**
@@ -717,6 +723,24 @@ export function claudeSubscriptionEnvironment(source: NodeJS.ProcessEnv = proces
   const env = { ...source }
   for (const key of ['ELECTRON_RUN_AS_NODE', ...CLAUDE_SESSION_MARKERS]) delete env[key]
   return env
+}
+
+/** Variables that send Claude Code's requests to a cloud provider, billed per token. */
+const CLAUDE_CLOUD_ROUTES = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
+/** A turn waits this long at most for a proxy's seat listing before it starts. */
+const PROXY_SEATS_TURN_WAIT_MS = 2_000
+/** A proxy's seat listing stands this long before a turn or a snapshot reads it again. */
+const PROXY_SEATS_FRESH_MS = 30 * 60_000
+/** A proxy that gave no listing is asked again after this long. */
+const PROXY_SEATS_RETRY_MS = 5 * 60_000
+
+/** A base URL that is Anthropic's own API, as with no base URL at all. */
+function isAnthropicApi(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl.trim()).hostname === 'api.anthropic.com'
+  } catch {
+    return false
+  }
 }
 
 /** Claude Code accepts an auto-compact window from 100K to 1M tokens. */
@@ -1344,6 +1368,69 @@ export class ClaudeSubscriptionProviderService {
     return {
       ...(bypassDisabled ? { bypassDisabled: true } : {}),
       ...(autoDisabled ? { unavailable: { auto: CLAUDE_AUTO_MODE_DISABLED } } : {})
+    }
+  }
+  /**
+   * Whether this entry's turns may keep the prompt cache for an hour, from what Mousse knows now
+   * (it asks nothing itself; `refreshProxySeats` does):
+   * - an API-key entry, a cloud route (Bedrock, Vertex, Foundry), an `ANTHROPIC_API_KEY`, or an
+   *   API-key sign-in pays per token;
+   * - with a base URL, only a local proxy whose last listing shows only subscription seats is a
+   *   subscription (only API keys: per token); any other address is unconfirmed;
+   * - without one, Claude Code's own subscription sign-in (`claude auth status`) is a subscription,
+   *   unless an `ANTHROPIC_AUTH_TOKEN` replaces it.
+   * `userSetting` when the user's own environment or Claude settings choose the lifetime.
+   */
+  promptCacheHour(cwd?: string, env: NodeJS.ProcessEnv = this.environment(), choice?: boolean): PromptCacheHour {
+    const options = cwd ? { cwd } : {}
+    const basis = this.promptCacheBasis(env, options)
+    const userSetting = basis !== 'per_token' && claudeChoosesCacheTtl(env, options)
+    return { basis, ...(userSetting ? { userSetting: true as const } : {}), ...(choice !== undefined ? { choice } : {}), on: promptCacheHourOn({ basis, ...(userSetting ? { userSetting: true as const } : {}) }, choice) }
+  }
+  private promptCacheBasis(env: NodeJS.ProcessEnv, options: { cwd?: string }): PromptCacheHour['basis'] {
+    if (this.dependencies.paysPerToken) return 'per_token'
+    const variable = (name: string) => claudeTurnVariable(env, name, options)
+    if (CLAUDE_CLOUD_ROUTES.some((name) => /^(1|true|yes|on)$/i.test(variable(name) ?? ''))) return 'per_token'
+    const baseUrl = variable('ANTHROPIC_BASE_URL')
+    if (baseUrl && !isAnthropicApi(baseUrl)) {
+      const seats = listedProxySeats(baseUrl)?.seats
+      return seats === 'subscription' ? 'subscription' : seats === 'api_key' ? 'per_token' : 'unconfirmed'
+    }
+    if (variable('ANTHROPIC_API_KEY')) return 'per_token'
+    const credential = this.account()?.credential
+    if (credential === 'api_key' || credential === 'ambient') return 'per_token'
+    return credential === 'subscription' && !variable('ANTHROPIC_AUTH_TOKEN') ? 'subscription' : 'unconfirmed'
+  }
+  /** The variable that keeps a turn's prompt cache for an hour, when `promptCacheHourOn` says so. */
+  private promptCacheEnv(choice: boolean | undefined, cwd: string | undefined): Record<string, string> {
+    return this.promptCacheHour(cwd, undefined, choice).on ? { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' } : {}
+  }
+  /** When each proxy origin's seats were last asked for here, so a proxy that does not list them is not asked every turn. */
+  private readonly seatsAsked = new Map<string, number>()
+  /**
+   * Lists the seats of the local proxy Claude Code's base URL points at (`readLocalProxySeats`) when
+   * no listing from the last half hour is known and none was asked for in the last few minutes.
+   * Never fails; `changed` fires when the answer moves the prompt cache basis.
+   */
+  async refreshProxySeats(cwd?: string, signal?: AbortSignal): Promise<void> {
+    try {
+      const env = this.environment()
+      const baseUrl = claudeTurnVariable(env, 'ANTHROPIC_BASE_URL', cwd ? { cwd } : {})
+      const origin = localProxyOrigin(baseUrl)
+      if (!origin) return
+      const now = Date.now()
+      const listed = listedProxySeats(baseUrl)
+      if (listed && now - listed.at < PROXY_SEATS_FRESH_MS) return
+      const asked = this.seatsAsked.get(origin)
+      if (asked !== undefined && now - asked < PROXY_SEATS_RETRY_MS) return
+      this.seatsAsked.set(origin, now)
+      const options = this.proxyOptions(signal)
+      if (!options || localProxyOrigin(options.baseUrl) !== origin) return
+      const before = this.promptCacheBasis(env, {})
+      await (this.dependencies.proxySeats ?? readLocalProxySeats)(options)
+      if (this.promptCacheBasis(env, {}) !== before) this.hooks.changed?.()
+    } catch {
+      // Unknown seats leave the cache at its default.
     }
   }
   /** Checks the sign-in with the environment the caller captured for its turn. */
@@ -2475,6 +2562,9 @@ export class ClaudeSubscriptionProviderService {
       turnSettings = policy.settings
     }
     if (!this.configured()) throw new AppError({ code: 'claude_subscription_not_connected', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+    // A proxy's seats decide the prompt cache lifetime: a listing older than half an hour is read again first.
+    await this.refreshProxySeats(input.locked ? undefined : input.cwd, AbortSignal.timeout(PROXY_SEATS_TURN_WAIT_MS))
+    input.signal?.throwIfAborted()
     if (this.activeThreads.has(input.threadId))
       throw new Error('A Claude turn is already running for this thread')
     const locked = input.locked
@@ -2491,7 +2581,7 @@ export class ClaudeSubscriptionProviderService {
     // A locked turn's environment is built from nothing (`lockedEnv`), with the instance's key last.
     // The compaction threshold is set over both: Claude Code's own session holds the tool calls and
     // results that fill its context, so only its auto-compact can keep it under the threshold.
-    const compaction = claudeAutoCompactEnv(input.autoCompactTokens)
+    const compaction = { ...claudeAutoCompactEnv(input.autoCompactTokens), ...this.promptCacheEnv(input.promptCacheHour, locked ? undefined : input.cwd) }
     // A bot turn on the owner's own entry runs in that entry's environment (their sign-in), without
     // the variables of the user's MCP servers, which it never gets. It loads no settings files, so
     // the `env` of the owner's Claude settings, where a proxy sign-in often lives, is applied here.

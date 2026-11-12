@@ -43,7 +43,7 @@ import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { InstanceBinary, InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
+import type { InstanceBinary, InstanceConfigView, NextStep, PromptCacheHour, UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
@@ -1739,6 +1739,16 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  /** Whether the instance's turns may keep the prompt cache for an hour; absent for a runtime that has no such choice. */
+  private promptCacheHourOf(record: InstanceRecord): PromptCacheHour | undefined {
+    try {
+      return record.runtime.promptCacheHour?.()
+    } catch (error) {
+      console.warn('[harness] could not read the prompt cache lifetime', { instanceId: record.instanceId, error: errorText(error) })
+      return undefined
+    }
+  }
+
   /** Capabilities of a record's instance at its last known version and current runtime facts. */
   private recordCaps(record: InstanceRecord): HarnessCaps {
     return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, this.currentFacts(record.instanceId), record.instanceId)
@@ -2428,6 +2438,7 @@ export class Harness implements HarnessGateway {
     const refreshedAt = runtime.modelsRefreshedAt ? runtime.modelsRefreshedAt() : models?.refreshedAt
     // Recomputed on every snapshot: the user may edit their Claude settings at any time.
     const limits = this.permissionLimitsOf(record)
+    const cacheHour = this.promptCacheHourOf(record)
     const signInStep: NextStep | undefined = auth.state === 'signed_out' || auth.state === 'expired'
       ? { action: 'sign_in', label: auth.state === 'expired' ? 'Sign in again' : 'Sign in', ...(auth.signInCommand ? { command: auth.signInCommand } : {}) }
       : undefined
@@ -2476,6 +2487,7 @@ export class Harness implements HarnessGateway {
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId), instanceId),
       ...(limits ? { permissionLimits: limits } : {}),
+      ...(cacheHour ? { promptCacheHour: cacheHour } : {}),
       config: this.configView(record),
       models: {
         entries,
@@ -2955,6 +2967,8 @@ export class Harness implements HarnessGateway {
       harnessFail('unsupported', `${this.displayName(record)} keeps the provider it was added with. Add another entry for another one.`, instanceId)
     if (patch.telemetry !== undefined && !telemetrySwitch(record.driver, record.config))
       harnessFail('unsupported', `${record.driver.label} has no telemetry switch Mousse could set.`, instanceId)
+    if (patch.promptCacheHour !== undefined && !record.runtime.promptCacheHour)
+      harnessFail('unsupported', `${record.driver.label} has no prompt cache setting Mousse could set.`, instanceId)
     const launch: CliProviderConfigPatch = {
       ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
       ...(patch.args !== undefined ? { args: patch.args } : {}),
@@ -3364,6 +3378,7 @@ export class Harness implements HarnessGateway {
     if (patch.env !== undefined) config.env = Object.keys(patch.env).length ? { ...patch.env } : null
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
     if (patch.telemetry !== undefined) config.telemetry = patch.telemetry
+    if (patch.promptCacheHour !== undefined) setOrDelete(config, 'promptCacheHour', patch.promptCacheHour ?? undefined)
     // The removed engine setting (Advanced → Engine) is dropped on the first write after it.
     delete config.engine
     if (patch.source !== undefined) {

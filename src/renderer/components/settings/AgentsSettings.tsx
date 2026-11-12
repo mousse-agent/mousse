@@ -180,7 +180,7 @@ export function AgentsSettings({
         <SettingsRow
           title="When the cache expires"
           anchor="agents-idle-compaction"
-          description="After a pause, the next message re-reads the whole thread."
+          description="After a pause, the next message re-reads the whole thread. Claude Code's cache lifetime is set per provider in Providers."
           control={
             <Select
               ariaLabel="When the cache expires"

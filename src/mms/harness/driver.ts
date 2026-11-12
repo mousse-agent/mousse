@@ -1,6 +1,6 @@
 import { accessSync, constants, realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
+import type { AuthState, CredentialKind, InstallOwner, PromptCacheHour } from '../../shared/harness/status'
 import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
@@ -41,6 +41,8 @@ export interface InstanceConfig {
   displayName?: string
   /** The entry's agent telemetry; absent = the default (`telemetryDefault`). */
   telemetry?: TelemetrySetting
+  /** Claude Code: the user kept (true) or did not keep (false) the prompt cache for an hour; absent = the automatic default. */
+  promptCacheHour?: boolean
   /** `private`: a Mousse-owned home under `<profileHome>/harness/<instanceId>/home`. */
   home: 'default' | 'private'
   loginMethod?: string
@@ -289,6 +291,11 @@ export interface DriverRuntime {
    * cached: the user may edit their settings at any time. Synchronous, no runtime start.
    */
   permissionLimits?(cwd?: string): PermissionLimits | undefined
+  /**
+   * Claude Code: whether its turns may keep the prompt cache for an hour (`InstanceSnapshot.promptCacheHour`).
+   * Read at every snapshot from what the runtime knows; it may start a background read that fires `changed`.
+   */
+  promptCacheHour?(): PromptCacheHour | undefined
   refreshModels?(cwd: string): Promise<void>
   /**
    * When the stored model list was last updated from the vendor (ISO time), kept with the list so
@@ -576,6 +583,7 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
   }
   if (raw.signedOutInMousse === true) config.signedOutInMousse = true
   if (raw.telemetry === 'off' || raw.telemetry === 'agent_setting') config.telemetry = raw.telemetry
+  if (typeof raw.promptCacheHour === 'boolean') config.promptCacheHour = raw.promptCacheHour
   // Only an entry with a home of its own can be locked: the user's own setup is never.
   if (raw.profile === 'locked' && config.home === 'private') config.profile = 'locked'
   return config

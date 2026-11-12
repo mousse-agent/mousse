@@ -511,7 +511,7 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
   // `engine` (the removed Pi engine setting) is still accepted from an older client, and ignored.
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider', 'telemetry'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider', 'telemetry', 'promptCacheHour'])
   if (o.useOlderSettings !== undefined) {
     if (o.useOlderSettings !== true) throw invalidParams(`${name}.useOlderSettings must be true`)
     return { useOlderSettings: true }
@@ -532,6 +532,10 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (o.telemetry !== undefined) {
     if (o.telemetry !== 'off' && o.telemetry !== 'agent_setting') throw invalidParams(`${name}.telemetry must be off|agent_setting`)
     patch.telemetry = o.telemetry
+  }
+  if (o.promptCacheHour !== undefined) {
+    if (o.promptCacheHour !== null && typeof o.promptCacheHour !== 'boolean') throw invalidParams(`${name}.promptCacheHour must be a boolean or null`)
+    patch.promptCacheHour = o.promptCacheHour
   }
   if (o.provider !== undefined) {
     const provider = asString(o.provider, `${name}.provider`, 64)

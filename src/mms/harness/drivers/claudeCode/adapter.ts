@@ -86,7 +86,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
      * On the owner's own entry: whether Claude Code's sandbox can run here now (`claudeSandboxFact`).
      * Read as each bot turn starts. Absent: it cannot, and a `shell` grant runs outside it.
      */
-    private readonly ownerSandbox?: () => boolean
+    private readonly ownerSandbox?: () => boolean,
+    /** The user's choice to keep this entry's prompt cache for an hour; undefined: the automatic default. */
+    private readonly promptCacheChoice: () => boolean | undefined = () => undefined
   ) {}
 
   /**
@@ -215,6 +217,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       mcp: host.bridge?.mcp ?? null,
       mcpTurnToken: host.bridge?.mcp ? host.bridge.turnToken : undefined,
       autoCompactTokens: host.context.compactionTokens,
+      promptCacheHour: this.promptCacheChoice(),
       // Claude Code loads the project's instruction files itself, as in a terminal (CLAUDE.md, and
       // AGENTS.md as its own settings decide), so Mousse appends only its own session instructions.
       // A locked turn's instructions replace Claude Code's own system prompt instead (`locked`).
