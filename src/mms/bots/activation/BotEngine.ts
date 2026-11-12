@@ -256,12 +256,18 @@ const OFFLINE_CHECKS_TO_STOP = 2
 /** The first wait before a waiting activation checks the internet again; it doubles up to the maximum. */
 export const BOT_OFFLINE_POLL_MS = 15_000
 export const BOT_OFFLINE_POLL_MAX_MS = 60_000
+/** How often a live dispatch's last call is written to `bots.db` at most (`checkpoint_at`). */
+export const BOT_CHECKPOINT_EVERY_MS = 1_000
 
 interface LiveDispatch {
   controller: AbortController
   timer: { clear(): void } | undefined
   /** When the dispatch started, on the monotonic clock: what settlement measures from. */
   startedMono: number
+  /** When it started, on the wall clock (`bot_dispatches.started_at`): its recorded last call is measured from it. */
+  startedAt: number
+  /** The last call written to `bots.db` (`checkpoint_at`), on the monotonic clock. */
+  checkpointMono: number
   /** The main dispatch's number; its consults attach to it. */
   n: number
   /** Wall-clock deadline of the main dispatch, which its consults share. */
@@ -1477,7 +1483,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const spendLimited = spendLimits(effective)
     const spendScope = Object.keys(spendLimited).length ? this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId), row.id, dispatch.n) : null
     const startedMono = this.monotonic()
-    this.live.set(row.id, { controller, timer, startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId, lastProgressMono: startedMono, offlineChecks: 0 })
+    this.live.set(row.id, { controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId, lastProgressMono: startedMono, offlineChecks: 0 })
     this.watchOffline(row.id, dispatch.n)
     const authority = this.authorityFor({
       row, mainN: dispatch.n, role: 'activation', permissions: compiled.permissions, grantDigest: grant.digest,
@@ -1797,12 +1803,37 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   // -- No internet (docs/bots.md) ----------------------------------------------------------------
 
-  /** The live dispatch did something (a call, a model request): it is making progress. */
+  /**
+   * The live dispatch did something (a call, a model request): it is making progress. The time of that call is kept in
+   * `bots.db` too (at most once a second), so a dispatch Mousse stops is charged up to it, never to its deadline.
+   */
   private progress(activationId: string): void {
     const live = this.live.get(activationId)
     if (!live) return
     live.lastProgressMono = this.monotonic()
     live.offlineChecks = 0
+    if (live.lastProgressMono - live.checkpointMono < BOT_CHECKPOINT_EVERY_MS) return
+    live.checkpointMono = live.lastProgressMono
+    try {
+      this.store.checkpointDispatch(activationId, live.n, live.startedAt + Math.ceil(live.lastProgressMono - live.startedMono))
+    } catch (error) {
+      // A call never fails for its record: without it, a stopped Mousse charges up to the previous one.
+      console.warn('a bot dispatch\'s last call could not be recorded', { activationId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * A dispatch Mousse stops while it runs (the profile closes) is charged up to its last call, as one the internet ended
+   * is and as the next start charges one a crash ended. Settled once: its run's end refunds nothing more.
+   */
+  private chargeToLastCall(activationId: string, live: LiveDispatch): void {
+    const dispatch = this.store.dispatch(activationId, live.n)
+    if (!dispatch || dispatch.deadlineMs === null || dispatch.prepaidMs === null) return
+    const used = Math.max(0, Math.min(dispatch.deadlineMs, Math.ceil(live.lastProgressMono - live.startedMono)))
+    this.store.db.transaction(() => {
+      if (this.store.run("UPDATE bot_dispatches SET used_ms = ?, prepaid_ms = ?, settled_by = 'run' WHERE activation_id = ? AND n = ? AND settled_by IS NULL", used, used, activationId, live.n))
+        this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', used - dispatch.prepaidMs!, activationId)
+    })
   }
 
   /** Whether the internet is there for the activation's provider; always, without `connectivity`. Never throws. */
@@ -2730,6 +2761,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status === 'running') {
       const run = main?.runId ? this.host.runs()?.getRun(main.runId) : undefined
       if (!main || main.endedAt === null || !run) return
+      // Mousse stopped while the turn ran (the profile is closing): the next start carries the activation on, with the
+      // time it has left (`reconcileActivation`); it never fails here. One that waits for the internet waits as before.
+      if (stoppedByMousse(run) && !row.offline) return
       // A usage limit: the instance is skipped until its reset, and the dispatch is tried again on
       // the next candidate; with none left the bot pauses until the reset (never a failure).
       const limitUntil = run.status === 'failed' ? run.outcome?.usageLimitUntil : undefined
@@ -3337,8 +3371,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // Measured on the monotonic clock of the process that ran the dispatch. Without that measure
     // (another process started it), nothing is refunded: the whole prepaid allowance stays charged.
-    // A dispatch ended to wait for the internet is charged up to its last call only.
-    const measured = live ? live.offline?.chargeMs ?? this.monotonic() - live.startedMono : undefined
+    // A dispatch ended to wait for the internet, or by Mousse stopping, is charged up to its last call only.
+    const measured = live ? live.offline?.chargeMs ?? (stoppedByMousse(run) ? live.lastProgressMono - live.startedMono : this.monotonic() - live.startedMono) : undefined
     this.store.db.transaction(() => {
       // Time: the measured window, never above the deadline, applied once as a signed difference.
       // `exit_at` is the supervisor's evidence that the processes are gone, never written here.
@@ -3503,6 +3537,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   settleRun(runId: string): void {
     const dispatch = this.store.dispatchByRun(runId)
     if (!dispatch || dispatch.endedAt !== null) return
+    // A run the last process left, ended by the boot, is the startup pass's: it charges the dispatch up to its last call
+    // and carries the activation on.
+    const ended = this.host.runs()?.getRun(runId)
+    if (ended && stoppedByMousse(ended) && this.live.get(dispatch.activationId)?.n !== dispatch.n) return
     if (dispatch.kind === 'consult') {
       const row = this.store.activation(dispatch.activationId)
       const run = this.host.runs()?.getRun(runId)
@@ -3753,16 +3791,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // P2: the supervisor's `reconcile` (above) killed the recorded process groups of unfinished
     // dispatches and wrote their `exit_at`.
-    // P3: main dispatches whose time window was never settled. Without exit evidence on the main row
-    // and on every attached consult row, the main dispatch's whole remaining allowance is charged.
+    // P3: main dispatches whose time window was never settled (Mousse stopped while they ran): charged up to their last
+    // recorded call (`checkpoint_at`, its consults' calls included), as a dispatch the internet ended is, never past
+    // their deadline. The time Mousse was down, and whatever ran after that call, is not the bot's work.
     for (const row of this.store.all("SELECT activation_id, n FROM bot_dispatches WHERE kind IN ('start', 'continue') AND started_at IS NOT NULL AND settled_by IS NULL")) {
       const main = this.store.dispatch(row.activation_id as string, Number(row.n))!
-      const attached = this.store.dispatches(main.activationId).filter((other) => other.kind === 'consult' && other.mainN === main.n && other.startedAt !== null)
-      const evidence = [main, ...attached].every((entry) => entry.exitAt !== null)
       const deadline = main.deadlineMs ?? 0
       const prepaid = main.prepaidMs ?? 0
-      const endAt = Math.max(...[main, ...attached].map((entry) => entry.exitAt ?? 0))
-      const charge = evidence ? Math.max(prepaid, Math.min(deadline, endAt - main.startedAt!)) : deadline
+      const charge = Math.max(0, Math.min(deadline, (main.checkpointAt ?? main.startedAt!) - main.startedAt!))
       this.store.db.transaction(() => {
         if (this.store.run("UPDATE bot_dispatches SET used_ms = ?, prepaid_ms = ?, settled_by = 'startup' WHERE activation_id = ? AND n = ? AND settled_by IS NULL", charge, charge, main.activationId, main.n))
           this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', charge - prepaid, main.activationId)
@@ -3898,12 +3934,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         runs.outbox.enqueue({ threadId: main.threadId, runId: run.runId, kind: 'turn.start', payload: { kind: 'bot', runId: run.runId, threadId: main.threadId, activationId: row.id, dispatchN: main.n } satisfies BotTurnPayload })
         return
       }
-      // Its time window was already settled (the whole allowance, without exit evidence): too little
-      // left is a budget wall, as for an interrupted run.
+      // Its time window was already settled (up to its last call): too little left is a budget wall, as for an
+      // interrupted run.
       const left = this.remainingMs(row)
       if (left !== undefined && left < ACTIVE_TIME_CHUNK_MS) {
         runs.markTerminal(run.runId, 'cancelled', { error: 'bot_dispatch_restarted' })
-        this.wallAtRest(row, { ...this.timeWallAt(row, main.n), reason: 'Mousse stopped unexpectedly before this bot\'s run began, and its work time was counted as used. Allow more time to continue.' })
+        this.wallAtRest(row, this.timeWallAt(row, main.n))
         return
       }
       // Otherwise a new dispatch with the same prompt, never the old row again. The new intent is
@@ -3927,13 +3963,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     if (run.status !== 'interrupted') return
-    // Row 10: under 15 s of work time left after P3: a budget wall that says why.
+    // Row 10: under 15 s of work time left after P3 (its last call came at its deadline): a budget wall, as at a
+    // deadline (work the owner asked for waits for the answer with what it had).
     const remaining = this.remainingMs(row)
     if (remaining !== undefined && remaining < ACTIVE_TIME_CHUNK_MS) {
-      this.wallAtRest(row, {
-        ...this.timeWallAt(row, main.n),
-        reason: 'Mousse stopped unexpectedly while this bot was working. Its remaining work time was counted as used, because Mousse can\'t tell how long its commands kept running. Allow more time to continue.'
-      })
+      this.wallAtRest(row, this.timeWallAt(row, main.n))
       return
     }
     // Rows 11 and 12: one automatic continuation, then the owner decides.
@@ -4605,11 +4639,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /** Stops the active-time timers (profile shutdown). */
+  /**
+   * Stops the active-time timers (profile shutdown). A dispatch still running is charged up to its last call, so the
+   * next start carries its activation on with the time it really has left.
+   */
   close(): void {
-    for (const live of this.live.values()) {
+    for (const [activationId, live] of this.live) {
       live.timer?.clear()
       live.watch?.clear()
+      try {
+        this.chargeToLastCall(activationId, live)
+      } catch (error) {
+        console.warn('a bot dispatch\'s time could not be settled as the profile closed; the next start settles it', { activationId, error: error instanceof Error ? error.message : String(error) })
+      }
     }
     this.live.clear()
     for (const timer of this.expiryTimers.values()) timer.clear()
@@ -4749,6 +4791,11 @@ function contextKey(stored: string): [string, number] {
 export function roomText(body: string): string {
   const lead = 'I ran out of room before finishing. Allow more and I\'ll carry on.'
   return body.trim() ? `${lead} Here is what I have so far:\n\n${body.trim()}` : lead
+}
+
+/** A run Mousse itself ended by stopping (a profile closing, or the boot after a crash): never the bot's own end. */
+function stoppedByMousse(run: Pick<RunRecord, 'status' | 'outcome'>): boolean {
+  return run.status === 'interrupted' && run.outcome?.interruptedBy === 'daemon_restart'
 }
 
 /** A run's error that says its turn reached the runtime's cap on model turns (`[provider_turn_cap] …`). */

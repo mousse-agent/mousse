@@ -528,6 +528,11 @@ export interface BotDispatchRow {
   prepaidMs: number | null
   usedMs: number | null
   startedAt: number | null
+  /**
+   * When the dispatch last made a call (wall clock; its start until it makes one): what a dispatch Mousse stopped while
+   * it ran is charged up to, at the next start or as the profile closes.
+   */
+  checkpointAt: number | null
   exitAt: number | null
   endedAt: string | null
   outcome: string | null
@@ -651,6 +656,7 @@ function dispatchOf(row: Row): BotDispatchRow {
     prepaidMs: num(row.prepaid_ms),
     usedMs: num(row.used_ms),
     startedAt: num(row.started_at),
+    checkpointAt: num(row.checkpoint_at),
     exitAt: num(row.exit_at),
     endedAt: str(row.ended_at),
     outcome: str(row.outcome),
@@ -967,6 +973,11 @@ export class BotStore {
   lastMainDispatch(activationId: string): BotDispatchRow | undefined {
     const row = this.get("SELECT * FROM bot_dispatches WHERE activation_id = ? AND kind IN ('start', 'continue') ORDER BY n DESC LIMIT 1", activationId)
     return row ? dispatchOf(row) : undefined
+  }
+
+  /** A dispatch whose time is not settled yet made a call at `at` (it only moves forward). */
+  checkpointDispatch(activationId: string, n: number, at: number): void {
+    this.run('UPDATE bot_dispatches SET checkpoint_at = ? WHERE activation_id = ? AND n = ? AND settled_by IS NULL AND (checkpoint_at IS NULL OR checkpoint_at < ?)', at, activationId, n, at)
   }
 
   setDispatchRun(activationId: string, n: number, runId: string): void {
