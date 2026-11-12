@@ -1,11 +1,12 @@
 /* The live line at the end of a running turn (turn-progress.tsx): what the turn does now. Laid out like the
-   reasoning row (18px icon box, 15/22 label), so the row that comes next takes its place. Its motion is the
-   thinking icon's turn while the turn thinks (thinking-icon.css), or the dots below: transform and opacity only,
-   which the compositor draws. */
+   reasoning row (18px icon box, body-size label on a 22px line), so the row that comes next takes its place. Its
+   motion is the thinking icon's turn while the turn thinks (thinking-icon.css), or the dots below: transform and
+   opacity only, which the compositor draws. */
 
 .turn-progress {
   color: color-mix(in srgb, var(--text-secondary) 85%, transparent);
-  font-size: 15px;
+  /* The chat's body size (1rem, Tailwind `text-base`), like the user's and the assistant's text. */
+  font-size: 1rem;
   font-weight: 450;
   line-height: 22px;
 }
