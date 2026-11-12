@@ -23,7 +23,7 @@ import {
   officialDownloadUrl
 } from './platform'
 import { activePointer, lockDir, metadataPath, stagingRoot, versionDir, versionsRoot } from './paths'
-import { assertOwnedPath, assertSafeTree, contained, ensureOwnedDirectory, removeOwnedTree } from './fsSafety'
+import { assertOwnedPath, assertSafeTree, contained, ensureOwnedDirectory, removeOwnedTree, type SafeTreeOptions } from './fsSafety'
 import { probeManagedBrowserExecutable } from './probe'
 
 const DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
@@ -44,8 +44,13 @@ function assertSafeVersion(version: string): void {
 
 export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
   private readonly installing = new Set<string>()
+  // The macOS app bundle carries framework symlinks that stay inside the bundle;
+  // Windows and Linux archives have none, so they keep refusing every symlink.
+  private readonly tree: SafeTreeOptions
 
-  constructor(private readonly platformInfo: ManagedBrowserPlatformInfo = detectManagedBrowserPlatform(), private readonly probe: ManagedBrowserExecutableProbe = probeManagedBrowserExecutable) {}
+  constructor(private readonly platformInfo: ManagedBrowserPlatformInfo = detectManagedBrowserPlatform(), private readonly probe: ManagedBrowserExecutableProbe = probeManagedBrowserExecutable) {
+    this.tree = { allowContainedSymlinks: platformInfo.supported && platformInfo.platform.startsWith('mac-') }
+  }
 
   platform(): ManagedBrowserPlatformInfo { return { ...this.platformInfo } }
 
@@ -108,7 +113,8 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       const extractResult = await extractChromeZip(archive.bytesData, extracted, {
         maxEntries: 100_000,
         maxExtractedBytes: options.maxExtractedBytes ?? DEFAULT_MAX_EXTRACTED_BYTES,
-        signal: options.signal
+        signal: options.signal,
+        allowContainedSymlinks: this.tree.allowContainedSymlinks
       })
       const executable = join(extracted, this.platformInfo.executableRelativePath)
       if (!await isValidExecutable(executable, extracted)) throw new Error(`Chrome archive is missing executable ${this.platformInfo.executableRelativePath}.`)
@@ -128,13 +134,13 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       await ensureOwnedDirectory(versionsRoot(root), root)
       if (active?.version === version && await pathExists(versionPath)) {
         backupPath = join(staging, 'previous-active')
-        await assertSafeTree(versionPath, root)
+        await assertSafeTree(versionPath, root, this.tree)
         await assertOwnedPath(backupPath, root)
         await rename(versionPath, backupPath)
       } else {
-        await removeOwnedTree(versionPath, root)
+        await removeOwnedTree(versionPath, root, this.tree)
       }
-      await assertSafeTree(extracted, root)
+      await assertSafeTree(extracted, root, this.tree)
       await assertOwnedPath(versionPath, root)
       await rename(extracted, versionPath)
       await assertOwnedPath(metadataPath(root, this.platformInfo.platform, version), root)
@@ -147,18 +153,18 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       let restoreError: unknown
       if (backupPath && versionPath) {
         try {
-          await removeOwnedTree(versionPath, root)
-          await assertSafeTree(backupPath, root)
+          await removeOwnedTree(versionPath, root, this.tree)
+          await assertSafeTree(backupPath, root, this.tree)
           await rename(backupPath, versionPath)
           backupPath = undefined
         } catch (caught) { restoreError = caught }
       } else if (versionPath && !(await isActiveVersion(root, versionPath))) {
-        await removeOwnedTree(versionPath, root).catch(() => undefined)
+        await removeOwnedTree(versionPath, root, this.tree).catch(() => undefined)
       }
       if (restoreError) throw new AggregateError([error, restoreError], 'Managed browser replacement failed and the active version could not be restored.')
       throw error
     } finally {
-      await removeOwnedTree(staging, root).catch(() => undefined)
+      await removeOwnedTree(staging, root, this.tree).catch(() => undefined)
       await release()
       this.installing.delete(root)
     }
@@ -224,7 +230,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       for (const entry of stagingEntries) {
         if (!entry.name.startsWith('mousse-') || !entry.isDirectory()) continue
         const path = join(stagingRoot(root), entry.name)
-        await removeOwnedTree(path, root)
+        await removeOwnedTree(path, root, this.tree)
         removed.push(path)
       }
       const active = await readActive(root)
@@ -242,7 +248,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       candidates.sort((a, b) => b.installedAt.localeCompare(a.installedAt))
       for (const candidate of candidates.slice(options.keepVersions ?? 1)) {
         const path = join(versionsRoot(root), candidate.name)
-        await removeOwnedTree(path, root)
+        await removeOwnedTree(path, root, this.tree)
         removed.push(path)
       }
       return removed

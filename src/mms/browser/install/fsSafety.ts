@@ -1,4 +1,4 @@
-import { lstat, mkdir, readdir, rm } from 'node:fs/promises'
+import { lstat, mkdir, readdir, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
 export function contained(root: string, target: string): boolean {
@@ -47,7 +47,17 @@ export async function assertOwnedPath(target: string, root: string): Promise<voi
   }
 }
 
-export async function assertSafeTree(target: string, root: string): Promise<void> {
+export interface SafeTreeOptions {
+  /**
+   * Accept symlinks inside the tree when their real path stays inside the tree
+   * itself (the macOS Chrome app bundle's framework links). The tree's own
+   * path and its parents must still be real directories, and removal unlinks
+   * such links without following them.
+   */
+  allowContainedSymlinks?: boolean
+}
+
+export async function assertSafeTree(target: string, root: string, options: SafeTreeOptions = {}): Promise<void> {
   await assertOwnedPath(target, root)
   let details
   try { details = await lstat(target) } catch (error) {
@@ -56,14 +66,29 @@ export async function assertSafeTree(target: string, root: string): Promise<void
   }
   if (details.isSymbolicLink()) throw new Error(`Managed browser path contains a symlink: ${target}`)
   if (!details.isDirectory()) return
-  for (const entry of await readdir(target, { withFileTypes: true })) {
-    const child = join(target, entry.name)
-    if (entry.isSymbolicLink()) throw new Error(`Managed browser path contains a symlink: ${child}`)
-    if (entry.isDirectory()) await assertSafeTree(child, root)
+  const treeRoot = options.allowContainedSymlinks ? await realpath(target) : undefined
+  await assertSafeChildren(target, root, treeRoot)
+}
+
+async function assertSafeChildren(directory: string, root: string, treeRoot: string | undefined): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const child = join(directory, entry.name)
+    if (entry.isSymbolicLink()) {
+      if (!treeRoot) throw new Error(`Managed browser path contains a symlink: ${child}`)
+      let resolved: string
+      try { resolved = await realpath(child) } catch { throw new Error(`Managed browser path contains a dangling symlink: ${child}`) }
+      const rel = relative(treeRoot, resolved)
+      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Managed browser path contains a symlink that leaves its tree: ${child}`)
+      continue
+    }
+    if (entry.isDirectory()) {
+      await assertOwnedPath(child, root)
+      await assertSafeChildren(child, root, treeRoot)
+    }
   }
 }
 
-export async function removeOwnedTree(target: string, root: string): Promise<void> {
-  await assertSafeTree(target, root)
+export async function removeOwnedTree(target: string, root: string, options: SafeTreeOptions = {}): Promise<void> {
+  await assertSafeTree(target, root, options)
   await rm(target, { recursive: true, force: true })
 }
