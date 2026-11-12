@@ -129,6 +129,11 @@ describe('a reply that launches subagents whose results arrive one by one', () =
 
     view = await show(21, all, 'completed', ['done', 'done', 'done'])
     expect(view).toMatchObject({ turns: 1, indicators: ['Worked for 21s'], notices: 0 })
+    // The finished turn folds its work, the cards with it, behind its line; the line opens it in place.
+    expect(view.text).not.toContain('3 subagents')
+    expect(view.text).toContain('All three test subagents')
+    await act(async () => { host.querySelector<HTMLButtonElement>('.turn-work-toggle')!.click() })
+    view = { ...view, text: host.textContent ?? '' }
     expect(view.text).toContain('3 subagents')
     expect(view.text).toContain('3 done')
     expect(view.text).not.toMatch(/finished task|MODEL-ONLY RESULT/)

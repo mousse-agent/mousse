@@ -8,10 +8,12 @@ import {
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mapPartStateToInvocationState } from '../src/renderer/chat/components/agent-elements/utils/tool-adapters'
 import {
-  activityGroupLabel,
   analyzeAssistantMessage,
+  foldTurnWork,
   partitionTurnSegments,
   settleFinishedTurn,
+  workGroupIconType,
+  workGroupTitle,
 } from '../src/renderer/chat/components/agent-elements/utils/assistant-blocks'
 
 const tool = (type: string, toolCallId: string, extra: Record<string, unknown> = {}) => ({
@@ -151,31 +153,6 @@ describe('analyzeAssistantMessage', () => {
     ).toBe(false)
   })
 
-  it('titles a run with the latest non-empty thought', () => {
-    const items = [
-      { part: tool('tool-Thinking', 't1', { input: { thought: 'First pass' } }) },
-      { part: tool('tool-Bash', 'a') },
-      { part: tool('tool-Thinking', 't2', { input: { thought: '   ' } }) },
-      { part: tool('tool-Thinking', 't3', { input: { thought: 'Check the model list' } }) },
-      { part: tool('tool-Read', 'r') },
-    ]
-    expect(activityGroupLabel(items)).toBe('Check the model list')
-    expect(activityGroupLabel([{ part: tool('tool-Grep', 'g') }, { part: tool('tool-Read', 'r') }])).toBe('')
-  })
-
-  it('titles a run with one line from the newest part of the latest thought', () => {
-    // Codex: titled reasoning summaries, merged into one thought.
-    const codex = '**Finding the start script**\n\nThe package has a start script.\n\n**Checking the build output**\n\nThe bundle is missing.'
-    expect(activityGroupLabel([{ part: tool('tool-Thinking', 't', { input: { thought: codex } }) }, { part: tool('tool-Bash', 'a') }])).toBe(
-      'Checking the build output'
-    )
-    // Claude: summarized prose; the last paragraph's first line.
-    const claude = 'The user wants the app running.\n\nnpm start downloads Electron first, so wait for it.\nThen check the log.'
-    expect(activityGroupLabel([{ part: tool('tool-Bash', 'a') }, { part: tool('tool-Thinking', 't', { output: claude }) }])).toBe(
-      'npm start downloads Electron first, so wait for it.'
-    )
-  })
-
   it('ignores suppressed questions and task output so runs stay joined', () => {
     const result = analyzeAssistantMessage(
       [
@@ -215,6 +192,85 @@ describe('analyzeAssistantMessage', () => {
     ).toBe(true)
     expect(analyzeAssistantMessage([tool('tool-Question', 'q')], false).toolsOnly).toBe(false)
   })
+
+  it('keeps approval and plan cards out of a group', () => {
+    for (const type of ['tool-QuickAction', 'tool-ExitPlanMode', 'tool-PlanWrite']) {
+      expect(analyzeAssistantMessage([tool(type, 'x')], false).toolsOnly).toBe(false)
+    }
+  })
+})
+
+describe('workGroupTitle', () => {
+  const item = (type: string, input: Record<string, unknown> = {}, id = Math.random().toString(36)) => ({ part: tool(type, id, { input }) })
+  const read = (path: string) => item('tool-Read', { file_path: path })
+  const run = (command = 'ls') => item('tool-Bash', { command })
+  const edit = (path: string) => item('tool-Edit', { file_path: path })
+  const thought = (text: string) => item('tool-Thinking', { thought: text })
+
+  it('names what the calls did, by kind, in the order they first ran', () => {
+    expect(workGroupTitle([read('a.ts'), run(), read('b.ts'), run(), read('c.ts'), run()])).toBe('Read 3 files and ran 3 commands')
+    expect(workGroupTitle([run(), read('a.ts')])).toBe('Ran 1 command and read 1 file')
+    expect(workGroupTitle([edit('a.ts'), edit('b.ts')])).toBe('Edited 2 files')
+    expect(workGroupTitle([item('tool-Write', { file_path: 'n.ts' })])).toBe('Edited 1 file')
+    expect(workGroupTitle([item('tool-Grep', { pattern: 'x' }), item('tool-Glob', { pattern: '*' })])).toBe('Searched code twice')
+    expect(workGroupTitle([item('tool-WebSearch', { query: 'x' })])).toBe('Searched the web once')
+    expect(workGroupTitle([item('tool-WebFetch'), item('tool-WebFetch')])).toBe('Fetched 2 pages')
+    expect(workGroupTitle([item('tool-mcp__github__get_issue'), item('tool-TodoWrite')])).toBe('Used 2 tools')
+  })
+
+  it('counts a file read twice once', () => {
+    expect(workGroupTitle([read('a.ts'), read('a.ts'), read('b.ts')])).toBe('Read 2 files')
+  })
+
+  it('names up to three kinds; with more, changes before reads, and the rest counted as other actions', () => {
+    expect(workGroupTitle([read('a.ts'), read('b.ts'), run(), run(), edit('a.ts')])).toBe('Read 2 files, ran 2 commands and edited 1 file')
+    expect(workGroupTitle([read('a.ts'), item('tool-Grep'), edit('a.ts'), run()])).toBe('Edited 1 file, ran 1 command and 2 other actions')
+    expect(workGroupTitle([read('a.ts'), item('tool-Grep'), item('tool-WebFetch'), item('tool-WebSearch')])).toBe('Read 1 file, searched code once and 2 other actions')
+  })
+
+  it('leaves thoughts out, and takes the latest thought\'s line for a group of thoughts alone', () => {
+    expect(workGroupTitle([thought('Look'), read('a.ts'), thought('More')])).toBe('Read 1 file')
+    expect(workGroupTitle([thought('**First**\n\nbody'), thought('   '), thought('**Checking the order**\n\nbody')])).toBe('Checking the order')
+    expect(workGroupTitle([thought('')])).toBe('Thought')
+  })
+
+  it('gives the icon of the calls\' kind, none for a mix', () => {
+    expect(workGroupIconType([read('a.ts'), thought('x'), read('b.ts')])).toBe('tool-Read')
+    expect(workGroupIconType([read('a.ts'), run()])).toBeUndefined()
+    expect(workGroupIconType([thought('x')])).toBe('tool-Thinking')
+  })
+})
+
+describe('foldTurnWork', () => {
+  const tools = { kind: 'tools' as const }
+  const text = { kind: 'message' as const, text: true }
+  const call = { kind: 'message' as const, toolsOnly: true }
+  const keep = { kind: 'message' as const, keep: true }
+  const steer = { kind: 'message' as const, steer: true }
+  const cards = (running = false) => ({ kind: 'cards' as const, running })
+
+  it('folds the work and the narration, never the answer', () => {
+    expect(foldTurnWork([text, tools, text, call, tools, text])).toEqual([true, true, true, true, true, false])
+  })
+
+  it('keeps errors, questions and notices in view, and finds the answer before them', () => {
+    expect(foldTurnWork([tools, text, keep])).toEqual([true, false, false])
+    expect(foldTurnWork([tools, keep, tools])).toEqual([true, false, true])
+  })
+
+  it('keeps calls with a failure the agent did not get past in view', () => {
+    expect(foldTurnWork([tools, { kind: 'tools', keep: true }, keep])).toEqual([true, false, false])
+    expect(foldTurnWork([{ kind: 'message', toolsOnly: true, keep: true }, text])).toEqual([false, false])
+  })
+
+  it('folds all the work of a turn cut off before its answer', () => {
+    expect(foldTurnWork([text, tools])).toEqual([true, true])
+  })
+
+  it('keeps steered messages and the replies written before them, and subagents still working', () => {
+    expect(foldTurnWork([text, tools, steer, tools, text])).toEqual([false, true, false, true, false])
+    expect(foldTurnWork([tools, cards(true), cards(false), text])).toEqual([true, false, true, false])
+  })
 })
 
 describe('partitionTurnSegments', () => {
@@ -232,6 +288,22 @@ describe('partitionTurnSegments', () => {
     expect(partitionTurnSegments([false, false])).toEqual([
       { kind: 'message', msgIndex: 0 },
       { kind: 'message', msgIndex: 1 },
+    ])
+  })
+
+  it('splits at narration, and groups one message that holds two calls', () => {
+    expect(partitionTurnSegments([true, true, false, true, true], [], [1, 1, 0, 1, 1])).toEqual([
+      { kind: 'tools', msgIndices: [0, 1] },
+      { kind: 'message', msgIndex: 2 },
+      { kind: 'tools', msgIndices: [3, 4] },
+    ])
+    expect(partitionTurnSegments([true], [], [2])).toEqual([{ kind: 'tools', msgIndices: [0] }])
+  })
+
+  it('groups a smaller run when asked (a call still running in a live turn)', () => {
+    expect(partitionTurnSegments([false, true], [], [0, 1], (run) => run.includes(1))).toEqual([
+      { kind: 'message', msgIndex: 0 },
+      { kind: 'tools', msgIndices: [1] },
     ])
   })
 })
@@ -254,11 +326,11 @@ describe('settleFinishedTurn', () => {
     }
   }
 
-  it('puts the answer last and folds the notes before it into the activity', () => {
+  it('puts the answer last and keeps the narration before it as prose, where it was', () => {
     const turn = settle([said('n1', 'Checking.'), step('c1'), said('n2', ' Reading the log. '), step('c2'), said('a1', 'Done.'), step('t1', 'tool-Thinking')])
     expect(turn.order).toEqual(['n1', 'c1', 'n2', 'c2', 't1', 'a1'])
-    expect(turn.grouped).toEqual(['n1', 'c1', 'n2', 'c2', 't1'])
-    expect(turn.notes).toEqual([{ text: 'Checking.' }, { text: 'Reading the log.' }])
+    expect(turn.grouped).toEqual(['c1', 'c2', 't1'])
+    expect(turn.notes).toEqual([])
   })
 
   it('keeps a turn without reply text, and what is not activity, where it was', () => {
@@ -299,6 +371,6 @@ describe('settleFinishedTurn', () => {
   it('still ends a stopped turn on text written after its work', () => {
     const turn = settle([said('n1', 'Checking.'), step('c1'), said('a1', 'Half an ans')], true)
     expect(turn.order).toEqual(['n1', 'c1', 'a1'])
-    expect(turn.notes).toEqual([{ text: 'Checking.' }])
+    expect(turn.notes).toEqual([])
   })
 })

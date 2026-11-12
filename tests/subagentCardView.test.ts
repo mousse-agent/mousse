@@ -457,7 +457,8 @@ describe('the transcript with cards and notices', () => {
       ],
       [card({ toolCallId: 'card-1', title: 'Reviewer one' }), card({ toolCallId: 'card-2', title: 'Reviewer two', state: 'done' })]
     )
-    const group = html.indexOf('Tool calls')
+    // A subagent still works, so the turn does too: its commands are one group, titled with what they did.
+    const group = html.indexOf('Ran 2 commands')
     expect(group).toBeGreaterThan(-1)
     expect(html).toContain('Reviewer one')
     expect(html).toContain('Reviewer two')

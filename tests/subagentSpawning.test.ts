@@ -165,6 +165,9 @@ describe('a thread whose agent starts subagents', () => {
       root.render(createElement(SubagentCardsContext.Provider, { value: cards ?? collectNativeSubagentCards(ui, live, live) },
         createElement(MessageList, { messages: ui, status: chatStatusFromTurn({ phase: live ? 'tool_running' : 'completed', turnId: RUN }) })))
     })
+    // A finished turn folds its work, its finished cards with it, behind its line: open it.
+    const toggle = host.querySelector<HTMLButtonElement>('.turn-work-toggle[aria-expanded="false"]')
+    if (toggle) await act(async () => { toggle.click() })
     return {
       cards: [...host.querySelectorAll('.subagent-card')].map((node) => node.textContent),
       progress: [...host.querySelectorAll('[data-turn-progress]')].map((node) => node.textContent),
@@ -197,7 +200,7 @@ describe('a thread whose agent starts subagents', () => {
     const view = await show([...intro, agent('a1', 2, { ...named, nativeId: 'task-1' })], true)
     expect(view.cards).toHaveLength(1)
     expect(view.cards[0]).toContain('Map the scroll code')
-    expect(view.progress).toEqual(['Running subagent…'])
+    expect(view.progress).toEqual(['Running subagent…Map the scroll code'])
   })
 
   it('draws started cards and counts only the ones still starting', async () => {

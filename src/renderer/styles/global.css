@@ -133,6 +133,38 @@ html[data-theme='light'] {
   letter-spacing: -0.011em;
   line-height: 1.3;
 }
+/* A finished turn's line is the control that opens its work in place: "Worked for 32s ›". Only its text
+   brightens on hover; the chevron turns down while the work is open. */
+.an-message-list .turn-work-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: color 150ms ease-out;
+}
+.an-message-list .turn-work-toggle:hover,
+.an-message-list .turn-work-toggle:focus-visible {
+  color: var(--text-primary);
+}
+.an-message-list .turn-work-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text-primary) 35%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.an-message-list .turn-work-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  transition: transform 150ms ease-out;
+}
+.an-message-list .turn-work-chevron[data-open] {
+  transform: rotate(90deg);
+}
 .an-message-list .turn-work-rule {
   height: 1px;
   background: color-mix(in srgb, var(--text-primary) 10%, transparent);

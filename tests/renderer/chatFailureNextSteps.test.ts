@@ -62,20 +62,19 @@ describe('a failed tool', () => {
 
 describe('a tool call group with failures', () => {
   const group = (failed: number, live: boolean) =>
-    createElement(ToolCallsGroup, { count: 3, failed, live, children: createElement('div', { 'data-testid': 'rows' }, 'rows') })
+    createElement(ToolCallsGroup, { count: 3, title: 'Ran 3 commands', failed, live, children: createElement('div', { 'data-testid': 'rows' }, 'rows') })
   const open = () => host.querySelector('[data-testid="rows"]') !== null && !host.querySelector('[hidden] [data-testid="rows"]')
 
   it('names the failures in the collapsed header', () => {
     render(group(1, false))
-    expect(text()).toMatch(/Tool calls\s*3\s*· 1 failed/)
+    expect(text()).toMatch(/Ran 3 commands\s*· 1 failed/)
     expect(open()).toBe(false)
   })
 
-  it('opens itself the first time a failure lands while the turn runs', () => {
+  it('stays closed when a failure lands while the turn runs', () => {
     render(group(0, true))
-    expect(open()).toBe(false)
     render(group(1, true))
-    expect(open()).toBe(true)
+    expect(open()).toBe(false)
   })
 
   it('stays closed when an old turn loads with a failure', () => {

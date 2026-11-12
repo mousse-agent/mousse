@@ -127,6 +127,8 @@ const thoughtRows = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-an
 const liveRows = () => [...host.querySelectorAll<HTMLElement>('.turn-answer svg.thinking-icon.is-thinking')]
   .filter((icon) => !icon.closest('[data-turn-progress]'))
 const answerText = () => [...host.querySelectorAll('.turn-answer')].at(-1)?.textContent ?? ''
+/** Opens the last turn's work, folded behind its "Worked for" line once the turn ends. */
+const openWork = () => act(() => [...host.querySelectorAll<HTMLButtonElement>('.turn-work-toggle')].at(-1)!.click())
 const progressLine = () => host.querySelector<HTMLElement>('[data-turn-progress]')
 
 describe('a streamed thought renders only its row', () => {
@@ -165,15 +167,17 @@ describe('a streamed thought renders only its row', () => {
     expect(answerText()).toContain('word29')
   })
 
-  it('in a group, renders the group header alone and its line follows the thought', () => {
-    // A tool call, then the thought: they share one group, whose header is the live line.
+  it('after calls, renders only its own row, beside the calls\' group, and its line follows the thought', () => {
+    // Calls, then the thought: the calls fold into a group, and the thought stays out of it as the live line.
     const mounted = startRenderCounts()
-    mount(thread(5, 'Checking the build', [tool('tool-1', 12)]))
+    mount(thread(5, 'Checking the build', [tool('tool-1', 12), tool('tool-0', 13)]))
     expect(mounted.ToolCallsGroup).toBeGreaterThan(0)
+    expect(liveRows()).toHaveLength(1)
     const counts = startRenderCounts()
     stream(thinking('th', 15, 'Checking the build output for the failing step'))
     expect(hasLiveText('th')).toBe(true)
-    expect(counts.ToolCallsGroup).toBe(1)
+    expect(counts.ThinkingTool).toBe(1)
+    expect(counts.ToolCallsGroup ?? 0).toBe(0)
     expect(counts.MessageList ?? 0).toBe(0)
     expect(counts.TurnRow ?? 0).toBe(0)
     expect(counts.Transcript ?? 0).toBe(0)
@@ -243,8 +247,10 @@ describe('the end of a thought', () => {
     // The row renders once, in the same pass as the transcript, and is no longer live.
     expect(counts.ThinkingTool).toBe(1)
     expect(liveRows()).toHaveLength(0)
-    // The turn ends: one row, its text once.
+    // The turn ends: its work folds; opened, one row, its text once.
     act(() => root.render(createElement(Transcript, { progress: { phase: 'completed' } as TurnProgressState, status: 'ready' })))
+    expect(thoughtRows()).toHaveLength(0)
+    openWork()
     expect(thoughtRows()).toHaveLength(1)
     act(() => thoughtRows()[0]!.click())
     expect(answerText().split('The end.').length - 1).toBe(1)
@@ -292,7 +298,11 @@ describe('the end of a thought', () => {
     expect(hasLiveText('th')).toBe(false)
     expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toContain('Running the tests')
     expect(useAppStore.getState().messages.at(-1)!.id).toBe('tool-2')
-    // The group, now titled from the stored thought, shows its newest heading.
+    // The group is titled with what its calls did; opened, its thought row holds the stored text in full.
+    const group = [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].find((button) => button.textContent!.startsWith('Read '))!
+    expect(group.textContent).not.toContain('Running the tests')
+    act(() => group.click())
+    act(() => host.querySelector<HTMLButtonElement>('.an-tool-group-rows button[aria-expanded]:has(svg.thinking-icon)')!.click())
     expect(answerText()).toContain('Running the tests')
   })
 
@@ -333,6 +343,7 @@ describe('the end of a thought', () => {
     stream(thinking('th', 9, 'Alpha beta gamma'))
     expect(hasLiveText('th')).toBe(true)
     act(() => root.render(createElement(Transcript, { progress: { phase: 'completed' } as TurnProgressState, status: 'ready' })))
+    openWork()
     act(() => thoughtRows()[0]!.click())
     expect(answerText()).toContain('Alpha beta gamma')
   })

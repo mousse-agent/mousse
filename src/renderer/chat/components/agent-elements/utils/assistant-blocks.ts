@@ -41,10 +41,15 @@ export function isV5ToolPart(part: unknown): part is ToolPartBase {
 }
 
 /**
- * Rows that need their own surface and never join an activity group. Answered questions stay in
- * view: a collapsed "Tool calls" group would hide what the user decided.
+ * Rows that need their own surface and never join an activity group or fold behind a finished turn's
+ * "Worked for" line: questions and what the user answered, an approval card, a plan to approve.
  */
-const STANDALONE_TOOL_TYPES = new Set(["tool-Question", "tool-QuestionAnswers"]);
+const STANDALONE_TOOL_TYPES = new Set(["tool-Question", "tool-QuestionAnswers", "tool-QuickAction", "tool-ExitPlanMode", "tool-PlanWrite"]);
+
+/** A call drawn on its own surface, never inside a group (see `STANDALONE_TOOL_TYPES`). */
+export function isStandaloneToolType(type: string): boolean {
+  return STANDALONE_TOOL_TYPES.has(type);
+}
 
 export type AssistantToolItem = {
   part: ToolPartBase;
@@ -165,9 +170,6 @@ export type TurnSegment =
   | { kind: "tools"; msgIndices: number[] }
   | { kind: "cards"; msgIndices: number[] };
 
-/** A note the agent wrote while it worked, as a row of a finished turn's activity. */
-export const NOTE_PART_TYPE = "tool-Note";
-
 /**
  * A compaction row: Mousse's line about the context, drawn after the turn it follows. It is never the
  * agent's answer, so a `/compact` after a reply leaves that reply where it was.
@@ -207,14 +209,14 @@ export function turnAnswerText(messages: SettleTurnMessage[]): string {
 
 /**
  * A finished turn as it reads once the work is done: its answer, the last reply row, comes last.
- * Activity after the answer moves above it, and reply rows before it that hold only text (the
- * agent's notes before its tool calls) join the activity as note rows. Returns the order to draw
+ * Activity after the answer moves above it. Reply rows before it (the agent's narration between
+ * calls) stay where they were, as prose that splits the work into groups. Returns the order to draw
  * the messages in and each message's analysis; a turn with no reply text keeps its order.
  *
  * Moving activity above the last reply row is for a turn that ran to its end: there the last reply is
  * the answer, written after the work even when an older turn saved it in a row that opened early. A
  * turn cut off by a Stop or a restart (`cutOff`) has no answer, so when activity follows its last reply
- * row, that row is a note written before the work and the turn keeps the order it ran in.
+ * row, that row is narration written before the work and the turn keeps the order it ran in.
  */
 export function settleFinishedTurn(
   messages: SettleTurnMessage[],
@@ -226,7 +228,7 @@ export function settleFinishedTurn(
   // them answered the earlier messages and stays as it was, where it was. Only what came after settles.
   let from = 0;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isRecord(messages[index]!.metadata) && Array.isArray((messages[index]!.metadata as { steerGroup?: unknown }).steerGroup)) {
+    if (isSteerRow(messages[index]!)) {
       from = index + 1;
       break;
     }
@@ -240,36 +242,24 @@ export function settleFinishedTurn(
   }
   if (answer === -1) return { order, analyses };
   if (cutOff && order.some((index) => index > answer && analyses[index]!.toolsOnly)) return { order, analyses };
-  const settled = analyses.map((analysis, index) => {
-    const message = messages[index]!;
-    const text = index < answer && index >= from ? replyText(message) : "";
-    if (!text || !(message.parts ?? []).every(isTextPart)) return analysis;
-    const part: ToolPartBase = {
-      type: NOTE_PART_TYPE,
-      toolCallId: `${message.id}-note`,
-      state: "output-available",
-      input: { text },
-    };
-    return { toolsOnly: true, toolItems: [{ part }], cardsOnly: false, cardParts: [] };
-  });
   const after = order.filter((index) => index > answer);
   return {
     order: [
       ...order.filter((index) => index < answer),
-      ...after.filter((index) => settled[index]!.toolsOnly),
+      ...after.filter((index) => analyses[index]!.toolsOnly),
       answer,
-      ...after.filter((index) => !settled[index]!.toolsOnly),
+      ...after.filter((index) => !analyses[index]!.toolsOnly),
     ],
-    analyses: settled,
+    analyses,
   };
 }
 
-/** A thinking part's text (what streamed so far, or its final output), or a note's. */
+function isSteerRow(message: SettleTurnMessage): boolean {
+  return isRecord(message.metadata) && Array.isArray((message.metadata as { steerGroup?: unknown }).steerGroup);
+}
+
+/** A thinking part's text (what streamed so far, or its final output). */
 function thoughtTextFromPart(part: ToolPartBase): string {
-  if (part.type === NOTE_PART_TYPE) {
-    const text = isRecord(part.input) ? part.input.text : undefined;
-    return typeof text === "string" ? text : "";
-  }
   if (part.type !== "tool-Thinking") return "";
   const input = isRecord(part.input) ? part.input.thought : undefined;
   const output = part.output ?? part.result;
@@ -332,23 +322,74 @@ export function thoughtSourceOf(part: ToolPartBase & { liveId?: string; liveFrom
   return { id, thought, from: Math.min(part.liveFrom ?? 0, thought.length) };
 }
 
-/**
- * The thought a group's live line follows, when the group's newest item is a thought still being written. Its
- * header reads the thought's live text (see `useLiveThought`), so a streamed delta renders the header alone.
- * Undefined when the newest item is not a live thought.
- */
-export function liveGroupThought(items: AssistantToolItem[]): LiveThoughtSource | undefined {
-  const last = items[items.length - 1]?.part;
-  if (!last || last.type !== "tool-Thinking" || last.state !== "input-available") return undefined;
-  return thoughtSourceOf(last) ?? { id: "", thought: thoughtTextFromPart(last), from: 0 };
+/** A thought still being written: while the turn runs it is the turn's live line, never folded into a group. */
+export function isLiveThoughtItem(item: AssistantToolItem | undefined): boolean {
+  return item?.part.type === "tool-Thinking" && item.part.state === "input-available";
 }
 
-/**
- * Title for a grouped run of thoughts and tool calls: one line from the
- * latest thought (or note) that actually has text. Empty when the run should
- * fall back to "Tool calls".
- */
-export function activityGroupLabel(items: AssistantToolItem[]): string {
+/** What a call in a work group did, for the group's title. */
+type WorkKind = "edit" | "command" | "read" | "search" | "web" | "fetch" | "agent" | "other" | "thought";
+
+const EDIT_TYPES = new Set(["tool-Edit", "tool-MultiEdit", "tool-Write", "tool-NotebookEdit", "tool-Write_file", "tool-Apply_patch"]);
+const SEARCH_TYPES = new Set(["tool-Grep", "tool-Glob", "tool-Search"]);
+
+function workKindOf(type: string): WorkKind {
+  if (type === "tool-Thinking") return "thought";
+  if (type === "tool-Read") return "read";
+  if (EDIT_TYPES.has(type)) return "edit";
+  if (type === "tool-Bash") return "command";
+  if (SEARCH_TYPES.has(type)) return "search";
+  if (type === "tool-WebSearch") return "web";
+  if (type === "tool-WebFetch") return "fetch";
+  if (type === "tool-Task" || type === "tool-Agent" || type === "tool-Subagent") return "agent";
+  return "other";
+}
+
+/** Which kinds a title names first when a group did more than two kinds of thing: changes before reads. */
+const KIND_PRIORITY: WorkKind[] = ["edit", "command", "read", "search", "web", "fetch", "agent", "other"];
+
+const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+const times = (count: number) => (count === 1 ? "once" : count === 2 ? "twice" : `${count} times`);
+
+function kindPhrase(kind: WorkKind, count: number): string {
+  switch (kind) {
+    case "edit": return `Edited ${plural(count, "file")}`;
+    case "command": return `Ran ${plural(count, "command")}`;
+    case "read": return `Read ${plural(count, "file")}`;
+    case "search": return `Searched code ${times(count)}`;
+    case "web": return `Searched the web ${times(count)}`;
+    case "fetch": return `Fetched ${plural(count, "page")}`;
+    case "agent": return `Ran ${plural(count, "subagent")}`;
+    default: return `Used ${plural(count, "tool")}`;
+  }
+}
+
+/** The file a read or an edit touched, so reading one file twice counts once. */
+function touchedFile(part: ToolPartBase): string | undefined {
+  if (!isRecord(part.input)) return undefined;
+  const path = part.input.file_path ?? part.input.path ?? part.input.notebook_path;
+  return typeof path === "string" && path.trim() ? path.trim() : undefined;
+}
+
+type KindTally = { kind: WorkKind; calls: number; files: Set<string>; first: number };
+
+function tallyKinds(items: AssistantToolItem[]): KindTally[] {
+  const tallies = new Map<WorkKind, KindTally>();
+  items.forEach((item, index) => {
+    const kind = workKindOf(item.part.type);
+    let tally = tallies.get(kind);
+    if (!tally) tallies.set(kind, (tally = { kind, calls: 0, files: new Set(), first: index }));
+    const file = kind === "read" || kind === "edit" ? touchedFile(item.part) : undefined;
+    if (file) {
+      if (!tally.files.has(file)) tally.calls += 1;
+      tally.files.add(file);
+    } else tally.calls += 1;
+  });
+  return [...tallies.values()];
+}
+
+/** One line from the latest thought in `items` that has text: a group of thoughts alone is titled with it. */
+function latestThoughtTitle(items: AssistantToolItem[]): string {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const heading = latestThoughtHeading(thoughtTextFromPart(items[index]!.part));
     if (heading) return heading;
@@ -357,20 +398,110 @@ export function activityGroupLabel(items: AssistantToolItem[]): string {
 }
 
 /**
+ * Title for a group of calls: what was done, by kind, such as "Read 3 files and ran 3 commands" or "Edited 2 files".
+ * Up to three kinds are named, in the order they first ran; with more, the two that changed most (edits, then
+ * commands, then reads) are named and the rest counted as other actions. Thoughts are left out; a group of thoughts alone takes its latest thought's line.
+ */
+export function workGroupTitle(items: AssistantToolItem[]): string {
+  const tallies = tallyKinds(items);
+  const work = tallies.filter((tally) => tally.kind !== "thought");
+  if (work.length === 0) return latestThoughtTitle(items) || (tallies.length > 0 ? "Thought" : "");
+  // Three kinds still read as one line; past that the rest are counted.
+  const named = [...work]
+    .sort((a, b) => KIND_PRIORITY.indexOf(a.kind) - KIND_PRIORITY.indexOf(b.kind))
+    .slice(0, work.length === 3 ? 3 : 2)
+    .sort((a, b) => a.first - b.first);
+  const rest = work.filter((tally) => !named.includes(tally)).reduce((sum, tally) => sum + tally.calls, 0);
+  const phrases = named.map((tally, index) => {
+    const phrase = kindPhrase(tally.kind, tally.calls);
+    return index === 0 ? phrase : phrase[0]!.toLowerCase() + phrase.slice(1);
+  });
+  if (rest > 0) phrases.push(plural(rest, "other action"));
+  return phrases.length > 1 ? `${phrases.slice(0, -1).join(", ")} and ${phrases.at(-1)}` : phrases[0]!;
+}
+
+/**
+ * The part type whose icon stands for a group: its calls' type when they are all of one kind ("tool-Thinking" when
+ * it holds only thoughts), undefined for a mix.
+ */
+export function workGroupIconType(items: AssistantToolItem[]): string | undefined {
+  const tallies = tallyKinds(items);
+  const work = tallies.filter((tally) => tally.kind !== "thought");
+  if (work.length === 0) return tallies.length > 0 ? "tool-Thinking" : undefined;
+  if (work.length > 1) return undefined;
+  return items.find((item) => workKindOf(item.part.type) === work[0]!.kind)?.part.type;
+}
+
+/** What `foldTurnWork` needs to know of one segment of a finished turn. */
+export type FoldRow = {
+  kind: TurnSegment["kind"];
+  /** Tool calls and thoughts only. */
+  toolsOnly?: boolean;
+  /** A reply row with text (narration, or the answer). */
+  text?: boolean;
+  /** A person's message steered into the turn. */
+  steer?: boolean;
+  /**
+   * Stays in view whatever the fold: an error, a question, an approval, a notice, a marker of Mousse's own, or calls
+   * holding a failure the agent did not get past.
+   */
+  keep?: boolean;
+  /** Cards of which one still works. */
+  running?: boolean;
+};
+
+/**
+ * Which segments of a finished turn fold behind its "Worked for" line: the work (thoughts, tool groups, narration,
+ * finished subagents), not the answer. The answer is the last reply row with no work after it; a turn cut off
+ * before it wrote one folds all of its work. What needs the person stays in view: errors and failures the agent did
+ * not get past, questions, approvals, notices, Mousse's own markers, steered messages and the replies written before
+ * them, and subagents still working.
+ */
+export function foldTurnWork(rows: FoldRow[]): boolean[] {
+  let answer = -1;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index]!;
+    if (row.kind === "tools") break;
+    if (row.kind === "cards") continue;
+    if (row.steer || row.toolsOnly) break;
+    if (row.keep) continue;
+    if (row.text) answer = index;
+    break;
+  }
+  let lastSteer = -1;
+  rows.forEach((row, index) => {
+    if (row.steer) lastSteer = index;
+  });
+  return rows.map((row, index) => {
+    if (row.kind === "tools") return !row.keep;
+    if (row.kind === "cards") return !row.running;
+    if (row.steer || row.keep || index === answer) return false;
+    if (row.toolsOnly) return true;
+    return !(row.text && index < lastSteer);
+  });
+}
+
+/**
  * Partition a turn's assistant messages into render segments: runs of
- * consecutive activity messages (tools and thoughts, length >= 2) collapse
- * into one group; consecutive subagent-card messages form one card list,
- * outside any group; everything else renders message by message.
+ * consecutive activity messages (tools and thoughts) collapse into one group
+ * when they hold at least `minCalls` calls (`callCounts` per message, one
+ * when absent); consecutive subagent-card messages form one card list,
+ * outside any group; everything else renders message by message. Narration
+ * (a reply row) between calls ends a group.
  */
 export function partitionTurnSegments(
   toolsOnlyFlags: boolean[],
   cardsOnlyFlags: boolean[] = [],
+  callCounts: number[] = [],
+  /** Whether a run of fewer calls still folds into a group (while the turn runs, one with a call still running). */
+  groupSmallRun?: (msgIndices: number[]) => boolean,
 ): TurnSegment[] {
   const segments: TurnSegment[] = [];
   let run: number[] = [];
   let cards: number[] = [];
   const flush = () => {
-    if (run.length >= 2) {
+    const calls = run.reduce((sum, msgIndex) => sum + (callCounts[msgIndex] ?? 1), 0);
+    if (run.length > 0 && (calls >= 2 || groupSmallRun?.(run))) {
       segments.push({ kind: "tools", msgIndices: run });
     } else {
       for (const msgIndex of run) segments.push({ kind: "message", msgIndex });
