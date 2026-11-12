@@ -54,7 +54,8 @@ import {
   MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES
 } from './replayCache'
 import { envelopeFrames } from './envelopeChunks'
-import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
+import { maxConnectionEventBytes, PROTOCOL_CONNECTION_EVENT_TYPES } from './types'
+import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../run/delegation/subagentEvents'
 import type { ThreadEvent } from '../run/types'
 
@@ -1461,7 +1462,7 @@ export class MmsProtocolServer {
     const valid = (): boolean =>
       !session.closed &&
       session.authenticated &&
-      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : NET_LOCAL_CAPABILITY) &&
+      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : type === 'bots.browser.frame' ? BOTS_BROWSER_STREAM_CAPABILITY : NET_LOCAL_CAPABILITY) &&
       !!binding &&
       session.binding?.profileId === binding.profileId &&
       session.binding.epoch === binding.epoch &&
@@ -1476,7 +1477,7 @@ export class MmsProtocolServer {
         )
       )
     }
-    if (type !== 'bridge.hub.thread' && type !== 'mcp.auth-url' && type !== 'git.operation') {
+    if (!PROTOCOL_CONNECTION_EVENT_TYPES.includes(type)) {
       return Promise.reject(new DomainRpcError('invalid_params', 'Unsupported connection event'))
     }
     if (session.connectionEventPending >= 8) {
@@ -1494,7 +1495,7 @@ export class MmsProtocolServer {
           profileEpoch: binding!.epoch,
           data
         },
-        MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES
+        maxConnectionEventBytes(type)
       )
     } catch (error) {
       return Promise.reject(error)

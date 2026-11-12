@@ -35,7 +35,8 @@ import {
   MMS_PROTOCOL_CHUNK_BYTES,
   MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_ID_LENGTH,
-  MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES,
+  maxConnectionEventBytes,
+  PROTOCOL_CONNECTION_EVENT_TYPES,
   MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_IMAGES,
   MMS_PROTOCOL_MAX_METHOD_LENGTH,
@@ -96,7 +97,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         Object.keys(raw).some(
           key => !['kind', 'type', 'profileId', 'profileEpoch', 'data'].includes(key)
         ) ||
-        (raw.type !== 'bridge.hub.thread' && raw.type !== 'mcp.auth-url' && raw.type !== 'git.operation') ||
+        !PROTOCOL_CONNECTION_EVENT_TYPES.includes(raw.type as never) ||
         !isBoundedString(raw.profileId, 128, { nonEmpty: true }) ||
         !Number.isSafeInteger(raw.profileEpoch) ||
         (raw.profileEpoch as number) < 1
@@ -104,7 +105,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         return null
       }
       try {
-        if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES) {
+        if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > maxConnectionEventBytes(raw.type as import('./types').ProtocolConnectionEventType)) {
           return null
         }
       } catch {
@@ -112,7 +113,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
       }
       return {
         kind: 'connection_event',
-        type: raw.type,
+        type: raw.type as import('./types').ProtocolConnectionEventType,
         profileId: raw.profileId,
         profileEpoch: raw.profileEpoch as number,
         data: raw.data

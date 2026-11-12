@@ -120,8 +120,12 @@ export interface ProtocolEvent {
   ts: string
 }
 
-/** What a connection event can carry: bridge display, MCP sign-in, and the live output of the Git action this socket started. */
-export type ProtocolConnectionEventType = 'bridge.hub.thread' | 'mcp.auth-url' | 'git.operation'
+/**
+ * What a connection event can carry: bridge display, MCP sign-in, the live output of the Git action this socket started,
+ * and the pictures of a bot's browser this socket watches.
+ */
+export type ProtocolConnectionEventType = 'bridge.hub.thread' | 'mcp.auth-url' | 'git.operation' | 'bots.browser.frame'
+export const PROTOCOL_CONNECTION_EVENT_TYPES: readonly ProtocolConnectionEventType[] = ['bridge.hub.thread', 'mcp.auth-url', 'git.operation', 'bots.browser.frame']
 
 /** Granted to every session: it may receive `git.operation` events for the Git actions it starts. */
 export const GIT_OPERATIONS_CAPABILITY = 'git.operations.v1'
@@ -142,6 +146,12 @@ export interface ProtocolConnectionEvent {
   data: unknown
 }
 export const MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES = 64 * 1024
+/** A bot browser's picture is a JPEG of up to 960 px (a sharp one included), in base64. */
+export const MMS_PROTOCOL_MAX_FRAME_EVENT_BYTES = 1024 * 1024
+/** The largest connection event of a type. */
+export function maxConnectionEventBytes(type: ProtocolConnectionEventType): number {
+  return type === 'bots.browser.frame' ? MMS_PROTOCOL_MAX_FRAME_EVENT_BYTES : MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES
+}
 
 export interface ProtocolTransportError {
   kind: 'error'
