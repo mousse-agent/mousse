@@ -123,6 +123,24 @@ export const ACTIVITY_CHECKPOINT_MS = 5000
 /** Longest subagent `description` an item keeps. */
 export const ACTIVITY_DESCRIPTION_CHARS = 200
 const ACTIVITY_ERROR_CHARS = 2000
+/** Longest report a runtime's own subagent (Claude Code's `Agent`) leaves on its row. */
+export const ACTIVITY_TASK_RESULT_CHARS = 4000
+
+/**
+ * What a provider's task reported when it ended, as its row keeps it, or undefined when it said nothing. A subagent's
+ * report is Markdown, so its line breaks stay (only trailing spaces and long blank runs go) and it is clipped to
+ * `ACTIVITY_TASK_RESULT_CHARS`; any other task's summary is one line of `ACTIVITY_DESCRIPTION_CHARS`.
+ */
+export function taskEndSummary(summary: unknown, kind: string | undefined): string | undefined {
+  if (typeof summary !== 'string' || !summary.trim()) return undefined
+  if (kind !== 'subagent') return clip(summary.replace(/\s+/g, ' ').trim(), ACTIVITY_DESCRIPTION_CHARS)
+  const kept = summary
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+|\s+$/g, '')
+  return clip(kept, ACTIVITY_TASK_RESULT_CHARS)
+}
 
 export const INTERRUPTED_SUMMARY: Readonly<Record<ActivityInterruptedBy, string>> = {
   stop: 'Stopped',

@@ -353,15 +353,15 @@ button.subagent-notice-row:focus-visible {
   padding: 2px 8px 4px 42px;
 }
 
+/* The whole report, as Markdown: the chat's own text sizes. */
 .subagent-card-full {
   margin: 0 0 4px;
   color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.55;
   overflow-wrap: anywhere;
   user-select: text;
 }
 
-.subagent-card-full[data-tone="failed"] {
+.subagent-card-full[data-tone="failed"],
+.subagent-card-full[data-tone="failed"] .an-markdown :is(p, li, h1, h2, h3, h4, h5, h6) {
   color: color-mix(in srgb, var(--danger) 75%, var(--text-secondary));
 }

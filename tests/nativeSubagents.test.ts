@@ -157,6 +157,20 @@ describe('a thread whose agent starts background agents', () => {
     expect(host.querySelector('[data-native-subagent="a1"] .subagent-card-calls')?.textContent).toContain('ls c1')
   })
 
+  it('keeps the line breaks of a Markdown report: the row shows one plain line, the opened card a heading and a list', async () => {
+    const report = '## Progress kinds\n\n- tool_running\n- streaming\n- compacting\n\nThat is all.'
+    const done = [user('u1', 0, 'List the kinds'), backgroundAgent('a1', 13, 'List the progress kinds', { summary: report, durationMs: 9_000 })]
+    expect(collectNativeSubagentCards(mousseToUIMessages(done), false).get('a1')?.native?.result).toBe(report)
+    await show(done, false)
+    const node = host.querySelector('[data-native-subagent="a1"]')!
+    expect(node.querySelector('.subagent-card-result')?.textContent).toBe('Progress kinds tool_running streaming compacting That is all.')
+    await act(async () => node.querySelector<HTMLButtonElement>('button.subagent-card')!.click())
+    const full = node.querySelector('.subagent-card-full')!
+    expect(full.querySelector('h2')?.textContent).toBe('Progress kinds')
+    expect([...full.querySelectorAll('li')].map((item) => item.textContent)).toEqual(['tool_running', 'streaming', 'compacting'])
+    expect(full.querySelector('p')?.textContent).toBe('That is all.')
+  })
+
   it('a finished agent\'s report continues the reply: no message from the user, no raw report, the card says done', async () => {
     const reported = [
       ...launched.map((message) => (message.id === 'a1' ? backgroundAgent('a1', 13, 'Map design language', { summary: 'Ideonite Design Language Report', durationMs: 106_000 }) : message)),

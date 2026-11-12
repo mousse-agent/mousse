@@ -102,7 +102,7 @@ import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivity
 import { ThreadResidency } from './ThreadResidency'
 import { isDeepStrictEqual } from 'node:util'
 import type { ContinuationInfo, OneShotTask, ProviderTaskEnd } from '../harness/driver'
-import { ACTIVITY_DESCRIPTION_CHARS, BACKGROUND_SUMMARY, type AgentActivityItem } from '../../shared/agentActivity'
+import { ACTIVITY_DESCRIPTION_CHARS, BACKGROUND_SUMMARY, taskEndSummary, type AgentActivityItem } from '../../shared/agentActivity'
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
@@ -905,8 +905,7 @@ function settledBackgroundEnd(activity: AgentActivityItem, end: ProviderTaskEnd)
   if (activity.kind !== 'subagent' && activity.kind !== 'command') return undefined
   if (activity.status !== 'done' || activity.summary !== BACKGROUND_SUMMARY) return undefined
   if (activity.nativeId && activity.nativeId !== end.taskId) return undefined
-  const clean = end.summary?.replace(/\s+/g, ' ').trim()
-  const summary = clean ? (clean.length > ACTIVITY_DESCRIPTION_CHARS ? `${clean.slice(0, ACTIVITY_DESCRIPTION_CHARS - 1)}…` : clean) : undefined
+  const summary = taskEndSummary(end.summary, activity.kind)
   const { summary: _summary, interruptedBy: _by, ...rest } = activity as AgentActivityItem & { interruptedBy?: unknown }
   const outcome =
     end.status === 'failed'
