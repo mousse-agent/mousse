@@ -204,6 +204,22 @@ describe('a search result whose setting is not on its page', () => {
   })
 })
 
+describe('the settings sidebar', () => {
+  it('lists the pages under App, Agents and This computer, in the search’s page order', () => {
+    const source = readFileSync(join(__dirname, '../../src/renderer/components/SettingsPage.tsx'), 'utf8')
+    const block = source.slice(source.indexOf('const SETTINGS_SECTIONS = ['), source.indexOf('] as const satisfies'))
+    const pages = [...block.matchAll(/id: '(\w+)', label: '([^']+)'.*?group: '([^']+)'/g)].map(([, id, label, group]) => ({ id, label, group }))
+    expect(pages.map((page) => page.id)).toEqual([...SETTINGS_SECTION_IDS])
+    const groups = new Map<string, string[]>()
+    for (const page of pages) groups.set(page.group, [...(groups.get(page.group) ?? []), page.label])
+    expect(Object.fromEntries(groups)).toEqual({
+      App: ['General', 'Appearance', 'Speech', 'Shortcuts'],
+      Agents: ['Providers', 'Agents', 'Skills & MCP'],
+      'This computer': ['Devices', 'Storage', 'Activity', 'Labs']
+    })
+  })
+})
+
 describe('the search results list', () => {
   it('leaves Mousse ID out when this build has no Mousse ID service', () => {
     const titles = (available: boolean) => searchSettings('mousse id', PAGES, searchIndex(available)).map((result) => result.title)
