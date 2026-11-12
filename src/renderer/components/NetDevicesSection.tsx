@@ -242,6 +242,8 @@ export function NetDevicesSection() {
   const authority = !!self?.isAuthority
   // On unless this computer turned it off; an older daemon that does not report it has no such switch.
   const workOnThreads = status?.workOnThreads !== false
+  // "Share bots with other devices": on unless this computer turned it off.
+  const shareBots = status?.shareBots !== false
 
   // The keychain refused to protect a new identity's keys, so a passphrase protects them instead.
   const needsPassphrase = !self && !!status?.vaultUnavailable
@@ -390,6 +392,16 @@ export function NetDevicesSection() {
             ? 'On · devices with Works on threads can open and change this device’s threads, within the limits set for each device below'
             : 'Off · no other device can open or change this device’s threads'}
           control={<Switch checked={workOnThreads} label="Let my other devices work on this device's threads"disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+        />
+      )}
+      {self && status?.enabled && unlocked && status.shareBots !== undefined && (
+        <SettingsRow
+          title="Share bots with other devices"
+          anchor="devices-bots"
+          description={shareBots
+            ? 'On · my phones and other devices list this device’s bots and can chat with them'
+            : 'Off · my other devices don’t see this device’s bots'}
+          control={<Switch checked={shareBots} label="Share bots with other devices" disabled={busy} onChange={(next) => void action('bridge.shareBots', { enabled: next })} />}
         />
       )}
       {/* Unlocking and protecting keys are next steps, so they stay here; keys already protected are noted under Advanced. */}

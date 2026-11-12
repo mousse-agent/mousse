@@ -111,6 +111,7 @@ import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
+import type { BotsSharingPort } from './protocol/botsSharingPort'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
@@ -295,6 +296,8 @@ export class MmsProfileServices {
   routedTerminals?: RoutedTerminalsPort
   /** The asks other computers made for editor connections, set while Bridge is on. */
   editorAsks?: EditorAsksPort
+  /** "Share bots with other devices" on this computer, set while Bridge is on. */
+  botsSharing?: BotsSharingPort
   /**
    * The threads, projects and statuses of the user's other computers, merged into this computer's lists
    * for windows. Set and cleared with `threadRouter`; empty while routing is off.
