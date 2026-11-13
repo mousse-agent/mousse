@@ -74,7 +74,7 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from './childPolicy'
+import { codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexTurnPolicy } from './childPolicy'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -1180,6 +1180,8 @@ export class CodexProviderService {
   private readonly pendingSweeps = new Map<string, Promise<void>>()
   /** Helpers of finished chats that were told to stop before their turn id was known. */
   private readonly orphans = new Set<NativeHelpers>()
+  /** The Codex package each app-server process runs (`codexPackageOf`), for a confined bot's profile. */
+  private readonly packages = new WeakMap<CodexConnection, string | undefined>()
   private readonly loaded = new Map<string, { mcpToken: string | null; relayKey: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
   private readonly activeThreads = new Set<string>()
   /**
@@ -2109,6 +2111,8 @@ export class CodexProviderService {
       return Promise.reject(error)
     }
     const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
+    // The Codex package this process runs: a confined bot's commands must be able to read it (`codexPackageOf`).
+    this.packages.set(conn, codexPackageOf(target.path))
     // A spawn `error` with no pid means the process never started; otherwise only `exit` counts.
     const exited = new Promise<void>((done) => {
       if (process.exitCode !== null || process.signalCode !== null) return done()
@@ -2816,7 +2820,7 @@ export class CodexProviderService {
       signal.throwIfAborted()
       if (!botOverrides) throw new AppError({ code: 'policy_unenforceable', message: CODEX_BOT_USER_MCP_UNREADABLE, errorInfo: { category: 'unavailable', retryable: false } })
     }
-    const botSandbox = input.bot ? codexBotSandbox(input.bot) : undefined
+    const botSandbox = input.bot ? codexBotSandbox(input.bot, this.packages.get(conn)) : undefined
     const overrides = {
       ...botOverrides,
       ...(botSandbox ? codexBotSandboxConfig(botSandbox) : {}),
@@ -2829,11 +2833,12 @@ export class CodexProviderService {
     // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
     // threshold or a bot's writable folders reopens it (Codex applies thread overrides when it loads a thread
     // and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}`
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.permissions ?? policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}${botSandbox?.confined ? `|read:${botSandbox.confined.readable.join('\u0000')}` : ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
-      sandbox: policy.sandbox,
+      // A confined bot's profile, or a sandbox mode: Codex takes one or the other.
+      ...(policy.permissions ? { permissions: policy.permissions } : { sandbox: policy.sandbox }),
       ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
       // Pinned twice: the request field and the config layer above user and workspace config.
       modelProvider: this.modelProvider,
@@ -2956,11 +2961,11 @@ export class CodexProviderService {
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, input.bot ? codexBotSandbox(input.bot) : undefined)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, input.bot ? codexBotSandbox(input.bot, this.packages.get(conn)) : undefined)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,
-        sandboxPolicy: policy.sandboxPolicy,
+        ...(policy.permissions ? { permissions: policy.permissions } : { sandboxPolicy: policy.sandboxPolicy }),
         ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
         ...(effort ? { effort } : {}),
         // Without it the server streams no reasoning summaries, and thought rows would stay empty.

@@ -5,6 +5,7 @@ import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
+import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
@@ -81,6 +82,11 @@ export interface CompileInput {
    * digest stay the same: only what this turn is offered narrows.
    */
   botTools?: { escalate: boolean; consult: boolean; memory?: boolean; frontDesk?: boolean }
+  /**
+   * What this computer lets bots do (Settings → What bots may do here): what it has switched off is taken out of the
+   * thread's permissions before anything is compiled, whatever the grant holds. Absent: everything.
+   */
+  limit?: BotComputerLimit
 }
 
 export type CompileResult =
@@ -158,7 +164,9 @@ export function systemTempDirs(): string[] {
 }
 
 export function compileBotThread(input: CompileInput): CompileResult {
-  const held = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
+  const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
+  // This computer's ceiling, before the tools, the sandbox's folders and the browser are compiled from it.
+  const held = input.limit ? withinComputerLimit(narrowed, input.limit) : narrowed
   const manifest = input.botTools?.frontDesk ? frontDeskManifest(held) : held
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))

@@ -128,4 +128,9 @@ export interface MousseConf {
   scheduled: ScheduledConfigSection
   mms: MmsConfigSection
   features: MousseFeatureFlags
+  /**
+   * What bots may do on this computer (`BotSettings`), as stored: kept once for the installation, never in a profile's
+   * file. Absent until the owner sets it; read only through `normalizeBotSettings`, which fails closed.
+   */
+  bots?: unknown
 }

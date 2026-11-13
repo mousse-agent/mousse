@@ -839,7 +839,8 @@ describe('locked Claude Code: shell (item 15)', () => {
   })
 
   it('compiles the sandbox: explicit denials, scratch as the only extra write for a read-only grant, no network, no key', () => {
-    const sandbox = claudeLockedSandbox({ workspace: { roots: ['/home/me/site'], access: 'read', scratch: '/p/bots/scratch/a' }, temps: ['/tmp', '/var/tmp'], home: '/home/me' })
+    // macOS: the home folder closed (Linux closes every top folder but the system's own: botApprovalRuntimes.test.ts).
+    const sandbox = claudeLockedSandbox({ workspace: { roots: ['/home/me/site'], access: 'read', scratch: '/p/bots/scratch/a' }, temps: ['/tmp', '/var/tmp'], home: '/home/me', platform: 'darwin' })
     expect(sandbox).toMatchObject({
       enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false, excludedCommands: [], enableWeakerNestedSandbox: false,
       filesystem: { allowWrite: ['/p/bots/scratch/a'], denyWrite: ['/home/me/site', '/tmp', '/var/tmp'], denyRead: ['/home/me'], allowRead: ['/home/me/site', '/p/bots/scratch/a'] },

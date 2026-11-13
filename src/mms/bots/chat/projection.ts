@@ -5,6 +5,7 @@ import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
+import { BOT_OFF_HERE_MARK, offHereNote, switchedOff, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -107,6 +108,8 @@ export class BotChatProjection {
      * read yet (nothing is shown gone then).
      */
     mcpWhere?(serverId: string): BotMcpWhere | undefined
+    /** What this computer lets bots do (Settings → What bots may do here), for About → Can use. Absent: everything. */
+    computerLimit?(): BotComputerLimit
   }) {}
 
   private get store(): BotStore {
@@ -378,9 +381,11 @@ export class BotChatProjection {
   /**
    * Each permission of `manifest` beyond the starter grant, as About → Can use lists it. The owner's MCP tools are one
    * line per server ("Use your GitHub tools"). One that gives nothing now says what is true (gone from Mousse, switched
-   * off, changed since it was allowed, or MCP turned off) and is marked so; Remove is there as an option, not as the fix.
+   * off, changed since it was allowed, MCP turned off, or switched off on this computer) and is marked so; Remove is there
+   * as an option, not as the fix.
    */
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
+    const limit = this.options.computerLimit?.()
     return grantedPermissions(manifest).map((permission) => {
       const id = permissionId(permission)
       const allowed = this.store.allowedAsk(botId, id)
@@ -401,6 +406,9 @@ export class BotChatProjection {
         return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }
       }
       const text = askText(permission, { budget: starterManifest().budget })
+      // Kept in the grant, but this computer has it switched off: it gives nothing here until it is switched on.
+      const off = limit ? switchedOff(limit, permission) : undefined
+      if (limit && off) return { id, title: text.title, note: offHereNote(off, limit), grantedAt, mark: BOT_OFF_HERE_MARK }
       return { id, title: text.title, note: text.note, grantedAt }
     })
   }

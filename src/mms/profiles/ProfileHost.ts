@@ -34,6 +34,12 @@ export interface ProfileHostShared {
   options?: MmsOptions
   /** Installation-owned ports are installed before a profile starts work. */
   configureServices?: (services: MmsProfileServices) => void
+  /**
+   * The installation's config store, when the caller already loaded it (the default profile's services read through it).
+   * Every profile must share one: each store writes the whole installation file, so a second one would write back what it
+   * read at start, such as what bots may do here before the owner changed it.
+   */
+  installationConfig?: MousseConfigStore
 }
 
 export class ProfileHost {
@@ -55,7 +61,7 @@ export class ProfileHost {
     this.installation = createInstallationPaths(shared.options?.homeDir ?? '')
     this.manager = ProfileManager.open(this.installation)
     this.recoverPendingRemovals()
-    this.installationConfig = MousseConfigStore.loadInstallation(this.installation.homeDir)
+    this.installationConfig = shared.installationConfig ?? MousseConfigStore.loadInstallation(this.installation.homeDir)
   }
 
   static async bootstrap(

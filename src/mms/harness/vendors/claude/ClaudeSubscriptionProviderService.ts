@@ -37,7 +37,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { withEnforced } from '../../env'
-import { CLAUDE_LOCKED_REMOVED_OPTIONS, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -65,7 +65,7 @@ import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import {
   CLAUDE_MCP_POLICY_CODE, claudeInputMcpEnv, claudeLiteralServers, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpPolicyForbidsAdded, claudeMcpPolicyText, claudeMcpRegistrationMs, claudeMcpStrings,
-  claudeStartupMcpOptions, ClaudeStderrTail, dropMousseServers, promptAfter, registerClaudeMcpServers, registerUserServersLater, withoutLiteralDollar,
+  CLAUDE_MCP_START_FOLDER, claudeStartupMcpOptions, ClaudeStderrTail, dropMousseServers, promptAfter, registerClaudeMcpServers, registerUserServersLater, withoutLiteralDollar,
   type ClaudeMcpLeftOut, type ClaudeMcpServers, type ClaudeStartupChannel
 } from './mcpRegistration'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
@@ -1662,6 +1662,8 @@ export class ClaudeSubscriptionProviderService {
     if (startup && Object.keys(startup.servers).length > 0) {
       const piped = await claudeStartupMcpOptions(options, startup.servers, onSpawned, {
         ...(this.dependencies.startupChannel ? { channel: this.dependencies.startupChannel } : {}),
+        // In Mousse's own data, out of the reach of a bot's commands (they can read the shared temporary folder).
+        fifoRoot: join(this.dir, CLAUDE_MCP_START_FOLDER),
         ...(startup.stderr ? { onStderr: startup.stderr } : {})
       })
       if (piped) {
@@ -2792,14 +2794,20 @@ export class ClaudeSubscriptionProviderService {
     // A bot turn on the owner's own entry runs in that entry's environment (their sign-in), without
     // the variables of the user's MCP servers, which it never gets. It loads no settings files, so
     // the `env` of the owner's Claude settings, where a proxy sign-in often lives, is applied here.
-    const env = locked && !locked.ownerEntry
+    const turnEnv = locked && !locked.ownerEntry
       ? this.finalEnv({ ...this.dependencies.lockedEnv!(locked.cwd), ...compaction })
       : locked
         ? this.finalEnv({ ...claudeEffectiveEnvironment(this.environment()), ...compaction })
         : this.finalEnv({ ...this.environment(), ...compaction })
+    // A bot turn's commands without file access (Linux): Claude Code keeps its temporary files in a private folder, and
+    // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
+    const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined
+    const env = botTemp ? { ...turnEnv, CLAUDE_CODE_TMPDIR: botTemp.dir } : turnEnv
     // A bot turn's gate knows Claude Code's own storage for it (its saved tool output), in the home
     // this turn runs with: reading that back never needs the bot's file access.
-    const lockedTurn = locked ? { ...locked, own: claudeOwnStorage(claudeHomeOf(env), locked.cwd) } : undefined
+    // Its commands are refused outright when their sandbox can't close what it must (`claudeCommandsRefusal`).
+    const commandsRefused = locked ? claudeCommandsRefusal(locked.authority) : undefined
+    const lockedTurn = locked ? { ...locked, own: claudeOwnStorage(claudeHomeOf(env), locked.cwd), ...(commandsRefused ? { commandsRefused } : {}), ...(botTemp ? { sharedTemp: botTemp.shared } : {}) } : undefined
     // This turn's own controller: it gates the turn's permission prompts and hooks and carries its
     // cancellation. A one-shot query also hands it to the SDK; a live query has a lifetime of its own.
     const controller = new AbortController()

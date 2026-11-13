@@ -60,6 +60,7 @@ import {
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, whatToAskText, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
 import { allPinned, copyPick, isPinned, limitFamilyOf, limitOnPick, pickProblemText, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { LlmProviderOption } from '../../../shared/settings'
@@ -201,6 +202,11 @@ export interface BotEngineHost {
    * browser tools on it, and an ended activation's tabs close. Absent: no bot gets the browser.
    */
   browser?: BotBrowserHost
+  /**
+   * What this computer lets bots do (Settings → Agents → What bots may do here, `settings.bots.here`): a ceiling over
+   * every bot's grant, read when each dispatch is prepared and on every call. Absent: everything.
+   */
+  computerLimit?(): BotComputerLimit
   /**
    * Whether the internet is there for the bot's provider (`createBotConnectivity`): checked before
    * a dispatch is sent, while one makes no progress, and while an activation waits for it. Absent:
@@ -367,6 +373,11 @@ interface LiveDispatch {
   regiven: number
   /** The runtime is compacting the turn's context since then (`BotTurnSteer.compacting`): a note waits for it, at most `BOT_COMPACTION_HOLD_MS`. */
   compactingSince?: number
+  /**
+   * What the turn started with that a runtime opens once for the whole turn: commands (`shell`), and file access
+   * (`files`, a sandbox over every folder). When this computer switches one off, the turn stops (`computerLimitChanged`).
+   */
+  powers: { shell: boolean; files: boolean }
 }
 
 /** An activation that runs or waits for its owner's answer holds a slot of its lane: what does not fit waits. */
@@ -476,6 +487,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private lastSweep = 0
   /** The owner's MCP servers this engine follows while an ask waits for a server's tools (`watchMcp`). */
   private mcpWatch?: { mcp: BotMcpHost; stop: () => void }
+  /** What this computer let bots do at the last settings save (`computerLimitChanged`). */
+  private lastLimit: BotComputerLimit | undefined
+  /**
+   * Turns this engine stopped because this computer switched off what they started with, by activation, and which
+   * switches: each goes on in a new turn under the new limit (`advance`), told why.
+   */
+  private readonly limitCuts = new Map<string, BotComputerSwitch[]>()
 
   constructor(private readonly host: BotEngineHost) {
     this.chat = new BotChatProjection({
@@ -485,6 +503,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
       schedules: (botId) => this.listSchedules(botId),
+      // About marks a permission this computer has switched off.
+      computerLimit: () => this.limit(),
       // Where each granted MCP server stands now, for About (on, switched off, changed, gone, or MCP off). Before the
       // servers were read since Mousse started, nothing is known: they are read in the background, and About names what
       // it can.
@@ -514,6 +534,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch (error) {
       console.warn('bot threads could not be read', { error: error instanceof Error ? error.message : String(error) })
     }
+    this.lastLimit = this.limit()
   }
 
   /**
@@ -556,6 +577,58 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       // A listener never undoes a committed change.
     }
+  }
+
+  /**
+   * What this computer lets bots do now (Settings → What bots may do here), read where a grant becomes what a turn
+   * runs with and on every call. A setting that can't be read gives nothing: the ceiling fails closed.
+   */
+  private limit(): BotComputerLimit {
+    if (!this.host.computerLimit) return BOT_COMPUTER_OPEN
+    try {
+      return this.host.computerLimit()
+    } catch (error) {
+      console.warn('what bots may do here could not be read; bots get none of it meanwhile', { error: error instanceof Error ? error.message : String(error) })
+      return BOT_COMPUTER_SHUT
+    }
+  }
+
+  /**
+   * The settings were saved: when what bots may do here changed since the last save, every bot's About is read again
+   * (it marks what is off here). A turn running now that started with commands or file access, and this computer has
+   * just switched that off, stops at once (`cutForLimit`): a runtime opens them once for the whole turn (Codex runs the
+   * commands it trusts without asking, and a command already running runs on), so a refusal at the next call is not
+   * enough. Everything else is read at every dispatch and call.
+   */
+  computerLimitChanged(): void {
+    const now = this.limit()
+    const before = this.lastLimit
+    this.lastLimit = now
+    if (before && before.shell === now.shell && before.files === now.files && before.browser === now.browser) return
+    const turnedOff = (['shell', 'files'] as const).filter((which) => (before?.[which] ?? true) && !now[which])
+    if (turnedOff.length) for (const [activationId, live] of this.live) {
+      const cut = turnedOff.filter((which) => live.powers[which])
+      if (cut.length && !live.controller.signal.aborted) this.cutForLimit(activationId, live, cut)
+    }
+    for (const botId of this.host.definitions.ids()) if (!this.store.registry(botId)?.deletedAt) this.changed({ botId })
+  }
+
+  /**
+   * Stops a running turn that started with what this computer has just switched off (`switches`), the way a wall ends a
+   * dispatch (its turn and consults are aborted, and the run ends `bot_wall`), says so in the bot's chat, and lets the
+   * activation go on in a new turn under the new limit once the run has ended (`advance`).
+   */
+  private cutForLimit(activationId: string, live: LiveDispatch, switches: BotComputerSwitch[]): void {
+    const row = this.store.activation(activationId)
+    if (!row || row.status !== 'running') return
+    this.limitCuts.set(activationId, switches)
+    live.controller.abort(new BotWallAbort('bot_computer_limit'))
+    try {
+      this.recorded(row, () => this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: stoppedForLimitText(switches), activationId: row.id, lane: row.lane }))
+    } catch (error) {
+      console.warn('a bot\'s stop for this computer\'s limit could not be shown', { activationId, error: error instanceof Error ? error.message : String(error) })
+    }
+    this.changed({ botId: row.botId, activationId })
   }
 
   // -- Definitions ------------------------------------------------------------------------------
@@ -1974,8 +2047,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const selection = row.selection
     if (!selection) return refuse('bot_model_missing', 'No model was chosen for this activation.')
     // What runs: the revision's own permissions held inside the grant, so a narrower revision
-    // narrows, plus what the owner allowed for this activation only.
-    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest)
+    // narrows, plus what the owner allowed for this activation only, under what this computer lets bots do.
+    const limit = this.limit()
+    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest, limit)
     const problem = manifestProblem(effective)
     if (problem) return this.block(row, 'bot_permissions_invalid', problem)
     const counters = this.store.counters(row.id)
@@ -1997,7 +2071,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat' }
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat' },
+      limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -2057,7 +2132,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const startedMono = this.monotonic()
     this.live.set(row.id, {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
-      lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0
+      lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0,
+      powers: { shell: compiled.permissions.tools.includes('shell'), files: compiled.permissions.workspace?.computer !== undefined }
     })
     this.liveRuns.set(payload.runId, row.id)
     this.watchOffline(row.id, dispatch.n)
@@ -2078,7 +2154,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
       // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
       ...this.instructionsOf(definition, definition.main, row.lane, {
-        allowed: botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)),
+        allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), here: limit },
         ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
       }),
       selection: { ...selection },
@@ -2283,7 +2359,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!spec) return refuse('bot_consult_unknown', 'This context thread is not part of the bot.')
     const selection = row.selection
     if (!selection) return refuse('bot_model_missing', 'No model was chosen for this activation.')
-    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest)
+    const limit = this.limit()
+    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest, limit)
     const remainingMs = main.deadline - this.now()
     if (remainingMs <= 0) return refuse('active_time_exhausted', 'This bot used up its work time.')
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
@@ -2296,7 +2373,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       nativeNames: (tools) => this.nativeNames(selection.instanceId, tools),
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
-      botTools: { escalate: true, consult: false, memory: true }
+      botTools: { escalate: true, consult: false, memory: true },
+      limit
     })
     if (!compiled.ok) return refuse('policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -2328,7 +2406,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dispatchN: dispatch.n,
       prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
       // A consult is never given MCP tools (its authority offers none): it is told so, never that it holds them.
-      ...this.instructionsOf(definition, spec, undefined, { allowed: { ...botAllowedOf(narrowManifest(effective, spec.narrow), (ids) => this.mcpServerNames(ids)), mcpNotHere: true } }),
+      ...this.instructionsOf(definition, spec, undefined, { allowed: { ...botAllowedOf(narrowManifest(effective, spec.narrow), (ids) => this.mcpServerNames(ids)), mcpNotHere: true, here: limit } }),
       selection: { ...selection },
       policy: compiled.policy,
       authority,
@@ -2339,11 +2417,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /** What an activation runs with: the revision held inside the grant, plus its "Allow this time" overlays. */
-  private effectiveManifest(row: BotActivationRow, revision: BotManifest, granted: BotManifest): BotManifest {
+  /**
+   * What an activation runs with: the revision held inside the grant, plus its "Allow this time" overlays, under what
+   * this computer lets bots do (`limit`, read now when not given). The ceiling comes last, so no overlay adds back
+   * what is switched off here; the grant itself is never changed by it.
+   */
+  private effectiveManifest(row: BotActivationRow, revision: BotManifest, granted: BotManifest, limit: BotComputerLimit = this.limit()): BotManifest {
     let manifest = intersectManifest(revision, granted)
     for (const overlay of this.store.overlays(row.id)) manifest = withPermission(manifest, overlay.permission, overlay.amount ?? undefined)
-    return manifest
+    return withinComputerLimit(manifest, limit)
   }
 
   /**
@@ -2598,7 +2680,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       counters: input.counters,
       time: { deadline: () => input.deadline, signal: controller.signal },
-      spend: input.spend
+      spend: input.spend,
+      // What this computer lets bots do, on every call: a switch turned off refuses this turn's next call.
+      limit: () => this.limit()
     })
     const observe = (call: NormalisedCall): void => {
       const sink = this.host.activity
@@ -2620,6 +2704,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
      * grant does not hold it.
      */
     const heldNow = (asked: BotAskRequest): string | undefined => {
+      // Switched off on this computer: nothing to hold or ask for, whatever the grant says.
+      const off = switchedOff(this.limit(), asked)
+      if (off) return notOnThisComputerText(off)
       const now = this.grantNow(row.id)
       if (!now || !grantHolds(now, asked)) return undefined
       const workOnly = row.lane === 'chat' && frontDeskLacks(asked)
@@ -2682,7 +2769,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       escalate: (request) => {
         this.progress(row.id)
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, the tools of one of your owner's MCP servers, a limit, or to export your memory.`
+        if (problem) return `${problem} ${whatToAskText(this.limit())}`
         // A new bot's first message answers no request: it asks once the owner wants something that needs more.
         if (firstMessage) return BOT_ASK_NOT_YET_TEXT
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
@@ -2700,6 +2787,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
         if ('tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
           return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
+        // Switched off on this computer: no card, whatever the grant holds; asking would not help.
+        const off = switchedOff(this.limit(), asked)
+        if (off) return notOnThisComputerText(off)
         // File access is one permission: a bot that has it has every folder already.
         if ('path' in asked && base.workspace?.computer) return BOT_FILES_HELD_TEXT
         // What the bot already holds is no ask: a card for it would grant nothing. In a chat turn its work holds more
@@ -3926,8 +4016,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         return this.usagePause(row, limitUntil, row.selection.instanceId)
       }
-      // Only a turn the reload stopped continues on the new model; one that finished first is done.
-      const reload = row.reloadPending && run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall'
+      // Only a turn the reload stopped continues on the new model, and only one this computer's limit stopped continues
+      // under it; one that finished first is done.
+      const limitCut = this.limitCuts.get(row.id)
+      this.limitCuts.delete(row.id)
+      const stopped = run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall'
+      const reload = (row.reloadPending || limitCut !== undefined) && stopped
+      if (limitCut && stopped) this.acknowledgeCut(row, run.runId, limitCut)
       if (run.status === 'failed' || (run.status !== 'completed' && run.status !== 'uncertain' && !reload)) {
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         if (!unknown) {
@@ -3976,7 +4071,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return
       }
       if (reload && next.status === 'running') {
-        await this.continueWith(row.id, ['running'], { reload: true })
+        await this.continueWith(row.id, ['running'], limitCut && !row.reloadPending ? { limitCut } : { reload: true })
         return
       }
       if (next.status === 'waiting_grant') {
@@ -4164,6 +4259,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * activation that ended (or whose processes are confirmed gone) without an outcome. Rows the
    * ledger now shows finished leave the list. Live runs are never scanned.
    */
+  /**
+   * A turn this computer's limit stopped (`cutForLimit`): the calls of the switched-off power it cut off mid-way (a
+   * command; with file access, a file change too) were stopped by the owner's own switch, and the bot no longer has that
+   * power, so they don't hold the work for an acknowledgement: the next turn is told they were interrupted. Any other
+   * call whose effect is unknown still holds it, as after any interruption.
+   */
+  private acknowledgeCut(row: BotActivationRow, runId: string, switches: readonly BotComputerSwitch[]): void {
+    if (!row.selection) return
+    const neutral: NeutralTool[] = switches.includes('files') ? ['shell', 'write', 'edit'] : ['shell']
+    const names = this.nativeNames(row.selection.instanceId, neutral)
+    if (!names.ok) return
+    const cut = new Set(names.names)
+    const ids = this.store.unknownCalls(row.id).filter((call) => !call.acknowledged && call.runId === runId && cut.has(call.tool)).map((call) => call.invocationId)
+    if (ids.length) this.store.acknowledgeUnknownCalls(row.id, ids)
+  }
+
   private collectUnknownCalls(row: BotActivationRow): void {
     const runs = this.host.runs()
     if (!runs) return
@@ -4192,7 +4303,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; limitCut?: BotComputerSwitch[] }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     const definition = this.host.definitions.revision(row.botId, row.revision)
@@ -4301,7 +4412,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; limitCut?: BotComputerSwitch[] }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -4316,6 +4427,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const depth = row.modelOverride?.depth
     const lead = input.answers.length
       ? input.answers.map(answerLine).join(' ')
+      : input.limitCut ? limitCutLead(input.limitCut)
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
         : input.restart ? 'Mousse restarted while you were working.'
           : input.turnCap ? 'You reached the most steps one turn may take; what you did so far is kept.'
@@ -4345,7 +4457,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (input.ownerText !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${input.ownerText}`
     // The walled dispatch never ran (a time wall before it started): its own prompt is sent now.
     if (neverRan !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${neverRan}`
-    return `[Mousse] ${lead} ${input.moreRoom ? 'Carry on where you left off.' : input.reload || input.usageReset ? 'Continue where you left off.' : 'Continue.'}${interrupted}`
+    return `[Mousse] ${lead} ${input.moreRoom ? 'Carry on where you left off.' : input.limitCut ? `Continue where you left off, without ${input.limitCut.length > 1 ? 'them' : 'it'}.` : input.reload || input.usageReset ? 'Continue where you left off.' : 'Continue.'}${interrupted}`
   }
 
   /**
@@ -4783,6 +4895,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.refusedAsks.delete(row.id)
+    this.limitCuts.delete(row.id)
     this.roomKeys.delete(row.id)
     this.carried.delete(row.id)
     this.offeredNotes.delete(row.id)

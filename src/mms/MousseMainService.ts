@@ -136,6 +136,8 @@ export class MousseMainService extends MmsProfileServices {
       const host = new ProfileHost({
         providerAuth: providers,
         domains,
+        // One installation store for every profile: the default profile already reads through it.
+        installationConfig,
         options: { ...options, homeDir: home },
         configureServices: (profile) => service!.configureProfileBrowser(profile)
       })

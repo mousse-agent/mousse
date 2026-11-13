@@ -184,9 +184,10 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     expect(sandbox.filesystem.denyRead).toEqual([mousse])
     expect(sandbox.filesystem.allowRead).toEqual([files, scratch])
     expect(sandbox.filesystem.denyWrite.sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'profiles', 'p2'), join(profile, 'bots', 'bots.db'), join(profile, 'harness')].sort())
-    // Without file access the home stays unreadable but for its own folders, and Claude Code's storage.
+    // Without file access the home stays unreadable but for its own folders, and Claude Code's storage (on macOS; Linux
+    // closes more: botApprovalRuntimes.test.ts).
     const own = join(base, '.claude', 'projects', 'x')
-    const without = claudeLockedSandbox({ workspace: authorityOf(permissions(null)).workspace!, temps: ['/tmp'], home: base, own: [own] }) as unknown as { filesystem: Record<string, string[]> }
+    const without = claudeLockedSandbox({ workspace: authorityOf(permissions(null)).workspace!, temps: ['/tmp'], home: base, own: [own], platform: 'darwin' }) as unknown as { filesystem: Record<string, string[]> }
     expect(without.filesystem).toMatchObject({ denyRead: [base], allowRead: [files, scratch, own], allowWrite: [files, scratch] })
   })
 
@@ -194,7 +195,8 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     const sandbox = codexBotSandbox(authorityOf(permissions(everywhere())))
     expect(sandbox).toEqual({ shell: true, writableRoots: [join(base, 'Documents'), files, scratch] })
     expect(codexTurnPolicy('default', undefined, 'ask', sandbox).sandboxPolicy).toMatchObject({ type: 'workspaceWrite', writableRoots: [join(base, 'Documents'), files, scratch], networkAccess: false })
-    expect(codexBotSandbox(authorityOf(permissions(null)))).toEqual({ shell: true, writableRoots: [files, scratch] })
+    // Without file access: its own folders only (on Windows in workspace-write; Linux and macOS add the profile's reads).
+    expect(codexBotSandbox(authorityOf(permissions(null)), undefined, 'win32')).toEqual({ shell: true, writableRoots: [files, scratch] })
     // On the real file system: never the kernel's own folders, never Mousse's data.
     const whole = codexBotSandbox({ tools: new Set(['shell'] as const), workspace: { roots: ['/'], access: 'write', scratch, files, computer: { closed: mousse } } })
     for (const kernel of ['/proc', '/sys', '/dev']) expect(whole.writableRoots).not.toContain(kernel)

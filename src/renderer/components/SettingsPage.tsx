@@ -195,6 +195,16 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return unsub
   }, [settingsOpen, refreshProviderData])
 
+  // What bots may do here is the installation's: a change made in another window, another profile or the CLI shows on
+  // an open page at once, so its switches always start from what the service holds.
+  useEffect(() => {
+    if (!settingsOpen) return
+    return window.mousse.settings.onChanged?.((next) => {
+      if (!next?.bots) return
+      setSettings((current) => (current ? { ...current, bots: next.bots } : current))
+    })
+  }, [settingsOpen])
+
   const updateSettings = useCallback(
     async (partial: MousseSettingsUpdate) => {
       const prevAcrylic = settings?.appearance.acrylic

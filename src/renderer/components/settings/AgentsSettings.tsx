@@ -1,7 +1,7 @@
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
-import type { IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
+import type { BotComputerLimit, IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
+import { BOTS_SHELL_TIP, BOTS_UNREADABLE_LINE, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import type { Project } from '../../../shared/types'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
@@ -10,7 +10,7 @@ import { AgentAutomationsSettings } from './AgentAutomationsSettings'
 import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
-import { Brain, Layers, RotateCcw } from '../../lib/icons'
+import { Bot, Brain, Layers, RotateCcw } from '../../lib/icons'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { DEVICE_SCOPE, useProviderSnapshots } from '../../lib/providerSnapshots'
 
@@ -66,11 +66,55 @@ function CacheTimeRow() {
   )
 }
 
+/** The switches of What bots may do here, in the owner's words, with where search lands on each and its tooltip. */
+const BOT_SWITCHES: ReadonlyArray<{ key: keyof BotComputerLimit; title: string; anchor: string; tip?: string }> = [
+  { key: 'shell', title: 'Run commands', anchor: 'agents-bots-shell', tip: BOTS_SHELL_TIP },
+  { key: 'files', title: 'Use files on this computer', anchor: 'agents-bots-files' },
+  { key: 'browser', title: 'Use the browser', anchor: 'agents-bots-browser' }
+]
+
 /**
- * Settings > Agents, in five groups: Models (default, thread titles, bots), Context (compaction and
- * the prompt cache), Access (how far agents may reach into other threads), Subagents, and the limits
- * on Automations agents add. Replaces the old Models, Context and per-CLI Agents pages; their stored
- * keys are left untouched.
+ * What bots may do here: a ceiling over every bot of every profile on this computer, enforced by the background
+ * service. A switch that is off gives no bot that permission here, and no bot can ask for it; a bot that holds it keeps
+ * it for when it is switched on again. When the stored setting could not be read, every switch is off and one line says
+ * why, until the owner sets them again.
+ */
+function BotsHereGroup({ settings, updateSettings }: { settings: MousseSettings; updateSettings: (partial: MousseSettingsUpdate) => Promise<void> }) {
+  const { here, unreadable } = normalizeBotSettings(settings.bots)
+  return (
+    <SettingsGroup
+      title="What bots may do here"
+      icon={Bot}
+      anchor="agents-bots-here"
+      description={unreadable ? <span role="status">{BOTS_UNREADABLE_LINE}</span> : 'Every bot on this computer, whatever it was allowed.'}
+    >
+      {BOT_SWITCHES.map(({ key, title, anchor, tip }) => (
+        <SettingsRow
+          key={key}
+          title={tip ? <span title={tip}>{title}</span> : title}
+          anchor={anchor}
+          htmlFor={anchor}
+          control={
+            <Switch
+              id={anchor}
+              label={title}
+              checked={here[key]}
+              // Only the switch that changed: the service puts it over the switches it holds, so a page whose copy is
+              // older never turns back a switch changed elsewhere (another window, profile or the CLI).
+              onChange={(on) => void updateSettings({ bots: { here: { [key]: on } as Partial<BotComputerLimit> } } as MousseSettingsUpdate)}
+            />
+          }
+        />
+      ))}
+    </SettingsGroup>
+  )
+}
+
+/**
+ * Settings > Agents, in six groups: Models (default, thread titles, bots), Context (compaction and
+ * the prompt cache), Access (how far agents may reach into other threads), Subagents, What bots may do
+ * here, and the limits on Automations agents add. Replaces the old Models, Context and per-CLI Agents
+ * pages; their stored keys are left untouched.
  */
 export function AgentsSettings({
   settings,
@@ -266,6 +310,8 @@ export function AgentsSettings({
           />
         }
       />
+
+      <BotsHereGroup settings={settings} updateSettings={updateSettings} />
 
       <AgentAutomationsSettings />
     </section>
