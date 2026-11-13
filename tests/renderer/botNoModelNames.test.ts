@@ -51,7 +51,7 @@ const bot = { ...summary('b1', {
 const other = { ...summary('b2', { name: 'Garden', state: 'stuck', stateText: 'Needs you: sign in again' }), ...leak } as BotSummary
 const rows: BotChatMessage[] = [
   { ...message(1, { author: 'owner', text: 'Think harder about this.' }), ...leak } as BotChatMessage,
-  { ...message(2, { text: 'Okay, I’ll take more time on this.', chips: [{ icon: 'think', text: 'taking more time', ...leak } as never] }), ...leak } as BotChatMessage,
+  { ...message(2, { text: 'Okay, I’ll take more time on this.', replyTo: { id: 'm1', author: 'owner', text: 'Think harder about this.' }, chips: [{ icon: 'think', text: 'taking more time', ...leak } as never] }), ...leak } as BotChatMessage,
   { ...message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status: 'open', ...leak } as never }), ...leak } as BotChatMessage,
   { ...message(4, { kind: 'error', text: '', error: { text: 'Paused until 14:00 (your Claude usage limit)', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } } }), ...leak } as BotChatMessage
 ]

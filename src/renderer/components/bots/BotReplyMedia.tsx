@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
-import { ChevronLeft, ChevronRight, Download, FolderOpen, Image as ImageIcon } from '../../lib/icons'
+import { ChevronLeft, ChevronRight, Download, FolderOpen } from '../../lib/icons'
 import { FloatingPortal } from '../../lib/floatingLayer'
 import { useImageGallery } from '../../chat/components/agent-elements/image-gallery'
 import type { LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
@@ -75,12 +75,15 @@ function PictureMenu({ at, onOpen, onClose }: { at: MenuAt; onOpen(): void; onCl
   </FloatingPortal>
 }
 
-/** One picture: a click opens the preview, a right-click or the menu key its menu. Before it is read its box waits empty. */
+/**
+ * One picture: a click opens the preview, a right-click or the menu key its menu. Before it is read its box waits
+ * empty; one that can't be read never shows (the reply keeps its chip). Its name is its alt text and label, never a
+ * tooltip, which would cover what is above it.
+ */
 function Picture({ image, images, single, onMenu }: { image: ReplyImage; images: readonly ReplyImage[]; single: boolean; onMenu(at: MenuAt): void }) {
   const file = useFileImage(image.path)
   const gallery = useImageGallery()
   const url = urlOf(image, file?.url)
-  const failed = !url && file?.failed
   const open = () => {
     if (!url || !gallery) return
     const set = lightboxSet(images)
@@ -93,13 +96,9 @@ function Picture({ image, images, single, onMenu }: { image: ReplyImage; images:
     const box = event.currentTarget.getBoundingClientRect()
     onMenu({ image, x: box.left + 12, y: box.top + 12 })
   }
-  const className = `bot-picture${single ? ' is-single' : ''}${url ? '' : ' is-empty'}${failed ? ' is-failed' : ''}`
-  if (failed) {
-    return <span className={className} role="img" aria-label={`${image.name} (can't be shown)`} title={image.path ?? image.name} onContextMenu={menu}>
-      <ImageIcon size={18} aria-hidden /><span>{image.name}</span>
-    </span>
-  }
-  return <button type="button" className={className} aria-label={`Open picture: ${image.name}`} title={image.name} disabled={!url}
+  if (!url && file?.failed) return null
+  const className = `bot-picture${single ? ' is-single' : ''}${url ? '' : ' is-empty'}`
+  return <button type="button" className={className} aria-label={`Open picture: ${image.name}`} disabled={!url}
     onClick={open} onContextMenu={menu} onKeyDown={keys}>
     {url && <img src={url} alt={image.name} loading="lazy" decoding="async" draggable={false} />}
   </button>

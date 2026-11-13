@@ -11,21 +11,22 @@
 
 /* Header: the face with its activity sticker, the name with its presence under it (what it does is in About); one menu. */
 .bot-header-about { position: relative; flex: none; display: grid; place-items: center; color: inherit; border-radius: 9px; }
-.bot-header-who { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; flex: 1; }
-.bot-header-name { display: block; max-width: 100%; padding: 0; color: inherit; text-align: left; }
+.bot-header-who { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 2px; height: 36px; min-width: 0; flex: 1; margin-left: 6px; }
+.bot-header-name { display: block; max-width: 100%; height: 18px; min-height: 0; padding: 0; border: 0; background: none; color: inherit; text-align: left; }
 .app .bot-header-name h1 { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 18px; font-weight: 600; margin: 0; }
 /* What it does now, on the face's corner: one of the app's icons on a round tile. It never moves. */
-.bot-sticker { position: absolute; right: -3px; bottom: -2px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; color: var(--text-primary); background: var(--surface-elevated, #2e2f38); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
+.bot-sticker { position: absolute; right: -7px; bottom: -5px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; color: var(--text-primary); background: var(--surface-elevated, #2e2f38); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
 .bot-sticker[data-kind='typing'] { color: var(--success, #7ec99a); }
 .bot-sticker[data-kind='paused'] { color: var(--text-secondary); }
 /* The presence under the name: quiet words; typing in the success tint, work in the warning tint. */
-.bot-presence { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; padding: 0; font-size: 12px; line-height: 16px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bot-presence { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; height: 16px; min-height: 0; padding: 0; border: 0; background: none; font-size: 12px; line-height: 16px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bot-presence[data-kind='typing'] { color: var(--success, #7ec99a); }
 .bot-presence[data-kind='busy'] { color: var(--warning, #d4b06a); }
 .bot-presence.is-button { border-radius: 5px; cursor: pointer; }
 .bot-presence.is-button:hover, .bot-presence.is-button[aria-expanded='true'] { color: var(--text-primary); }
 .bot-presence > span { overflow: hidden; text-overflow: ellipsis; }
-.bot-presence-root { position: relative; max-width: 100%; }
+.bot-presence-root { position: relative; display: flex; height: 16px; max-width: 100%; }
+.bot-presence > svg { flex: none; }
 .bot-conversation > .chat-conversation-header { padding-block: 12px; }
 .bot-menu-root { position: relative; margin-left: auto; }
 .bot-header-more { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--text-secondary); }
@@ -47,7 +48,7 @@
 .bot-conversation .chat-message-markdown.chat-markdown { font-size: var(--bot-text); line-height: 1.65; }
 .bot-conversation .bot-you-bubble.chat-markdown { line-height: 1.5; }
 .bot-conversation .chat-message-meta { font-size: var(--bot-meta); line-height: 18px; margin-bottom: 4px; }
-.bot-conversation .chat-transcript { padding: 12px 0 20px; scrollbar-gutter: stable both-edges; }
+.bot-conversation .chat-transcript { padding: 12px 0 20px; scrollbar-gutter: stable both-edges; -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 12px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 12px), transparent); }
 .bot-conversation .chat-transcript > * { width: var(--bot-column); margin-inline: auto; box-sizing: border-box; }
 
 /* Messages in groups (messageGroups.ts): one sender's messages close in time sit tight; a new sender, a quiet line or a
@@ -73,7 +74,8 @@
 .bot-bubble > .bot-markdown { margin: 0; }
 .bot-markdown > :first-child { margin-top: 0; }
 .bot-markdown > :last-child { margin-bottom: 0; }
-.bot-markdown .an-md-code { display: inline-block; max-width: 100%; vertical-align: bottom; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
+.bot-markdown .an-md-code { overflow-wrap: anywhere; }
+.bot-markdown .an-md-code.is-whole { white-space: nowrap; }
 .bot-bubble-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 2px; }
 .bot-bubble-time { margin-left: auto; font-size: 11px; line-height: 16px; color: var(--text-secondary); opacity: .8; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .bot-bubble > .bot-reply-quote { margin: 0 0 6px; max-width: 100%; }
@@ -207,13 +209,14 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-bubble.is-media-only .bot-bubble-foot { padding: 0 6px; }
 .bot-picture { position: relative; display: block; flex: none; padding: 0; overflow: hidden; border-radius: 12px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); cursor: zoom-in; }
 .bot-picture > img { display: block; }
-.bot-picture.is-single > img { max-width: min(420px, 100%); max-height: 420px; width: auto; height: auto; }
+.bot-picture.is-single { width: fit-content; max-width: min(420px, 100%); }
+.bot-picture.is-single > img { max-width: 100%; max-height: 420px; width: auto; height: auto; }
+/* A picture that can't be read: its file's chip under the words. */
+.bot-picture-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
 .bot-picture.is-single.is-empty { width: min(320px, 100%); height: 220px; }
 .bot-carousel .bot-picture { height: 220px; scroll-snap-align: start; }
 .bot-carousel .bot-picture > img { height: 100%; width: auto; max-width: 340px; min-width: 120px; object-fit: cover; }
 .bot-carousel .bot-picture.is-empty { width: 220px; }
-.bot-picture.is-failed { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; width: 220px; height: 160px; padding: 10px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); cursor: default; }
-.bot-picture.is-failed > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-picture:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; }
 .bot-carousel { position: relative; max-width: 100%; border-radius: 12px; outline: none; }
 .bot-carousel:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }

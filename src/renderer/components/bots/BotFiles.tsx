@@ -9,6 +9,8 @@ import { parseMousseFileLink } from '../../../shared/chatReferences'
 import { BotMarkdownImage, useFileImage } from './BotImages'
 import { botPathLabel, linkBotPaths, pathName } from './botPaths'
 import { isKeyValueList } from './botChatShape'
+import { MathInline } from '../../markdown/math/MathView'
+import { readMathClass } from '../../markdown/math/math-markup'
 
 /**
  * Files a bot names in its chat: each path is a chip with the file's name (its full path on hover). A click opens it
@@ -32,6 +34,8 @@ export function useBotFiles(): BotFilesHost | null {
 }
 
 const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp)$/i
+/** Inline code this long or shorter, without spaces, never breaks inside. */
+const WHOLE_CODE = 40
 const reason = (error: unknown) => String((error as { message?: string })?.message ?? error).replace(/^Error invoking remote method '[^']*':\s*(?:Error:\s*)?/, '')
 
 /**
@@ -102,6 +106,14 @@ const botMarkdownComponents: Partial<Components> = {
     </a>
   },
   img: ({ src, alt }) => <BotMarkdownImage src={typeof src === 'string' ? src : undefined} alt={alt} />,
+  // Inline code stays inline, so the punctuation after it stays with it. A short piece without spaces never breaks
+  // inside (a file name or a flag reads whole); a longer one wraps anywhere. Inline math is drawn as a thread draws it.
+  inlineCode: ({ children, node: _node, ...props }) => {
+    const math = readMathClass(props.className)
+    const text = Children.toArray(children).join('')
+    if (math) return <MathInline tex={text} display={math.display} delimiter={math.delimiter} />
+    return <code {...props} className={`an-md-code${text.length <= WHOLE_CODE && !/\s/.test(text) ? ' is-whole' : ''}`}>{children}</code>
+  },
   ul: ({ node, children, ...props }) => isKeyValueList(node as Parameters<typeof isKeyValueList>[0])
     ? <KeyValueCard>{children}</KeyValueCard>
     : <ul className="an-md-ul list-outside" {...props}>{children}</ul>

@@ -28,6 +28,11 @@ describe('replyImages', () => {
     expect(words).toBe(kept)
   })
 
+  it('marks a picture whose path stays in the words as a chip, wherever it was named first', () => {
+    const { images } = replyImages({ text: `![a](/home/me/a.png)\nAnd /home/me/a.png again. ![b](/home/me/b.png)`, attachments: [{ name: 'c.png', path: '/home/me/c.png' }] })
+    expect(images.map((image) => [image.key, Boolean(image.chip)])).toEqual([['/home/me/a.png', true], ['/home/me/b.png', false], ['/home/me/c.png', false]])
+  })
+
   it('names a picture by its alt text, else by its file name', () => {
     expect(replyImages({ text: '![a boy](/home/me/a.png) ![](/home/me/b.png)' }).images.map((image) => image.name)).toEqual(['a boy', 'b.png'])
   })

@@ -118,6 +118,10 @@ describe('the transcript', () => {
     expect([...reply!.querySelectorAll('.bot-steps li')].map((step) => step.textContent)).toEqual(['Read 2 pages · example.com', 'Remembered · vegetarian'])
     // A message with no work has no such line.
     expect(error!.querySelector('.bot-worked')).toBeNull()
+    // Work whose time isn't known (a reply to no message) shows no line: never a bare "Worked".
+    await act(async () => fake.emit.message('inbox', message(9, { id: 'b9', text: 'Here are four takes.', chips: [{ icon: 'think', text: 'made 4 pictures' }] })))
+    expect(transcript().querySelector('[data-message-id="b9"] .bot-worked')).toBeNull()
+    expect(transcript().querySelector('[data-message-id="b9"] .bot-bubble-time')).not.toBeNull()
     expect(error!.querySelector('.bot-error span')?.textContent).toBe('Set up a provider so I can work.')
     await click(button('Set up', error!))
     expect(useAppStore.getState().settingsOpen).toBe(true)
@@ -271,19 +275,48 @@ describe('the transcript', () => {
       expect(carousel.querySelector('.bot-carousel-count, .bot-carousel-arrow')).toBeNull()
     })
 
-    it('a click opens the preview on the reply’s own pictures, with Save and Show in folder for the one shown', async () => {
+    it('a picture that can’t be read never shows: the reply keeps its chip, or gets one under its words', async () => {
       install()
+      // Only `gone.png` can't be read.
+      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async (name: string) => { if (name === 'gone.png') throw new Error('ENOENT'); return { mimeType: 'image/png', data: [137, 80, 78, 71] } }) }, localFiles })
       fake.chats.inbox = [
-        message(1, { id: 'b0', text: `An older one: ![old](${picture('old.png')})` }),
-        message(2, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })
+        message(1, { id: 'b1', text: `Picture: ${picture('gone.png')}` }),
+        message(2, { id: 'b2', text: `![made](${picture('gone.png')})` }),
+        message(3, { id: 'b3', text: `![a](${picture('a.png')}) ![gone](${picture('gone.png')})` })
       ]
       await open()
       await settle()
+      // Named in the words: its chip there, no picture and no box.
+      expect(article('b1').querySelector('.bot-reply-media, .bot-picture')).toBeNull()
+      expect(article('b1').querySelector('.bot-bubble')!.classList.contains('has-media')).toBe(false)
+      expect([...article('b1').querySelectorAll('.bot-path-open')].map((chip) => chip.textContent)).toEqual(['gone.png'])
+      // A picture alone that can't be read: its chip, as the message.
+      expect(article('b2').querySelector('.bot-picture')).toBeNull()
+      expect(article('b2').querySelector('.bot-bubble')!.classList.contains('is-media-only')).toBe(false)
+      expect(article('b2').querySelector('.bot-picture-chips .bot-path-open')?.textContent).toBe('gone.png')
+      // With a picture that can: that one alone, as a single picture, and the other's chip.
+      expect([...article('b3').querySelectorAll('.bot-picture')].map((tile) => tile.getAttribute('aria-label'))).toEqual(['Open picture: a'])
+      expect(article('b3').querySelector('.bot-picture.is-single, .bot-carousel')?.classList.contains('is-single')).toBe(true)
+      expect(article('b3').querySelector('.bot-picture-chips .bot-path-open')?.textContent).toBe('gone.png')
+    })
+
+    it('a click opens the preview on the reply’s own pictures, with Previous and Next, Save and Show in folder', async () => {
+      install()
+      fake.chats.inbox = [
+        message(1, { id: 'b0', text: `An older one: ![old](${picture('old.png')})` }),
+        message(2, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')}) ![c](${picture('c.png')})` })
+      ]
+      await open()
+      await settle()
+      // A picture's name is its label and alt text, never a tooltip that could cover what is above it.
+      expect(article('b1').querySelector('.bot-picture[title], .bot-picture img[title]')).toBeNull()
       await click(button('Open picture: b', article('b1')))
       const preview = document.querySelector<HTMLElement>('[role="dialog"]')!
       expect(preview.getAttribute('aria-label')).toBe('b')
-      // The reply's two pictures, not the chat's three.
-      expect(preview.textContent).toContain('2 / 2')
+      // The reply's three pictures, not the chat's four; in the middle, both arrows, as for a thread's pictures.
+      expect(preview.textContent).toContain('2 / 3')
+      expect(button('Previous image (←)', preview)).toBeDefined()
+      expect(button('Next image (→)', preview)).toBeDefined()
       await click(button('Save', preview))
       expect(localFiles.saveCopy).toHaveBeenCalledWith(picture('b.png'))
       await click(button('Previous image (←)', preview))
@@ -317,6 +350,14 @@ describe('the transcript', () => {
       await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
       expect(document.querySelector('.bot-picture-menu')).toBeNull()
     })
+  })
+
+  it('short inline code never breaks inside, and the punctuation after it stays with it; longer code may wrap', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'The shortlist is saved in `ssd-shortlist.md`: run `Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size` to see it.' })]
+    await open()
+    const codes = [...transcript().querySelectorAll<HTMLElement>('[data-message-id="b1"] code.an-md-code')]
+    // Which pieces keep whole is decided here; how a line wraps is checked in screenshots.
+    expect(codes.map((code) => [code.textContent, code.classList.contains('is-whole')])).toEqual([['ssd-shortlist.md', true], ['Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size', false]])
   })
 
   it('a list of keys and values reads as a small card', async () => {

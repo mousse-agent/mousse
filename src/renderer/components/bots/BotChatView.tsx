@@ -7,7 +7,7 @@ import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { MarkdownPreview } from '../editors/MarkdownPreview'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
-import { BotFilePane, BotFilesProvider, BotMarkdown } from './BotFiles'
+import { BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip } from './BotFiles'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
 import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
@@ -25,7 +25,7 @@ import { chatRows, stepChips, type BotChatRow, type OwnerMarks } from './botChat
 import { formatDurationLong, formatWorkedFor } from '../../utils/responseTimeline'
 import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
 import type { LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
-import { BotImageFiles, BotMarkdownImage, BotOtherFiles, botFileImageUrl } from './BotImages'
+import { BotImageFiles, BotMarkdownImage, BotOtherFiles, botFileImageUrl, useFailedFileImages } from './BotImages'
 import { botChatImages } from './imageSources'
 
 const EMPTY: BotChatMessage[] = []
@@ -148,9 +148,9 @@ export function workedMs(message: Pick<BotChatMessage, 'at'>, asked: Pick<BotCha
 }
 
 /** "Worked for 32s ›", as under a thread's prompt: the steps of the reply's work fold behind it. */
-function WorkedToggle({ ms, open, onToggle }: { ms?: number; open: boolean; onToggle(): void }) {
-  return <button type="button" className="bot-worked" aria-expanded={open} title={ms === undefined ? undefined : `Worked for ${formatDurationLong(ms)}`} onClick={onToggle}>
-    {ms === undefined ? 'Worked' : formatWorkedFor(ms)}
+function WorkedToggle({ ms, open, onToggle }: { ms: number; open: boolean; onToggle(): void }) {
+  return <button type="button" className="bot-worked" aria-expanded={open} title={`Worked for ${formatDurationLong(ms)}`} onClick={onToggle}>
+    {formatWorkedFor(ms)}
     <ChevronRight size={13} className="bot-worked-chevron" data-open={open || undefined} aria-hidden />
   </button>
 }
@@ -207,19 +207,26 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
   const openAsk = message.ask?.status === 'open' ? message.ask : undefined
   // Its pictures show above its words, as a messenger's image message; the words keep the rest.
   const media = useMemo(() => replyImages(message), [message])
-  const pictures = media.images.length > 0
+  // A picture that can't be read is no picture: it shows as its file's chip only (in the words, or under them).
+  const failed = useFailedFileImages(media.images.flatMap((image) => (image.path ? [image.path] : [])))
+  const shownImages = failed.size ? media.images.filter((image) => !image.path || !failed.has(image.path)) : media.images
+  const lostChips = failed.size ? media.images.filter((image) => image.path && failed.has(image.path) && !image.chip) : []
+  const pictures = shownImages.length > 0
+  // The time and the steps behind it: "Worked for 32s" only when it is known how long it took; no line without it.
+  const ms = workedMs(message, asked)
   return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}`} data-message-id={message.id}>
     <div className="bot-message-line">
-      <div className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text ? ' is-media-only' : ''}`}>
+      <div className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-        <BotReplyMedia images={media.images} />
+        <BotReplyMedia images={shownImages} />
         {media.text && <BotMarkdown text={media.text} className="bot-markdown" />}
+        {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {message.error && <BotErrorLine error={message.error} onAction={onAction} />}
         {stepsOpen && <BotSteps chips={steps} />}
         <div className="bot-bubble-foot">
-          {steps.length > 0 && <WorkedToggle ms={workedMs(message, asked)} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
+          {steps.length > 0 && ms !== undefined && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
           <BubbleTime message={message} />
         </div>
       </div>

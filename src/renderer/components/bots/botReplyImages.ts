@@ -9,8 +9,11 @@ import { linkBotPaths } from './botPaths'
  * as files. Pure: nothing is read here.
  */
 
-/** One picture of a reply: a file of this computer, or a `data:` image. `key` is its path or its URL. */
-export type ReplyImage = { key: string; name: string } & ({ path: string; url?: undefined } | { url: string; path?: undefined })
+/**
+ * One picture of a reply: a file of this computer, or a `data:` image. `key` is its path or its URL. `chip`: its path
+ * also stays in the words as a chip (a path the reply names), so a picture that can't be read needs nothing more.
+ */
+export type ReplyImage = { key: string; name: string; chip?: true } & ({ path: string; url?: undefined } | { url: string; path?: undefined })
 
 /** A Markdown image, `![alt](src)` or `![alt](<src> "title")`. */
 const MARKDOWN_IMAGE = /!\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"\n]*")?\s*\)/g
@@ -24,8 +27,11 @@ const FILE_LINK = /\]\(mousse-file:\/\/open\?path=([^)\s]+)\)/g
  */
 export function replyImages(message: Pick<BotChatMessage, 'text' | 'attachments'>): { images: ReplyImage[]; text: string } {
   const images: ReplyImage[] = []
-  const seen = new Set<string>()
-  const add = (image: ReplyImage) => { if (!seen.has(image.key)) { seen.add(image.key); images.push(image) } }
+  const add = (image: ReplyImage) => {
+    const known = images.find((entry) => entry.key === image.key)
+    if (known) { if (image.chip) known.chip = true; return }
+    images.push(image)
+  }
   let fence: string | null = null
   const lines = message.text.split('\n').map((line) => {
     const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
@@ -47,7 +53,7 @@ export function replyImages(message: Pick<BotChatMessage, 'text' | 'attachments'
     for (const [, encoded] of linkBotPaths(kept).matchAll(FILE_LINK)) {
       let path: string
       try { path = decodeURIComponent(encoded!) } catch { continue }
-      if (isImageFile(path)) add({ key: path, path, name: fileNameOf(path) })
+      if (isImageFile(path)) add({ key: path, path, name: fileNameOf(path), chip: true })
     }
     // A line that held only pictures goes with them.
     return kept.trim() || !line.trim() ? kept : null
