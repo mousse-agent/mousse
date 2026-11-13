@@ -353,8 +353,10 @@ interface AppState {
    * Optimistic thread switch in one store update: highlight immediately and restore a
    * cached transcript when available so the chat does not flash empty on re-visits.
    * Without one, `transcriptPending` holds back the empty page until the thread's view arrives.
+   * It shows the thread workspace, which moves the sidebar off Chats (`agreeWithTab`), unless `keepWorkspace`:
+   * the main process's echo of a selection (and the thread it restores at launch) is not a request to open it.
    */
-  switchToThread: (id: string) => void
+  switchToThread: (id: string, options?: { keepWorkspace?: boolean }) => void
   /** Apply daemon snapshot for the selected thread in a single paint. */
   applyThreadView: (view: ThreadViewSnapshot) => void
   setProjects: (projects: Project[]) => void
@@ -831,9 +833,10 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
     return { stopRequests, turnStates: { ...s.turnStates, [threadId]: request.daemon } }
   }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
-  switchToThread: (id) =>
+  switchToThread: (id, options) =>
     set((s) => {
-      if (s.activeThreadId === id) return { sidebarMode: 'projects' }
+      const workspace = options?.keepWorkspace ? {} : { sidebarMode: 'projects' as const }
+      if (s.activeThreadId === id) return options?.keepWorkspace ? s : workspace
       if (s.activeThreadId && s.messages.length > 0) {
         rememberMessages(s.activeThreadId, s.messages)
       }
@@ -841,7 +844,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       // Nothing cached: a thread that never started is known to be empty; any other one waits for its view.
       const target = s.threads.find((thread) => thread.id === id)
       return {
-        sidebarMode: 'projects',
+        ...workspace,
         activeThreadId: id,
         messages: cached ?? [],
         transcriptPending: !cached && !(target && !isThreadStarted(target)),

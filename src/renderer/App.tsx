@@ -358,7 +358,9 @@ export default function App() {
       window.mousse.threads.onTouched?.(applyIfCurrent(useAppStore.getState().applyThreadTouches)) ?? (() => undefined),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
       // and other main-driven selection without showing the previous transcript.
-      window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id))),
+      // It is an echo (or, at launch, the thread restored): the workspace stays where the person left it, so a
+      // window that opens on the Chats tab keeps showing Chats.
+      window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id, { keepWorkspace: true }))),
       window.mousse.threads.onActivity(applyIfCurrent(setThreadActivity)),
       // Keep the default provider current; subagent rows of threads on the default draw its logo.
       window.mousse.settings.onChanged(applyIfCurrent((settings) => {
