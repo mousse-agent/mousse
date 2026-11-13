@@ -126,6 +126,32 @@ describe('a prepared bot turn', () => {
     expect(settled).toEqual([{ payload: expect.objectContaining({ runId: effect.runId }), outcome: { text: 'Footer fixed.' } }])
   })
 
+  it("the turn's own steer source is the engine's: an agent's steer per take, kept with the engine's token, never the thread's queue", async () => {
+    const offered = ['The owner added: only cordless.']
+    const steer = {
+      attached: vi.fn(), accepted: vi.fn(), handedBack: vi.fn(), compacted: vi.fn(),
+      peek: () => offered[0],
+      take: () => (offered.length ? { text: offered.shift()!, token: 'act-1:d1:s1' } : undefined)
+    }
+    orch.setBotDispatcher({ prepare: (payload) => ({ ...prepare()(payload) as object, steer }) as never, settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    runTurn.mockImplementation(async () => ({ message: 'Done.', actions: [] }))
+    await execute(await queuedBotRun())
+    const opts = (runTurn.mock.calls[0] as unknown[])[4] as { externalPeekSteer: () => unknown; externalDrainSteer: () => unknown }
+    expect(opts.externalPeekSteer()).toEqual([{ text: 'The owner added: only cordless.', byAgent: true }])
+    expect(opts.externalDrainSteer()).toEqual([{ text: 'The owner added: only cordless.', byAgent: true, botSteer: 'act-1:d1:s1' }])
+    expect(opts.externalDrainSteer()).toBeUndefined()
+    expect(opts.externalPeekSteer()).toBeUndefined()
+  })
+
+  it('a failed turn settles with no words, except a turn cap, which hands back what it said last', async () => {
+    orch.setBotDispatcher({ prepare: prepare(), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    runTurn.mockImplementationOnce(async () => ({ message: '[provider_failed] It broke.', actions: [], error: { code: 'provider_failed', message: 'It broke.' } }))
+    await execute(await queuedBotRun('bot-a'))
+    runTurn.mockImplementationOnce(async () => ({ message: '[provider_turn_cap] Claude Code reached the most steps one turn may take.', actions: [], error: { code: 'provider_turn_cap', message: 'Claude Code reached the most steps one turn may take.' }, partial: 'Two picks so far.' }))
+    await execute(await queuedBotRun('bot-b'))
+    expect(settled.map((entry) => entry.outcome)).toEqual([{}, { text: 'Two picks so far.' }])
+  })
+
   it('a thread that already has history fails with bot_state_invalid before anything is sent', async () => {
     orch.setBotDispatcher({ prepare: prepare(), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
     const effect = await queuedBotRun()
@@ -177,7 +203,7 @@ describe('bot turn setup', () => {
     expect(runTurn).not.toHaveBeenCalled()
   })
 
-  it('the bot’s role and instructions lead the turn preamble, and its app tools never ask a person', async () => {
+  it('the bot’s role and instructions are its system text, and its app tools never ask a person', async () => {
     const internals = orch as unknown as {
       getOrCreateSession(threadId: string): unknown
       registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: { approvals?: string; bot?: unknown } }
@@ -188,13 +214,14 @@ describe('bot turn setup', () => {
     const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-bot', 'agent', false, { authority, skills: [] })
     const app = await internals.completeAppTurn(registered.turn, { promptRuntime: false, userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })
     expect(app.bot).toBe(authority)
-    expect(app.instructions(true).turnPreamble.startsWith('Your role and instructions:\nYou are ZEBRA-REVIEWER.')).toBe(true)
     expect(internals.appToolTurns.get('run-bot')?.approvals).toBe('never')
-    // Its own instructions only: no orchestration or applet guidance about tools its grant never holds.
-    expect(app.instructions(true).sessionInstructions).toBe('')
+    // Its own instructions only, as its system text (where a compaction keeps them): no orchestration or applet
+    // guidance about tools its grant never holds, and not in the turn's message.
+    expect(app.instructions(true).sessionInstructions).toBe('You are ZEBRA-REVIEWER.')
+    expect(app.instructions(true).turnPreamble).not.toContain('ZEBRA-REVIEWER')
   })
 
-  it('the context pack follows the role in the turn preamble, ahead of Mousse\'s own text (Bot Phase 1 §5.3.2)', async () => {
+  it('the context pack leads the turn preamble, ahead of Mousse\'s own text (Bot Phase 1 §5.3.2)', async () => {
     const internals = orch as unknown as {
       getOrCreateSession(threadId: string): unknown
       registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: unknown }
@@ -204,7 +231,8 @@ describe('bot turn setup', () => {
     const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-pack', 'agent', false, { authority, skills: [] })
     const app = await internals.completeAppTurn(registered.turn, { userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.', botPreamble: '<bot_memory>PACK-4411</bot_memory>' })
     const preamble = app.instructions(true).turnPreamble
-    expect(preamble.startsWith('Your role and instructions:\nYou are ZEBRA-REVIEWER.\n\n<bot_memory>PACK-4411</bot_memory>')).toBe(true)
+    expect(preamble.startsWith('<bot_memory>PACK-4411</bot_memory>')).toBe(true)
+    expect(app.instructions(true).sessionInstructions).toBe('You are ZEBRA-REVIEWER.')
     // Without a pack the preamble is as before.
     const plain = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-plain', 'agent', false, { authority, skills: [] })
     const without = await internals.completeAppTurn(plain.turn, { userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })

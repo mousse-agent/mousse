@@ -64,6 +64,7 @@ export const NET_LOCAL_METHODS = [
   'bridge.setKind',
   'bridge.policy',
   'bridge.workOnThreads',
+  'bridge.shareBots',
   'bridge.editorServer',
   'net.authority.transfer',
   'net.authority.status',
@@ -131,6 +132,8 @@ export interface NetStatus {
   features?: import('../featureFlags').NetFeatureFlags
   /** Whether other computers of the user may work on this computer's threads (`bridge.workOnThreads`). On by default. */
   workOnThreads?: boolean
+  /** Whether this computer shares its personal bots with the user's other devices (`bridge.shareBots`). On by default. */
+  shareBots?: boolean
   /**
    * Which SSH server answers editor connections from other computers (`bridge.editorServer`): `system` is the
    * owner's choice "Use this computer's SSH server", and `available` says whether Mousse's own endpoint can
@@ -155,7 +158,11 @@ export interface NetStatus {
    * Mousse restarts, only a passphrase can protect them.
    */
   vaultUnavailable?: boolean
-  self?: { node: NodeId; user: UserId; isAuthority: boolean }
+  /**
+   * `removed`: this computer was removed from the user's devices and cannot reconnect with this
+   * identity. Signing in to Mousse ID sets it aside and adds the computer back as a new one.
+   */
+  self?: { node: NodeId; user: UserId; isAuthority: boolean; removed?: true }
   rosterState?: RosterState
   routes: Route[]
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>

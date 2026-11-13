@@ -403,8 +403,9 @@ export class ToolRegistry {
     // Scope and level are checked first: a refused call asks nobody anything and leaves no ledger row.
     const scope = this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
     // A bot's thread lists the browser tools whatever it holds: one its owner has not allowed says so, and how to ask,
-    // not that no browser is bound to the turn.
-    if (turn.bot && botBrowserWithheld(turn.bot, name)) return { text: botBrowserNotAllowed(turn.bot), isError: true }
+    // not that no browser is bound to the turn. One the owner allowed after the turn started is answered as held: the
+    // bot is not sent to ask again, and its turn continues with the browser once it ends.
+    if (turn.bot && botBrowserWithheld(turn.bot, name)) return { text: turn.bot.held?.({ tool: name }) ?? botBrowserNotAllowed(turn.bot), isError: true }
     const availability = tool.available?.(turn) ?? true
     if (availability !== true) return { text: availability, isError: true }
     const unattended = unattendedRefusal(tool, turn)

@@ -104,11 +104,14 @@ export interface BotBrowserView {
   open: boolean
   /** Who uses it: the bot, or the owner after Take over. */
   control: 'bot' | 'owner'
-  /** The tab the view follows: the one the bot (or the owner) used last. */
+  /**
+   * The tab the view follows: the tab the owner took while they hold the browser, else the current tab of the
+   * activation it follows (`activationId`), which another run's calls never change.
+   */
   tab?: { url: string; title: string }
-  /** The activations that used the browser, oldest first: their replies show its preview. */
+  /** The activations that used the browser, oldest first. */
   activations: string[]
-  /** The activation using it now, while it runs. */
+  /** The activation whose tab the view shows: its reply shows the preview. It changes only when that activation ends. */
   activationId?: string
   /** The latest picture, when asked for (`frame: true`), or the last one once it closed. */
   frame?: BotBrowserFrame

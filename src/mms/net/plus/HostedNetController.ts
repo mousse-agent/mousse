@@ -501,6 +501,19 @@ export class HostedNetController implements HostedNet {
     )
   }
 
+  identityReset(): void {
+    if (this.plusRenewal) clearTimeout(this.plusRenewal)
+    this.plusRenewal = undefined
+    this.stopEnrollmentPoll()
+    this.hostedProfile?.cancelLogin()
+    this.hostedProfile = undefined
+    this.hostedConsentFenced = false
+    this.requestsTried.clear()
+    this.requestsApproved.clear()
+    this.direct = DEFAULT_DIRECT_PATH
+    this.directReadAt = undefined
+  }
+
   resumeRenewal(): void {
     if (!this.hostedRelayEnabled()) return
     this.armRenewal()

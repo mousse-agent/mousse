@@ -14,7 +14,7 @@ import { MmsBrowserService } from '../src/mms/browser/MmsBrowserService'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
-import { BOT_BROWSER_KEEPER, BotBrowsers, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
+import { BOT_BROWSER_KEEPER, BROWSER_TURN_HOLD_MS, BotBrowsers, BrowserTurns, MAX_BROWSER_WAITERS, OWNER_CUT_IN_MS, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
 import type { BotTurnBrowser } from '../src/mms/bots/activation/dispatcher'
 import { dispatchBrowserTool } from '../src/mms/orchestrator/browser/dispatch'
 import { snapshotBrowserExecutionBinding } from '../src/mms/orchestrator/browser/binding'
@@ -101,6 +101,94 @@ function viewer(deliveryMs = 0) {
 }
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+describe('turns on a bot\'s browser (BrowserTurns)', () => {
+  it('runs one call at a time, in the order they came; a stopped wait leaves at once; the queue is bounded', async () => {
+    const turns = new BrowserTurns()
+    const order: string[] = []
+    let release!: () => void
+    const first = turns.run(() => new Promise<void>((resolve) => { order.push('a start'); release = () => { order.push('a end'); resolve() } }), { tab: 'tab-a' })
+    expect(turns.busy).toBe(true)
+    expect(turns.holderTab).toBe('tab-a')
+    const second = turns.run(async () => { order.push('b') })
+    const stop = new AbortController()
+    const stopped = turns.run(async () => { order.push('never') }, { signal: stop.signal })
+    const third = turns.run(async () => { order.push('c') })
+    stop.abort()
+    await expect(stopped).rejects.toMatchObject({ code: 'cancelled' })
+    release()
+    await Promise.all([first, second, third])
+    expect(order).toEqual(['a start', 'a end', 'b', 'c'])
+    expect(turns.busy).toBe(false)
+    // A full queue refuses the next call as busy, instead of growing without end.
+    let hold!: () => void
+    const holding = turns.run(() => new Promise<void>((resolve) => { hold = resolve }))
+    const waiting = Array.from({ length: MAX_BROWSER_WAITERS }, () => turns.run(async () => undefined))
+    await expect(turns.run(async () => undefined)).rejects.toMatchObject({ code: 'timeout' })
+    hold()
+    await Promise.all([holding, ...waiting])
+    // A wait longer than its bound is refused as busy too.
+    const long = turns.run(() => new Promise<void>((resolve) => setTimeout(resolve, 200)))
+    await expect(turns.run(async () => undefined, { waitMs: 20 })).rejects.toMatchObject({ code: 'timeout' })
+    await long
+  })
+
+  it("the owner's input goes ahead of the calls that wait: it waits only for the one under way", async () => {
+    const turns = new BrowserTurns()
+    const order: string[] = []
+    let release!: () => void
+    const under = turns.run(() => new Promise<void>((resolve) => { release = resolve }))
+    const runs = [turns.run(async () => { order.push('run b') }), turns.run(async () => { order.push('run c') })]
+    const owner = turns.run(async () => { order.push('owner') }, { first: true })
+    release()
+    await Promise.all([under, owner, ...runs])
+    expect(order).toEqual(['owner', 'run b', 'run c'])
+  })
+
+  it("the owner's input cuts into a run's call that holds the browser after a moment; a call that does not give way is waited for", async () => {
+    expect(OWNER_CUT_IN_MS).toBeLessThan(500)
+    const turns = new BrowserTurns()
+    const order: string[] = []
+    const cutIn = { afterMs: 50, reason: () => new BrowserAutomationError({ code: 'human_controlled', message: 'Your owner is using your browser now.' }) }
+    let runSignal: AbortSignal | undefined
+    // A run's long call holds the browser, and another run's waits behind it.
+    const long = turns.run((held) => { runSignal = held; return new Promise<void>(() => undefined) }, { yields: true })
+    const behind = turns.run(async () => { order.push('run b') }, { yields: true })
+    const started = Date.now()
+    const owner = turns.run(async () => { order.push('owner'); return 'applied' }, { first: true, cutIn })
+    // Queued is not done: the owner's work has not run while the run's call still holds the browser.
+    await sleep(10)
+    expect(order).toEqual([])
+    await expect(owner).resolves.toBe('applied')
+    expect(Date.now() - started).toBeGreaterThanOrEqual(40)
+    await expect(long).rejects.toMatchObject({ code: 'human_controlled' })
+    expect(runSignal!.aborted).toBe(true)
+    await behind
+    expect(order).toEqual(['owner', 'run b'])
+    // Closing an ended run's tab does not give way: the owner's input waits for it to end.
+    let release!: () => void
+    const side = turns.run(() => new Promise<void>((resolve) => { release = resolve }))
+    let went = false
+    const after = turns.run(async () => { went = true }, { first: true, cutIn })
+    await sleep(120)
+    expect(went).toBe(false)
+    release()
+    await Promise.all([side, after])
+    expect(went).toBe(true)
+  })
+
+  it('a holder that never returns is stopped at its limit: its call fails, its signal ends, and the next call goes', async () => {
+    expect(BROWSER_TURN_HOLD_MS).toBeGreaterThan(4 * 60_000)
+    const turns = new BrowserTurns()
+    let held: AbortSignal | undefined
+    const stuck = turns.run((signal) => { held = signal; return new Promise<void>(() => undefined) }, { holdMs: 50 })
+    const next = turns.run(async () => 'went')
+    await expect(stuck).rejects.toMatchObject({ code: 'timeout', message: expect.stringContaining('did not answer in time') })
+    expect(held!.aborted).toBe(true)
+    await expect(next).resolves.toBe('went')
+    expect(turns.busy).toBe(false)
+  })
+})
+
 describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
   it('each bot drives its own persistent browser, apart from the owner\'s and from the other bot\'s; sign-ins stay after it closes', async () => {
     const { browser, bots, turn, call, idle, origin } = await fixture()
@@ -162,7 +250,8 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     expect(clicked.error).toBeUndefined()
     expect(clicked.action!.outcome).toBe('verified')
     const view = await bots.view(BOT_A, { frame: true })
-    expect(view).toMatchObject({ open: true, control: 'bot', tab: { url: `${origin}/form.html` }, activationId: 'act-run' })
+    // The view follows the first activation that used the browser, the chat, whose reply shows the preview.
+    expect(view).toMatchObject({ open: true, control: 'bot', tab: { url: `${origin}/form.html` }, activationId: 'act-chat' })
     expect(view.activations).toEqual(['act-chat', 'act-run'])
     expect(view.frame!.mimeType).toBe('image/jpeg')
     expect(Buffer.from(view.frame!.data, 'base64').subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]))
@@ -254,6 +343,188 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     // The owner goes to another page: its picture shows soon after, without anyone asking twice.
     await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/nav-b.html` })
     await expect.poll(async () => (await bots.view(BOT_A, { frame: true })).frame!.data !== still.data, { timeout: 2_000, interval: 40 }).toBe(true)
+  }, 60_000)
+
+  it('with two runs browsing, the view follows one run\'s tab; while the owner holds a tab, their input lands there only, and is refused once it has gone', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const first = turn(BOT_A, 'act-r1', 'run')
+    const second = turn(BOT_A, 'act-r2', 'run')
+    const opened = await call(first, 'browser_open', { url: `${origin}/form.html` })
+    await call(second, 'browser_open', { url: `${origin}/remember.html` })
+    // The second run's calls never move the view: it follows the first run's tab, and the preview sits on its reply.
+    await call(second, 'browser_observe', {})
+    expect(await bots.view(BOT_A, { frame: true })).toMatchObject({ activationId: 'act-r1', tab: { url: `${origin}/form.html` } })
+    // The owner takes over the tab they see.
+    expect((await bots.control(BOT_A, 'owner')).control).toBe('owner')
+    const field = opened.observation!.elements.find((element) => element.role === 'textbox' && element.name?.trim() === 'Name')!
+    // Meanwhile the second run may not open a tab, but reads its page, bringing its own tab forward before and while the
+    // owner types: a tab in the back takes no input, so each input takes its turn and brings the owner's tab forward.
+    expect((await call(second, 'browser_tabs', { operation: 'new', url: `${origin}/nav-a.html` })).error).toMatch(/owner is using your browser/)
+    await call(second, 'browser_observe', {})
+    await Promise.all([bots.input(BOT_A, { kind: 'click', x: field.bounds!.x + 5, y: field.bounds!.y + 5 }), call(second, 'browser_observe', {}), call(second, 'browser_observe', {})])
+    await call(second, 'browser_observe', {})
+    await Promise.all([call(second, 'browser_observe', {}), bots.input(BOT_A, { kind: 'type', text: 'Ada' }), call(second, 'browser_observe', {})])
+    await call(second, 'browser_observe', {})
+    await Promise.all([bots.input(BOT_A, { kind: 'key', key: 'Enter' }), call(second, 'browser_observe', {})])
+    await call(second, 'browser_observe', {})
+    // The view stayed on the owner's tab throughout.
+    expect(await bots.view(BOT_A, { frame: true })).toMatchObject({ control: 'owner', activationId: 'act-r1', tab: { url: `${origin}/form.html` } })
+    expect((await bots.control(BOT_A, 'bot')).control).toBe('bot')
+    expect((await call(first, 'browser_extract', {})).extraction!.text).toContain('saved:Ada')
+    for (const tab of (await call(second, 'browser_tabs', { operation: 'list' })).tabs!) {
+      expect((await call(second, 'browser_extract', { tabId: tab.id })).extraction!.text).not.toContain('Ada')
+    }
+
+    // Held again, and the run whose tab it is ends: its tab closes, and the owner's input is refused, never sent elsewhere.
+    await bots.control(BOT_A, 'owner')
+    bots.activationEnded({ botId: BOT_A, activationId: 'act-r1' })
+    await expect.poll(async () => bots.input(BOT_A, { kind: 'scroll', x: 10, y: 10, deltaX: 0, deltaY: 1 }).then(() => 'sent', (error: Error) => error.message), { timeout: 5_000, interval: 50 })
+      .toBe('The tab you took over has closed. Give the browser back, then take it over again.')
+    await expect(bots.input(BOT_A, { kind: 'type', text: 'Zed42' })).rejects.toThrow(/has closed/)
+    for (const tab of (await call(second, 'browser_tabs', { operation: 'list' })).tabs!) {
+      expect((await call(second, 'browser_extract', { tabId: tab.id })).extraction!.text).not.toContain('Zed42')
+    }
+    // Given back, the view follows the run still browsing.
+    await bots.control(BOT_A, 'bot')
+    await call(second, 'browser_observe', {})
+    expect((await bots.view(BOT_A, { frame: true })).activationId).toBe('act-r2')
+  }, 60_000)
+
+  it('a call that waited its turn while the owner took the browser over is refused when the turn comes, and loads nothing', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const first = turn(BOT_A, 'act-r1', 'run')
+    const second = turn(BOT_A, 'act-r2', 'run')
+    const opened = await call(first, 'browser_open', { url: `${origin}/form.html` })
+    const own = await call(second, 'browser_open', { url: `${origin}/remember.html` })
+    // The first run holds the browser's turn with a wait; the second run's navigation queues behind it.
+    const waiting = call(first, 'browser_wait', { sessionId: opened.session!.id, tabId: opened.observation!.tabId, condition: { type: 'text', text: 'never-present', present: true }, timeoutMs: 1_500 })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const queued = call(second, 'browser_open', { url: `${origin}/nav-a.html` })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    // Take over takes no turn: it is the owner's at once, while the wait still holds the turn.
+    expect((await bots.control(BOT_A, 'owner')).control).toBe('owner')
+    await waiting
+    expect((await queued).error).toMatch(/owner is using your browser/)
+    expect((await call(second, 'browser_tabs', { operation: 'list' })).tabs).toEqual([expect.objectContaining({ id: own.observation!.tabId, url: `${origin}/remember.html` })])
+    expect((await call(second, 'browser_extract', {})).extraction!.text).not.toContain('Page A')
+    await bots.control(BOT_A, 'bot')
+  }, 60_000)
+
+  it('two runs on two tabs, the owner holds one: the view stays on it, the other run reads but cannot act, the sentence lands whole there only, and Give back hands both runs their browser', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const first = turn(BOT_A, 'act-r1', 'run')
+    const second = turn(BOT_A, 'act-r2', 'run')
+    const one = await call(first, 'browser_open', { url: `${origin}/form.html` })
+    const two = await call(second, 'browser_open', { url: `${origin}/form.html?second` })
+    expect(one.observation!.tabId).not.toBe(two.observation!.tabId)
+    // The view follows the first run's tab, and Take over holds exactly that tab.
+    const taken = await bots.hold(BOT_A, 'view-a', { op: 'take', platform: 'other' })
+    expect(taken.browser).toMatchObject({ control: 'owner', holder: 'this-view', activationId: 'act-r1', tab: { url: `${origin}/form.html` } })
+    const holdId = taken.hold!.id
+    // The other run reads its own page, but acts on nothing and opens nothing while the owner holds the browser.
+    expect((await call(second, 'browser_observe', {})).error).toBeUndefined()
+    const seen = (await call(second, 'browser_observe', {})).observation!
+    const otherSave = seen.elements.find((element) => element.name === 'Save')!
+    expect((await call(second, 'browser_act', { sessionId: seen.sessionId, tabId: seen.tabId, generation: seen.generation, observationId: seen.observationId,
+      controlLeaseId: two.session!.controlLeaseId, action: { type: 'click', target: { kind: 'ref', ref: otherSave.ref } } })).error).toMatch(/owner is using your browser/)
+    expect((await call(second, 'browser_tabs', { operation: 'new', url: `${origin}/nav-a.html` })).error).toMatch(/owner is using your browser/)
+    // The owner clicks the Name field on a picture of the tab they hold, types a sentence and presses Enter, while the
+    // other run keeps reading its own page.
+    const shot = await bots.view(BOT_A, { frame: true, viewId: 'view-a' })
+    const field = one.observation!.elements.find((element) => element.role === 'textbox' && element.name?.trim() === 'Name')!
+    const sentence = 'The quick brown fox jumps over the lazy dog'
+    const reading = Promise.all([call(second, 'browser_observe', {}), call(second, 'browser_extract', {}), call(second, 'browser_observe', {})])
+    const { acks } = await bots.send(BOT_A, 'view-a', holdId, [
+      { seq: 1, input: { kind: 'click', x: field.bounds!.x + 5, y: field.bounds!.y + 5 }, picture: shot.frame!.id! },
+      { seq: 2, input: { kind: 'type', text: sentence }, picture: shot.frame!.id! },
+      { seq: 3, input: { kind: 'key', key: 'Enter' }, picture: shot.frame!.id! }
+    ])
+    expect(acks.map((ack) => ack.status)).toEqual(['applied', 'applied', 'applied'])
+    await reading
+    // The view stayed on the held tab throughout.
+    expect(await bots.view(BOT_A, { viewId: 'view-a' })).toMatchObject({ control: 'owner', activationId: 'act-r1', tab: { url: `${origin}/form.html` } })
+    expect((await call(first, 'browser_extract', {})).extraction!.text).toContain(`saved:${sentence}:pwlen=0`)
+    const untouched = (await call(second, 'browser_extract', {})).extraction!.text
+    expect(untouched).toContain('idle')
+    expect(untouched).not.toContain('quick brown fox')
+    // Give back: both runs have their browser again, and the view still follows the first.
+    await bots.hold(BOT_A, 'view-a', { op: 'release', holdId })
+    // The run picks the browser up again on its own tab, with the session's new lease.
+    const reopened = await call(second, 'browser_open', {})
+    expect(reopened.observation!.tabId).toBe(two.observation!.tabId)
+    const again = reopened.observation!
+    const saved = await call(second, 'browser_act', { sessionId: again.sessionId, tabId: again.tabId, generation: again.generation, observationId: again.observationId,
+      controlLeaseId: reopened.session!.controlLeaseId, action: { type: 'click', target: { kind: 'ref', ref: again.elements.find((element) => element.name === 'Save')!.ref } } })
+    expect(saved.error).toBeUndefined()
+    expect((await call(second, 'browser_extract', {})).extraction!.text).toContain('saved::pwlen=0')
+    expect((await bots.view(BOT_A)).activationId).toBe('act-r1')
+  }, 60_000)
+
+  it("the owner's input does not wait out a run's call that holds the browser: it cuts in, and is answered once it is on the page", async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const first = turn(BOT_A, 'act-r1', 'run')
+    const second = turn(BOT_A, 'act-r2', 'run')
+    const one = await call(first, 'browser_open', { url: `${origin}/form.html` })
+    const two = await call(second, 'browser_open', { url: `${origin}/remember.html` })
+    const taken = await bots.hold(BOT_A, 'view-a', { op: 'take', platform: 'other' })
+    const holdId = taken.hold!.id
+    const shot = await bots.view(BOT_A, { frame: true, viewId: 'view-a' })
+    const field = one.observation!.elements.find((element) => element.role === 'textbox' && element.name?.trim() === 'Name')!
+    expect((await bots.send(BOT_A, 'view-a', holdId, [{ seq: 1, input: { kind: 'click', x: field.bounds!.x + 5, y: field.bounds!.y + 5 }, picture: shot.frame!.id! }])).acks[0]!.status).toBe('applied')
+    // The other run holds the browser's turn with a long read of its own page (reading is allowed during a hold).
+    const startedWait = Date.now()
+    const waiting = call(second, 'browser_wait', { sessionId: two.session!.id, tabId: two.observation!.tabId, condition: { type: 'text', text: 'never-present', present: true }, timeoutMs: 20_000 })
+    await sleep(300)
+    const sentAt = Date.now()
+    let answeredAt: number | undefined
+    const sending = bots.send(BOT_A, 'view-a', holdId, [
+      { seq: 2, input: { kind: 'type', text: 'Cut in' }, picture: shot.frame!.id! },
+      { seq: 3, input: { kind: 'key', key: 'Enter' }, picture: shot.frame!.id! }
+    ]).then((answer) => { answeredAt = Date.now(); return answer })
+    // Taken is not applied: no answer while the run's call still holds the browser.
+    await sleep(40)
+    expect(answeredAt).toBeUndefined()
+    const { acks } = await sending
+    expect(acks).toMatchObject([{ status: 'applied' }, { status: 'applied' }])
+    // Well under the half second after which the view says "Sending…", not the run's 20 seconds.
+    expect(answeredAt! - sentAt).toBeLessThan(500 + 1_000)
+    // The run's read was stopped and told why; it was not left to run out.
+    expect((await waiting).error).toMatch(/owner is using your browser/)
+    expect(Date.now() - startedWait).toBeLessThan(10_000)
+    // Answered as applied once the page had it: the form saved the text.
+    expect((await call(first, 'browser_extract', {})).extraction!.text).toContain('saved:Cut in:pwlen=0')
+    // A stopped call is not a lost browser: the browser stays open, and the run still reads its own tab.
+    expect((await bots.view(BOT_A, { viewId: 'view-a' })).open).toBe(true)
+    expect((await call(second, 'browser_tabs', { operation: 'list' })).tabs).toEqual([expect.objectContaining({ id: two.observation!.tabId })])
+    await bots.hold(BOT_A, 'view-a', { op: 'release', holdId })
+  }, 60_000)
+
+  it('several activations browsing at once take turns on the one browser: none is refused or loses its tab mid-action', async () => {
+    // Without the turns, three clicks sent to the session at once all land, but the two whose tabs lose the front wait
+    // about 5 s each on their checks (0.8 s in turn), close to an action's 8 s limit.
+    const { bots, turn, call, origin } = await fixture()
+    const runs = ['act-r1', 'act-r2', 'act-r3'].map((id) => turn(BOT_A, id, 'run'))
+    const opened = []
+    for (const run of runs) opened.push(await call(run, 'browser_open', { url: `${origin}/form.html` }))
+    expect(new Set(opened.map((entry) => entry.session!.id)).size).toBe(1)
+    const click = async (index: number) => {
+      const seen = (await call(runs[index]!, 'browser_observe', {})).observation!
+      const save = seen.elements.find((element) => element.name === 'Save')!
+      return call(runs[index]!, 'browser_act', { sessionId: seen.sessionId, tabId: seen.tabId, generation: seen.generation, observationId: seen.observationId,
+        controlLeaseId: opened[index]!.session!.controlLeaseId, action: { type: 'click', target: { kind: 'ref', ref: save.ref } } })
+    }
+    // All three click at once, each on its own tab: each waits its turn, and each click lands on its own page.
+    const clicks = await Promise.all(runs.map((_, index) => click(index)))
+    for (const clicked of clicks) {
+      expect(clicked.error).toBeUndefined()
+      expect(clicked.action!.outcome).toBe('verified')
+    }
+    for (const run of runs) expect((await call(run, 'browser_extract', {})).extraction!.text).toContain('saved')
+    // The owner's view meanwhile follows the last tab used and never fails a call.
+    const viewing = bots.view(BOT_A, { frame: true })
+    const again = await Promise.all(runs.map((run) => call(run, 'browser_observe', {})))
+    expect(again.every((entry) => !entry.error)).toBe(true)
+    expect((await viewing).open).toBe(true)
   }, 60_000)
 })
 

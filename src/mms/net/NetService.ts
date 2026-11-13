@@ -10,7 +10,7 @@ import {
 } from './hosted'
 import type { NodeInviteInput } from './enrollment/service'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
-import { existsSync } from 'node:fs'
+import { existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type {
@@ -164,6 +164,12 @@ interface NetConfiguration {
    * every call, so turning it off is also a kill switch.
    */
   workOnThreads?: boolean
+  /**
+   * "Share bots with other devices": the owner's personal bots of this computer are listed for, and used from, the
+   * user's phones and other computers unless this is turned off (on when absent). Read on every call and every lists
+   * push, so turning it off also ends what an open lists stream shows.
+   */
+  shareBots?: boolean
   /**
    * "Use this computer's SSH server" for editor connections from other computers: the owner's choice for this
    * computer. Off when absent: Mousse's own SSH endpoint answers. It is written only while it is on, so a profile
@@ -322,6 +328,7 @@ export class NetService {
   /** The tunnels `mousse-cli net ssh-proxy` holds on this computer's local connections. */
   private localTunnelStore?: LocalEditorTunnels
   private readonly editorFirstOpen = new Set<(node: NodeId) => void>()
+  private readonly shareBotsListeners = new Set<() => void>()
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
   /** The optional Mousse ID module; absent in builds and tests that leave it out. */
@@ -404,6 +411,8 @@ export class NetService {
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
+          throw new NetError('storage_corrupt')
+        if (cfg.shareBots !== undefined && typeof cfg.shareBots !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.editorSystemSsh !== undefined && typeof cfg.editorSystemSsh !== 'boolean')
           throw new NetError('storage_corrupt')
@@ -791,6 +800,14 @@ export class NetService {
     if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
       return this.transportList()
     if (this.disabled) throw new NetError('disabled')
+    // A computer removed from its devices can never reconnect with its identity: signing in sets
+    // it aside and joins again, as a computer with no identity does.
+    if (this.hosted && method === 'net.plus.login.begin' && this.selfRemoved())
+      return this.track(
+        this.serial(() => this.setAsideRemovedIdentity()).then(() =>
+          this.hosted!.joinSignIn(method, params)
+        )
+      )
     // Signing in to Mousse ID on a computer with no network identity joins the account's network.
     if (
       this.hosted &&
@@ -1037,6 +1054,19 @@ export class NetService {
           }
           return { enabled: this.config.workOnThreads !== false }
         }
+        case 'bridge.shareBots': {
+          // "Share bots with other devices". Any computer sets it for itself; the bot methods and the lists read it
+          // on every call and push, so turning it off takes effect at once.
+          this.requireEnrolled()
+          if (params.enabled !== undefined) {
+            const was = this.config.shareBots !== false
+            this.config = { ...this.config, shareBots: params.enabled === true }
+            this.saveConfig()
+            if (was !== (params.enabled === true)) for (const listener of [...this.shareBotsListeners]) listener()
+            this.emit()
+          }
+          return { enabled: this.config.shareBots !== false }
+        }
         case 'bridge.editorServer': {
           // "Use this computer's SSH server" for editor connections from other computers. Any computer sets it
           // for itself. It applies to the next tunnel: one that is open keeps the server it was opened to.
@@ -1242,6 +1272,103 @@ export class NetService {
     return (
       existsSync(join(this.options.profileDir, 'net', 'net.db')) && !!this.runtime().identity.self()
     )
+  }
+  /** This computer has an identity that was removed from its devices (see `NetIdentityService.selfRemoved`). */
+  private selfRemoved(): boolean {
+    try {
+      return this.hasIdentity() && this.runtime().identity.selfRemoved()
+    } catch {
+      return false
+    }
+  }
+  /**
+   * Moves the network identity of a computer removed from its devices out of the way, so signing in
+   * joins again with new keys. `net` becomes `net.removed-<time>`; nothing is deleted, and threads,
+   * chats and the rest of the profile stay as they are. Runs in the serial queue. Checked again
+   * here, so a second sign-in (or one for an identity that is not removed) changes nothing.
+   */
+  private async setAsideRemovedIdentity(): Promise<void> {
+    if (!this.selfRemoved()) return
+    await this.closeRuntime()
+    const directory = join(this.options.profileDir, 'net')
+    let aside = `${directory}.removed-${Date.now()}`
+    if (existsSync(aside)) aside += `-${randomBytes(4).toString('hex')}`
+    try {
+      renameSync(directory, aside)
+    } catch (cause) {
+      // The identity stays where it was: load it again, as it was before the sign-in.
+      try {
+        this.runtime()
+        if (this.config.enabled) await this.activateWithHosted()
+      } catch (error) {
+        this.lastError = error instanceof NetError ? error.code : 'internal'
+      }
+      this.emit()
+      throw new NetError(
+        'internal',
+        `Mousse couldn’t set this computer’s old network identity aside: ${cause instanceof Error ? cause.message : String(cause)}`
+      )
+    }
+    this.emit()
+  }
+  /**
+   * Ends the loaded runtime and everything running on it, but not the service: the next `runtime()`
+   * loads the profile's network again from disk. Follows `shutdown()`.
+   */
+  private async closeRuntime(): Promise<void> {
+    this.tunnels?.endAll('net_off')
+    this.localTunnelStore?.closeAll()
+    this.webrtc?.stop()
+    this.webrtc = undefined
+    this.transport?.admission.close()
+    this.renewal?.cancel()
+    this.renewal = undefined
+    this.presenceTimer?.cancel()
+    this.presenceTimer = undefined
+    this.rosterListener?.()
+    this.rosterListener = undefined
+    this.policyListener?.()
+    this.policyListener = undefined
+    for (const gateway of this.gateways) gateway.close()
+    for (const supervisor of this.supervisors.values()) supervisor.close()
+    for (const session of this.sessions) session.close()
+    this.supervisors.clear()
+    this.gateways.clear()
+    this.routes = undefined
+    this.localSignedRoutes = undefined
+    try {
+      await Promise.all([
+        this.transport?.teardown(),
+        ...[...this.enrollmentListeners].map((listener) => listener.teardown()),
+        this.closeDomain()
+      ])
+    } catch (error) {
+      // The domain could not drain: its stores stay open (as in `shutdown()`) and nothing moves.
+      if (!this.domainClosed) this.domainClosing = undefined
+      throw error
+    } finally {
+      this.transport = undefined
+      this.enrollmentListeners.clear()
+    }
+    await this.drainTasks(
+      [...this.sessions, ...this.drainingSessions].flatMap((session) => session.activeTasks())
+    ).catch(() => {})
+    this.sessions.clear()
+    this.drainingSessions.clear()
+    this.archiveFences.clear()
+    this.state?.streams.close()
+    this.state?.blobs.close()
+    this.state?.db.close()
+    this.state = undefined
+    this.domain = undefined
+    this.domainClosing = undefined
+    this.domainClosed = false
+    this.tunnels = undefined
+    this.presenceStore = undefined
+    this.config = defaults()
+    this.lastError = undefined
+    // Mousse ID's session was bound to the closed runtime; it starts again from the next one.
+    this.hosted?.identityReset()
   }
   /** Invites that a phone redeems over a relay rendezvous; the only route a phone can dial. */
   private async issueRendezvousInvite(
@@ -2817,12 +2944,18 @@ export class NetService {
         enabled: this.config.enabled,
         features: { ...this.config.features! },
         workOnThreads: this.config.workOnThreads !== false,
+        shareBots: this.config.shareBots !== false,
         editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.protectedAtRest(),
         ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
-        ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}),
+        ...(self
+          ? {
+              self: rt.identity.selfRemoved() ? { ...self, removed: true as const } : self,
+              rosterState: rt.identity.rosterState(self.user)
+            }
+          : {}),
         routes: this.transport?.routes() ?? [],
         transports: this.transport?.statuses() ?? [],
         peers: [...peers.values()],
@@ -2850,6 +2983,15 @@ export class NetService {
     ) {
       throw new NetError('disabled')
     }
+  }
+  /** "Share bots with other devices" (on unless this computer turned it off). */
+  sharesBots(): boolean {
+    return this.config.shareBots !== false
+  }
+  /** Called when "Share bots with other devices" turns on or off. */
+  onShareBotsChanged(listener: () => void): () => void {
+    this.shareBotsListeners.add(listener)
+    return () => this.shareBotsListeners.delete(listener)
   }
   featureEnabled(feature: keyof NetFeatureFlags): boolean {
     return (

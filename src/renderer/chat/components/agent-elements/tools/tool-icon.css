@@ -12,7 +12,7 @@
 }
 
 .an-tool-icon[data-state='running'] {
-  animation: an-tool-icon-pulse calc(1.6s * var(--ui-motion-scale, 1)) ease-in-out infinite;
+  animation: an-tool-icon-pulse calc(1.6s * var(--ui-motion-scale, 1)) steps(12, jump-none) infinite;
   will-change: opacity;
 }
 

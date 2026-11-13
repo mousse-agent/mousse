@@ -59,7 +59,7 @@
 .side-card-action-spin {
   flex-shrink: 0;
   color: var(--text-secondary);
-  animation: side-card-action-spin 0.9s linear infinite;
+  animation: side-card-action-spin 0.9s steps(12) infinite;
 }
 
 .side-card-action-done {

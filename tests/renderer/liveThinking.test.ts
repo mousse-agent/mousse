@@ -288,7 +288,7 @@ describe('the end of a thought', () => {
     expect(ids.at(-1)).toBe('u-real')
   })
 
-  it('a row that lands through the update channel gives the group title the thought\'s full text, in one write', () => {
+  it('a row that lands through the update channel gives the thought\'s row its full text, in one write', () => {
     mount(thread(5, '**Checking the build**\n\nIt fails', [tool('tool-1', 12)]))
     stream(thinking('th', 15, '**Checking the build**\n\nIt fails.\n\n**Running the tests**\n\nNow'))
     expect(hasLiveText('th')).toBe(true)

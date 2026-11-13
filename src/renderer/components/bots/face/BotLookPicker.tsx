@@ -31,6 +31,8 @@ export interface BotLookPickerProps {
   /** The owner's other bots' looks; Shuffle prefers looks none of them wear. */
   existingLooks?: readonly BotLook[]
   className?: string
+  /** The live preview's size; New bot's Look step shows it larger. */
+  previewSize?: number
 }
 
 const PREVIEW_SIZE = 112
@@ -75,7 +77,7 @@ export function lookLabel(look: KnownBotLook): string {
   return `${BOT_COLOUR_LABELS[look.colour]} ${noun}${extras.length > 0 ? ` with ${extras.join(' and ')}` : ''}`
 }
 
-export function BotLookPicker({ look, onChange, existingLooks = [], className }: BotLookPickerProps) {
+export function BotLookPicker({ look, onChange, existingLooks = [], className, previewSize = PREVIEW_SIZE }: BotLookPickerProps) {
   const current = normalizeBotLook(look)
   const id = useId()
   const kind = botKindOf(current)
@@ -83,8 +85,8 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
   const previewLabel = lookLabel(current)
   return (
     <div className={`bot-look-picker${className ? ` ${className}` : ''}`}>
-      <div className="bot-look-picker__preview">
-        <BotFace look={current} state="idle" size={PREVIEW_SIZE} view="full" label={previewLabel} />
+      <div className="bot-look-picker__preview" style={previewSize !== PREVIEW_SIZE ? { width: previewSize } : undefined}>
+        <BotFace look={current} state="idle" size={previewSize} view="full" label={previewLabel} />
         <button type="button" className="btn btn-ghost btn-sm bot-look-picker__shuffle" onClick={() => onChange(shuffleLook(current, existingLooks))}>
           <Shuffle size={14} aria-hidden />
           Shuffle

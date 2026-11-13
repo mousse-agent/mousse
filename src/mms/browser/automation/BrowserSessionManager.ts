@@ -592,7 +592,9 @@ export class BrowserSessionManager {
     } catch (error) {
       const sessionId = typeof params.sessionId === 'string' ? params.sessionId : undefined
       const errorCode = String((error as { code?: unknown })?.code ?? '')
-      const workerDisconnected = !(error instanceof BrowserAutomationError) || errorCode === 'worker_disconnected'
+      // A request its caller stopped (a run that ended, or a call that gave way) says nothing about the worker.
+      const cancelledByCaller = signal?.aborted === true && errorCode === 'cancelled'
+      const workerDisconnected = !cancelledByCaller && (!(error instanceof BrowserAutomationError) || errorCode === 'worker_disconnected')
       if (sessionId && workerDisconnected) {
         const entry = this.sessions.get(sessionId)
         if (entry && entry.record.lifecycle !== 'closed') {
