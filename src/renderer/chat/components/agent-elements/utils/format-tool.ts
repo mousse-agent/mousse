@@ -105,6 +105,15 @@ export function thoughtHeading(content: string | undefined): string {
 }
 
 /**
+ * A finished thought's row: its first paragraph in plain text, whole. The row cuts it at its own width, so a wide
+ * chat shows more of it than a narrow one.
+ */
+export function thoughtLine(content: string | undefined): string {
+  const first = content?.split(/\n\s*\n/).find((block) => block.trim());
+  return first ? liveThoughtText(first) : "";
+}
+
+/**
  * One line for the newest part of a thought. A thought made of titled
  * summaries ("**Title**" lines, as Codex sends them) gives its last title;
  * any other gives the first line of its last paragraph.
@@ -122,10 +131,10 @@ export function latestThoughtHeading(content: string | undefined): string {
 }
 
 /**
- * Characters of a live thought kept for its one line: more than any row shows. The row cuts what does not fit at
- * the start (`an-live-thought`), so the newest words are what shows at any width.
+ * Characters of a live thought kept for its lines: more than four lines of the widest row hold. The box shows its
+ * last lines (`an-live-thought`), so the newest words are what shows at any width.
  */
-const LIVE_THOUGHT_CHARS = 160;
+const LIVE_THOUGHT_CHARS = 640;
 
 /** The newest paragraph of a thought being written, whole, in plain text: the live line's tooltip and what is read out. */
 export function liveThoughtText(content: string | undefined): string {

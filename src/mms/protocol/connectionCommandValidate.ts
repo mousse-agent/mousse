@@ -217,6 +217,7 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
     case 'window.open':
     case 'window.close':
     case 'window.wait':
+    case 'page.resize':
       throw new Error(`${request.method} is not an attached browser method`)
   }
   return { ...request, params }

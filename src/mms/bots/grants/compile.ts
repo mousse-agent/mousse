@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -98,6 +98,8 @@ export interface CompileInput {
     threads?: 'read' | 'all'
     /** `make_image` (#1088): the owner picked a model in Runs on's Images row. Chat and work alike; never a consult. */
     images?: boolean
+    /** `publish_applet` (`BOT_APPLET_TOOL`): a main turn, chat or work, publishes applets; they need no permission. Never a consult. */
+    applets?: boolean
   }
   /**
    * What this computer lets bots do (Settings → What bots may do here): what it has switched off is taken out of the
@@ -230,7 +232,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
     ...(input.botTools?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
     ...(input.botTools?.frontDesk ? BOT_WORK_TOOLS : []),
-    ...(input.botTools?.images ? [BOT_IMAGE_TOOL] : [])
+    ...(input.botTools?.images ? [BOT_IMAGE_TOOL] : []),
+    ...(input.botTools?.applets ? [BOT_APPLET_TOOL] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {

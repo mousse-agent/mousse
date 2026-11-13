@@ -5,7 +5,7 @@ import { Code2, Download, Eye, FileCode, Image as ImageIcon, RotateCcw, ShieldCh
 import { useAppStore } from '../../stores/appStore'
 import './applets.css'
 import { useAppletRuntime } from './useAppletRuntime'
-import { addAppletInputToDraft, exportApplet, requestAppletRepair } from './appletActions'
+import { addAppletInputToDraft, exportApplet, requestAppletRepair, type AppletConversation } from './appletActions'
 import { AppletConversationInput, AppletError } from './AppletCard'
 
 type AppletTab = DocumentTab & { applet: NonNullable<DocumentTab['applet']> }
@@ -35,8 +35,9 @@ function ToolbarButton({ label, pressed, disabled, onClick, children }: {
 /**
  * An applet in the side panel's Documents tab: it fills the panel, with Restart, Source and the exports beside the
  * tabs. `tabs` is the panel's tab strip, drawn in the same toolbar row. Keyed by tab, so each tab starts fresh.
+ * `conversation`: it is opened from outside the thread (a bot's chat), whose composer takes its text.
  */
-export function AppletPanelView({ tab, tabs }: { tab: AppletTab; tabs: ReactNode }) {
+export function AppletPanelView({ tab, tabs, conversation }: { tab: AppletTab; tabs: ReactNode; conversation?: AppletConversation }) {
   const { threadId, reference } = tab.applet
   const currentProfile = useAppStore((s) => s.profileId)
   // A tab from another profile cannot load: its thread belongs to that profile.
@@ -102,7 +103,7 @@ export function AppletPanelView({ tab, tabs }: { tab: AppletTab; tabs: ReactNode
       </div>
       {!available && <p className="mousse-applet-error" role="status">Open this applet from its thread.</p>}
       {available && error && (
-        <AppletError error={error} onRepair={() => requestAppletRepair(profileId, threadId, reference, error)} />
+        <AppletError error={error} onRepair={() => requestAppletRepair(profileId, threadId, reference, error, conversation)} />
       )}
       {sourceOpen ? (
         <div className="mousse-applet-source scrollbar-ultra-thin">
@@ -129,7 +130,7 @@ export function AppletPanelView({ tab, tabs }: { tab: AppletTab; tabs: ReactNode
       {conversationInput && (
         <AppletConversationInput
           text={conversationInput}
-          onAdd={() => { if (addAppletInputToDraft(profileId, threadId, reference, conversationInput)) setConversationInput(null) }}
+          onAdd={() => { if (addAppletInputToDraft(profileId, threadId, reference, conversationInput, conversation)) setConversationInput(null) }}
           onDismiss={() => setConversationInput(null)}
         />
       )}

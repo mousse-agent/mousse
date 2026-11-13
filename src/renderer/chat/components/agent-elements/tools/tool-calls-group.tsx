@@ -1,6 +1,7 @@
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ToolRowBase } from "./tool-row-base";
+import { useToolOpen, useToolOpenOf } from "./tool-open-state";
 import { countRender } from "../render-counts";
 import "./tool-calls-group.css";
 
@@ -14,6 +15,12 @@ export type ToolCallsGroupProps = {
   failed?: number;
   /** True while the turn runs: an open group keeps its newest row in view as rows arrive. */
   live?: boolean;
+  /**
+   * The key its open state is kept under (tool-open-state.ts), so a group the list rebuilds stays as the person left
+   * it, and the ids of its calls: a new group that takes in a row the person opened opens with it.
+   */
+  openKey?: string;
+  rowKeys?: readonly string[];
   children: ReactNode;
 };
 
@@ -28,10 +35,20 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
   title,
   failed = 0,
   live = false,
+  openKey,
+  rowKeys,
   children,
 }: ToolCallsGroupProps) {
   countRender("ToolCallsGroup");
-  const [expanded, setExpanded] = useState(false);
+  const openOf = useToolOpenOf();
+  const [startsOpen] = useState(() => rowKeys?.some((key) => openOf(key) === true) ?? false);
+  const [ownExpanded, setOwnExpanded] = useState(startsOpen);
+  const kept = useToolOpen(openKey, startsOpen);
+  const expanded = kept ? kept[0] : ownExpanded;
+  const setExpanded = (update: (prev: boolean) => boolean) => {
+    if (kept) kept[1](update(kept[0]));
+    else setOwnExpanded(update);
+  };
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether the open box shows its last row: rows that arrive then keep it in view.
   const atEndRef = useRef(true);

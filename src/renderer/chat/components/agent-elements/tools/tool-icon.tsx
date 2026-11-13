@@ -1,13 +1,11 @@
 import { createContext, useContext, type ComponentType, type ReactNode } from "react";
 import {
-  ClipboardList,
-  FilePlus,
-  FileText,
-  FolderSearch,
-  Globe,
-  Pencil,
-  Plug,
-  Search,
+  Eye,
+  RowEdit,
+  RowSearch,
+  RowSubagent,
+  RowTodo,
+  RowWeb,
   Terminal,
   Wrench,
 } from "../../../../lib/icons";
@@ -15,11 +13,12 @@ import { parseMcpToolType, toolRegistry } from "./tool-registry";
 import "./tool-icon.css";
 
 /**
- * What a tool row knows about its call beyond its own part: when it started (`at`, for the time on hover) and whether
- * the agent got past its failure (`recovered`). The tool renderer provides it per call; a row's panel resets it, so a
- * row nested inside another reads its own.
+ * What a tool row knows about its call beyond its own part: when it started (`at`, for the time on hover), whether
+ * the agent got past its failure (`recovered`), and the key its open state is kept under (`openKey`, the call's id:
+ * tool-open-state.ts). The tool renderer provides it per call; a row's panel resets it, so a row nested inside another
+ * reads its own.
  */
-export type ToolRowInfo = { at?: string | number | Date; recovered?: boolean };
+export type ToolRowInfo = { at?: string | number | Date; recovered?: boolean; openKey?: string };
 export const ToolRowContext = createContext<ToolRowInfo>({});
 export const NO_ROW_INFO: ToolRowInfo = {};
 export const useToolRowInfo = () => useContext(ToolRowContext);
@@ -33,17 +32,20 @@ export type ToolIconState = "running" | "done" | "failed";
 const TOOL_ICONS: Record<string, IconType> = {
   "tool-Bash": Terminal,
   "tool-BashOutput": Terminal,
-  "tool-Read": FileText,
-  "tool-Edit": Pencil,
-  "tool-MultiEdit": Pencil,
-  "tool-NotebookEdit": Pencil,
-  "tool-Write": FilePlus,
-  "tool-Grep": Search,
-  "tool-Glob": FolderSearch,
-  "tool-WebFetch": Globe,
-  "tool-WebSearch": Globe,
-  "tool-TodoWrite": ClipboardList,
-  "tool-ToolSearch": Plug,
+  "tool-Read": Eye,
+  "tool-Edit": RowEdit,
+  "tool-MultiEdit": RowEdit,
+  "tool-NotebookEdit": RowEdit,
+  "tool-Write": RowEdit,
+  "tool-Grep": RowSearch,
+  "tool-Glob": RowSearch,
+  "tool-WebFetch": RowWeb,
+  "tool-WebSearch": RowWeb,
+  "tool-TodoWrite": RowTodo,
+  "tool-ToolSearch": Wrench,
+  "tool-Task": RowSubagent,
+  "tool-Agent": RowSubagent,
+  "tool-Subagent": RowSubagent,
 };
 
 /** The icon for a tool part's type (`tool-Bash`, `tool-mcp__server__name`). */
@@ -51,7 +53,7 @@ export function toolIconFor(type: string | undefined): IconType {
   if (!type) return Wrench;
   const own = TOOL_ICONS[type];
   if (own) return own;
-  if (parseMcpToolType(type)) return Plug;
+  if (parseMcpToolType(type)) return Wrench;
   return toolRegistry[type]?.icon ?? Wrench;
 }
 

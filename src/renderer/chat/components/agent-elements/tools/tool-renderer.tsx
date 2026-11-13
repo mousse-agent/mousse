@@ -69,7 +69,11 @@ function AgentTool({ part, nestedTools, chatStatus }: { part: any; nestedTools?:
 /** A call's row, with what the row shows beyond its part: its start time and whether the agent got past its failure. */
 export const ToolRenderer = memo(function ToolRenderer(props: ToolRendererProps) {
   const { createdAt, failureRecovered } = props.part as { createdAt?: string; failureRecovered?: boolean };
-  const info = useMemo(() => ({ at: createdAt, recovered: failureRecovered === true }), [createdAt, failureRecovered]);
+  const toolCallId = (props.part as { toolCallId?: string }).toolCallId;
+  const info = useMemo(
+    () => ({ at: createdAt, recovered: failureRecovered === true, openKey: toolCallId }),
+    [createdAt, failureRecovered, toolCallId],
+  );
   return (
     <ToolRowContext.Provider value={info}>
       <ToolRendererBody {...props} />

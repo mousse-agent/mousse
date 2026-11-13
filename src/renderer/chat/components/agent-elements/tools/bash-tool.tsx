@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import { useRowOpenState } from "./tool-open-state";
 import { commandLabel } from "../../../../../shared/agentActivity";
 import { IconTerminal2 } from "../../../../lib/icons";
 import type { TimelineStep, StepState } from "../types/timeline";
@@ -58,7 +59,7 @@ export function BashToolRow({
   isError = false,
 }: BashToolRowProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useRowOpenState(false);
   const isPending = state === "animating";
   const isInterrupted = step.bashInterrupted === true;
   const command = step.bashCommand ?? step.toolDetail;

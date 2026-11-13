@@ -1,20 +1,17 @@
-/* The chat's thinking icon (ThinkingIcon in lib/icons.tsx). While the model thinks (`.is-thinking`) the icon
-   turns: 2s a turn at Normal speed, scaled by Settings > Animation speed (`--ui-motion-scale`). The whole icon
-   turns, not its orbit group: the centre is a circle at the middle, so it looks the same, and a transform on the
-   icon's own box, on its own layer, is drawn by the compositor (one inside the SVG would lay the SVG out on every
-   frame). It turns smoothly at the display's rate: a stepped turn (24 steps, about 12 a second) read as a laggy
-   spin. A small icon's layer costs the compositor next to nothing per frame, and the main thread does no work for
-   it, so streamed text does not slow it. It has no colour animation, which would paint every frame. With motion off
-   (that setting or the OS reduced-motion setting), and once the thought is done, the icon is still. */
+/* The chat's thinking icon (ThinkingIcon in lib/icons.tsx, a brain). While the model thinks (`.is-thinking`) it
+   pulses gently, like a running tool's icon (tool-icon.css): opacity only, in steps (about 15 a second, see
+   agent-ui.css), scaled by Settings > Animation speed (`--ui-motion-scale`). It has no colour animation, which would
+   paint every frame. With motion off (that setting or the OS reduced-motion setting), and once the thought is done,
+   the icon is still. */
 
 .thinking-icon.is-thinking {
-  animation: thinking-icon-turn calc(2s * var(--ui-motion-scale, 1)) linear infinite;
-  transform-origin: 50% 50%;
-  will-change: transform;
+  animation: thinking-icon-pulse calc(1.6s * var(--ui-motion-scale, 1)) steps(12, jump-none) infinite;
+  will-change: opacity;
 }
 
-@keyframes thinking-icon-turn {
-  to { transform: rotate(360deg); }
+@keyframes thinking-icon-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 [data-motion='off'] .thinking-icon.is-thinking {

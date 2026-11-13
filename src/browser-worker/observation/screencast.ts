@@ -84,6 +84,8 @@ export interface ViewerPicture {
   sharp: boolean
   /** The document and scroll it shows: a person's input on it is checked against the page as it is then. */
   spot?: BrowserPictureSpot
+  /** The page's size it shows, in CSS pixels. */
+  viewport?: { width: number; height: number }
 }
 
 /** What a watcher's long-poll answers: the tab's state, and its latest picture when the watcher has not had it. */
@@ -137,6 +139,11 @@ export interface ViewerCapturesOptions {
    * holds the browser (undefined otherwise, or when the page does not answer soon).
    */
   hits?(cdpSessionId: string): Promise<BrowserPictureHits | undefined>
+  /**
+   * The size the session lays its pages out at, its pixel ratio, and how many times it was resized:
+   * each picture is marked with that count, or -1 when it shows a size the page had already left.
+   */
+  page?(): { width: number; height: number; scale: number; seq: number }
   now?: () => number
   settleMs?: number
   leaseMs?: number
@@ -205,6 +212,13 @@ interface TabCapture {
   chooser?: BrowserFileChooser
   /** Where the page was scrolled when last read (a screencast picture does not say). */
   scroll: { x: number; y: number }
+  /** The resize count `latest` was taken at (`ViewerCapturesOptions.page`), -1 when it may show a size the page had left. */
+  latestSize: number
+  /**
+   * The page was resized and no still has been taken since: a screencast picture may have been painted
+   * before the resize, so it is shown and places nothing until a still (always the page as it is) is taken.
+   */
+  resizedUnseen?: boolean
   /** What was on top at a grid of points when last read, while a person holds the browser. */
   hits?: BrowserPictureHits
   /** The latest picture's scroll and grid are being read (the read under way): it is handed to no watcher before they are. */
@@ -323,7 +337,7 @@ export class ViewerCaptures {
     await this.start(capture)
     this.refreshBehind(capture)
     if (capture.latest) this.handed(capture)
-    return { ...(capture.latest ? { picture: capture.latest } : {}), viewport: capture.viewport }
+    return { ...(capture.latest ? { picture: capture.latest } : {}), viewport: capture.latest?.viewport ?? capture.viewport }
   }
 
   /** A picture the caller took of a watched tab: the latest until the page paints again. */
@@ -331,6 +345,7 @@ export class ViewerCaptures {
     const capture = this.captures.get(cdpSessionId)
     if (!capture) return
     capture.latest = picture
+    capture.latestSize = picture.spot?.sizeSeq ?? capture.latestSize
     capture.shownCast = undefined
     capture.frameSeq = this.bump()
     this.pump(capture)
@@ -380,6 +395,20 @@ export class ViewerCaptures {
     const capture = this.captures.get(cdpSessionId)
     if (!capture) return
     void this.readViewport(capture).then((changed) => { if (changed) this.pump(capture) })
+  }
+
+  /**
+   * The session laid its pages out at a new size: each watched tab's next picture shows it. A fresh
+   * still follows soon in case the page paints nothing by itself; pictures from before it place nothing.
+   */
+  pageResized(): void {
+    for (const capture of this.captures.values()) {
+      this.forgetRecent(capture)
+      capture.settleMs = this.settleMs
+      capture.resizedUnseen = true
+      if (capture.latest) capture.latest = { ...capture.latest, sharp: false }
+      void this.readViewport(capture).then(() => this.armSettle(capture, 0))
+    }
   }
 
   /** The agent cursor moved in a tab: its watchers hear of it at once (it is drawn over the picture). */
@@ -484,7 +513,7 @@ export class ViewerCaptures {
         capture = {
           info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, recent: [], frameSeq: 0, stateSeq: this.bump(),
           handedSeq: 0, quietSeq: -1, held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false,
-          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set(), scroll: { x: 0, y: 0 }
+          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set(), scroll: { x: 0, y: 0 }, latestSize: 0
         }
         const problem = this.options.problem?.(info.cdpSessionId)
         if (problem) capture.problem = problem
@@ -684,8 +713,13 @@ export class ViewerCaptures {
         : Math.max(this.settleMs, capture.settleMs / 2)
       capture.stillAt = undefined
     }
-    const scale = Math.min(1, capture.width / capture.viewport.width, SCREENCAST_MAX_HEIGHT / capture.viewport.height)
-    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false, ...this.spot(capture) }
+    const page = this.options.page?.()
+    // Just after a resize, one may have been painted before it: it is shown, and places nothing.
+    capture.latestSize = page ? (capture.resizedUnseen ? -1 : page.seq) : 0
+    const { width, height } = capture.viewport
+    const ratio = page?.scale ?? 1
+    const scale = Math.min(1, capture.width / (width * ratio), SCREENCAST_MAX_HEIGHT / (height * ratio)) * ratio
+    capture.latest = { data, width: Math.round(width * scale), height: Math.round(height * scale), viewport: { width, height }, at: now, sharp: false, ...this.spot(capture) }
     capture.shownCast = data
     capture.frameSeq = this.bump()
     capture.echoPending = undefined
@@ -807,12 +841,15 @@ export class ViewerCaptures {
     if (!capture.width) return
     const before = capture.frameSeq
     const over = capture.lastCast
+    const sizedAt = this.options.page?.()
     try {
       const metrics = await this.cdp.send<LayoutMetrics>('Page.getLayoutMetrics', {}, { sessionId, timeoutMs: 5_000 })
       const viewportChanged = this.applyViewport(capture, metrics)
       const visual = metrics.cssVisualViewport ?? {}
       const { width, height } = capture.viewport
-      let scale = Math.min(1, capture.width / width, SCREENCAST_MAX_HEIGHT / height)
+      // The clip's scale is of CSS pixels: the page's pixel ratio multiplies it.
+      const ratio = sizedAt?.scale ?? 1
+      let scale = Math.min(1, capture.width / (width * ratio), SCREENCAST_MAX_HEIGHT / (height * ratio))
       let shot: { data: string; params: Record<string, unknown> } | undefined
       // Full quality, then lower, then half the size: the first that fits.
       for (const [quality, shrink] of [[STILL_QUALITY, 1], [CAST_QUALITY, 1], [40, 1], [40, 0.5]] as const) {
@@ -834,7 +871,11 @@ export class ViewerCaptures {
         return
       }
       capture.scroll = { x: visual.pageX ?? 0, y: visual.pageY ?? 0 }
-      capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true, ...this.spot(capture) }
+      // Resized while it was taken: it may show either size, so it places nothing. Otherwise it is the page as it is.
+      const kept = !sizedAt || this.options.page?.().seq === sizedAt.seq
+      capture.latestSize = sizedAt ? (kept ? sizedAt.seq : -1) : 0
+      if (kept) capture.resizedUnseen = false
+      capture.latest = { data: shot.data, width: Math.round(width * scale * ratio), height: Math.round(height * scale * ratio), viewport: { width, height }, at: this.now(), sharp: true, ...this.spot(capture) }
       capture.lastStill = shot
       capture.shownCast = over
       capture.stillAt = capture.behind ? undefined : this.now()
@@ -877,6 +918,7 @@ export class ViewerCaptures {
       await Promise.all([this.readScroll(capture), this.readHits(capture)])
       if (capture.frameSeq !== before || this.captures.get(capture.info.cdpSessionId) !== capture) return
       const { spot: _stillSpot, ...rest } = capture.latest
+      if (capture.latestSize !== (this.options.page?.().seq ?? 0)) capture.latestSize = -1
       capture.latest = { ...rest, data, at: this.now(), ...this.spot(capture) }
       capture.lastStill = { data, params: still.params }
       capture.shownCast = capture.lastCast
@@ -891,7 +933,7 @@ export class ViewerCaptures {
   /** The document a picture of the tab shows now, and where its page was scrolled (as last read). */
   private spot(capture: TabCapture): { spot?: BrowserPictureSpot } {
     const documentId = this.options.document?.(capture.info.cdpSessionId)
-    return documentId ? { spot: { documentId, scrollX: capture.scroll.x, scrollY: capture.scroll.y, ...(capture.hits ? { hits: capture.hits } : {}) } } : {}
+    return documentId ? { spot: { documentId, scrollX: capture.scroll.x, scrollY: capture.scroll.y, ...(capture.hits ? { hits: capture.hits } : {}), ...(this.options.page ? { sizeSeq: capture.latestSize } : {}) } } : {}
   }
 
   private async readViewport(capture: TabCapture): Promise<boolean> {
@@ -937,7 +979,8 @@ export class ViewerCaptures {
       url: capture.info.url,
       title: capture.info.title,
       ...(capture.info.page ? { page: capture.info.page } : {}),
-      viewport: { ...capture.viewport },
+      // The size the latest picture shows: a picture is never labelled with a size it does not show.
+      viewport: { ...(capture.latest?.viewport ?? capture.viewport) },
       behind: capture.behind,
       loading: capture.loading,
       ...(capture.problem ? { problem: capture.problem } : {}),

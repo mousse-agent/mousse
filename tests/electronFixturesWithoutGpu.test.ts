@@ -11,6 +11,7 @@ const ENTRY_POINTS = [
   'tests/fixtures/agent-platform/main-browser-e2e/electron-main.ts',
   'tests/fixtures/agent-platform/main-browser-e2e/launch.mjs',
   'tests/fixtures/agent-platform/scheduled-browser-e2e/electron-gui.ts',
+  'tests/fixtures/applet-height/main.ts',
   'tests/fixtures/browser-host-probe/main.ts',
   'tests/fixtures/chat-undo-full-shell-driver.mjs',
   'tests/fixtures/code-block-copy/main.ts',
@@ -43,6 +44,7 @@ const PRELOAD_SCRIPTS = ['tests/fixtures/agent-platform/editor-cross-feature/pre
  * of string literals is checked against ENTRY_POINTS instead and needs no entry here.
  */
 const COMPUTED_LAUNCHES: Record<string, { starts: string; how: string }> = {
+  'tests/applet-height-electron.test.ts:22': { starts: 'tests/fixtures/applet-height/main.ts', how: 'esbuild bundle of tests/fixtures/applet-height/main.ts (line 19) in a temporary folder' },
   'tests/chatUndoFullShell.test.ts:30': { starts: 'tests/fixtures/chat-undo-full-shell-driver.mjs', how: 'fullShellElectronArgs(resolve(the driver)) adds only display flags' },
   'tests/errorElectronBridge.test.ts:44': { starts: 'tests/fixtures/repository-upgrades/electron-error-bridge.ts', how: 'esbuild bundle of tests/fixtures/repository-upgrades/electron-error-bridge.ts (line 36) in a temporary folder' },
   'tests/gitFoundationFullShell.test.ts:29': { starts: 'tests/fixtures/git-foundation-full-shell-driver.mjs', how: 'fullShellElectronArgs(resolve(the driver)) adds only display flags' },

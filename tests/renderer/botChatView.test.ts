@@ -21,9 +21,10 @@ vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ Composer
 // The composer's microphone pulls in audio worklets jsdom does not have; these tests never record.
 vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 const markdown = vi.hoisted(() => ({ renders: 0 }))
-vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
+// The bot chat draws its messages with the thread's Markdown: each draw is counted.
+vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (importOriginal) => {
   const { createElement: h } = await import('react')
-  return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => { markdown.renders++; return h('div', { className }, value) } }
+  return { ...(await importOriginal<object>()), Markdown: ({ content, className }: { content: string; className?: string }) => { markdown.renders++; return h('div', { className }, content) } }
 })
 
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')

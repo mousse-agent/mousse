@@ -13,7 +13,8 @@ export async function captureViewportScreenshot(
   cdpSessionId: string,
   viewport: BrowserViewport,
   clip?: { x: number; y: number; width: number; height: number },
-  options: { fromSurface?: boolean; timeoutMs?: number } = {}
+  /** `scale`: of the CSS pixels (1/ratio on a page laid out at a pixel ratio above 1, for a picture at its CSS size). */
+  options: { fromSurface?: boolean; timeoutMs?: number; scale?: number } = {}
 ): Promise<ScreenshotCapture> {
   const region = clip ?? { x: 0, y: 0, width: viewport.cssWidth, height: viewport.cssHeight }
   if (![region.x, region.y, region.width, region.height].every((value) => Number.isFinite(value)) || region.width < 1 || region.height < 1) {
@@ -26,7 +27,7 @@ export async function captureViewportScreenshot(
     format: 'png',
     fromSurface: options.fromSurface !== false,
     captureBeyondViewport: false,
-    clip: { x: region.x, y: region.y, width: region.width, height: region.height, scale: 1 }
+    clip: { x: region.x, y: region.y, width: region.width, height: region.height, scale: options.scale ?? 1 }
   }, { sessionId: cdpSessionId, timeoutMs: options.timeoutMs ?? 15_000 })
   const bytes = Buffer.from(result.data, 'base64')
   const { width, height } = pngDimensions(bytes)

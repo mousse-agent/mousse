@@ -2,6 +2,7 @@ import type {
   WatchedBrowserAck,
   WatchedBrowserHold,
   WatchedBrowserHoldRequest,
+  WatchedBrowserPageSize,
   WatchedBrowserSent,
   WatchedBrowserUpdate,
   WatchedBrowserView
@@ -66,7 +67,7 @@ export interface BrowserViewApi {
    * capped). Renew it every `WATCHED_BROWSER_RENEW_MS`; it ends with `unwatch`, the connection, or a
    * missed renewal. Answers the state and the last picture.
    */
-  'browser.view.watch': { params: { threadId: string; watchId: string; width: number; fps: number; viewId?: string }; result: { browser: ThreadBrowserView } }
+  'browser.view.watch': { params: { threadId: string; watchId: string; width: number; fps: number; viewId?: string; page?: WatchedBrowserPageSize }; result: { browser: ThreadBrowserView } }
   'browser.view.unwatch': { params: { threadId: string; watchId: string }; result: { ok: true } }
   /**
    * A view's hold of the browser: `take` hands it to that view (the agents' actions are refused until it

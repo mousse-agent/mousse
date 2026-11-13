@@ -20,6 +20,7 @@ import { modelLabel } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
 import { UserMessage } from "./user-message";
+import { CopyButton } from "./copy-button";
 import { AfterTurnsLayoutProvider, type AfterTurnsLayout } from "./after-turns";
 import { ImageGalleryProvider } from "./image-gallery";
 import { collectThreadImages } from "./image-sources";
@@ -31,12 +32,13 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconInfoCircle, IconX, RowTools, Square } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
   formatTokensPerSecond,
 } from "../../../utils/assistantMessageActions";
+import { createToolOpenStore, ToolOpenContext } from "./tools/tool-open-state";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
 import { TurnProgressRow, useTurnProgressState } from "./turn-progress";
@@ -504,66 +506,6 @@ function ForkFromTurnButton({ turnId }: { turnId: string }) {
     >
       <GitFork className="w-3.5 h-3.5 text-an-foreground-muted" />
     </button>
-  );
-}
-
-function CopyButton({
-  text,
-  onCopied,
-}: {
-  text: string;
-  onCopied?: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const copiedTimerRef = useRef<number | null>(null);
-
-  const handleCopy = () => {
-    void navigator.clipboard.writeText(text);
-    setCopied(true);
-    if (copiedTimerRef.current) {
-      window.clearTimeout(copiedTimerRef.current);
-    }
-    copiedTimerRef.current = window.setTimeout(() => {
-      setCopied(false);
-      copiedTimerRef.current = null;
-    }, 2000);
-    onCopied?.();
-  };
-  return (
-    <>
-      <button
-        type="button"
-        onClick={handleCopy}
-        onPointerDown={(event) => {
-          event.stopPropagation();
-        }}
-        onMouseDown={(event) => event.stopPropagation()}
-        title="Copy"
-        aria-label="Copy"
-        className={cn(
-          "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
-          "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10",
-        )}
-      >
-        <div className="relative w-3.5 h-3.5">
-          <IconCopy
-            className={cn(
-              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-              copied ? "opacity-0 scale-50" : "opacity-100 scale-100",
-            )}
-          />
-          <IconCheck
-            className={cn(
-              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-              copied ? "opacity-100 scale-100" : "opacity-0 scale-50",
-            )}
-          />
-        </div>
-      </button>
-      <span className="sr-only" role="status" aria-live="polite">
-        {copied ? "Copied" : ""}
-      </span>
-    </>
   );
 }
 
@@ -1402,6 +1344,8 @@ export const MessageList = memo(function MessageList({
   toolRenderers,
 }: MessageListProps) {
   countRender("MessageList");
+  // The rows and groups the person opened, kept for the list's life (tools/tool-open-state.ts).
+  const [toolOpenStore] = useState(createToolOpenStore);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
@@ -1823,7 +1767,11 @@ export const MessageList = memo(function MessageList({
     if (!turnId) return;
     if (replyActive) {
       const clock = workClockRef.current;
-      if (clock?.turnId !== turnId) {
+      if (clock && clock.turnId !== turnId && clock.endedAt == null) {
+        // The same reply, still running, under a new prompt id: the service's saved copy of the prompt took the place of
+        // the one shown on send (a later time, another id), or a steer joined the reply. Its time keeps its start.
+        clock.turnId = turnId;
+      } else if (clock?.turnId !== turnId) {
         const user = normalizedMessages.find((message) => message.id === turnId);
         workClockRef.current = {
           turnId,
@@ -2075,10 +2023,12 @@ export const MessageList = memo(function MessageList({
   }, [dispatchFollow]);
 
   const showJumpButton = !isPinned && normalizedMessages.length > 0;
-  // When the reply in progress started, as the work clock saw it (the clock is set in an effect).
+  // When the reply in progress started, as the work clock saw it (the clock is set in an effect). A clock still running
+  // is the reply's even before the effect moves it to a new prompt id (see above), so the time never jumps back.
+  const workClock = workClockRef.current;
   const liveStartedAt =
-    lastUserMessageId != null && workClockRef.current?.turnId === lastUserMessageId
-      ? workClockRef.current.startedAt
+    lastUserMessageId != null && workClock && (workClock.turnId === lastUserMessageId || (workClock.endedAt == null && replyActive))
+      ? workClock.startedAt
       : null;
   // Tick position and active-turn state live in PromptMarkersOverlay so
   // scrolling never re-renders the conversation to update the rail.
@@ -2089,6 +2039,7 @@ export const MessageList = memo(function MessageList({
     collectThreadImages(normalizedMessages.filter((message) => !isResultNotice(message)), safeMarkdownUrl);
 
   return (
+    <ToolOpenContext.Provider value={toolOpenStore}>
     <ImageGalleryProvider images={threadImages}>
     <div
       className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col"
@@ -2214,6 +2165,7 @@ export const MessageList = memo(function MessageList({
     )}
     </div>
     </ImageGalleryProvider>
+    </ToolOpenContext.Provider>
   );
 });
 
@@ -2616,6 +2568,8 @@ const TurnRow = memo(function TurnRow({
             const group = grouped.length === 0 ? null : single ? renderTool(single.part, single.nestedTools, itemKey(single, 0)) : (
               <ToolCallsGroup
                 key={`${firstId}-toolcalls`}
+                openKey={`${firstId}-toolcalls`}
+                rowKeys={grouped.map((item, k) => itemKey(item, k))}
                 count={grouped.length}
                 icon={
                   iconType === "tool-Thinking" ? (
@@ -2623,7 +2577,7 @@ const TurnRow = memo(function TurnRow({
                   ) : iconType ? (
                     <ToolIcon type={iconType} state="done" />
                   ) : (
-                    <Wrench size={18} />
+                    <RowTools size={18} />
                   )
                 }
                 title={workGroupTitle(grouped)}
@@ -2636,12 +2590,14 @@ const TurnRow = memo(function TurnRow({
             );
             return {
               fold: { kind: "tools", keep: unrecovered > 0 },
-              node: liveThought ? (
+              // One wrapper whether or not a thought is being written beside the calls, so the group is not rebuilt
+              // when one starts or ends.
+              node: (
                 <Fragment key={`${firstId}-toolcalls-live`}>
                   {group}
-                  {renderTool(liveThought.part, liveThought.nestedTools, itemKey(liveThought, items.length - 1))}
+                  {liveThought && renderTool(liveThought.part, liveThought.nestedTools, itemKey(liveThought, items.length - 1))}
                 </Fragment>
-              ) : group,
+              ),
             };
           });
           // A finished turn folds its work behind its "Worked for" line; the line opens it in place.

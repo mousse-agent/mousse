@@ -2,7 +2,8 @@ import React, { memo, Suspense, useContext } from "react";
 import type { FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
-import { File, FilePlus, GitCompare, IconChevronRight, Pencil } from "../../../../lib/icons";
+import { File, GitCompare, IconChevronRight, RowEdit } from "../../../../lib/icons";
+import { useRowOpenState } from "./tool-open-state";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
@@ -358,7 +359,7 @@ function EditLine({
 
 /** Open, collapsed by default; a failure opens it once, when it happens. */
 function useRowOpen(failed: boolean): [boolean, () => void] {
-  const [open, setOpen] = React.useState(failed);
+  const [open, setOpen] = useRowOpenState(failed);
   const wasFailed = React.useRef(failed);
   React.useEffect(() => {
     if (failed && !wasFailed.current) setOpen(true);
@@ -367,9 +368,6 @@ function useRowOpen(failed: boolean): [boolean, () => void] {
   return [open, () => setOpen((prev) => !prev)];
 }
 
-function fileIcon(verb: FileVerb): React.ReactNode {
-  return verb === "create" ? <FilePlus size={18} /> : <Pencil size={18} />;
-}
 
 /** One file's row: "Edited <name> +N −M", opening to its diff, with Changes and Files actions on hover. */
 function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) {
@@ -405,7 +403,7 @@ function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) 
   const label = rowLabel(file.verb, rowStatus);
   return (
     <EditLine
-      icon={fileIcon(file.verb)}
+      icon={<RowEdit size={18} />}
       label={label}
       name={name}
       title={path}
@@ -445,7 +443,7 @@ function EditFilesGroup({ files, status }: { files: EditedFile[]; status: RowSta
   const count = `${files.length} files`;
   return (
     <EditLine
-      icon={fileIcon(verb)}
+      icon={<RowEdit size={18} />}
       label={label}
       name={count}
       isFileName={false}

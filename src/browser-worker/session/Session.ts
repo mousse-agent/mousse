@@ -46,6 +46,7 @@ import { CdpDisconnectedError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep, workerWarning } from '../util'
 import { BrowserWorkerError, isBrowserWorkerError } from '../errors'
 import { browserWindowDisplay, type BrowserWindowDisplay, type BrowserWindowEnd, type BrowserWindowState } from '../../shared/browser/window'
+import { WATCHED_BROWSER_PAGE, sameWatchedBrowserPageSize, watchedBrowserPageSize, type WatchedBrowserPageSize } from '../../shared/browser/watched'
 
 export interface SessionConfig {
   profileId: string
@@ -184,7 +185,7 @@ export class ManagedSession {
   private readonly ops = new Set<Promise<unknown>>()
   private readonly frameEnables = new Map<string, Promise<void>>()
   private userDataDir = ''
-  private observations = new Map<string, { tabId: string; generation: number; documentId: string; viewport: BrowserObservation['viewport']; screenshot?: BrowserObservation['screenshot'] }>()
+  private observations = new Map<string, { tabId: string; generation: number; documentId: string; viewport: BrowserObservation['viewport']; sizeSeq: number; screenshot?: BrowserObservation['screenshot'] }>()
   private lastActionFingerprint = ''
   private repeatedActionCount = 0
   private downloadDir = ''
@@ -202,6 +203,13 @@ export class ManagedSession {
   private frontHistory: string[] = []
   /** The pictures of the tabs people watch (`frame.next`, `frame`), created on the first one asked for. */
   private viewers: ViewerCaptures | null = null
+  /**
+   * The size every tab's page is laid out at, in CSS pixels, and its pixel ratio: the default, or a
+   * person's large view of it (`page.resize`), as a window would be resized. New tabs take it too.
+   */
+  private page: WatchedBrowserPageSize = { ...WATCHED_BROWSER_PAGE.default }
+  /** Counts the page's resizes: a picture or a screenshot from before the last one places nothing. */
+  private sizeSeq = 0
   /** Each tab's title as its page last set it, by target id, for people watching. */
   private readonly viewerTitles = new Map<string, string>()
   /** Tabs whose page is still loading (its main frame started and has not stopped), by CDP session. */
@@ -1090,8 +1098,8 @@ export class ManagedSession {
     const includeScreenshot = optionalBoolean(params.includeScreenshot) === true
     if (typeof params.deviceScaleFactor === 'number' && params.deviceScaleFactor > 0) {
       await this.requireChrome().cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: 1280,
-        height: 720,
+        width: this.page.width,
+        height: this.page.height,
         deviceScaleFactor: params.deviceScaleFactor,
         mobile: false
       }, { sessionId: tab.cdpSessionId })
@@ -1158,11 +1166,12 @@ export class ManagedSession {
     let screenshot: BrowserObservation['screenshot']
     if (includeScreenshot) {
       const clip = params.clip && typeof params.clip === 'object' ? params.clip as { x: number; y: number; width: number; height: number } : undefined
-      const captured = await captureViewportScreenshot(this.requireChrome().cdp, tab.cdpSessionId, collected.viewport, clip)
+      // At the page's CSS size whatever its pixel ratio (a person's view may raise it): the model sees what it saw before.
+      const captured = await captureViewportScreenshot(this.requireChrome().cdp, tab.cdpSessionId, collected.viewport, clip, this.page.scale !== 1 ? { scale: 1 / this.page.scale } : {})
       const written = this.artifacts.write(this.profileId, this.id, captured.bytes, 'image/png', 'png')
       screenshot = { artifactId: written.artifactId, ...captured.screenshot }
     }
-    this.observations.set(observationId, { tabId: tab.publicId, generation: this.generation, documentId: collected.documentId, viewport: collected.viewport, ...(screenshot ? { screenshot } : {}) })
+    this.observations.set(observationId, { tabId: tab.publicId, generation: this.generation, documentId: collected.documentId, viewport: collected.viewport, sizeSeq: this.sizeSeq, ...(screenshot ? { screenshot } : {}) })
     this.touch()
     return {
       sessionId: this.id,
@@ -1494,6 +1503,7 @@ export class ManagedSession {
         return chooser ? { multiple: chooser.mode === 'selectMultiple', ...(chooser.site ? { site: chooser.site } : {}) } : undefined
       },
       hits: (cdpSessionId) => this.readHits(cdpSessionId),
+      page: () => ({ width: this.page.width, height: this.page.height, scale: this.page.scale, seq: this.sizeSeq }),
       now: () => this.clock().getTime()
     })
     return this.viewers
@@ -1568,16 +1578,19 @@ export class ManagedSession {
     const cursor = this.liveCursor(tab)
     const picture = { tabId: tab.publicId, url: tab.url, title: this.viewerTab(tab).title, mimeType: 'image/jpeg' as const, viewport, ...(cursor ? { cursor } : {}) }
     if (painted) return { ...picture, data: painted.data, width: painted.width, height: painted.height, capturedAt: new Date(painted.at).toISOString(), ...(painted.spot ? { spot: painted.spot } : {}) }
+    const sizedAt = this.sizeSeq
     const metrics = await cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
-    const scale = Math.min(1, maxWidth / viewport.width, SCREENCAST_MAX_HEIGHT / viewport.height)
+    // The clip's scale is of CSS pixels: the page's pixel ratio multiplies it.
+    const ratio = this.page.scale
+    const scale = Math.min(1, maxWidth / (viewport.width * ratio), SCREENCAST_MAX_HEIGHT / (viewport.height * ratio))
     // The clip is in page coordinates: the visible viewport starts at the scroll offset.
     const shot = await cdp.send<{ data: string }>('Page.captureScreenshot', {
       format: 'jpeg', quality: 60, fromSurface: true, captureBeyondViewport: false,
       clip: { x: metrics.cssVisualViewport?.pageX ?? 0, y: metrics.cssVisualViewport?.pageY ?? 0, width: viewport.width, height: viewport.height, scale }
     }, { sessionId: tab.cdpSessionId, timeoutMs: 10_000 })
     const hits = await this.readHits(tab.cdpSessionId)
-    const spot = { documentId: tab.page, scrollX: metrics.cssVisualViewport?.pageX ?? 0, scrollY: metrics.cssVisualViewport?.pageY ?? 0, ...(hits ? { hits } : {}) }
-    const taken = { data: shot.data, width: Math.round(viewport.width * scale), height: Math.round(viewport.height * scale), at: this.clock().getTime(), sharp: false, spot }
+    const spot = { documentId: tab.page, scrollX: metrics.cssVisualViewport?.pageX ?? 0, scrollY: metrics.cssVisualViewport?.pageY ?? 0, ...(hits ? { hits } : {}), sizeSeq: sizedAt === this.sizeSeq ? sizedAt : -1 }
+    const taken = { data: shot.data, width: Math.round(viewport.width * scale), height: Math.round(viewport.height * scale), viewport: { ...viewport }, at: this.clock().getTime(), sharp: false, spot }
     viewers.keep(tab.cdpSessionId, taken)
     return { ...picture, data: taken.data, width: taken.width, height: taken.height, capturedAt: nowIso(this.clock), spot }
   }
@@ -1725,6 +1738,9 @@ export class ManagedSession {
    */
   private async fencePoint(tab: TabState, input: { x: number; y: number }, spot: BrowserPictureSpot, signal: AbortSignal | undefined, options: { wheel: boolean; press: boolean }): Promise<{ ok: true; dx: number; dy: number } | { ok: false; message: string }> {
     if (spot.documentId !== tab.page) return { ok: false, message: 'The page changed since that picture' }
+    // A picture from before the page was resized shows another layout: what was under the point is elsewhere now.
+    // A wheel turn is never lost to it: it turns where the person pointed.
+    if ((spot.sizeSeq ?? 0) !== this.sizeSeq) return options.wheel ? { ok: true, dx: 0, dy: 0 } : { ok: false, message: 'The page was resized since that picture' }
     const metrics = await this.requireChrome().cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })
     const visual = metrics.cssVisualViewport ?? {}
     const dx = Math.round((spot.scrollX - (visual.pageX ?? 0)) * 100) / 100
@@ -2066,6 +2082,7 @@ export class ManagedSession {
       case 'frame.next': return this.trackOp(signal, (opSignal) => this.viewerNext(params, opSignal))
       case 'frame.stop': return this.viewerStop(params)
       case 'human.input': return this.trackOp(signal, (opSignal) => this.humanInput(params, opSignal))
+      case 'page.resize': return this.trackOp(signal, (opSignal) => this.resizePage(params, opSignal))
       case 'control.take': {
         const owner = params.owner === 'human' ? 'human' : 'agent'
         if (owner === 'agent' && this.windowed) return this.trackOp(signal, (opSignal) => this.closeWindow(opSignal)).then(() => this.handle(method, params, signal))
@@ -2117,14 +2134,37 @@ export class ManagedSession {
       cdp.send('Accessibility.enable', {}, { sessionId: tab.cdpSessionId, signal }),
       cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: tab.cdpSessionId, signal })
     ])
-    // A window keeps its own size: only a browser without one paints at a fixed size.
+    // A window keeps its own size: only a browser without one is laid out at the session's (`page`).
     if (this.windowed) return
-    await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: 1280,
-      height: 720,
-      deviceScaleFactor: 1,
+    await this.sizeTab(tab, signal)
+  }
+
+  /** Lays a tab's page out at the session's size (`page`). */
+  private sizeTab(tab: TabState, signal?: AbortSignal): Promise<unknown> {
+    return this.requireChrome().cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: this.page.width,
+      height: this.page.height,
+      deviceScaleFactor: this.page.scale,
       mobile: false
-    }, { sessionId: tab.cdpSessionId, signal })
+    }, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })
+  }
+
+  /**
+   * Every tab's page is laid out at a new size (`page.resize`), as a window resized: a person's large
+   * view of the browser, at its own size and the screen's pixel ratio (within `WATCHED_BROWSER_PAGE`),
+   * or the default without one. Its caller gives it a turn of its own, so it never lands in the middle
+   * of an action. Pictures and screenshots from before it place nothing (`sizeSeq`); the agent's next
+   * observation sees the new size.
+   */
+  async resizePage(params: Record<string, unknown>, signal?: AbortSignal): Promise<WatchedBrowserPageSize> {
+    const next = watchedBrowserPageSize(params)
+    if (sameWatchedBrowserPageSize(next, this.page)) return { ...this.page }
+    this.page = next
+    this.sizeSeq += 1
+    // A window keeps its own size; the browser takes this one when it is without a window again.
+    if (!this.windowed) await Promise.all([...this.tabs.values()].map((tab) => this.sizeTab(tab, signal).catch(() => undefined)))
+    this.viewers?.pageResized()
+    return { ...this.page }
   }
 
   /**
@@ -2430,7 +2470,7 @@ export class ManagedSession {
   private async resolveOneTarget(request: BrowserActionRequest, tab: TabState, target: BrowserTarget): Promise<ActionableTarget> {
     if (target.kind === 'image-point') {
       const observation = this.observations.get(request.observationId)
-      if (!observation || !observation.screenshot || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId) fail('stale_observation', 'Image point geometry is stale')
+      if (!observation || !observation.screenshot || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId || observation.sizeSeq !== this.sizeSeq) fail('stale_observation', 'Image point geometry is stale')
       const mapped = mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, target.point)
       const located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: mapped.x, y: mapped.y, includeUserAgentShadowDOM: false }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
       if (!located.backendNodeId) fail('not_actionable', 'No DOM target exists at the image point')
@@ -2680,7 +2720,8 @@ function pictureSpot(value: unknown): BrowserPictureSpot | undefined {
     && Array.isArray(hits.samples) && hits.samples.length === HIT_COLS * HIT_ROWS * 3 && hits.samples.every(finite)
     ? { world: hits.world as string, width: hits.width as number, height: hits.height as number, cols: HIT_COLS, rows: HIT_ROWS, samples: hits.samples as number[] }
     : undefined
-  return { documentId: spot.documentId, scrollX: spot.scrollX as number, scrollY: spot.scrollY as number, ...(grid ? { hits: grid } : {}) }
+  const sizeSeq = typeof spot.sizeSeq === 'number' && Number.isSafeInteger(spot.sizeSeq) && spot.sizeSeq >= -1 ? spot.sizeSeq : undefined
+  return { documentId: spot.documentId, scrollX: spot.scrollX as number, scrollY: spot.scrollY as number, ...(grid ? { hits: grid } : {}), ...(sizeSeq !== undefined ? { sizeSeq } : {}) }
 }
 
 export function mapImagePoint(observation: BrowserObservation, point: { x: number; y: number }): { x: number; y: number } {

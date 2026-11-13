@@ -6,7 +6,7 @@ import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
 import type { BotAskMode, BotAskRequest, BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
-import type { BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
+import type { BotChatApplet, BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
 import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
@@ -419,7 +419,11 @@ export interface BotMessageRow {
   askId: string | null
   error: BotError | null
   activationId: string | null
-  attachments: Array<{ name: string; path: string }> | null
+  /**
+   * The message's files, then the applets its reply shows (each with `applet`, an empty `path` and its title as `name`),
+   * so a file's index never moves and `bots.db` keeps its version; an older build shows an applet as its title.
+   */
+  attachments: Array<{ name: string; path: string; applet?: BotChatApplet }> | null
   clientRequestId: string | null
   /** The message this one answers (a reply to the owner, or the owner's reply to the bot); null for none. */
   replyTo: string | null

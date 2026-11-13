@@ -31,6 +31,7 @@ describe('publish_applet from a vendor turn', () => {
     const vendor = new VendorAdapter(async ({ input, mcp }) => {
       if (input.prompt !== 'Chart it') return 'Revised.'
       results.push(await callTool(mcp!, 'publish_applet', { ...applet('Broken'), schemaVersion: 2 }))
+      results.push(await callTool(mcp!, 'publish_applet', { ...applet('Viewport'), css: 'main { min-height: 100dvh }' }))
       for (const title of ['One', 'Two', 'Three', 'Four']) results.push(await callTool(mcp!, 'publish_applet', applet(title)))
       return 'Here are the charts.'
     })
@@ -40,12 +41,15 @@ describe('publish_applet from a vendor turn', () => {
 
     for (const result of results) expect(result.error).toBeUndefined()
     expect(results[0]).toMatchObject({ isError: true, text: 'Unsupported applet schema version.' })
-    expect(results.slice(1, 4).map((result) => [result.isError, JSON.parse(result.text!)])).toEqual([
+    // An applet sized to the viewport is refused with the reason, and stages nothing.
+    expect(results[1].isError).toBe(true)
+    expect(results[1].text).toMatch(/sizes itself to the viewport.*Use content-driven heights or pixel heights/)
+    expect(results.slice(2, 5).map((result) => [result.isError, JSON.parse(result.text!)])).toEqual([
       [undefined, { queued: true, title: 'One' }],
       [undefined, { queued: true, title: 'Two' }],
       [undefined, { queued: true, title: 'Three' }]
     ])
-    expect(results[4]).toMatchObject({ isError: true, text: 'Only three applets may be published per response.' })
+    expect(results[5]).toMatchObject({ isError: true, text: 'Only three applets may be published per response.' })
 
     // The reply in the transcript carries one fence per staged applet, after the model's text.
     const reply = d.orch.getMessages(d.thread.id).filter((message) => message.role === 'assistant').at(-1)!
@@ -54,6 +58,7 @@ describe('publish_applet from a vendor turn', () => {
     for (const title of ['One', 'Two', 'Three']) expect(reply.content).toContain(`"title":"${title}"`)
     expect(reply.content).not.toContain('"title":"Four"')
     expect(reply.content).not.toContain('"title":"Broken"')
+    expect(reply.content).not.toContain('"title":"Viewport"')
     expect(reply.presentationParts?.filter((part) => part.type === 'applet')).toHaveLength(3)
 
     // Session text carries the generation guidance; the next turn's preamble lists the published applets.
