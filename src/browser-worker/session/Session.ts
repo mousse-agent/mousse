@@ -842,11 +842,16 @@ export class ManagedSession {
   }
 
   releaseControl(controlLeaseId: string): void {
-    this.requireChrome()
-    if (controlLeaseId !== this.controlLeaseId) fail('stale_generation', 'Control lease does not match')
+    this.releasable(controlLeaseId)
     this.controlOwner = 'agent'
     this.lifecycle = 'agent-controlled'
     this.touch()
+  }
+
+  /** Refuses a release on a session that is not available, or by a lease that is not the current one. */
+  private releasable(controlLeaseId: string): void {
+    this.requireChrome()
+    if (controlLeaseId !== this.controlLeaseId) fail('stale_generation', 'Control lease does not match')
   }
 
   async act(params: Record<string, unknown>, signal?: AbortSignal, humanLease = false): Promise<BrowserActionResult> {
@@ -1640,6 +1645,8 @@ export class ManagedSession {
       case 'human.input': return this.trackOp(signal, (opSignal) => this.humanInput(params, opSignal))
       case 'control.take': {
         const owner = params.owner === 'human' ? 'human' : 'agent'
+        // A closing, closed or disconnected session refuses at once, before anything is let go of.
+        this.requireChrome()
         // A page the agent's action was still loading never commits for the person.
         const loadingForAgent = owner === 'human' && this.inFlight?.dispatched ? this.inFlight.tabSessionId : undefined
         // Given back: what the person left down is let go of first, while the page is still theirs.
@@ -1657,11 +1664,15 @@ export class ManagedSession {
             .then(() => taken)
         })
       }
-      case 'control.release':
+      case 'control.release': {
+        const controlLeaseId = requiredId(params.controlLeaseId)
+        // Refused at once, before what the person holds down is let go of.
+        this.releasable(controlLeaseId)
         return this.releaseHuman().then(() => this.interceptChooser(undefined, false)).then(() => {
-          this.releaseControl(requiredId(params.controlLeaseId))
+          this.releaseControl(controlLeaseId)
           return this.guardClipboard(false).then(() => this.afterControlMoved()).then(() => ({ ok: true, lifecycle: this.lifecycle }))
         })
+      }
       default:
         fail('unsupported', 'Unsupported method')
     }
