@@ -272,14 +272,22 @@ export const LINUX_SYSTEM_FOLDERS: readonly string[] = ['/bin', '/sbin', '/lib',
 export const CLAUDE_TOPS_UNLISTED = 'Commands are off for this turn: Mousse couldn\'t list this computer\'s top folders to keep your commands out of them, so no command runs. Carry on without commands and say what you skipped.'
 
 /**
+ * The longest `CLAUDE_CODE_TMPDIR` Claude Code also gives the commands it runs: with a longer one their temporary folder
+ * falls back to the shared one (checked on the pinned SDK's Claude Code, which says "≤~30 bytes").
+ */
+const CLAUDE_TMPDIR_MAX_BYTES = 30
+
+/**
  * Where Claude Code keeps a bot turn's own temporary files (`CLAUDE_CODE_TMPDIR`) on Linux, for a bot with "run commands"
- * and without file access: a folder of its own in the user's runtime folder (`$XDG_RUNTIME_DIR/mousse-bots/<its working
- * folder, hashed>`, mode 700), which the sandbox closes with the rest of `/run` but for this one folder. Otherwise
+ * and without file access: a folder of its own in the user's runtime folder (`$XDG_RUNTIME_DIR/mb<its working folder,
+ * hashed>`, mode 700, at most `CLAUDE_TMPDIR_MAX_BYTES` long), which the sandbox closes with the rest of `/run` but for
+ * this one folder. Otherwise
  * Claude Code would keep them in the shared `<temporary folder>/claude-<uid>`, where every Claude Code session of this
  * user keeps its commands' output (the owner's own included), and which its sandbox opens to the bot's commands, read
  * and write. `shared`: those shared folders, which the sandbox then closes (`claudeLockedSandbox`'s `sharedTemp`).
  * Undefined elsewhere, and when there is no private runtime folder under `/run` (none set, elsewhere, not a folder of this
- * user's, or open to others): the turn keeps the shared folder, as Claude Code does.
+ * user's, open to others, or so long the folder's path would be too long): the turn keeps the shared folder, as Claude
+ * Code does.
  */
 export function claudeBotTemp(authority: Pick<BotAuthority, 'tools' | 'workspace'>, env: NodeJS.ProcessEnv, cwd: string, platform: NodeJS.Platform = process.platform, runtime: string | undefined = env.XDG_RUNTIME_DIR ?? process.env.XDG_RUNTIME_DIR): { dir: string; shared: string[] } | undefined {
   if (platform !== 'linux' || !authority.tools.has('shell') || !authority.workspace || authority.workspace.computer) return undefined
@@ -289,7 +297,10 @@ export function claudeBotTemp(authority: Pick<BotAuthority, 'tools' | 'workspace
   try {
     const stat = lstatSync(runtime)
     if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o077) !== 0) return undefined
-    const dir = join(runtime, 'mousse-bots', createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 16))
+    const dir = join(runtime, `mb${createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 10)}`)
+    // Claude Code uses a longer one for itself but not for the commands it runs (their sockets' paths would be too long):
+    // they would get the shared folder after all.
+    if (Buffer.byteLength(dir) > CLAUDE_TMPDIR_MAX_BYTES) return undefined
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     const shared = [...new Set(['/tmp', env.TMPDIR, env.CLAUDE_CODE_TMPDIR].filter((root): root is string => Boolean(root) && isAbsolute(root!)).map((root) => join(root, `claude-${uid}`)))]
     return { dir, shared }
