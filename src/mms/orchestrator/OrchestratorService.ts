@@ -12857,8 +12857,9 @@ export class OrchestratorService extends EventEmitter {
         turnEnd ? { turnId: engineRunId, turnEnd } : undefined
       )
       // Work cut because it ran out of room hands back what it had, even right after a tool call; any other stop its open reply.
+      // A bot's reply is the turn's last row only: its notes between tool calls never reach its owner's chat.
       const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
-      const response: OrchestratorResponse = { message: stoppedReplyText(partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
+      const response: OrchestratorResponse = { message: stoppedReplyText(opts?.bot ? unshown : partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       try {
@@ -13044,8 +13045,10 @@ export class OrchestratorService extends EventEmitter {
       this.addSystemMessage(`[${modeLabel}] Ignored orchestration actions emitted by the model.`)
     }
 
+    // A thread's run keeps the turn's whole text. A bot's reply is its final message only (the row the turn ends on):
+    // the notes it wrote between tool calls are working notes, never part of what its owner reads.
     const response: OrchestratorResponse = {
-      message: displayText || 'Done.',
+      message: (opts?.bot ? finalText : displayText) || 'Done.',
       actions
     }
     if (executionFailed) {
