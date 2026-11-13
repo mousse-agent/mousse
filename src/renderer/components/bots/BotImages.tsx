@@ -47,7 +47,8 @@ function loadFileImage(path: string): Promise<void> {
   return read
 }
 
-function useFileImage(path: string | undefined): FileImage | undefined {
+/** An image file's picture, read once per window (the Files pane shows it too). */
+export function useFileImage(path: string | undefined): FileImage | undefined {
   const [image, setImage] = useState(() => (path ? fileImages.get(path) : undefined))
   useEffect(() => {
     if (!path) return

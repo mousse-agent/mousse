@@ -124,11 +124,14 @@ describe('in the chat', () => {
     act(() => root.render(createElement(BotChatView, { bot })))
   }
 
-  it('sends the answer and shows the line the reply carries', async () => {
+  it('answers from the quick replies, then says so in a quiet line with what Allow did on hover', async () => {
     await show(ask())
     await click(button('Allow'))
     expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'allow'])
-    expect(host.querySelector('.ask-card-answer')?.textContent).toBe('Allowed: use files on this computer')
+    const line = host.querySelector('.bot-system-line')!
+    expect(line.textContent).toBe('You let Notes tidier use files on this computer')
+    expect(line.getAttribute('title')).toBe('Allowed: use files on this computer')
+    expect(host.querySelector('.bot-ask-buttons')).toBeNull()
   })
 
   it('exports the memory to the folder picked, then closes the ask', async () => {
@@ -138,7 +141,7 @@ describe('in the chat', () => {
     expect(fake.calls).toContainEqual(['exportMemory', 'b1', '/home/me/Backups'])
     expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'allow'])
     expect(fake.calls.findIndex(([name]) => name === 'exportMemory')).toBeLessThan(fake.calls.findIndex(([name]) => name === 'answer'))
-    expect(host.querySelector('.ask-card-answer')?.textContent).toBe('Saved its memory to the folder you picked')
+    expect(host.querySelector('.bot-system-line')?.getAttribute('title')).toBe('Saved its memory to the folder you picked')
   })
 
   it('keeps the export ask open when no folder is picked', async () => {
@@ -146,7 +149,7 @@ describe('in the chat', () => {
     await show(ask({ kind: 'export_memory', title: 'save its memory to a folder' }))
     await click(button('Allow'))
     expect(fake.calls.some(([name]) => name === 'exportMemory' || name === 'answer')).toBe(false)
-    expect(host.querySelector('.ask-card')).not.toBeNull()
+    expect(host.querySelector('.bot-ask-buttons')).not.toBeNull()
   })
 
   it('does nothing but answer for Not now on an export ask', async () => {

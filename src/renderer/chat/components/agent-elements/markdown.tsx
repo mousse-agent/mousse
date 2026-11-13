@@ -226,6 +226,11 @@ export type MarkdownProps = {
    * each update, and blocks that appear fade in. Off for everything already written.
    */
   streaming?: boolean;
+  /**
+   * Elements drawn the caller's way instead (a bot's chat draws its own images and paths). Pass one object kept for
+   * the module's life: a new one each render would make Streamdown draw every block again.
+   */
+  components?: Partial<Components>;
 };
 
 /** Splits text into blocks as Streamdown does, counting the blocks it splits (see render-counts). */
@@ -462,7 +467,19 @@ const markdownMathComponents: Components = {
   },
 };
 
-export const Markdown = memo(function Markdown({ content, className, streaming = false }: MarkdownProps) {
+/** The components with a caller's own elements over them, made once per override object. */
+const overridden = new WeakMap<Partial<Components>, { plain: Components; math: Components }>();
+function componentsWith(override: Partial<Components> | undefined, math: boolean): Components {
+  if (!override) return math ? markdownMathComponents : markdownComponents;
+  let made = overridden.get(override);
+  if (!made) {
+    made = { plain: { ...markdownComponents, ...override }, math: { ...markdownMathComponents, ...override } };
+    overridden.set(override, made);
+  }
+  return math ? made.math : made.plain;
+}
+
+export const Markdown = memo(function Markdown({ content, className, streaming = false, components }: MarkdownProps) {
   countRender("Markdown");
   const renderMath = useRenderMath();
   const math = renderMath && mayContainMath(content);
@@ -499,7 +516,7 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
     >
       <MarkdownSetupContext.Provider value={math ? "math" : "plain"}>
       <Streamdown
-        components={math ? markdownMathComponents : markdownComponents}
+        components={componentsWith(components, math)}
         plugins={math ? markdownMathPlugins : markdownPlugins}
         BlockComponent={CachedBlock}
         parseMarkdownIntoBlocksFn={

@@ -1,20 +1,26 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { ArrowDown, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
-import type { BotChatMessage, BotChatQuote, BotChip, BotError, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import { ArrowDown, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
+import type { BotChatMessage, BotChatQuote, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { MarkdownPreview } from '../editors/MarkdownPreview'
 import { BotFace } from './face/BotFace'
-import { BotChips, BotChipView } from './BotChips'
-import { BotAsk } from '../asks/AskCard'
+import { BotSteps } from './BotSteps'
+import { BotFilePane, BotFilesProvider, BotMarkdown } from './BotFiles'
+import { BotEmojiButton } from './BotEmoji'
+import { BotAskReplies } from './BotAskReplies'
+import { BotActivitySticker, BotPresenceLine } from './BotPresence'
+import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
 import { BotAboutPanel, RUNS_ON_ID } from './BotAboutPanel'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
-import { botFullTime, botGroupTime, botMessageLabel, placeMessages } from './messageGroups'
+import { botGroupTime, placeMessages } from './messageGroups'
+import { chatRows, stepChips, type BotChatRow, type OwnerMarks } from './botChatShape'
+import { formatDurationLong, formatWorkedFor } from '../../utils/responseTimeline'
 import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
 import { BotImageFiles, BotMarkdownImage, BotOtherFiles, botFileImageUrl } from './BotImages'
 import { botChatImages } from './imageSources'
@@ -23,8 +29,8 @@ const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
 const NO_VOICE: VoiceMessage[] = []
 const NO_SKILLS: never[] = []
-const NO_WORK: BotWorkItem[] = []
-/** The chat's turn waits for the internet (its work, if any, says so on its own line). */
+const NO_MARKS = new Map<string, OwnerMarks>()
+/** The chat's turn waits for the internet (its work, if any, says so in the header's list). */
 const OFFLINE_TEXT = 'Waiting for internet'
 const ignore = () => {}
 
@@ -78,45 +84,12 @@ function QuoteLine({ quote, botName }: { quote: BotChatQuote; botName: string })
   </>
 }
 
-/** The quote above a message that answers an earlier one, not the one right above it: who wrote it and its first line. */
+/** The quote at the top of a message that answers an earlier one, not the one right above it: who wrote it and its first line. */
 export function BotReplyQuote({ botId, quote, botName }: { botId: string; quote: BotChatQuote; botName: string }) {
   return <button type="button" className="bot-quote bot-reply-quote" data-author={quote.author} disabled={quote.gone} onClick={() => void showMessage(botId, quote.id)} aria-label={`Replying to ${quoteOwner(quote, botName)}: ${quoteLine(quote)}`}>
     <QuoteLine quote={quote} botName={botName} />
   </button>
 }
-
-/** How long work has run, in plain words: "just now", "4 min", "1 h 20 min". */
-export function workElapsed(startedAt: string, now = Date.now()): string {
-  const minutes = Math.floor(Math.max(0, now - Date.parse(startedAt)) / 60_000)
-  if (!Number.isFinite(minutes) || minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes} min`
-  return `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ''}`
-}
-
-/** What a piece of work is doing now, in a few words. */
-function workDoing(item: BotWorkItem, chip: BotChip | undefined): string {
-  if (item.status === 'queued') return 'waiting its turn'
-  if (item.status === 'waiting_for_internet') return 'waiting for internet'
-  if (item.status === 'paused') return 'held'
-  return chip ? `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` : 'working'
-}
-
-/** One piece of work above the composer: its title, what it is doing, for how long, and Stop. The time moves twice a minute. */
-const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: BotWorkItem }) {
-  const chip = useBotsStore((s) => s.activity[item.id])
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
-    return () => window.clearInterval(timer)
-  }, [])
-  const running = item.status === 'running'
-  return <li className={`bot-work-line${running ? ' is-running' : ''}`}>
-    {running ? <Loader2 size={13} className="chat-spin" aria-hidden /> : <span className="bot-work-dot" aria-hidden />}
-    <span className="bot-work-title">{item.title}</span>
-    <span className="bot-work-doing">{workDoing(item, chip)}{item.model && <> · <span className="bot-work-model" title={item.model.detail}>{item.model.name}</span></>} · {workElapsed(item.startedAt, now)}</span>
-    <button type="button" aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
-  </li>
-})
 
 /** A message as a reply quote: who wrote it and its first line. */
 export function quoteOf(message: BotChatMessage): BotChatQuote {
@@ -151,86 +124,137 @@ function PinnedLine({ botId, item }: { botId: string; item: BotPinned }) {
   </button>
 }
 
+/** Reply, beside a bubble on hover. */
 function ReplyButton({ onReply }: { onReply(): void }) {
   return <button type="button" className="bot-reply-button" aria-label="Reply" title="Reply" onClick={onReply}><Reply size={14} aria-hidden /></button>
 }
 
-/** `starts`: the first message of its group, with the group's space above it (messageGroups.ts). */
-interface OwnerMessageProps { botId: string; message: BotChatMessage; pending: boolean; botName: string; quote: boolean; starts: boolean; onReply?(message: BotChatMessage): void }
+/** The time in a bubble's corner; "Sending…" while the message is on its way. */
+function BubbleTime({ message, pending = false }: { message: BotChatMessage; pending?: boolean }) {
+  return pending ? <span className="bot-bubble-time">Sending…</span> : <time className="bot-bubble-time" dateTime={message.at}>{botGroupTime(message.at)}</time>
+}
+
+/**
+ * How long a bot's reply took: from the message it answers to the reply, when that message is loaded; undefined
+ * otherwise.
+ */
+export function workedMs(message: Pick<BotChatMessage, 'at'>, asked: Pick<BotChatMessage, 'at'> | undefined): number | undefined {
+  if (!asked) return undefined
+  const ms = Date.parse(message.at) - Date.parse(asked.at)
+  return Number.isFinite(ms) && ms >= 0 ? ms : undefined
+}
+
+/** "Worked for 32s ›", as under a thread's prompt: the steps of the reply's work fold behind it. */
+function WorkedToggle({ ms, open, onToggle }: { ms?: number; open: boolean; onToggle(): void }) {
+  return <button type="button" className="bot-worked" aria-expanded={open} title={ms === undefined ? undefined : `Worked for ${formatDurationLong(ms)}`} onClick={onToggle}>
+    {ms === undefined ? 'Worked' : formatWorkedFor(ms)}
+    <ChevronRight size={13} className="bot-worked-chevron" data-open={open || undefined} aria-hidden />
+  </button>
+}
+
+/** `starts`: the first message of its group, with the group's space above it (messageGroups.ts). `marks`: what the bot's replies left on it. */
+interface OwnerMessageProps { botId: string; message: BotChatMessage; pending: boolean; botName: string; quote: boolean; starts: boolean; marks?: OwnerMarks; onReply?(message: BotChatMessage): void }
 
 // Messages render again only when they change: a poll, a live chip or the bot starting work leaves them alone.
-// The group's time is drawn beside them (GroupTime), so a message that stops being a group's last does not render again.
-const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botName, quote, starts, onReply }: OwnerMessageProps) {
+const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botName, quote, starts, marks, onReply }: OwnerMessageProps) {
   const quoted = quote && message.replyTo
-  return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id} title={pending ? undefined : botFullTime(message.at)}>
+  return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id}>
     {quoted && <BotReplyQuote botId={botId} quote={message.replyTo!} botName={botName} />}
     <div className="bot-you-line">
       {!pending && onReply && <ReplyButton onReply={() => onReply(message)} />}
       {/* As in a messaging app: the pictures first, the words under them, then any other files. */}
       <div className="bot-you-content">
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
-        {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" renderImage={BotMarkdownImage} />}
+        {message.text && <div className="bot-you-bubble">
+          <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" renderImage={BotMarkdownImage} />
+          <BubbleTime message={message} pending={pending} />
+          {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={marks.title}>{marks.reaction}</span>}
+        </div>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
+        {!message.text && <BubbleTime message={message} pending={pending} />}
       </div>
     </div>
+    {marks?.passedOn && <p className="bot-receipt" title={marks.title}>Passed on</p>}
   </article>
 })
 
-/** One small time under a group's last message, on its sender's side; "Sending…" while that message is on its way. */
-function GroupTime({ message, pending }: { message: BotChatMessage; pending: boolean }) {
-  return <div className="bot-group-time" data-author={message.author}>
-    {pending ? <span>Sending…</span> : <time dateTime={message.at} title={botFullTime(message.at)}>{botGroupTime(message.at)}</time>}
-  </div>
-}
-
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
-const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.onAction === b.onAction && a.browser === b.browser &&
+const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.asked === b.asked && a.onAction === b.onAction && a.browser === b.browser &&
   a.quote === b.quote && a.starts === b.starts && a.onReply === b.onReply &&
-  a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.bot.look.colour === b.bot.look.colour && a.bot.look.accessory === b.bot.look.accessory
+  a.bot.id === b.bot.id && a.bot.name === b.bot.name
 
 /**
  * `browser`: the live preview of the bot's browser, on the reply of the last run that used it. `quote`: show the
- * message this one answers (it is not the one right above). `starts`: the first of its group, with the face and name;
- * the rest of the group leave the face's place empty, with Reply in it on hover.
+ * message this one answers (it is not the one right above). `starts`: the first of its group, with the group's space
+ * above it. `asked`: the message it answers, when loaded (how long it took).
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage }
 
-const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, starts, onReply }: BotMessageProps) {
+/**
+ * A bot's message as a messenger shows it in a one-to-one chat: a bubble on the left, with no face or name (the header
+ * says who it is), the time in its corner. A report reads as any reply that quotes the request; a list of keys and
+ * values reads as a small card; the files it names are chips. What its work did folds behind "Worked for". An open ask
+ * is quick replies under the bubble.
+ */
+const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, starts, onReply, asked }: BotMessageProps) {
   const store = useBotsStore.getState
   const quoted = quote && message.replyTo
-  const label = botMessageLabel(message)
-  return <article className={`chat-participant-message from-agent${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}`} data-message-id={message.id} title={botFullTime(message.at)}>
-    {/* Transcript faces are still: one baked pose per look, shared by every message. */}
-    {starts
-      ? <BotFace look={bot.look} state="idle" size={36} view="head" className="bot-message-face" still />
-      : <div className="bot-message-gutter"><ReplyButton onReply={() => onReply(message)} /></div>}
-    <div className="chat-participant-message-body">
-      {starts && <div className="chat-message-meta"><strong>{bot.name}</strong>{label && <span className="bot-message-label">{label}</span>}<ReplyButton onReply={() => onReply(message)} /></div>}
-      {!starts && label && <span className="bot-message-label is-own-line">{label}</span>}
-      {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-      {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" renderImage={BotMarkdownImage} />}
-      {!!message.attachments?.length && <div className="bot-message-files"><BotImageFiles files={message.attachments} /><BotOtherFiles files={message.attachments} /></div>}
-      <BotChips chips={message.chips} />
-      {browser}
-      {message.ask && <BotAsk botName={bot.name} ask={message.ask} fromRun={message.kind === 'notice'}
-        onAnswer={(answer) => store().answer(bot.id, message.ask!.askId, answer)}
-        onExport={() => store().exportMemory(bot.id, message.ask!.askId)} />}
-      {message.error && <BotErrorLine error={message.error} onAction={onAction} />}
+  const [stepsOpen, setStepsOpen] = useState(false)
+  const steps = stepChips(message.chips)
+  const openAsk = message.ask?.status === 'open' ? message.ask : undefined
+  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}`} data-message-id={message.id}>
+    <div className="bot-message-line">
+      <div className="bot-bubble">
+        {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
+        {message.text && <BotMarkdown text={message.text} className="chat-message-markdown chat-markdown" />}
+        {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
+        {!!message.attachments?.length && <div className="bot-message-files"><BotImageFiles files={message.attachments} /><BotOtherFiles files={message.attachments} /></div>}
+        {message.error && <BotErrorLine error={message.error} onAction={onAction} />}
+        {stepsOpen && <BotSteps chips={steps} />}
+        <div className="bot-bubble-foot">
+          {steps.length > 0 && <WorkedToggle ms={workedMs(message, asked)} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
+          <BubbleTime message={message} />
+        </div>
+      </div>
+      <ReplyButton onReply={() => onReply(message)} />
     </div>
+    {openAsk && <BotAskReplies ask={openAsk}
+      onAnswer={(answer) => store().answer(bot.id, openAsk.askId, answer)}
+      onExport={() => store().exportMemory(bot.id, openAsk.askId)} />}
+    {browser}
   </article>
 }, sameBotMessage)
 
+/** A quiet centred line between messages: work the bot started, an ask answered. */
+function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
+  return <p className="bot-system-line" role="note" {...(row.title ? { title: row.title } : {})}><span>{row.text}</span></p>
+}
+
 /**
- * A bot's chat (bot-ui §4.4): the header with its face, name (what it does is in About) and one menu; the
- * owner's bubbles and the bot's messages with chips, ask cards and error lines; one status line
- * while it works; and the thread composer without a thread's run settings: text, attach (also by
- * dropping or pasting), dictation, and send or Stop.
+ * While the chat's turn runs: the bot's next message, typing, as a messaging app shows it: three dots in a small bubble
+ * in the bot's column, the only thing in the chat that moves. Waiting for the internet, it says so instead, still.
+ */
+function BotTyping({ bot, starts, offline }: { bot: BotSummary; starts: boolean; offline: boolean }) {
+  return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : `${bot.name} is typing`}>
+    <div className="bot-message-line">
+      {offline
+        ? <p className="bot-bubble bot-status-line">{OFFLINE_TEXT}</p>
+        : <span className="bot-bubble bot-typing-bubble" aria-hidden><i /><i /><i /></span>}
+    </div>
+  </article>
+}
+
+/**
+ * A bot's chat (bot-ui §4.4), as a one-to-one messenger: the header with its face, its name and its presence ("typing…",
+ * "busy with 2 things", which opens its work, "free"); the owner's bubbles on the right and the bot's on the left, each
+ * with its time; quiet lines for work it started and asks answered; a typing bubble while its chat turn runs; the files
+ * it names, opened in the Files pane; and the thread composer without a thread's run settings: text, emoji, attach
+ * (also by dropping or pasting), dictation (also while it works), and send or Stop.
  */
 export function BotChatView({ bot }: { bot: BotSummary }) {
   const chat = useBotsStore((s) => s.chats[bot.id])
   const load = useBotsStore((s) => s.chatLoad[bot.id])
   const pending = useBotsStore((s) => s.pending[bot.id] ?? EMPTY)
-  const live = useBotsStore((s) => s.live[bot.id])
   const happy = useBotsStore((s) => s.happy[bot.id])
   const draft = useBotsStore((s) => s.drafts[bot.id] ?? '')
   const attachments = useBotsStore((s) => s.attachments[bot.id])
@@ -241,20 +265,30 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const store = useBotsStore.getState
   const transcript = useRef<HTMLDivElement>(null)
   const messages = chat?.messages ?? EMPTY
-  // The chat's own turn: its status line and Stop. Work beside it has its line above the composer, and the chat stays free.
+  // The chat's own turn: its typing bubble and Stop. Work beside it is in the header's list, and the chat stays free.
   // A service from before work (no `chat` or `work` in its summary) says only that the bot works: that is the chat's.
   const legacy = bot.chat === undefined && bot.work === undefined
   const working = Boolean(bot.chat) || (legacy && bot.state === 'working')
-  const chatChip = useBotsStore((s) => (bot.chat ? s.activity[bot.chat.activationId] : undefined)) ?? (legacy || live?.activationId === bot.chat?.activationId ? live?.chip : undefined)
-  const work = bot.work ?? NO_WORK
-  // The chat's turn waits for the internet: no spinner, and the header says so (work that waits says so on its line).
+  // The chat's turn waits for the internet: no dots, and it says so.
   const offline = bot.chat ? Boolean(bot.chat.offline) : working && bot.waiting === 'internet'
+  const typing = working && !offline
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
-  // The sent messages and those on their way, in one run of groups: who starts and ends each, and the day lines.
-  const shown = useMemo(() => (pending.length ? [...messages, ...pending] : messages), [messages, pending])
-  const places = useMemo(() => placeMessages(shown), [shown])
+  // The rows: messages, and quiet lines for work started and asks answered; what replies left on the owner's messages.
+  const { rows, marks } = useMemo(() => chatRows(messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined)), [messages, bot.name])
+  // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
+  const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
+  const places = useMemo(() => placeMessages(shown.map((row) => (row.kind === 'message' ? row.message : { author: 'system', at: row.at }))), [shown])
+  // The message each reply answers, for how long its work took.
+  const byId = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages])
+  // A file a chip opened, in the Files pane beside the chat. Opening one closes About and the browser's split view.
+  const [file, setFile] = useState<string | null>(null)
+  const openFile = useCallback((path: string) => {
+    setFile(path)
+    useBotsStore.setState({ aboutOpen: false })
+    useBotBrowserStore.getState().closePane()
+  }, [])
   // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens the split view.
   // Each watches the browser's pictures only while it is on screen.
   const browser = useBotBrowser(bot.id)
@@ -282,7 +316,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     else if (held.atEnd) element.scrollTop = element.scrollHeight
     if (!held.atEnd && held.lastSeq !== undefined && lastSeq !== undefined && lastSeq > held.lastSeq && messages.at(-1)?.author === 'bot') setUnseen(true)
     anchor.current = { firstId, lastSeq, height: element.scrollHeight, atEnd: held.atEnd }
-  }, [firstId, lastSeq, messages, pending.length, working, live?.chip?.text, replying?.id, work.length])
+  }, [firstId, lastSeq, messages, pending.length, working, offline, replying?.id])
   useEffect(() => { anchor.current = { lastSeq: anchor.current.lastSeq, height: 0, atEnd: true }; setUnseen(false) }, [bot.id])
   const toEnd = () => {
     const element = transcript.current
@@ -325,16 +359,25 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // Up in an empty composer brings back the owner's last message, as in a thread.
   const lastPrompt = () => [...pending, ...messages].reverse().find((message) => message.author === 'owner' && message.text)?.text
   // The preview steps through every picture of this chat that has loaded, read only when one opens.
-  const chatImages = () => botChatImages(shown, botFileImageUrl)
+  const chatImages = () => botChatImages([...messages, ...pending], botFileImageUrl)
+  const composerField = useCallback(() => document.querySelector<HTMLTextAreaElement>('.bot-input-area textarea'), [])
+  // The typing bubble is the bot's next message: it joins the group of the bot's message right above it.
+  const last = shown.at(-1)
+  const typingStarts = !(last?.kind === 'message' && last.message.author === 'bot')
+  const toggleAbout = () => useBotsStore.setState({ aboutOpen: !aboutOpen })
 
-  return <ImageGalleryProvider images={chatImages}>
+  return <ImageGalleryProvider images={chatImages}><BotFilesProvider botId={bot.id} open={openFile}>
     {/* The bot's colour tints the quotes of its messages. */}
-    <section className="chat-conversation bot-conversation" style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
+    <section className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header className="chat-conversation-header">
-        <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={() => useBotsStore.setState({ aboutOpen: !aboutOpen })}>
+        <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={toggleAbout}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
-          <div><h1>{bot.name}</h1></div>
+          <BotActivitySticker bot={bot} typing={typing} offline={offline} />
         </button>
+        <div className="bot-header-who">
+          <button type="button" className="bot-header-name" tabIndex={-1} aria-hidden onClick={toggleAbout}><h1>{bot.name}</h1></button>
+          <BotPresenceLine bot={bot} typing={typing} offline={offline} />
+        </div>
         <BotMenu bot={bot} />
       </header>
       <div className="chat-transcript" ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
@@ -351,22 +394,24 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <button type="button" onClick={() => void store().loadChat(bot.id)}>Retry</button>
         </div>}
         {chat?.loadingOlder && <p className="chat-empty-hint bot-loading-older">Loading earlier messages…</p>}
-        {shown.map((message, index) => {
+        {shown.map((row, index) => {
           const place = places[index]!
-          const sending = index >= messages.length
+          const day = place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>
+          if (row.kind === 'system') return <Fragment key={row.id}>{day}<SystemLine row={row} /></Fragment>
+          const message = row.message
+          const sending = index >= rows.length
           // A reply shows what it answers unless that is the message right above it.
-          const quote = Boolean(message.replyTo) && (sending || messages[index - 1]?.id !== message.replyTo!.id)
+          const above = shown[index - 1]
+          const quote = Boolean(message.replyTo) && (sending || !(above?.kind === 'message' && above.message.id === message.replyTo!.id))
           return <Fragment key={message.id}>
-            {place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>}
+            {day}
             {message.author === 'owner'
-              ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} onReply={sending ? undefined : reply} />
-              : <BotMessage bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} />}
-            {place.ends && <GroupTime message={message} pending={sending} />}
+              ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending ? undefined : reply} />
+              : <BotMessage bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply}
+                asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} />}
           </Fragment>
         })}
-        {offline
-          ? <div className="chat-run-status bot-offline-status" role="status">{OFFLINE_TEXT}</div>
-          : working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{chatChip && <BotChipView chip={{ ...chatChip, live: true }} />}</div>}
+        {(working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} />}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
@@ -377,7 +422,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />
-          {!!work.length && <ul className="bot-work" aria-label={`${bot.name}'s work`}>{work.map((item) => <WorkLine key={item.id} botId={bot.id} item={item} />)}</ul>}
           {replying && <div className="bot-quote bot-replying" data-author={replying.author} role="status" aria-label={`Replying to ${quoteOwner(replying, bot.name)}: ${quoteLine(replying)}`}>
             <QuoteLine quote={replying} botName={bot.name} />
             <button type="button" aria-label="Don't reply to this message" title="Cancel reply" onClick={() => store().setReplyingTo(bot.id, null)}><X size={14} aria-hidden /></button>
@@ -396,6 +440,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             slashCommands={false}
             placeholder={`Message ${bot.name}`}
             stoppable={working}
+            dictateWhileStoppable
+            extraActions={<BotEmojiButton field={composerField} value={draft} onChange={(value) => store().setDraft(bot.id, value)} />}
             onSend={() => void store().send(bot.id)}
             onStop={() => void store().stop(bot.id)}
             lastPrompt={lastPrompt}
@@ -403,7 +449,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </ComposerNoticeProvider>
       </div>
     </section>
+    {file && <BotFilePane botId={bot.id} path={file} onClose={() => setFile(null)} />}
     {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}
-  </ImageGalleryProvider>
+  </BotFilesProvider></ImageGalleryProvider>
 }

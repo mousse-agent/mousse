@@ -103,25 +103,26 @@ describe('no model name on any bot screen', () => {
     probe.remove()
   })
 
-  it('is absent from the Bots section, Recent and the empty page', async () => {
+  it('is absent from the Bots section and the empty page', async () => {
     expect(host.querySelector('.bot-roster')).not.toBeNull()
-    expect(host.querySelector('.chat-recent-section')).not.toBeNull()
     expect(found()).toEqual([])
   })
 
-  it('is absent from the chat, its status line and its error lines', async () => {
+  it('is absent from the chat, its steps, its presence and its error lines', async () => {
     await act(async () => useChatsStore.getState().openBot('b1'))
-    expect(host.querySelectorAll('.chat-transcript article')).toHaveLength(4)
-    expect(host.querySelector('.chat-run-status .bot-chip')).not.toBeNull()
+    expect(host.querySelectorAll('.chat-transcript article[data-message-id]')).toHaveLength(4)
+    expect(host.querySelector('.bot-typing')).not.toBeNull()
+    await click(host.querySelector('.bot-worked') ?? undefined)
+    expect(host.querySelector('.bot-steps')?.textContent).toBe('Taking more time')
     expect(host.querySelector('.bot-error button')?.textContent).toBe('Sign in')
     expect(found()).toEqual([])
   })
 
-  it('is absent while the bot waits for the internet: the sidebar and status line say only that', async () => {
+  it('is absent while the bot waits for the internet: the chat and its presence say only that', async () => {
     const waiting = { ...bot, stateText: 'Waiting for internet', waiting: 'internet' } as BotSummary
     await act(async () => useBotsStore.setState((state) => ({ bots: state.bots.map((entry) => (entry.id === 'b1' ? waiting : entry)) })))
     await act(async () => useChatsStore.getState().openBot('b1'))
-    expect(host.querySelector('.chat-run-status')?.textContent).toBe('Waiting for internet')
+    expect(host.querySelector('.bot-typing')?.textContent).toBe('Waiting for internet')
     expect(host.textContent).toContain('Waiting for internet')
     expect(found()).toEqual([])
   })
