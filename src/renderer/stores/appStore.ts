@@ -39,9 +39,10 @@ import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode }
 export type PaletteMode = 'all' | 'messages'
 
 /** In-memory transcript cache so re-visiting a thread paints instantly (not in Zustand). */
-// Each entry is a fully hydrated transcript. Keeping sixteen live-sized threads
-// pins large tool payloads and markdown strings in the renderer heap.
-const MESSAGE_CACHE_MAX = 3
+// Each entry is a hydrated transcript: a thread opens at its newest page (at most 200 messages), plus any older
+// pages the person loaded. Sixteen whole transcripts pinned large tool payloads and markdown strings in the
+// renderer heap; eight newest pages keep the threads someone moves between ready without that.
+const MESSAGE_CACHE_MAX = 8
 const messageCache = new Map<string, ChatMessage[]>()
 const messageCacheOrder: string[] = []
 
@@ -60,6 +61,45 @@ function rememberMessages(threadId: string, messages: ChatMessage[]): void {
 
 function takeCachedMessages(threadId: string): ChatMessage[] | undefined {
   return messageCache.get(threadId)
+}
+
+/**
+ * Messages of the thread being opened (`openingThreadId`) that arrived before its view. The view can be older than
+ * them, so they join its transcript as live messages would (`reconcileMessageSnapshot`).
+ */
+let openingEarly: { threadId: string; messages: ChatMessage[] } | null = null
+
+/**
+ * The store update that shows thread `id`: its cached transcript when there is one, otherwise an empty one that
+ * waits for its view (`transcriptPending`) unless the thread never started. Remembers the transcript left behind.
+ */
+function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string): Partial<AppState> {
+  if (s.activeThreadId && s.messages.length > 0) rememberMessages(s.activeThreadId, s.messages)
+  const cached = takeCachedMessages(id)
+  const early = openingEarly?.threadId === id ? openingEarly.messages : []
+  openingEarly = null
+  // Nothing cached: a thread that never started is known to be empty; any other one waits for its view.
+  const target = s.threads.find((thread) => thread.id === id)
+  return {
+    activeThreadId: id,
+    openingThreadId: null,
+    messages: early.reduce(upsertMessage, cached ?? []),
+    transcriptPending: !cached && !(target && !isThreadStarted(target)),
+    // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
+    agents: [],
+    tasks: [],
+    loading: false
+  }
+}
+
+/**
+ * Whether switching to `id` would show a listed, started thread with no messages while its view loads (see
+ * `openThreadWhenReady`). A thread this window does not list yet is shown at once, as before.
+ */
+function opensEmpty(s: Pick<AppState, 'threads'>, id: string): boolean {
+  if (messageCache.has(id)) return false
+  const target = s.threads.find((thread) => thread.id === id)
+  return Boolean(target && isThreadStarted(target))
 }
 
 /** Cheap identity check to skip identical snapshot applies after a cache hit. */
@@ -330,7 +370,22 @@ interface AppState {
    * started, so an empty `messages` does not mean an empty thread. The chat holds back its empty page until it lands.
    */
   transcriptPending: boolean
-  /** The selected thread's transcript will not arrive (its select failed): stop waiting for it. */
+  /**
+   * A thread being opened whose transcript is not here yet (`openThreadWhenReady`). The window goes on showing the
+   * thread it shows until the opened thread's view arrives, then shows it with its messages in one update, so no
+   * frame shows it without them. Only its row in the sidebar is highlighted meanwhile.
+   */
+  openingThreadId: string | null
+  /**
+   * Opens a thread the person asked for. A cached or never-started thread is shown at once (`switchToThread`); a
+   * started one with nothing cached is held in `openingThreadId` until its view arrives. Returns whether it is held.
+   */
+  openThreadWhenReady: (id: string) => boolean
+  /** The held thread's view is slow (another computer, a busy service): show it now and wait with an empty transcript. */
+  showOpeningThread: (threadId: string) => void
+  /** A message (or a change to one) of the thread being opened, which arrived before its view. */
+  holdOpeningMessage: (threadId: string, message: ChatMessage) => void
+  /** The selected (or held) thread's transcript will not arrive (its select failed): stop waiting for it. */
   settleTranscript: (threadId: string) => void
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
@@ -355,6 +410,7 @@ interface AppState {
    * Without one, `transcriptPending` holds back the empty page until the thread's view arrives.
    * It shows the thread workspace, which moves the sidebar off Chats (`agreeWithTab`), unless `keepWorkspace`:
    * the main process's echo of a selection (and the thread it restores at launch) is not a request to open it.
+   * That echo also leaves a held thread (`openingThreadId`) waiting for its view.
    */
   switchToThread: (id: string, options?: { keepWorkspace?: boolean }) => void
   /** Apply daemon snapshot for the selected thread in a single paint. */
@@ -578,8 +634,34 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setSidebarMode: (sidebarMode) => set({ sidebarMode }),
   messages: [],
   transcriptPending: false,
+  openingThreadId: null,
+  openThreadWhenReady: (id) => {
+    const s = get()
+    if (s.activeThreadId === id) {
+      // Back to the thread on screen while another was being opened: stop opening that one.
+      if (s.openingThreadId) set({ openingThreadId: null })
+      return false
+    }
+    if (!opensEmpty(s, id)) {
+      get().switchToThread(id)
+      return false
+    }
+    openingEarly = null
+    set({ openingThreadId: id, sidebarMode: 'projects' })
+    return true
+  },
+  showOpeningThread: (threadId) =>
+    set((s) => (s.openingThreadId === threadId ? switchPatch(s, threadId) : s)),
+  holdOpeningMessage: (threadId, message) => {
+    if (get().openingThreadId !== threadId) return
+    const held = openingEarly?.threadId === threadId ? openingEarly.messages : []
+    openingEarly = { threadId, messages: upsertMessage(held, message) }
+  },
   settleTranscript: (threadId) =>
-    set((s) => (s.transcriptPending && s.activeThreadId === threadId ? { transcriptPending: false } : s)),
+    set((s) => {
+      if (s.openingThreadId === threadId) return { ...switchPatch(s, threadId), transcriptPending: false }
+      return s.transcriptPending && s.activeThreadId === threadId ? { transcriptPending: false } : s
+    }),
   agents: [],
   tasks: [],
   mainAreaWidth: null,
@@ -836,27 +918,18 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   switchToThread: (id, options) =>
     set((s) => {
       const workspace = options?.keepWorkspace ? {} : { sidebarMode: 'projects' as const }
-      if (s.activeThreadId === id) return options?.keepWorkspace ? s : workspace
-      if (s.activeThreadId && s.messages.length > 0) {
-        rememberMessages(s.activeThreadId, s.messages)
-      }
-      const cached = takeCachedMessages(id)
-      // Nothing cached: a thread that never started is known to be empty; any other one waits for its view.
-      const target = s.threads.find((thread) => thread.id === id)
-      return {
-        ...workspace,
-        activeThreadId: id,
-        messages: cached ?? [],
-        transcriptPending: !cached && !(target && !isThreadStarted(target)),
-        // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
-        agents: [],
-        tasks: [],
-        loading: false
-      }
+      // The main process's echo of the thread being opened: it is still held for its view.
+      if (options?.keepWorkspace && s.openingThreadId === id) return s
+      const opening = s.openingThreadId ? { openingThreadId: null } : {}
+      if (s.activeThreadId === id) return options?.keepWorkspace && !s.openingThreadId ? s : { ...workspace, ...opening }
+      return { ...workspace, ...switchPatch(s, id) }
     }),
   applyThreadView: (view) =>
-    set((s) => {
-      if (s.activeThreadId !== view.threadId) return s
+    set((current) => {
+      // The held thread's view shows it, with its messages, in this one update.
+      const opened = current.openingThreadId === view.threadId ? switchPatch(current, view.threadId) : null
+      const s = opened ? { ...current, ...opened } : current
+      if (s.activeThreadId !== view.threadId) return current
       const reconciled = reconcileMessageSnapshot(s.messages, view.messages)
       rememberMessages(view.threadId, reconciled)
       const messagesUnchanged = sameMessageSnapshot(s.messages, reconciled)
@@ -876,8 +949,9 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
         if (next) earlierByThread[view.threadId] = next
         else delete earlierByThread[view.threadId]
       }
-      if (messagesUnchanged && agents === s.agents && tasks === s.tasks && earlierByThread === s.earlierByThread && !s.transcriptPending) return s
+      if (!opened && messagesUnchanged && agents === s.agents && tasks === s.tasks && earlierByThread === s.earlierByThread && !s.transcriptPending) return s
       return {
+        ...opened,
         messages: messagesUnchanged ? s.messages : reconciled,
         agents,
         tasks,
@@ -1047,6 +1121,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
     }
     messageCache.clear()
     messageCacheOrder.splice(0)
+    openingEarly = null
     return {
       ...state,
       profileId,
@@ -1060,6 +1135,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       queueDraftNotices: {},
       messages: [],
       transcriptPending: false,
+      openingThreadId: null,
       agents: [],
       tasks: [],
       activeThreadId: null,
