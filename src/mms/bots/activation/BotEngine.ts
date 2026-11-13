@@ -6525,7 +6525,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = this.store.activation(activationId)
     if (!row || row.botId !== botId || row.lane !== 'chat') return ''
     const rows = this.store.all(`SELECT m.text FROM bot_messages m WHERE m.activation_id = ? AND m.author = 'owner'
-      AND NOT EXISTS (SELECT 1 FROM bot_questions q WHERE q.answer_message = m.id AND q.status = 'answered' AND json_extract(q.answer_json, '$.choice') IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM bot_questions q WHERE q.answer_message = m.id AND q.status = 'answered' AND (json_extract(q.answer_json, '$.choice') IS NOT NULL OR json_extract(q.answer_json, '$.tapped')))
       ORDER BY m.seq`, activationId)
     return rows.map((message) => (typeof message.text === 'string' ? message.text : '')).join('\n')
   }

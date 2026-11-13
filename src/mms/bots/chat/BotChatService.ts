@@ -456,7 +456,7 @@ export class BotChatService {
           ...(replyTo ? { replyTo: replyTo.id } : {}),
           ...(answering ? { questionId: answering.id } : {})
         })
-        if (answering) this.store.answerQuestion(answering.id, tap ? { choice: tap.choice, by: 'owner' } : { text, by: 'owner' }, posted.id)
+        if (answering) this.store.answerQuestion(answering.id, tap ? { choice: tap.choice, by: 'owner', tapped: true } : { text, by: 'owner' }, posted.id)
         // Any other question still open is moved past: the owner wrote something else, and the bot hears what it had asked.
         const moved = this.store.moveOnQuestions(input.botId, posted.id, answering?.id)
         touched = [...(answering ? [answering] : []), ...moved]

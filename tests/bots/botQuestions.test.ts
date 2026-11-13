@@ -206,6 +206,9 @@ describe('what a question never does', () => {
     const continued = f.store.lastMainDispatch(turn.activation.id)!
     expect(continued.kind).toBe('continue')
     expect(continued.prompt.text).toContain('Your question "Which flat should I book a viewing for?" was not shown to the owner, because you also asked for a permission. Ask it again with ask_owner if you still need to know.')
+     // The continuation can ask it again: the unshown question never counted as the turn's one.
+    const again = await start(f, turn.activation.id, continued.n)
+    expect(JSON.parse((await tool('ask_owner', again.prepared, again.payload.threadId, FLATS)).text).asked).toBe(true)
   })
 
   it('a turn the owner stopped shows no question', async () => {
@@ -283,6 +286,18 @@ describe('forgetting, deleting and exporting', () => {
     expect(JSON.stringify(kept.answer)).not.toContain('walk-up')
     expect(chatOf(f, botId).find((message) => message.id === second.bubble.id)?.question).toMatchObject({ status: 'answered' })
     expect(chatOf(f, botId).find((message) => message.id === second.bubble.id)?.question?.answer).toBeUndefined()
+  })
+
+  it('forgetting a tapped answer keeps it from becoming the owner’s words: its turn still cannot switch models', async () => {
+    const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+    const { bubble } = await asked({ question: 'Which model should I use?', choices: ['Opus 4.6', 'Something cheaper'] })
+    const { message } = await tap(bubble.question!.questionId, 'Opus 4.6')
+    const tapped = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    memory.forget(botId, { refs: [journaled(memory, message, 'owner_msg')], by: 'owner_ui' })
+    expect(JSON.stringify(f.store.question(bubble.question!.questionId)!.answer)).not.toContain('Opus')
+    expect(f.bots.ownerWords(botId, tapped.id)).toBe('')
+    const turn = await start(f, tapped.id)
+    expect(JSON.parse((await tool('use_model', turn.prepared, turn.payload.threadId, { model: 'Opus 4.6', scope: 'now' })).text)).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
   })
 
   it('deleting the bot withdraws its open questions, and the purge removes them', async () => {

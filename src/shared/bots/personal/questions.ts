@@ -26,6 +26,8 @@ export interface BotQuestionAnswer {
   choice?: string
   text?: string
   by: 'owner'
+  /** Answered by a tap: the bot's label, never the owner's own words. Kept when the answer is forgotten. */
+  tapped?: true
 }
 
 /** A question on a bot's message, as the app draws it: its answers to tap, and where it stands. */

@@ -985,7 +985,7 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   // answer the forgotten message gave keeps no copy either (issue #1123).
   if (has('bot_questions')) {
     tx.statement("UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')), status = CASE WHEN status IN ('open', 'moved_on') THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?").run(text, botId, messageId)
-    tx.statement("UPDATE bot_questions SET answer_json = json_object('by', json_extract(answer_json, '$.by'), 'redacted', json('true')) WHERE bot_id = ? AND answer_message = ? AND answer_json IS NOT NULL").run(botId, messageId)
+    tx.statement("UPDATE bot_questions SET answer_json = CASE WHEN json_extract(answer_json, '$.tapped') OR json_extract(answer_json, '$.choice') IS NOT NULL THEN json_object('by', json_extract(answer_json, '$.by'), 'tapped', json('true'), 'redacted', json('true')) ELSE json_object('by', json_extract(answer_json, '$.by'), 'redacted', json('true')) END WHERE bot_id = ? AND answer_message = ? AND answer_json IS NOT NULL").run(botId, messageId)
   }
   // A note the forgotten message passed to work: gone from the note and from the prompt that carried it.
   if (has('bot_work_notes')) {

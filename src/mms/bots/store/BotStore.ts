@@ -1589,9 +1589,12 @@ export class BotStore {
     return this.all('SELECT * FROM bot_questions WHERE activation_id = ? ORDER BY created_at, rowid', activationId).map(questionOf)
   }
 
-  /** How many questions a bot asked: in one activation, or since a time. */
+  /**
+   * How many questions a bot asked: in one activation, or since a time. One withdrawn before it was shown (its turn
+   * stopped at a wall, and its continuation asks it again) is not counted.
+   */
   countQuestions(botId: string, input: { activationId?: string; since?: string }): number {
-    return Number(this.get('SELECT COUNT(*) AS n FROM bot_questions WHERE bot_id = ? AND (? IS NULL OR activation_id = ?) AND created_at >= ?',
+    return Number(this.get("SELECT COUNT(*) AS n FROM bot_questions WHERE bot_id = ? AND (? IS NULL OR activation_id = ?) AND created_at >= ? AND NOT (status = 'withdrawn' AND message_id IS NULL)",
       botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
   }
 
