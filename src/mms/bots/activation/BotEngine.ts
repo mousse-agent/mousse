@@ -4022,6 +4022,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.limitCuts.delete(row.id)
       const stopped = run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall'
       const reload = (row.reloadPending || limitCut !== undefined) && stopped
+      if (limitCut && stopped) this.acknowledgeCut(row, run.runId, limitCut)
       if (run.status === 'failed' || (run.status !== 'completed' && run.status !== 'uncertain' && !reload)) {
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         if (!unknown) {
@@ -4258,6 +4259,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * activation that ended (or whose processes are confirmed gone) without an outcome. Rows the
    * ledger now shows finished leave the list. Live runs are never scanned.
    */
+  /**
+   * A turn this computer's limit stopped (`cutForLimit`): the calls of the switched-off power it cut off mid-way (a
+   * command; with file access, a file change too) were stopped by the owner's own switch, and the bot no longer has that
+   * power, so they don't hold the work for an acknowledgement: the next turn is told they were interrupted. Any other
+   * call whose effect is unknown still holds it, as after any interruption.
+   */
+  private acknowledgeCut(row: BotActivationRow, runId: string, switches: readonly BotComputerSwitch[]): void {
+    if (!row.selection) return
+    const neutral: NeutralTool[] = switches.includes('files') ? ['shell', 'write', 'edit'] : ['shell']
+    const names = this.nativeNames(row.selection.instanceId, neutral)
+    if (!names.ok) return
+    const cut = new Set(names.names)
+    const ids = this.store.unknownCalls(row.id).filter((call) => !call.acknowledged && call.runId === runId && cut.has(call.tool)).map((call) => call.invocationId)
+    if (ids.length) this.store.acknowledgeUnknownCalls(row.id, ids)
+  }
+
   private collectUnknownCalls(row: BotActivationRow): void {
     const runs = this.host.runs()
     if (!runs) return

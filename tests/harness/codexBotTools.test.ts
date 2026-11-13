@@ -11,10 +11,11 @@
  * tools and sandbox, and Mousse must answer nothing a child asks.
  */
 import { createServer, type Server } from 'node:http'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { CodexProviderService, codexEnvironment } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import type { CodexConnection } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import type { CodexModel } from '../../src/mms/harness/vendors/codex/protocol'
@@ -59,6 +60,14 @@ const ACCOUNTED: Record<string, string> = {
   'collaboration.list_agents': 'lists its subagents'
 }
 const COMMANDS = /(^|[.:])(exec_command|write_stdin|shell|local_shell)$/
+/** Whether a `sleep <seconds>` runs anywhere on this computer (POSIX). */
+const sleeping = (seconds: string): boolean => {
+  try {
+    return execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).split('\n').some((line) => line.trim() === `sleep ${seconds}`)
+  } catch {
+    return false
+  }
+}
 
 type Body = { model?: string; input?: unknown[]; tools?: unknown[] }
 
@@ -152,7 +161,7 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
 
   let threads = 0
   /** A bot holding `tools`, without file access: its files folder and scratch only. */
-  async function botTurn(model: string, tools: NeutralTool[]) {
+  function botOf(tools: NeutralTool[]) {
     const files = join(root, `bot-${threads}`, 'files')
     const scratch = join(root, `bot-${threads}`, 'scratch')
     for (const folder of [files, scratch]) mkdirSync(folder, { recursive: true })
@@ -162,8 +171,12 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
       waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) },
       time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
     })
+    return { bot, files, scratch, threadId: `bot-tools-${threads++}` }
+  }
+  async function botTurn(model: string, tools: NeutralTool[]) {
+    const { bot, scratch, threadId } = botOf(tools)
     requests = []
-    await service.chat({ threadId: `bot-tools-${threads++}`, cwd: scratch, model, prompt: 'Go.', mcp: null, bot, onText: () => undefined })
+    await service.chat({ threadId, cwd: scratch, model, prompt: 'Go.', mcp: null, bot, onText: () => undefined })
     return requests
   }
   const modelWith = (version: string | null) => models.find((model) => model.multiAgentVersion === version)
@@ -206,6 +219,25 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
     expect(JSON.stringify(withShell)).not.toContain('secret-1061')
     first = undefined
     child = undefined
+  }, 120_000)
+
+  it.skipIf(process.platform === 'win32')('a bot turn stopped while its command runs ends at once, and so does the command (how Mousse stops a turn when a switch goes off)', async () => {
+    const model = modelWith(null)!
+    const { bot, scratch, threadId } = botOf(['read', 'shell'])
+    // A duration nothing else on the computer sleeps for, so the command is found by it, whatever its sandbox's pids.
+    const seconds = `300.${process.pid}`
+    first = { type: 'function_call', id: 'f1', call_id: 'call_1', name: 'exec_command', arguments: JSON.stringify({ cmd: `exec sleep ${seconds}`, yield_time_ms: 30_000 }) }
+    requests = []
+    const stop = new AbortController()
+    const turn = service.chat({ threadId, cwd: scratch, model: model.id, prompt: 'Go.', mcp: null, bot, signal: stop.signal, onText: () => undefined }).then(() => 'completed', () => 'stopped')
+    const running = () => sleeping(seconds)
+    await vi.waitFor(() => expect(running()).toBe(true), { timeout: 30_000, interval: 100 })
+    const stoppedAt = Date.now()
+    stop.abort(new Error('stopped'))
+    expect(await turn).toBe('stopped')
+    await vi.waitFor(() => expect(running()).toBe(false), { timeout: 15_000, interval: 100 })
+    expect(Date.now() - stoppedAt).toBeLessThan(15_000)
+    first = undefined
   }, 120_000)
 })
 
