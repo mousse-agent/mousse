@@ -49,9 +49,28 @@ import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import type { TrustedProfileBinding } from '../../mms/protocol/domainRegistry'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
 import { isQualifiedId } from '../../shared/threadRef'
+import type { TurnState } from '../../shared/types'
+import { describeLinkError, type GuiConnectionLogSink } from './guiConnectionLog'
 
 /** A window opens a thread at its newest messages; older ones load as it scrolls back (`thread.messages`). */
 const GUI_SNAPSHOT_NEWEST = 200
+
+/** First wait before a window's lost service connection is opened again; it doubles up to `WINDOW_REOPEN_MAX_MS`. */
+export const WINDOW_REOPEN_BASE_MS = 500
+export const WINDOW_REOPEN_MAX_MS = 30_000
+
+/** What the service says about one thread's turn, read without its transcript (`turnStatusForSender`). */
+export interface WindowTurnStatus {
+  turnState?: TurnState
+  activeTurn: { active: boolean; running: boolean }
+  activity?: string
+  /**
+   * The service has sent this window's connection events it never received: the service's event number when it
+   * answered is past the last one the connection got. Only for this computer's threads; another computer's answer
+   * carries that computer's numbering.
+   */
+  behind: boolean
+}
 
 export type GuiMmsConnectionState =
   | 'idle'
@@ -115,6 +134,11 @@ interface WindowSession {
   closing?: Promise<void>
 }
 
+interface WindowReopen {
+  timer: ReturnType<typeof setTimeout> | null
+  attempts: number
+}
+
 export interface GuiAttachedBrowserHost {
   handleCommand(sender: WebContents, command: AttachedBrowserCommand, signal: AbortSignal): Promise<Awaited<ReturnType<AttachedBrowserCommandHandler>>>
   releaseWindow(sender: WebContents): Promise<void>
@@ -173,6 +197,10 @@ export class GuiMmsController extends EventEmitter {
   private readonly endpointOverride?: string
   private readonly ownerTokenOverride?: string
   private readonly requestTimeoutMs?: number
+  /** Where main writes what happens to its service connections (`<home>/logs/gui-connection.log`). */
+  private linkLog: GuiConnectionLogSink | null = null
+  /** Windows whose own connection closed without main closing it, waiting to be opened again. */
+  private readonly windowReopens = new Map<number, WindowReopen>()
 
   constructor(opts: GuiMmsControllerOptions = {}) {
     super()
@@ -194,6 +222,14 @@ export class GuiMmsController extends EventEmitter {
   /** True from `stopForInstall` until `resumeAfterInstall`. */
   get installingUpdate(): boolean {
     return this.installing
+  }
+
+  setConnectionLog(log: GuiConnectionLogSink | null): void {
+    this.linkLog = log
+  }
+
+  private log(event: string, fields?: Parameters<GuiConnectionLogSink['write']>[1]): void {
+    this.linkLog?.write(event, fields)
   }
 
   get connectionState(): GuiMmsConnectionState {
@@ -270,6 +306,8 @@ export class GuiMmsController extends EventEmitter {
   async stop(): Promise<void> {
     this.quitting = true
     this.clearReconnectTimer()
+    for (const reopen of this.windowReopens.values()) if (reopen.timer) clearTimeout(reopen.timer)
+    this.windowReopens.clear()
     await this.startPromise?.catch(() => undefined)
     await this.reconnecting?.catch(() => undefined)
     await Promise.allSettled([...this.windowSessionOpenings.values()])
@@ -325,6 +363,7 @@ export class GuiMmsController extends EventEmitter {
   private enterFailed(err?: Error): void {
     this.clearAllTimersAndListeners()
     this.setState('failed')
+    this.log('service.failed', { error: err ? describeLinkError(err) : undefined, attempts: this.reconnectAttempts })
     if (err) this.emit('error', err)
   }
 
@@ -363,7 +402,8 @@ export class GuiMmsController extends EventEmitter {
         const bound = result as unknown as {profile?:{id?:string};epoch?:number}
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
           session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
-          await session.client.subscribe(0)
+          const subscribed = await session.client.subscribe(0)
+          this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
           await this.attachedBrowserHost?.acknowledgeClosed(sender)
         }
       }
@@ -513,8 +553,12 @@ export class GuiMmsController extends EventEmitter {
         !binding || event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
       this.emit('window-connection-event', { senderId: sender.id, event })
     })
-    this.windowEventUnsubs.set(sender.id, () => { unsubscribe(); unsubscribeConnection() })
-    await windowClient.subscribe(0)
+    // A connection main did not close (the service restarted, or dropped it as too slow to read) is opened again
+    // at once instead of waiting for the window's next request; until then the window hears nothing (#1042).
+    const unsubscribeClosed = windowClient.onConnectionClosed(error => this.windowConnectionLost(sender, session, error))
+    this.windowEventUnsubs.set(sender.id, () => { unsubscribe(); unsubscribeConnection(); unsubscribeClosed() })
+    const subscribed = await windowClient.subscribe(0)
+    this.afterWindowSubscribe(sender.id, windowClient, subscribed, this.windowReopens.has(sender.id) ? 'reopened' : 'opened')
     await this.attachedBrowserHost?.acknowledgeClosed(sender)
     // A thread of this computer the window already shows is shown again on this connection; nothing waits for it.
     // Threads of other computers are focused through their router when they are selected.
@@ -526,6 +570,105 @@ export class GuiMmsController extends EventEmitter {
       if (openedSession) await this.closeWindowSession(sender.id, openedSession).catch(() => undefined)
       else if (client) await client.close().catch(() => undefined)
       throw error
+    }
+  }
+
+  /**
+   * A window's subscription is in place. A gap it reported (the service's replay no longer holds what the window
+   * missed) is acted on now: it used to wait for the next event, and after a finished turn none may come.
+   */
+  private afterWindowSubscribe(
+    senderId: number,
+    client: LocalMmsClient,
+    subscribed: { sequence: number; gap: boolean; replay?: unknown[] },
+    how: 'opened' | 'reopened' | 'profile-bound'
+  ): void {
+    this.log('window.subscribed', {
+      window: senderId,
+      how,
+      sequence: subscribed.sequence,
+      replayed: Array.isArray(subscribed.replay) ? subscribed.replay.length : 0,
+      gap: client.requiresResnapshot
+    })
+    if (client.requiresResnapshot) this.emit('window-resnapshot', { senderId })
+  }
+
+  /** A window's own connection closed. Main's own closes (`closeWindowSession`, `stop`) are not losses. */
+  private windowConnectionLost(sender: WebContents, session: WindowSession, error: Error): void {
+    if (session.closing || this.quitting || this.installing || sender.isDestroyed()) return
+    if (this.windowSessions.get(sender.id) !== session) return
+    this.log('window.lost', { window: sender.id, error: describeLinkError(error), lastSequence: session.client.lastKnownSequence })
+    this.scheduleWindowReopen(sender)
+  }
+
+  private scheduleWindowReopen(sender: WebContents): void {
+    if (this.quitting || this.installing || sender.isDestroyed()) {
+      this.windowReopens.delete(sender.id)
+      return
+    }
+    let reopen = this.windowReopens.get(sender.id)
+    if (!reopen) {
+      reopen = { timer: null, attempts: 0 }
+      this.windowReopens.set(sender.id, reopen)
+      sender.once('destroyed', () => {
+        const pending = this.windowReopens.get(sender.id)
+        if (pending?.timer) clearTimeout(pending.timer)
+        this.windowReopens.delete(sender.id)
+      })
+    }
+    if (reopen.timer) return
+    const delay = Math.min(WINDOW_REOPEN_MAX_MS, WINDOW_REOPEN_BASE_MS * 2 ** reopen.attempts)
+    const pending = reopen
+    pending.attempts += 1
+    pending.timer = setTimeout(() => {
+      pending.timer = null
+      void this.reopenWindow(sender, pending)
+    }, delay)
+    ;(pending.timer as { unref?: () => void }).unref?.()
+  }
+
+  private async reopenWindow(sender: WebContents, reopen: WindowReopen): Promise<void> {
+    if (this.windowReopens.get(sender.id) !== reopen) return
+    if (this.quitting || this.installing || sender.isDestroyed()) {
+      this.windowReopens.delete(sender.id)
+      return
+    }
+    const current = this.windowSessions.get(sender.id)
+    // A request of the window opened a replacement first: it still needs catching up.
+    const alreadyOpen = Boolean(current?.client.connected && !current.closing)
+    try {
+      if (!alreadyOpen) await this.prepareWindow(sender)
+      this.windowReopens.delete(sender.id)
+      this.log('window.reopened', { window: sender.id, attempts: reopen.attempts, byRequest: alreadyOpen })
+      this.emit('window-session-reopened', { senderId: sender.id })
+    } catch (error) {
+      if (this.windowReopens.get(sender.id) !== reopen) return
+      this.log('window.reopen-failed', { window: sender.id, attempts: reopen.attempts, error: describeLinkError(error) })
+      this.scheduleWindowReopen(sender)
+    }
+  }
+
+  /**
+   * What the service says about a thread's turn, read through the window's own connection without the transcript: the
+   * cheap check behind the catch-up (#1042). `behind` compares the service's event number when it answered with the
+   * last one this connection received; an answer is written after every event numbered before it, so a lower count
+   * means events were lost on the way, not still in flight.
+   */
+  async turnStatusForSender(senderId: number, threadId: string): Promise<WindowTurnStatus> {
+    const session = this.windowSessions.get(senderId)
+    if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
+    const status = await session.client.request<{
+      turnState?: TurnState
+      activeTurn?: { active?: boolean; running?: boolean }
+      activity?: string
+      revision?: number
+    }>('thread.snapshot', { threadId, transcript: false })
+    const revision = typeof status?.revision === 'number' ? status.revision : undefined
+    return {
+      ...(status?.turnState && typeof status.turnState === 'object' ? { turnState: status.turnState } : {}),
+      activeTurn: { active: Boolean(status?.activeTurn?.active), running: Boolean(status?.activeTurn?.running) },
+      ...(typeof status?.activity === 'string' ? { activity: status.activity } : {}),
+      behind: !isQualifiedId(threadId) && revision !== undefined && revision > session.client.lastKnownSequence
     }
   }
 
@@ -822,8 +965,14 @@ export class GuiMmsController extends EventEmitter {
       // LocalMmsClient rejects pending on disconnect; schedule reconnect unless quitting.
       this.watchDisconnect(client)
 
-      await client.subscribe(client.lastKnownSequence > 0 ? client.lastKnownSequence : 0)
+      const subscribed = await client.subscribe(client.lastKnownSequence > 0 ? client.lastKnownSequence : 0)
       this.assertMayConnect()
+      this.log('service.connected', {
+        instance: hello.instanceId,
+        serverVersion: hello.serverVersion,
+        sequence: subscribed.sequence,
+        gap: client.requiresResnapshot
+      })
       if (client.requiresResnapshot) {
         this.emit('resnapshot', { reason: 'subscribe_gap_or_instance', hello })
       }
@@ -855,6 +1004,7 @@ export class GuiMmsController extends EventEmitter {
     this.disconnectTimer = setInterval(() => {
       if (this.quitting || this.installing || this.client !== client) return
       if (!client.connected && this.state === 'ready') {
+        this.log('service.lost', { lastSequence: client.lastKnownSequence })
         this.scheduleReconnect('disconnect')
       }
     }, 1000)
@@ -870,6 +1020,7 @@ export class GuiMmsController extends EventEmitter {
     this.setState('reconnecting')
     const attempt = this.reconnectAttempts++
     const delay = Math.min(30_000, this.reconnectBaseMs * Math.pow(2, attempt))
+    this.log('service.reconnect-scheduled', { reason, attempt: attempt + 1, delayMs: delay })
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       void this.reconnect(reason)
@@ -916,6 +1067,7 @@ export class GuiMmsController extends EventEmitter {
       return false
     } catch (err) {
       if (this.quitting || this.installing) return false
+      this.log('service.reconnect-failed', { reason, error: describeLinkError(err) })
       // Tests with auto-start off fail fast; managed daemon keeps retrying while dev restarts MMS.
       if (this.disableAutoStart && !this.managedDaemon) {
         this.enterFailed(err instanceof Error ? err : new Error(String(err)))
