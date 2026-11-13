@@ -1020,7 +1020,7 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     await click(presence())
     const line = host.querySelector('.bot-work-line')!
     expect(line.textContent).toBe('Vacuum comparisonworking · 2 subagents · 4 min')
-    expect(line.querySelector('.bot-work-subagents')!.getAttribute('title')).toBe('Prices · Some Model on OpenRouter\nReviews · Haiku 5.5 on Claude Code, low reasoning · can't run commands there')
+    expect(line.querySelector('.bot-work-subagents')!.getAttribute('title')).toBe("Prices · Some Model on OpenRouter\nReviews · Haiku 5.5 on Claude Code, low reasoning · can't run commands there")
     await click(button('Stop Vacuum comparison'))
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
   })
