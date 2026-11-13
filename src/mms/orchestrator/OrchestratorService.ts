@@ -12546,8 +12546,10 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
+    // Applets published by tool join the turn's last reply as fences, so they publish with it.
+    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
     if (mode === 'plan') {
-      const planMarkdown = (stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.') + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+      const planMarkdown = (stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.') + appletFences
       if (this.activeAssistantMessageId) {
         const streamingId = this.activeAssistantMessageId
         this.activeAssistantMessageId = null
@@ -12584,14 +12586,15 @@ export class OrchestratorService extends EventEmitter {
     // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
-    const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+    const replyOnlyText = stripActionBlocks(assistantText)
+    const displayText = replyOnlyText + appletFences
     // A tool call ends a reply row, so a turn's notes before its calls already have rows of their
     // own: the row that ends the turn (the open one, else the last closed one) holds the rest.
     const shownReplies = this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content))
-    const finalText = unshownReplyText(
-      displayText,
-      this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
-    )
+    const earlierReplies = this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
+    const finalText = unshownReplyText(displayText, earlierReplies)
+    // The streamed row never held the applet fences, so it is matched on the reply text alone.
+    const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
     // again, comes next. "Done." would read as if the turn had finished with nothing to say.
@@ -12607,12 +12610,13 @@ export class OrchestratorService extends EventEmitter {
       this.activeAssistantMessageId = null
     } else if (
       this.lastCompletedAssistantMessageId &&
-      stripActionBlocks(this.lastCompletedAssistantContent) === finalText
+      stripActionBlocks(this.lastCompletedAssistantContent) === finalReplyText
     ) {
       // Compare stripped-to-stripped: the streamed snapshot is raw (often
-      // trailing whitespace / action fences) while displayText is stripped.
-      // A raw === stripped comparison fails on whitespace alone and appends
-      // a visually identical twin message.
+      // trailing whitespace / action fences) while the reply text is stripped.
+      // A raw === stripped comparison fails on whitespace alone, and a match
+      // that counted the applet fences never succeeds; either appends a
+      // visually identical twin message.
       this.updateStreamingAssistantMessage(
         this.lastCompletedAssistantMessageId,
         finalText,

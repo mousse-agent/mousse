@@ -207,6 +207,30 @@ it('stages structured tool submissions through the same final publication path a
   expect(completed?.presentationParts?.filter((part) => part.type === 'applet')).toHaveLength(3)
 })
 
+it('keeps one reply row when a tool-published applet follows a reply that already closed', async () => {
+  const { main, thread } = await fixture()
+  main.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  // As Claude Code streams it: the applet is published by tool, then the reply opens and closes
+  // before the turn ends.
+  const adapter = piAdapter(() => 'I published a chart.')
+  const startTurn = adapter.startTurn.bind(adapter)
+  adapter.startTurn = async (input, sink, ctl, host) => {
+    host.tools.onPublishApplet!(source)
+    sink.text({ phase: 'start', content: '', contentIndex: 0 })
+    return startTurn(input, sink, ctl, host)
+  }
+  main.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: main.getProfileHomeDir() }))
+  await main.orchestrator.send({ content: 'Illustrate costs', mode: 'agent' }, false, {
+    threadId: thread.id
+  })
+  const replies = main.threads
+    .loadThreadData(thread.id)
+    .messages.filter((message) => message.role === 'assistant' && !message.kind && !message.hidden)
+  expect(replies).toHaveLength(1)
+  expect(replies[0].content).toContain('I published a chart.')
+  expect(replies[0].presentationParts?.filter((part) => part.type === 'applet')).toHaveLength(1)
+})
+
 it('publishes native plan-mode applets once while retaining the plan message', async () => {
   const { main, thread } = await fixture()
   const content = 'Plan explanation\n' + fence(source)
