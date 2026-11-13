@@ -593,8 +593,9 @@ describe('a face while the shader compiles', () => {
     const canvas = faceCanvas()!
     expect(canvas).not.toBeNull()
     expect(flat()).toBeNull()
-    await settle()
+    // Decoded as the saved frames loaded: painted in the same commit, never an empty box.
     expect(lastDrawn(canvas)).toMatchObject({ width: 40, height: 40 })
+    await settle()
     fake.tick(SAVED_HOLD_MS * 10)
     expect(flat()).toBeNull()
     expect(fake.draws).toHaveLength(0)
@@ -636,6 +637,37 @@ describe('a face while the shader compiles', () => {
     expect(lastDrawn(canvas)).toMatchObject({ width: 40, height: 40 })
     fake.tick(SAVED_HOLD_MS)
     expect(flat()).toBeNull()
+  })
+
+  it('fills a moving face mounted while live with its still frame until its first live frame', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: coral })
+    saved.open()
+    await settle()
+    const fake = fakeEnv({ saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    const canvas = faceCanvas()!
+    expect(lastDrawn(canvas)).toMatchObject({ width: 40, height: 40 })
+    fake.tick()
+    expect(lastDrawn(canvas)).toBe(fake.gpu.canvas)
+  })
+
+  it('fills a moving face mounted while live from its saved still frame when none is in memory', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: coral })
+    saved.open()
+    await settle()
+    const key = stillFrameKey({ look: coral, state: 'idle', view: 'head', size: 40 }, 40)
+    // Decoded as the store opened, then handed to another window's face: only the saved record is left.
+    expect(saved.store.take(key)).not.toBeNull()
+    const fake = fakeEnv({ saved, observer: true })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    const canvas = faceCanvas()!
+    await settle()
+    expect(lastDrawn(canvas)).toMatchObject({ width: 40, height: 40 })
+    expect(fake.draws).toHaveLength(0)
   })
 
   it('copies a still face saved in an earlier run in once live, instead of drawing it again', async () => {
@@ -768,9 +800,9 @@ describe('saved frames', () => {
   it('forgets a saved frame that cannot be decoded, and the face draws flat', async () => {
     const saved = fakeSaved()
     await drawAndSave(saved, { look: coral })
+    saved.fail.decode = true
     saved.open()
     await settle()
-    saved.fail.decode = true
     const fake = fakeEnv({ status: () => 'pending', saved })
     resetSharedFaceRenderer(() => fake.env)
     render(face())
@@ -856,8 +888,8 @@ describe('reduced motion', () => {
     ))
     expect(host.querySelectorAll('.bot-face-live[data-still="true"]')).toHaveLength(2 + 1)
     for (let i = 0; i < 5; i++) fake.tick()
-    // The two alike faces share one cached frame.
-    expect(fake.draws).toHaveLength(2)
+    // The two alike faces share one cached frame (past the budget the third first shows a one-sample draft).
+    expect(fake.draws.filter((draw) => draw.uniforms.uV[2] === 2)).toHaveLength(2)
     expect(fake.draws[0]!.uniforms).toEqual(faceUniforms({ colour: 'yellow', accessory: 'beret' }, stillPose('stuck'), { view: 'head', size: 40, samples: 2 }))
     expect(fake.pending()).toBe(0)
   })
@@ -1000,7 +1032,7 @@ describe('the shared renderer', () => {
     renderer.dispose()
   })
 
-  it('keeps each tick within the sample budget, blank faces first', () => {
+  it('draws every blank face on its first tick, then keeps each tick within the sample budget', () => {
     const fake = fakeEnv()
     const renderer = new FaceRenderer(fake.env)
     const canvases = Array.from({ length: 20 }, () => document.createElement('canvas'))
@@ -1013,6 +1045,8 @@ describe('the shared renderer', () => {
     expect(side).toBe(80)
     const perTick = Math.floor(SAMPLE_BUDGET / (side * side))
     expect(perTick).toBeLessThan(20)
+    fake.tick()
+    expect(drawnTo.size).toBe(20)
     const counts: number[] = []
     for (let i = 0; i < 4; i++) {
       const before = fake.draws.length
@@ -1020,22 +1054,27 @@ describe('the shared renderer', () => {
       counts.push(fake.draws.length - before)
     }
     expect(Math.max(...counts)).toBe(perTick)
-    expect(drawnTo.size).toBe(20)
     for (const draw of fake.draws) expect(draw.side).toBe(80)
     renderer.dispose()
   })
 
-  it('draws still faces with 2×2 samples, counted four times against the budget', () => {
+  it('draws still faces with 2×2 samples, counted four times; past the budget a blank one gets a one-sample draft, drawn clean later', () => {
     const fake = fakeEnv()
     const renderer = new FaceRenderer(fake.env)
     const looks = ['coral', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink'] as const
     for (const colour of looks) renderer.register(document.createElement('canvas'), spec({ look: { colour, accessory: 'none' }, still: true }))
     const perTick = Math.max(1, Math.floor(SAMPLE_BUDGET / (80 * 80 * 4)))
+    const clean = () => fake.draws.filter((draw) => draw.uniforms.uV[2] === 2)
     fake.tick()
-    expect(fake.draws).toHaveLength(perTick)
-    for (const draw of fake.draws) expect(draw.uniforms.uV[2]).toBe(2)
-    while (fake.draws.length < looks.length) fake.tick()
+    // All eight show at once: the first within the budget clean, the rest as drafts.
     expect(fake.draws).toHaveLength(looks.length)
+    expect(clean()).toHaveLength(perTick)
+    while (clean().length < looks.length) fake.tick()
+    expect(new Set(clean().map((draw) => draw.uniforms.uCol.join()))).toHaveProperty('size', looks.length)
+    // Then nothing more: each clean frame is drawn once.
+    const drawn = fake.draws.length
+    fake.tick()
+    expect(fake.draws).toHaveLength(drawn)
     renderer.dispose()
   })
 

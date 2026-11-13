@@ -21,7 +21,8 @@ import { noteWebGlContext } from '../../../lib/webglCount'
  *   staggered so the faces don't all draw on the same tick. Ticks draw at most 60 times a second.
  * - A tick draws at most `SAMPLE_BUDGET` shader samples (drawn pixels), blank faces first,
  *   then the most overdue; the rest wait for the next tick. Many faces then lower the frame rate,
- *   not the frame time.
+ *   not the frame time. A blank face never waits: past the budget it is drawn anyway, a still one
+ *   as a one-sample draft that a later tick draws clean.
  * - Still faces (reduced motion, `still`, settled faces) draw once, with 2×2 samples for clean
  *   edges (counted four times against the budget). Their frame is cached per look, state, view
  *   and pixel size, so a long list of the same still face costs one draw. Live faces take one
@@ -40,10 +41,12 @@ import { noteWebGlContext } from '../../../lib/webglCount'
  *   WebGL failed) shows the saved frame of its spec; a moving face shows the saved still pose of its
  *   spec, which is drawn once for it (with what a tick's budget leaves) just to be saved. Only a
  *   face with no saved frame draws the flat `BotFaceStill`, and keeps it over its canvas until the
- *   renderer first draws into it. When live, a still face
- *   saved in an earlier run is copied in rather than drawn again. The saved frames start loading as
- *   the window starts (`startFaceFrameStore`); a face that mounts before they have, or whose
- *   picture is still decoding, holds an empty box for at most `SAVED_HOLD_MS`.
+ *   renderer first draws into it. When live, a still face saved in an earlier run is copied in
+ *   rather than drawn again, and a face just mounted shows its still frame until its first live one.
+ *   The saved frames start loading as the window starts (`startFaceFrameStore`), and the most
+ *   recently used are decoded then, so a face mounting after that paints its saved picture in the
+ *   same commit. One that mounts before, or whose picture was not decoded then, holds an empty box
+ *   for at most `SAVED_HOLD_MS`.
  * - While the shader compiles, the renderer checks it every `READY_POLL_MS`, so faces go live
  *   within that of it being ready. With no `KHR_parallel_shader_compile` the check waits for the
  *   compile, so it is then made only when a face is due to draw.
@@ -273,6 +276,8 @@ interface Job {
   cacheKey?: string
   /** A moving face's still pose, drawn only to keep and save: its canvas is left as it is. */
   saveOnly?: boolean
+  /** A blank still face drawn at one sample past the budget: neither kept nor saved, and drawn clean later. */
+  draft?: boolean
   x: number
   y: number
 }
@@ -420,7 +425,22 @@ export class FaceRenderer {
     this.slots.set(canvas, slot)
     this.sizeCanvas(slot)
     this.observer?.observe(canvas)
-    if (!this.live()) this.showSaved(slot)
+    if (!this.live()) {
+      this.showSaved(slot)
+    } else {
+      // Live: its first frame comes with a tick once the observer has seen it on screen, a frame or
+      // two away; its still frame, in memory or saved, fills the box until then.
+      const key = stillFrameKey(slot.spec, slot.px)
+      const ready = this.stillFrame(key, slot.px)
+      if (ready) {
+        this.paint(slot, ready, key)
+      } else if (this.env.frames?.has(key)) {
+        const load = slot.load
+        void this.savedImage(key, slot.px).then((frame) => {
+          if (frame && slot.load === load && this.slots.get(slot.canvas) === slot && !slot.drawn && slot.picture === null) this.paint(slot, frame, key)
+        })
+      }
+    }
     this.schedule()
     return {
       update: (next) => this.update(slot, next),
@@ -557,6 +577,21 @@ export class FaceRenderer {
     while (this.cache.size > STILL_CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!)
   }
 
+  /** A still frame in memory, or decoded as the saved frames loaded (then kept in memory); at once, or undefined. */
+  private stillFrame(key: string, px: number): CanvasImageSource | undefined {
+    const cached = this.cache.get(key)
+    if (cached) return cached
+    const frames = this.env.frames
+    const image = frames?.take(key)
+    if (!frames || !image) return undefined
+    if (image.width !== px || image.height !== px) {
+      frames.forget(key)
+      return undefined
+    }
+    this.remember(key, image)
+    return image
+  }
+
   /** A saved still frame, decoded and kept in memory; null when there is none. Waits for the saved frames to load. */
   private savedImage(key: string, px: number): Promise<CanvasImageSource | null> {
     const cached = this.cache.get(key)
@@ -605,8 +640,8 @@ export class FaceRenderer {
     const load = ++slot.load
     slot.cancelHold?.()
     slot.cancelHold = null
-    const cached = this.cache.get(key)
-    if (cached) return this.paint(slot, cached, key)
+    const ready = this.stillFrame(key, slot.px)
+    if (ready) return this.paint(slot, ready, key)
     const frames = this.env.frames
     if (!frames || (frames.settled() && !frames.has(key))) return slot.events.onNoPicture?.()
     slot.cancelHold = this.env.setTimer?.(() => {
@@ -736,15 +771,17 @@ export class FaceRenderer {
     if (due.length === 0) return this.schedule()
     due.sort((a, b) => a.at - b.at)
     const jobs: Job[] = []
+    /** Blank still faces alike to one drawn this tick: they copy its frame once it is drawn. */
+    const alike: [Slot, string][] = []
     let spent = 0
     for (const { slot } of due) {
       const { spec } = slot
       // Still frames are drawn once and cached, so they take 2×2 samples for clean edges.
-      const samples: 1 | 2 = slot.drawnStill ? 2 : 1
-      const view = { view: spec.view, size: spec.size, samples }
-      const cacheKey = slot.drawnStill ? stillFrameKey(spec, slot.px) : undefined
+      let samples: 1 | 2 = slot.drawnStill ? 2 : 1
+      let cacheKey = slot.drawnStill ? stillFrameKey(spec, slot.px) : undefined
+      const blank = !slot.drawn && slot.picture === null
       if (cacheKey) {
-        const cached = this.cache.get(cacheKey)
+        const cached = this.stillFrame(cacheKey, slot.px)
         if (cached) {
           this.remember(cacheKey, cached)
           slot.ctx.clearRect(0, 0, slot.px, slot.px)
@@ -753,17 +790,33 @@ export class FaceRenderer {
           this.markDrawn(slot)
           continue
         }
-        // Two still faces alike on one tick: the second copies the first's frame next tick.
-        if (jobs.some((job) => job.cacheKey === cacheKey)) continue
+        // Two still faces alike on one tick: the second copies the first's frame.
+        if (jobs.some((job) => job.cacheKey === cacheKey)) {
+          if (blank) alike.push([slot, cacheKey])
+          continue
+        }
         // Saved in an earlier run: copied in once loaded, instead of drawn again.
         if (this.env.frames?.has(cacheKey)) {
           if (!this.loads.has(cacheKey)) void this.savedImage(cacheKey, slot.px).then(() => this.schedule())
           continue
         }
       }
-      const cost = slot.drawPx * slot.drawPx * samples * samples
-      if (spent > 0 && spent + cost > SAMPLE_BUDGET) continue
+      let cost = slot.drawPx * slot.drawPx * samples * samples
+      if (spent > 0 && spent + cost > SAMPLE_BUDGET) {
+        if (!blank) continue
+        // A blank face never waits for the budget. A still one is drawn now as a one-sample draft,
+        // and its clean frame (the one kept and saved) on a later tick.
+        if (cacheKey) {
+          samples = 1
+          cacheKey = undefined
+          cost = slot.drawPx * slot.drawPx
+          jobs.push({ slot, uniforms: faceUniforms(spec.look, stillPose(spec.state), { view: spec.view, size: spec.size, samples }), draft: true, x: 0, y: 0 })
+          spent += cost
+          continue
+        }
+      }
       spent += cost
+      const view = { view: spec.view, size: spec.size, samples }
       if (cacheKey) {
         jobs.push({ slot, uniforms: faceUniforms(spec.look, stillPose(spec.state), view), cacheKey, x: 0, y: 0 })
         continue
@@ -803,6 +856,14 @@ export class FaceRenderer {
         for (const [key, copy] of copies) {
           this.remember(key, copy)
           this.env.frames?.save(key, copy)
+        }
+        for (const [slot, key] of alike) {
+          const frame = this.cache.get(key)
+          if (!frame) continue
+          slot.ctx.clearRect(0, 0, slot.px, slot.px)
+          slot.ctx.drawImage(frame, 0, 0, slot.px, slot.px)
+          slot.dirty = false
+          this.markDrawn(slot)
         }
       }
       const ms = this.env.now() - started
@@ -891,6 +952,8 @@ export class FaceRenderer {
     slot.ctx.imageSmoothingQuality = 'high'
     slot.ctx.drawImage(gpu.canvas, job.x, job.y, slot.drawPx, slot.drawPx, 0, 0, px, px)
     this.markDrawn(slot)
+    // A draft is drawn clean on a later tick.
+    if (job.draft) slot.dirty = true
     if (!job.cacheKey) return null
     const copy = this.env.createCanvas()
     copy.width = copy.height = px

@@ -6,9 +6,15 @@
  * - Every record carries the art version it was drawn with; records of any other version are
  *   ignored and deleted when the store opens, so a picture never outlives an art change.
  * - The store is bounded: least recently used records go first past `MAX_SAVED_FRAMES` records or
- *   `MAX_SAVED_BYTES` bytes. The look picker draws 23 faces per look; a 36 px tile is about 5 KB.
+ *   `MAX_SAVED_BYTES` bytes. The look picker draws 23 faces per look; a 36 px tile is about 7 KB,
+ *   so the count is reached first (about 3 MB).
  * - Any storage failure (no IndexedDB, a full disk, a corrupt record) leaves the store empty or
  *   forgets the record: faces then draw as they would with no saved picture.
+ * - As it opens, the store decodes the `PRELOAD_FRAMES` most recently used pictures (the faces of the
+ *   last session, mostly) before it counts as loaded, so a face mounting after that paints its
+ *   picture in the same commit (`take`). A decode waits on the main thread, which is busy while the
+ *   app starts; without this, faces would wait on it. Decoded pictures not taken within
+ *   `PRELOAD_KEEP_MS` are let go.
  *
  * The records live in the renderer's IndexedDB, in the Electron user data of the app (or of the
  * development run) that drew them.
@@ -16,6 +22,12 @@
 
 export const MAX_SAVED_FRAMES = 400
 export const MAX_SAVED_BYTES = 4 * 1024 * 1024
+/** Pictures decoded as the store opens: a 96 px picture takes 36 KB decoded, so about 2 MB at most. */
+export const PRELOAD_FRAMES = 64
+/** The longest the store waits for those decodes before it counts as loaded anyway. */
+export const PRELOAD_LIMIT_MS = 400
+/** Decoded pictures no face took within this long are let go. */
+export const PRELOAD_KEEP_MS = 60_000
 
 export interface SavedFrameRecord {
   key: string
@@ -48,6 +60,8 @@ export interface FaceFrameStore {
   /** Calls `listener` once settled (at once when it already is); returns a function that stops it. */
   onSettled(listener: () => void): () => void
   has(key: string): boolean
+  /** The picture decoded as the store opened, handed over once; null when it wasn't. */
+  take(key: string): SavedFrameImage | null
   /** The decoded picture, or null when there is none or it can't be decoded (then it is forgotten). */
   image(key: string): Promise<SavedFrameImage | null>
   /** Saves the picture in `canvas` under `key`, unless one is saved already. */
@@ -64,6 +78,8 @@ export interface FaceFrameStoreOptions {
 
 export class SavedFaceFrames implements FaceFrameStore {
   private readonly records = new Map<string, SavedFrameRecord>()
+  /** Pictures decoded as the store opened, until a face takes them. */
+  private readonly decoded = new Map<string, SavedFrameImage>()
   private readonly listeners = new Set<() => void>()
   private readonly saving = new Set<string>()
   private readonly now: () => number
@@ -110,7 +126,33 @@ export class SavedFaceFrames implements FaceFrameStore {
       this.records.clear()
       this.bytes = 0
     }
+    await this.preload()
     this.settle()
+  }
+
+  /** Decodes the most recently used pictures, waiting at most `PRELOAD_LIMIT_MS`. */
+  private async preload(): Promise<void> {
+    const recent = [...this.records.values()].sort((a, b) => b.usedAt - a.usedAt).slice(0, PRELOAD_FRAMES)
+    if (recent.length === 0) return
+    const decodes = recent.map(async (record) => {
+      try {
+        const image = await this.codec.decode(record.data)
+        if (image && this.records.get(record.key) === record) this.decoded.set(record.key, image)
+      } catch {
+        // Decoded again when a face asks (`image`), which forgets it if it still fails.
+      }
+    })
+    let stopWaiting: () => void = () => undefined
+    await Promise.race([Promise.all(decodes), new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, PRELOAD_LIMIT_MS)
+      stopWaiting = () => clearTimeout(timer)
+    })])
+    stopWaiting()
+    const release = setTimeout(() => {
+      for (const image of this.decoded.values()) (image as { close?(): void }).close?.()
+      this.decoded.clear()
+    }, PRELOAD_KEEP_MS)
+    ;(release as { unref?(): void }).unref?.()
   }
 
   private settle(): void {
@@ -136,7 +178,18 @@ export class SavedFaceFrames implements FaceFrameStore {
     return this.records.has(key)
   }
 
+  take(key: string): SavedFrameImage | null {
+    const image = this.decoded.get(key)
+    const record = this.records.get(key)
+    if (!image || !record) return null
+    this.decoded.delete(key)
+    this.used(record)
+    return image
+  }
+
   async image(key: string): Promise<SavedFrameImage | null> {
+    const taken = this.take(key)
+    if (taken) return taken
     const record = this.records.get(key)
     if (!record) return null
     let image: SavedFrameImage | null = null
@@ -149,11 +202,15 @@ export class SavedFaceFrames implements FaceFrameStore {
       this.forget(key)
       return null
     }
-    if (this.records.get(key) === record && !this.off) {
-      record.usedAt = this.now()
-      void this.backend?.put([record]).catch(() => undefined)
-    }
+    if (this.records.get(key) === record) this.used(record)
     return image
+  }
+
+  /** Marks a record shown now, for the least-recently-used order. */
+  private used(record: SavedFrameRecord): void {
+    if (this.off) return
+    record.usedAt = this.now()
+    void this.backend?.put([record]).catch(() => undefined)
   }
 
   save(key: string, canvas: HTMLCanvasElement): void {
@@ -183,6 +240,7 @@ export class SavedFaceFrames implements FaceFrameStore {
     const record = this.records.get(key)
     if (!record) return
     this.records.delete(key)
+    this.decoded.delete(key)
     this.bytes -= record.bytes
     void this.backend?.remove([key]).catch(() => undefined)
   }
@@ -195,6 +253,7 @@ export class SavedFaceFrames implements FaceFrameStore {
     for (const record of oldest) {
       if (this.records.size <= this.maxFrames && this.bytes <= this.maxBytes) break
       this.records.delete(record.key)
+      this.decoded.delete(record.key)
       this.bytes -= record.bytes
       removed.push(record.key)
     }
