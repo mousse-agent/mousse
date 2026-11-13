@@ -1,5 +1,6 @@
-import type { KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_COLOURS, BOT_EYES, BOT_KINDS, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
+import { browserFrameCodec, hashText, indexedDbFrameBackend, SavedFaceFrames, type FaceFrameStore } from './faceFrameStore'
 import { FaceMotion, faceUniforms, stillPose, WHISKER_MIN_SIZE, type FaceUniforms } from './facePoses'
 import { MICE_FRAGMENT_SHADER, MICE_UNIFORMS, MICE_VERTEX_SHADER, type MiceUniform } from './miceShader'
 import { noteWebGlContext } from '../../../lib/webglCount'
@@ -20,7 +21,8 @@ import { noteWebGlContext } from '../../../lib/webglCount'
  *   staggered so the faces don't all draw on the same tick. Ticks draw at most 60 times a second.
  * - A tick draws at most `SAMPLE_BUDGET` shader samples (drawn pixels), blank faces first,
  *   then the most overdue; the rest wait for the next tick. Many faces then lower the frame rate,
- *   not the frame time.
+ *   not the frame time. A blank face never waits: past the budget it is drawn anyway, a still one
+ *   as a one-sample draft that a later tick draws clean.
  * - Still faces (reduced motion, `still`, settled faces) draw once, with 2×2 samples for clean
  *   edges (counted four times against the budget). Their frame is cached per look, state, view
  *   and pixel size, so a long list of the same still face costs one draw. Live faces take one
@@ -29,15 +31,36 @@ import { noteWebGlContext } from '../../../lib/webglCount'
  *   idle or paused, and a few seconds after the window lost focus in any state; a busy face moves
  *   again when the window has focus.
  *
- * Faces never stay blank: a shader that has not compiled within `PENDING_TIMEOUT_MS`, a refused or
- * software context, and a first frame that reads back empty all make the faces draw the still fallback.
+ * Ready from launch, and never blank:
+ * - Each window starts the renderer right after its first paint (`warmFaceRendererAfterPaint`,
+ *   from `main.tsx`), so the shader compiles before any face shows: ANGLE's Direct3D 11 backend on
+ *   Windows takes seconds. Once compiled it stays for the life of the window; with no face shown
+ *   for `IDLE_SHRINK_MS`, only the shared drawing buffer shrinks to 1×1.
+ * - Every still frame drawn is also saved between runs (`faceFrameStore.ts`), under its exact spec
+ *   and the art version (`faceArtVersion`). A face that can't draw live (compiling, context lost,
+ *   WebGL failed) shows the saved frame of its spec; a moving face shows the saved still pose of its
+ *   spec, which is drawn once for it (with what a tick's budget leaves) just to be saved. Only a
+ *   face with no saved frame draws the flat `BotFaceStill`, and keeps it over its canvas until the
+ *   renderer first draws into it. When live, a still face saved in an earlier run is copied in
+ *   rather than drawn again, and a face just mounted shows its still frame until its first live one.
+ *   The saved frames start loading as the window starts (`startFaceFrameStore`), and the most
+ *   recently used are decoded then, so a face mounting after that paints its saved picture in the
+ *   same commit. One that mounts before, or whose picture was not decoded then, holds an empty box
+ *   for at most `SAVED_HOLD_MS`.
+ * - While the shader compiles, the renderer checks it every `READY_POLL_MS`, so faces go live
+ *   within that of it being ready. With no `KHR_parallel_shader_compile` the check waits for the
+ *   compile, so it is then made only when a face is due to draw.
+ * - A refused or software context, a failed compile and a first frame that reads back empty make
+ *   the faces show their saved frame or the flat drawing.
  *
- * To measure: `faceRendererStats()` (in development also `window.__mousseFaceStats(measureGpu?)`)
- * reports the time per drawing tick. With `measureGpu`, `gpuMs` is the GPU time of each tick's
- * draws, from a timer query (`EXT_disjoint_timer_query`) where there is one. Without it, each
- * drawing tick waits for the GPU before and after drawing and subtracts the time an empty wait
- * takes; that stalls the pipeline, so leave it off otherwise. On the development machine (AMD
- * Renoir integrated graphics) a sample costs 40 to 80 ns, so the budget keeps a tick near 2 to 4 ms.
+ * To measure: `faceRendererStats()` (also `window.__mousseFaceStats(measureGpu?)`) reports the
+ * time per drawing tick, and `compileMs`, the time from the renderer's creation to the shader being
+ * found ready (logged once as `[bot faces] shader ready in … ms`). With `measureGpu`, `gpuMs` is the
+ * GPU time of each tick's draws, from a timer query (`EXT_disjoint_timer_query`) where there is
+ * one. Without it, each drawing tick waits for the GPU before and after drawing and subtracts the
+ * time an empty wait takes; that stalls the pipeline, so leave it off otherwise. On the development
+ * machine (AMD Renoir integrated graphics) a sample costs 40 to 80 ns, so the budget keeps a tick
+ * near 2 to 4 ms.
  */
 
 export interface FaceSpec {
@@ -53,6 +76,14 @@ export interface FaceSpec {
 export interface FaceHandle {
   update(spec: FaceSpec): void
   dispose(): void
+}
+
+/** What a face hears from the renderer about its canvas. */
+export interface FaceSlotEvents {
+  /** The face can't draw live and has no saved frame for its spec: it should draw the flat fallback. */
+  onNoPicture?(): void
+  /** The renderer drew into the canvas while live, for the first time. */
+  onDrawn?(): void
 }
 
 /** The GPU side, behind an interface so the scheduling can be tested without WebGL. */
@@ -73,6 +104,13 @@ export interface FaceGpu {
   onRestored(listener: () => void): void
   /** Called when the context is lost. */
   onLost?(listener: () => void): void
+  /** Shrinks the drawing buffer to 1×1; the next draw grows it again. */
+  shrink?(): void
+  /**
+   * `status()` waits for the compile to end instead of answering at once (no
+   * `KHR_parallel_shader_compile`). Then it is read only when a face is due to draw, not polled.
+   */
+  readonly statusWaits?: boolean
   dispose(): void
 }
 
@@ -96,9 +134,16 @@ export interface FaceRendererEnv {
   random?: () => number
   /** Calls `callback` after `ms`; returns a function that cancels it. Without it a lost context waits for its restore. */
   setTimer?(callback: () => void, ms: number): () => void
+  /** Still frames saved between runs. Without it, a face that can't draw live draws the flat fallback. */
+  frames?: FaceFrameStore
+  /** Debug logging (the console in the app). */
+  log?(message: string): void
 }
 
 export type FaceRendererStatus = 'pending' | 'ready' | 'failed'
+
+/** Whether a face that can't draw live has a picture: in memory or saved, none, or not known until the saved frames load. */
+export type FacePicture = 'saved' | 'none' | 'unknown'
 
 export interface FaceRendererStats {
   /** Ticks that drew at least one face. */
@@ -114,6 +159,8 @@ export interface FaceRendererStats {
   /** Faces registered, and how many of them are on screen. */
   faces: number
   visible: number
+  /** Milliseconds from the renderer's creation to the shader being found ready; null until it is. */
+  compileMs: number | null
 }
 
 const MAX_PIXEL_RATIO = 2
@@ -129,23 +176,19 @@ const MIN_TICK = 1 / 62
 /** Seconds an idle or paused face moves after its state changed, and any face after the window lost focus. */
 export const IDLE_LIVE_SECONDS = 6
 export const UNFOCUSED_LIVE_SECONDS = 3
-/** A lost context not back within this long fails: the faces draw the still fallback. */
+/** A lost context not back within this long fails: the faces show their saved frame or the flat fallback. */
 export const LOST_CONTEXT_TIMEOUT_MS = 5_000
+/** How often a compile in progress is checked, so faces go live within this of the shader being ready. */
+export const READY_POLL_MS = 100
 /**
- * A shader still compiling after this long counts as failed, so the faces draw the still fallback
- * instead of nothing. ANGLE's Direct3D 11 backend on Windows can take far longer than this to compile
- * the ray-marching shader. The compile goes on: when it finishes, the faces draw live again.
+ * With no face on screen for this long, the shared drawing buffer shrinks to 1×1. The context and the
+ * compiled shader stay, so the next face draws live at once.
  */
-export const PENDING_TIMEOUT_MS = 3_000
-/** How often a timed-out compile is checked again. */
-export const PENDING_POLL_MS = 1_000
-/**
- * With no face on screen for this long, the shared renderer lets its WebGL context go, so the GPU
- * process frees the context, its buffer and the compiled shader. The next face makes a new one.
- */
-export const IDLE_RELEASE_MS = 30_000
-/** A renderer made again after a release first checks its compile this soon, then every `PENDING_POLL_MS`. */
-export const RESTART_POLL_MS = 100
+export const IDLE_SHRINK_MS = 30_000
+/** The longest a face holds an empty box while its saved frame loads, before it draws the flat fallback. */
+export const SAVED_HOLD_MS = 60
+/** Changes when the way a frame is drawn or copied out changes, outside the shader and the poses. */
+const FRAME_FORMAT = 1
 
 /** Seconds between frames, by state. */
 const FRAME_INTERVAL: Record<BotFaceState, number> = {
@@ -168,6 +211,36 @@ export function faceDrawSide(size: number, pixelRatio: number): number {
   return Math.max(1, Math.round(size * (size < WHISKER_MIN_SIZE ? MAX_PIXEL_RATIO : pixelRatio)))
 }
 
+/** The key of a face's still frame, in memory and saved: its look, state, view and size, and its canvas's side in device pixels. */
+export function stillFrameKey(spec: Pick<FaceSpec, 'look' | 'state' | 'view' | 'size'>, px: number): string {
+  const { look } = spec
+  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${spec.state}|${spec.view}|${spec.size}|${px}`
+}
+
+const ART_STATES: readonly BotFaceState[] = ['idle', 'working', 'needs_you', 'stuck', 'paused', 'happy']
+
+/**
+ * Names the art a saved frame was drawn with: the shader source, the still-pose uniforms of every
+ * state, colour, accessory, character and eye shape, the drawing sizes and `FRAME_FORMAT`. A change
+ * to any of them makes a new version, and frames saved under another are deleted.
+ */
+export function faceArtVersion(): string {
+  const view = { view: 'full', size: 104, samples: 2 } as const
+  const looks: KnownBotLook[] = [
+    ...BOT_COLOURS.map((colour) => ({ colour, accessory: 'none' as const })),
+    ...BOT_ACCESSORIES.map((accessory) => ({ colour: 'teal' as const, accessory })),
+    ...BOT_KINDS.flatMap((kind) => BOT_EYES.map((eyes) => ({ colour: 'purple' as const, accessory: 'none' as const, kind, eyes })))
+  ]
+  const samples = [
+    ...ART_STATES.map((state) => faceUniforms(looks[0]!, stillPose(state), view)),
+    ...ART_STATES.map((state) => faceUniforms(looks[0]!, stillPose(state), { view: 'head', size: 40, samples: 2 })),
+    ...looks.map((look) => faceUniforms(look, stillPose('idle'), view))
+  ]
+  return hashText(
+    [FRAME_FORMAT, MAX_PIXEL_RATIO, WHISKER_MIN_SIZE, JSON.stringify(BOT_COLOUR_HEX), JSON.stringify(BOT_ACCESSORY_HEX), MICE_VERTEX_SHADER, MICE_FRAGMENT_SHADER, JSON.stringify(samples)].join('\n')
+  )
+}
+
 interface Slot {
   canvas: HTMLCanvasElement
   ctx: CanvasRenderingContext2D
@@ -186,12 +259,25 @@ interface Slot {
   changedAt: number
   /** Whether its last frame was the still pose. */
   drawnStill: boolean
+  /** The key of the still frame shown while the face can't draw live; null once drawn live, or empty. */
+  picture: string | null
+  /** Whether the renderer has drawn into the canvas while live. */
+  drawn: boolean
+  /** Counts saved-frame loads, so a stale one is dropped. */
+  load: number
+  /** Ends the empty-box wait for a saved frame. */
+  cancelHold: (() => void) | null
+  events: FaceSlotEvents
 }
 
 interface Job {
   slot: Slot
   uniforms: FaceUniforms
   cacheKey?: string
+  /** A moving face's still pose, drawn only to keep and save: its canvas is left as it is. */
+  saveOnly?: boolean
+  /** A blank still face drawn at one sample past the budget: neither kept nor saved, and drawn clean later. */
+  draft?: boolean
   x: number
   y: number
 }
@@ -200,19 +286,24 @@ export class FaceRenderer {
   private readonly env: FaceRendererEnv
   private gpu: FaceGpu | null
   private readonly slots = new Map<HTMLCanvasElement, Slot>()
-  private readonly cache = new Map<string, HTMLCanvasElement>()
+  /** Still frames by `stillFrameKey`, drawn this run or loaded from the saved ones. */
+  private readonly cache = new Map<string, CanvasImageSource>()
+  /** Saved frames being loaded, by key. */
+  private readonly loads = new Map<string, Promise<CanvasImageSource | null>>()
+  /** Still poses of moving faces drawn to be saved this run, by key, so each is drawn once. */
+  private readonly stillsTaken = new Set<string>()
   private readonly observer: IntersectionObserver | null
   private readonly listeners = new Set<() => void>()
   private readonly random: () => number
   private frameId: number | null = null
   private failed = false
   private ready = false
+  private readonly createdAt: number
+  private compileMs: number | null = null
   /** Cancels the wait for a lost context to come back. */
   private cancelLostTimer: (() => void) | null = null
-  /** Cancels the next check of a compile that is still pending. */
-  private cancelPendingTimer: (() => void) | null = null
-  /** The shader took longer than `PENDING_TIMEOUT_MS`: the faces draw still until it is ready. */
-  private timedOut = false
+  /** Cancels the next check of a compile in progress. */
+  private cancelReadyPoll: (() => void) | null = null
   /** Whether the first drawn face has been read back to check that it is not empty. */
   private verified = false
   private readonly onVisibility = () => this.schedule()
@@ -226,14 +317,10 @@ export class FaceRenderer {
   /** Wait for the GPU at the end of each tick, so the stats include the shader time. */
   measureGpu = false
 
-  /**
-   * `stillUntilReady`: the faces draw the still fallback until the shader is ready, instead of nothing
-   * for up to `PENDING_TIMEOUT_MS`. Used when the shared renderer is made again after a release, so a
-   * face that was live before never shows empty while the new context compiles.
-   */
-  constructor(env: FaceRendererEnv, options: { stillUntilReady?: boolean } = {}) {
+  constructor(env: FaceRendererEnv) {
     this.env = env
     this.random = env.random ?? Math.random
+    this.createdAt = env.now()
     this.gpu = env.createGpu()
     if (!this.gpu) this.failed = true
     this.gpu?.onLost?.(() => this.lost())
@@ -242,15 +329,9 @@ export class FaceRenderer {
       this.cancelLostTimer = null
       for (const slot of this.slots.values()) slot.dirty = true
       // The restored context compiles the shader again, which may take as long as the first compile.
-      if (this.gpu?.status() === 'pending') this.startPendingTimer()
+      this.startReadyPoll()
       this.schedule()
     })
-    if (options.stillUntilReady && this.gpu && env.setTimer) {
-      this.timedOut = true
-      this.cancelPendingTimer = env.setTimer(this.checkPending, RESTART_POLL_MS)
-    } else {
-      this.startPendingTimer()
-    }
     const Observer = env.IntersectionObserver
     this.observer = Observer && this.gpu
       ? new Observer((entries) => {
@@ -272,13 +353,19 @@ export class FaceRenderer {
     }) ?? null
     // Faces off screen are sized when they next draw; a still face on screen draws again at the new ratio.
     this.stopRatioWatch = env.onPixelRatioChange?.(() => {
-      for (const slot of this.slots.values()) if (slot.visible) this.sizeCanvas(slot)
+      for (const slot of this.slots.values()) {
+        if (!slot.visible) continue
+        this.sizeCanvas(slot)
+        if (!this.live()) this.showSaved(slot)
+      }
       this.schedule()
     }) ?? null
+    // A first check now, where it is free, then every `READY_POLL_MS`.
+    if (this.gpu && !this.gpu.statusWaits) this.checkReady()
   }
 
   status(): FaceRendererStatus {
-    if (this.failed || this.timedOut) return 'failed'
+    if (this.failed) return 'failed'
     return this.ready ? 'ready' : 'pending'
   }
 
@@ -293,9 +380,21 @@ export class FaceRenderer {
     return () => this.listeners.delete(listener)
   }
 
-  /** Starts drawing into `canvas`. Null when the canvas has no 2D context or WebGL failed. */
-  register(canvas: HTMLCanvasElement, spec: FaceSpec): FaceHandle | null {
-    if (this.failed || this.timedOut) return null
+  /** Whether a face of this spec has a picture to show while it can't draw live. */
+  pictureFor(spec: Pick<FaceSpec, 'look' | 'state' | 'view' | 'size'>): FacePicture {
+    const key = stillFrameKey(spec, this.canvasSide(spec.size))
+    if (this.cache.has(key)) return 'saved'
+    const frames = this.env.frames
+    if (!frames) return 'none'
+    if (!frames.settled()) return 'unknown'
+    return frames.has(key) ? 'saved' : 'none'
+  }
+
+  /**
+   * Starts drawing into `canvas`: live once the shader is ready, its saved frame until then. Null
+   * when the canvas has no 2D context.
+   */
+  register(canvas: HTMLCanvasElement, spec: FaceSpec, events: FaceSlotEvents = {}): FaceHandle | null {
     let ctx: CanvasRenderingContext2D | null = null
     try {
       ctx = canvas.getContext('2d')
@@ -316,17 +415,41 @@ export class FaceRenderer {
       px: 0,
       drawPx: 0,
       changedAt: t,
-      drawnStill: spec.still
+      drawnStill: spec.still,
+      picture: null,
+      drawn: false,
+      load: 0,
+      cancelHold: null,
+      events
     }
     this.slots.set(canvas, slot)
     this.sizeCanvas(slot)
     this.observer?.observe(canvas)
+    if (!this.live()) {
+      this.showSaved(slot)
+    } else {
+      // Live: its first frame comes with a tick once the observer has seen it on screen, a frame or
+      // two away; its still frame, in memory or saved, fills the box until then.
+      const key = stillFrameKey(slot.spec, slot.px)
+      const ready = this.stillFrame(key, slot.px)
+      if (ready) {
+        this.paint(slot, ready, key)
+      } else if (this.env.frames?.has(key)) {
+        const load = slot.load
+        void this.savedImage(key, slot.px).then((frame) => {
+          if (frame && slot.load === load && this.slots.get(slot.canvas) === slot && !slot.drawn && slot.picture === null) this.paint(slot, frame, key)
+        })
+      }
+    }
     this.schedule()
     return {
       update: (next) => this.update(slot, next),
       dispose: () => {
         if (this.slots.get(canvas) !== slot) return
         this.slots.delete(canvas)
+        slot.load++
+        slot.cancelHold?.()
+        slot.cancelHold = null
         this.observer?.unobserve(canvas)
         if (!this.wanted()) this.stop()
       }
@@ -336,7 +459,7 @@ export class FaceRenderer {
   stats(): FaceRendererStats {
     let visible = 0
     for (const slot of this.slots.values()) if (slot.visible) visible++
-    return { ...this.stat, faces: this.slots.size, visible }
+    return { ...this.stat, faces: this.slots.size, visible, compileMs: this.compileMs }
   }
 
   resetStats(): void {
@@ -348,12 +471,18 @@ export class FaceRenderer {
     return this.frameId !== null
   }
 
+  /** Shrinks the shared drawing buffer while no face shows; the context and the compiled shader stay. */
+  shrink(): void {
+    this.gpu?.shrink?.()
+  }
+
   dispose(): void {
     this.stop()
     this.cancelLostTimer?.()
     this.cancelLostTimer = null
-    this.cancelPendingTimer?.()
-    this.cancelPendingTimer = null
+    this.cancelReadyPoll?.()
+    this.cancelReadyPoll = null
+    for (const slot of this.slots.values()) slot.cancelHold?.()
     this.observer?.disconnect()
     this.env.document?.removeEventListener('visibilitychange', this.onVisibility)
     this.stopRatioWatch?.()
@@ -377,18 +506,33 @@ export class FaceRenderer {
     if (prev.state !== next.state) slot.motion.set(next.state, slot.changedAt)
     slot.dirty = true
     this.sizeCanvas(slot)
+    if (!this.live()) this.showSaved(slot)
     this.schedule()
+  }
+
+  private canvasSide(size: number): number {
+    return Math.max(1, Math.round(size * facePixelRatio(this.env.pixelRatio())))
   }
 
   private sizeCanvas(slot: Slot): void {
     const ratio = facePixelRatio(this.env.pixelRatio())
-    const px = Math.max(1, Math.round(slot.spec.size * ratio))
+    const px = this.canvasSide(slot.spec.size)
     slot.drawPx = faceDrawSide(slot.spec.size, ratio)
     if (px === slot.px) return
     slot.px = px
-    slot.canvas.width = px
-    slot.canvas.height = px
+    // Setting a canvas's size clears it, even to the size it has, so only a new size is set.
+    if (slot.canvas.width !== px || slot.canvas.height !== px) {
+      slot.canvas.width = px
+      slot.canvas.height = px
+      slot.picture = null
+      slot.drawn = false
+    }
     slot.dirty = true
+  }
+
+  /** Whether the faces draw live: the shader is ready and nothing failed. */
+  private live(): boolean {
+    return this.ready && !this.failed
   }
 
   private hidden(): boolean {
@@ -405,7 +549,7 @@ export class FaceRenderer {
 
   /** Whether any face wants a frame, now or later. */
   private wanted(): boolean {
-    if (this.failed || this.timedOut || this.hidden()) return false
+    if (this.failed || this.hidden()) return false
     const t = this.env.now() / 1000
     for (const slot of this.slots.values()) if (slot.visible && (slot.dirty || !slot.drawnStill || !this.still(slot, t))) return true
     return false
@@ -426,56 +570,141 @@ export class FaceRenderer {
     for (const listener of [...this.listeners]) listener()
   }
 
-  /** Fails for good: the faces draw the still fallback. */
+  /** Keeps a still frame in memory, most recently used last, so the oldest goes first. */
+  private remember(key: string, frame: CanvasImageSource): void {
+    this.cache.delete(key)
+    this.cache.set(key, frame)
+    while (this.cache.size > STILL_CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!)
+  }
+
+  /** A still frame in memory, or decoded as the saved frames loaded (then kept in memory); at once, or undefined. */
+  private stillFrame(key: string, px: number): CanvasImageSource | undefined {
+    const cached = this.cache.get(key)
+    if (cached) return cached
+    const frames = this.env.frames
+    const image = frames?.take(key)
+    if (!frames || !image) return undefined
+    if (image.width !== px || image.height !== px) {
+      frames.forget(key)
+      return undefined
+    }
+    this.remember(key, image)
+    return image
+  }
+
+  /** A saved still frame, decoded and kept in memory; null when there is none. Waits for the saved frames to load. */
+  private savedImage(key: string, px: number): Promise<CanvasImageSource | null> {
+    const cached = this.cache.get(key)
+    if (cached) return Promise.resolve(cached)
+    const frames = this.env.frames
+    if (!frames) return Promise.resolve(null)
+    let loading = this.loads.get(key)
+    if (!loading) {
+      loading = new Promise<void>((resolve) => frames.onSettled(resolve))
+        .then(() => (frames.has(key) ? frames.image(key) : null))
+        .then((image) => {
+          if (!image) return null
+          // A frame of the wrong size is not this spec's: drop it, and draw the face anew.
+          if (image.width !== px || image.height !== px) {
+            frames.forget(key)
+            return null
+          }
+          this.remember(key, image)
+          return image
+        })
+        .catch(() => {
+          frames.forget(key)
+          return null
+        })
+        .finally(() => this.loads.delete(key))
+      this.loads.set(key, loading)
+    }
+    return loading
+  }
+
+  /** Draws a still frame into a face that can't draw live. */
+  private paint(slot: Slot, frame: CanvasImageSource, key: string): void {
+    slot.ctx.clearRect(0, 0, slot.px, slot.px)
+    slot.ctx.imageSmoothingQuality = 'high'
+    slot.ctx.drawImage(frame, 0, 0, slot.px, slot.px)
+    slot.picture = key
+  }
+
+  /**
+   * Shows the still frame of the face's spec while it can't draw live: from memory at once, or saved,
+   * holding the empty box for at most `SAVED_HOLD_MS`. With none, the face draws the flat fallback.
+   */
+  private showSaved(slot: Slot): void {
+    const key = stillFrameKey(slot.spec, slot.px)
+    if (slot.picture === key) return
+    const load = ++slot.load
+    slot.cancelHold?.()
+    slot.cancelHold = null
+    const ready = this.stillFrame(key, slot.px)
+    if (ready) return this.paint(slot, ready, key)
+    const frames = this.env.frames
+    if (!frames || (frames.settled() && !frames.has(key))) return slot.events.onNoPicture?.()
+    slot.cancelHold = this.env.setTimer?.(() => {
+      slot.cancelHold = null
+      if (slot.load === load && !this.live()) slot.events.onNoPicture?.()
+    }, SAVED_HOLD_MS) ?? null
+    void this.savedImage(key, slot.px).then((frame) => {
+      if (slot.load !== load || this.slots.get(slot.canvas) !== slot) return
+      slot.cancelHold?.()
+      slot.cancelHold = null
+      // Live by now and already drawn: the live frame stays.
+      if (this.live() && slot.drawn) return
+      if (frame) this.paint(slot, frame, key)
+      else if (!this.live()) slot.events.onNoPicture?.()
+    })
+  }
+
+  /** Fails for good: each face shows its saved frame, or draws the flat fallback. */
   private fail(): void {
     if (this.failed) return
     this.failed = true
-    this.cancelPendingTimer?.()
-    this.cancelPendingTimer = null
+    this.cancelReadyPoll?.()
+    this.cancelReadyPoll = null
     this.stop()
+    for (const slot of [...this.slots.values()]) this.showSaved(slot)
     this.notify()
   }
 
-  /** The shader is ready. From a tick, that tick draws; after a timeout, every face draws again. */
+  /** The shader is ready. From a tick, that tick draws. */
   private becomeReady(fromTick = false): void {
-    this.cancelPendingTimer?.()
-    this.cancelPendingTimer = null
-    if (this.ready && !this.timedOut) return
-    const wasTimedOut = this.timedOut
+    this.cancelReadyPoll?.()
+    this.cancelReadyPoll = null
+    if (this.ready) return
     this.ready = true
-    this.timedOut = false
-    if (wasTimedOut) for (const slot of this.slots.values()) slot.dirty = true
+    if (this.compileMs === null) {
+      this.compileMs = Math.round(this.env.now() - this.createdAt)
+      this.env.log?.(`[bot faces] shader ready in ${this.compileMs} ms`)
+    }
     this.notify()
     if (!fromTick) this.schedule()
   }
 
-  /** Gives the shader `PENDING_TIMEOUT_MS` to become ready, whether or not any tick runs meanwhile. */
-  private startPendingTimer(): void {
-    if (this.failed || !this.env.setTimer) return
-    this.cancelPendingTimer?.()
-    this.cancelPendingTimer = this.env.setTimer(this.checkPending, PENDING_TIMEOUT_MS)
+  /** Checks a compile in progress every `READY_POLL_MS`, whether or not any face shows. */
+  private startReadyPoll(): void {
+    if (this.failed || this.ready || !this.gpu || this.gpu.statusWaits || !this.env.setTimer || this.cancelReadyPoll) return
+    this.cancelReadyPoll = this.env.setTimer(this.checkReady, READY_POLL_MS)
   }
 
-  /** Still compiling: draw the still fallback, and look again until the compile ends. */
-  private readonly checkPending = (): void => {
-    this.cancelPendingTimer = null
+  private readonly checkReady = (): void => {
+    this.cancelReadyPoll = null
     const gpu = this.gpu
-    if (!gpu || this.failed || (this.ready && !this.timedOut)) return
+    if (!gpu || this.failed || this.ready) return
     const status = gpu.status()
     if (status === 'ready') return this.becomeReady()
     if (status === 'failed') return this.fail()
-    if (status === 'lost') this.lost()
-    if (!this.timedOut) {
-      this.timedOut = true
-      this.stop()
-      this.notify()
-    }
-    this.cancelPendingTimer = this.env.setTimer?.(this.checkPending, PENDING_POLL_MS) ?? null
+    // Lost: the poll starts again when the context is back.
+    if (status === 'lost') return this.lost()
+    this.startReadyPoll()
   }
 
   /**
    * Reads back the first face drawn: a face with no visible pixel means the GPU draws nothing here
-   * (it reports ready but its frames come out empty), so the faces draw the still fallback instead.
+   * (it reports ready but its frames come out empty), so the faces show saved frames or the flat fallback.
    */
   private verifyDrawn(slot: Slot): void {
     this.verified = true
@@ -490,7 +719,7 @@ export class FaceRenderer {
     this.fail()
   }
 
-  /** The context is lost: not ready until it is back, and failed when it does not come back in time. */
+  /** The context is lost: not ready until it is back, and failed when it does not come back in time. Faces keep what they show. */
   private lost(): void {
     if (this.failed) return
     if (this.ready) {
@@ -500,11 +729,15 @@ export class FaceRenderer {
     if (this.cancelLostTimer || !this.env.setTimer) return
     this.cancelLostTimer = this.env.setTimer(() => {
       this.cancelLostTimer = null
-      if (this.failed || this.gpu?.status() !== 'lost') return
-      this.failed = true
-      this.stop()
-      this.notify()
+      if (this.gpu?.status() === 'lost') this.fail()
     }, LOST_CONTEXT_TIMEOUT_MS)
+  }
+
+  private markDrawn(slot: Slot): void {
+    slot.picture = null
+    if (slot.drawn) return
+    slot.drawn = true
+    slot.events.onDrawn?.()
   }
 
   private tick(nowMs: number): void {
@@ -538,30 +771,52 @@ export class FaceRenderer {
     if (due.length === 0) return this.schedule()
     due.sort((a, b) => a.at - b.at)
     const jobs: Job[] = []
+    /** Blank still faces alike to one drawn this tick: they copy its frame once it is drawn. */
+    const alike: [Slot, string][] = []
     let spent = 0
     for (const { slot } of due) {
       const { spec } = slot
       // Still frames are drawn once and cached, so they take 2×2 samples for clean edges.
-      const samples: 1 | 2 = slot.drawnStill ? 2 : 1
-      const view = { view: spec.view, size: spec.size, samples }
-      const cacheKey = slot.drawnStill ? `${spec.look.colour}|${spec.look.accessory}|${spec.look.kind ?? 'mouse'}|${spec.look.eyes ?? 'pill'}|${spec.state}|${spec.view}|${spec.size}|${slot.px}` : undefined
+      let samples: 1 | 2 = slot.drawnStill ? 2 : 1
+      let cacheKey = slot.drawnStill ? stillFrameKey(spec, slot.px) : undefined
+      const blank = !slot.drawn && slot.picture === null
       if (cacheKey) {
-        const cached = this.cache.get(cacheKey)
+        const cached = this.stillFrame(cacheKey, slot.px)
         if (cached) {
-          // Most recently used last, so the oldest goes first.
-          this.cache.delete(cacheKey)
-          this.cache.set(cacheKey, cached)
+          this.remember(cacheKey, cached)
           slot.ctx.clearRect(0, 0, slot.px, slot.px)
-          slot.ctx.drawImage(cached, 0, 0)
+          slot.ctx.drawImage(cached, 0, 0, slot.px, slot.px)
           slot.dirty = false
+          this.markDrawn(slot)
           continue
         }
-        // Two still faces alike on one tick: the second copies the first's frame next tick.
-        if (jobs.some((job) => job.cacheKey === cacheKey)) continue
+        // Two still faces alike on one tick: the second copies the first's frame.
+        if (jobs.some((job) => job.cacheKey === cacheKey)) {
+          if (blank) alike.push([slot, cacheKey])
+          continue
+        }
+        // Saved in an earlier run: copied in once loaded, instead of drawn again.
+        if (this.env.frames?.has(cacheKey)) {
+          if (!this.loads.has(cacheKey)) void this.savedImage(cacheKey, slot.px).then(() => this.schedule())
+          continue
+        }
       }
-      const cost = slot.drawPx * slot.drawPx * samples * samples
-      if (spent > 0 && spent + cost > SAMPLE_BUDGET) continue
+      let cost = slot.drawPx * slot.drawPx * samples * samples
+      if (spent > 0 && spent + cost > SAMPLE_BUDGET) {
+        if (!blank) continue
+        // A blank face never waits for the budget. A still one is drawn now as a one-sample draft,
+        // and its clean frame (the one kept and saved) on a later tick.
+        if (cacheKey) {
+          samples = 1
+          cacheKey = undefined
+          cost = slot.drawPx * slot.drawPx
+          jobs.push({ slot, uniforms: faceUniforms(spec.look, stillPose(spec.state), { view: spec.view, size: spec.size, samples }), draft: true, x: 0, y: 0 })
+          spent += cost
+          continue
+        }
+      }
       spent += cost
+      const view = { view: spec.view, size: spec.size, samples }
       if (cacheKey) {
         jobs.push({ slot, uniforms: faceUniforms(spec.look, stillPose(spec.state), view), cacheKey, x: 0, y: 0 })
         continue
@@ -573,12 +828,44 @@ export class FaceRenderer {
       slot.nextAt = slot.nextAt + interval < t ? t + interval : slot.nextAt + interval
       jobs.push({ slot, uniforms: faceUniforms(spec.look, slot.motion.frame(t, dt), view), x: 0, y: 0 })
     }
+    // A moving face's still pose is drawn once too, with what the budget leaves, and saved: a later
+    // launch shows it while the shader compiles. After the faces' own frames, which the check reads.
+    const frames = this.env.frames
+    if (jobs.length > 0 && frames?.settled()) {
+      for (const { slot } of due) {
+        if (slot.drawnStill) continue
+        const key = stillFrameKey(slot.spec, slot.px)
+        if (this.stillsTaken.has(key) || this.cache.has(key) || frames.has(key) || jobs.some((job) => job.cacheKey === key)) continue
+        const cost = slot.drawPx * slot.drawPx * 4
+        if (spent + cost > SAMPLE_BUDGET) break
+        spent += cost
+        this.stillsTaken.add(key)
+        const view = { view: slot.spec.view, size: slot.spec.size, samples: 2 as const }
+        jobs.push({ slot, uniforms: faceUniforms(slot.spec.look, stillPose(slot.spec.state), view), cacheKey: key, saveOnly: true, x: 0, y: 0 })
+      }
+    }
     if (jobs.length > 0) {
       this.lastDraw = t
       const started = this.env.now()
-      if (this.measureGpu) this.measure(gpu, () => this.drawJobs(gpu, jobs))
-      else this.drawJobs(gpu, jobs)
+      const copies: [string, HTMLCanvasElement][] = []
+      if (this.measureGpu) this.measure(gpu, () => this.drawJobs(gpu, jobs, copies))
+      else this.drawJobs(gpu, jobs, copies)
       if (!this.verified) this.verifyDrawn(jobs[0]!.slot)
+      // Kept and saved only once the first frame is known not to be empty.
+      if (!this.failed) {
+        for (const [key, copy] of copies) {
+          this.remember(key, copy)
+          this.env.frames?.save(key, copy)
+        }
+        for (const [slot, key] of alike) {
+          const frame = this.cache.get(key)
+          if (!frame) continue
+          slot.ctx.clearRect(0, 0, slot.px, slot.px)
+          slot.ctx.drawImage(frame, 0, 0, slot.px, slot.px)
+          slot.dirty = false
+          this.markDrawn(slot)
+        }
+      }
       const ms = this.env.now() - started
       this.stat.ticks++
       this.stat.lastFaces = jobs.length
@@ -609,8 +896,8 @@ export class FaceRenderer {
     record(Math.max(0, drawn - drawing - (this.env.now() - drawn)))
   }
 
-  /** Packs the jobs into rows of the shared buffer, draws them, then copies each out. */
-  private drawJobs(gpu: FaceGpu, jobs: Job[]): void {
+  /** Packs the jobs into rows of the shared buffer, draws them, then copies each out; still frames' copies go in `copies`. */
+  private drawJobs(gpu: FaceGpu, jobs: Job[], copies: [string, HTMLCanvasElement][]): void {
     let batch: Job[] = []
     let x = 0
     let y = 0
@@ -620,7 +907,10 @@ export class FaceRenderer {
       if (batch.length === 0) return
       gpu.ensureSize(width, y + rowHeight)
       for (const job of batch) gpu.draw(job.x, job.y, job.slot.drawPx, job.uniforms)
-      for (const job of batch) this.copyOut(gpu, job)
+      for (const job of batch) {
+        const copy = this.copyOut(gpu, job)
+        if (copy) copies.push([job.cacheKey!, copy])
+      }
       batch = []
       x = y = rowHeight = width = 0
     }
@@ -642,23 +932,35 @@ export class FaceRenderer {
     flush()
   }
 
-  private copyOut(gpu: FaceGpu, job: Job): void {
+  /** Copies a drawn face into its canvas; for a still frame, also returns a copy to keep. */
+  private copyOut(gpu: FaceGpu, job: Job): HTMLCanvasElement | null {
     const { slot } = job
     const px = slot.px
+    if (job.saveOnly) {
+      const copy = this.env.createCanvas()
+      copy.width = copy.height = px
+      const ctx = copy.getContext('2d')
+      if (!ctx) return null
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(gpu.canvas, job.x, job.y, slot.drawPx, slot.drawPx, 0, 0, px, px)
+      return copy
+    }
     slot.dirty = false
     slot.ctx.clearRect(0, 0, px, px)
     // Small faces are scaled down from 2x; a better filter than bilinear keeps them smooth. Set
     // here, as resizing a canvas resets it.
     slot.ctx.imageSmoothingQuality = 'high'
     slot.ctx.drawImage(gpu.canvas, job.x, job.y, slot.drawPx, slot.drawPx, 0, 0, px, px)
-    if (!job.cacheKey) return
+    this.markDrawn(slot)
+    // A draft is drawn clean on a later tick.
+    if (job.draft) slot.dirty = true
+    if (!job.cacheKey) return null
     const copy = this.env.createCanvas()
     copy.width = copy.height = px
     const ctx = copy.getContext('2d')
-    if (!ctx) return
+    if (!ctx) return null
     ctx.drawImage(slot.canvas, 0, 0)
-    this.cache.set(job.cacheKey, copy)
-    while (this.cache.size > STILL_CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!)
+    return copy
   }
 }
 
@@ -782,12 +1084,18 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       checkLinked()
       return state
     },
+    get statusWaits() {
+      return !parallel
+    },
     ensureSize(width, height) {
       // Grow only, in steps, so the buffer isn't reallocated every tick.
       const w = Math.max(canvas.width, Math.ceil(width / 128) * 128)
       const h = Math.max(canvas.height, Math.ceil(height / 128) * 128)
       if (w !== canvas.width) canvas.width = w
       if (h !== canvas.height) canvas.height = h
+    },
+    shrink() {
+      if (canvas.width !== 1 || canvas.height !== 1) canvas.width = canvas.height = 1
     },
     draw(x, y, side, u) {
       const glY = canvas.height - y - side
@@ -848,6 +1156,24 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
   }
 }
 
+let browserFrames: FaceFrameStore | undefined
+
+/**
+ * The saved face frames of this window, loading from IndexedDB. Called as the window starts
+ * (`main.tsx`), so they are in before the first face; reading them doesn't wait on the shader.
+ */
+export function startFaceFrameStore(): FaceFrameStore {
+  if (browserFrames) return browserFrames
+  let backend = null
+  try {
+    backend = typeof indexedDB === 'undefined' ? null : indexedDbFrameBackend(indexedDB)
+  } catch {
+    backend = null
+  }
+  browserFrames = new SavedFaceFrames(backend, faceArtVersion(), browserFrameCodec)
+  return browserFrames
+}
+
 function browserEnv(): FaceRendererEnv | null {
   if (typeof document === 'undefined' || typeof window === 'undefined') return null
   return {
@@ -885,6 +1211,8 @@ function browserEnv(): FaceRendererEnv | null {
       const handle = window.setTimeout(callback, ms)
       return () => window.clearTimeout(handle)
     },
+    frames: startFaceFrameStore(),
+    log: (message) => console.info(message),
     document,
     IntersectionObserver: typeof IntersectionObserver === 'undefined' ? undefined : IntersectionObserver
   }
@@ -894,21 +1222,19 @@ let shared: FaceRenderer | null | undefined
 let sharedEnv: () => FaceRendererEnv | null = browserEnv
 let unsubscribeShared: (() => void) | null = null
 const sharedListeners = new Set<() => void>()
-/** The timer for `IDLE_RELEASE_MS` is set on the environment the shared renderer was made from. */
+/** The timer for `IDLE_SHRINK_MS` is set on the environment the shared renderer was made from. */
 let sharedTimerEnv: FaceRendererEnv | null = null
-let cancelIdleRelease: (() => void) | null = null
-/** The shared renderer was let go while idle: the next one draws still faces until it is ready. */
-let released = false
+let cancelIdleShrink: (() => void) | null = null
 
 function notifyShared(): void {
   for (const listener of [...sharedListeners]) listener()
 }
 
-/** The app's one face renderer, made on first use. Null when WebGL is missing or failed to start. */
+/** The window's one face renderer, made at launch (`warmFaceRenderer`) or on first use. Null when WebGL is missing or failed to start. */
 export function sharedFaceRenderer(): FaceRenderer | null {
   if (shared !== undefined) return shared
   const env = sharedEnv()
-  const renderer = env ? new FaceRenderer(env, { stillUntilReady: released }) : null
+  const renderer = env ? new FaceRenderer(env) : null
   if (!renderer || renderer.broken) {
     renderer?.dispose()
     shared = null
@@ -916,70 +1242,73 @@ export function sharedFaceRenderer(): FaceRenderer | null {
   }
   shared = renderer
   sharedTimerEnv = env
-  released = false
   unsubscribeShared = renderer.subscribe(notifyShared)
-  // Made by a face's render, which subscribes next; until then nothing shows it, so the idle wait starts.
-  if (sharedListeners.size === 0) scheduleIdleRelease()
-  if (import.meta.env?.DEV) {
-    ;(globalThis as { __mousseFaceStats?: (measureGpu?: boolean) => FaceRendererStats }).__mousseFaceStats = (measureGpu) => {
-      if (measureGpu !== undefined && measureGpu !== renderer.measureGpu) {
-        renderer.measureGpu = measureGpu
-        renderer.resetStats()
-      }
-      return renderer.stats()
+  if (sharedListeners.size === 0) scheduleIdleShrink()
+  // Read-only numbers, kept in packaged builds too so a slow compile can be checked on any machine.
+  ;(globalThis as { __mousseFaceStats?: (measureGpu?: boolean) => FaceRendererStats }).__mousseFaceStats = (measureGpu) => {
+    if (measureGpu !== undefined && measureGpu !== renderer.measureGpu) {
+      renderer.measureGpu = measureGpu
+      renderer.resetStats()
     }
+    return renderer.stats()
   }
   return shared
 }
 
-/** `unavailable` when there is no WebGL at all. Faces draw the still fallback unless it is `pending` or `ready`. */
+/** Makes the shared renderer now, so the shader compiles before any face shows. */
+export function warmFaceRenderer(): void {
+  sharedFaceRenderer()
+}
+
+/** Makes the shared renderer right after the window's next frame is painted, so it never delays that paint. */
+export function warmFaceRendererAfterPaint(win: Pick<Window, 'requestAnimationFrame' | 'setTimeout'> = window): void {
+  // A timeout set from a frame callback runs once that frame has been painted.
+  win.requestAnimationFrame(() => {
+    win.setTimeout(warmFaceRenderer, 0)
+  })
+}
+
+/** `unavailable` when there is no WebGL at all. Faces draw live when it is `ready`, and their saved frame or the flat fallback otherwise. */
 export function sharedFaceRendererStatus(): FaceRendererStatus | 'unavailable' {
   const renderer = sharedFaceRenderer()
   return renderer ? renderer.status() : 'unavailable'
 }
 
-/** Each face on screen subscribes; with none for `IDLE_RELEASE_MS`, the shared renderer and its context go. */
+/** Each face mounted subscribes; with none for `IDLE_SHRINK_MS`, the shared drawing buffer shrinks. */
 export function subscribeSharedFaceRenderer(listener: () => void): () => void {
   sharedListeners.add(listener)
-  cancelIdleRelease?.()
-  cancelIdleRelease = null
+  cancelIdleShrink?.()
+  cancelIdleShrink = null
   return () => {
     sharedListeners.delete(listener)
-    if (sharedListeners.size === 0) scheduleIdleRelease()
+    if (sharedListeners.size === 0) scheduleIdleShrink()
   }
 }
 
-function scheduleIdleRelease(): void {
-  cancelIdleRelease?.()
-  cancelIdleRelease = shared && sharedTimerEnv?.setTimer ? sharedTimerEnv.setTimer(releaseIdleRenderer, IDLE_RELEASE_MS) : null
+function scheduleIdleShrink(): void {
+  cancelIdleShrink?.()
+  cancelIdleShrink = shared && sharedTimerEnv?.setTimer ? sharedTimerEnv.setTimer(shrinkIdleRenderer, IDLE_SHRINK_MS) : null
 }
 
-/** Frees the WebGL context while no face shows. A renderer that never got WebGL (`null`) stays, so it is not tried again. */
-function releaseIdleRenderer(): void {
-  cancelIdleRelease = null
+function shrinkIdleRenderer(): void {
+  cancelIdleShrink = null
   if (sharedListeners.size > 0 || !shared) return
-  unsubscribeShared?.()
-  unsubscribeShared = null
-  shared.dispose()
-  shared = undefined
-  sharedTimerEnv = null
-  released = true
+  shared.shrink()
 }
 
 export function faceRendererStats(): FaceRendererStats | null {
   return shared ? shared.stats() : null
 }
 
-/** Drops the shared renderer; the next face makes a new one from `env` (the browser by default). */
+/** Drops the shared renderer; the next use makes a new one from `env` (the browser by default). */
 export function resetSharedFaceRenderer(env?: () => FaceRendererEnv | null): void {
-  cancelIdleRelease?.()
-  cancelIdleRelease = null
+  cancelIdleShrink?.()
+  cancelIdleShrink = null
   unsubscribeShared?.()
   unsubscribeShared = null
   shared?.dispose()
   shared = undefined
   sharedTimerEnv = null
-  released = false
   sharedEnv = env ?? browserEnv
   notifyShared()
 }

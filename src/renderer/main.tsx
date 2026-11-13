@@ -12,6 +12,7 @@ import { ReadAloudHost } from './readAloud/ReadAloudModal'
 import { PhoneSpeechHost } from './speechRelay/PhoneSpeechHost'
 import { EnrollmentRequestHost } from './components/EnrollmentRequestPrompt'
 import { EditorAskHost } from './components/EditorAskPrompt'
+import { startFaceFrameStore, warmFaceRendererAfterPaint } from './components/bots/face/faceRenderer'
 import './styles/global.css'
 import './styles/compact-shell.css'
 import './styles/sentence-case.css'
@@ -28,6 +29,10 @@ applyAppearance(startupAppearance && typeof startupAppearance === 'object'
 // Warm the local monospace face before canvas-based terminals measure glyphs.
 // The normal app shell renders immediately while the asset loads.
 void document.fonts.load('400 13px "Geist Mono"').catch(() => { /* system monospace fallback */ })
+
+// Bot faces: read the pictures saved in earlier runs now (IndexedDB, off the main thread), so a
+// known face shows its real picture from its first paint.
+startFaceFrameStore()
 
 function ProfilePages() {
   useTheme()
@@ -66,3 +71,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <Root />
   </React.StrictMode>
 )
+
+// Start compiling the bot face shader once the first frame is painted (seconds on Direct3D 11), so
+// faces are live by the time one shows.
+warmFaceRendererAfterPaint()
