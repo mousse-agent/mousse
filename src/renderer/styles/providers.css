@@ -498,7 +498,17 @@ html[data-theme='high-contrast'] .prov-status-badge {
   font-size: var(--settings-fs-row);
 }
 
+/* A group's rows sit close under its heading; groups sit well apart, so each reads as one block. */
+.prov-editor .prov-editor-section .settings-group-head {
+  margin-bottom: 0;
+}
+
 .prov-editor .settings-advanced-body > .prov-editor-section {
+  padding-top: var(--space-32);
+}
+
+.prov-editor .settings-advanced-body > .prov-editor-section:first-child,
+.prov-editor .settings-advanced-body > .prov-advanced-note + .prov-editor-section {
   padding-top: var(--space-16);
 }
 

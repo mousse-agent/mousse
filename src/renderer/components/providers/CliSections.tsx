@@ -3,7 +3,7 @@ import type { InstanceSnapshot, StatusDescription } from '../../../shared/harnes
 import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
 import { Select } from '../ui/Select'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
-import { SettingsRow, Switch } from '../settings/SettingsRow'
+import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, FieldWithAction, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
   binaryOverrideOf,
@@ -416,6 +416,12 @@ export function promptCacheHourNote(state: NonNullable<InstanceSnapshot['promptC
   return undefined
 }
 
+/** An on/off setting as a dropdown, so turning it on or off is a deliberate choice. */
+const ON_OFF_OPTIONS: Array<{ value: 'off' | 'on'; label: string }> = [
+  { value: 'off', label: 'Off' },
+  { value: 'on', label: 'On' }
+]
+
 /**
  * Claude Code: keep the prompt cache for an hour instead of five minutes. Off by default, for an
  * entry that pays per token or that Mousse could not confirm as a subscription. Not shown on a
@@ -432,12 +438,13 @@ export function PromptCacheHourRow({ snapshot, onSave }: { snapshot: InstanceSna
       htmlFor="providers-prompt-cache-hour"
       description={withError(promptCacheHourNote(state), error)}
       control={
-        <Switch
+        <Select
           id="providers-prompt-cache-hour"
-          label="Keep prompt cache 1 hour"
-          checked={state.on}
+          ariaLabel="Keep prompt cache 1 hour"
+          value={state.on ? 'on' : 'off'}
           disabled={state.userSetting === true}
-          onChange={(on) => void run('promptCacheHour', () => onSave(on))}
+          onChange={(next) => { if ((next === 'on') !== state.on) void run('promptCacheHour', () => onSave(next === 'on')) }}
+          options={ON_OFF_OPTIONS}
         />
       }
     />
