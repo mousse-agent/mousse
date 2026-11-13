@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { Check, Copy, FileText, LayoutGrid } from '../lib/icons'
+import { Check, Copy, FileText, GitCompare, LayoutGrid } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { TabBar } from './ui/TabBar'
 import '../styles/chat-markdown.css'
 import { AppletPanelView } from './applets/AppletPanelView'
+import { TurnFileDiff } from './changes/TurnFileDiff'
 
 const COPIED_MS = 1600
 
@@ -50,7 +51,9 @@ export function DocumentPanel() {
         name: tab.title,
         icon: tab.applet
           ? <LayoutGrid size={13} strokeWidth={2} className="document-tab-icon" aria-hidden="true" />
-          : <FileText size={13} strokeWidth={2} className="document-tab-icon" aria-hidden="true" />
+          : tab.turnFile
+            ? <GitCompare size={13} strokeWidth={2} className="document-tab-icon" aria-hidden="true" />
+            : <FileText size={13} strokeWidth={2} className="document-tab-icon" aria-hidden="true" />
       }))}
       onSelect={setActiveDocumentTab}
       onClose={closeDocumentTab}
@@ -59,6 +62,9 @@ export function DocumentPanel() {
 
   if (activeTab?.applet) {
     return <AppletPanelView key={activeTab.id} tab={{ ...activeTab, applet: activeTab.applet }} tabs={tabs} />
+  }
+  if (activeTab?.turnFile) {
+    return <TurnFileDiff key={activeTab.id} tab={{ ...activeTab, turnFile: activeTab.turnFile }} tabs={tabs} />
   }
 
   return (

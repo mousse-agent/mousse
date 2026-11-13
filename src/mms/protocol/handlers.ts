@@ -165,6 +165,8 @@ import { parseChatReference } from '../../shared/chatReferences'
 import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/review'
 import { repoRelativePaths } from '../git/repoPaths'
 import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
+import { locateTurnFile, threadWroteFile, turnFilePath } from '../git/turnFile'
+import { writtenFilePaths } from '../../shared/turnFiles'
 import { resolveReviewScope } from '../actions/reviewRange'
 
 /** The Claude subscription's id on the usage page. */
@@ -4066,6 +4068,29 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const path = requiredContainedPath(ctx, target.root, p.path, 'inspect')
       const oldPath = p.oldPath === undefined ? undefined : requiredContainedPath(ctx, target.root, p.oldPath, 'inspect')
       return await readReview(target, () => readFileVersions(target.root, target.range, path, oldPath))
+    }
+    case 'review.turnFile': {
+      // A file the thread's agent wrote, wherever it is on this computer: the changed-files summary under a turn opens
+      // it as a diff against its own repository, or as a file. Read-only, from a window of this computer, and only
+      // for a path the thread's own Edit and Write calls name.
+      const p = isObject(params) ? params : {}
+      if (!isLocalWindow(ctx) || ctx.connection?.bridgeCaller)
+        throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer opens the files a thread wrote')
+      const lookup = threadLookupContext(ctx, p)
+      const requested = asString(p.path, 'path', 4096)
+      if (requested.includes('\0')) throw new DomainRpcError('invalid_params', 'That is not a file path.')
+      let folder: string | null = null
+      try {
+        folder = projectRootContext(ctx, { threadId: lookup.threadId })
+      } catch {
+        // A thread without a folder of its own: only an absolute path can name its file.
+      }
+      const path = turnFilePath(requested, folder)
+      if (!path) throw new DomainRpcError('invalid_params', 'Enter the full path of the file.')
+      const written = writtenFilePaths(ctx.mms.orchestrator.getMessagesForPersistence(lookup.threadId))
+      if (!threadWroteFile(written, path, folder))
+        throw new DomainRpcError('forbidden', 'Only a file this thread’s agent wrote opens here')
+      return await locateTurnFile(path)
     }
     case 'actions.undoLatest': {
       const p = isObject(params) ? params : {}

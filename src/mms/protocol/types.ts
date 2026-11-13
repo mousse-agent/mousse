@@ -444,6 +444,7 @@ export const PROTOCOL_METHODS = [
   'git.diff',
   'review.files',
   'review.file',
+  'review.turnFile',
   'git.log',
   'git.branches',
   'git.diffStats',

@@ -896,3 +896,32 @@
 .changes-restore-what .changes-faint {
   font-size: 11px;
 }
+
+/* A file outside the Changes tab's lists, in the Documents tab (TurnFileDiff). */
+.turn-file-diff-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.turn-file-diff-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.turn-file-diff-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.turn-file-diff-body {
+  padding: 8px;
+}

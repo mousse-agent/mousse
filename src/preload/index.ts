@@ -142,6 +142,7 @@ import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMeth
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
 import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
+import type { TurnFileParams, TurnFileResult } from '../shared/turnFiles'
 import type {
   GitHubApi,
   GitHubAvailability,
@@ -872,7 +873,9 @@ const api = {
   },
   review: {
     files: (params: ReviewFilesParams): Promise<ReviewFilesResult> => ipcRenderer.invoke('review:files', params),
-    file: (params: ReviewFileParams): Promise<ReviewFileResult> => ipcRenderer.invoke('review:file', params)
+    file: (params: ReviewFileParams): Promise<ReviewFileResult> => ipcRenderer.invoke('review:file', params),
+    /** A file the thread's agent wrote, anywhere on this computer: a diff against its own repository, or the file itself. */
+    turnFile: (params: TurnFileParams): Promise<TurnFileResult> => ipcRenderer.invoke('review:turnFile', params)
   },
   publish: {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
