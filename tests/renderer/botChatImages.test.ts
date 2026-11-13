@@ -100,7 +100,8 @@ describe('the owner’s attached images', () => {
     expect(readAsset.mock.calls.map((call) => [call[0], call[3]])).toEqual([['beach.png', FOLDER], ['harbour.jpg', FOLDER], ['old-town.webp', FOLDER]])
     // Pictures first, then the words, then any other file.
     const content = owner.querySelector('.bot-you-content')!
-    expect([...content.children].map((child) => child.className.split(' ')[0])).toEqual(['bot-images', 'bot-you-bubble', 'bot-you-files'])
+    const parts = ['bot-images', 'bot-you-bubble', 'bot-you-files']
+    expect([...content.children].map((child) => parts.find((name) => child.classList.contains(name)))).toEqual(parts)
     expect([...owner.querySelectorAll('.bot-file-pill')].map((pill) => pill.textContent)).toEqual(['tickets.pdf'])
 
     await click(tiles[1])
