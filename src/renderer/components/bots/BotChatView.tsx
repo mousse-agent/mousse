@@ -482,7 +482,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </div>
         <BotMenu bot={bot} />
       </header>
-      <div className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
+      <div className="chat-transcript" data-applet-scroller data-quote-source ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight

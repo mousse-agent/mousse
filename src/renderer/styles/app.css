@@ -2507,6 +2507,51 @@ html[data-chat-width='full'] .chat {
   margin: 0 -5px;
 }
 
+/* A Reply pill: text quoted from the conversation (lib/composerQuotes.ts). */
+.composer-quote-chip {
+  padding: 1px 2px;
+  margin: 0 -2px;
+  background: rgba(var(--accent-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* The pill's "Reply" word reads as its tag. */
+.composer-quote-tag {
+  border-radius: 4px;
+  background: rgba(var(--accent-rgb), 0.3);
+}
+
+/* The Reply button beside text selected in a conversation. */
+.selection-reply-button {
+  position: fixed;
+  z-index: 1000;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--ui-raised, var(--surface-raised, #1c1c1c));
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.selection-reply-button:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.45);
+}
+
+.selection-reply-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .browser-element-pill-tag {
   flex-shrink: 0;
   font-family: inherit;
