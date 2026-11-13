@@ -20,6 +20,7 @@ import type { BrowserAccessState } from '../../shared/browser/access'
 import type { InAppBrowserState } from '../../shared/browser/inApp'
 import type { BrowserAgentCursor } from '../../shared/browser/agentCursor'
 import { AgentCursor } from './browser/AgentCursor'
+import { ThreadBrowserLayer, ThreadBrowserRow } from './browser/ThreadBrowserView'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { browserTabsOpenedThisSession, useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
@@ -694,6 +695,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         <button type="button" disabled={browserBusy} onClick={() => void changeAccess(true, pendingAccess.requestId)}>Allow</button>
         <button type="button" disabled={browserBusy} onClick={() => void changeAccess(false, pendingAccess.requestId)}>Deny</button>
       </div>}
+      {/* The thread agent's browser without a window, when it has one open: its line, and its view over the tabs. */}
+      {activeThreadId && <ThreadBrowserRow threadId={activeThreadId} active={active} />}
       {hasVisibleTabs && (agentControlled || activeControl?.owner === 'human') && <div className="browser-agent-controls" aria-label="Agent browser controls">
         <span>{agentControlled ? 'Agent is using this tab' : 'You have control'}</span>
         {agentControlled ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('take')}>Take control</button>
@@ -810,6 +813,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       </KeepMounted>
       </KeepMounted>
       </KeepMountedStack>
+      {activeThreadId && <ThreadBrowserLayer threadId={activeThreadId} />}
       {confirmClearCookies && (
         <FloatingPortal>
           <ClearCookiesDialog

@@ -6,7 +6,7 @@ import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { BrowserBackendRouter } from '../src/mms/browser/BrowserBackendRouter'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
 import { BrowserSessionManager } from '../src/mms/browser/automation/BrowserSessionManager'
-import { BrowserViewerService } from '../src/mms/browser/viewer/BrowserViewerService'
+import { ChatBrowserSnapshots } from '../src/mms/chats/resources/ChatBrowserSnapshots'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import { MANAGED_BROWSER_ROOT, startFixtureSite } from './fixtures/browser/harness'
@@ -35,7 +35,7 @@ it.skipIf(!chromeReady)('imports a real managed-browser screenshot into session-
   try {
     const opened = await sessions.open(context, { url: site.origin + '/form.html' })
     const sessionId = opened.session!.id
-    const viewer = new BrowserViewerService({ sessions, context,
+    const viewer = new ChatBrowserSnapshots({ sessions, context,
       artifactResolver: (id, owner, selectedSessionId) => artifacts.describe({ profileId: owner.execution.profileId, threadId: owner.execution.threadId, runId: owner.execution.runId, sessionId: selectedSessionId }, id) })
     const snapshot = await viewer.observe({ sessionId })
     expect(snapshot.artifacts).toHaveLength(1)

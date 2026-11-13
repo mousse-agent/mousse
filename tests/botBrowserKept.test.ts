@@ -1,9 +1,10 @@
 /**
  * A bot's browser answers only through `BotBrowsers` (its owner's view and controls, and the bot's own
- * tools). The general `browser.sessions.*` methods, a thread's agent, a workflow or a group chat that
- * names the bot's home thread, its session or its profile are refused in plain words and change
- * nothing: the owner's hold, the followed tab and the session stay as they were. The same calls for an
- * ordinary thread still work.
+ * tools). The general `browser.sessions.*` methods, a thread's browser view (`browser.view.*`), a
+ * thread's agent, a workflow or a group chat that names the bot's home thread, its session or its
+ * profile are refused in plain words and change nothing: the owner's hold, the followed tab and the
+ * session stay as they were. An ordinary thread's browser without a window is taken over through its
+ * view alone.
  */
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -14,6 +15,8 @@ import { MmsBrowserService } from '../src/mms/browser/MmsBrowserService'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { registerBrowserMethods } from '../src/mms/browser/registerBrowserMethods'
+import { registerBrowserViewMethods } from '../src/mms/browser/viewer/registerBrowserViewMethods'
+import { BROWSER_VIEW_CAPABILITY } from '../src/shared/browser/threadView'
 import { BrowserSessionManager } from '../src/mms/browser/automation/BrowserSessionManager'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
 import { DomainHandlerRegistry } from '../src/mms/protocol/domainRegistry'
@@ -62,6 +65,7 @@ async function fixture() {
   const bots = new BotBrowsers({ profileId, browser: () => browser, homeThread: (botId) => botId === BOT ? HOME : undefined, setTimer: () => ({ clear: () => undefined }) })
   const domains = new DomainHandlerRegistry()
   registerBrowserMethods(domains, () => browser)
+  registerBrowserViewMethods(domains, () => browser)
   domains.seal()
   const site = await startFixtureSite()
   cleanups.push(async () => {
@@ -73,7 +77,7 @@ async function fixture() {
   })
   /** The owner's app window calling a general browser method. */
   const gui = (method: string, params: Record<string, unknown>) => domains.dispatch({
-    connection: { id: 'conn-1', binding: { profileId, epoch: 1 }, capabilities: new Set([BROWSER_VIEWER_CAPABILITY]), clientType: 'gui' }
+    connection: { id: 'conn-1', binding: { profileId, epoch: 1 }, capabilities: new Set([BROWSER_VIEWER_CAPABILITY, BROWSER_VIEW_CAPABILITY]), clientType: 'gui', emitConnectionEvent: async () => undefined }
   } as unknown as HandlerContext, method, params)
   /** The bot's own session record, as its keeper reads it. */
   const botSession = (): BrowserSessionRecord => browser.sessions.trustedSessionScope({ profileId, threadId: HOME, sessionId: browser.sessions.listThreadSessions({ profileId, threadId: HOME, keeper: BOT_BROWSER_KEEPER })[0]!.id, keeper: BOT_BROWSER_KEEPER }).record
@@ -91,20 +95,17 @@ describe.skipIf(!chrome.ok)('a bot\'s browser answers only through its own view 
     const view = await bots.view(BOT, { frame: true })
     const sessionId = before.id
 
-    // Listing the bot's home thread shows nothing of it, and asks for no session.
-    expect(await gui('browser.sessions.list', { threadId: HOME })).toMatchObject({ sessions: [] })
-    expect(await gui('browser.sessions.get', { threadId: HOME })).not.toHaveProperty('session')
-    // Every method that names its session is refused in plain words: from its home thread, or another.
+    // The thread view of the bot's home thread shows nothing of it, and cannot take it over.
+    expect(await gui('browser.view.get', { threadId: HOME, viewId: 'view-1' })).toMatchObject({ browser: { open: false } })
+    await expect(gui('browser.view.hold', { threadId: HOME, viewId: 'view-1', request: { op: 'take', force: true } })).rejects.toMatchObject({ code: 'session_closed' })
+    await expect(gui('browser.view.watch', { threadId: HOME, viewId: 'view-1', watchId: 'watch-1', width: 480, fps: 5 })).resolves.toMatchObject({ browser: { open: false } })
+    // Every general method that names its session is refused in plain words: from its home thread, or another.
     const params: Record<string, Record<string, unknown>> = {
-      'browser.sessions.get': { sessionId },
-      'browser.sessions.observe': { sessionId },
       'browser.sessions.takeControl': { sessionId },
       'browser.sessions.resume': { sessionId },
-      'browser.sessions.close': { sessionId },
-      'browser.sessions.humanAction': { sessionId, tabId: 'tab-1', generation: before.generation, observationId: 'obs-1', action: { type: 'click', target: { kind: 'ref', ref: 'e1' } } },
       'browser.artifacts.read': { sessionId, artifactId: 'artifact-1' }
     }
-    for (const method of BROWSER_GUI_METHODS.filter((name) => name !== 'browser.sessions.list')) {
+    for (const method of BROWSER_GUI_METHODS) {
       for (const threadId of [HOME, THREAD]) {
         await expect(gui(method, { threadId, ...params[method] }), `${method} on ${threadId}`).rejects.toMatchObject({ code: 'policy_denied', message: expect.stringMatching(BOT_REFUSAL) })
       }
@@ -177,16 +178,22 @@ describe.skipIf(!chrome.ok)('a bot\'s browser answers only through its own view 
     expect((JSON.parse(tabs.text) as { tabs: Array<{ id: string; url: string }> }).tabs).toEqual([expect.objectContaining({ id: tabId, url: `${origin}/form.html` })])
   }, 90_000)
 
-  it('an ordinary thread\'s session still answers the general methods', async () => {
+  it('an ordinary thread\'s browser without a window is taken over through its view alone', async () => {
     const { browser, gui, origin } = await fixture()
-    const opened = await browser.tools.invoke('browser_open', { url: `${origin}/form.html` }, threadContext(THREAD))
+    // A thread's agent opens it through the thread's browser.
+    const opened = await browser.dispatch(threadContext(THREAD), 'browser_open', { url: `${origin}/form.html` })
     expect(opened.ok).toBe(true)
     const sessionId = opened.ok ? opened.value.session!.id : ''
-    expect(await gui('browser.sessions.list', { threadId: THREAD })).toMatchObject({ sessions: [expect.objectContaining({ id: sessionId })] })
-    expect(await gui('browser.sessions.observe', { threadId: THREAD, sessionId })).toMatchObject({ session: { id: sessionId } })
-    expect(await gui('browser.sessions.takeControl', { threadId: THREAD, sessionId })).toMatchObject({ session: { id: sessionId, lifecycle: 'human-controlled' } })
-    expect(await gui('browser.sessions.resume', { threadId: THREAD, sessionId })).toMatchObject({ session: { id: sessionId } })
-    expect(await gui('browser.sessions.close', { threadId: THREAD, sessionId })).toMatchObject({ session: { id: sessionId, lifecycle: 'closed' } })
+    // The general Take control and Resume are the in-app tab's: a second way to hold this one is refused.
+    for (const method of ['browser.sessions.takeControl', 'browser.sessions.resume'])
+      await expect(gui(method, { threadId: THREAD, sessionId }), method).rejects.toMatchObject({ code: 'policy_denied', message: expect.stringMatching(/Browser panel/) })
+    expect(browser.sessions.trustedSessionScope({ profileId, threadId: THREAD, sessionId }).record.lifecycle).not.toBe('human-controlled')
+    // Its view takes it over, and gives it back.
+    const taken = await gui('browser.view.hold', { threadId: THREAD, viewId: 'view-1', request: { op: 'take' } }) as { browser: { open: boolean; control: string; holder?: string }; hold: { id: string } }
+    expect(taken.browser).toMatchObject({ open: true, control: 'owner', holder: 'this-view' })
+    expect(browser.sessions.trustedSessionScope({ profileId, threadId: THREAD, sessionId }).record.lifecycle).toBe('human-controlled')
+    await gui('browser.view.hold', { threadId: THREAD, viewId: 'view-1', request: { op: 'release', holdId: taken.hold.id } })
+    expect(browser.sessions.trustedSessionScope({ profileId, threadId: THREAD, sessionId }).record.lifecycle).not.toBe('human-controlled')
   }, 60_000)
 
   it('keeps the bot\'s session after a restart, and one recorded before sessions named their keeper', async () => {

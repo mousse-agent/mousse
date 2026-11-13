@@ -33,37 +33,12 @@ export interface BrowserViewerSnapshot {
   updatedAt: string
 }
 
-export interface BrowserViewerContext {
-  execution: ExecutionContext
-  policy: ExecutionPolicySnapshot
-  signal?: AbortSignal
-  vision?: boolean
-}
-
-/** Serializable renderer request. Authority is selected by the root-owned bridge. */
-export interface BrowserViewerRequest {
-  sessionId?: string
-  tabId?: string
-}
-
 export interface BrowserViewerHumanAction {
   sessionId: string
   tabId: string
   generation: number
   observationId: string
   action: BrowserViewerAction
-}
-
-export interface BrowserViewerClient {
-  snapshot(input?: BrowserViewerRequest): Promise<BrowserViewerSnapshot>
-  subscribe(listener: (snapshot: BrowserViewerSnapshot) => void): () => void
-  observe(input: { sessionId: string; tabId?: string }): Promise<BrowserViewerSnapshot>
-  humanAction(input: BrowserViewerHumanAction): Promise<BrowserViewerSnapshot>
-  takeControl(input: { sessionId: string }): Promise<BrowserViewerSnapshot>
-  resumeAgent(input: { sessionId: string }): Promise<BrowserViewerSnapshot>
-  close(input: { sessionId: string }): Promise<BrowserViewerSnapshot>
-  history(input?: BrowserViewerRequest): Promise<BrowserViewerHistoryEntry[]>
-  artifactUrl?(artifactId: string): string
 }
 
 export function viewerPointToCss(point: BrowserPoint, screenshot: BrowserScreenshot, viewport: BrowserViewport): BrowserPoint {

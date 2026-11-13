@@ -3,7 +3,7 @@ import { readFile, realpath, stat } from 'node:fs/promises'
 import type { ChatResourceParticipant, ChatSharedFileWriteResult, ChatSharedTerminal } from '../../../shared/chatResources'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../../../shared/browser/automation'
 import type { BrowserViewerSnapshot } from '../../../shared/browser/viewer'
-import { BrowserViewerService } from '../../browser/viewer/BrowserViewerService'
+import { ChatBrowserSnapshots } from './ChatBrowserSnapshots'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import { assertEpisodePath } from '../../agents/WorkspaceAccessPolicy'
@@ -50,7 +50,7 @@ export function createMmsChatResourceService(services: MmsProfileServices, resol
       policy, signal: new AbortController().signal, vision: true, target: { backend: 'managed-chromium' }
     }
   }
-  const viewer = (binding: TrustedChatResourceBinding, sessionId: string): BrowserViewerService => new BrowserViewerService({
+  const viewer = (binding: TrustedChatResourceBinding, sessionId: string): ChatBrowserSnapshots => new ChatBrowserSnapshots({
     sessions: services.platform.browser.sessions, context: browserContext(binding, sessionId),
     artifactResolver: (artifactId, context, id) => services.platform.browser.artifacts.describe({
       profileId, threadId: binding.threadId, ...(context.execution.runId ? { runId: context.execution.runId } : {}), sessionId: id

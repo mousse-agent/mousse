@@ -9,17 +9,13 @@ import {
   MAX_BROWSER_ARTIFACT_READ_BYTES,
   type BrowserArtifactReadResult,
   type BrowserAttachmentRegisterResult,
-  type BrowserSessionListResult,
-  type BrowserSessionSnapshotResult
+  type BrowserSessionPublicRecord
 } from '../../shared/browser/host'
-import { validateBrowserAction } from '../../shared/browser/validation'
-import type { BrowserViewerHumanAction, BrowserViewerSnapshot } from '../../shared/browser/viewer'
 import type { ExecutionPolicySnapshot } from '../../shared/execution/types'
 import { ExecutionPolicyService } from '../execution/ExecutionPolicyService'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 import type { HandlerContext } from '../protocol/handlers'
 import { BrowserAutomationError } from './automation/BrowserSessionManager'
-import { BrowserViewerService } from './viewer/BrowserViewerService'
 import type { MmsBrowserService } from './MmsBrowserService'
 
 const policies = new ExecutionPolicyService()
@@ -30,15 +26,17 @@ const ATTACH_FIELDS: Record<(typeof BROWSER_ATTACHMENT_METHODS)[number], readonl
   'browser.attachments.select': ['uiTabId', 'threadId']
 }
 const GUI_FIELDS: Record<(typeof BROWSER_GUI_METHODS)[number], readonly string[]> = {
-  'browser.sessions.list': ['threadId'],
-  'browser.sessions.get': ['threadId', 'sessionId'],
-  'browser.sessions.observe': ['threadId', 'sessionId', 'tabId'],
   'browser.sessions.takeControl': ['threadId', 'sessionId'],
   'browser.sessions.resume': ['threadId', 'sessionId'],
-  'browser.sessions.close': ['threadId', 'sessionId'],
-  'browser.sessions.humanAction': ['threadId', 'sessionId', 'tabId', 'generation', 'observationId', 'action'],
   'browser.artifacts.read': ['threadId', 'sessionId', 'artifactId']
 }
+
+/**
+ * A browser without a window is taken over only through its view's hold (`browser.view.hold` for a
+ * thread's, `bots.browser.hold` for a bot's), which ends when the window that took it goes away. Take
+ * control and Resume here are the in-app tab's, which its own window shows and drives.
+ */
+const WINDOWLESS_REFUSAL = 'Take over this browser from its view in the thread\'s Browser panel.'
 
 export interface BrowserDomainRegistration {
   dispose(): void
@@ -104,25 +102,6 @@ function viewerContext(profileId: string, threadId: string, runId: string | unde
     signal: new AbortController().signal,
     vision: true
   }
-}
-
-function publicSnapshot(snapshot: BrowserViewerSnapshot): BrowserSessionSnapshotResult {
-  if (!snapshot.session) return snapshot
-  const { controlLeaseId: _lease, ...session } = snapshot.session
-  return { ...snapshot, session }
-}
-
-function createViewer(browser: MmsBrowserService, context: BrowserToolContext): BrowserViewerService {
-  return new BrowserViewerService({
-    sessions: browser.sessions,
-    context,
-    artifactResolver: (artifactId, owner, sessionId) => browser.artifacts.describe({
-      profileId: owner.execution.profileId,
-      threadId: owner.execution.threadId,
-      runId: owner.execution.runId,
-      sessionId
-    }, artifactId)
-  })
 }
 
 function assertAttachedOwner(browser: MmsBrowserService, sessionId: string, backend: string | undefined, connectionId: string): void {
@@ -226,65 +205,45 @@ export function registerBrowserMethods(
           if (binding && binding.profileId !== owner.profileId) throw new DomainRpcError('profile_mismatch', 'Browser request does not match the connection binding')
           const browser = await resolve(owner.profileId)
           const threadId = asString(params.threadId, 'threadId')
-          const policy = viewerPolicy(owner.profileId)
-          if (method === 'browser.sessions.list') {
-            return {
-              sessions: browser.listPublicSessions(threadId),
-              ...(browser.selectedTarget(threadId) ? { selected: browser.selectedTarget(threadId) } : {})
-            } satisfies BrowserSessionListResult
-          }
-          const sessionId = method === 'browser.sessions.get' ? optionalString(params.sessionId, 'sessionId') : asString(params.sessionId, 'sessionId')
+          const sessionId = asString(params.sessionId, 'sessionId')
           // A kept session (a bot's browser) is never listed here; named, it is refused in plain words.
-          const listed = browser.listPublicSessions(threadId)
-          const selected = sessionId ? listed.find((record) => record.id === sessionId) : listed[0]
-          const kept = sessionId && !selected ? browser.sessions.keptRefusal(sessionId) : undefined
+          const selected = browser.listPublicSessions(threadId).find((record) => record.id === sessionId)
+          const kept = !selected ? browser.sessions.keptRefusal(sessionId) : undefined
           if (kept) throw new DomainRpcError('policy_denied', kept)
-          if (method === 'browser.sessions.get' && !selected) {
-            return { mode: 'managed', tabs: [], connection: 'disconnected', history: [], artifacts: [], updatedAt: new Date().toISOString() } satisfies BrowserSessionSnapshotResult
-          }
           if (!selected) throw new DomainRpcError('session_closed', 'Browser session is unavailable')
           const scope = browser.sessions.trustedSessionScope({ profileId: owner.profileId, threadId, sessionId: selected.id })
-          const viewContext = viewerContext(owner.profileId, scope.threadId, scope.runId, policy)
+          const viewContext = viewerContext(owner.profileId, scope.threadId, scope.runId, viewerPolicy(owner.profileId))
           try {
             if (method === 'browser.artifacts.read') {
-            assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
-            const artifactId = asString(params.artifactId, 'artifactId', 160)
-            const bound = Math.min(viewContext.policy.maxArtifactBytes, MAX_BROWSER_ARTIFACT_READ_BYTES)
-            const file = await browser.artifacts.read({
-              profileId: owner.profileId,
-              threadId: scope.threadId,
-              sessionId: selected.id,
-              ...(scope.runId === undefined ? {} : { runId: scope.runId })
-            }, artifactId, bound)
-            if (file.ref.mediaType !== 'image/png') throw new DomainRpcError('artifact_denied', 'Browser artifact reads are limited to authorized PNG screenshots')
+              assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
+              const artifactId = asString(params.artifactId, 'artifactId', 160)
+              const bound = Math.min(viewContext.policy.maxArtifactBytes, MAX_BROWSER_ARTIFACT_READ_BYTES)
+              const file = await browser.artifacts.read({
+                profileId: owner.profileId,
+                threadId: scope.threadId,
+                sessionId: selected.id,
+                ...(scope.runId === undefined ? {} : { runId: scope.runId })
+              }, artifactId, bound)
+              if (file.ref.mediaType !== 'image/png') throw new DomainRpcError('artifact_denied', 'Browser artifact reads are limited to authorized PNG screenshots')
               return {
-              artifact: { ...file.ref },
-              mediaType: file.ref.mediaType,
-              byteLength: file.bytes.byteLength,
-              bytesBase64: Buffer.from(file.bytes).toString('base64')
+                artifact: { ...file.ref },
+                mediaType: file.ref.mediaType,
+                byteLength: file.bytes.byteLength,
+                bytesBase64: Buffer.from(file.bytes).toString('base64')
               } satisfies BrowserArtifactReadResult
             }
-            if (method !== 'browser.sessions.get') assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
-            const viewer = createViewer(browser, viewContext)
-            if (method === 'browser.sessions.get') return publicSnapshot(await viewer.snapshot({ sessionId: selected.id }))
-            if (method === 'browser.sessions.observe') return publicSnapshot(await viewer.observe({ sessionId: selected.id, tabId: optionalString(params.tabId, 'tabId') }))
-            if (method === 'browser.sessions.takeControl') return publicSnapshot(await viewer.takeControl({ sessionId: selected.id }))
-            if (method === 'browser.sessions.resume') return publicSnapshot(await viewer.resumeAgent({ sessionId: selected.id }))
-            if (method === 'browser.sessions.close') {
-              const snapshot = publicSnapshot(await viewer.close({ sessionId: selected.id }))
-              browser.releaseUnusedSelections()
-              return snapshot
+            // Take control and Resume belong to the in-app tab; a browser without a window has one hold rule, its view's.
+            if (selected.backend !== 'electron-attached') throw new DomainRpcError('policy_denied', WINDOWLESS_REFUSAL)
+            assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
+            if (method === 'browser.sessions.takeControl') await browser.sessions.control(viewContext, selected.id, 'human')
+            else {
+              await browser.sessions.control(viewContext, selected.id, 'agent')
+              // A fresh generation fences input made before the agent had the tab again, without needing a screenshot.
+              await browser.sessions.observe({ ...viewContext, vision: false }, { sessionId: selected.id, includeScreenshot: false })
             }
-            const action = validateBrowserAction(params.action)
-            if (action.type === 'upload' || action.type === 'dialog') throw new DomainRpcError('invalid_params', 'This human browser action is not available in the viewer')
-            const input: BrowserViewerHumanAction = {
-              sessionId: selected.id,
-              tabId: asString(params.tabId, 'tabId'),
-              generation: asEpoch(params.generation, 'generation'),
-              observationId: asString(params.observationId, 'observationId'),
-              action
-            }
-            return publicSnapshot(await viewer.humanAction(input))
+            // The session as a window may see it: never its control lease.
+            const session: BrowserSessionPublicRecord = browser.listPublicSessions(threadId).find((record) => record.id === selected.id) ?? selected
+            return { session }
           } finally {
             browser.sessions.retireViewerBudget(viewContext)
           }

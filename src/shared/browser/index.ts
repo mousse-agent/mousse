@@ -14,15 +14,12 @@ export type {
 } from './install'
 export { viewerPointToCss } from './viewer'
 export type {
-  BrowserViewerClient,
   BrowserViewerConnection,
-  BrowserViewerContext,
   BrowserViewerControlOwner,
   BrowserViewerHistoryEntry,
   BrowserViewerHumanAction,
   BrowserViewerMode,
   BrowserViewerRunLink,
-  BrowserViewerRequest,
   BrowserViewerSnapshot
 } from './viewer'
 export type {
@@ -68,7 +65,6 @@ export {
   BROWSER_VIEWER_CAPABILITY,
   BROWSER_GUI_METHODS,
   BROWSER_ATTACHMENT_METHODS,
-  BROWSER_VIEWER_CLIENT_METHODS,
   MAX_BROWSER_ATTACHMENTS_PER_CONNECTION,
   MAX_BROWSER_ATTACHMENTS_PER_PROFILE,
   MAX_BROWSER_ARTIFACT_READ_BYTES
@@ -80,8 +76,6 @@ export type {
   BrowserAttachmentRegisterResult,
   BrowserSessionPublicRecord,
   BrowserSelectedTarget,
-  BrowserSessionListResult,
-  BrowserSessionSnapshotResult,
   BrowserArtifactReadResult,
   BrowserGuiMethod,
   BrowserAttachmentMethod,
