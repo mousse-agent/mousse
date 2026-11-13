@@ -43,7 +43,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     if (!threadId || !preview.current || !enabled) return
     const node = preview.current
     const api = window.mousse.applets
-    const scroller = host === 'transcript' ? node.closest<HTMLElement>('.an-message-list') : null
+    // A thread's transcript, or another conversation that shows applets (a bot's chat marks its own).
+    const scroller = host === 'transcript' ? node.closest<HTMLElement>('.an-message-list, [data-applet-scroller]') : null
     // The panel stage does not scroll; it is the clip itself.
     const clipHost = host === 'transcript' ? scroller : node.parentElement
     let disposed = false
@@ -113,8 +114,10 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
       if (scrollPaused) return
       const rect = node.getBoundingClientRect()
       const viewport = clipHost?.getBoundingClientRect()
+      // The composer of the conversation the applet is in: a hidden one elsewhere (the thread's, behind a bot's chat)
+      // has no place on screen.
       const composer = host === 'transcript'
-        ? node.closest('.mousse-chat-shell')?.querySelector('.chat-composer-stack') ??
+        ? node.closest('.mousse-chat-shell, [data-applet-conversation]')?.querySelector('.chat-composer-stack, [data-applet-composer]') ??
           document.querySelector('.chat-composer-stack')
         : null
       const composerTop = composer?.getBoundingClientRect().top ?? window.innerHeight
