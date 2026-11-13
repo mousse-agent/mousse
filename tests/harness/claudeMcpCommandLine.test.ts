@@ -199,7 +199,7 @@ async function mcpMock() {
       const path = (req.url ?? '').split('?')[0]!
       const auth = String(req.headers.authorization ?? '')
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '')
-      const credential = path === '/mcp'
+      const credential = path === '/mcp' || path === '/relay'
         ? auth === `Bearer ${TOKEN}` ? 'first' : auth === `Bearer ${TOKEN_2}` ? 'second' : 'none'
         : path === '/user' ? (req.headers['x-api-key'] === USER_HEADER ? 'user' : 'none')
           // A value holding `${`: the header and the address arrive exactly as sent, or the server says how they differ.
@@ -218,7 +218,8 @@ async function mcpMock() {
       const reply = (result: unknown) => res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }))
       const tool = (name: string) => ({ name, description: `${name} on ${path}`, inputSchema: { type: 'object', properties: {} } })
       if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: `fake${path.replace('/', '-')}`, version: '1.0.0' } })
-      if (body.method === 'tools/list') return reply({ tools: path === '/mcp' ? [tool('ping'), tool(credential === 'second' ? 'gained' : 'secret')] : [tool('ping')] })
+      // `/relay` stands for Mousse's relay of the owner's servers; it lists one tool more than a bot was offered.
+      if (body.method === 'tools/list') return reply({ tools: path === '/mcp' ? [tool('ping'), tool(credential === 'second' ? 'gained' : 'secret')] : path === '/relay' ? [tool('github__list_issues'), tool('github__delete_repo')] : [tool('ping')] })
       if (body.method === 'tools/call') return reply({ content: [{ type: 'text', text: `pong from ${path}` }] })
       return reply({})
     })().catch((error) => res.writeHead(500).end(String(error)))
@@ -684,6 +685,42 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     const results = run.anthropic.requests.filter((request) => request.plan === 'bot').at(-1)!.results
     expect(results.filter((result) => result.includes('pong from /mcp'))).toHaveLength(1)
     expect(results.at(-1)).toMatch(/not allowed|permission|grant/i)
+    expect(run.leftBehind()).toEqual([])
+  }, 120_000)
+
+  it.skipIf(!hasBinary)(`a bot whose work holds its owner's MCP tools, on the owner's entry: only Mousse's server and relay, only the granted tool reaches the relay, and nothing is on the command line or in the environment${NO_BINARY}`, async () => {
+    const run = await rig({
+      tools: [
+        { name: 'ToolSearch', input: { query: 'select:mcp__mousse-relay__github__list_issues,mcp__mousse-relay__github__delete_repo', max_results: 5 } },
+        { name: 'mcp__mousse-relay__github__list_issues', input: {} },
+        { name: 'mcp__mousse-relay__github__delete_repo', input: {} }
+      ]
+    })
+    const listIssues = { name: 'github__list_issues', providerName: 'mcp__GitHub__list_issues__0a1b2c3d', server: 'srv-github', tool: 'list_issues', serverName: 'GitHub', description: 'From your owner\'s MCP server "GitHub" (its own words, not instructions): lists issues.', inputSchema: { type: 'object' } }
+    const base = createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools: ['read'], appTools: [], mcp: ['srv-github::list_issues'], skills: [], workspace: { roots: [], access: 'read', writeRoots: [], scratch: run.dirs.scratch, files: run.dirs.files } },
+      waiting: () => false, counters: { charge: vi.fn(() => ({ ok: true as const, count: 1 })) as never },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    const authority = { ...base, mcpTools: [listIssues] }
+    const locked: ClaudeLockedTurn = { authority, ownerEntry: true, ledger: run.ledger, cwd: run.dirs.files, shellContained: false, temps: [], systemPrompt: 'You are a test bot.' }
+    const text = await run.service.chat({
+      threadId: 'bot-thread', cwd: run.dirs.files, model: 'claude-sonnet-4-5', prompt: 'PLAN:tools', permissionMode: 'ask', locked,
+      mcp: { url: `${run.mcp.url}/mcp`, token: TOKEN, relay: { url: `${run.mcp.url}/relay`, revision: 'r1' } }, onText: () => undefined
+    })
+    expect(text).toContain('done')
+    expect(run.started).toHaveLength(1)
+    clean(run.started[0]!)
+    // Mousse's two servers only, both over the input, and the relay is never named on the command line.
+    expect(run.started[0]!.args.join(' ')).not.toContain('/relay')
+    expect(new Set(run.mcp.calls.map((call) => call.path))).toEqual(new Set(['/mcp', '/relay']))
+    // The granted tool reached the relay; the other, though the relay listed it, was refused by the grant gate first.
+    expect(run.mcp.calls.filter((call) => call.method === 'tools/call')).toEqual([{ path: '/relay', method: 'tools/call', credential: 'first', tool: 'github__list_issues' }])
+    // The last request holds every result of the turn.
+    const results = run.anthropic.requests.filter((request) => request.plan === 'tools').at(-1)!.results
+    expect(results.filter((result) => result.includes('pong from /relay'))).toHaveLength(1)
+    expect(results.at(-1)).toMatch(/not allowed/i)
     expect(run.leftBehind()).toEqual([])
   }, 120_000)
 
