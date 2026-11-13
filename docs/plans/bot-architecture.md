@@ -48,7 +48,7 @@ Quotes are from the founders' notes (17 Oct and 29 Oct 2026) and from `bot-ui.md
 | Containers, desktop computer use, public webhook ingress | Phase 5 |
 | Layer 2 Mousse MCP (Track M) | Parallel track (§11.6) |
 | Team bots, Space bots, bots in groups | Teams is parked. Fields are reserved (§12.2). |
-| The user's MCP tools for bots | Phase 2. Compile still refuses them (`compile.ts`). Shell ("run commands") moved into Phase 1 in revision 5 (§3.6). |
+| The user's MCP tools for bots | Shipped ahead of Phase 2: one ask per server, stored per tool, every call through Mousse (`docs/bots.md`, "Use your MCP tools"). Shell ("run commands") moved into Phase 1 in revision 5 (§3.6). |
 
 **Decisions the founders already made, and how this plan respects them:**
 
@@ -1513,7 +1513,7 @@ These are condensed from revision 1, whose detailed designs still hold unless no
    - **Polling triggers**, using no model tokens: GitHub PRs and issues, a web page, HTTP JSON, every 5 minutes by default. A cursor of seen items is kept per trigger, and each new item becomes a run. The UI's "within 5 minutes".
    - **A network domain grant**, enforced in the authority for `web_fetch` (which skips every check today) and in the sandbox for shell.
    - **A sandbox for Pi's commands**, and Claude Code's sandbox evidence on more platforms (shell itself shipped in Phase 1, revision 5).
-   - **The user's MCP tools for bots** through the relay, per tool.
+   - **The user's MCP tools for bots**: shipped, through the relay (Claude Code, Codex) and the user MCP proxy (Pi), asked for once per server and stored per tool (`docs/bots.md`, "Use your MCP tools").
    - **The `setsid` sweep**, with shell (§5.9).
    - **Memory Phase 2** (bot-context.md §11): budgeted idle consolidation, auto-recall, an About "Memory" list, shared owner facts, the CJK trigram index, `bots.memory.reindex` as a client method.
    - **The usage-window reserve** (30% by default), with `usage()` on the Claude driver.
