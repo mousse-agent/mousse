@@ -99,6 +99,7 @@ const guiMms = {
   getCurrentSenderId: () => WINDOW,
   getWindowBindingForSender: () => binding,
   isProfileChanging: () => profileChanging,
+  notePersonInput: vi.fn(),
   getBaseBinding: () => undefined,
   // The base connection's own resnapshot is not what these tests follow.
   connected: false
@@ -410,6 +411,15 @@ describe('the same check on other occasions', () => {
     await vi.waitFor(() => expect(lastTurn()?.phase).toBe('completed'))
     expect(logLines.find((line) => line.event === 'renderer.gone')?.fields).toMatchObject({ window: WINDOW, reason: 'crashed' })
     expect(logLines.find((line) => line.event === 'check.behind')?.fields.reasons).toEqual(['renderer-replaced'])
+  })
+
+  it("tells main of the person's own keys and clicks, not of anything else the window receives", () => {
+    win.webContents.emit('input-event', {}, { type: 'mouseMove' })
+    expect(guiMms.notePersonInput).not.toHaveBeenCalled()
+    win.webContents.emit('input-event', {}, { type: 'mouseDown' })
+    win.webContents.emit('input-event', {}, { type: 'rawKeyDown' })
+    expect(guiMms.notePersonInput).toHaveBeenCalledTimes(2)
+    expect(guiMms.notePersonInput).toHaveBeenCalledWith(WINDOW)
   })
 
   it('a window that is current sends nothing when it is focused again', async () => {

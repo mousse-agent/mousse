@@ -58,6 +58,8 @@ const GUI_SNAPSHOT_NEWEST = 200
 /** First wait before a window's lost service connection is opened again; it doubles up to `WINDOW_REOPEN_MAX_MS`. */
 export const WINDOW_REOPEN_BASE_MS = 500
 export const WINDOW_REOPEN_MAX_MS = 30_000
+/** A request this soon after the person's key or click in its window counts as theirs (`notePersonInput`). */
+export const PERSON_REQUEST_MS = 10_000
 
 /**
  * Where an answer to a read stands among the service's updates (#1042): the service that answered (`instance`) and its
@@ -240,6 +242,8 @@ export class GuiMmsController extends EventEmitter {
   private readonly windowProfiles = new Map<number, string>()
   private readonly reopenWatched = new WeakSet<WebContents>()
   private disconnectUnsub: (() => void) | null = null
+  /** When the person last pressed a key or clicked in each window (`notePersonInput`). */
+  private readonly personInput = new Map<number, number>()
 
   constructor(opts: GuiMmsControllerOptions = {}) {
     super()
@@ -443,14 +447,33 @@ export class GuiMmsController extends EventEmitter {
     this.scheduleReconnect('disconnect')
   }
 
+  /** The person pressed a key or clicked in a window: a request it makes soon after is theirs. */
+  notePersonInput(senderId: number): void {
+    this.personInput.set(senderId, Date.now())
+  }
+
+  /**
+   * Whether the request in progress follows the person's own input in its window, once: windows also ask on their own
+   * (a list read every half minute), and after the reconnect gave up those must not start the service over and over.
+   */
+  private takePersonRequest(): boolean {
+    const sender = this.senderAls.getStore()
+    const at = sender ? this.personInput.get(sender.id) : undefined
+    if (at === undefined || Date.now() - at > PERSON_REQUEST_MS) return false
+    this.personInput.delete(sender!.id)
+    return true
+  }
+
   /**
    * A request needs the main connection after it was lost: it waits for the reconnect, asks for one when nothing has
-   * noticed the loss yet, and after the reconnect gave up tries once more (the person asked).
+   * noticed the loss yet, and after the reconnect gave up tries once more when the person asked (a key or a click in
+   * the window just before). The window's own requests fail at once then.
    */
   private async restoreService(noticedBy: string): Promise<ProtocolHelloOk> {
     if (this.state === 'ready' && this.client && !this.client.connected) this.mainConnectionLost(noticedBy)
     if (this.gaveUp) {
-      this.log('service.retry', { by: noticedBy })
+      if (!this.takePersonRequest()) throw linkError('reconnect_unavailable', 'MMS reconnect is unavailable')
+      this.log('service.retry', { by: 'person' })
       await this.reconnect('retry')
       if (!this.connected || !this.lastHello) throw linkError('reconnect_unavailable', 'MMS reconnect is unavailable')
       return this.lastHello
@@ -552,7 +575,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private rememberWindowProfile(sender: WebContents, profileId: string): void {
-    if (!this.windowProfiles.has(sender.id)) sender.once('destroyed', () => this.windowProfiles.delete(sender.id))
+    if (!this.windowProfiles.has(sender.id)) sender.once('destroyed', () => { this.windowProfiles.delete(sender.id); this.personInput.delete(sender.id) })
     this.windowProfiles.set(sender.id, profileId)
   }
 

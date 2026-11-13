@@ -1577,6 +1577,12 @@ export function registerGuiIpc(
     win.on('show', () => visibleAgain(senderId, 'shown'))
     win.on('restore', () => visibleAgain(senderId, 'restored'))
     win.on('focus', () => visibleAgain(senderId, 'focused'))
+    // A key or a click: a request the window makes soon after is the person's (after the service connection gave up,
+    // only those try it again).
+    win.webContents.on('input-event', (_event, input) => {
+      const type = (input as { type?: string } | undefined)?.type
+      if (type === 'mouseDown' || type === 'keyDown' || type === 'rawKeyDown') guiMms.notePersonInput?.(senderId)
+    })
     win.on('unresponsive', () => linkLog.write('window.unresponsive', { window: senderId }))
     win.on('responsive', () => {
       linkLog.write('window.responsive', { window: senderId })

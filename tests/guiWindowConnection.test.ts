@@ -189,10 +189,16 @@ describe("a window's own service connection", () => {
       expect(lines.filter((line) => line.event === 'window.reopen-failed')).toEqual([])
       expect(atGiveUp).toBeLessThan(20)
 
+      // The window's own requests (a list it reads every half minute) do not try again: they fail at once.
+      await expect(limited.runWithSender(sender, () => limited.request('threads.list'))).rejects.toThrow('MMS reconnect is unavailable')
+      expect(lines.slice(atGiveUp)).toEqual([])
+
       // The service is back and the person does something in the window: one try, and the window is opened again.
       server = new MmsProtocolServer({ mms, ownerToken, version: 'test' })
       await server.start()
+      limited.notePersonInput(909)
       await limited.runWithSender(sender, () => limited.request('threads.list'))
+      expect(lines.some((line) => line.event === 'service.retry' && line.fields.by === 'person')).toBe(true)
       expect(restored).toHaveBeenCalledWith(expect.objectContaining({ reason: 'reconnect:retry' }))
       await vi.waitFor(() => expect(reopened).toHaveBeenCalledWith({ senderId: 909 }))
       expect(limited.getWindowBindingForSender(909)).not.toBeNull()
