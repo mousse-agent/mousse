@@ -20,7 +20,7 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_FEATURES_OFF, CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MANAGED_VERSION } from '../../src/mms/harness/vendors/codex/release'
-import { CODEX_BOT_VERSION_TEXT } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_VERSION_TEXT, codexBotSettingText } from '../../src/shared/harness/codexBotVersion'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
@@ -2313,6 +2313,22 @@ describe('a bot turn on Codex', () => {
     expect(calls).toEqual([])
     await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
     replay.assertDone()
+  })
+
+  it('a bot turn doesn\'t run while the owner\'s Codex config has on a feature a thread can\'t switch off, and says which', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot, calls } = botIn(files)
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { features: { multi_env_copy_file: true, view_image: true } }, layers: [] } })
+    ])
+    const codex = service(replay)
+    await expect(new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: bot as never }))
+      .rejects.toMatchObject({ message: codexBotSettingText(['multi_env_copy_file']) })
+    replay.assertDone()
+    expect(calls).toEqual([])
   })
 
   it('a bot turn that holds MCP tools gets Mousse\'s relay, and every MCP server of the owner\'s own Codex setup is off', async () => {
