@@ -27,6 +27,16 @@ const TOOL_TEXT: Record<string, AskText> = {
   browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' }
 }
 
+/**
+ * What an MCP ask's card says of what the tools can do, only as the tools' own annotations tell it (their read-only
+ * hints): Mousse never judges a server itself.
+ */
+export function mcpChangesNote(name: string, changes: 'none' | 'some' | 'unknown' | undefined): string {
+  if (changes === 'none') return `${name} says these tools only read.`
+  if (changes === 'some') return `${name} says some of these tools can change things.`
+  return `${name} doesn't say whether these tools change things.`
+}
+
 /** The one file permission (`filesAsk`), read and write, everywhere but Mousse's own data. */
 export const FILES_TEXT: AskText = { title: 'use files on this computer', note: 'Read and change any file or folder, except Mousse\'s own data.' }
 
@@ -67,7 +77,15 @@ export function askText(request: BotAskRequest, options: { budget?: BotBudget } 
   // File access is one permission, whatever folder an ask names (`filesAsk`).
   if ('path' in request) return FILES_TEXT
   if ('skill' in request) return { title: `use the ${request.skill} skill`, note: '' }
-  if ('mcp' in request) return { title: `use ${request.mcp.tool} from ${request.mcp.serverId}`, note: '' }
+  // The owner's MCP tools are one ask per server: "use your GitHub tools", and "use GitHub's new tools" once it added some.
+  if ('mcp' in request) {
+    const name = request.mcp.name
+    if (name) {
+      const changes = mcpChangesNote(name, request.mcp.changes)
+      return request.mcp.added ? { title: `use ${name}'s new tools`, note: `${name} has new tools. ${changes}` } : { title: `use your ${name} tools`, note: changes }
+    }
+    return { title: request.mcp.tool ? `use the MCP tool ${request.mcp.tool}` : 'use the tools of an MCP server', note: '' }
+  }
   if ('tool' in request) {
     // Every browser tool is one permission: "use the browser", never "the browser act tool".
     const tool = botGrantTool(request.tool)

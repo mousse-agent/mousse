@@ -91,6 +91,7 @@ import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManage
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
+import { BotMcp } from '../bots/mcp/BotMcp'
 import { mousseCallAsksPerson } from '../run/mcp/attachment'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
@@ -1784,6 +1785,7 @@ export class OrchestratorService extends EventEmitter {
   /** The MCP relay's catalogue and handler (SPEC §15.5), built on first use; none without an MCP manager. */
   private relayCatalogImpl?: RelayCatalog
   private relayHandlerImpl?: RelayHandler
+  private botMcpImpl?: BotMcp
   /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
   readonly appToolTurns = new AppToolTurns()
   /** The definition runs of each thread, for its public Stop (`stopDefinitionRuns`). */
@@ -3774,8 +3776,8 @@ export class OrchestratorService extends EventEmitter {
       turns: this.appToolTurns,
       bots: () => this.botAppTools?.bots,
       botMemory: () => this.botAppTools?.memory,
-      // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`).
-      ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager) } } : {})
+      // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`), and a bot's granted ones on Pi.
+      ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager), ...(this.botMcp() ? { botMcp: this.botMcp()! } : {}) } } : {})
     }).registry
     return this.mcpRegistry
   }
@@ -3783,8 +3785,25 @@ export class OrchestratorService extends EventEmitter {
   /** The MCP relay's catalogue of the user's servers' tools; undefined without an MCP manager. */
   relayCatalog(): RelayCatalog | undefined {
     if (!this.mcpManager) return undefined
-    this.relayCatalogImpl ??= new RelayCatalog({ manager: this.mcpManager, settings: () => this.settingsStore.get().integrations.mcp })
+    this.relayCatalogImpl ??= new RelayCatalog({
+      manager: this.mcpManager,
+      settings: () => this.settingsStore.get().integrations.mcp,
+      // Personal bots reach the profile's own servers through Mousse whatever the threads' relay settings.
+      listProfile: () => this.botMcpImpl !== undefined
+    })
     return this.relayCatalogImpl
+  }
+
+  /**
+   * Personal bots' use of the owner's MCP servers (`BotMcp`): the profile's own servers, through the relay catalogue,
+   * each call on the owner's connection after the bot's grant allowed it. Undefined without an MCP manager.
+   */
+  botMcp(): BotMcp | undefined {
+    const catalog = this.relayCatalog()
+    const manager = this.mcpManager
+    if (!catalog || !manager) return undefined
+    this.botMcpImpl ??= new BotMcp({ catalog, manager, enabled: () => this.settingsStore.get().integrations.mcp.enabled })
+    return this.botMcpImpl
   }
 
   /** What the Mousse MCP server serves at its relay path; undefined without an MCP manager. */
@@ -3801,7 +3820,10 @@ export class OrchestratorService extends EventEmitter {
       readOnlyThread: host.readOnlyThread,
       permissionModeFor: host.permissionModeFor,
       askApproval: host.askApproval,
-      toolLedger: host.toolLedger
+      toolLedger: host.toolLedger,
+      // A bot's turn sees only its offered tools, each call held to its grant.
+      botOf: (credential) => this.appToolTurns.get(credential.runId)?.bot,
+      ...(this.botMcp() ? { botMcp: this.botMcp()! } : {})
     })
     return this.relayHandlerImpl
   }

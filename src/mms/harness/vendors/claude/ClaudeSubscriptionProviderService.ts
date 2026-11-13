@@ -3135,8 +3135,10 @@ export class ClaudeSubscriptionProviderService {
       const messages = async function* (): AsyncGenerator<SDKUserMessage> {
         yield { ...userMessage(resume ?? branch?.id ?? ''), ...(promptId ? { uuid: promptId as SDKUserMessage['uuid'] } : {}) }
       }
-      // The turn's Mousse server: a bot's turn never attaches the MCP relay, since its grant gate knows only Mousse's own tools.
-      const mousse: McpAttachment | null = input.mcp ? (locked ? { url: input.mcp.url, token: input.mcp.token } : input.mcp) : null
+      // The turn's Mousse servers. A bot's turn has Mousse's own, and the relay only when its work holds the owner's MCP
+      // tools (the gateway attaches it then): the relay lists just those, and the grant gate checks each by name.
+      const botRelay = locked?.authority.mcpTools?.length ? input.mcp?.relay : undefined
+      const mousse: McpAttachment | null = input.mcp ? (locked ? { url: input.mcp.url, token: input.mcp.token, ...(botRelay ? { relay: botRelay } : {}) } : input.mcp) : null
       /**
        * The turn's MCP servers, never named on Claude Code's command line (#358, `launch`): Mousse's own and the ones it
        * runs in process, registered over its input and waited for, Mousse's last so it keeps its name; and the user's

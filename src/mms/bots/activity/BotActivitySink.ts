@@ -62,8 +62,9 @@ export function chipCallOf(call: NormalisedCall): { tool: string; input: unknown
     case 'builtin':
     case 'app':
       return { tool: call.tool, input: call.args }
+    // The server's name only ("used GitHub"): never the tool's arguments, nor the server's id.
     case 'mcp':
-      return { tool: 'mcp', input: { server: call.server, tool: call.tool } }
+      return { tool: 'mcp', input: call.serverName ? { server: call.serverName } : {} }
     case 'skill':
       return { tool: 'skill', input: { skill: call.skill } }
   }

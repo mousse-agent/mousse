@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
-import type { BotAuthority, BotCheck, BotCheckDenied, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
+import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { BotChatMessage, BotChip, BotError } from '../../../shared/bots/personal/chat'
 import {
   BOT_ASK_DENY_COOLDOWN_MS,
@@ -13,16 +13,19 @@ import {
   filesAsk,
   filesAskOf,
   isSpecialAsk,
+  mcpAskTools,
   permissionText,
   withPermission,
   type BotAskRequest,
   type BotBudgetWallKey,
   type BotEscalationAnswer,
   type BotEscalationSummary,
+  type BotMcpAsk,
   type BotPermissionRequest,
   type BotWallKind,
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
+import { mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
 import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
@@ -72,7 +75,7 @@ import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type 
 import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread } from '../grants/compile'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
-import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkStarted } from '../seams'
+import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkStarted } from '../seams'
 import { workWaits, type BotActivationRow, type BotDispatchRow, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
@@ -187,7 +190,12 @@ export interface BotEngineHost {
    * Whether the skill or MCP tool an ask names exists here: a run never asks the owner for one that
    * does not (the card would show the bot's own words). Absent: every name is taken as it is.
    */
-  knownAsk?(permission: { skill: string } | { mcp: { serverId: string; tool: string } }): boolean
+  knownAsk?(permission: { skill: string } | { mcp: { serverId: string; tool?: string } }): boolean
+  /**
+   * The owner's MCP servers a bot may hold tools of (`BotMcp`): set up for the whole profile in Mousse. Absent: no bot
+   * is offered an MCP tool, and an ask for one is refused with no card.
+   */
+  mcp?: BotMcpHost
   /**
    * The bot's own browser (`BotBrowsers`): a turn whose grant holds "use the browser" gets its
    * browser tools on it, and an ended activation's tabs close. Absent: no bot gets the browser.
@@ -226,8 +234,8 @@ export const BOT_ASK_HELD_CONSULT_TEXT = 'The owner already allowed this, but th
 /** What a call or `escalate` is answered with when the grant holds the permission but this turn can't use it. */
 export const BOT_ASK_HELD_UNAVAILABLE_TEXT = 'The owner already allowed this, but it can\'t be used on this turn. Do not ask again. Carry on without it and say in your report what you skipped.'
 
-/** What an ask for an MCP tool is answered with: no bot can hold one yet, so no card is made. */
-export const BOT_MCP_UNAVAILABLE_TEXT = 'MCP tools are not available to bots yet, so there is nothing to ask for. Carry on without it, and tell the owner plainly if that matters.'
+/** What an ask for an MCP tool is answered with where Mousse has no MCP servers to offer (no MCP manager): no card. */
+export const BOT_MCP_UNAVAILABLE_TEXT = 'Your owner has no MCP servers set up in Mousse here, so there is nothing to ask for. Carry on without it, and tell the owner plainly if that matters.'
 
 /** What a run's ask for a skill or MCP tool that is not here is refused with. */
 export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
@@ -462,7 +470,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
-      schedules: (botId) => this.listSchedules(botId)
+      schedules: (botId) => this.listSchedules(botId),
+      // The owner's MCP servers set up now, for About's names; one that is gone is shown so.
+      ...(host.mcp ? { mcpServers: () => host.mcp!.servers() } : {})
     })
     this.service = new BotChatService(this, {
       store: host.store,
@@ -1910,6 +1920,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row && dispatch && row.status === 'running' && dispatch.startedAt === null) await this.ready(row, dispatch).catch(() => false)
     const selection = this.store.activation(payload.activationId)?.selection
     if (selection) await this.refreshInstance(selection.instanceId)
+    // Work whose grant holds MCP tools reads the owner's servers first (bounded), so its turn is offered them.
+    const current = this.store.activation(payload.activationId)
+    if (this.host.mcp && current?.lane === 'run' && this.store.activeGrant(current.botId)?.manifest.mcp.length) await this.host.mcp.warm()
   }
 
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
@@ -2022,7 +2035,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       row, mainN: dispatch.n, role: 'activation', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller, deadline, counters: counterScope, spend: spendScope,
       contexts: definition.context.map((thread) => ({ key: thread.key, title: thread.title })),
-      dispatchId: dispatch.clientRequestId
+      dispatchId: dispatch.clientRequestId,
+      mcpTools: this.offeredMcp(compiled.permissions.mcp)
     })
     const pack = this.packs.get(row.id)
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
@@ -2034,7 +2048,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
       // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
       ...this.instructionsOf(definition, definition.main, row.lane, {
-        allowed: botAllowedOf(narrowManifest(effective, definition.main.narrow)),
+        allowed: botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)),
         ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
       }),
       selection: { ...selection },
@@ -2283,7 +2297,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       activationId: row.id,
       dispatchN: dispatch.n,
       prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
-      ...this.instructionsOf(definition, spec, undefined, { allowed: botAllowedOf(narrowManifest(effective, spec.narrow)) }),
+      ...this.instructionsOf(definition, spec, undefined, { allowed: botAllowedOf(narrowManifest(effective, spec.narrow), (ids) => this.mcpServerNames(ids)) }),
       selection: { ...selection },
       policy: compiled.policy,
       authority,
@@ -2311,6 +2325,75 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!current || !grant || grant.digest !== current.grantDigest) return undefined
     const definition = this.host.definitions.revision(current.botId, current.revision)
     return definition ? this.effectiveManifest(current, definition.permissions, grant.manifest) : undefined
+  }
+
+  /** The names of the servers `ids` names that are set up now; a removed one is left out. */
+  private mcpServerNames(ids: readonly string[]): string[] {
+    if (!this.host.mcp) return []
+    try {
+      const servers = this.host.mcp.servers()
+      return ids.flatMap((id) => servers.filter((server) => server.serverId === id).map((server) => server.name))
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * `mcp_servers`: the owner's MCP servers a bot may hold tools of, each with a line of Mousse's own (how many tools,
+   * and a few of their names), whether the bot holds its tools (all, some: it has new ones, or none), and whether it is
+   * answering. No schema, description or other text of the server's. Read at call time against the active grant.
+   */
+  mcpServerList(botId: string, lane: BotLane): BotMcpListing {
+    if (!this.host.mcp) return { servers: [], note: 'Your owner has no MCP servers set up in Mousse here.' }
+    const grant = this.store.activeGrant(botId)?.manifest
+    const held = new Set((grant?.mcp ?? []).map((pair) => `${pair.serverId}::${pair.tool}`))
+    const servers = this.host.mcp.servers().map((server) => {
+      const holds = server.tools.filter((tool) => held.has(`${server.serverId}::${tool.tool}`)).length
+      const names = server.tools.slice(0, 4).map((tool) => tool.tool)
+      const about = server.tools.length
+        ? `${server.tools.length} tool${server.tools.length === 1 ? '' : 's'}, such as ${names.join(', ')}${server.tools.length > names.length ? ', …' : ''}`
+        : 'no tools known yet'
+      const yours: BotMcpListing['servers'][number]['yours'] = !server.tools.length ? 'no' : holds === server.tools.length ? 'yes' : holds ? 'some: it has new tools' : 'no'
+      return { server: server.name, id: server.serverId, about, yours, ...(server.failing ? { answering: false as const } : {}) }
+    })
+    const note = !servers.length
+      ? 'Your owner has no MCP servers set up in Mousse for you to use.'
+      : lane === 'chat'
+        ? 'Servers marked yes are your work\'s: hand jobs that need them to work_start. For any other, ask once with escalate ({"mcp": {"server": "<name>"}}) and hand the job off once the owner has answered.'
+        : 'Use the tools of servers marked yes. For any other, ask once with escalate ({"mcp": {"server": "<name>"}}), carry on without it, and say so in your report.'
+    return { servers, note }
+  }
+
+  /** The granted MCP tools (`<server id>::<tool>`) a turn is offered: of servers set up for the whole profile now. */
+  private offeredMcp(pairs: readonly string[]): BotMcpTool[] {
+    if (!this.host.mcp || !pairs.length) return []
+    try {
+      return this.host.mcp.offered(new Set(pairs))
+    } catch (error) {
+      console.warn('a bot turn starts without its MCP tools: they could not be listed', { error: error instanceof Error ? error.message : String(error) })
+      return []
+    }
+  }
+
+  /**
+   * An ask for the owner's MCP tools as Mousse asks for it (`mcpAskFor`): one per server, by the id or name the bot
+   * gave, for every tool the server offers now that the activation's grant (read now) does not hold. A server whose
+   * every tool the grant holds is that ask with all of them, which the callers answer as held. A server or tool that is
+   * not set up here is refused, with no card.
+   */
+  private mcpAsk(activationId: string, named: BotMcpAsk & { server?: string }): { asked: BotPermissionRequest } | { refused: string } {
+    if (!this.host.mcp) return { refused: BOT_MCP_UNAVAILABLE_TEXT }
+    let servers: BotMcpServer[]
+    try {
+      servers = this.host.mcp.servers()
+    } catch {
+      servers = []
+    }
+    const held = new Set((this.grantNow(activationId)?.mcp ?? []).map((pair) => `${pair.serverId}::${pair.tool}`))
+    const resolved = mcpAskFor(servers, named, held)
+    if ('refused' in resolved) return resolved
+    if ('held' in resolved) return { asked: { mcp: { serverId: resolved.held.serverId, name: resolved.held.name, tools: resolved.held.tools.map((tool) => tool.tool) } } }
+    return { asked: { mcp: resolved.ask } }
   }
 
   /** A turn was refused `asked`: if the owner allows it before the turn ends, the activation continues with it. */
@@ -2374,6 +2457,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     dispatchId: string
     /** What the turn's activation was allowed when the turn started (before a chat turn's front-desk narrowing). */
     startedWith: BotManifest
+    /** The granted MCP tools the turn is offered (`BotMcp.offered`); none in a chat turn. */
+    mcpTools?: readonly BotMcpTool[]
   }): BotAuthority {
     const { row, controller } = input
     const activity: BotActivityContext = { botId: row.botId, activationId: row.id, dispatchId: input.dispatchId }
@@ -2442,8 +2527,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if ('refused' in decided || !ESCALATABLE.has(decided.wall.kind)) return decided
       // Only app tools a bot can be granted are worth asking for; any other is just refused.
       if (call.kind === 'app' && !BOT_APP_TOOLS.has(botGrantTool(call.tool))) return decided
-      const permission = permissionOfWall(call, decided.wall)
+      let permission = permissionOfWall(call, decided.wall)
       if (!permission) return decided
+      // An MCP tool is asked for as its server, with every tool it offers now; one that is not here is refused, no card.
+      if ('mcp' in permission) {
+        const resolved = this.mcpAsk(row.id, permission.mcp)
+        if ('refused' in resolved) return { ok: false, refused: { text: resolved.refused, askId: '' } }
+        permission = resolved.asked
+      }
       // No turn asks for what the bot's grant already holds, and a new bot's first message asks for nothing at all.
       const held = heldNow(permission)
       if (held) return { ok: false, refused: { text: held, askId: '' } }
@@ -2456,6 +2547,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const authority: BotAuthority = {
       ...base,
+      ...(input.mcpTools?.length ? { mcpTools: input.mcpTools } : {}),
       check,
       held: (asked) => {
         this.progress(row.id)
@@ -2478,15 +2570,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       escalate: (request) => {
         this.progress(row.id)
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, a limit, or to export your memory.`
-        // No bot can hold an MCP tool yet (`compileBotThread` refuses one), so a card for it could never be allowed.
-        if ('mcp' in (request.permission as object)) return BOT_MCP_UNAVAILABLE_TEXT
+        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, the tools of one of your owner's MCP servers, a limit, or to export your memory.`
         // A new bot's first message answers no request: it asks once the owner wants something that needs more.
         if (firstMessage) return BOT_ASK_NOT_YET_TEXT
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
         if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
         // An ask for any browser tool is the one "use the browser" ask.
-        const asked = grantRequestOf(request.permission as BotAskRequest)
+        let asked = grantRequestOf(request.permission as BotAskRequest)
+        // The owner's MCP tools: one ask per server, for every tool it offers now that the bot lacks. A server or tool
+        // that is not set up here is refused now, with no card, in both lanes.
+        if ('mcp' in asked) {
+          if (!this.host.mcp) return BOT_MCP_UNAVAILABLE_TEXT
+          const resolved = this.mcpAsk(row.id, asked.mcp as BotMcpAsk & { server?: string })
+          if ('refused' in resolved) return resolved.refused
+          asked = resolved.asked
+        }
         // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
         if ('tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
           return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
@@ -3136,9 +3234,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { budget: { key: permission.budget.key, amount: Math.min(permission.budget.amount ?? held, held) } } as T
   }
 
-  /** Whether a run may ask for `permission`: a skill or MCP tool must exist here (`knownAsk`). */
+  /**
+   * Whether a run may ask for `permission`: a skill must exist here (`knownAsk`). An MCP ask was made from the servers
+   * set up now (`mcpAsk`), and lists the tools it grants.
+   */
   private askable(permission: BotAskRequest): boolean {
-    if (!('skill' in permission) && !('mcp' in permission)) return true
+    if ('mcp' in permission) return Boolean(permission.mcp.name && mcpAskTools(permission.mcp).length)
+    if (!('skill' in permission)) return true
     try {
       return this.host.knownAsk?.(permission) ?? true
     } catch {
@@ -5170,6 +5272,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice),
     ownerWords: (botId, activationId) => this.ownerWords(botId, activationId),
     rows: (botId) => this.ownerSlots(botId),
+    mcpServers: (botId, lane) => this.mcpServerList(botId, lane),
     work: {
       start: (botId, from, input) => this.startWork(botId, from, input),
       list: (botId) => this.listWork(botId),
@@ -5859,19 +5962,28 @@ function spendLimits(manifest: BotManifest): ActivationLimits {
 
 /**
  * Whether a grant (`BotManifest`, before a chat turn's front-desk narrowing) holds the permission `asked` names: a tool
- * (any browser tool is the browser), file access, or a skill. Limits, MCP tools and special asks never count.
+ * (any browser tool is the browser), file access, a skill, or every tool an MCP ask lists. Limits and special asks
+ * never count.
  */
 function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
   if ('path' in asked) return manifest.workspace !== null
   if ('skill' in asked) return manifest.skills.includes(asked.skill)
+  if ('mcp' in asked) {
+    const tools = mcpAskTools(asked.mcp)
+    return tools.length > 0 && tools.every((tool) => manifest.mcp.some((pair) => pair.serverId === asked.mcp.serverId && pair.tool === tool))
+  }
   if (!('tool' in asked) || typeof asked.tool !== 'string') return false
   const tool = botGrantTool(asked.tool)
   // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
   return (isNeutralTool(tool) && (manifest.tools as readonly string[]).includes(tool)) || manifest.appTools.includes(tool)
 }
 
-/** Whether `asked` is something a chat turn is never offered, which its work has (`frontDeskManifest`): commands, the web, the browser. */
+/**
+ * Whether `asked` is something a chat turn is never offered, which its work has (`frontDeskManifest`): commands, the
+ * web, the browser, the owner's MCP tools.
+ */
 function frontDeskLacks(asked: BotAskRequest): boolean {
+  if ('mcp' in asked) return true
   if (!('tool' in asked) || typeof asked.tool !== 'string') return false
   const tool = botGrantTool(asked.tool)
   return BOT_WORK_ONLY_TOOLS.includes(tool) || tool === BOT_BROWSER_PERMISSION
@@ -5886,7 +5998,10 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     return asked.tool === BOT_BROWSER_PERMISSION ? authority.appTools.has('browser_open') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)
-  if ('mcp' in asked) return authority.mcp.has(`${asked.mcp.serverId}::${asked.mcp.tool}`)
+  if ('mcp' in asked) {
+    const tools = mcpAskTools(asked.mcp)
+    return tools.length > 0 && tools.every((tool) => authority.mcp.has(`${asked.mcp.serverId}::${tool}`))
+  }
   return false
 }
 

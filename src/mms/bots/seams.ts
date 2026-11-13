@@ -103,12 +103,23 @@ export interface BotToolHost {
      */
     reach?(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start'
   }
+  /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
+  mcpServers?(botId: string, lane: BotLane): BotMcpListing
   /** One-off reminders: said at a time, or work started then. */
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }
     list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; work?: string }>
     cancel(botId: string, reminderId: string): boolean
   }
+}
+
+/**
+ * `mcp_servers`' answer: each server by its name (and id), a line of Mousse's own about it, whether the bot holds its
+ * tools, and whether it is answering. Nothing of the server's own text but its tools' names.
+ */
+export interface BotMcpListing {
+  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'some: it has new tools'; answering?: false }>
+  note: string
 }
 
 /**

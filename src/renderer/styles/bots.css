@@ -145,6 +145,9 @@ button.bot-image:focus-visible { outline: 2px solid var(--accent); outline-offse
 .ask-card-title svg { color: var(--accent); flex-shrink: 0; }
 .ask-card-title strong { font-weight: 600; }
 .ask-card-note { margin: 4px 0 0 24px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); line-height: 1.5; }
+.ask-card-details { margin: 2px 0 0 24px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); line-height: 1.5; }
+.ask-card-details > summary { cursor: pointer; width: fit-content; }
+.ask-card-details > p { margin: 2px 0 0; overflow-wrap: anywhere; }
 .ask-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .ask-card-answer { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); }
 .bot-ghost-button { border-radius: 8px; padding: 8px 13px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }

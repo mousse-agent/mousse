@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
@@ -74,10 +74,11 @@ export interface CompileInput {
   /**
    * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
    * `consult` on the activation thread of a bot with context threads. `memory`: the five
-   * `memory_*` tools (Bot Phase 1 §5.10), always on and never grantable, so a bot whose stored
-   * grant predates them has them too. `frontDesk`: a chat turn (docs/plans/bot-always-free.md): it gets the work
-   * and reminder tools (`BOT_WORK_TOOLS`), and not what can take long (`BOT_WORK_ONLY_TOOLS`, the browser), which
-   * its work runs with instead. The grant and its digest stay the same: only what this turn is offered narrows.
+   * `memory_*` tools (Bot Phase 1 §5.10) and the listing of the owner's MCP servers (`mcp_servers`), always on and
+   * never grantable, so a bot whose stored grant predates them has them too. `frontDesk`: a chat turn
+   * (docs/plans/bot-always-free.md): it gets the work and reminder tools (`BOT_WORK_TOOLS`), and not what can take long
+   * (`BOT_WORK_ONLY_TOOLS`, the browser, the owner's MCP tools), which its work runs with instead. The grant and its
+   * digest stay the same: only what this turn is offered narrows.
    */
   botTools?: { escalate: boolean; consult: boolean; memory?: boolean; frontDesk?: boolean }
 }
@@ -162,8 +163,9 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return unenforceable(`The Mousse tool ${refusedApp} would reach other threads, act in your name or ask you.`)
-  // The user's MCP tools do not reach Pi's RPC engine yet, so a grant naming one cannot be held as approved.
-  if (manifest.mcp.length) return unenforceable('Your MCP tools are not available to bots yet.', ['mcp'])
+  // The owner's MCP tools (granted per server, stored per tool) reach every runtime through Mousse, which checks each
+  // call against these pairs before the server sees it: the MCP relay on Claude Code and Codex, the user MCP proxy on
+  // Pi. Each turn is offered only the granted tools of servers set up now (`BotMcp.offered`); a chat turn none.
   // `shell` ("run commands") is one permission, granted as a whole: each runtime runs its commands
   // from the bot's files folder, in its own sandbox where it has one (bot-architecture.md §3.5).
   const scratch = real(input.scratch)
@@ -191,7 +193,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
     ...(input.botTools?.escalate ? ['escalate'] : []),
     ...(input.botTools?.consult ? ['consult'] : []),
-    ...(input.botTools?.memory ? BOT_MEMORY_TOOLS : []),
+    // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
+    ...(input.botTools?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
     ...(input.botTools?.frontDesk ? BOT_WORK_TOOLS : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
@@ -227,11 +230,15 @@ export function compileBotThread(input: CompileInput): CompileResult {
 
 const WORK_ONLY: ReadonlySet<string> = new Set(BOT_WORK_ONLY_TOOLS)
 
-/** What a chat turn is offered of a grant: everything but what can take long, which its work does (`BOT_WORK_ONLY_TOOLS`, the browser). */
+/**
+ * What a chat turn is offered of a grant: everything but what can take long, which its work does (`BOT_WORK_ONLY_TOOLS`,
+ * the browser, and the owner's MCP tools).
+ */
 export function frontDeskManifest(manifest: BotManifest): BotManifest {
   return {
     ...manifest,
     tools: manifest.tools.filter((tool) => !WORK_ONLY.has(tool)),
-    appTools: manifest.appTools.filter((tool) => !WORK_ONLY.has(tool) && tool !== BOT_BROWSER_PERMISSION)
+    appTools: manifest.appTools.filter((tool) => !WORK_ONLY.has(tool) && tool !== BOT_BROWSER_PERMISSION),
+    mcp: []
   }
 }

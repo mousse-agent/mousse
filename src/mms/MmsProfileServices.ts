@@ -766,9 +766,11 @@ export class MmsProfileServices {
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
-      // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
+      // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
-      browser: botBrowsers
+      browser: botBrowsers,
+      // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
+      ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {
       // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
       const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })

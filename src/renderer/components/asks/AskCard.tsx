@@ -15,6 +15,8 @@ export interface AskCardProps {
   /** The line as plain text, for the row's tooltip and labels. */
   lineText: string
   note?: string
+  /** What Allow grants, by name, on one line the person can open (an MCP server's tools). */
+  details?: { summary: string; items: string[] }
   /** An answered ask shows `answered` as its one line. */
   answered?: { text: string; allowed: boolean }
   layout?: 'card' | 'row'
@@ -25,7 +27,7 @@ export interface AskCardProps {
   label?: string
 }
 
-export function AskCard({ line, lineText, note, answered, layout = 'card', onAnswer, row, label }: AskCardProps) {
+export function AskCard({ line, lineText, note, details, answered, layout = 'card', onAnswer, row, label }: AskCardProps) {
   const [busy, setBusy] = useState(false)
   const answer = async (choice: 'allow' | 'not_now') => {
     setBusy(true)
@@ -48,6 +50,10 @@ export function AskCard({ line, lineText, note, answered, layout = 'card', onAns
   return <div className="ask-card" role="group" aria-label={label ?? lineText}>
     <div className="ask-card-title"><Shield size={16} aria-hidden /><span>{line}</span></div>
     {note && <p className="ask-card-note">{note}</p>}
+    {details && details.items.length > 0 && <details className="ask-card-details">
+      <summary>{details.summary}</summary>
+      <p>{details.items.join(', ')}</p>
+    </details>}
     <div className="ask-card-actions">
       <button type="button" className="bot-ghost-button" disabled={busy} onClick={() => void answer('not_now')}>Not now</button>
       <button type="button" className="chat-primary-button" disabled={busy} onClick={() => void answer('allow')}>Allow</button>
@@ -85,6 +91,7 @@ export function BotAsk({ botName, ask, fromRun = false, onAnswer, onExport }: {
     lineText={`${botName} wants to ${ask.title}`}
     label={`${botName} asks`}
     {...(ask.note ? { note: ask.note } : {})}
+    {...(ask.details ? { details: ask.details } : {})}
     {...(ask.status !== 'open' ? { answered: { text: askAnswerLine(ask, fromRun), allowed: ask.status === 'allowed' } } : {})}
     onAnswer={(answer) => (answer === 'allow' && ask.kind === 'export_memory' && onExport ? onExport() : onAnswer(answer))}
   />

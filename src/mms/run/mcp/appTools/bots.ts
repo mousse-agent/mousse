@@ -3,6 +3,7 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../../shared/bots/personal/methods'
+import { BOT_MCP_LIST_TOOL } from '../../../../shared/bots/personal/manifest'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
@@ -30,6 +31,12 @@ const PERMISSION = Type.Union([
   Type.Object({ tool: Type.String({ description: 'A tool name, for example read, edit, web_fetch, or shell to run commands.' }) }),
   Type.Object({ path: Type.String({ description: 'Any absolute folder path: this asks to use files anywhere on this computer, read and write, once.' }), access: Type.Union([Type.Literal('read'), Type.Literal('write')]) }),
   Type.Object({ skill: Type.String({ description: 'A skill id.' }) }),
+  Type.Object({
+    mcp: Type.Object({
+      server: Type.String({ description: 'One of your owner\'s MCP servers, by the name mcp_servers gives it. This asks for every tool it offers, once.' }),
+      tool: Type.Optional(Type.String({ description: 'The tool you need, if you know it; the ask is for the whole server anyway.' }))
+    })
+  }),
   Type.Object({
     budget: Type.Object({
       key: Type.Union(['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'].map((key) => Type.Literal(key))),
@@ -79,6 +86,11 @@ export const BOT_TOOLS: Tool[] = [
   {
     name: 'bot_schedule_list',
     description: 'List your schedules: id, label and next run.',
+    parameters: Type.Object({})
+  },
+  {
+    name: BOT_MCP_LIST_TOOL,
+    description: 'List your owner\'s MCP servers set up in Mousse (tools for services like GitHub or their notes): each by name, what it has, and whether you can use it. To use one you can\'t yet, ask once with escalate ({"mcp": {"server": "<name>"}}).',
     parameters: Type.Object({})
   },
   {
@@ -353,6 +365,16 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         return json(call.deps.host.schedules.list(call.botId))
+      }
+    }),
+    // The owner's MCP servers by name, and which ones the bot holds: no schema, and nothing of the servers' runs.
+    ownTool(byName.get(BOT_MCP_LIST_TOOL)!, deps, {
+      class: 'read',
+      describe: () => 'List MCP servers',
+      handler: async (_args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        return json(call.deps.host.mcpServers?.(call.botId, call.lane) ?? { servers: [], note: 'Your owner has no MCP servers set up in Mousse here.' })
       }
     }),
     ownTool(byName.get('set_profile')!, deps, {

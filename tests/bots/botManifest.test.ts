@@ -71,7 +71,7 @@ describe('the subset rule', () => {
     // File access is one permission, granted already: another folder adds nothing.
     expect(addedPermissions(wider, granted).map((line) => line.text)).toEqual([
       'Create and overwrite files',
-      'Use the github tool `merge_pr`',
+      'Use the MCP tool `merge_pr`',
       'Use the skill *changelog*',
       'Up to 30 minutes of work per run'
     ])
@@ -96,7 +96,7 @@ describe('the subset rule', () => {
       'Use files on this computer',
       'Read files',
       'Edit files',
-      'Use the github tool `create_issue`',
+      'Use the MCP tool `create_issue`',
       'Use the skill *release-notes*',
       'Up to 15 minutes of work per run'
     ])

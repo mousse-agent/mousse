@@ -9,7 +9,7 @@ import { mousseVersion } from '../../appVersion'
 import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type MousseTool, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
-import { RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
+import { RELAY_BOT_INSTRUCTIONS, RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
 
 /** The `tools/list` `_meta` key that keeps a tool out of Claude Code's tool search (`MousseTool.alwaysLoad`). */
 export const ALWAYS_LOAD_META = 'anthropic/alwaysLoad'
@@ -263,7 +263,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
   private relayServer(relay: RelayHandler, resolved: CredentialRecord, requestSignal: AbortSignal): Server {
     const server = new Server(
       { name: 'mousse-relay', version: mousseVersion() },
-      { capabilities: { tools: {} }, instructions: RELAY_INSTRUCTIONS }
+      { capabilities: { tools: {} }, instructions: relay.forBot(resolved) ? RELAY_BOT_INSTRUCTIONS : RELAY_INSTRUCTIONS }
     )
     const { credentials } = this.options
     server.setRequestHandler(ListToolsRequestSchema, async () => ({

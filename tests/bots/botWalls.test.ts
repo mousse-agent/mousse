@@ -400,7 +400,7 @@ describe('consults', () => {
     expect(context).toMatchObject({ history: 'thread', authority: { role: 'context' } })
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
-    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, 'read'].sort())
+    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, 'mcp_servers', 'read'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)
