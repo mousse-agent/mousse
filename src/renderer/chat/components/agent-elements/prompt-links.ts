@@ -1,12 +1,15 @@
+import { linkLabel } from "./link-label";
+
 /**
  * A prompt is plain text, but people paste links into it: bare web addresses and Markdown links such as
- * `[#35130](https://github.com/o/r/pull/35130)`. The bubble shows each as a link with its label, and a
- * GitHub pull request, issue or commit with the GitHub mark and a short label. Find reads the same
- * labels (see find-index), so what it counts is what the bubble shows.
+ * `[#35130](https://github.com/o/r/pull/35130)`. The bubble shows each as a link drawn by `LinkLabel`
+ * (see link-label), like a link in a reply. Find reads the same labels (see find-index), so what it
+ * counts is what the bubble shows.
  */
 export type PromptSegment =
   | { kind: "text"; text: string }
-  | { kind: "link"; text: string; href: string; github: boolean };
+  /** `text` is the label as written: a Markdown link's label, or the bare address itself. */
+  | { kind: "link"; text: string; href: string };
 
 /** A Markdown link with a web address, or a bare web address. */
 const LINK_PATTERN = /\[([^\[\]\n]+)\]\((https?:\/\/[^\s()<>]+(?:\([^\s()<>]*\)[^\s()<>]*)*)\)|https?:\/\/[^\s<>"'`]+/gi;
@@ -42,31 +45,6 @@ function isWebUrl(href: string): boolean {
   }
 }
 
-/** True for an address on github.com (or a subdomain). */
-export function isGitHubUrl(href: string): boolean {
-  try {
-    const host = new URL(href).hostname.toLowerCase();
-    return host === "github.com" || host.endsWith(".github.com");
-  } catch {
-    return false;
-  }
-}
-
-/** `#123` for a pull request or issue, the short hash for a commit; otherwise null. */
-export function shortGitHubLabel(href: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(href);
-  } catch {
-    return null;
-  }
-  if (url.hostname.toLowerCase() !== "github.com") return null;
-  const [, , kind, id] = url.pathname.split("/").filter(Boolean);
-  if ((kind === "pull" || kind === "issues") && id && /^\d+$/.test(id)) return `#${id}`;
-  if (kind === "commit" && id && /^[0-9a-f]{7,40}$/i.test(id)) return id.slice(0, 7);
-  return null;
-}
-
 /** Splits a prompt into its text and its links, in order. Without links it is one text segment. */
 export function promptSegments(text: string): PromptSegment[] {
   const segments: PromptSegment[] = [];
@@ -84,9 +62,7 @@ export function promptSegments(text: string): PromptSegment[] {
     const end = markdownLabel !== undefined ? start + match[0].length : start + href.length;
     if (!isWebUrl(href)) continue;
     pushText(text.slice(last, start));
-    const github = isGitHubUrl(href);
-    const label = markdownLabel ?? (github ? shortGitHubLabel(href) : null) ?? href;
-    segments.push({ kind: "link", text: label, href, github });
+    segments.push({ kind: "link", text: markdownLabel ?? href, href });
     // A bare address trimmed of its trailing punctuation leaves that punctuation as text.
     last = end;
   }
@@ -96,5 +72,7 @@ export function promptSegments(text: string): PromptSegment[] {
 
 /** The prompt's text as the bubble shows it: each link as its label. */
 export function promptDisplayText(text: string): string {
-  return promptSegments(text).map((segment) => segment.text).join("");
+  return promptSegments(text)
+    .map((segment) => (segment.kind === "link" ? linkLabel(segment.href, segment.text) : segment.text))
+    .join("");
 }

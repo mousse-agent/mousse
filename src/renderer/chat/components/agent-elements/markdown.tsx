@@ -7,8 +7,7 @@ import { cn } from "./utils/cn";
 import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
-import { IconGitHub } from "./icons";
-import { isGitHubUrl } from "./prompt-links";
+import { LinkLabel } from "./link-label-view";
 import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
 import {
   hideUnclosedMathFence,
@@ -398,8 +397,7 @@ const markdownComponents: Components = {
         onClick={(event) => { event.preventDefault(); routeLink(routedHref); }}
         className="an-md-link"
       >
-        {isGitHubUrl(routedHref) && <IconGitHub className="an-md-link-icon" />}
-        {children}
+        <LinkLabel href={routedHref}>{children}</LinkLabel>
       </a>
     );
   },

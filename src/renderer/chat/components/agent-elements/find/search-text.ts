@@ -5,11 +5,12 @@ import { unified } from "unified";
 import { remarkMousseMath } from "../../../../markdown/math/remark-mousse-math";
 import { hideUnclosedMathFence, mayContainMath } from "../../../../markdown/math/math-detect";
 import { normalizeCodeFenceLanguages, normalizeMarkdown } from "../markdown";
+import { linkLabel } from "../link-label";
 
 /**
  * The text of a Markdown reply as the reader sees it, in the blocks the page
  * draws it in. Find counts occurrences in these blocks, so they follow the
- * rendered text and not the source: `**bold**` is `bold`, a link is its label,
+ * rendered text and not the source: `**bold**` is `bold`, a link is its label (a bare GitHub address its short one),
  * an image contributes nothing, a table cell is a block of its own.
  *
  * The parse is the one Streamdown renders (`remark-parse` + `remark-gfm`, plus
@@ -19,6 +20,7 @@ import { normalizeCodeFenceLanguages, normalizeMarkdown } from "../markdown";
 type MarkdownNode = {
   type: string;
   value?: string;
+  url?: string;
   lang?: string | null;
   children?: MarkdownNode[];
 };
@@ -63,6 +65,16 @@ function writeInline(node: MarkdownNode, out: BlockWriter): void {
     case "break":
       out.flush();
       return;
+    case "link": {
+      // A bare GitHub address reads as its short label, as the page draws it (see link-label).
+      const only = node.children?.length === 1 ? node.children[0] : undefined;
+      if (node.url && only?.type === "text" && only.value !== undefined) {
+        out.text(linkLabel(node.url, only.value));
+        return;
+      }
+      for (const child of node.children ?? []) writeInline(child, out);
+      return;
+    }
     case "image":
     case "imageReference":
     case "html":
