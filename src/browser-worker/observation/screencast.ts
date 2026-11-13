@@ -152,8 +152,6 @@ export interface ViewerCapturesOptions {
 interface ScreencastFrameEvent {
   data?: string
   sessionId?: number
-  /** The page's size the picture shows, in CSS pixels. */
-  metadata?: { deviceWidth?: number; deviceHeight?: number }
 }
 
 interface Waiting {
@@ -214,8 +212,13 @@ interface TabCapture {
   chooser?: BrowserFileChooser
   /** Where the page was scrolled when last read (a screencast picture does not say). */
   scroll: { x: number; y: number }
-  /** The resize count `latest` was taken at (`ViewerCapturesOptions.page`), -1 when it shows a size the page had left. */
+  /** The resize count `latest` was taken at (`ViewerCapturesOptions.page`), -1 when it may show a size the page had left. */
   latestSize: number
+  /**
+   * The page was resized and no still has been taken since: a screencast picture may have been painted
+   * before the resize, so it is shown and places nothing until a still (always the page as it is) is taken.
+   */
+  resizedUnseen?: boolean
   /** What was on top at a grid of points when last read, while a person holds the browser. */
   hits?: BrowserPictureHits
   /** The latest picture's scroll and grid are being read (the read under way): it is handed to no watcher before they are. */
@@ -402,8 +405,9 @@ export class ViewerCaptures {
     for (const capture of this.captures.values()) {
       this.forgetRecent(capture)
       capture.settleMs = this.settleMs
+      capture.resizedUnseen = true
       if (capture.latest) capture.latest = { ...capture.latest, sharp: false }
-      void this.readViewport(capture).then(() => this.armSettle(capture, this.settleMs))
+      void this.readViewport(capture).then(() => this.armSettle(capture, 0))
     }
   }
 
@@ -657,7 +661,7 @@ export class ViewerCaptures {
     capture.repeatTimer = undefined
     capture.repeat = undefined
     capture.repeatGapMs = 0
-    this.show(capture, data, pictureSize(event.metadata))
+    this.show(capture, data)
     // Held until a watcher takes a picture: Chromium paints no more for nobody.
     capture.held.push(event.sessionId)
     if (capture.settle) clearTimeout(capture.settle)
@@ -701,7 +705,7 @@ export class ViewerCaptures {
   }
 
   /** A screencast picture becomes the latest. A still it replaces soon after was not worth taking: the next one waits longer. */
-  private show(capture: TabCapture, data: string, size?: { width: number; height: number }): void {
+  private show(capture: TabCapture, data: string): void {
     const now = this.now()
     if (capture.stillAt !== undefined) {
       capture.settleMs = now - capture.stillAt < STILL_STANDS_MS
@@ -709,14 +713,9 @@ export class ViewerCaptures {
         : Math.max(this.settleMs, capture.settleMs / 2)
       capture.stillAt = undefined
     }
-    // Chromium says which size of the page a screencast picture shows.
-    if (size && (size.width !== capture.viewport.width || size.height !== capture.viewport.height)) {
-      capture.viewport = { ...size }
-      capture.stateSeq = this.bump()
-    }
     const page = this.options.page?.()
-    // One painted before a resize and sent after it shows a size the page has left: it is shown, and places nothing.
-    capture.latestSize = page ? (!size || sameSize(size, page) ? page.seq : -1) : 0
+    // Just after a resize, one may have been painted before it: it is shown, and places nothing.
+    capture.latestSize = page ? (capture.resizedUnseen ? -1 : page.seq) : 0
     const { width, height } = capture.viewport
     const ratio = page?.scale ?? 1
     const scale = Math.min(1, capture.width / (width * ratio), SCREENCAST_MAX_HEIGHT / (height * ratio)) * ratio
@@ -872,8 +871,10 @@ export class ViewerCaptures {
         return
       }
       capture.scroll = { x: visual.pageX ?? 0, y: visual.pageY ?? 0 }
-      // Resized while it was taken: it may show either size, so it places nothing.
-      capture.latestSize = sizedAt ? (this.options.page?.().seq === sizedAt.seq ? sizedAt.seq : -1) : 0
+      // Resized while it was taken: it may show either size, so it places nothing. Otherwise it is the page as it is.
+      const kept = !sizedAt || this.options.page?.().seq === sizedAt.seq
+      capture.latestSize = sizedAt ? (kept ? sizedAt.seq : -1) : 0
+      if (kept) capture.resizedUnseen = false
       capture.latest = { data: shot.data, width: Math.round(width * scale * ratio), height: Math.round(height * scale * ratio), viewport: { width, height }, at: this.now(), sharp: true, ...this.spot(capture) }
       capture.lastStill = shot
       capture.shownCast = over
@@ -992,16 +993,6 @@ export class ViewerCaptures {
     }
   }
 }
-
-/** The page's size a screencast picture shows, as Chromium says it (CSS pixels), when it does. */
-function pictureSize(metadata: ScreencastFrameEvent['metadata']): { width: number; height: number } | undefined {
-  const width = metadata?.deviceWidth
-  const height = metadata?.deviceHeight
-  if (typeof width !== 'number' || typeof height !== 'number' || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return undefined
-  return { width: Math.round(width), height: Math.round(height) }
-}
-
-const sameSize = (a: { width: number; height: number }, b: { width: number; height: number }) => Math.abs(a.width - b.width) <= 1 && Math.abs(a.height - b.height) <= 1
 
 interface LayoutMetrics {
   cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number }

@@ -84,20 +84,27 @@ export const PAGE_SIZE_SETTLE_MS = 250
 /**
  * The view's own size, which the page is laid out at while it shows the browser: the stage's content
  * box in CSS pixels and the screen's pixel ratio, once it has stayed put for `PAGE_SIZE_SETTLE_MS`
- * (the first size at once). Undefined until it is measured.
+ * (the first size at once). Undefined until it is measured; null where it cannot be (no size yet, no
+ * way to measure it).
  */
-export function useStagePageSize(element: RefObject<HTMLElement | null>): WatchedBrowserPageSize | undefined {
-  const [page, setPage] = useState<WatchedBrowserPageSize | undefined>(undefined)
+export function useStagePageSize(element: RefObject<HTMLElement | null>): WatchedBrowserPageSize | null | undefined {
+  const [page, setPage] = useState<WatchedBrowserPageSize | null | undefined>(undefined)
   useEffect(() => {
     const target = element.current
-    if (!target || typeof ResizeObserver === 'undefined') return
+    if (!target || typeof ResizeObserver === 'undefined') {
+      setPage(null)
+      return
+    }
     let timer: ReturnType<typeof setTimeout> | undefined
     let first = true
     const measure = () => {
       const style = getComputedStyle(target)
       const width = Math.floor(target.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0))
       const height = Math.floor(target.clientHeight - (parseFloat(style.paddingTop) || 0) - (parseFloat(style.paddingBottom) || 0))
-      if (width <= 0 || height <= 0) return
+      if (width <= 0 || height <= 0) {
+        setPage((known) => known ?? null)
+        return
+      }
       const next = watchedBrowserPageSize({ width, height, scale: window.devicePixelRatio || 1 })
       const apply = () => setPage((known) => known && known.width === next.width && known.height === next.height && known.scale === next.scale ? known : next)
       if (timer) clearTimeout(timer)
@@ -238,11 +245,11 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   useEffect(() => { if (!editing.current) setAddress(url) }, [url])
   // Watched while on screen, faster while the person holds the browser. The page is laid out at the
   // view's own size, so its picture fills it; the picture is that size at the screen's pixel ratio.
-  // Until it is measured (or where it cannot be), the page keeps its size and the picture is 960 px wide.
+  // Watched once it is measured; where it cannot be, the page keeps its size and the picture is 960 px wide.
   const page = useStagePageSize(stage)
   const width = page ? Math.min(WATCHED_BROWSER_PANE.maxWidth, Math.round(page.width * page.scale)) : UNMEASURED_WIDTH
   const fps = owner ? WATCHED_BROWSER_PANE.heldFps : WATCHED_BROWSER_PANE.fps
-  kit.useWatch(browserKey, stage, view.open && !windowed ? { width, fps, ...(page ? { page } : {}) } : undefined)
+  kit.useWatch(browserKey, stage, view.open && !windowed && page !== undefined ? { width, fps, ...(page ? { page } : {}) } : undefined)
   const stream = kit.useStream(browserKey)
   const fresh = Boolean(note && Date.now() - note.at < NOTE_MS)
   const now = useNow(Boolean(view.open && stream && !stream.live) || fresh)
