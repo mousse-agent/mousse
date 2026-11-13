@@ -67,11 +67,11 @@ function quotedTitles(switches: readonly BotComputerSwitch[]): string {
 
 /**
  * The bot's chat line when a turn that started with what this computer has just switched off (`switches`) is stopped
- * (`BotEngine.cutForLimit`). The work goes on in a new turn without it.
+ * (`BotEngine.cutForLimit`). It says only what is true when it is posted: the turn stopped, and why. Whether the work
+ * goes on in a new turn (it may not: its time may be up) is shown by the work itself.
  */
 export function stoppedForLimitText(switches: readonly BotComputerSwitch[]): string {
-  const these = switches.length > 1 ? 'them' : 'it'
-  return `Stopped: ${quotedTitles(switches)} ${switches.length > 1 ? 'were' : 'was'} switched off on this computer. I carry on without ${these}.`
+  return `Stopped: ${quotedTitles(switches)} ${switches.length > 1 ? 'were' : 'was'} switched off on this computer.`
 }
 
 /** What the turn that goes on after such a stop is told first. */

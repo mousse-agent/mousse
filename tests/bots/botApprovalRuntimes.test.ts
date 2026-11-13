@@ -5,11 +5,12 @@
  * with an ask, and the run carries on; anything that can't be asked for is just refused. Nobody is
  * shown a normal approval prompt.
  */
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
-import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, holdClaudeBotTemp, removeClaudeBotTemp, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
@@ -234,11 +235,18 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     // user's runtime folder, included), and the home folder; the bot's folders are not. Claude Code's shared temporary
     // folders, when the turn keeps its own elsewhere, are closed read and write.
     const tops = ['bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'snap', 'srv', 'sys', 'tmp', 'usr', 'var']
-    const linux = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops, sharedTemp: ['/tmp/claude-1000'] }).filesystem!
+    const linux = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops, sharedTemp: ['/tmp/claude-1000'], exists: () => false }).filesystem!
     expect([...linux.denyRead!].sort()).toEqual(['/boot', '/home', '/home/owner', '/media', '/mnt', '/opt', '/root', '/run', '/snap', '/srv', '/tmp/claude-1000', '/var'])
     expect(linux.denyWrite).toEqual(expect.arrayContaining(['/tmp', '/tmp/claude-1000']))
     expect(linux.allowRead).toEqual(expect.arrayContaining(mine))
     expect(linux.allowWrite).toEqual(expect.arrayContaining(mine))
+    expect(linux.allowRead!.filter((path) => path.startsWith('/run'))).toEqual([])
+    // NixOS: its programs (on the PATH) and setuid wrappers live under `/run`; those two stay readable, nothing else there.
+    const present = new Set(['/run/current-system/sw/bin', '/run/wrappers', '/run/user/1000', '/run/media'])
+    const nixos = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => [...tops, 'nix'], exists: (path) => present.has(path) }).filesystem!
+    expect(nixos.denyRead).toContain('/run')
+    expect(nixos.allowRead!.filter((path) => path.startsWith('/run')).sort()).toEqual(['/run/current-system/sw/bin', '/run/wrappers'])
+    expect(nixos.denyRead).not.toContain('/nix')
     // `/` can't be listed: no sandbox is built with fewer folders closed; it throws instead (and the gate refuses, below).
     expect(() => claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => { throw new Error('EACCES') } })).toThrow()
     // On macOS, the home folder only.
@@ -270,10 +278,16 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     limit = { ...limit, files: false }
     const { prepared, payload } = await run('r1')
     const cwd = prepared.authority.workspace!.files!
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     // A runtime folder in the shared temporary folder is open to every bot: no private folder there.
     expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', '/tmp/runtime-1000')).toBeUndefined()
     expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', '')).toBeUndefined()
     expect(claudeBotTemp(prepared.authority, {}, cwd, 'darwin', '/run/user/1000')).toBeUndefined()
+    // The service log says once that bots' commands use the shared folder here, with why and nothing of the bot's.
+    const said = warn.mock.calls.filter(([text]) => /shared temporary folder/.test(String(text)))
+    expect(said).toHaveLength(1)
+    expect(String(said[0]![0])).not.toContain(cwd)
+    warn.mockRestore()
     // Where it is real (Linux with one), the folder is its own, short enough for Claude Code to give its commands, and
     // the shared folders are the ones the sandbox closes (the real program: claudeMcpCommandLine.test.ts).
     const runtime = process.platform === 'linux' ? process.env.XDG_RUNTIME_DIR : undefined
@@ -283,8 +297,40 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
         expect(temp.dir.startsWith(`${runtime}/mb`)).toBe(true)
         expect(Buffer.byteLength(temp.dir)).toBeLessThanOrEqual(30)
         expect(temp.shared).toEqual([`/tmp/claude-${process.getuid!()}`, `/var/tmp/x/claude-${process.getuid!()}`])
+        // Removed when the bot is deleted, unless a turn of it still runs (its end empties it).
+        const release = holdClaudeBotTemp(temp.dir)
+        removeClaudeBotTemp(cwd, runtime)
+        expect(existsSync(temp.dir)).toBe(true)
+        release()
+        removeClaudeBotTemp(cwd, runtime)
+        expect(existsSync(temp.dir)).toBe(false)
       }
     }
     await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('a bot\'s private temporary folder is emptied when the last of its turns running ends, and kept while another runs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-bot-temp-'))
+    try {
+      const chatTurn = holdClaudeBotTemp(dir)
+      const work = holdClaudeBotTemp(dir)
+      mkdirSync(join(dir, 'tasks'))
+      writeFileSync(join(dir, 'tasks', 'out.txt'), 'output')
+      chatTurn()
+      chatTurn()
+      expect(readdirSync(dir)).toEqual(['tasks'])
+      work()
+      expect(existsSync(dir)).toBe(true)
+      expect(readdirSync(dir)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a deleted bot\'s private temporary folder goes with it', async () => {
+    const removed = vi.fn()
+    f.host.removeRuntimeTemp = removed
+    await f.bots.remove(botId)
+    expect(removed).toHaveBeenCalledWith(f.bots.filesFolder(botId))
   })
 })

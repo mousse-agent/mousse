@@ -101,6 +101,7 @@ import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
+import { toolArgsDigest } from '../run/tools/argsDigest'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow, RESTART_INTERRUPTED_TEXT, RESTART_UNSENT_TEXT } from '../run/restartNote'
 import { ThreadResidency } from './ThreadResidency'
 import { isDeepStrictEqual } from 'node:util'
@@ -1056,10 +1057,6 @@ function durableSendInput(input: OrchestratorSendInput): OrchestratorSendInput {
   return { ...rest, images: images.map((image) => ({ ...image, data: '' })) }
 }
 
-/** Ledger digest of tool arguments: sha256 of their stable JSON. */
-function toolArgsDigest(args: unknown): string {
-  return sha256Hex(stableStringify(args ?? {}))
-}
 
 export class OrchestratorService extends EventEmitter {
   private appletStore?: AppletStore

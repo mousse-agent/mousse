@@ -19,6 +19,8 @@ import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_FEATURES_OFF, CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_MANAGED_VERSION } from '../../src/mms/harness/vendors/codex/release'
+import { CODEX_BOT_VERSION_NEWER_TEXT } from '../../src/shared/harness/codexBotVersion'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
@@ -45,10 +47,12 @@ const SUPERVISED = { type: 'readOnly', networkAccess: false }
  * helpers are tracked from the thread's items alone.
  */
 const NIL_THREAD = '00000000-0000-0000-0000-000000000000'
-function handshake(firstId = 1, probe = true): TranscriptFrame[] {
+/** What the replayed Codex says it is at `initialize`: the version Mousse runs, so a bot's turn may run on it. */
+const CHECKED_USER_AGENT = `codex_cli_rs/${CODEX_MANAGED_VERSION} (Mac OS 15.0.0; arm64) unknown (mousse; 0.1.1)`
+function handshake(firstId = 1, probe = true, userAgent = CHECKED_USER_AGENT): TranscriptFrame[] {
   return [
     out({ id: firstId, method: 'initialize', params: { clientInfo: { name: 'mousse', title: 'Mousse', version: '0.1.1' }, capabilities: { experimentalApi: true, requestAttestation: false } } }),
-    inn({ id: firstId, result: { userAgent: 'replay', codexHome: '/home/replay/.codex', platformFamily: 'unix', platformOs: 'macos' } }),
+    inn({ id: firstId, result: { userAgent, codexHome: '/home/replay/.codex', platformFamily: 'unix', platformOs: 'macos' } }),
     out({ method: 'initialized' }),
     ...(probe
       ? [
@@ -2289,6 +2293,26 @@ describe('a bot turn on Codex', () => {
     ])
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { cwd: string }> }
     expect(saved.threads['thread-1'].cwd).toBe(files)
+  })
+
+  it('a Codex newer than the version its tools were checked on runs no bot turn, and the owner\'s own thread on it runs', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot, calls } = botIn(files)
+    const replay = transport([
+      // A Codex that may offer tools Mousse has not accounted for: nothing of the bot's turn reaches it.
+      ...handshake(1, true, 'codex_cli_rs/0.999.0 (Mac OS 15.0.0; arm64) unknown (mousse; 0.1.1)'),
+      ...threadStart(4),
+      ...turnStart(5, 'mine'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    await expect(adapter.startTurn(input({ prompt: 'go', threadId: 'bot-thread' }), recordingSink(), control(), { ...host(), bot: bot as never })).rejects.toMatchObject({ message: CODEX_BOT_VERSION_NEWER_TEXT })
+    expect(calls).toEqual([])
+    await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
+    replay.assertDone()
   })
 
   it('a bot turn that holds MCP tools gets Mousse\'s relay, and every MCP server of the owner\'s own Codex setup is off', async () => {

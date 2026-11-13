@@ -20,7 +20,7 @@ import { CodexProviderService, codexEnvironment } from '../../src/mms/harness/ve
 import type { CodexConnection } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import type { CodexModel } from '../../src/mms/harness/vendors/codex/protocol'
 import { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
-import { CODEX_BOT_FEATURES_OFF } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_OFF } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import type { NeutralTool } from '../../src/shared/harness/tools'
@@ -180,6 +180,13 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
     return requests
   }
   const modelWith = (version: string | null) => models.find((model) => model.multiAgentVersion === version)
+
+  // A bot turn runs only on a Codex this file has checked: Mousse reads the version from what the binary says when it
+  // starts. A binary given by `MOUSSE_CODEX_BINARY` fails here until its tools are accounted for and its version added.
+  it('the version Mousse reads from this binary is one a bot may run on', () => {
+    const app = (service as unknown as { app: { conn: CodexConnection }; versions: WeakMap<CodexConnection, string | undefined> })
+    expect(CODEX_BOT_CHECKED_VERSIONS).toContain(app.versions.get(app.app.conn))
+  })
 
   const kinds: Array<[string, string | null]> = [['no subagents', null], ['v1 subagents', 'v1'], ['v2 subagents', 'v2']]
   it.each(kinds)('a model with %s: every tool offered is accounted for; commands only with "run commands"; nothing opens a file by its path', async (_name, version) => {

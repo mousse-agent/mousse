@@ -5,16 +5,18 @@
  * is left out and named; only server names are ever logged.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { McpSetServersResult, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  CLAUDE_MCP_POLICY_CODE, CLAUDE_MCP_STARTUP_WAIT_MS, claudeInputMcpEnv, claudeLiteralServers, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpPolicyForbidsAdded, claudeMcpPolicyText,
+  CLAUDE_MCP_POLICY_CODE, CLAUDE_MCP_START_FOLDER, CLAUDE_MCP_STARTUP_WAIT_MS, claudeInputMcpEnv, claudeLiteralServers, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpPolicyForbidsAdded, claudeMcpPolicyText,
   claudeMcpRegistrationMs, claudeMcpStrings, claudeStartupChannel, claudeStartupMcpOptions, ClaudeStderrTail, dropMousseServers, promptAfter, redactClaudeOutput,
-  registerClaudeMcpServers, registerUserServersLater, withoutLiteralDollar, type ClaudeMcpServers
+  registerClaudeMcpServers, registerUserServersLater, sweepClaudeMcpStartFolders, withoutLiteralDollar, type ClaudeMcpServers
 } from '../src/mms/harness/vendors/claude/mcpRegistration'
+import { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 
 const POSIX = globalThis.process.platform !== 'win32'
 /** Said in the name of a test of the startup channel, which Windows does not have (its user servers go over the input). */
@@ -225,6 +227,46 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
       const failing = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: 'fifo', fifoRoot: root, spawn: (() => { throw new Error('spawn failed') }) as never }))!
       expect(() => failing.spawnClaudeCodeProcess!({ command: 'claude', args: [], env: {}, signal: new AbortController().signal })).toThrow('spawn failed')
       expect(readdirSync(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('a start folder a killed service left behind is removed when the service starts; a recent one, and anything else, are kept', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-fifo-sweep-'))
+    try {
+      const stateDir = join(home, 'state')
+      const root = join(stateDir, CLAUDE_MCP_START_FOLDER)
+      const left = join(root, 'mousse-mcp-left')
+      const recent = join(root, 'mousse-mcp-recent')
+      const other = join(root, 'notes')
+      for (const dir of [left, recent, other]) mkdirSync(dir, { recursive: true })
+      writeFileSync(join(left, 'servers'), '')
+      const hourAgo = new Date(Date.now() - 60 * 60_000)
+      utimesSync(left, hourAgo, hourAgo)
+      new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { stateDir, live: false })
+      await vi.waitFor(() => expect(existsSync(left)).toBe(false))
+      expect(readdirSync(root).sort()).toEqual(['mousse-mcp-recent', 'notes'])
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(!FIFO)(`a start folder a running start holds is kept by the sweep, however old${NO_FIFO}`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-fifo-test-'))
+    try {
+      const fifo = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: 'fifo', fifoRoot: root }))!
+      const path = String(fifo.extraArgs!['mcp-config'])
+      // Spawned, and not reading yet: its pipe waits in its folder.
+      const child = fifo.spawnClaudeCodeProcess!({ command: globalThis.process.execPath, args: ['-e', 'setTimeout(() => {}, 5000)'], env: { PATH: globalThis.process.env.PATH }, signal: new AbortController().signal }) as unknown as { kill(): void; once(event: string, listener: () => void): void }
+      try {
+        await sweepClaudeMcpStartFolders(root, Date.now() + 60 * 60_000)
+        expect(existsSync(path)).toBe(true)
+      } finally {
+        const exited = new Promise<void>((resolve) => child.once('exit', resolve))
+        child.kill()
+        await exited
+      }
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

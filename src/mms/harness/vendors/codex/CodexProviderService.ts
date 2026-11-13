@@ -74,7 +74,8 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexTurnPolicy } from './childPolicy'
+import { CODEX_BOT_CHECKED_VERSIONS, codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexTurnPolicy } from './childPolicy'
+import { codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -1182,6 +1183,8 @@ export class CodexProviderService {
   private readonly orphans = new Set<NativeHelpers>()
   /** The Codex package each app-server process runs (`codexPackageOf`), for a confined bot's profile. */
   private readonly packages = new WeakMap<CodexConnection, string | undefined>()
+  /** The Codex version each process reported at `initialize` (`codexVersionOf`): a bot's turn runs only on a checked one. */
+  private readonly versions = new WeakMap<CodexConnection, string | undefined>()
   private readonly loaded = new Map<string, { mcpToken: string | null; relayKey: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
   private readonly activeThreads = new Set<string>()
   /**
@@ -2146,7 +2149,8 @@ export class CodexProviderService {
         // notifications and keeps extra fields on approval requests; Mousse ignores both.
         capabilities: { experimentalApi: true, requestAttestation: false }
       })
-      .then(() => {
+      .then((result) => {
+        this.versions.set(conn, codexVersionOf(result?.userAgent))
         conn.notify('initialized')
         return conn
       })
@@ -2816,6 +2820,10 @@ export class CodexProviderService {
     // A bot's turn gets none of the user's own MCP servers: Codex would run their tools without asking.
     let botOverrides: Record<string, boolean> | undefined
     if (input.bot) {
+      // Only a Codex whose tools were accounted for runs a bot (`CODEX_BOT_CHECKED_VERSIONS`): it ignores a feature name it
+      // doesn't know, so a tool a newer one added would reach the bot. The owner's own threads run on any version.
+      const unchecked = codexBotVersionRefusal(this.versions.get(conn), CODEX_BOT_CHECKED_VERSIONS)
+      if (unchecked) throw new AppError({ code: 'policy_unenforceable', message: unchecked, errorInfo: { category: 'unavailable', retryable: false } })
       botOverrides = codexBotMcpOverrides((await readCodexUserSetup(conn, cwd)).mcpServers)
       signal.throwIfAborted()
       if (!botOverrides) throw new AppError({ code: 'policy_unenforceable', message: CODEX_BOT_USER_MCP_UNREADABLE, errorInfo: { category: 'unavailable', retryable: false } })

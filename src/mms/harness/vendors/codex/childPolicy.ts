@@ -5,6 +5,7 @@ import { entriesBeside } from '../../../bots/grants/compile'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { AskForApproval, SandboxMode, SandboxPolicy } from './protocol'
+import { CODEX_MANAGED_VERSION } from './release'
 
 /**
  * What a turn's mode, permission mode and delegation policy decide about Codex's sandbox and approvals: one of Codex's
@@ -127,7 +128,8 @@ export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified
  * Codex's features that add a tool no bot turn may have, whatever it holds, as `codex features list` names them (Codex
  * 0.162.1). Each runs or reads without an approval the bot's authority could answer, or reaches past what Mousse holds
  * the bot to; the owner's own Codex config may switch any of them on, and the thread config switches them off again.
- * Codex ignores a name it does not know.
+ * Codex ignores a name it does not know, so this list holds only on the versions it was checked against
+ * (`CODEX_BOT_CHECKED_VERSIONS`).
  * - `view_image`: opens any image by its path, with no approval and outside every sandbox (Mousse's own data included).
  * - `image_generation`: makes images and saves them where Codex keeps them.
  * - `multi_agent`, `multi_agent_v2`: subagents (`spawn_agent` and the rest of `collaboration`), threads Mousse does not
@@ -169,6 +171,15 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'tool_suggest',
   'skill_search'
 ]
+
+/**
+ * The Codex versions whose tools a bot is offered were read from the real binary and accounted for, with
+ * `CODEX_BOT_FEATURES_OFF` and `CODEX_COMMAND_FEATURES` off (`tests/harness/codexBotTools.test.ts`). Codex ignores a
+ * feature name it does not know, so on any other version a tool added or renamed there would reach a bot: a bot's turn
+ * runs only on these (`codexBotVersionRefusal`), whatever entry runs it. The owner's own threads are not affected. When
+ * Mousse moves to a new Codex, that test is run on it and its version is added here.
+ */
+export const CODEX_BOT_CHECKED_VERSIONS: readonly string[] = [CODEX_MANAGED_VERSION]
 
 /**
  * The name of the permission profile a confined bot's commands run under, defined in its thread config

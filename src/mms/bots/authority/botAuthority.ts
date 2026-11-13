@@ -21,7 +21,7 @@ import type { BotPermissions } from '../grants/compile'
  */
 
 /** The arguments that name a path, on every runtime (Pi's and Claude's built-ins). */
-const PATH_ARGUMENTS = ['path', 'file_path', 'filePath', 'notebook_path', 'directory', 'dir', 'cwd'] as const
+export const PATH_ARGUMENTS = ['path', 'file_path', 'filePath', 'notebook_path', 'directory', 'dir', 'cwd'] as const
 
 /** Built-ins that change files: they need write access, except inside the scratch folder. */
 const WRITE_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['edit', 'write'])
