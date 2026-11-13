@@ -21,6 +21,8 @@ import { recordHarnessSpawn, runHarness } from '../spawn'
 import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
 import { compatibilityFields } from '../compatibility'
 import { CODEX_NATIVE_TOOLS } from '../vendors/codex/botApprovals'
+import { CODEX_BOT_CHECKED_VERSIONS } from '../vendors/codex/childPolicy'
+import { codexBotRunsOnNote } from '../../../shared/harness/codexBotVersion'
 
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
@@ -311,6 +313,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     // mode, and each approval is answered by the bot's authority (`vendors/codex/botApprovals.ts`).
     botAuthority: () => true,
     botApprovals: () => true,
+    // A Codex whose version hasn't been checked for bots: Runs on says so before any work is sent (the turn is refused too).
+    botRunsOnNote: (_config, installedVersion) => codexBotRunsOnNote(installedVersion, CODEX_BOT_CHECKED_VERSIONS),
     nativeToolNames: (neutral) => CODEX_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @openai/codex@latest'

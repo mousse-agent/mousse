@@ -193,6 +193,8 @@ export interface BotEngineHost {
   modelOptions?(): Promise<BotModelOption[]>
   /** The app's model listing (`harness.llmProviders`), which Runs on narrows to `modelOptions` for the model picker. */
   modelListing?(): Promise<LlmProviderOption[]>
+  /** Runs on's line for a bot's row on an entry (`HarnessGateway.botRunsOnNote`): a Codex not checked for bots. */
+  runsOnNote?(instanceId: string): { text: string; title: string } | undefined
   /** This computer's name, the one computer a bot runs on for now. */
   computerName?(): string
   /** The person's other computers (About lists them; a bot runs on the computer that holds it). */
@@ -553,6 +555,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       now: () => this.now(),
       ...(host.modelOptions ? { modelOptions: host.modelOptions } : {}),
       ...(host.modelListing ? { modelListing: host.modelListing } : {}),
+      ...(host.runsOnNote ? { runsOnNote: host.runsOnNote } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),
       ...(host.otherComputers ? { otherComputers: host.otherComputers } : {})
     })

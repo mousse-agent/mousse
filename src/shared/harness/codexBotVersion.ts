@@ -1,14 +1,17 @@
 /**
- * What a bot's chat says when its turn does not run because the Codex that would run it is not a version whose tools
- * Mousse has accounted for (`codexBotVersionRefusal`). The run fails with this text as its error, and the bot's chat
- * shows it as it is.
+ * What a bot's chat says when its turn does not run because the Codex that would run it is not a version Mousse has
+ * checked for bots (`codexBotVersionRefusal`): older or newer alike. The run fails with this text as its error, and the
+ * bot's chat shows it as it is.
  */
-export const CODEX_BOT_VERSION_NEWER_TEXT = 'This version of Codex is newer than Mousse knows, so my work can\'t run on it yet.'
-/** The same for a Codex older than every version checked, or one whose version could not be read. */
-export const CODEX_BOT_VERSION_UNKNOWN_TEXT = 'Mousse doesn\'t know this version of Codex, so my work can\'t run on it.'
+export const CODEX_BOT_VERSION_TEXT = 'This version of Codex hasn\'t been checked for bots yet, so my work can\'t run on it.'
+/** The same when Codex didn't say which version it is. */
+export const CODEX_BOT_VERSION_UNKNOWN_TEXT = 'Mousse couldn\'t tell which version of Codex this is, so my work can\'t run on it.'
 
 /** The texts a bot's chat shows as they are when its run fails with one of them. */
-export const CODEX_BOT_VERSION_TEXTS: ReadonlySet<string> = new Set([CODEX_BOT_VERSION_NEWER_TEXT, CODEX_BOT_VERSION_UNKNOWN_TEXT])
+export const CODEX_BOT_VERSION_TEXTS: ReadonlySet<string> = new Set([CODEX_BOT_VERSION_TEXT, CODEX_BOT_VERSION_UNKNOWN_TEXT])
+
+/** What Runs on says, once, when a row is picked on such an entry: before any work is sent. */
+export const CODEX_BOT_RUNS_ON_TEXT = 'Bots\' work won\'t run on this version of Codex: it hasn\'t been checked for bots yet.'
 
 /**
  * The version in the user agent Codex's app-server reports at `initialize` (`<originator>/<version> (<system>) …`).
@@ -25,14 +28,14 @@ export function codexVersionOf(userAgent: unknown): string | undefined {
  */
 export function codexBotVersionRefusal(version: string | undefined, checked: readonly string[]): string | undefined {
   if (version !== undefined && checked.includes(version)) return undefined
-  if (version === undefined) return CODEX_BOT_VERSION_UNKNOWN_TEXT
-  return checked.every((known) => compareVersions(version, known) > 0) ? CODEX_BOT_VERSION_NEWER_TEXT : CODEX_BOT_VERSION_UNKNOWN_TEXT
+  return version === undefined ? CODEX_BOT_VERSION_UNKNOWN_TEXT : CODEX_BOT_VERSION_TEXT
 }
 
-/** `a` against `b` by their numeric `major.minor.patch`; a pre-release suffix is ignored. */
-function compareVersions(a: string, b: string): number {
-  const parts = (value: string) => value.split(/[-+]/)[0]!.split('.').map((part) => Number(part))
-  const [x, y] = [parts(a), parts(b)]
-  for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) - (y[i] ?? 0)
-  return 0
+/**
+ * Runs on's line for a Codex entry whose installed `version` (as its check read it) is not one of `checked`, with the
+ * versions in its tooltip. Undefined when it is checked, or not known yet: the turn itself decides then.
+ */
+export function codexBotRunsOnNote(version: string | undefined, checked: readonly string[]): { text: string; title: string } | undefined {
+  if (version === undefined || checked.includes(version)) return undefined
+  return { text: CODEX_BOT_RUNS_ON_TEXT, title: `Codex ${version} is installed here. Checked for bots: ${checked.join(', ')}.` }
 }

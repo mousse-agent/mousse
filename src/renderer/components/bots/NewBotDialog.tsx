@@ -158,7 +158,7 @@ function NewBotRunsOn({ choices, model, onModel, rows, onPick, onOneWork }: {
         : <span className="bot-new-runs-on-computer" title="This computer. A bot runs on the computer it is made on.">{here?.name ?? 'This computer'}</span>}
     </div>
     {choices.providers
-      ? <BotModelRows name="New bot" providers={choices.providers} slots={rows ?? EMPTY_ROWS} onPick={onPick} onOneWork={onOneWork} />
+      ? <BotModelRows name="New bot" providers={choices.providers} slots={rows ?? EMPTY_ROWS} {...(choices.notes ? { notes: choices.notes } : {})} onPick={onPick} onOneWork={onOneWork} />
       : <div className="bot-new-row">
         <span>Model</span>
         <BotModelSelect ariaLabel="New bot's model" models={choices.models} value={model} onChange={onModel} />

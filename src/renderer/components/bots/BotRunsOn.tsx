@@ -74,6 +74,16 @@ export function botRowTitle(providers: readonly LlmProviderOption[], pick: BotMo
   return undefined
 }
 
+/** The line to say once for the rows: the first picked row's entry that has one (a Codex not checked for bots). */
+export function pickedNote(slots: BotShownRows, notes: BotRunsOnChoices['notes']): { text: string; title: string } | undefined {
+  if (!notes) return undefined
+  for (const row of ['talk', 'light', 'medium', 'hard'] as const) {
+    const pick = slots[row]
+    if (isPinned(pick) && notes[pick.instanceId]) return notes[pick.instanceId]
+  }
+  return undefined
+}
+
 interface RowSpec {
   key: BotModelSlotKey | 'work'
   label: string
@@ -98,13 +108,15 @@ const ROWS_OF: Record<RowSpec['key'], readonly BotModelSlotKey[]> = { talk: ['ta
  * when the work rows differ; closing it puts Medium work's pick on all work (`onOneWork`), and is refused while Medium
  * work has no pick and the rows differ. Controlled: `onPick` gets the rows a pick goes on (Work is all three).
  */
-export function BotModelRows({ name, providers, slots, named, onPick, onOneWork, disabled }: {
+export function BotModelRows({ name, providers, slots, named, notes, onPick, onOneWork, disabled }: {
   /** The bot's name for the controls' labels ("Pip's Talk model"); New bot passes "New bot". */
   name: string
   providers: readonly LlmProviderOption[]
   slots: BotShownRows
   /** Rows of a bot from before picks that run a model by name. */
   named?: Partial<Record<BotModelSlotKey, string>>
+  /** By entry, what to say once when a row is picked there (`BotRunsOnChoices.notes`). */
+  notes?: BotRunsOnChoices['notes']
   onPick: (rows: readonly BotModelSlotKey[], pick: BotModelPick & { instanceId: string }) => void
   onOneWork: () => void
   disabled?: boolean
@@ -119,6 +131,7 @@ export function BotModelRows({ name, providers, slots, named, onPick, onOneWork,
   const entries = severalEntries(providers)
   // Closing puts Medium work's pick on all work: there must be one.
   const cannotClose = advanced && differ && !isPinned(slots.medium)
+  const note = pickedNote(slots, notes)
   const toggle = (next: boolean) => {
     if (!next && cannotClose) return
     setAdvanced(next)
@@ -150,6 +163,7 @@ export function BotModelRows({ name, providers, slots, named, onPick, onOneWork,
       </div>
     })}
   </div>
+    {note ? <p className="bot-model-note" title={note.title} data-testid="bot-model-note">{note.text}</p> : null}
     <div className="bot-model-advanced">
       <span id={advancedId} title={cannotClose ? 'Pick a model for Medium work first' : 'A model for each kind of work'}>Advanced</span>
       <Switch checked={advanced} onChange={toggle} labelledBy={advancedId} disabled={disabled || cannotClose} />

@@ -150,6 +150,8 @@ export class BotChatService {
     modelOptions?(): Promise<BotModelOption[]>
     /** The app's model listing, narrowed to `modelOptions` for the model picker Runs on shows. */
     modelListing?(): Promise<LlmProviderOption[]>
+    /** Runs on's line for a bot's row on an entry (`HarnessGateway.botRunsOnNote`): a Codex not checked for bots. */
+    runsOnNote?(instanceId: string): { text: string; title: string } | undefined
     /** This computer's name, as the rest of the app shows it. */
     computerName?(): string
     /** The person's other computers, online or not. */
@@ -541,9 +543,20 @@ export class BotChatService {
     } catch {
       // The device list cannot be read now: this computer is the one listed.
     }
+    // Said once in Runs on for an entry a bot's work won't run on (a Codex not checked for bots), before work is sent.
+    const notes: Record<string, { text: string; title: string }> = {}
+    for (const instanceId of new Set(options.map((option) => option.instanceId))) {
+      try {
+        const note = this.options.runsOnNote?.(instanceId)
+        if (note) notes[instanceId] = note
+      } catch {
+        // Nothing to say about it now; the turn is still refused where it starts.
+      }
+    }
     return {
       models,
       providers: botPickProviderOptions(listing, options),
+      ...(Object.keys(notes).length ? { notes } : {}),
       ...(last ? { last: { talk: offeredNow(last.talk), light: offeredNow(last.light), medium: offeredNow(last.medium), hard: offeredNow(last.hard) } } : {}),
       computer: 'this_computer',
       computers: [

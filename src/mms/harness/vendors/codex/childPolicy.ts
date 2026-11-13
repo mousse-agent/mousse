@@ -144,6 +144,17 @@ export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified
  * - `request_permissions_tool`: asks for more sandbox permissions.
  * - `default_mode_request_user_input`, `send_message_to_user_async`: questions and messages to a person, who is not there.
  * - `goals`, `sleep_tool`, `tool_suggest`, `skill_search`: goals Codex follows on its own, waiting, and suggestions.
+ * - `context_management`: `new_context` (starts the model's context over, which can drop the bot's own rules) and
+ *   `get_context_remaining`.
+ * - `stable_environment_tools`: `wait_for_environment`, Codex's execution environments, which Mousse doesn't hold to the
+ *   bot's sandbox.
+ * - `code_mode_tool_search`: code mode's `tool_search`, which loads tools a turn wasn't offered.
+ * - `use_legacy_landlock`: Codex's older Landlock sandbox in place of bubblewrap, which the bot's profile relies on (with
+ *   it on, a bot's turn can't start).
+ * - `rollout_budget`: a token budget that won't load without settings whose form isn't documented, so its tools, if
+ *   any, were never seen.
+ * The features above `context_management` were found on 0.162.1 with the tools an owner's config switches on; the rest
+ * with every feature each checked release lists on (`CODEX_BOT_CHECKED`).
  */
 export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'view_image',
@@ -170,7 +181,11 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'sleep_tool',
   'tool_suggest',
   'skill_search',
-  'rollout_budget'
+  'rollout_budget',
+  'context_management',
+  'stable_environment_tools',
+  'code_mode_tool_search',
+  'use_legacy_landlock'
 ]
 
 /**
@@ -197,6 +212,7 @@ export const CODEX_BOT_ACCOUNTED_TOOLS: Readonly<Record<string, string>> = {
   'nested:list_mcp_resource_templates': 'the same',
   'nested:read_mcp_resource': 'the same',
   'nested:clock__curr_time': 'the time',
+  'clock.curr_time': 'the time',
   'collaboration.spawn_agent': 'a subagent: inherits the bot\'s tools and sandbox; Mousse answers none of its asks',
   'collaboration.send_message': 'a message to a subagent',
   'collaboration.followup_task': 'more work for a subagent',

@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_REFUSED_TEXT, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, holdClaudeBotTemp, removeClaudeBotTemp, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
@@ -18,7 +18,7 @@ import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
-import { CODEX_BOT_VERSION_NEWER_TEXT } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_RUNS_ON_TEXT, CODEX_BOT_VERSION_TEXT } from '../../src/shared/harness/codexBotVersion'
 
 let f: BotFixture
 let botId: string
@@ -331,8 +331,21 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
   it('a turn a Codex of an unchecked version would run does not run, and the bot\'s chat says why in one line', async () => {
     const { payload } = await run('r1')
     // What `CodexProviderService` throws before the thread starts (codexAdapter.test.ts), as the run's error.
-    await finish(f, payload, 'failed', { outcome: { error: CODEX_BOT_VERSION_NEWER_TEXT } })
-    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: CODEX_BOT_VERSION_NEWER_TEXT } })
+    await finish(f, payload, 'failed', { outcome: { error: CODEX_BOT_VERSION_TEXT } })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: CODEX_BOT_VERSION_TEXT } })
+  })
+
+  it('Runs on hears, by entry, what an entry says about bots before any work is sent (a Codex not checked for them)', async () => {
+    const note = { text: CODEX_BOT_RUNS_ON_TEXT, title: 'Codex 0.999.0 is installed here. Checked for bots: 0.162.1.' }
+    f.host.modelOptions = async () => [
+      { instanceId: 'codex', entry: 'Codex', model: 'gpt-x', label: 'GPT X', efforts: [] },
+      { instanceId: 'claude', entry: 'Claude Code', model: 'opus', label: 'Opus', efforts: [] }
+    ] as never
+    f.host.runsOnNote = (instanceId) => (instanceId === 'codex' ? note : undefined)
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    expect((await f.bots.service.modelChoices()).notes).toEqual({ codex: note })
+    expect((await f.bots.service.modelGet(botId)).notes).toEqual({ codex: note })
   })
 
   it('a deleted bot\'s private temporary folder goes with it', async () => {

@@ -768,6 +768,7 @@ export class MmsProfileServices {
       // shown in the app's model picker from its own listing.
       modelOptions: () => botModels.pickable(),
       modelListing: () => harness.llmProviders({ kind: 'device' }),
+      runsOnNote: (instanceId) => harness.botRunsOnNote(instanceId),
       // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),

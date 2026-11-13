@@ -86,6 +86,7 @@ function RunsOn({ botId, name, refresh }: { botId: string; name: string; refresh
           providers={choices.providers}
           slots={slots}
           {...(choices.named ? { named: choices.named } : {})}
+          {...(choices.notes ? { notes: choices.notes } : {})}
           onPick={(rows, picked) => {
             const changed = Object.fromEntries(rows.map((row) => [row, picked])) as Partial<BotShownRows>
             void save({ ...slots, ...changed }, { slots: changed })

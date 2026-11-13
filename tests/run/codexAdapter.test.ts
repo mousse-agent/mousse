@@ -20,7 +20,7 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_FEATURES_OFF, CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MANAGED_VERSION } from '../../src/mms/harness/vendors/codex/release'
-import { CODEX_BOT_VERSION_NEWER_TEXT } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_VERSION_TEXT } from '../../src/shared/harness/codexBotVersion'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
@@ -2309,7 +2309,7 @@ describe('a bot turn on Codex', () => {
     ])
     const codex = service(replay)
     const adapter = new CodexAdapter(() => codex)
-    await expect(adapter.startTurn(input({ prompt: 'go', threadId: 'bot-thread' }), recordingSink(), control(), { ...host(), bot: bot as never })).rejects.toMatchObject({ message: CODEX_BOT_VERSION_NEWER_TEXT })
+    await expect(adapter.startTurn(input({ prompt: 'go', threadId: 'bot-thread' }), recordingSink(), control(), { ...host(), bot: bot as never })).rejects.toMatchObject({ message: CODEX_BOT_VERSION_TEXT })
     expect(calls).toEqual([])
     await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
     replay.assertDone()
