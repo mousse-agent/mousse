@@ -202,20 +202,21 @@
   background-repeat: no-repeat;
 }
 
-/* A thought being written (ToolRowBase `liveDetail`): its newest words show, whatever the row's width. Too long for
-   the row, it is cut at its start: the box runs right to left so it overflows (and takes the ellipsis) on the left,
-   and the text inside keeps its own direction. Short, it sits at the left like any detail. */
+/* A thought being written (ToolRowBase `liveDetail`): under its label, in the label's colour, up to four lines.
+   The box keeps its last lines, so a longer thought loses its oldest words, never its newest. */
 .an-live-thought {
-  direction: rtl;
-  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: calc(4 * 20px);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.an-live-thought > bdi {
-  direction: ltr;
-  unicode-bidi: isolate;
+  padding-left: 26px;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  color: var(--an-foreground-muted);
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 /* Indicators that loop while agents work move in steps, about 15 a second, not on every frame. Each update makes

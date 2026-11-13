@@ -47,8 +47,9 @@ export type ToolRowBaseProps = {
   failed?: boolean;
   detail?: string;
   /**
-   * The detail is a thought being written: its newest words matter, so a detail too long for the row is cut at its
-   * start, not its end (`an-live-thought`). `detailTitle` is the full text, for the tooltip and screen readers.
+   * The detail is a thought being written: it shows under the label, up to four lines, and its newest words matter,
+   * so a longer one loses its oldest lines (`an-live-thought`). `detailTitle` is the full text, for the tooltip and
+   * screen readers.
    */
   liveDetail?: boolean;
   detailTitle?: string;
@@ -141,11 +142,7 @@ export function ToolRowBase({
             isAnimating && shimmerLabel ? shimmerLabel : completeLabel
           )}
         </span>
-        {detail && liveDetail ? (
-          <span className="an-live-thought font-normal min-w-0 flex-1 text-an-foreground-muted/60" title={detailTitle ?? detail} aria-label={detailTitle ?? detail}>
-            <bdi>{detail}</bdi>
-          </span>
-        ) : detail && (
+        {detail && !liveDetail && (
           <span className={cn("font-normal truncate min-w-0 flex-1 text-an-foreground-muted/60", detailClassName)} title={detailTitle}>
             {detail}
           </span>
@@ -166,6 +163,15 @@ export function ToolRowBase({
     </div>
   );
 
+  const line = detail && liveDetail ? (
+    <div className="flex flex-col w-full min-w-0">
+      {row}
+      <div className="an-live-thought" title={detailTitle ?? detail} aria-label={detailTitle ?? detail}>
+        <span>{detail}</span>
+      </div>
+    </div>
+  ) : row;
+
   // A thought being written is read out now and then, not with every word.
   const announced = useThrottledText(liveDetail && isAnimating ? detailTitle ?? detail ?? "" : "", ANNOUNCE_MS);
   const announcement = liveDetail && isAnimating && announced ? (
@@ -173,7 +179,7 @@ export function ToolRowBase({
   ) : null;
 
   if (!expandable) {
-    return <div className="an-tool-chrome flex flex-col gap-1">{row}{announcement}</div>;
+    return <div className="an-tool-chrome flex flex-col gap-1">{line}{announcement}</div>;
   }
 
   const toggle = () => {
@@ -191,7 +197,7 @@ export function ToolRowBase({
         aria-disabled={!canToggle}
         onClick={toggle}
       >
-        {row}
+        {line}
       </button>
       {announcement}
       {/* The shared Collapse animates a grid row, so the panel content is laid out once at full size and

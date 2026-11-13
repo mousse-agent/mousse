@@ -165,20 +165,29 @@ describe('the line under Working', () => {
     expectLive('Writing…')
   })
 
-  it('3. a long thought shows the end of what is being written, cut at its start to fit the row', () => {
-    const long = `**Planning** ${'word '.repeat(60)}and the newest words`
+  it('3. a long thought shows the end of what is being written, under its label, and folds to its opening once it ends', () => {
+    const long = `**Planning** ${'word '.repeat(200)}and the newest words`
     render([ask(), reply('t1', thought('input-available', long))], 'streaming', { phase: 'thinking' })
     const [row] = liveRows()
+    expect(row!.startsWith('Thinking ')).toBe(true)
     expect(row!.endsWith('and the newest words')).toBe(true)
-    expect(row!.length).toBeLessThan(180)
+    expect(row!.length).toBeLessThan(700)
     expect(row).toContain('…')
-    // The words sit in a box that overflows at its start (agent-ui.css), so a narrow row hides the oldest words,
-    // never the newest; the whole paragraph is the tooltip and what a screen reader gets.
+    // The words sit in a box under the label that keeps its last lines (agent-ui.css), so a long thought hides its
+    // oldest words, never the newest; the whole paragraph is the tooltip and what a screen reader gets.
     const words = host.querySelector<HTMLElement>('.turn-answer .an-live-thought')!
-    expect(words.firstElementChild!.tagName).toBe('BDI')
+    expect(words.closest('.an-tool-row-line')).toBeNull()
     expect(words.textContent!.endsWith('and the newest words')).toBe(true)
-    expect(words.title).toBe(`Planning ${'word '.repeat(60)}and the newest words`.replace(/\s+/g, ' '))
+    expect(words.title).toBe(`Planning ${'word '.repeat(200)}and the newest words`.replace(/\s+/g, ' '))
     expect(words.getAttribute('aria-label')).toBe(words.title)
+
+    // The next step starts: the thought folds to one row of its opening paragraph, whole (the row cuts it at its
+    // width), and the box under the label goes.
+    const opening = `**Planning** the lighthouse simulator with a canvas, a lamp switch and a power failure button`
+    render([ask(), reply('t1', { ...thought('output-available', `${opening}\n\nSecond paragraph.`), toolCallId: 'th1' }), reply('r1', { type: 'text', text: 'Here is the plan.' })], 'streaming', { phase: 'writing' })
+    expect(host.querySelector('.turn-answer .an-live-thought')).toBeNull()
+    expect(host.querySelector('.turn-answer')!.textContent).toContain('Planning the lighthouse simulator with a canvas, a lamp switch and a power failure button')
+    expect(host.querySelector('.turn-answer')!.textContent).not.toContain('Second paragraph.')
   })
 
   it('3. a thought being written does not shimmer: only its icon turns (no paint every frame)', () => {
