@@ -136,7 +136,7 @@ import type {
   SignInResponse
 } from '../shared/harness/types'
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
-import type { BotBrowserFrameEvent } from '../shared/bots/personal/browser'
+import type { BotBrowserFrameEvent, BotBrowserView } from '../shared/bots/personal/browser'
 import type { ThreadBrowserFrameEvent } from '../shared/browser/threadView'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
@@ -810,7 +810,13 @@ const api = {
      * cancelled, or why it was refused.
      */
     chooseBrowserFiles: (request: { botId: string; viewId: string; holdId: string; multiple: boolean; site?: string }): Promise<{ token?: string; count?: number; cancelled?: true; refused?: string }> =>
-      ipcRenderer.invoke('bots:chooseBrowserFiles', request)
+      ipcRenderer.invoke('bots:chooseBrowserFiles', request),
+    /**
+     * Open in a window (`open`) or Close window (`close`) for the bot's browser this window holds: the app opens it
+     * on its own screen and answers the browser's view, or why it was refused.
+     */
+    browserWindow: (request: { botId: string; viewId: string; holdId: string; op: 'open' | 'close' }): Promise<{ browser?: BotBrowserView; refused?: string }> =>
+      ipcRenderer.invoke('bots:browserWindow', request)
   },
   skills: {
     list: (projectId?: string): Promise<SkillsRegistrySnapshot> =>
