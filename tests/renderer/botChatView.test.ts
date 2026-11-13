@@ -10,6 +10,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
+import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -611,6 +612,31 @@ describe('while it works', () => {
     await type(box(), 'Also check the spam folder.')
     expect(button('Stop run')).toBeDefined()
     expect(button('Send message')?.disabled).toBe(false)
+  })
+
+  it('moves the typing dots one after another while motion is on, and holds them still with Animation speed Off', async () => {
+    // jsdom has no Web Animations, so element.animate is recorded here; that the dots run on the compositor with no
+    // main-thread frames is checked in a trace of the app.
+    const started: Array<{ element: Element; options: KeyframeAnimationOptions; cancelled: boolean }> = []
+    ;(HTMLElement.prototype as { animate?: unknown }).animate = function (this: Element, _keyframes: Keyframe[], options: KeyframeAnimationOptions) {
+      const record = { element: this, options, cancelled: false }
+      started.push(record)
+      return { cancel: () => { record.cancelled = true } }
+    }
+    try {
+      await open({ ...inbox, state: 'working', stateText: 'Working…' })
+      const dots = [...transcript().querySelectorAll('.bot-typing-bubble i')]
+      const running = () => started.filter((record) => !record.cancelled)
+      expect(running().map((record) => [dots.indexOf(record.element), record.options.delay, record.options.iterations]))
+        .toEqual([[0, 0, Infinity], [1, 150, Infinity], [2, 300, Infinity]])
+      act(() => setAnimationSpeed('off'))
+      expect(running()).toEqual([])
+      act(() => setAnimationSpeed('normal'))
+      expect(running()).toHaveLength(3)
+    } finally {
+      delete (HTMLElement.prototype as { animate?: unknown }).animate
+      setAnimationSpeed('normal')
+    }
   })
 
   it('says Waiting for internet where it would type, with nothing moving, and still offers Stop', async () => {

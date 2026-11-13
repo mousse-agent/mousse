@@ -95,14 +95,13 @@
 .bot-steps li { display: flex; align-items: center; gap: 8px; }
 .bot-step-open { padding: 0 7px; border-radius: 6px; font-size: 12px; line-height: 18px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .bot-step-open:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-/* While the chat's turn runs: three dots in a bubble, the only thing that moves. */
+/* While the chat's turn runs: three dots in a bubble, the only thing that moves (TypingDots in BotChatView.tsx moves
+   them; with Animation speed Off or reduced motion they hold still a little brighter). */
 .bot-typing-bubble { display: inline-flex; align-items: center; gap: 4px; padding: 11px 14px; }
-.bot-typing-bubble > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; animation: bot-typing 1.2s ease-in-out infinite; }
-.bot-typing-bubble > i:nth-child(2) { animation-delay: .15s; }
-.bot-typing-bubble > i:nth-child(3) { animation-delay: .3s; }
-@keyframes bot-typing { 0%, 60%, 100% { opacity: .35; transform: none; } 30% { opacity: .9; transform: translateY(-2px); } }
+.bot-typing-bubble > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }
+.bot-typing-bubble.is-still > i { opacity: .6; }
 .bot-status-line { margin: 0; padding: 7px 13px; font-size: var(--bot-meta); color: var(--text-secondary); }
-@media (prefers-reduced-motion: reduce) { .bot-typing-bubble > i { animation: none; opacity: .6; } .bot-worked-chevron { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .bot-worked-chevron { transition: none; } }
 /* An open ask: quick replies under the bubble, the details on demand. */
 .bot-ask-replies { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
 .bot-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -239,13 +238,13 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-carousel .bot-picture { height: 220px; scroll-snap-align: start; }
 .bot-carousel .bot-picture > img { height: 100%; width: auto; max-width: 340px; min-width: 120px; object-fit: cover; }
 .bot-carousel .bot-picture.is-empty { width: 220px; }
-.bot-picture:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; }
+.bot-picture:focus-visible > img { opacity: 0.82; }
 .bot-carousel { max-width: 100%; border-radius: 12px; outline: none; }
 .bot-carousel-strip { position: relative; }
 .bot-carousel-strip.fades-after .bot-carousel-track { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
 .bot-carousel-strip.fades-before .bot-carousel-track { -webkit-mask-image: linear-gradient(to right, transparent, #000 40px); mask-image: linear-gradient(to right, transparent, #000 40px); }
 .bot-carousel-strip.fades-before.fades-after .bot-carousel-track { -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); }
-.bot-carousel:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }
+.bot-carousel:focus-visible .bot-picture > img { opacity: 0.82; }
 .bot-carousel-track { position: relative; display: flex; gap: 6px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-behavior: smooth; scrollbar-width: none; overscroll-behavior-x: contain; }
 .bot-carousel-track::-webkit-scrollbar { display: none; }
 .bot-carousel-arrow { position: absolute; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: #fff; background: rgba(0, 0, 0, .5); opacity: 0; transition: opacity .15s; }
