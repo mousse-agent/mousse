@@ -371,6 +371,12 @@ export function claudeStartupChannel(platform: NodeJS.Platform): ClaudeStartupCh
   return platform === 'darwin' ? 'descriptor' : 'fifo'
 }
 
+/**
+ * The folder, in the Claude Code entry's own state folder in Mousse's data, where a start's named pipe is made
+ * (`claudeStartupMcpOptions`'s `fifoRoot`): never the shared temporary folder, which a bot's commands can read.
+ */
+export const CLAUDE_MCP_START_FOLDER = 'mcp-start'
+
 /** How long Mousse waits for Claude Code to open the named pipe, and how often it looks. */
 const FIFO_WAIT_MS = 5 * 60_000
 const FIFO_POLL_MS = { first: 5, most: 100 }
@@ -491,8 +497,11 @@ function writeWhenOpened(fifo: Fifo, config: string, child: ChildProcess): void 
  * a named pipe cannot be made.
  *
  * On Linux the named pipe and its folder exist only from Claude Code's spawn until it opens the pipe, or ends: a start
- * that never spawns it leaves nothing. Another process of the same user that opens the pipe before Claude Code does, in
- * that moment (it holds no value until a reader opens it), would read the servers; Claude Code
+ * that never spawns it leaves nothing. The service makes them in `fifoRoot`, a folder of Mousse's own data
+ * (`CLAUDE_MCP_START_FOLDER`, made with mode 700 when missing; the system's temporary folder only when a caller names
+ * none), never the shared temporary folder: a bot's commands, which can read `/tmp` in Claude Code's sandbox, can read
+ * nothing of Mousse's data. Another process of the same user, outside any sandbox, that opens the pipe before
+ * Claude Code does, in that moment (it holds no value until a reader opens it), would read the servers; Claude Code
  * would then read nothing and fail to start, which the turn reports. That process can already read the same user's
  * Mousse files and Claude Code settings. No other user can enter the folder.
  */
@@ -505,7 +514,14 @@ export async function claudeStartupMcpOptions(
   const channel = deps.channel ?? claudeStartupChannel(deps.platform ?? process.platform)
   if (!channel || options.spawnClaudeCodeProcess || Object.hasOwn(options.extraArgs ?? {}, 'mcp-config')) return undefined
   const root = deps.fifoRoot ?? tmpdir()
-  if (channel === 'fifo' && !(await canMakeFifo(root))) return undefined
+  if (channel === 'fifo') {
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 })
+    } catch {
+      return undefined
+    }
+    if (!(await canMakeFifo(root))) return undefined
+  }
   const fifo = channel === 'fifo' ? fifoPlace(root) : undefined
   const spawn = deps.spawn ?? nodeSpawn
   const config = JSON.stringify({ mcpServers: claudeLiteralServers(servers, 'startup') })
