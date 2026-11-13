@@ -7,6 +7,8 @@ import type { CodexConnection } from './CodexAppServerClient'
 export interface CodexUserSetup {
   /** Names of every enabled MCP server in the effective config; null when it cannot be read. */
   mcpServers: string[] | null
+  /** The features of the effective config (`config.features`); null when it cannot be read. */
+  features: Record<string, unknown> | null
 }
 
 type ServerEntry = { enabled?: boolean | null } | null | undefined
@@ -30,8 +32,9 @@ export async function readCodexUserSetup(conn: CodexConnection, cwd: string | nu
     const names = new Set(enabledServers(response.config.mcp_servers))
     for (const layer of response.layers ?? [])
       if (!layer.disabledReason) for (const name of enabledServers(layer.config?.mcp_servers)) names.add(name)
-    return { mcpServers: [...names] }
+    const features = response.config.features
+    return { mcpServers: [...names], features: features && typeof features === 'object' ? features as Record<string, unknown> : {} }
   } catch {
-    return { mcpServers: null }
+    return { mcpServers: null, features: null }
   }
 }

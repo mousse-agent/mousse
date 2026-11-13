@@ -7,8 +7,18 @@ export const CODEX_BOT_VERSION_TEXT = 'This version of Codex hasn\'t been checke
 /** The same when Codex didn't say which version it is. */
 export const CODEX_BOT_VERSION_UNKNOWN_TEXT = 'Mousse couldn\'t tell which version of Codex this is, so my work can\'t run on it.'
 
-/** The texts a bot's chat shows as they are when its run fails with one of them. */
-export const CODEX_BOT_VERSION_TEXTS: ReadonlySet<string> = new Set([CODEX_BOT_VERSION_TEXT, CODEX_BOT_VERSION_UNKNOWN_TEXT])
+/**
+ * What a bot's chat says when the owner's own Codex config switches on a feature that adds a tool Mousse can't switch off
+ * for one thread (`CODEX_BOT_FEATURES_REFUSED`): the turn does not run while it is on.
+ */
+export function codexBotSettingText(features: readonly string[]): string {
+  return `Codex's own setting ${features.map((name) => `"${name}"`).join(', ')} is on, and my work can't run with it. Switch it off in Codex's config.toml to let me work here.`
+}
+
+/** Whether a bot's run failed with one of these texts, which its chat shows as they are. */
+export function isCodexBotRefusal(reason: string): boolean {
+  return reason === CODEX_BOT_VERSION_TEXT || reason === CODEX_BOT_VERSION_UNKNOWN_TEXT || /^Codex's own setting ".+" is on, and my work can't run with it\./.test(reason)
+}
 
 /** What Runs on says, once, when a row is picked on such an entry: before any work is sent. */
 export const CODEX_BOT_RUNS_ON_TEXT = 'Bots\' work won\'t run on this version of Codex: it hasn\'t been checked for bots yet.'

@@ -153,7 +153,6 @@ export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified
  * - `agent_message_board`: a message board between agents, which reaches other threads; it also adds `clock.curr_time`
  *   and code mode's `tool_search`.
  * - `code_mode_tool_search`: code mode's `tool_search`, which loads tools the turn wasn't offered.
- * - `multi_env_copy_file` (from 0.164.0): copies a file by its path between environments, outside the bot's authority.
  * - `executor_capability_discovery_v2` (from 0.164.0): a `skills` namespace (`list`, `read`, `installations`) that
  *   reads the owner's installed skills, which a bot is held to its granted ones.
  * - `use_legacy_landlock`: Codex's older Landlock sandbox in place of bubblewrap, which the bot's profile relies on (with
@@ -191,10 +190,17 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'deferred_executor',
   'agent_message_board',
   'code_mode_tool_search',
-  'multi_env_copy_file',
   'executor_capability_discovery_v2',
   'use_legacy_landlock'
 ]
+
+/**
+ * Codex's features that add a tool no bot may have but that a thread's config can't switch off: Codex reads them once
+ * for its whole process (found on the real binary: the tool stays with the feature off in the thread's config). A bot's
+ * turn doesn't run while the owner's own config has one on (`codexBotSettingText`); their own threads keep it.
+ * - `multi_env_copy_file` (from 0.164.0): copies a file by its path between two environments, outside the bot's authority.
+ */
+export const CODEX_BOT_FEATURES_REFUSED: readonly string[] = ['multi_env_copy_file']
 
 /**
  * Every tool a bot's turn on Codex may be offered, by the name the model sees (a namespace before a dot), and what it can

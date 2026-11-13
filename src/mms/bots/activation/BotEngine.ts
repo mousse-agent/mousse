@@ -79,7 +79,7 @@ import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type 
 import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread, type BotPermissions } from '../grants/compile'
 import { toolArgsDigest } from '../../run/tools/argsDigest'
-import { CODEX_BOT_VERSION_TEXTS } from '../../../shared/harness/codexBotVersion'
+import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
 import { workWaits, type BotActivationRow, type BotDispatchRow, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
@@ -6499,7 +6499,7 @@ function isJournalFailure(error: unknown): boolean {
 /** Why an activation stopped, in plain words for its chat; never a provider's own message (it may name a model). */
 function failureText(reason: string): string {
   // A runtime that can't run the bot's work says why in the bot's own words (a Codex whose tools Mousse hasn't checked).
-  if (CODEX_BOT_VERSION_TEXTS.has(reason)) return reason
+  if (isCodexBotRefusal(reason)) return reason
   switch (reason) {
     case 'bot_grant_revoked': return 'My permissions changed, so I stopped.'
     case 'bot_context_failed': return 'I couldn\'t read my notes, so I stopped. Try again.'

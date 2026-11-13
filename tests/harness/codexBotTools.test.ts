@@ -21,10 +21,11 @@ import { CodexProviderService, codexEnvironment } from '../../src/mms/harness/ve
 import type { CodexConnection } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import type { CodexModel } from '../../src/mms/harness/vendors/codex/protocol'
 import { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
-import { CODEX_BOT_ACCOUNTED_TOOLS, CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_OFF } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_BOT_ACCOUNTED_TOOLS, CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_OFF, CODEX_BOT_FEATURES_REFUSED } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import type { NeutralTool } from '../../src/shared/harness/tools'
+import { codexBotSettingText } from '../../src/shared/harness/codexBotVersion'
 
 const pinned = new CodexInstallation({ installationHome: resolve(__dirname, '..', '..', '.cache', 'codex-pin') }).installed()
 const listed = (process.env.MOUSSE_CODEX_BINARIES || process.env.MOUSSE_CODEX_BINARY || '').split(delimiter).filter(Boolean)
@@ -74,6 +75,9 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
   /** What the model answers: the parent's first request, a child's first request; anything else gets "done". */
   let first: object | undefined
   let child: object | undefined
+  /** The features this binary lists, and the owner's config written with every one on and `more` on too. */
+  let featureNames: string[] = []
+  let writeConfig: (more: string[]) => void = () => undefined
 
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), 'mousse-codex-bot-tools-'))
@@ -109,15 +113,17 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
     expect(named.length).toBeGreaterThan(50)
     // `rollout_budget` won't load without settings whose form isn't documented; it is switched off for bots instead.
     // `MOUSSE_CODEX_FEATURES_LEFT_OUT` (names, comma-separated) leaves features off: to find which one adds a tool.
-    const leftOut = new Set(['rollout_budget', ...(process.env.MOUSSE_CODEX_FEATURES_LEFT_OUT ?? '').split(',').filter(Boolean)])
-    const features = [...new Set([...named, ...CODEX_BOT_FEATURES_OFF])].filter((name) => !leftOut.has(name))
-    writeFileSync(join(codexHome, 'config.toml'), [
+    // A feature a thread can't switch off (`CODEX_BOT_FEATURES_REFUSED`) refuses the bot's turn: checked on its own below.
+    const leftOut = new Set(['rollout_budget', ...CODEX_BOT_FEATURES_REFUSED, ...(process.env.MOUSSE_CODEX_FEATURES_LEFT_OUT ?? '').split(',').filter(Boolean)])
+    featureNames = named
+    writeConfig = (more) => writeFileSync(join(codexHome, 'config.toml'), [
       'model_provider = "probe"',
       'sandbox_mode = "danger-full-access"',
       'approval_policy = "never"',
       '[model_providers.probe]', 'name = "probe"', `base_url = "http://127.0.0.1:${port}/v1"`, 'wire_api = "responses"', 'env_key = "PROBE_KEY"',
-      '[features]', ...features.map((feature) => `${feature} = true`), ''
+      '[features]', ...[...new Set([...named, ...CODEX_BOT_FEATURES_OFF, ...more])].filter((name) => more.includes(name) || !leftOut.has(name)).map((feature) => `${feature} = true`), ''
     ].join('\n'))
+    writeConfig([])
     questions = new UserQuestionService()
     service = new CodexProviderService(root, questions, {}, {
       dir: join(root, 'state'),
@@ -169,6 +175,18 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
     expect(CODEX_BOT_CHECKED_VERSIONS).toContain(versionOf(BINARY!))
   })
 
+  // A feature Codex reads once for its whole process can't be switched off for one thread: with it on in the owner's
+  // config, a bot's turn doesn't run, and says why.
+  it('a feature a thread can\'t switch off, on in the owner\'s config, refuses the bot\'s turn with a line naming it', async () => {
+    const refused = CODEX_BOT_FEATURES_REFUSED.filter((name) => featureNames.includes(name))
+    if (!refused.length) return
+    writeConfig(refused)
+    try {
+      await expect(botTurn(modelWith(null)!.id, ['read'])).rejects.toMatchObject({ message: codexBotSettingText(refused) })
+    } finally {
+      writeConfig([])
+    }
+  })
   const kinds: Array<[string, string | null]> = [['no subagents', null], ['v1 subagents', 'v1'], ['v2 subagents', 'v2']]
   it.each(kinds)('a model with %s: every tool offered is accounted for; commands only with "run commands"; nothing opens a file by its path', async (_name, version) => {
     const model = modelWith(version)
