@@ -101,6 +101,28 @@
 @media (prefers-reduced-motion: reduce) { .chat-participant-message.is-shown { animation: none; } .bot-reply-button { transition: none; } }
 .bot-you-files { display: flex; flex-wrap: wrap; gap: 6px; }
 .bot-file-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 8px; font-size: var(--bot-meta, 12.5px); line-height: 18px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+/* Pictures (BotImages.tsx), as a messaging app shows them: rounded thumbnails in fixed boxes, so nothing moves when one
+   loads. One alone is large; two or four sit in a square grid; three put the first across the top. */
+.bot-images { --thumb: 150px; display: grid; grid-template-columns: repeat(2, var(--thumb)); gap: 4px; }
+.bot-images[data-count='1'] { grid-template-columns: 260px; }
+.bot-images[data-count='3'] > :first-child { grid-column: span 2; }
+.bot-image { position: relative; display: block; height: var(--thumb); padding: 0; overflow: hidden; border-radius: 12px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+.bot-images[data-count='1'] > .bot-image { height: 195px; }
+.bot-image.is-inline { display: inline-block; width: 260px; height: 180px; margin: 6px 0; vertical-align: top; }
+button.bot-image { cursor: zoom-in; }
+/* Keyboard focus is a fill: the picture dims a little, as the rest of the app highlights. */
+button.bot-image:focus-visible > img { opacity: 0.82; }
+.bot-image > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.bot-image.is-failed { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 8px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); text-align: center; }
+.bot-image.is-inline.is-failed { display: inline-flex; }
+.bot-image.is-failed > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-message-files { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+/* A web image is never loaded (it would tell its server who read the chat): a quiet link opens it in the browser. */
+.bot-image-link, .chat-markdown a.bot-image-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 9px; border-radius: 8px; font-size: var(--bot-meta, 12.5px); line-height: 20px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); text-decoration: none; vertical-align: middle; }
+/* An image that can't be shown at all (an SVG, an unknown kind): only its name, without the link's tint. */
+.bot-image-link.is-blocked { padding-inline: 0; background: none; opacity: .75; }
+.bot-image-link > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-markdown a.bot-image-link:hover, a.bot-image-link:hover { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 15%, transparent); }
 .bot-loading-older { text-align: center; }
 /* The chat's first load: a quiet line in the middle, or what failed with Retry. */
 .bot-conversation .chat-transcript > .bot-load-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 100%; font-size: var(--bot-meta); color: var(--text-secondary); }
@@ -114,7 +136,7 @@
 .bot-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .bot-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 11px; border-radius: 9px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); color: var(--text-secondary); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 12px; }
 .bot-chip b { font-weight: 500; color: var(--accent); }
-.bot-chip.is-live svg { animation: chat-spin 1s linear infinite; }
+.bot-chip.is-live svg { animation: chat-spin 1s steps(12) infinite; }
 .chat-run-status .bot-chip { margin-left: 4px; }
 @media (prefers-reduced-motion: reduce) { .bot-chip.is-live svg { animation: none; } }
 
@@ -142,6 +164,16 @@
 .bot-new-label-gap { margin-top: 12px; }
 .chat-dialog .bot-new-name, .chat-dialog .bot-new-text { display: block; width: 100%; padding: 9px 12px; margin-bottom: 16px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.5; }
 .chat-dialog .bot-new-text { min-height: 76px; resize: none; margin-bottom: 0; }
+/* New bot's steps: one height for every step, so the dialog and Back / Next stay where they are; an error sits at its foot. */
+.bot-new-step { display: flex; flex-direction: column; height: 300px; margin-top: 16px; min-height: 0; }
+.bot-new-step .bot-look-picker { margin-bottom: 0; }
+.chat-dialog .bot-new-step .bot-new-text { flex: 1; min-height: 76px; }
+.chat-dialog .bot-new-error { margin: auto 0 0; padding-top: 10px; }
+/* Runs on: the computer, then the model rows (About's), stacked; with Advanced open they still fit the step's height. */
+.bot-new-runs-on-step { display: flex; flex-direction: column; gap: 4px; }
+.bot-new-runs-on { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-secondary); }
+.bot-new-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; }
+.bot-new-runs-on-computer { color: var(--text-primary); }
 .bot-dialog .chat-dialog-heading { margin-bottom: 14px; }
 .chat-dialog .bot-new-name::placeholder, .chat-dialog .bot-new-text::placeholder { color: var(--text-secondary); }
 .bot-new-foot { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
@@ -149,7 +181,6 @@
 .bot-new-foot .chat-primary-button[disabled] { opacity: .4; }
 .bot-new-foot .bot-ghost-button + .chat-primary-button { margin-left: 0; }
 .bot-new-foot .bot-ghost-button:first-child { margin-left: auto; }
-.bot-new-hint { font-size: 11px; color: var(--text-secondary); }
 .bot-dialog-text { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
 .chat-primary-button.bot-danger-button { background: var(--error, #e79090); color: var(--surface-strong, #18151c); }
 
@@ -169,6 +200,23 @@
 .bot-about-row button { font-size: 11px; color: var(--text-secondary); }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
+/* A bot's model rows (#673, About → Runs on and New bot): a label, then the app's model picker, every picker as wide as
+   the one column they share (the label column is fixed, so Advanced never moves it). The picker reads the settings
+   control tokens, declared here because neither place is inside Settings. */
+.bot-model-picker, .bot-new-runs-on { --bot-row-label: 86px; --settings-control-h: 28px; --settings-fs-small: 12px; --space-8: 8px; }
+.bot-model-rows { display: grid; grid-template-columns: var(--bot-row-label) minmax(0, 1fr); column-gap: 12px; row-gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
+.bot-model-row { display: contents; }
+.bot-model-row-label { white-space: nowrap; }
+.bot-model-rows .settings-model-picker { display: flex; width: 100%; }
+.bot-model-rows .settings-model-btn { flex: 1; max-width: none; }
+.bot-model-rows .settings-model-btn-label { flex: 1; text-align: left; }
+.bot-model-advanced { display: flex; align-items: center; justify-content: space-between; padding: 6px 0 3px; font-size: 12px; color: var(--text-secondary); }
+/* About is a narrow panel: a tighter label column, so a model, its level and the entry's icon fit. */
+.bot-about .bot-model-picker { --bot-row-label: 78px; }
+.bot-about .bot-model-rows { column-gap: 8px; }
+/* New bot's Runs on: Computer's label and control in the same columns as the rows. */
+.bot-new-runs-on .bot-new-row { display: grid; grid-template-columns: var(--bot-row-label) minmax(0, 1fr); column-gap: 12px; }
+.bot-new-runs-on .bot-new-row > .ui-select { width: 100%; }
 .bot-about-foot { display: flex; gap: 8px; margin-top: 22px; }
 .bot-about-foot button { flex: 1; }
 .bot-about-foot .is-danger { color: var(--error, #e79090); }

@@ -170,6 +170,24 @@ describe('the transcript while a reply streams', () => {
     expect(t.follower.holding()).toBe(false)
   })
 
+  it('lands on the new end when the person folds the queue away mid-turn, with no space held under it', () => {
+    const t = transcript({ content: 3000 })
+    send(t)
+    t.state.content += 1200
+    t.follower.follow()
+    // Show less: the queue folds 450 px away; the reply above comes down with the end, nothing is held.
+    t.follower.closeNext()
+    t.state.content -= 450
+    t.follower.follow()
+    expect(t.reserve()).toBe(0)
+    expect(t.follower.holding()).toBe(false)
+    expect(t.container.scrollTop).toBe(t.end())
+    // Only that fold: a message sent now afterwards is held as before.
+    t.state.content -= 60
+    t.follower.follow()
+    expect(t.reserve()).toBe(60)
+  })
+
   it('closes a held space after the turn ends, if nothing grew into it', () => {
     const t = transcript({ content: 3000 })
     send(t)

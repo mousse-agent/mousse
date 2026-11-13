@@ -860,6 +860,30 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   color: var(--text-primary);
 }
 
+/* Agents → Context → Cache time: each entry's time, then Change where it has a switch. */
+.agents-cache-times .agent-access-cap {
+  align-items: center;
+}
+
+.agents-cache-time {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-12);
+  flex-shrink: 0;
+}
+
+/* A quiet tag after a row title, e.g. "Experimental". */
+.settings-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-8);
+  border-radius: 9px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--ui-hover);
+}
+
 /* MoreDetails: a quiet text toggle after a description, and the rules it folds away. */
 .settings-more-btn {
   padding: 0;
@@ -929,6 +953,64 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 
 .settings-advanced-body > .settings-group:first-child {
   padding-top: var(--space-16);
+}
+
+/* A fold: a heading that opens its rows (Skills & MCP). A sub fold is one step smaller and sits closer;
+   its count ("3 of 9 on") shows only while it is closed. */
+.settings-fold {
+  margin-top: var(--settings-section-gap);
+}
+
+.settings-fold.sub {
+  margin-top: var(--space-16);
+}
+
+.settings-fold > summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  font-size: var(--settings-fs-heading);
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.settings-fold.sub > summary {
+  font-size: var(--settings-fs-row);
+}
+
+.settings-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-fold > summary .settings-advanced-chevron {
+  align-self: center;
+}
+
+.settings-fold[open] > summary .settings-advanced-chevron {
+  transform: rotate(90deg);
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
+}
+
+.settings-fold-count {
+  margin-left: var(--space-4);
+  font-size: var(--settings-fs-small);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.settings-fold[open] > summary .settings-fold-count {
+  display: none;
+}
+
+.settings-fold-body > .settings-group:first-child {
+  padding-top: var(--space-12);
+}
+
+.settings-fold-body > .settings-fold.sub:first-child {
+  margin-top: var(--space-12);
 }
 
 /* All themes fit the column in one row; narrow windows wrap, never scroll. */

@@ -5,6 +5,7 @@ import { MessageList } from "./message-list";
 import { useComposerFold } from "./composer-fold";
 import { Suggestions, type SuggestionItem } from "./input/suggestions";
 import { cn } from "./utils/cn";
+import { errorTitle } from "../../adapters/mousseToUI";
 import type { AgentChatProps } from "./types";
 import type { QuestionAnswer } from "./question/question-prompt";
 
@@ -150,7 +151,7 @@ export function AgentChat({
                     parts: [
                       {
                         type: "error",
-                        title: "Request failed",
+                        title: errorTitle(error as { code?: unknown }),
                         message: error.message,
                       },
                     ],

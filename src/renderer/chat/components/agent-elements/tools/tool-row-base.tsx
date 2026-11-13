@@ -3,7 +3,7 @@ import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
-import { ToolStateIcon } from "./tool-icon";
+import { NO_ROW_INFO, RecoveredFailureMark, ToolRowContext, ToolRowTime, ToolStateIcon, useToolRowInfo } from "./tool-icon";
 
 /** How often a thought being written is read out to a screen reader. */
 const ANNOUNCE_MS = 5000;
@@ -40,7 +40,10 @@ export type ToolRowBaseProps = {
   shimmerLabel?: string;
   completeLabel: string;
   isAnimating: boolean;
-  /** A failed call: the label reads in the danger colour. */
+  /**
+   * A failed call. When the agent got past it (`ToolRowContext.recovered`), only the icon dims toward the danger
+   * colour and a small × follows the label; otherwise the label reads in the danger colour.
+   */
   failed?: boolean;
   detail?: string;
   /**
@@ -93,11 +96,14 @@ export function ToolRowBase({
   const [ownOpen, setOwnOpen] = useState(defaultOpen);
   const isExpanded = expanded ?? ownOpen;
   const canToggle = expandable && (isComplete || isExpanded || isAnimating);
+  const { at, recovered = false } = useToolRowInfo();
+  const loudFailure = failed && !isAnimating && !recovered;
+  const quietFailure = failed && !isAnimating && recovered;
 
   const row = (
     <div
       className={cn(
-        "flex items-center max-w-full select-none gap-1 rounded-an-tool-border-radius",
+        "an-tool-row-line flex items-center w-full max-w-full select-none gap-1 rounded-an-tool-border-radius",
         canToggle ? "cursor-pointer" : "cursor-default",
       )}
     >
@@ -118,7 +124,7 @@ export function ToolRowBase({
         <span
           className={cn(
             "font-[450] whitespace-nowrap",
-            failed && !isAnimating && "text-[var(--danger)]",
+            loudFailure && "text-[var(--danger)]",
             // A label with nothing after it (a thought) keeps to one line.
             detail || trailingContent ? "shrink-0" : "min-w-0 truncate",
           )}
@@ -144,6 +150,7 @@ export function ToolRowBase({
             {detail}
           </span>
         )}
+        {quietFailure && <RecoveredFailureMark />}
         {badge && <span className="shrink-0 whitespace-nowrap font-normal">{badge}</span>}
         {trailingContent}
       </div>
@@ -155,6 +162,7 @@ export function ToolRowBase({
           />
         </div>
       )}
+      <ToolRowTime at={at} />
     </div>
   );
 
@@ -190,7 +198,8 @@ export function ToolRowBase({
           only its clip changes per frame (an animated `height` re-measured the diffs, markdown and nested
           tools every frame). The gap sits inside it as padding so it opens and closes with the panel. */}
       <Collapse open={isExpanded} className="overflow-hidden pt-2" itemCount={itemCount}>
-        {children}
+        {/* Rows inside the panel are other calls: they read their own time and failure, not this row's. */}
+        <ToolRowContext.Provider value={NO_ROW_INFO}>{children}</ToolRowContext.Provider>
       </Collapse>
     </div>
   );

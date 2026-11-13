@@ -4,6 +4,12 @@ import type { FindPainter } from "./dom-highlight";
 /** Space kept between the match and the edge of whatever scrolls it. */
 export const REVEAL_MARGIN = 16;
 
+/**
+ * Dispatched (bubbling) from the match before it is brought into view; a part that hides some of its
+ * text, such as a folded long prompt, opens on it.
+ */
+export const FIND_REVEAL_EVENT = "mousse:find-reveal";
+
 export type RevealTarget = {
   turnKey: string;
   messageId: string;
@@ -61,15 +67,18 @@ function overshoot(innerStart: number, innerEnd: number, outerStart: number, out
 }
 
 /**
- * Puts the range where the reader can see it. First every scroller between the
- * range and the transcript, innermost first (a code block's own scroller, a
- * table's, an expanded thought's), since only then is the range's rectangle the
- * place the reader sees it; then the transcript.
+ * Puts the range where the reader can see it. A fold around it is told to open
+ * (`FIND_REVEAL_EVENT`); opening one adds text below the match, so the match
+ * stays where it is measured now. Then every scroller between the range and the
+ * transcript, innermost first (a code block's own scroller, a table's, an
+ * expanded thought's), since only then is the range's rectangle the place the
+ * reader sees it; then the transcript.
  */
 export function bringIntoView(range: Range, deps: Pick<RevealDeps, "container" | "onProgrammaticScroll">): void {
   const { container } = deps;
   const start = range.commonAncestorContainer;
   let element: Element | null = start instanceof Element ? start : start.parentElement;
+  element?.dispatchEvent(new Event(FIND_REVEAL_EVENT, { bubbles: true }));
   for (; element && element !== container; element = element.parentElement) {
     if (!isScroller(element)) continue;
     const rect = range.getBoundingClientRect();

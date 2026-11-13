@@ -9,7 +9,7 @@ import { ToolCallsGroup } from '../../src/renderer/chat/components/agent-element
 import { BashToolRow } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { ErrorMessage } from '../../src/renderer/chat/components/agent-elements/error-message'
 import { createTurnActions, TurnActionsContext, type TurnActions } from '../../src/renderer/chat/components/agent-elements/turn-actions'
-import { chatStatusFromPhase, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
+import { chatStatusFromPhase, errorTitle, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import type { ChatImageAttachment, ChatMessage } from '../../src/shared/types'
 import { RunInterruptedNotice } from '../../src/renderer/chat/components/MousseAgentChatShell'
 import type { TimelineStep } from '../../src/renderer/chat/components/agent-elements/types/timeline'
@@ -61,26 +61,37 @@ describe('a failed tool', () => {
 })
 
 describe('a tool call group with failures', () => {
-  const group = (failed: number, live: boolean) =>
-    createElement(ToolCallsGroup, { count: 3, failed, live, children: createElement('div', { 'data-testid': 'rows' }, 'rows') })
+  const group = (failed: number) =>
+    createElement(ToolCallsGroup, { count: 3, title: 'Ran 3 commands', failed, children: createElement('div', { 'data-testid': 'rows' }, 'rows') })
   const open = () => host.querySelector('[data-testid="rows"]') !== null && !host.querySelector('[hidden] [data-testid="rows"]')
 
   it('names the failures in the collapsed header', () => {
-    render(group(1, false))
-    expect(text()).toMatch(/Tool calls\s*3\s*· 1 failed/)
+    render(group(1))
+    expect(text()).toMatch(/Ran 3 commands\s*· 1 failed/)
     expect(open()).toBe(false)
   })
+})
 
-  it('opens itself the first time a failure lands while the turn runs', () => {
-    render(group(0, true))
-    expect(open()).toBe(false)
-    render(group(1, true))
-    expect(open()).toBe(true)
+describe('the turn line of a failed call', () => {
+  const at = (s: number) => `2026-11-05T10:00:0${s}.000Z`
+  const call = (id: string, status: 'done' | 'failed', s: number): ChatMessage => ({
+    id, role: 'system', content: '', timestamp: at(s), kind: 'mcp_tool_call',
+    toolCall: { title: 'Read', summary: 'Read', details: [], status: 'complete' },
+    activity: { id, callId: id, toolName: 'Read', kind: 'generic', status, startedAt: at(s) } as unknown as ChatMessage['activity'],
+  })
+  const thread = (...rest: ChatMessage[]): ChatMessage[] => [{ id: 'u1', role: 'user', content: 'Read the config', timestamp: at(0) }, ...rest]
+  const show = (messages: ChatMessage[], status: 'ready' | 'error') =>
+    render(createElement(MessageList, { messages: mousseToUIMessages(messages), status }))
+
+  it('does not name a failure the agent got past', () => {
+    show(thread(call('a', 'failed', 1), call('b', 'done', 2), { id: 'r', role: 'assistant', content: 'Done.', timestamp: at(3) }), 'ready')
+    expect(text()).not.toMatch(/· \d+ failed/)
   })
 
-  it('stays closed when an old turn loads with a failure', () => {
-    render(group(2, false))
-    expect(open()).toBe(false)
+  it('names a failure that ended the turn', () => {
+    const error: ChatMessage = { id: 'e', role: 'system', content: 'failed', timestamp: at(3), error: { code: 'orchestrator_turn_failed', message: 'failed' } }
+    show(thread(call('a', 'done', 1), call('b', 'failed', 2), error), 'error')
+    expect(text()).toMatch(/· 1 failed/)
   })
 })
 
@@ -173,9 +184,40 @@ describe('a failed turn', () => {
 
   it('shows its error in the transcript with Retry', () => {
     render(shown(failedThread, vi.fn()))
-    expect(text()).toContain('Request failed')
+    expect(text()).toContain('Provider error')
     expect(text()).toContain('The provider could not accept this request.')
     expect(button('Retry')?.disabled).toBe(false)
+  })
+
+  it('shows the provider\'s own status and message, with its reference and Retry on a quiet line under it', () => {
+    const refused: ChatMessage[] = [
+      failedThread[0],
+      {
+        id: 's1', role: 'system', timestamp: '2026-11-05T10:00:01.000Z',
+        content: '[provider_api_error] 400 · messages.3.content.0: tool_use ids were found without tool_result blocks',
+        error: { code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', details: { provider: 'claude', status: 400, supportId: '1ecec6b5-2610-41b1-80f9-099a6f0732cc' } }
+      }
+    ]
+    render(shown(refused, vi.fn()))
+    expect(text()).toContain('Provider error')
+    expect(host.querySelector('.an-error-text')!.textContent).toBe('400 · messages.3.content.0: tool_use ids were found without tool_result blocks')
+    const meta = host.querySelector('.an-error-meta')!
+    expect(meta.textContent).toBe('Reference 1ecec6b5-2610-41b1-80f9-099a6f0732cc' + 'Retry')
+    expect(meta.querySelector('button[aria-label="Retry"]')).not.toBeNull()
+    expect(text()).not.toContain('Something went wrong')
+  })
+
+  it('moves the reference of a generic failure under its message', () => {
+    render(createElement(ErrorMessage, { title: 'Request failed', message: 'Something went wrong. Please try again or report this error. Reference: 02fb3fb4-25fb', onRetry: vi.fn() }))
+    expect(host.querySelector('.an-error-text')!.textContent).toBe('Something went wrong. Please try again or report this error.')
+    expect(host.querySelector('.an-error-meta')!.textContent).toBe('Reference 02fb3fb4-25fbRetry')
+  })
+
+  it('titles a failure by what refused it', () => {
+    expect(errorTitle({ code: 'provider_api_error' })).toBe('Provider error')
+    expect(errorTitle({ code: 'provider_usage_limit' })).toBe('Usage limit reached')
+    expect(errorTitle({ code: 'orchestrator_turn_failed' })).toBe('Request failed')
+    expect(errorTitle(undefined)).toBe('Request failed')
   })
 
   it('sends the prompt again through the send path on Retry', () => {

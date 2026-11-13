@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { getCommand, type CommandDefinition, type CommandId, type CommandScope, type ShortcutOverrides } from '../../../shared/commands'
+import { getCommand, type CommandId, type CommandScope, type ShortcutOverrides } from '../../../shared/commands'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
 import { setRecording } from '../../commands/commandRegistry'
 import {
@@ -8,7 +8,10 @@ import {
   proposeBinding,
   resetAllPatch,
   resetPatch,
+  shortcutAnchor,
   shortcutGroups,
+  shortcutRowTitle,
+  shortRowTitle,
   type BindingProposal,
   type RecorderAction,
   type ShortcutRow
@@ -25,19 +28,10 @@ const SCOPE_NOTES: Record<CommandScope, string | null> = {
   'workflow-editor': 'Works in the workflow editor'
 }
 
-/** Shorter names for rows whose section already says where they work. Command titles stay as they are. */
-const ROW_TITLES: Partial<Record<CommandId, string>> = {
-  'editor.save': 'Save file',
-  'workflow.undo': 'Undo',
-  'workflow.redo': 'Redo'
-}
-
-const rowTitle = (command: CommandDefinition): string => ROW_TITLES[command.id] ?? command.title
-
 /** A command named in a conflict notice, which may sit in another section: a short name keeps its section. */
 const title = (id: CommandId): string => {
   const command = getCommand(id)
-  const short = ROW_TITLES[id]
+  const short = shortRowTitle(id)
   if (!short) return command.title
   return command.scope === 'global' ? short : `${short} (${command.category})`
 }
@@ -148,15 +142,18 @@ function ConfirmNotice({ proposal, onChoose }: { proposal: Extract<BindingPropos
 /** Settings → Shortcuts: every command with its shortcut; press keys to rebind, reset one or all. Saved per profile. */
 export function ShortcutsSettings({
   settings,
-  onUpdate
+  onUpdate,
+  initialQuery = ''
 }: {
   settings: MousseSettings
   onUpdate: (partial: MousseSettingsUpdate) => Promise<void>
+  /** The filter to open with: a settings search result for a shortcut fills it in. */
+  initialQuery?: string
 }) {
   const appPlatform = useAppStore((state) => state.appInfo?.platform)
   const platform = appPlatform ?? window.mousse.platform ?? ''
   const overrides = useMemo(() => settings.shortcuts ?? {}, [settings.shortcuts])
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useState(initialQuery)
   const [recordingId, setRecordingId] = useState<CommandId | null>(null)
   const [pending, setPending] = useState<Pending | null>(null)
   const [confirmingResetAll, setConfirmingResetAll] = useState(false)
@@ -218,13 +215,14 @@ export function ShortcutsSettings({
   const renderRow = (row: ShortcutRow, scopeOfSection: CommandScope | null) => {
     const { command } = row
     const id = command.id
-    const name = rowTitle(command)
+    const name = shortcutRowTitle(id)
     const recording = recordingId === id
     const notice = pending?.id === id ? pending : null
     const notes = rowNotes(row, scopeOfSection)
     return (
       <SettingsRow
         key={id}
+        anchor={shortcutAnchor(id)}
         title={name}
         titleAction={row.custom ? <span className="shortcut-badge">Custom</span> : undefined}
         description={notes.length ? notes.join('. ') : undefined}

@@ -12,7 +12,7 @@
 }
 
 .an-tool-icon[data-state='running'] {
-  animation: an-tool-icon-pulse calc(1.6s * var(--ui-motion-scale, 1)) ease-in-out infinite;
+  animation: an-tool-icon-pulse calc(1.6s * var(--ui-motion-scale, 1)) steps(12, jump-none) infinite;
   will-change: opacity;
 }
 
@@ -22,6 +22,38 @@
 
 .an-tool-icon[data-state='failed'] {
   color: var(--danger);
+}
+
+/* A failure the agent got past: the icon only leans toward the danger colour; the label stays grey. */
+.an-tool-icon[data-state='recovered'] {
+  color: color-mix(in srgb, var(--danger) 55%, transparent);
+}
+
+.an-tool-failed-mark {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: color-mix(in srgb, var(--danger) 70%, transparent);
+}
+
+/* The time a work row's call started: quiet meta text at the row's right edge, shown on hover or keyboard focus. */
+.an-tool-row-time {
+  margin-left: auto;
+  padding-left: 12px;
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--an-foreground-muted, currentColor);
+  opacity: 0;
+  transition: opacity calc(150ms * var(--ui-motion-scale, 1)) ease-out;
+}
+
+.an-tool-row-line:hover .an-tool-row-time,
+:focus-visible > .an-tool-row-line .an-tool-row-time,
+.an-tool-row-line:has(:focus-visible) .an-tool-row-time {
+  opacity: 0.7;
 }
 
 @keyframes an-tool-icon-pulse {

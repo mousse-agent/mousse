@@ -2,8 +2,9 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
+import type { BotModelPick, BotModelSlots } from '../../shared/bots/personal/definition'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
-import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment } from '../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
 import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
@@ -50,10 +51,33 @@ export interface NewBotDraft {
   look: BotLook | null
   name: string
   description: string
+  /** A model picked by hand on the single Runs on picker (#673, an older service); null is by usage, the default. */
+  model: string | null
+  /**
+   * The rows on Runs on (#673, `BotModelRows`), each a pick or null (Pick a model). null until Runs on's choices come:
+   * then the owner's last bot's picks that are still offered (`seedNewBotRows`), else every row empty. Create bot waits
+   * until every row holds a pick, and sends them only to a service whose choices carry `providers`.
+   */
+  slots: BotShownRows | null
+  /** The step New bot shows, so closing and reopening returns to it. */
+  step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
   touched: boolean
 }
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', touched: false }
+/** New bot's steps: the look, what it does (name and sentence), and where it runs. */
+export type NewBotStep = 'look' | 'about' | 'runsOn'
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, step: 'look', touched: false }
+
+/**
+ * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service
+ * refuses is What it does's. Anything else (no answer, a busy service) stays where Create bot was pressed.
+ */
+export function newBotStepForFailure(cause: unknown, current: NewBotStep): NewBotStep {
+  const code = cause && typeof cause === 'object' && 'code' in cause ? String((cause as { code: unknown }).code) : ''
+  if (code === 'model_unavailable') return 'runsOn'
+  if (code === 'invalid_params' || code === 'bot_invalid') return 'about'
+  return current
+}
 
 interface BotsState {
   profileId: string | null
@@ -104,9 +128,16 @@ interface BotsState {
   openNewBot(): void
   /** Closes New bot; what was put in stays for the next time it opens. */
   closeNewBot(): void
-  setNewBotDraft(change: Partial<Omit<NewBotDraft, 'touched'>>): void
+  setNewBotDraft(change: Partial<Omit<NewBotDraft, 'touched' | 'step'>>): void
+  /**
+   * New bot's rows once Runs on's choices come: the draft's rows, else `last` (the owner's last bot's picks), each kept
+   * only while `offered` (a pick no longer offered is empty again). Seeding is not putting anything in.
+   */
+  seedNewBotRows(last: BotShownRows | undefined, offered: (pick: BotModelPick) => boolean): void
+  /** Moves New bot to a step; moving alone is not putting anything in. */
+  setNewBotStep(step: NewBotStep): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string }): Promise<BotSummary | null>
+  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>
@@ -451,6 +482,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     setNewBotDraft(change) { set((state) => ({ newBotDraft: { ...state.newBotDraft, ...change, touched: true } })) },
 
+    seedNewBotRows(last, offered) {
+      set((state) => {
+        const rows = state.newBotDraft.slots ?? last
+        const keep = (pick: BotModelPick | null | undefined) => (pick && offered(pick) ? pick : null)
+        return { newBotDraft: { ...state.newBotDraft, slots: { talk: keep(rows?.talk), light: keep(rows?.light), medium: keep(rows?.medium), hard: keep(rows?.hard) } } }
+      })
+    },
+
+    setNewBotStep(step) { set((state) => ({ error: state.errorBotId === null ? null : state.error, newBotDraft: { ...state.newBotDraft, step } })) },
+
     create(input) {
       if (createOperation) return createOperation
       const owner = epoch
@@ -468,7 +509,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
           return bot
         } catch (cause) {
           if (owner !== epoch) return null
-          set({ error: createFailureText(cause), errorBotId: null, busy: false })
+          set((state) => ({ error: createFailureText(cause), errorBotId: null, busy: false, newBotDraft: { ...state.newBotDraft, step: newBotStepForFailure(cause, state.newBotDraft.step) } }))
           // An answer that never came may still have made the bot: the list shows it if so.
           void get().refresh()
           return null
@@ -554,7 +595,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 })
 
 /** Failures whose words come from the service and are meant for the owner as they are. */
-const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable'])
+const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable', 'model_unavailable'])
 
 /**
  * What New bot says when Create bot fails. No answer, a lost connection or an unexpected error all

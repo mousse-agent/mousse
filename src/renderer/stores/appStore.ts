@@ -557,6 +557,12 @@ function savePersonalWorkspace(state: AppState): void {
   } catch { /* quota/private mode */ }
 }
 
+/**
+ * Browser tabs opened since the window started. Tabs restored from an earlier session are not in it: their pages
+ * load when first shown (BrowserPanel), so restored tabs do not each start a page renderer at launch.
+ */
+export const browserTabsOpenedThisSession = new Set<string>()
+
 export const useAppStore = create<AppState>()(persist((set, get) => ({
   profileId: 'default',
   profileReady: false,
@@ -1060,6 +1066,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
   }),
   addBrowserTab: (ownerThreadId) => {
     const id = crypto.randomUUID()
+    browserTabsOpenedThisSession.add(id)
     const key = ownerThreadId ?? '__standalone__'
     set((s) => ({
       browserTabs: [...s.browserTabs, {
@@ -1092,6 +1099,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       }
       const id = crypto.randomUUID()
       ensuredId = id
+      browserTabsOpenedThisSession.add(id)
       const key = ownerThreadId ?? '__standalone__'
       return {
         browserTabs: [

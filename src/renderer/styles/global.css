@@ -40,19 +40,10 @@
   --an-input-background: var(--surface-strong);
   --an-input-border-color: var(--border);
   --an-input-color: var(--text-primary);
-  --an-max-width: 680px;
-  /* Inline-code token defaults (github-dark palette — app default is dark).
-     Themes may override per palette; blacksphere-plus already defines its
-     own --syntax-*. Chips consume these via var(--syntax-*, fallback) so
-     they stay theme-compliant everywhere. */
-  --syntax-keyword: #ff7b72;
-  --syntax-string: #a5d6ff;
-  --syntax-number: #79c0ff;
-  --syntax-function: #d2a8ff;
+  --an-max-width: 784px;
 }
 /* Light: the transcript, tables, code chips and the user bubble take the
-   theme's text and surface tokens instead of the dark bridge above, and
-   inline code uses the github-light token ramp. */
+   theme's text and surface tokens instead of the dark bridge above. */
 html[data-theme='light'] {
   --an-foreground: var(--text-primary);
   --an-foreground-muted: var(--text-secondary);
@@ -69,10 +60,6 @@ html[data-theme='light'] {
      grey with a dark band sweeping it (agent-ui.css). */
   --an-shimmer-base: color-mix(in srgb, var(--text-primary) 48%, var(--surface-base));
   --an-shimmer-peak: var(--text-primary);
-  --syntax-keyword: #cf222e;
-  --syntax-string: #0a3069;
-  --syntax-number: #0550ae;
-  --syntax-function: #8250df;
 }
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] {
@@ -89,16 +76,7 @@ html[data-theme='light'] {
     --an-input-placeholder-color: var(--text-secondary);
     --an-shimmer-base: color-mix(in srgb, var(--text-primary) 48%, var(--surface-base));
     --an-shimmer-peak: var(--text-primary);
-    --syntax-keyword: #cf222e;
-    --syntax-string: #0a3069;
-    --syntax-number: #0550ae;
-    --syntax-function: #8250df;
   }
-}
-/* Make user bubbles pop in narrow sidebar */
-.an-message-list .max-w-\[calc\(95\%-40px\)\] {
-  max-width: calc(100% - 24px) !important;
-  margin-inline-start: 24px !important;
 }
 /* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
    so registry re-syncs can't silently drop them. Unlayered, so they also
@@ -116,10 +94,6 @@ html[data-theme='light'] {
 .an-markdown.an-code-no-header [data-streamdown="code-block"] code {
   font-family: inherit;
   font-size: 12px;
-}
-.an-markdown [data-streamdown="code-block-body"] {
-  padding-left: 16px !important;
-  padding-right: 16px !important;
 }
 /* Dim tool chrome (thought rows, tool groups, tool cards) so the
    assistant's text keeps the contrast. Hover and focus stay at the same
@@ -153,6 +127,38 @@ html[data-theme='light'] {
   font-weight: 450;
   letter-spacing: -0.011em;
   line-height: 1.3;
+}
+/* A finished turn's line is the control that opens its work in place: "Worked for 32s ›". Only its text
+   brightens on hover; the chevron turns down while the work is open. */
+.an-message-list .turn-work-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: color 150ms ease-out;
+}
+.an-message-list .turn-work-toggle:hover,
+.an-message-list .turn-work-toggle:focus-visible {
+  color: var(--text-primary);
+}
+.an-message-list .turn-work-toggle:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  border-radius: 4px;
+}
+.an-message-list .turn-work-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  transition: transform 150ms ease-out;
+}
+.an-message-list .turn-work-chevron[data-open] {
+  transform: rotate(90deg);
 }
 .an-message-list .turn-work-rule {
   height: 1px;
@@ -223,8 +229,7 @@ html[data-theme='light'] {
    pre-line keeps structure (blank lines, lists, fences) intact while
    honoring the author's breaks — same as user bubbles (pre-wrap). */
 .an-markdown .an-md-p,
-.an-markdown .an-md-li,
-.an-markdown .an-md-blockquote {
+.an-markdown .an-md-li {
   white-space: pre-line;
 }
 /* Chat text must stay selectable/copyable — the app root sets
@@ -525,6 +530,12 @@ html.platform-darwin .overlay-titlebar {
   overflow: hidden;
 }
 
+/* At opacity 0 a browser guest still counts as on screen, so its page keeps rendering every frame. Hidden, it
+   keeps its layout, document and viewport but stops drawing. A tab an agent drives stays drawn for its screenshots. */
+.keep-mounted-layout-inactive .browser-webview:not([data-agent-controlled]) {
+  visibility: hidden;
+}
+
 /* A split-out page or panel whose chunk did not load (lib/lazyComponent.tsx). */
 .lazy-load-failed {
   padding: 12px 14px;
@@ -605,18 +616,65 @@ html.platform-darwin .overlay-titlebar {
   scroll-snap-align: start;
 }
 
+/* A prompt: 12px padding, at most 80% of the column, text at 14px on a 22.75px line. */
 .chat-user-bubble {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  font-size: 14px;
+  line-height: 1.625;
+}
+/* A long prompt shows its first 176px, fading out, until "Show full message" is pressed. */
+.chat-user-text.is-folded {
+  max-height: 176px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.75rem), transparent);
+}
+/* A link in a prompt: the accent colour, underlined on hover; a GitHub one leads with the GitHub mark. */
+.chat-user-link {
+  color: var(--an-md-link, var(--an-primary-color));
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.chat-user-link:hover,
+.chat-user-link:focus-visible {
+  text-decoration: underline;
+}
+/* The GitHub mark before a link to GitHub, in every chat surface (link-label-view.tsx). */
+.chat-link-mark {
+  display: inline-block;
+  margin-right: 0.25em;
+  vertical-align: -0.125em;
+}
+.chat-link-unbroken {
+  white-space: nowrap;
+}
+.chat-user-fold {
+  align-self: flex-start;
+  margin-top: -2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.chat-user-fold:hover {
+  color: var(--text-primary);
+}
+.chat-user-fold:focus-visible {
+  border-radius: 4px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 .chat-user-bubble .chat-user-image-carousel {
   margin-left: 0;
 }
 /* "from <computer>" under a turn that a person on another of the user's computers sent. */
 .chat-user-sent-from {
-  max-width: calc(95% - 40px);
+  max-width: 80%;
   padding-right: 4px;
   overflow: hidden;
   color: var(--text-secondary);

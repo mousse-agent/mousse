@@ -515,7 +515,7 @@ describe('the command table', () => {
   })
 
   it('binds Find in thread to Mod+F, apart from the palette (Mod+K) and thread search (Mod+Shift+O)', () => {
-    expect(COMMANDS.find((command) => command.id === 'chat.findInThread')).toMatchObject({ title: 'Find in thread', category: 'Thread' })
+    expect(COMMANDS.find((command) => command.id === 'chat.findInThread')).toMatchObject({ title: 'Find in thread', category: 'Threads' })
     expect(defaultBindingFor('chat.findInThread', 'win32')).toBe('CommandOrControl+F')
     const win = resolveBindings({}, 'win32')
     expect(win.get(resolveBinding('CommandOrControl+F', 'win32')!)).toEqual(['chat.findInThread'])

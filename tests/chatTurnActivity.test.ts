@@ -50,30 +50,63 @@ describe('a turn right after sending', () => {
   })
 })
 
+const read = (id: string, path: string): UIMessage =>
+  ({
+    id,
+    role: 'assistant',
+    parts: [{ type: 'tool-Read', toolCallId: id, state: 'output-available', input: { file_path: path }, output: 'x' }]
+  }) as unknown as UIMessage
+
+const edit = (id: string, path: string): UIMessage =>
+  ({
+    id,
+    role: 'assistant',
+    parts: [{ type: 'tool-Edit', toolCallId: id, state: 'output-available', input: { file_path: path, old_string: 'a', new_string: 'b' }, output: 'ok' }]
+  }) as unknown as UIMessage
+
+const reply = (id: string, said: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text: said }] })
+
 describe('a tool call group', () => {
-  it('is titled with the latest thought, not "Tool calls"', () => {
+  it('is titled with what its calls did, not with a thought', () => {
     const html = render(
       [
         user,
         thought('t1', 'Find the start script', 'output-available'),
+        read('r1', 'package.json'),
         command('c1'),
+        read('r2', 'scripts/start.js'),
+        command('c2'),
         thought('t2', 'The app is starting; watch the log', 'output-available'),
-        command('c2')
+        read('r3', 'logs/app.log'),
+        command('c3')
       ],
-      'ready'
+      'streaming'
     )
-    expect(text(html)).toContain('The app is starting; watch the log')
-    expect(html).not.toContain('Tool calls')
+    expect(text(html)).toContain('Read 3 files and ran 3 commands')
+    expect(text(html)).not.toContain('watch the log')
   })
 
-  it('falls back to "Tool calls" and the count only when no thought has text', () => {
-    const html = render([user, thought('t1', '', 'output-available'), command('c1'), command('c2')], 'ready')
-    expect(text(html)).toContain('Tool calls 3')
+  it('splits at narration: the calls on each side are a group of their own, the narration prose between them', () => {
+    const html = render(
+      [user, read('r1', 'a.ts'), read('r2', 'b.ts'), reply('n1', 'Now the fix.'), edit('e1', 'a.ts'), edit('e2', 'b.ts')],
+      'streaming'
+    )
+    const flat = text(html)
+    expect(flat).toContain('Read 2 files')
+    expect(flat).toContain('Edited 2 files')
+    expect(flat.indexOf('Read 2 files')).toBeLessThan(flat.indexOf('Now the fix.'))
+    expect(flat.indexOf('Now the fix.')).toBeLessThan(flat.indexOf('Edited 2 files'))
+    // The narration is the reply's prose, not a row of the activity.
+    expect(html).toMatch(/data-find-text[^>]*>[\s\S]*Now the fix\./)
+  })
+
+  it('is titled with its latest thought when it holds only thoughts', () => {
+    const html = render([user, thought('t1', 'Look around', 'output-available'), thought('t2', 'Check the order', 'output-available')], 'streaming')
+    expect(text(html)).toContain('Check the order')
   })
 })
 
 describe('a finished turn', () => {
-  const reply = (id: string, said: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text: said }] })
   const turn = [
     user,
     reply('n1', 'Checking the start script first.'),
@@ -92,17 +125,18 @@ describe('a finished turn', () => {
       .map((piece) => piece.trim())
       .filter((piece) => piece && !piece.includes('turn-answer'))
 
-  it('ends on its answer, with its notes and the activity after it folded into one group above it', () => {
+  it('shows the prompt, one "Worked for" line that opens the work, and the answer', () => {
     const html = render(turn, 'ready')
-    // The group is titled from its latest thought and collapsed: the note is inside it, not shown.
-    expect(rows(html)).toEqual(['Nothing else to check', 'The app starts on port 3000.'])
+    expect(rows(html)).toEqual(['The app starts on port 3000.'])
+    expect(html).toMatch(/<button[^>]*class="turn-work-label turn-work-toggle"[^>]*aria-expanded="false"/)
+    expect(text(html)).toMatch(/Worked( for)?/)
   })
 
   it('keeps the order things happened in while the turn still runs, the live line last', () => {
     const html = render(turn, 'streaming')
     expect(rows(html)).toEqual([
       'Checking the start script first.',
-      'The script is fine',
+      'Ran 1 command',
       'The app starts on port 3000.',
       'Nothing else to check',
       'Thinking…'

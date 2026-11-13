@@ -1268,6 +1268,14 @@ describe('CodexAdapter', () => {
       expect(decide(managed)).toMatchObject({ action: 'pause', pause: { until: resetsAt, estimated: false } })
     })
 
+    it('a provider refusal shows its status and message on a plain Codex; a usage limit still pauses', async () => {
+      const refused = await turn(failing(new CodexTurnFailure('unexpected status 400 Bad Request: {"error":{"message":"Invalid value for \'tools\'"}}, url: http://127.0.0.1:9841/v1/responses', { message: 'x', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 400 } } })), false)
+      expect(refused).toMatchObject({ code: 'provider_api_error', message: "400 · Invalid value for 'tools'" })
+      expect(decide(refused)).toBeUndefined()
+      const limited = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, new CodexTurnFailure('Too many requests', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }))), false)
+      expect(decide(limited)).toMatchObject({ action: 'pause' })
+    })
+
     it('a managed Codex failure that is not a usage limit does not pause', async () => {
       const overloaded = new CodexTurnFailure('Overloaded', { message: 'Overloaded', codexErrorInfo: 'serverOverloaded' })
       const managed = await turn(failing(overloaded), true)
@@ -2307,6 +2315,52 @@ describe('a bot turn on Codex', () => {
     await adapter.startTurn(input({ prompt: 'one', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
     await adapter.startTurn(input({ prompt: 'two', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
     replay.assertDone()
+  })
+
+  it("a bot's dispatch whose system text changed (an Allow) starts a new Codex thread under the new text, with the history in its prompt", async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const setup = (id: number) => [
+      out({ id, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id, result: { config: { mcp_servers: {} }, layers: [] } })
+    ]
+    const before = 'Your name is Pip.\n\nWhat your owner allows now: your files folder.'
+    const after = 'Your name is Pip.\n\nWhat your owner allows now: your files folder, and the web.'
+    const replay = transport([
+      ...handshake(),
+      ...setup(4),
+      ...threadStart(5, threadParams({ developerInstructions: before })),
+      ...turnStart(6, 'one'),
+      ...message('msg-1', ['one']),
+      completed('completed'),
+      // The same system text: the loaded thread goes on.
+      ...setup(7),
+      ...turnStart(8, 'two', 'turn-2'),
+      ...message('msg-2', ['two'], 'turn-2'),
+      completed('completed', 'turn-2'),
+      // The owner allowed the web: the system text changed. The loaded thread, which keeps its old developer instructions,
+      // is let go, and a new one starts under the new text, never with the old permissions as its system text.
+      ...setup(9),
+      out({ id: 10, method: 'thread/unsubscribe', params: { threadId: T } }),
+      inn({ id: 10, result: { status: 'unsubscribed' } }),
+      out({ id: 11, method: 'thread/start', params: threadParams({ developerInstructions: after }) }),
+      inn({ id: 11, result: threadResult('thr-2') }),
+      out({ id: 12, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+two\n\nCurrent request:\nthree'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      inn({ id: 12, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
+      note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),
+      note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-3', status: 'completed', error: null } })
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    const withText = (sessionInstructions: string): AdapterHost => ({ ...host(), bridge: { ...host().bridge!, sessionInstructions }, bot: bot as never })
+    await adapter.startTurn(input({ prompt: 'one', nativeHistory: '' }), recordingSink(), control(), withText(before))
+    await adapter.startTurn(input({ prompt: 'two', nativeHistory: 'history+one' }), recordingSink(), control(), withText(before))
+    const third = await adapter.startTurn(input({ prompt: 'three', nativeHistory: 'history+two' }), recordingSink(), control(), withText(after))
+    replay.assertDone()
+    expect(third).toMatchObject({ text: 'three', providerRef: { sessionId: 'thr-2' } })
+    const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { codexThreadId: string; instructionsHash?: string }> }
+    expect(saved.threads['thread-1']).toMatchObject({ codexThreadId: 'thr-2', instructionsHash: expect.any(String) })
   })
 
   /** A real bot authority over its files folder, a folder it may change and one it may read. */

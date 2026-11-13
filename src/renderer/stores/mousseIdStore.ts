@@ -153,8 +153,9 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     const deviceName = (await window.mousse.app?.getInfo().catch(() => undefined))?.deviceName?.trim() || 'My device'
     let net = get().net
     // A computer with no network identity yet signs in first: it then joins the account's other
-    // computers, or creates the network when it is the account's first computer.
-    const joining = !net?.self
+    // computers, or creates the network when it is the account's first computer. A computer that
+    // was removed from its devices does the same: the daemon sets its old identity aside first.
+    const joining = !net?.self || !!net.self.removed
     if (!joining && mousseIdPreparation(net) === 'automatic') {
       try {
         net = await prepareNetworking(net, deviceName)
@@ -194,7 +195,7 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
           }
           // A Mousse ID without the join sign-in: create this computer's own network first.
           if (!joining || errorCode(cause) !== 'forbidden') throw cause
-          net = await prepareNetworking(net, deviceName)
+          net = await prepareNetworking(net?.self?.removed ? undefined : net, deviceName)
           if (get().profileId === profileId) set({ net })
           return request<PendingSignIn>('net.plus.login.begin', { ...begin, bindRoot: !!net.self?.isAuthority })
         })

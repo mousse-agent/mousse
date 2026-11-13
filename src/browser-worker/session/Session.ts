@@ -846,6 +846,8 @@ export class ManagedSession {
     const input = validateBrowserHumanInput(params.input)
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
     const cdp = this.requireChrome().cdp
+    // A tab in the back takes no input in a browser without a window (the event never completes): it comes forward first.
+    await this.toFront(tab)
     if (input.kind === 'navigate') await navigateAndWaitForLoad(cdp, tab.cdpSessionId, input.url, 15_000, signal)
     else if (input.kind === 'back' || input.kind === 'forward' || input.kind === 'reload') {
       await dispatchAction(cdp, tab.cdpSessionId, { type: input.kind }, undefined, signal)
