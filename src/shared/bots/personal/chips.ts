@@ -158,7 +158,8 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'use_model': return { kind: 'model', icon: 'think', live: 'switching models' }
     case 'consult': {
       const context = str(args.context)
-      return { kind: 'consult', icon: 'think', live: 'checking with', ...(context ? { detail: shortChipText(context, 30) } : {}) }
+      // A context thread is the bot's own knowledge of a topic: it looks into it, never "checks with" someone.
+      return { kind: 'consult', icon: 'think', live: 'looking into', ...(context ? { detail: shortChipText(context, 30) } : {}) }
     }
     case 'skill':
     case 'load_skill': {
@@ -174,10 +175,10 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'shell': return { kind: 'tool', icon: 'think', live: 'running a command' }
     // A picture on the Images row's model (#1088), never the model's name.
     case 'make_image': return { kind: 'picture', icon: 'think', live: 'making a picture' }
-    // The chat's work and reminders (docs/plans/bot-always-free.md).
+    // The chat's work and reminders (docs/plans/bot-always-free.md), worded as the bot's own doing: never a hand-off.
     case 'work_start': return { kind: 'work', icon: 'think', live: 'starting on it' }
-    case 'work_stop': return { kind: 'work_stop', icon: 'think', live: 'stopping work' }
-    case 'work_note': return { kind: 'work_note', icon: 'think', live: 'passing it on' }
+    case 'work_stop': return { kind: 'work_stop', icon: 'think', live: 'stopping' }
+    case 'work_note': return { kind: 'work_note', icon: 'think', live: 'noting it' }
     case 'work_list': return { kind: 'work_look', icon: 'think', live: 'checking on its work' }
     case 'work_models': return { kind: 'work_look', icon: 'think', live: 'looking at your models' }
     case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
@@ -252,8 +253,18 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
         ...(name ? { title: workModelDetail({ name, entry: str(model.entry) ?? '', ...(effort ? { effort } : {}) }) } : {})
       }
     }
-    case 'work_stop': return result.result === 'stopped' ? { icon: 'think', text: 'stopped work' } : null
-    case 'work_note': return result.result === 'noted' ? { icon: 'think', text: 'passed on your note' } : null
+    // The job's title, as on "started": "stopped · SSD search".
+    case 'work_stop': {
+      if (result.result !== 'stopped') return null
+      const title = str(result.title)
+      return { icon: 'think', text: 'stopped', ...(title ? { highlight: shortChipText(title, 40) } : {}) }
+    }
+    // An acknowledgement under the reply, which says what changes; the job it is for on hover.
+    case 'work_note': {
+      if (result.result !== 'noted') return null
+      const title = str(result.title)
+      return { icon: 'think', text: 'noted', ...(title ? { title: `For ${shortChipText(title, 60)}` } : {}) }
+    }
     case 'remind': {
       const label = str(result.label)
       return { icon: 'schedule', text: 'reminder', ...(label ? { highlight: label } : {}) }
@@ -299,7 +310,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'save': return chip(n === 1 ? 'saved a file' : `saved ${n} files`, listed(details))
     case 'draft': return chip('worked on a draft')
     case 'lookback': return chip('looked back', n === 1 ? details[0] : String(n))
-    case 'consult': return chip('checked with', listed(details))
+    case 'consult': return chip('looked into', listed(details))
     case 'skill': return chip(details.length ? 'used a skill' : 'looked at its skills', listed(details))
     case 'tool': return chip(details.length ? 'used a tool' : 'ran a command', listed(details))
     case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
