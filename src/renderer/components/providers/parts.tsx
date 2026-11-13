@@ -304,15 +304,18 @@ export function EditorSection({
   title,
   action,
   description,
+  anchor,
   children
 }: {
   title: ReactNode
   action?: ReactNode
   description?: ReactNode
+  /** Where a settings search result lands (lib/settingsSearch.ts). */
+  anchor?: string
   children: ReactNode
 }) {
   return (
-    <section className="settings-group prov-editor-section">
+    <section className="settings-group prov-editor-section" data-settings-anchor={anchor}>
       <div className="settings-group-head">
         <div className="settings-group-head-text">
           <h3 className="settings-group-title">{title}</h3>

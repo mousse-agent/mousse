@@ -1,4 +1,4 @@
-import { COMMANDS, commandAllowedInContext, type CommandContext, type CommandId } from '../../shared/commands'
+import { COMMANDS_IN_DISPLAY_ORDER, commandAllowedInContext, type CommandContext, type CommandId } from '../../shared/commands'
 import { visibleThreads } from '../../shared/threadLineage'
 import { isThreadStarted } from '../../shared/threadTitle'
 import type { Project, Thread, ThreadSearchResult } from '../../shared/types'
@@ -36,7 +36,7 @@ export interface PaletteGroup {
  * The palette toggle itself and display-only entries are never listed.
  */
 export function eligibleCommands(ctx: CommandContext, isRegistered: (id: CommandId) => boolean): PaletteItem[] {
-  return COMMANDS.filter(
+  return COMMANDS_IN_DISPLAY_ORDER.filter(
     (command) => !command.fixed && command.id !== 'palette.open' && isRegistered(command.id) && commandAllowedInContext(command, ctx)
   ).map((command) => ({
     kind: 'command',

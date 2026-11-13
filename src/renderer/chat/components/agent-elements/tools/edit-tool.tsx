@@ -17,7 +17,9 @@ import { openTurnInChanges } from "../../../../components/changes/openChanges";
 import { useAppStore } from "../../../../stores/appStore";
 import { lazyNamed } from "../../../../lib/lazyComponent";
 import { TurnIdContext } from "../turn-context";
-import { ToolStateIcon } from "./tool-icon";
+import { NO_ROW_INFO, RecoveredFailureMark, ToolRowContext, ToolRowTime, ToolStateIcon, useToolRowInfo } from "./tool-icon";
+
+const RECOVERED_ONLY = { recovered: true };
 
 /** What one file's diff is drawn from. */
 export type DiffSource =
@@ -292,9 +294,11 @@ function EditLine({
 }) {
   const isPending = status === "pending";
   const isFailed = status === "failed";
+  // A failure the agent got past stays grey: only its icon dims toward red, with a small ×.
+  const { at, recovered = false } = useToolRowInfo();
   const text = (
     <>
-      <span className={cn("font-[450] shrink-0 whitespace-nowrap", isFailed && "text-red-400")}>{label}</span>
+      <span className={cn("font-[450] shrink-0 whitespace-nowrap", isFailed && !recovered && "text-red-400")}>{label}</span>
       {name &&
         (isFileName ? (
           <span className="an-edit-row-name min-w-0 truncate font-mono font-medium text-[13px] text-an-foreground">{name}</span>
@@ -306,7 +310,7 @@ function EditLine({
   return (
     <div className="an-edit-row flex flex-col min-w-0" data-status={status}>
       {/* The hover group is the line alone, so hovering a call's line does not show the actions of the file rows under it. */}
-      <div className="an-tool-chrome group/edit-line flex items-center gap-1 min-w-0">
+      <div className="an-tool-chrome an-tool-row-line group/edit-line flex items-center gap-1 min-w-0">
         <button
           type="button"
           className={cn(
@@ -328,6 +332,7 @@ function EditLine({
             text
           )}
           {!isPending && <Stat added={added} removed={removed} />}
+          {isFailed && recovered && <RecoveredFailureMark />}
           {canOpen && (
             <IconChevronRight
               aria-hidden="true"
@@ -341,8 +346,12 @@ function EditLine({
             {actions}
           </span>
         )}
+        <ToolRowTime at={at} />
       </div>
-      <Collapse open={open}>{children}</Collapse>
+      {/* File rows under the call keep its failure state but not its time. */}
+      <Collapse open={open}>
+        <ToolRowContext.Provider value={recovered ? RECOVERED_ONLY : NO_ROW_INFO}>{children}</ToolRowContext.Provider>
+      </Collapse>
     </div>
   );
 }

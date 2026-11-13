@@ -108,12 +108,21 @@ describe('Claude Subscription children', () => {
       seen.push({ hook, canUse })
       yield result
     })()
-    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    return Object.assign(generator, {
+      close: vi.fn(),
+      interrupt: vi.fn(async () => {}),
+      // The servers Claude Code is given, over its input (#358).
+      setMcpServers: vi.fn(async (servers: Record<string, unknown>) => {
+        registered.set(options, servers)
+        return { added: Object.keys(servers), removed: [], errors: {} }
+      })
+    }) as unknown as Query
   }
+  /** The servers each query was given over its input, by its options. */
+  const registered = new Map<Options, Record<string, unknown>>()
   const integrations: ClaudeTurnIntegrations = {
     mcpServers: { userserver: { type: 'stdio', command: 'user-mcp' } },
     proxiedServers: { oauthserver: { tools: [{ name: 'lookup' }], call: async () => ({ content: [], isError: false }) } as never },
-    env: {},
     toolRules: {},
     warnings: []
   }
@@ -153,8 +162,9 @@ describe('Claude Subscription children', () => {
    */
   const untouched = (turn: Options) => {
     for (const key of ['tools', 'disallowedTools', 'strictMcpConfig', 'settingSources']) expect(turn).not.toHaveProperty(key)
-    expect(turn.extraArgs).toEqual(CLAUDE_TURN_EXTRA_ARGS)
-    expect(Object.keys(turn.mcpServers ?? {})).toEqual(expect.arrayContaining(['mousse', 'userserver', 'oauthserver']))
+    // The user's own servers reach Claude Code through the pipe it reads at its start; the rest over its input (#358).
+    expect(turn.extraArgs).toEqual({ ...CLAUDE_TURN_EXTRA_ARGS, ...(process.platform === 'win32' ? {} : { 'mcp-config': '/dev/fd/3' }) })
+    expect(Object.keys(registered.get(turn) ?? {})).toEqual(expect.arrayContaining(['mousse', 'oauthserver', ...(process.platform === 'win32' ? ['userserver'] : [])]))
   }
 
   it('a shared child keeps the default permission mode and is denied writes, shell, external MCP tools and thread-writing tools, first and resumed', async () => {

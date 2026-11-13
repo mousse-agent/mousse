@@ -189,6 +189,27 @@ describe('Cursor behind the gateway', () => {
     expect(snapshot).toMatchObject({ driver: 'cursor', runs: { state: 'yes' }, binary: { source: 'bundled' }, auth: { state: 'signed_in', methodLabel: 'API key', canSignOut: true } })
   })
 
+  it('a run the provider refused shows its status and message, credentials removed; a refused key still asks for a sign-in', async () => {
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => fake.emit({ event: 'run_end', runId: 'run-1', status: 'error', error: { message: 'Model gpt-x is not available on your plan (key crsr_abcdefghijklmnopqrstuv)', status: 400 } }), 5)
+        return { runId: 'run-1' }
+      }
+    })
+    const { turn } = setup(host.connect)
+    await expect((await turn('thread')).result).rejects.toMatchObject({ code: 'provider_api_error', message: '400 · Model gpt-x is not available on your plan (key [redacted])', details: { provider: 'cursor', status: 400 } })
+    const refusedKey = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        setTimeout(() => fake.emit({ event: 'run_end', runId: 'run-1', status: 'error', error: { message: 'Invalid API key', code: 'unauthenticated', auth: true } }), 5)
+        return { runId: 'run-1' }
+      }
+    })
+    const second = setup(refusedKey.connect)
+    await expect((await second.turn('thread')).result).rejects.not.toMatchObject({ code: 'provider_api_error' })
+  })
+
   it('passes the key on every agent call, and a stop cancels a run whose send was still in flight', async () => {
     let releaseSend!: () => void
     const host = new FakeCursorHost({

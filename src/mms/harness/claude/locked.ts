@@ -297,7 +297,6 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
  */
 export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
   env: NodeJS.ProcessEnv
-  mcpServers: NonNullable<Options['mcpServers']>
   mousseTools: boolean
   spawn?: Options['spawnClaudeCodeProcess']
   home?: string
@@ -313,7 +312,9 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     plugins: [],
     // Only Mousse's own launch arguments; none of the user's.
     extraArgs: { ...CLAUDE_TURN_EXTRA_ARGS },
-    mcpServers: input.mcpServers,
+    // None on the command line, where any local process reads them: Mousse's own server, the only one a locked turn
+    // has, is registered over Claude Code's input once it starts (`registerClaudeMcpServers`, #358).
+    mcpServers: {},
     tools,
     disallowedTools,
     permissionMode: 'default',

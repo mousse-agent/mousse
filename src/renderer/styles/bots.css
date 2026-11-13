@@ -101,6 +101,27 @@
 @media (prefers-reduced-motion: reduce) { .chat-participant-message.is-shown { animation: none; } .bot-reply-button { transition: none; } }
 .bot-you-files { display: flex; flex-wrap: wrap; gap: 6px; }
 .bot-file-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 8px; font-size: var(--bot-meta, 12.5px); line-height: 18px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+/* Pictures (BotImages.tsx), as a messaging app shows them: rounded thumbnails in fixed boxes, so nothing moves when one
+   loads. One alone is large; two or four sit in a square grid; three put the first across the top. */
+.bot-images { --thumb: 150px; display: grid; grid-template-columns: repeat(2, var(--thumb)); gap: 4px; }
+.bot-images[data-count='1'] { grid-template-columns: 260px; }
+.bot-images[data-count='3'] > :first-child { grid-column: span 2; }
+.bot-image { position: relative; display: block; height: var(--thumb); padding: 0; overflow: hidden; border-radius: 12px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+.bot-images[data-count='1'] > .bot-image { height: 195px; }
+.bot-image.is-inline { display: inline-block; width: 260px; height: 180px; margin: 6px 0; vertical-align: top; }
+button.bot-image { cursor: zoom-in; }
+button.bot-image:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bot-image > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.bot-image.is-failed { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 8px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); text-align: center; }
+.bot-image.is-inline.is-failed { display: inline-flex; }
+.bot-image.is-failed > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-message-files { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+/* A web image is never loaded (it would tell its server who read the chat): a quiet link opens it in the browser. */
+.bot-image-link, .chat-markdown a.bot-image-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 9px; border-radius: 8px; font-size: var(--bot-meta, 12.5px); line-height: 20px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); text-decoration: none; vertical-align: middle; }
+/* An image that can't be shown at all (an SVG, an unknown kind): only its name, without the link's tint. */
+.bot-image-link.is-blocked { padding-inline: 0; background: none; opacity: .75; }
+.bot-image-link > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-markdown a.bot-image-link:hover, a.bot-image-link:hover { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 15%, transparent); }
 .bot-loading-older { text-align: center; }
 /* The chat's first load: a quiet line in the middle, or what failed with Retry. */
 .bot-conversation .chat-transcript > .bot-load-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 100%; font-size: var(--bot-meta); color: var(--text-secondary); }

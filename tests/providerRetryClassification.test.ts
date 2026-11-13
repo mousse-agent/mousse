@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { boundedResetIso, estimatedReset, normalizeProviderError, readUsageLimit, usageLimitError } from '../src/mms/orchestrator/providerErrors'
+import { boundedResetIso, estimatedReset, normalizeProviderError, providerApiError, providerReportedError, PROVIDER_MESSAGE_CHARS, readProviderStatus, readUsageLimit, usageLimitError } from '../src/mms/orchestrator/providerErrors'
+import { assertAssistantResponseSucceeded } from '../src/mms/harness/drivers/pi/stream'
+import { classifyProviderFailure } from '../src/mms/agentDefinitions/runtimeFallback'
 import { serializeAppError } from '../src/shared/errors'
 import { APIConnectionError, InternalServerError } from '@anthropic-ai/sdk'
 
@@ -179,4 +181,87 @@ describe('provider error classification', () => {
       expect(normalizeProviderError({ status: 429, message })).toMatchObject({ code: 'provider_quota_exceeded', errorInfo: { retryable: false } })
       expect(normalizeProviderError(message)).toMatchObject({ code: 'provider_quota_exceeded', errorInfo: { retryable: false } })
     })
+})
+
+describe('a provider refusal a runtime reports as text', () => {
+  it('keeps the provider\'s status and message, not a generic line', () => {
+    const error = providerApiError('API Error: 400 messages.3.content.0: tool_use ids were found without tool_result blocks', 'claude')!
+    expect(error).toMatchObject({ code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', errorInfo: { category: 'invalid', retryable: false } })
+    expect(serializeAppError(error).details).toMatchObject({ provider: 'claude', status: 400, supportId: expect.stringMatching(/^[0-9a-f-]{36}$/) })
+  })
+
+  it('reads the message of a JSON body', () => {
+    const error = providerApiError('API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_1"}')!
+    expect(error.message).toBe('500 · Internal server error')
+    expect(error.errorInfo).toEqual({ category: 'unavailable', retryable: false })
+  })
+
+  it('trims the text, removes credentials and cuts a long message', () => {
+    const error = providerApiError(`API Error: 401   Invalid  key sk-ant-api03-abcdefghijklmnop\n${'x'.repeat(900)}`)!
+    expect(error.message.startsWith('401 · Invalid key [redacted] x')).toBe(true)
+    expect(error.message.length).toBeLessThanOrEqual(PROVIDER_MESSAGE_CHARS + 6)
+    expect(error.message.endsWith('…')).toBe(true)
+    expect(error.errorInfo.category).toBe('denied')
+  })
+
+  it('is undefined for any other text', () => {
+    expect(providerApiError('API Error: Connection error.')).toBeUndefined()
+    expect(providerApiError('Claude Code turn failed')).toBeUndefined()
+  })
+
+  it('keeps a rate limit classified as one for fallbacks', () => {
+    expect(classifyProviderFailure(providerApiError('API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Too many tokens per minute"}}'))).toBe('rate_limit')
+  })
+})
+
+describe('a provider refusal on the Pi runtime and its API routes', () => {
+  it('a 400 with a JSON body shows the provider\'s status and message, keeping its classification', () => {
+    const error = normalizeProviderError('400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 99999999 > 64000, which is the maximum allowed"}}', 'anthropic')
+    expect(error).toMatchObject({ code: 'provider_request_invalid', message: '400 · max_tokens: 99999999 > 64000, which is the maximum allowed', errorInfo: { category: 'invalid', retryable: false } })
+    expect(serializeAppError(error).details).toMatchObject({ provider: 'anthropic', status: 400, supportId: expect.any(String) })
+  })
+
+  it('reads pi-ai\'s labelled form and the status the host captured', () => {
+    expect(normalizeProviderError('xai API error (400): Model grok-x does not support images', 'xai').message).toBe('400 · Model grok-x does not support images')
+    const assistant = { role: 'assistant', stopReason: 'error', errorMessage: '{"error":{"message":"The model `gpt-x` does not exist or you do not have access to it."}}', provider: 'openai' } as never
+    expect(() => assertAssistantResponseSucceeded(assistant, { status: 404 })).toThrow(expect.objectContaining({ code: 'provider_request_invalid', message: '404 · The model `gpt-x` does not exist or you do not have access to it.' }))
+  })
+
+  it('a 403 keeps its kind and shows the provider\'s message', () => {
+    expect(normalizeProviderError({ status: 403, message: '403 Your organization is not allowed to use this model.' }, 'openai'))
+      .toMatchObject({ code: 'provider_permission_denied', message: '403 · Your organization is not allowed to use this model.', errorInfo: { category: 'denied' } })
+  })
+
+  it('removes credentials and cuts a long message', () => {
+    const error = normalizeProviderError(`400 Bad key sk-or-v1-abcdefghijklmnopqrstuvwxyz0123 ${'y'.repeat(900)}\nAuthorization: Bearer abc.def.ghi`, 'openrouter')
+    expect(error.message).not.toMatch(/sk-or|abc\.def/)
+    expect(error.message.length).toBeLessThanOrEqual(PROVIDER_MESSAGE_CHARS + 6)
+    expect(error.message.endsWith('…')).toBe(true)
+  })
+
+  it('keeps sign-in, usage-limit, retry and overflow paths', () => {
+    expect(normalizeProviderError({ status: 401, message: '401 invalid x-api-key' })).toMatchObject({ code: 'provider_auth_invalid', message: 'Provider authentication failed. Check your provider connection.' })
+    const limit = normalizeProviderError({ status: 429, message: '429 rate limited', headers: { get: () => '3600' } }, 'openai')
+    expect(readUsageLimit(limit)).toMatchObject({ provider: 'openai', estimated: false })
+    expect(normalizeProviderError({ status: 503, message: '503 upstream' })).toMatchObject({ code: 'provider_unavailable', errorInfo: { retryable: true } })
+    expect(normalizeProviderError({ status: 400, message: '400 prompt is too long: 250000 tokens' })).toMatchObject({ code: 'provider_context_overflow' })
+  })
+})
+
+describe('the status forms runtimes report a refusal in', () => {
+  it.each([
+    ['API Error: 400 bad', 400, 'bad'],
+    ['unexpected status 400 Bad Request: bad, url: http://x/v1/responses, request id: r1', 400, 'bad'],
+    ['[API Error: got status: 429 Too Many Requests. {"error":{"message":"Resource exhausted"}}]', 429, '{"error":{"message":"Resource exhausted"}}'],
+    ['openai API error (404): no such model', 404, 'no such model'],
+    ['HTTP 502: Bad gateway', 502, 'Bad gateway']
+  ])('%s', (text, status, body) => {
+    expect(readProviderStatus(text)).toEqual({ status, body })
+  })
+
+  it('a reported failure without a status shows its message alone; an ACP label is dropped', () => {
+    expect(providerReportedError('Internal error: API Error: 400 {"error":{"message":"tool_use ids were found without tool_result blocks"}}')).toMatchObject({ code: 'provider_api_error', message: '400 · tool_use ids were found without tool_result blocks' })
+    expect(providerReportedError('  rate limit   reached ', { provider: 'grok' })).toMatchObject({ message: 'rate limit reached', errorInfo: { category: 'unavailable', retryable: false } })
+    expect(providerReportedError('Model not available', { status: 400 })).toMatchObject({ message: '400 · Model not available' })
+  })
 })

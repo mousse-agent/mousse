@@ -251,6 +251,14 @@ describe('background agents, plans and stopped turns', () => {
     expect(saved(events).byCall('bg')).toMatchObject({ kind: 'subagent', status: 'done', background: true, nativeId: 't9', durationMs: 7000, summary: 'Agent "Background" completed' })
   })
 
+  it("an agent's Markdown report keeps its line breaks on the row", () => {
+    const report = '## Findings\r\n\r\n- tool_running  \n- streaming\n\n\n\n- compacting\n'
+    const events = readFrames([...launch, { ...notify('completed'), summary: report }])
+    const summary = '## Findings\n\n- tool_running\n- streaming\n\n- compacting'
+    expect(completeOf(events, 'bg')?.activity).toMatchObject({ summary })
+    expect(saved(events).byCall('bg')).toMatchObject({ summary })
+  })
+
   it('a failed or stopped notification closes the row failed or interrupted', () => {
     expect(saved(readFrames([...launch, notify('failed')])).byCall('bg')).toMatchObject({ status: 'failed' })
     expect(saved(readFrames([...launch, notify('stopped')])).byCall('bg')).toMatchObject({ status: 'interrupted', interruptedBy: 'stop' })

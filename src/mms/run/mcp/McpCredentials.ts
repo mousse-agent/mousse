@@ -237,8 +237,10 @@ export class McpCredentials {
   }
 
   /**
-   * A new runtime epoch for (thread, instance): its process or session was replaced, it crashed or was
-   * terminated, or its turn could not be proven drained. Revokes the epoch's credentials at once.
+   * A new credential epoch for (thread, instance): its process or session was replaced, it crashed or was
+   * terminated, its turn failed or could not be proven drained, or its generation changed. Revokes the epoch's
+   * credentials at once. The runtime need not be replaced: Claude Code keeps its process and takes the new
+   * bearer over its input when the tools it may see are unchanged (SPEC §15.1, #358).
    */
   bumpEpoch(threadId: string, instanceId: string): number {
     return this.db.transaction(() => this.bump(threadId, instanceId))

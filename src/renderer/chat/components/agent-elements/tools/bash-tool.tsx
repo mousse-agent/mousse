@@ -13,6 +13,7 @@ import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
 import { bashOutputLines } from "../utils/bash-output";
 import { CopyIconButton } from "./copy-icon-button";
 import { ToolRowBase } from "./tool-row-base";
+import { useToolRowInfo } from "./tool-icon";
 
 export type BashToolRowProps = {
   step: Extract<TimelineStep, { type: "tool-call" }>;
@@ -69,6 +70,8 @@ export function BashToolRow({
   const hasExitCode = typeof step.bashExitCode === "number";
   const exitFailed = hasExitCode && step.bashExitCode !== 0;
   const failed = isError && !isInterrupted;
+  // A failure the agent got past is quiet on the collapsed row (a dim icon and ×, ToolRowBase): no red exit code there.
+  const { recovered = false } = useToolRowInfo();
 
   // While the command runs the output follows its tail, unless the user scrolled up.
   const outputRef = useRef<HTMLDivElement | null>(null);
@@ -106,14 +109,14 @@ export function BashToolRow({
         detail={summary || undefined}
         detailTitle={summary || undefined}
         detailClassName={cn("an-bash-row-command text-[13px]", MONO)}
-        badge={exitFailed && !expanded ? (
+        badge={exitFailed && !expanded && !recovered ? (
           <span className="text-[12.5px] text-[var(--danger)]">exit {step.bashExitCode}</span>
         ) : undefined}
         expandable={hasBody}
         expanded={expanded}
         onToggleExpand={() => setExpanded((open) => !open)}
       >
-        <div className={cn("an-bash-body rounded-md bg-an-tool-background px-2.5 py-2 text-[12px] leading-[17px]", MONO)}>
+        <div className={cn("an-bash-body rounded-md bg-an-tool-background px-2.5 py-2 text-[13px] leading-[20px]", MONO)}>
           {command && (
             <div className="flex items-start gap-1">
               <div className="flex-1 min-w-0 max-h-[160px] overflow-y-auto break-words whitespace-pre-wrap">
@@ -139,7 +142,10 @@ export function BashToolRow({
               <div
                 ref={outputRef}
                 onScroll={handleOutputScroll}
-                className="an-bash-output flex-1 min-w-0 text-an-tool-color-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto"
+                className={cn(
+                  "an-bash-output flex-1 min-w-0 text-an-tool-color-muted whitespace-pre-wrap break-words max-h-[320px] overflow-y-auto",
+                  MONO,
+                )}
               >
                 {bashOutputLines(step.bashOutput).map((line, index) => (
                   <span key={index} className={cn(line.failed && "text-[var(--danger)]")}>
@@ -152,12 +158,12 @@ export function BashToolRow({
             </div>
           )}
           {(hasExitCode || typeof step.bashDurationMs === "number" || isInterrupted) && (
-            <div className="mt-1.5 flex gap-2 font-sans text-[11px] text-an-tool-color-muted">
+            <div className="an-bash-exit mt-1.5 flex gap-3 text-an-tool-color-muted">
               {hasExitCode && (
                 <span className={cn(exitFailed && "text-[var(--danger)]")}>exit {step.bashExitCode}</span>
               )}
               {typeof step.bashDurationMs === "number" && <span>{formatDuration(step.bashDurationMs)}</span>}
-              {isInterrupted && <span>{step.bashSummary ?? "Interrupted"}</span>}
+              {isInterrupted && <span className="font-sans">{step.bashSummary ?? "Interrupted"}</span>}
             </div>
           )}
         </div>

@@ -8,6 +8,7 @@ import {
 } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
 import { ImageLightbox } from "../image-lightbox";
+import { useImageGallery } from "../image-gallery";
 
 export type FileAttachmentProps = {
   id: string;
@@ -121,6 +122,8 @@ export function FileAttachment({
   enableImagePreview = true,
 }: FileAttachmentProps) {
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  // Among other attachments (the composer's), the preview steps through all of them.
+  const gallery = useImageGallery();
   const iconName = getFileIconName(filename, isImage);
   // Image attachments with a renderable preview (pasted screenshots, dragged
   // images) render as a bare thumbnail — the auto-generated filename
@@ -132,7 +135,8 @@ export function FileAttachment({
   const openLightbox = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    setIsLightboxOpen(true);
+    if (gallery && url) gallery.open({ id, url, filename });
+    else setIsLightboxOpen(true);
   };
 
   return (
@@ -218,7 +222,7 @@ export function FileAttachment({
         </button>
       )}
 
-      {canPreview && url && (
+      {canPreview && url && !gallery && (
         <ImageLightbox
           open={isLightboxOpen}
           onClose={() => setIsLightboxOpen(false)}

@@ -1,8 +1,12 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { flushSync } from "react-dom";
 import type { UIMessage } from "ai";
+import { FIND_REVEAL_EVENT } from "./find/reveal";
 import { cn } from "./utils/cn";
 import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
+import { useImageGallery } from "./image-gallery";
+import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 
@@ -27,49 +31,6 @@ function isTextPart(part: MessagePart): part is { type: "text"; text: string } {
     part.type === "text" &&
     typeof (part as { text?: unknown }).text === "string"
   );
-}
-
-/** The file name an attached image part carries, if any. */
-function getImageNameFromPart(part: unknown): string | undefined {
-  if (!isRecord(part)) return undefined;
-  const name = part.filename ?? part.name ?? part.fileName;
-  return typeof name === "string" && name.trim() ? name : undefined;
-}
-
-function getImageUrlFromPart(part: unknown): string | null {
-  if (!isRecord(part)) return null;
-  const type = part.type;
-  if (typeof type !== "string") return null;
-
-  if (type === "image") {
-    const imagePart = part as { url?: string; image?: string };
-    return imagePart.url ?? imagePart.image ?? null;
-  }
-
-  if (type === "data-image") {
-    const dataPart = part as { data?: { url?: string } };
-    return dataPart.data?.url ?? null;
-  }
-
-  if (type === "file") {
-    const filePart = part as {
-      mimeType?: string;
-      mediaType?: string;
-      url?: string;
-      data?: string;
-    };
-    // The adapter emits AI SDK standard `mediaType`; be lenient and accept
-    // legacy `mimeType` too.
-    const mimeType = filePart.mimeType ?? filePart.mediaType;
-    if (mimeType?.startsWith("image/")) {
-      if (filePart.url) return filePart.url;
-      if (filePart.data) {
-        return `data:${mimeType};base64,${filePart.data}`;
-      }
-    }
-  }
-
-  return null;
 }
 
 type FilePart = {
@@ -105,16 +66,59 @@ function getFileFromPart(part: unknown) {
   };
 }
 
+/** A long prompt shows this much (px) until "Show full message" is pressed. */
+export const PROMPT_FOLD_HEIGHT = 176;
+
+/**
+ * True when the element's text is at least twice the fold height, so folding it hides enough to matter.
+ *
+ * Measured in the resize observer's callback only, never while React commits: reading a size during a
+ * commit lays out the transcript half-way through a move of the turn window (the previous window's
+ * spacers still in place), and the browser clamps the scroll position to that layout, undoing a jump
+ * such as Find's to the last turn. The observer reports every element once it is observed, before the
+ * frame is painted, and the fold is applied in that same frame.
+ */
+function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string): boolean {
+  const [tall, setTall] = useState(false);
+  const tallRef = useRef(false);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const next = element.scrollHeight >= PROMPT_FOLD_HEIGHT * 2;
+      if (next === tallRef.current) return;
+      tallRef.current = next;
+      flushSync(() => setTall(next));
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref, text]);
+  return tall;
+}
+
 export const UserMessage = memo(function UserMessage({
   message,
   className,
   enableImagePreview = true,
 }: UserMessageProps) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const gallery = useImageGallery();
+  const [expanded, setExpanded] = useState(false);
+  const textRef = useRef<HTMLParagraphElement>(null);
   const textParts = message.parts?.filter(isTextPart) ?? [];
   const text = textParts.map((p) => p.text).join("");
+  const foldable = useTallEnoughToFold(textRef, text);
+  const folded = foldable && !expanded;
+  // Find landing on a match in the folded part opens the prompt, so the match is not hidden under the fold.
+  useEffect(() => {
+    const element = textRef.current;
+    if (!element || !folded) return;
+    const open = () => setExpanded(true);
+    element.addEventListener(FIND_REVEAL_EVENT, open);
+    return () => element.removeEventListener(FIND_REVEAL_EVENT, open);
+  }, [folded]);
 
-  const images: Array<{ url: string; name?: string }> = [];
+  const images = userMessageImageTiles(message);
   const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
   const references: ChatReference[] = [];
   for (const part of message.parts ?? []) {
@@ -122,21 +126,8 @@ export const UserMessage = memo(function UserMessage({
       const reference = parseChatReference(part.data);
       if (reference) references.push(reference);
     }
-    const imageUrl = getImageUrlFromPart(part);
-    if (imageUrl) images.push({ url: imageUrl, name: getImageNameFromPart(part) });
     const file = getFileFromPart(part);
     if (file) files.push(file);
-  }
-  if (isRecord(message) && Array.isArray(message.experimental_attachments)) {
-    for (const att of message.experimental_attachments as Array<{
-      contentType?: string;
-      url?: string;
-      name?: string;
-    }>) {
-      if (att.contentType?.startsWith("image/") && att.url) {
-        images.push({ url: att.url, name: att.name || undefined });
-      }
-    }
   }
 
   if (!text && images.length === 0 && files.length === 0 && references.length === 0) return null;
@@ -145,15 +136,13 @@ export const UserMessage = memo(function UserMessage({
   const sentFromName = (message.metadata as { sentFrom?: { name?: unknown } } | undefined)?.sentFrom?.name;
   const sentFrom = typeof sentFromName === "string" && sentFromName ? sentFromName : undefined;
 
-  const lightboxImages = images.map(({ url, name }, i) => ({
-    id: `${message.id}-img-${i}`,
-    url,
-    filename: name ?? `Image ${i + 1}`,
-  }));
+  const lightboxImages = userMessageImages(message);
+  // In a conversation its one preview steps through all of the conversation's images; alone, through this prompt's.
+  const openImage = (i: number) => (gallery ? gallery.open(lightboxImages[i]!) : setLightboxIndex(i));
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
-      <div className="chat-user-bubble max-w-[calc(95%-40px)] ms-[70px] px-3.5 py-1.5 text-base rounded-an-message bg-an-user-message-bg text-an-user-message-text">
+      <div className="chat-user-bubble max-w-[80%] p-3 rounded-an-message bg-an-user-message-bg text-an-user-message-text">
       {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
         {images.map(({ url, name }, i) => {
           const label = name ?? `Image ${i + 1}`;
@@ -174,7 +163,7 @@ export const UserMessage = memo(function UserMessage({
               className={cn(tileClass, "cursor-pointer")}
               aria-label={name ? `Open ${name}` : `Open image ${i + 1}`}
               title={name}
-              onClick={() => setLightboxIndex(i)}
+              onClick={() => openImage(i)}
             >
               {image}
             </button>
@@ -185,7 +174,7 @@ export const UserMessage = memo(function UserMessage({
           );
         })}
       </div>}
-      {enableImagePreview && lightboxImages.length > 0 && (
+      {enableImagePreview && !gallery && lightboxImages.length > 0 && (
         <ImageLightbox
           open={lightboxIndex !== null}
           onClose={() => setLightboxIndex(null)}
@@ -213,13 +202,24 @@ export const UserMessage = memo(function UserMessage({
       )}
       {text && (
         <p
-          className="leading-6 whitespace-pre-wrap wrap-break-word"
+          ref={textRef}
+          className={cn("chat-user-text whitespace-pre-wrap wrap-break-word", folded && "is-folded")}
           data-find-text
           data-message-id={message.id}
           data-part-index="0"
         >
           {text}
         </p>
+      )}
+      {text && foldable && (
+        <button
+          type="button"
+          className="chat-user-fold"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "Show less" : "Show full message"}
+        </button>
       )}
       </div>
       {sentFrom && (

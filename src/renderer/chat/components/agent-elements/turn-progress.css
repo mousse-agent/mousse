@@ -21,10 +21,18 @@
 }
 
 .turn-progress-label {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* What the running call works on, after its label: dim, one line, cut at the end. */
+.turn-progress-detail {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 400;
+  color: color-mix(in srgb, var(--text-secondary) 55%, transparent);
 }
 
 /* Three small dots for a step that is not thinking (a tool running, a retry, a stop). They pulse one after another by

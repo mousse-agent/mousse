@@ -7,13 +7,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UIMessage } from 'ai'
 import { TurnEditSummary } from '../../src/renderer/chat/components/agent-elements/turn-edit-summary'
-import { AppearanceSettings } from '../../src/renderer/components/settings/AppearanceSettings'
+import { ChatSettings } from '../../src/renderer/components/settings/ChatSettings'
 import { setTurnChangedFiles } from '../../src/renderer/lib/turnChangedFilesSetting'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useChangesStore } from '../../src/renderer/stores/changesStore'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
-import { THEME_OPTIONS } from '../../src/shared/settings'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -106,7 +105,7 @@ describe('changed files after a turn', () => {
   })
 })
 
-describe('Settings > Appearance > Changed files after each turn', () => {
+describe('Settings > Chat > Changed files after each turn', () => {
   let home: string
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'mousse-turn-files-setting-')) })
   afterEach(() => rmSync(home, { recursive: true, force: true }))
@@ -114,14 +113,11 @@ describe('Settings > Appearance > Changed files after each turn', () => {
   it('saves the choice, and a fresh settings store reads it back', () => {
     const store = new SettingsStore(MousseConfigStore.load(home))
     const before = store.get().appearance
-    const drawSettings = () => act(() => root.render(createElement(AppearanceSettings, {
+    const drawSettings = () => act(() => root.render(createElement(ChatSettings, {
       settings: store.get(),
-      options: { themes: THEME_OPTIONS, accentColors: [], llmProviders: [], agentTypes: [] },
       onUpdate: async (partial) => { store.set(partial); drawSettings() },
-      restartRequired: false,
-      onRestart: () => undefined,
-      onPreviewAcrylicIntensity: () => undefined,
-      onCommitAcrylicIntensity: () => undefined
+      onPreviewFrostedComposer: () => undefined,
+      onCommitFrostedComposer: () => undefined
     })))
     drawSettings()
     const trigger = () => host.querySelector<HTMLButtonElement>('[aria-label="Changed files after each turn"]')!

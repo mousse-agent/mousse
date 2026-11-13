@@ -64,7 +64,9 @@ function render(messages: UIMessage[], status: Status, state: TurnProgressState 
 /** The last turn's header and the live line under it. */
 const header = () => [...host.querySelectorAll<HTMLElement>('.turn-work-label')].at(-1)?.textContent ?? null
 const line = () => host.querySelector<HTMLElement>('[data-turn-progress]')
-const lineText = () => line()?.textContent ?? ''
+/** The line's label; what a running call works on follows it, dim (`.turn-progress-detail`). */
+const lineText = () => line()?.querySelector('.turn-progress-label')?.textContent ?? ''
+const lineDetail = () => line()?.querySelector('.turn-progress-detail')?.textContent ?? null
 /** Reasoning rows and groups in the last turn, not the rows inside a group: their header buttons. */
 const reasoningRows = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].filter((button) => button.querySelector('svg.thinking-icon') && !button.closest('.an-tool-group-rows'))
 const reasoningRow = (title: string) => {
@@ -72,6 +74,9 @@ const reasoningRow = (title: string) => {
   if (!row) throw new Error(`no reasoning row ${title}: ${reasoningRows().map((button) => button.textContent).join(' | ')}`)
   return row
 }
+/** A group's header in the last turn, by the start of its title. */
+const groupHeader = (title: string) =>
+  [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].find((button) => !button.closest('.an-tool-group-rows') && button.textContent!.startsWith(title)) ?? null
 /** The live reasoning rows (a thought being written), as their one line of text. */
 const liveRows = () => [...host.querySelectorAll<HTMLElement>('.turn-answer svg.thinking-icon.is-thinking')]
   .filter((icon) => !icon.closest('[data-turn-progress]'))
@@ -192,10 +197,11 @@ describe('the line under Working', () => {
     render([ask(), reply('t1', thought('input-available', '**Reading**\n\nThe output says'))], 'streaming', { phase: 'thinking' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
     expect(host.querySelector('.turn-answer svg.thinking-icon.is-thinking')).not.toBeNull()
-    // A group's header titled with a thought neither, while its thought streams or its tool runs.
+    // Nor a group's header while a call in it runs: the header is still, the live line under it names the call.
     const first = reply('t1', { ...thought('output-available', '**Reading the test**\n\nIt starts both.'), toolCallId: 'th1' })
     render([ask(), first, reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], 'streaming', { phase: 'tool_running' })
-    expect(reasoningRow('Reading the test').querySelector('.an-text-shimmer--active')).toBeNull()
+    expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
+    expect(groupHeader('Ran 1 command')).not.toBeNull()
   })
 
   it('3. a thought being written is read out now and then, not with every word', () => {
@@ -242,33 +248,26 @@ describe('the line under Working', () => {
     expect(opened.indexOf('Checking the order')).toBeLessThan(opened.lastIndexOf('Planning the fix'))
   })
 
-  it('3. thoughts around a tool call group into one row: the live thought on its header, then the latest title', () => {
+  it('3. a thought written after calls stays out of their group: the group is a still summary, the thought the live line', () => {
     const first = reply('t1', { ...thought('output-available', '**Reading the test**\n\nIt starts both.'), toolCallId: 'th1' })
     const call = reply('c1', tool('Bash', 'output-available', { command: 'ls' }))
     const live = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier'), toolCallId: 'th2' })
     render([ask(), first, call, live], 'streaming', { phase: 'thinking' })
     expect(line()).toBeNull()
-    const header = reasoningRow('Thinking')
-    expect(header.textContent).toContain('Make A due earlier')
-    expect(header.getAttribute('aria-expanded')).toBe('false')
-    // Opened while the thought streams, the thought shows once: on its own row, not on the header too.
-    act(() => { header.click() })
-    // What shows: the panel without its screen-reader announcements.
-    const panel = header.parentElement!.cloneNode(true) as HTMLElement
-    for (const hidden of panel.querySelectorAll('.sr-only')) hidden.remove()
-    expect(panel.textContent!.split('Make A due earlier')).toHaveLength(2)
-    expect(header.textContent).not.toContain('Make A due earlier')
-    act(() => { header.click() })
+    const group = groupHeader('Ran 1 command')!
+    expect(group.getAttribute('aria-expanded')).toBe('false')
+    expect(group.textContent).not.toContain('Make A due earlier')
+    expect(liveRows()).toEqual(['Thinking Make A due earlier'])
     // The turn moves on to writing. The provider still marks the thought as streaming (it closes it at the turn's
-    // end), but with text after it it is done: the group stays, titled with its latest thought, still, and one row.
+    // end), but with text after it it is done: it joins the group, which keeps its title and stays one row.
     const still = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier.'), toolCallId: 'th2' })
     render([ask(), first, call, still, reply('a1', text('Fixed by'))], 'streaming', { phase: 'streaming' })
     expect(liveRows()).toEqual([])
-    expect(reasoningRows()).toHaveLength(1)
-    expect(reasoningRow('Planning the fix').getAttribute('aria-expanded')).toBe('false')
+    expect(reasoningRows()).toHaveLength(0)
+    expect(groupHeader('Ran 1 command')!.getAttribute('aria-expanded')).toBe('false')
     expectLive('Writing…')
-    act(() => { reasoningRow('Planning the fix').click() })
-    const opened = reasoningRow('Planning the fix').parentElement!.textContent!
+    act(() => { groupHeader('Ran 1 command')!.click() })
+    const opened = groupHeader('Ran 1 command')!.parentElement!.textContent!
     for (const piece of ['Reading the test', 'ls', 'Planning the fix']) expect(opened).toContain(piece)
   })
 
@@ -296,6 +295,9 @@ describe('the line under Working', () => {
     render([ask(), reply('c1', tool('Bash', 'input-available', { command: 'npm test -- --run slow.test.ts' }))], 'streaming', { phase: 'tool_running' })
     expectLive('Running Bash…')
     expect(line()!.title).toBe('npm test -- --run slow.test.ts')
+    // The command follows the label, dim; the call itself is folded into a still summary above the line.
+    expect(lineDetail()).toBe('npm test -- --run slow.test.ts')
+    expect(groupHeader('Ran 1 command')!.getAttribute('aria-expanded')).toBe('false')
   })
 
   it('5. while a steer waits for the command, the line still reads Running <tool>…, and its tooltip says when the steer goes in', () => {
@@ -563,5 +565,12 @@ describe('its animation', () => {
     expect(css).not.toMatch(/border-(left|right)|inset-inline|box-shadow/)
     const group = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-calls-group.tsx', 'utf8')
     expect(group).not.toMatch(/border-l\b/)
+  })
+
+  it('caps an open group at about 18rem, which scrolls on its own', () => {
+    const groupCss = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-calls-group.css', 'utf8')
+    const rule = groupCss.match(/\.an-tool-group-scroll\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(rule).toMatch(/max-height:\s*min\(18rem, 50dvh\)/)
+    expect(rule).toMatch(/overflow-y:\s*auto/)
   })
 })

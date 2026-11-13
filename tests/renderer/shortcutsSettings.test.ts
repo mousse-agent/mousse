@@ -2,10 +2,11 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { ShortcutsSettings, rowNotes, sectionScope } from '../../src/renderer/components/settings/ShortcutsSettings'
-import { shortcutGroups } from '../../src/renderer/commands/shortcutEditing'
+import { shortcutAnchor, shortcutGroups } from '../../src/renderer/commands/shortcutEditing'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { getDefaultSettings, type MousseSettings } from '../../src/shared/settings'
 import type { ShortcutOverrides } from '../../src/shared/commands'
+import { SHORTCUT_SEARCH_INDEX, searchIndex, searchSettings, type SettingsSearchPage } from '../../src/renderer/lib/settingsSearch'
 
 const globals = globalThis as { window?: unknown }
 const originalWindow = globals.window
@@ -26,7 +27,7 @@ const render = (shortcuts: ShortcutOverrides): string => {
 
 it('lists every group with the default shortcuts and no reset buttons', () => {
   const markup = render({})
-  for (const heading of ['Thread', 'View', 'Go', 'Surfaces', 'Model picker', 'Workflow editor', 'Editor']) expect(markup).toContain(heading)
+  for (const heading of ['Threads', 'Composer', 'View', 'Go', 'Surfaces', 'Model picker', 'Workflow editor', 'Editor']) expect(markup).toContain(heading)
   expect(markup).toContain('Ctrl+Shift+Backspace')
   expect(markup).toContain('Ctrl+Tab')
   expect(markup).not.toContain('Custom')
@@ -91,4 +92,43 @@ it('keeps a row note when its scope differs from its section', () => {
 
 it('spaces shortcut rows on the compact step of the shared scale', () => {
   expect(render({})).toContain('class="settings-group shortcuts-group"')
+})
+
+it('names the composer rows briefly; the palette keeps the long titles', () => {
+  const markup = render({})
+  expect(markup).toContain('>Steer the running reply<')
+  expect(markup).toContain('>Switch send mode<')
+  expect(markup).not.toContain('Steer: send into the running reply')
+  expect(markup).not.toContain('Switch send mode (Queue or Steer)')
+  expect(markup).toContain('data-settings-anchor="shortcuts-composer-switch-send-mode"')
+})
+
+it('opens with the filter a settings search result fills in', () => {
+  const settings: MousseSettings = { ...getDefaultSettings(), shortcuts: {} }
+  const markup = renderToStaticMarkup(createElement(ShortcutsSettings, { settings, onUpdate: async () => undefined, initialQuery: 'Stop run' }))
+  expect(markup).toContain('value="Stop run"')
+  expect(markup).toContain('>Stop run<')
+  expect(markup).not.toContain('>New thread<')
+})
+
+it('finds shortcuts from the settings search and lands on the Shortcuts page with its filter filled in', () => {
+  const pages: SettingsSearchPage[] = [
+    { id: 'appearance', label: 'Appearance', keywords: [] },
+    { id: 'shortcuts', label: 'Shortcuts', keywords: ['keyboard'] }
+  ]
+  const first = (query: string) => searchSettings(query, pages, searchIndex(true))[0]
+  expect(first('steer')).toEqual({ title: 'Steer the running reply', section: 'shortcuts', anchor: 'shortcuts-composer-steer', filter: 'Steer the running reply' })
+  expect(first('send mode')).toMatchObject({ title: 'Switch send mode', section: 'shortcuts', filter: 'Switch send mode' })
+  expect(first('back')).toMatchObject({ title: 'Back', section: 'shortcuts', anchor: 'shortcuts-thread-back', filter: 'Back' })
+  expect(first('forward')).toMatchObject({ title: 'Forward', section: 'shortcuts', filter: 'Forward' })
+  expect(first('stop')).toMatchObject({ title: 'Stop run', section: 'shortcuts', filter: 'Stop run' })
+  expect(searchSettings('queue', pages, searchIndex(true)).map((result) => result.title)).toEqual(expect.arrayContaining(['Steer the running reply', 'Switch send mode']))
+  // Every shortcut has its own anchor, and its filled-in filter shows the row it lands on.
+  const anchors = searchIndex(true).map((entry) => entry.anchor)
+  expect(new Set(anchors).size).toBe(anchors.length)
+  for (const entry of SHORTCUT_SEARCH_INDEX) {
+    expect(entry.anchor).toMatch(/^[a-z][a-z0-9-]*$/)
+    const rows = shortcutGroups(entry.filter!, {}, 'win32').flatMap((group) => group.rows.map((row) => shortcutAnchor(row.command.id)))
+    expect(rows, entry.title).toContain(entry.anchor)
+  }
 })

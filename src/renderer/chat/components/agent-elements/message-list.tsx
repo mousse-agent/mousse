@@ -1,4 +1,5 @@
 import React, {
+  Fragment,
   memo,
   useId,
   useRef,
@@ -19,6 +20,9 @@ import { modelLabel } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
 import { UserMessage } from "./user-message";
+import { ImageGalleryProvider } from "./image-gallery";
+import { collectThreadImages } from "./image-sources";
+import { safeMarkdownUrl } from "../../../utils/chatLinks";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { holdReplyPacing } from "../../../lib/replyPacingSetting";
 import { LiveMarkdown } from "./live-markdown";
@@ -26,7 +30,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -35,6 +39,7 @@ import {
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
 import { TurnProgressRow, useTurnProgressState } from "./turn-progress";
+import { ToolIcon } from "./tools/tool-icon";
 import {
   PermissionRequestRow,
   isPermissionRequestPart,
@@ -51,10 +56,14 @@ import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import { getToolStatus } from "./utils/format-tool";
 import {
-  activityGroupLabel,
   analyzeAssistantMessage,
-  liveGroupThought,
+  foldTurnWork,
+  isLiveThoughtItem,
+  isStandaloneToolType,
   settleEarlierThoughts,
+  workGroupIconType,
+  workGroupTitle,
+  type FoldRow,
   isErrorPart,
   isRecord,
   isTextPart,
@@ -263,6 +272,7 @@ function TurnWorkStatus({
   waitingLabel,
   end,
   endYieldsToNotice = false,
+  fold,
 }: {
   active: boolean;
   startedAt?: number | null;
@@ -273,6 +283,11 @@ function TurnWorkStatus({
   end?: TurnEndMark;
   /** The last turn's mark gives way while the "Run interrupted" notice shows for the same turn. */
   endYieldsToNotice?: boolean;
+  /**
+   * A finished turn whose work folds behind this line: the line is the control that opens it ("Worked for 32s ›"),
+   * and `open` says whether the work shows.
+   */
+  fold?: { open: boolean; onToggle: () => void };
 }) {
   const fallbackStartRef = useRef<number | null>(null);
   if (!active) fallbackStartRef.current = null;
@@ -303,7 +318,9 @@ function TurnWorkStatus({
   const mark = !active && end
     ? endYieldsToNotice ? <LastTurnEndMark end={end} separate={Boolean(label)} /> : <TurnEndLabel end={end} separate={Boolean(label)} />
     : null;
-  if (!label && !mark) return null;
+  // A turn with work to open always has its line, even when it has no time to show.
+  const shown = label ?? (fold && !active ? "Worked" : null);
+  if (!shown && !mark) return null;
   const longLabel =
     elapsedMs == null || (active && waitingLabel)
       ? undefined
@@ -312,8 +329,19 @@ function TurnWorkStatus({
     <div className="turn-work" data-find-ignore>
       {active && !waitingLabel ? (
         <LiveWorkLabel working={label!} title={longLabel} />
+      ) : fold ? (
+        <button
+          type="button"
+          className="turn-work-label turn-work-toggle"
+          aria-expanded={fold.open}
+          title={longLabel}
+          onClick={fold.onToggle}
+        >
+          {shown}{mark}
+          <IconChevronRight className="turn-work-chevron" data-open={fold.open || undefined} aria-hidden="true" />
+        </button>
       ) : (
-        <div className="turn-work-label" title={longLabel}>{label}{mark}</div>
+        <div className="turn-work-label" title={longLabel}>{shown}{mark}</div>
       )}
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
@@ -1407,6 +1435,27 @@ export const MessageList = memo(function MessageList({
     () => new Set([...subagentCards.values()].filter((card) => card.spawning).map((card) => card.toolCallId)),
     [subagentCards],
   );
+  // Cards whose subagent still works: a finished turn keeps them in view when its work folds.
+  const runningCardIds = useMemo(
+    () => new Set([...subagentCards.values()].filter((card) => !card.pending && isRunningSubagent(card)).map((card) => card.toolCallId)),
+    [subagentCards],
+  );
+  // Finished turns whose work is open, by turn key: kept while the thread is open (the list mounts per thread).
+  const [openWork, setOpenWork] = useState<ReadonlySet<string>>(() => new Set());
+  const openWorkRef = useRef(openWork);
+  openWorkRef.current = openWork;
+  const dispatchFollowRef = useRef<((event: FollowEvent) => void) | null>(null);
+  const toggleWork = useCallback((turnKey: string) => {
+    // Opening grows the turn under the line that was clicked: the view stays where it is instead of following
+    // the end, so the line does not move away from the pointer.
+    if (!openWorkRef.current.has(turnKey)) dispatchFollowRef.current?.({ type: "navigate" });
+    setOpenWork((current) => {
+      const next = new Set(current);
+      if (next.has(turnKey)) next.delete(turnKey);
+      else next.add(turnKey);
+      return next;
+    });
+  }, []);
   // Subagents (by task and by thread) whose state a card in the thread shows.
   const cardedSubagents = useMemo(() => {
     const ids = new Set<string>();
@@ -1458,6 +1507,7 @@ export const MessageList = memo(function MessageList({
       onComposerCompactChangeRef.current?.(compact);
     }
   }, []);
+  dispatchFollowRef.current = dispatchFollow;
 
   // What the user just did to the scroll position. Assigned on every render so
   // the listeners attached once with the element always see current callbacks.
@@ -2007,7 +2057,13 @@ export const MessageList = memo(function MessageList({
   // Tick position and active-turn state live in PromptMarkersOverlay so
   // scrolling never re-renders the conversation to update the rail.
 
+  // An image opened anywhere in the thread steps through all of the thread's images (subagent results joined
+  // to a reply show none of their own).
+  const threadImages = () =>
+    collectThreadImages(normalizedMessages.filter((message) => !isResultNotice(message)), safeMarkdownUrl);
+
   return (
+    <ImageGalleryProvider images={threadImages}>
     <div
       className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col"
       onMouseMove={handleGutterHover}
@@ -2080,6 +2136,9 @@ export const MessageList = memo(function MessageList({
                 cardedSubagents={cardedSubagents}
                 subagentCardIds={subagentCardIds}
                 spawningCardIds={spawningCardIds}
+                runningCardIds={runningCardIds}
+                workOpen={openWork.has(turnKey)}
+                onToggleWork={toggleWork}
               />
             );
           })}
@@ -2128,6 +2187,7 @@ export const MessageList = memo(function MessageList({
       </button>
     )}
     </div>
+    </ImageGalleryProvider>
   );
 });
 
@@ -2163,7 +2223,58 @@ type TurnRowProps = {
   cardedSubagents: Set<string>;
   subagentCardIds: Set<string>;
   spawningCardIds: Set<string>;
+  /** Cards whose subagent still works: they stay in view when the turn's work folds. */
+  runningCardIds: Set<string>;
+  /** Whether this finished turn's work is open under its "Worked for" line. */
+  workOpen: boolean;
+  /** Opens or closes a finished turn's work, by turn key. */
+  onToggleWork: (turnKey: string) => void;
 };
+
+/** A failed call the agent did not get past: it stays in view when the turn's work folds. */
+function isUnrecoveredFailure(part: unknown): boolean {
+  return isV5ToolPart(part) && getToolStatus(part).isError && !(part as { failureRecovered?: boolean }).failureRecovered;
+}
+
+/** A call (not a thought) that has not finished. */
+function isRunningCall(part: ToolPartBase): boolean {
+  return part.type !== "tool-Thinking" && (part.state === "input-streaming" || part.state === "input-available");
+}
+
+/**
+ * What folding needs to know of one message of a finished turn: whether it is work (calls, thoughts), narration or
+ * an answer (text), a person's steered message, or something that stays in view whatever the fold (an error, a
+ * question or an approval, a notice, Mousse's own markers, an applet).
+ */
+function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boolean): FoldRow {
+  if (readSteerGroup(msg)) return { kind: "message", steer: true };
+  if (toolsOnly) return { kind: "message", toolsOnly: true, keep: (msg.parts ?? []).some(isUnrecoveredFailure) };
+  const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
+  if (
+    readSubagentNotice(msg) || readBackgroundNotice(msg) || isThreadNotice(msg) || isCompactionRow(msg) ||
+    metadata.contextHandoff != null || metadata.contextCleared || metadata.scheduledRun != null
+  ) {
+    return { kind: "message", keep: true };
+  }
+  let text = false;
+  let work = false;
+  for (const part of normalizeAssistantToolParts(msg.parts ?? []) as unknown[]) {
+    if (isTextPart(part)) {
+      if (part.text.trim()) text = true;
+      continue;
+    }
+    if (isErrorPart(part) || isPermissionRequestPart(part) || isAppletPart(part)) return { kind: "message", keep: true };
+    if (isRecord(part) && part.type === "data-applet-pending") return { kind: "message", keep: true };
+    if (isV5ToolPart(part)) {
+      if (suppressQuestionTool && part.type === "tool-Question") continue;
+      if (isStandaloneToolType(part.type)) return { kind: "message", keep: true };
+      work = true;
+    }
+  }
+  // Text written beside calls in one message is part of the work.
+  if (work) return { kind: "message", toolsOnly: true };
+  return { kind: "message", text };
+}
 
 /**
  * One turn of the transcript. Memoised: a streamed delta changes only the last turn's messages, so
@@ -2196,6 +2307,9 @@ const TurnRow = memo(function TurnRow({
   cardedSubagents,
   subagentCardIds,
   spawningCardIds,
+  runningCardIds,
+  workOpen,
+  onToggleWork,
 }: TurnRowProps) {
   countRender("TurnRow");
   const turnActionsForEdit = useTurnActions();
@@ -2328,6 +2442,186 @@ const TurnRow = memo(function TurnRow({
             : settledMs ?? turnDurationMs(turn.userMsg, turn.assistantMsgs, turn.end);
           const liveStart = liveStartedAt ?? readCreatedAt(turn.userMsg);
 
+          // Subagent results whose subagents have a card in the thread show there, as the card's state: the
+          // results add no line of their own. A thought with anything after it in the turn is done (the
+          // provider closes it only later).
+          const turnMsgs = settleEarlierThoughts(turn.assistantMsgs.flatMap((msg) => {
+            const background = readBackgroundNotice(msg);
+            if (background) {
+              const rest = background.filter((item) => !cardedSubagents.has(item.taskId));
+              if (rest.length === 0) return [];
+              return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), backgroundNotice: rest } }];
+            }
+            const notice = readSubagentNotice(msg);
+            if (!notice) return [msg];
+            const rest = notice.filter(
+              (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
+            );
+            if (rest.length === 0) return [];
+            return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
+          }));
+          const turnAnalyses = turnMsgs.map((msg) =>
+            analyzeAssistantMessage(
+              msg.parts ?? [],
+              suppressQuestionTool,
+              subagentCardIds,
+            ),
+          );
+          // A finished turn ends on its answer: the work that led to it comes above it. A cut-off turn keeps
+          // the order it ran in when work followed its last text.
+          const settled = isTurnStreaming
+            ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
+            : settleFinishedTurn(turnMsgs, turnAnalyses, Boolean(turn.end));
+          const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
+          const analyses = settled.order.map((index) => settled.analyses[index]!);
+          // Consecutive calls and thoughts become one line that says what they did; narration between them
+          // splits them. While the turn runs, a call still running folds into such a line even alone: the live
+          // line under the work says what runs now, so it does not show twice.
+          const segments = partitionTurnSegments(
+            analyses.map((a) => a.toolsOnly),
+            analyses.map((a) => a.cardsOnly),
+            analyses.map((a) => a.toolItems.length),
+            isTurnStreaming
+              ? (run) => run.some((msgIndex) => analyses[msgIndex]!.toolItems.some((item) => isRunningCall(item.part)))
+              : undefined,
+          );
+          const chatStreamingStatus = isLastTurn && isStreaming ? "streaming" : undefined;
+          const renderTool = (part: ToolPartBase, nestedTools: ToolPartBase[] | undefined, key: string) => (
+            <CustomToolRenderer
+              key={key}
+              part={part}
+              nestedTools={nestedTools}
+              chatStatus={chatStreamingStatus}
+              toolRenderers={toolRenderers}
+            />
+          );
+          const rows = segments.map((segment): { node: React.ReactNode; fold: FoldRow } => {
+            if (segment.kind === "cards") {
+              // A card still starting is not drawn: the progress line says "Starting subagent…".
+              const cardParts = segment.msgIndices.flatMap(
+                (msgIndex) => analyses[msgIndex]!.cardParts,
+              ).filter((part) => !spawningCardIds.has(part.toolCallId!));
+              const running = cardParts.some((part) => runningCardIds.has(part.toolCallId!));
+              if (cardParts.length === 0) return { node: null, fold: { kind: "cards" } };
+              const cardNested = new Map(
+                segment.msgIndices.flatMap((msgIndex) => [
+                  ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),
+                ]),
+              );
+              return {
+                fold: { kind: "cards", running },
+                node: (
+                  <SubagentCardGroup
+                    key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
+                    toolCallIds={cardParts.map((part) => part.toolCallId!)}
+                  >
+                    {cardParts.map((part) => renderTool(part, cardNested.get(part.toolCallId!), part.toolCallId!))}
+                  </SubagentCardGroup>
+                ),
+              };
+            }
+            if (segment.kind === "message") {
+              const msg = answerMsgs[segment.msgIndex]!;
+              const fold = foldRowOf(msg, analyses[segment.msgIndex]!.toolsOnly, suppressQuestionTool);
+              const steeredGroup = readSteerGroup(msg);
+              if (steeredGroup) {
+                return {
+                  fold,
+                  node: (
+                    <SteerGroup
+                      key={msg.id}
+                      messages={steeredGroup}
+                      UserMessageComponent={CustomUserMessage}
+                      className={userMessageClassName}
+                      enableImagePreview={enableImagePreview}
+                    />
+                  ),
+                };
+              }
+              const notice = readSubagentNotice(msg);
+              if (notice) {
+                return {
+                  fold,
+                  node: (
+                    <div key={msg.id} data-notice-id={msg.id}>
+                      <SubagentNotice items={notice} />
+                    </div>
+                  ),
+                };
+              }
+              const background = readBackgroundNotice(msg);
+              if (background) {
+                return {
+                  fold,
+                  node: (
+                    <div key={msg.id} data-notice-id={msg.id}>
+                      <BackgroundNotice items={background} />
+                    </div>
+                  ),
+                };
+              }
+              const isLastMsg = isLastTurn && segment.msgIndex === answerMsgs.length - 1;
+              return {
+                fold,
+                node: (
+                  <AssistantParts
+                    key={msg.id}
+                    msg={msg}
+                    isLast={isLastMsg}
+                    isStreaming={isLastMsg && isStreaming}
+                    retryPromptId={isLastTurn && !isStreaming ? turn.userMsg?.id : undefined}
+                    suppressQuestionTool={suppressQuestionTool}
+                    ToolRendererComponent={CustomToolRenderer}
+                    toolRenderers={toolRenderers}
+                  />
+                ),
+              };
+            }
+            const items = segment.msgIndices.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+            const firstId = answerMsgs[segment.msgIndices[0]!]!.id;
+            const itemKey = (item: (typeof items)[number], k: number) => item.part.toolCallId ?? `${firstId}-tool-${k}`;
+            // A thought still being written stays out of the group: its own row is the turn's live line.
+            const liveThought = isLastTurn && isStreaming && isLiveThoughtItem(items[items.length - 1]) ? items[items.length - 1]! : undefined;
+            const grouped = liveThought ? items.slice(0, -1) : items;
+            const iconType = workGroupIconType(grouped);
+            const unrecovered = grouped.filter((item) => isUnrecoveredFailure(item.part)).length;
+            // One finished call left beside the live thought is its own row: it says more than "Read 1 file".
+            const single = grouped.length === 1 && !isRunningCall(grouped[0]!.part) ? grouped[0]! : undefined;
+            const group = grouped.length === 0 ? null : single ? renderTool(single.part, single.nestedTools, itemKey(single, 0)) : (
+              <ToolCallsGroup
+                key={`${firstId}-toolcalls`}
+                count={grouped.length}
+                icon={
+                  iconType === "tool-Thinking" ? (
+                    <ThinkingIcon size={18} />
+                  ) : iconType ? (
+                    <ToolIcon type={iconType} state="done" />
+                  ) : (
+                    <Wrench size={18} />
+                  )
+                }
+                title={workGroupTitle(grouped)}
+                // Only failures the agent did not get past are named on the group line.
+                failed={unrecovered}
+                live={isLastTurn && isStreaming}
+              >
+                {grouped.map((item, k) => renderTool(item.part, item.nestedTools, itemKey(item, k)))}
+              </ToolCallsGroup>
+            );
+            return {
+              fold: { kind: "tools", keep: unrecovered > 0 },
+              node: liveThought ? (
+                <Fragment key={`${firstId}-toolcalls-live`}>
+                  {group}
+                  {renderTool(liveThought.part, liveThought.nestedTools, itemKey(liveThought, items.length - 1))}
+                </Fragment>
+              ) : group,
+            };
+          });
+          // A finished turn folds its work behind its "Worked for" line; the line opens it in place.
+          const folded = isTurnStreaming ? rows.map(() => false) : foldTurnWork(rows.map((row) => row.fold));
+          const hasFold = folded.some((value, index) => value && rows[index]!.node != null);
+
           return (
             <div className="group/assistant-turn">
               <TurnWorkStatus
@@ -2342,200 +2636,11 @@ const TurnRow = memo(function TurnRow({
                 }
                 end={turn.end}
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
+                fold={hasFold ? { open: workOpen, onToggle: () => onToggleWork(turnKey) } : undefined}
               />
               <div className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
-                {(() => {
-                  // Consecutive thoughts and tool calls collapse into one
-                  // group titled with the latest thought. A run with
-                  // no thought falls back to "Tool calls N".
-                  // Subagent results whose subagents have a card in
-                  // the thread show there, as the card's state: the
-                  // results add no line of their own.
-                  // A thought with anything after it in the turn is done (the provider closes it only later).
-                  const turnMsgs = settleEarlierThoughts(turn.assistantMsgs.flatMap((msg) => {
-                    const background = readBackgroundNotice(msg);
-                    if (background) {
-                      const rest = background.filter((item) => !cardedSubagents.has(item.taskId));
-                      if (rest.length === 0) return [];
-                      return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), backgroundNotice: rest } }];
-                    }
-                    const notice = readSubagentNotice(msg);
-                    if (!notice) return [msg];
-                    const rest = notice.filter(
-                      (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
-                    );
-                    if (rest.length === 0) return [];
-                    return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
-                  }));
-                  const turnAnalyses = turnMsgs.map((msg) =>
-                    analyzeAssistantMessage(
-                      msg.parts ?? [],
-                      suppressQuestionTool,
-                      subagentCardIds,
-                    ),
-                  );
-                  // A finished turn ends on its answer: the notes and
-                  // activity that led to it collapse above it. A cut-off
-                  // turn keeps the order it ran in when work followed its
-                  // last text.
-                  const settled = isTurnStreaming
-                    ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
-                    : settleFinishedTurn(turnMsgs, turnAnalyses, Boolean(turn.end));
-                  const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
-                  const analyses = settled.order.map((index) => settled.analyses[index]!);
-                  const segments = partitionTurnSegments(
-                    analyses.map((a) => a.toolsOnly),
-                    analyses.map((a) => a.cardsOnly),
-                  );
-                  return segments.map((segment) => {
-                    if (segment.kind === "cards") {
-                      // A card still starting is not drawn: the progress line says "Starting subagent…".
-                      const cardParts = segment.msgIndices.flatMap(
-                        (msgIndex) => analyses[msgIndex]!.cardParts,
-                      ).filter((part) => !spawningCardIds.has(part.toolCallId!));
-                      if (cardParts.length === 0) return null;
-                      const cardNested = new Map(
-                        segment.msgIndices.flatMap((msgIndex) => [
-                          ...(analyses[msgIndex]!.cardNestedTools ?? new Map()),
-                        ]),
-                      );
-                      const chatStreamingStatus = isLastTurn && isStreaming
-                        ? "streaming"
-                        : undefined;
-                      return (
-                        <SubagentCardGroup
-                          key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
-                          toolCallIds={cardParts.map(
-                            (part) => part.toolCallId!,
-                          )}
-                        >
-                          {cardParts.map((part) => (
-                            <CustomToolRenderer
-                              key={part.toolCallId}
-                              part={part}
-                              nestedTools={cardNested.get(part.toolCallId!)}
-                              chatStatus={chatStreamingStatus}
-                              toolRenderers={toolRenderers}
-                            />
-                          ))}
-                        </SubagentCardGroup>
-                      );
-                    }
-                    if (segment.kind === "message") {
-                      const msg =
-                        answerMsgs[segment.msgIndex]!;
-                      const steeredGroup = readSteerGroup(msg);
-                      if (steeredGroup) {
-                        return (
-                          <SteerGroup
-                            key={msg.id}
-                            messages={steeredGroup}
-                            UserMessageComponent={CustomUserMessage}
-                            className={userMessageClassName}
-                            enableImagePreview={enableImagePreview}
-                          />
-                        );
-                      }
-                      const notice = readSubagentNotice(msg);
-                      if (notice) {
-                        return (
-                          <div key={msg.id} data-notice-id={msg.id}>
-                            <SubagentNotice items={notice} />
-                          </div>
-                        );
-                      }
-                      const background = readBackgroundNotice(msg);
-                      if (background) {
-                        return (
-                          <div key={msg.id} data-notice-id={msg.id}>
-                            <BackgroundNotice items={background} />
-                          </div>
-                        );
-                      }
-                      const isLastMsg =
-                        isLastTurn &&
-                        segment.msgIndex ===
-                          answerMsgs.length - 1;
-                      return (
-                        <AssistantParts
-                          key={msg.id}
-                          msg={msg}
-                          isLast={isLastMsg}
-                          isStreaming={isLastMsg && isStreaming}
-                          retryPromptId={
-                            isLastTurn && !isStreaming
-                              ? turn.userMsg?.id
-                              : undefined
-                          }
-                          suppressQuestionTool={suppressQuestionTool}
-                          ToolRendererComponent={CustomToolRenderer}
-                          toolRenderers={toolRenderers}
-                        />
-                      );
-                    }
-                    const items = segment.msgIndices.flatMap(
-                      (msgIndex) =>
-                        analyses[msgIndex]!.toolItems,
-                    );
-                    // A thought still being written ends the group: its header is the turn's live line.
-                    const liveThought = isLastTurn && isStreaming ? liveGroupThought(items) : undefined;
-                    const groupLabel = liveThought !== undefined ? "Thinking" : activityGroupLabel(items);
-                    const firstId =
-                      answerMsgs[
-                        segment.msgIndices[0]!
-                      ]!.id;
-                    const chatStreamingStatus = isLastTurn && isStreaming
-                      ? "streaming"
-                      : undefined;
-                    // Only shimmer the group header while a child
-                    // tool is still running — not for the whole
-                    // remaining turn stream (text after tools).
-                    const anyToolPending = items.some((item) => {
-                      const state = item.part.state;
-                      return (
-                        state !== "output-available" &&
-                        state !== "output-error"
-                      );
-                    });
-                    return (
-                      <ToolCallsGroup
-                        key={`${firstId}-toolcalls`}
-                        count={items.length}
-                        icon={
-                          groupLabel ? (
-                            <ThinkingIcon size={18} active={anyToolPending && isLastTurn && isStreaming} />
-                          ) : (
-                            <Wrench size={18} />
-                          )
-                        }
-                        label={groupLabel}
-                        liveThought={liveThought}
-                        autoOpen={anyToolPending}
-                        failed={
-                          items.filter(
-                            (item) =>
-                              getToolStatus(item.part).isError,
-                          ).length
-                        }
-                        live={isLastTurn && isStreaming}
-                      >
-                        {items.map((item, k) => (
-                          <CustomToolRenderer
-                            key={
-                              item.part.toolCallId ??
-                              `${firstId}-tool-${k}`
-                            }
-                            part={item.part}
-                            nestedTools={item.nestedTools}
-                            chatStatus={chatStreamingStatus}
-                            toolRenderers={toolRenderers}
-                          />
-                        ))}
-                      </ToolCallsGroup>
-                    );
-                  });
-                })()}
+                  {rows.map((row, index) => (folded[index] && !workOpen ? null : row.node))}
                 </TurnIdContext.Provider>
                 {isTurnStreaming && (
                   <TurnProgressRow messages={turn.assistantMsgs} awaitingSubagents={!isStreaming} />

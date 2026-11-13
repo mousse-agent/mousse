@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ACCENT_COLORS, THEME_OPTIONS, getDefaultSettings, normalizeAppearance } from '../../src/shared/settings'
+import { getDefaultSettings, normalizeAppearance } from '../../src/shared/settings'
 import { setContextRingInComposer } from '../../src/renderer/lib/contextRingSetting'
 import { searchSettings, type SettingsSearchPage } from '../../src/renderer/lib/settingsSearch'
 import { ComposerFooter } from '../../src/renderer/components/ComposerFooter'
@@ -106,13 +106,13 @@ describe('context ring in composer', () => {
     expect(ring()?.title).toBe('4% · ~43.9K of 1M')
   })
 
-  it('is found by Settings search on the Appearance page', () => {
-    const pages: SettingsSearchPage[] = [{ id: 'appearance', label: 'Appearance', keywords: [] }]
-    expect(searchSettings('context ring', pages)[0]).toMatchObject({ title: 'Context ring in composer', section: 'appearance', anchor: 'appearance-context-ring' })
+  it('is found by Settings search on the Chat page', () => {
+    const pages: SettingsSearchPage[] = [{ id: 'chat', label: 'Chat', keywords: [] }]
+    expect(searchSettings('context ring', pages)[0]).toMatchObject({ title: 'Context ring', section: 'chat', anchor: 'chat-context-ring' })
   })
 })
 
-describe('Settings › Appearance › Composer', () => {
+describe('Settings › Chat › Composer', () => {
   let home: string
 
   beforeEach(() => {
@@ -126,19 +126,14 @@ describe('Settings › Appearance › Composer', () => {
   })
 
   it('groups the composer options under a Composer heading, and the toggle turns the ring on and survives a reload', async () => {
-    const { AppearanceSettings } = await import('../../src/renderer/components/settings/AppearanceSettings')
+    const { ChatSettings } = await import('../../src/renderer/components/settings/ChatSettings')
     const { applyAppearance } = await import('../../src/renderer/hooks/useTheme')
     const { MousseConfigStore } = await import('../../src/mms/config/MousseConfigStore')
     const { SettingsStore } = await import('../../src/mms/settings/SettingsStore')
     const store = new SettingsStore(MousseConfigStore.load(home))
-    const draw = () => act(() => view.render(createElement(AppearanceSettings, {
+    const draw = () => act(() => view.render(createElement(ChatSettings, {
       settings: store.get(),
-      options: { themes: THEME_OPTIONS, accentColors: ACCENT_COLORS, llmProviders: [], agentTypes: [] },
       onUpdate: async (partial) => { store.set(partial); applyAppearance(store.get().appearance); draw() },
-      restartRequired: false,
-      onRestart: () => undefined,
-      onPreviewAcrylicIntensity: () => undefined,
-      onCommitAcrylicIntensity: () => undefined,
       onPreviewFrostedComposer: () => undefined,
       onCommitFrostedComposer: () => undefined
     })))
@@ -149,16 +144,16 @@ describe('Settings › Appearance › Composer', () => {
     expect(heading).toBeDefined()
     const group = heading.closest('[aria-labelledby]') ?? heading.parentElement!.parentElement!
     const titles = [...group.querySelectorAll('.settings-item-title')].map((title) => title.textContent)
-    expect(titles).toEqual(['Context ring in composer', 'Frosted composer'])
-    // The general appearance options stay outside it.
-    expect([...host.querySelectorAll('.settings-item-title')].map((title) => title.textContent)).toEqual(expect.arrayContaining(['Color theme', 'Render math', 'Project colors on threads']))
+    expect(titles).toEqual(['Context ring', 'Frosted composer'])
+    // The conversation options stay outside it.
+    expect([...host.querySelectorAll('.settings-item-title')].map((title) => title.textContent)).toEqual(expect.arrayContaining(['Chat width', 'Render math', 'Replies by paragraph']))
     expect(titles).not.toContain('Render math')
 
-    const toggle = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Context ring in composer"]')!
+    const toggle = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Context ring"]')!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await act(async () => { toggle.click() })
     expect(store.get().appearance.contextRingInComposer).toBe(true)
-    expect(host.querySelector('[role="switch"][aria-label="Context ring in composer"]')?.getAttribute('aria-checked')).toBe('true')
+    expect(host.querySelector('[role="switch"][aria-label="Context ring"]')?.getAttribute('aria-checked')).toBe('true')
     expect(new SettingsStore(MousseConfigStore.load(home)).get().appearance.contextRingInComposer).toBe(true)
 
     // useTheme hands the saved value to the composer when settings change.

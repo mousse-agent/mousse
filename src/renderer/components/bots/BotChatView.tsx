@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { ArrowDown, CircleAlert, Loader2, Paperclip, Reply, Shield, X } from '../../lib/icons'
+import { ArrowDown, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
 import type { BotChatMessage, BotChatQuote, BotChip, BotError, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
@@ -15,6 +15,9 @@ import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botFullTime, botGroupTime, botMessageLabel, placeMessages } from './messageGroups'
+import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
+import { BotImageFiles, BotMarkdownImage, BotOtherFiles, botFileImageUrl } from './BotImages'
+import { botChatImages } from './imageSources'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
@@ -163,9 +166,11 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
     {quoted && <BotReplyQuote botId={botId} quote={message.replyTo!} botName={botName} />}
     <div className="bot-you-line">
       {!pending && onReply && <ReplyButton onReply={() => onReply(message)} />}
+      {/* As in a messaging app: the pictures first, the words under them, then any other files. */}
       <div className="bot-you-content">
-        {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" />}
-        {!!message.attachments?.length && <div className="bot-you-files">{message.attachments.map((file, index) => <span key={`${index}:${file.name}`} className="bot-file-pill" title={file.path || undefined}><Paperclip size={12} aria-hidden />{file.name}</span>)}</div>}
+        {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
+        {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" renderImage={BotMarkdownImage} />}
+        {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
       </div>
     </div>
   </article>
@@ -203,7 +208,8 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
       {starts && <div className="chat-message-meta"><strong>{bot.name}</strong>{label && <span className="bot-message-label">{label}</span>}<ReplyButton onReply={() => onReply(message)} /></div>}
       {!starts && label && <span className="bot-message-label is-own-line">{label}</span>}
       {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-      {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" />}
+      {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" renderImage={BotMarkdownImage} />}
+      {!!message.attachments?.length && <div className="bot-message-files"><BotImageFiles files={message.attachments} /><BotOtherFiles files={message.attachments} /></div>}
       <BotChips chips={message.chips} />
       {browser}
       {message.ask && <BotAsk botName={bot.name} ask={message.ask} fromRun={message.kind === 'notice'}
@@ -317,8 +323,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [bot.id, store])
   // Up in an empty composer brings back the owner's last message, as in a thread.
   const lastPrompt = () => [...pending, ...messages].reverse().find((message) => message.author === 'owner' && message.text)?.text
+  // The preview steps through every picture of this chat that has loaded, read only when one opens.
+  const chatImages = () => botChatImages(shown, botFileImageUrl)
 
-  return <>
+  return <ImageGalleryProvider images={chatImages}>
     {/* The bot's colour tints the quotes of its messages. */}
     <section className="chat-conversation bot-conversation" style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header className="chat-conversation-header">
@@ -396,5 +404,5 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     </section>
     {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}
-  </>
+  </ImageGalleryProvider>
 }

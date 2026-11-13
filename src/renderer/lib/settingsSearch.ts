@@ -1,7 +1,10 @@
+import { MOUSSE_BUILTIN_TOOL_GROUPS, MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
+import { COMMANDS_IN_DISPLAY_ORDER } from '../../shared/commands'
+import { shortcutAnchor, shortcutRowTitle } from '../commands/shortcutEditing'
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
-export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'activity', 'providers', 'agents', 'integrations', 'speech', 'shortcuts', 'connections', 'storage', 'labs'] as const
+export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'connections', 'storage', 'activity', 'labs'] as const
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number]
 
 /**
@@ -20,6 +23,8 @@ export interface SettingsSearchEntry {
    * (where the search lands instead) and the line that says why the setting is not there.
    */
   needs?: { anchor: string; reason: string }
+  /** For a row in a page's own filtered list (a shortcut): the text to fill that page's filter with. */
+  filter?: string
 }
 
 /** Every setting the search finds. Rows that exist once per item (a provider, a shortcut, a device) are found by their page. */
@@ -29,22 +34,26 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Thread path in title bar', section: 'appearance', anchor: 'appearance-thread-path', keywords: ['breadcrumb', 'back', 'forward', 'history', 'navigation', 'subagent', 'parent'] },
   { title: 'Acrylic glass', section: 'appearance', anchor: 'appearance-acrylic', keywords: ['translucent', 'transparent', 'blur', 'window'] },
   { title: 'Glass intensity', section: 'appearance', anchor: 'appearance-glass-intensity', keywords: ['acrylic', 'blur', 'opacity'] },
-  { title: 'Context ring in composer', section: 'appearance', anchor: 'appearance-context-ring', keywords: ['context', 'tokens', 'usage', 'gauge', 'window', 'composer'] },
-  { title: 'Frosted composer', section: 'appearance', anchor: 'appearance-frosted-composer', keywords: ['glass', 'blur', 'translucent', 'transparent', 'opacity', 'color boost'] },
-  { title: 'Render math', section: 'appearance', anchor: 'appearance-render-math', keywords: ['latex', 'equations'] },
-  { title: 'Show replies a paragraph at a time', section: 'appearance', anchor: 'appearance-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade'] },
+  { title: 'Animation speed', section: 'appearance', anchor: 'appearance-animation-speed', keywords: ['motion', 'reduce motion', 'transitions', 'fast', 'slow'] },
   { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
   { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
-  { title: 'Changed files after each turn', section: 'appearance', anchor: 'appearance-turn-changed-files', keywords: ['edits', 'summary', 'diff'] },
+  { title: 'Conversation', section: 'chat', anchor: 'chat-conversation', keywords: ['transcript', 'replies'] },
+  { title: 'Chat width', section: 'chat', anchor: 'chat-width', keywords: ['wide', 'full', 'narrow', 'column', 'layout', 'transcript', 'conversation'] },
+  { title: 'Render math', section: 'chat', anchor: 'chat-render-math', keywords: ['latex', 'equations'] },
+  { title: 'Replies by paragraph', section: 'chat', anchor: 'chat-reply-pacing', keywords: ['streaming', 'pacing', 'word by word', 'fade', 'paragraph at a time'] },
+  { title: 'Changed files after each turn', section: 'chat', anchor: 'chat-turn-changed-files', keywords: ['edits', 'summary', 'diff'] },
+  { title: 'Composer', section: 'chat', anchor: 'chat-composer', keywords: ['context ring', 'frosted'] },
+  { title: 'Context ring', section: 'chat', anchor: 'chat-context-ring', keywords: ['context', 'tokens', 'usage', 'gauge', 'window', 'composer'] },
+  { title: 'Frosted composer', section: 'chat', anchor: 'chat-frosted-composer', keywords: ['glass', 'blur', 'translucent', 'transparent', 'opacity', 'color boost'] },
   { title: 'Default permission mode', section: 'general', anchor: 'general-permission-mode', keywords: ['permissions', 'approvals', 'ask'] },
   { title: 'Resume after usage limits reset', section: 'general', anchor: 'general-resume', keywords: ['rate limit', 'paused', 'continue'] },
-  { title: 'When a thread finishes', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'completion sound', 'toast', 'system notification', 'done'] },
-  { title: 'When a thread needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'question', 'approval', 'toast', 'sound'] },
-  { title: 'When a thread stops', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
+  { title: 'Finished', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'when a thread finishes', 'completion sound', 'toast', 'system notification', 'done'] },
+  { title: 'Needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'when a thread needs you', 'question', 'approval', 'toast', 'sound'] },
+  { title: 'Stopped', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'when a thread stops', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
   { title: 'Delete private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto delete', 'timer', 'incognito', 'chats'] },
-  { title: 'All threads on my other computers', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote'] },
-  { title: 'Version and updates', section: 'general', anchor: 'general-updates', keywords: ['check for updates', 'about', 'upgrade'] },
+  { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },
+  { title: 'Updates', section: 'general', anchor: 'general-updates', keywords: ['version', 'check for updates', 'about', 'upgrade'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
   { title: 'Phones', section: 'connections', anchor: 'account-phones', keywords: ['mobile', 'pair'], needs: { anchor: 'account-mousse-id', reason: 'Phones appear once you sign in to Mousse ID.' } },
@@ -52,29 +61,45 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Token usage', section: 'activity', anchor: 'account-token-usage', keywords: ['tokens'] },
 
   { title: 'Telemetry', section: 'providers', anchor: 'providers-telemetry', keywords: ['privacy', 'tracking'] },
-  { title: 'Keep the prompt cache for 1 hour', section: 'providers', anchor: 'providers-prompt-cache-hour', keywords: ['cache', 'ttl', 'one hour', 'subscription', 'claude code', 'when the cache expires'] },
+  { title: 'Keep prompt cache 1 hour', section: 'providers', anchor: 'providers-prompt-cache-hour', keywords: ['cache', 'ttl', 'one hour', 'api key', 'claude code', 'when the cache expires', 'keep the prompt cache for 1 hour'] },
+  { title: 'Sign in', section: 'providers', anchor: 'providers-status', keywords: ['status', 'login', 'log in', 'account', 'sign out'] },
+  { title: 'Update', section: 'providers', anchor: 'providers-update', keywords: ['cli update', 'upgrade', 'new version', 'update now'], needs: { anchor: 'providers-status', reason: 'Update appears when a newer version is available.' } },
+  { title: 'Models', section: 'providers', anchor: 'providers-models', keywords: ['favorites', 'favourites', 'hidden', 'hide', 'custom model', 'model list'] },
+  { title: 'Claude settings', section: 'providers', anchor: 'providers-claude-settings', keywords: ['settings.json', 'claude code settings'], needs: { anchor: 'providers-status', reason: 'Claude settings appear on a Claude Code provider.' } },
   { title: 'API key', section: 'providers', anchor: 'providers-api-key', keywords: ['key'] },
   { title: 'Executable path', section: 'providers', anchor: 'providers-executable', keywords: ['binary', 'cli'] },
   { title: 'Launch arguments', section: 'providers', anchor: 'providers-arguments', keywords: ['flags', 'args'] },
   { title: 'Variables', section: 'providers', anchor: 'providers-variables', keywords: ['environment', 'env'] },
   { title: 'Display name', section: 'providers', anchor: 'providers-display-name', keywords: ['rename'] },
 
+  { title: 'Models', section: 'agents', anchor: 'agents-models', keywords: ['model', 'default model', 'thread titles', 'bot model'] },
   { title: 'Default model', section: 'agents', anchor: 'agents-default-model', keywords: ['reasoning', 'effort', 'speed', 'fast'] },
   { title: 'Thread titles', section: 'agents', anchor: 'agents-title-model', keywords: ['title model', 'naming', 'chat titles'] },
   { title: 'Bot model', section: 'agents', anchor: 'agents-bot-model', keywords: ['bot model', 'bots', 'personal bots'] },
+  { title: 'Context', section: 'agents', anchor: 'agents-context', keywords: ['compaction', 'prompt cache'] },
   { title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction', keywords: ['compaction', 'tokens', 'summarize'] },
   { title: 'When the cache expires', section: 'agents', anchor: 'agents-idle-compaction', keywords: ['cache', 'idle', 'compact', 'suggest'] },
-  { title: 'Agent access', section: 'agents', anchor: 'agents-access', keywords: ['reach beyond their own threads', 'read other threads', 'manage threads', 'access level'] },
-  { title: 'Automations agents add', section: 'agents', anchor: 'agents-automations', keywords: ['automations', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },
-  { title: 'Agents may answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions'] },
-  { title: 'Let agents start subagents on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'create subagents on other devices'] },
-  { title: 'Give each subagent its own worktree', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch'] },
+  { title: 'Cache time', section: 'agents', anchor: 'agents-cache-time', keywords: ['prompt cache', 'ttl', 'one hour', '5 minutes', 'claude code'], needs: { anchor: 'agents-idle-compaction', reason: 'Cache time appears once a Claude Code provider is on.' } },
+  { title: 'Access', section: 'agents', anchor: 'agents-access', keywords: ['agent access', 'reach beyond their own threads', 'read other threads', 'manage threads', 'access level'] },
+  { title: 'Answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions', 'agents may answer approvals'], needs: { anchor: 'agents-access', reason: 'This appears once access is set to Manage.' } },
+  { title: 'Capped threads', section: 'agents', anchor: 'agents-capped-threads', keywords: ['cap', 'remote send', 'bot threads', 'plan mode', 'read-only subagents'] },
+  { title: 'Subagents', section: 'agents', anchor: 'agents-subagents', keywords: ['subagent'] },
+  { title: 'Subagents on other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'let agents start subagents on your other devices'] },
+  { title: 'Worktree per subagent', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch', 'give each subagent its own worktree'] },
+  { title: 'Automations', section: 'agents', anchor: 'agents-automations', keywords: ['automations agents add', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },
+  { title: 'At most', section: 'agents', anchor: 'agents-automations-active', keywords: ['automations', 'limits', 'active', 'most active automations'] },
+  { title: 'At least', section: 'agents', anchor: 'agents-automations-interval', keywords: ['automations', 'limits', 'minutes apart', 'interval', 'fewest minutes between runs'] },
+  { title: 'End after', section: 'agents', anchor: 'agents-automations-lifetime', keywords: ['automations', 'limits', 'days', 'expire', 'lifetime'] },
 
   { title: 'Skills', section: 'integrations', anchor: 'integrations-skills' },
   { title: 'MCP servers', section: 'integrations', anchor: 'integrations-mcp', keywords: ['tools'] },
-  { title: 'Available to main agent', section: 'integrations', anchor: 'integrations-main-agent', keywords: ['skill defaults'] },
-  { title: 'Let other agents use your MCP servers', section: 'integrations', anchor: 'integrations-share', keywords: ['relay', 'mcp', 'share with other agents'] },
   { title: 'Web search', section: 'integrations', anchor: 'integrations-web-search', keywords: ['search tool'] },
+  { title: 'Exa', section: 'integrations', anchor: 'integrations-web-exa', keywords: ['web search', 'api key'] },
+  { title: 'Parallel', section: 'integrations', anchor: 'integrations-web-parallel', keywords: ['web search', 'api key'] },
+  { title: 'Who can use them', section: 'integrations', anchor: 'integrations-access', keywords: ['available to main agent', 'available to agents', 'skill defaults', 'skills', 'mcp', 'agents'] },
+  { title: 'Share MCP servers', section: 'integrations', anchor: 'integrations-share', keywords: ['relay', 'mcp', 'let other agents use your mcp servers'] },
+  { title: 'Built-in tools', section: 'integrations', anchor: 'integrations-tools', keywords: ['tools', 'mousse tools'] },
+  ...builtInToolEntries(),
 
   { title: 'Read aloud', section: 'speech', anchor: 'speech-read-aloud', keywords: ['text to speech'] },
   { title: 'Voice', section: 'speech', anchor: 'speech-voice', keywords: ['read aloud'], needs: { anchor: 'speech-read-aloud', reason: 'Voice appears once you choose a read aloud model that has voices.' } },
@@ -85,10 +110,10 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
 
   { title: 'Device name', section: 'connections', anchor: 'devices-name', keywords: ['computer name'] },
   { title: 'Networking', section: 'connections', anchor: 'devices-networking', keywords: ['network', 'connection'] },
-  { title: 'Let other computers work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', "let my other computers work on this computer's threads"] },
+  { title: 'Let my other devices work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', 'computers', "let my other devices work on this device's threads"] },
   { title: 'Passphrase', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'network keys'] },
   { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['pair', 'add device', 'computers'] },
-  { title: 'Let my editor reach my other computers', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh'] },
+  { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },
   { title: 'Tailscale Serve', section: 'connections', anchor: 'devices-tailscale-serve' },
   { title: 'Connection add-ons', section: 'connections', anchor: 'devices-addons', keywords: ['tunnel', 'relay', 'ssh'] },
   { title: 'Connection checks', section: 'connections', anchor: 'devices-checks', keywords: ['diagnostics', 'features'] },
@@ -104,20 +129,70 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Memory', section: 'labs', anchor: 'labs-profiler-memory', keywords: ['ram', 'diagnostics', 'report', 'leak', 'processes'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Memory notices', section: 'labs', anchor: 'labs-memory-notices', keywords: ['ram', 'diagnostics', 'notification'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Heap snapshot', section: 'labs', anchor: 'labs-heap-snapshot', keywords: ['memory', 'diagnostics'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
-  { title: 'Profiler agent access', section: 'labs', anchor: 'labs-profiler-agents', keywords: ['tools', 'agents', 'profiler tools'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } }
+  { title: 'Agents can read the profiler', section: 'labs', anchor: 'labs-profiler-agents', keywords: ['agent access', 'tools', 'profiler tools'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } }
 ]
+
+/**
+ * Built-in tools: one entry per tool group, found by its tools' names. The web tools sit under Web
+ * search, one row each; the development-only group has none.
+ */
+function builtInToolEntries(): SettingsSearchEntry[] {
+  const words = (id: string) => [id, id.replace(/_/g, ' ')]
+  return MOUSSE_BUILTIN_TOOL_GROUPS.filter((group) => group.id !== 'devgui').flatMap((group) => {
+    const tools = MOUSSE_BUILTIN_TOOLS.filter((tool) => tool.group === group.id)
+    if (group.id === 'web') {
+      return tools.map((tool) => ({ title: tool.label, section: 'integrations' as const, anchor: `integrations-tool-${tool.id.replace(/_/g, '-')}`, keywords: [...words(tool.id), 'web search', 'built-in tools'] }))
+    }
+    return [{ title: group.label, section: 'integrations' as const, anchor: `integrations-tools-${group.id}`, keywords: [...tools.flatMap((tool) => words(tool.id)), 'built-in tools'] }]
+  })
+}
 
 /** Settings that exist only when this build has the Mousse ID service. */
 export const MOUSSE_ID_ANCHORS: readonly string[] = ['account-mousse-id', 'account-phones']
 
-/** The settings the search offers: Mousse ID rows only when this build has the service. */
+/**
+ * Every shortcut, built from the command table: found by its row name, its command's title and words,
+ * and its group. It lands on its row with the Shortcuts filter set to that name.
+ */
+export const SHORTCUT_SEARCH_INDEX: readonly SettingsSearchEntry[] = COMMANDS_IN_DISPLAY_ORDER.map((command) => ({
+  title: shortcutRowTitle(command.id),
+  section: 'shortcuts',
+  anchor: shortcutAnchor(command.id),
+  keywords: [command.title, command.category, ...(command.searchTerms ?? [])],
+  filter: shortcutRowTitle(command.id)
+}))
+
+/** The settings the search offers: Mousse ID rows only when this build has the service, then the shortcuts. */
 export function searchIndex(mousseIdAvailable: boolean): readonly SettingsSearchEntry[] {
-  return mousseIdAvailable ? SETTINGS_SEARCH_INDEX : SETTINGS_SEARCH_INDEX.filter((entry) => !MOUSSE_ID_ANCHORS.includes(entry.anchor))
+  const settings = mousseIdAvailable ? SETTINGS_SEARCH_INDEX : SETTINGS_SEARCH_INDEX.filter((entry) => !MOUSSE_ID_ANCHORS.includes(entry.anchor))
+  return [...settings, ...SHORTCUT_SEARCH_INDEX]
 }
 
-/** The index entry for an anchor, if the search knows it. */
+/**
+ * Anchors of settings that moved, mapped to where they are now, so a link or landing that still names
+ * the old anchor reaches the setting. Add the old anchor here whenever a setting's anchor changes.
+ */
+export const SETTINGS_ANCHOR_ALIASES: Readonly<Record<string, string>> = {
+  // Moved from Appearance to the Chat page.
+  'appearance-chat': 'chat-conversation',
+  'appearance-chat-width': 'chat-width',
+  'appearance-render-math': 'chat-render-math',
+  'appearance-reply-pacing': 'chat-reply-pacing',
+  'appearance-turn-changed-files': 'chat-turn-changed-files',
+  'appearance-composer': 'chat-composer',
+  'appearance-context-ring': 'chat-context-ring',
+  'appearance-frosted-composer': 'chat-frosted-composer'
+}
+
+/** The anchor a setting has now: `anchor` itself, or where it moved to. */
+export function currentSettingsAnchor(anchor: string, aliases: Readonly<Record<string, string>> = SETTINGS_ANCHOR_ALIASES): string {
+  return Object.hasOwn(aliases, anchor) ? aliases[anchor] : anchor
+}
+
+/** The index entry for an anchor (old anchors included), if the search knows it. */
 export function settingsSearchEntry(anchor: string): SettingsSearchEntry | undefined {
-  return SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === anchor)
+  const current = currentSettingsAnchor(anchor)
+  return SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === current) ?? SHORTCUT_SEARCH_INDEX.find((entry) => entry.anchor === current)
 }
 
 /** A page as the search sees it: its name and the words it is found by. */
@@ -132,45 +207,68 @@ export interface SettingsSearchResult {
   title: string
   section: SettingsSectionId
   anchor?: string
+  /** The page's own filter to fill in (`filter` on the entry). */
+  filter?: string
 }
 
-/** How well `text` matches `query`: 3 starts with it, 2 a word starts with it, 1 contains it, 0 not at all. */
+const WORD_CHAR = /[\p{L}\p{N}]/u
+/** Endings a whole word may still have: "notification" is the word "notifications". */
+const WORD_ENDING = /^(?:s|es|ed|d|ing)?(?![\p{L}\p{N}])/u
+
+/**
+ * How `query` sits in `text`: 2 as a whole word ("back" in "Back"), 1 at the start of a longer word
+ * ("back" in "background"), 0 not at the start of any word ("ring" in "sharing").
+ */
+function wordMatch(text: string, query: string): number {
+  let best = 0
+  for (let at = text.indexOf(query); at >= 0 && best < 2; at = text.indexOf(query, at + 1)) {
+    if (at > 0 && WORD_CHAR.test(text[at - 1])) continue
+    best = WORD_ENDING.test(text.slice(at + query.length)) ? 2 : 1
+  }
+  return best
+}
+
+/** How well `text` matches `query`: 3 starts with it, 2 a later word starts with it, 0 not at all. */
 function matchScore(text: string, query: string): number {
   const lower = text.toLowerCase()
   if (lower.startsWith(query)) return 3
-  if (lower.includes(` ${query}`)) return 2
-  return lower.includes(query) ? 1 : 0
+  return wordMatch(lower, query) ? 2 : 0
 }
 
 /**
  * The settings and pages matching `query`, best first: a title match before a keyword match, and a
- * setting before a page at the same strength. Every word of the query must match.
+ * setting before a page at the same strength. Every word of the query must start a word of the
+ * setting's title, its keywords or its page name. When some results have every word whole, only
+ * those show: "back" lists what is called back, not "background"; "backg" still finds it.
  */
 export function searchSettings(query: string, pages: readonly SettingsSearchPage[], index: readonly SettingsSearchEntry[] = SETTINGS_SEARCH_INDEX): SettingsSearchResult[] {
   const q = query.trim().toLowerCase().replace(/\s+/g, ' ')
   if (!q) return []
   const words = q.split(' ')
   const pageLabel = new Map(pages.map((page) => [page.id, page.label]))
-  const score = (title: string, keywords: readonly string[], context: string): number => {
+  /** Whether every word is whole, and the result's rank; undefined when a word starts no word. */
+  const score = (title: string, keywords: readonly string[], context: string): { whole: boolean; value: number } | undefined => {
     const haystack = [title, ...keywords, context].join(' ').toLowerCase()
-    if (!words.every((word) => haystack.includes(word))) return 0
+    const matched = Math.min(...words.map((word) => wordMatch(haystack, word)))
+    if (!matched) return undefined
     const titled = matchScore(title, q)
-    if (titled) return 10 + titled
-    return Math.max(1, ...keywords.map((keyword) => matchScore(keyword, q)))
+    return { whole: matched === 2, value: titled ? 10 + titled : Math.max(1, ...keywords.map((keyword) => matchScore(keyword, q))) }
   }
-  const scored: Array<SettingsSearchResult & { score: number; order: number }> = []
+  const scored: Array<SettingsSearchResult & { whole: boolean; score: number; order: number }> = []
   index.forEach((entry, order) => {
     if (!pageLabel.has(entry.section)) return
-    const value = score(entry.title, entry.keywords ?? [], pageLabel.get(entry.section) ?? '')
-    if (value) scored.push({ title: entry.title, section: entry.section, anchor: entry.anchor, score: value + 0.5, order })
+    const match = score(entry.title, entry.keywords ?? [], pageLabel.get(entry.section) ?? '')
+    if (match) scored.push({ title: entry.title, section: entry.section, anchor: entry.anchor, filter: entry.filter, whole: match.whole, score: match.value + 0.5, order })
   })
   pages.forEach((page, order) => {
-    const value = score(page.label, page.keywords, '')
-    if (value) scored.push({ title: page.label, section: page.id, score: value, order: index.length + order })
+    const match = score(page.label, page.keywords, '')
+    if (match) scored.push({ title: page.label, section: page.id, whole: match.whole, score: match.value, order: index.length + order })
   })
+  const anyWhole = scored.some((result) => result.whole)
   return scored
+    .filter((result) => result.whole || !anyWhole)
     .sort((a, b) => b.score - a.score || a.order - b.order)
-    .map(({ title, section, anchor }) => (anchor ? { title, section, anchor } : { title, section }))
+    .map(({ title, section, anchor, filter }) => (anchor ? { title, section, anchor, ...(filter ? { filter } : {}) } : { title, section }))
 }
 
 const FOCUSABLE = [
@@ -189,17 +287,28 @@ const FOCUSABLE = [
 export function revealSettingsAnchor(root: ParentNode, anchor: string): boolean {
   const target = root.querySelector<HTMLElement>(`[data-settings-anchor="${anchor}"]`)
   if (!target) return false
+  let opened = false
   for (let details = target.closest('details'); details; details = details.parentElement?.closest('details') ?? null) {
+    if (!details.open) opened = true
     details.open = true
   }
   const control = target.querySelector(':scope > .settings-item-control')?.querySelector<HTMLElement>(FOCUSABLE)
     ?? target.querySelector<HTMLElement>(FOCUSABLE)
   const focusable = control ?? target
   if (!control && !target.hasAttribute('tabindex')) target.tabIndex = -1
-  target.scrollIntoView?.({ block: 'center' })
-  focusable.focus({ preventScroll: true })
+  const land = (): void => {
+    target.scrollIntoView?.({ block: 'center' })
+    focusable.focus({ preventScroll: true })
+  }
+  land()
+  // A fold that just opened animates its rows in, and Chromium focuses nothing inside it until they
+  // show: land again once it is open.
+  if (opened && target.ownerDocument.activeElement !== focusable) setTimeout(land, FOLD_OPEN_MS)
   return true
 }
+
+/** A little longer than a fold's open animation (`details.ui-collapse-details` in styles/collapse.css). */
+const FOLD_OPEN_MS = 220
 
 /** What landing on a search result reports back to the page. */
 export interface SettingsAnchorLanding {
@@ -231,6 +340,7 @@ export function landOnSettingsAnchor(
   landing: SettingsAnchorLanding,
   { quietMs = ANCHOR_QUIET_MS, waitMs = ANCHOR_WAIT_MS }: { quietMs?: number; waitMs?: number } = {}
 ): () => void {
+  anchor = currentSettingsAnchor(anchor)
   if (revealSettingsAnchor(root, anchor)) {
     landing.onDone()
     return () => {}

@@ -308,6 +308,27 @@ describe('Agent editor layout', () => {
     expect(html.indexOf('aria-label="Telemetry"')).toBeGreaterThan(advanced)
     expect(html.indexOf('>Status<')).toBeLessThan(advanced)
   })
+
+  it('shows an available update in Setup, not under Advanced', () => {
+    const entry = snapshot({ update: { kind: 'one_click', owner: 'npm', latestVersion: '2.2.0' } })
+    const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    const update = html.indexOf('Update to v2.2.0')
+    expect(update).toBeGreaterThan(html.indexOf('>Setup<'))
+    expect(update).toBeLessThan(html.indexOf('Models'))
+    expect(update).toBeLessThan(html.indexOf('Advanced</summary>'))
+    expect(html.match(/Update to v2\.2\.0/g)).toHaveLength(1)
+  })
+
+  it('offers the update once: on its row, not again on the status', () => {
+    for (const compatibility of [{ state: 'tested' as const }, { state: 'known_broken' as const, knownProblem: { reason: 'Breaks sign-in.', fixedIn: '2.2.0' } }]) {
+      const entry = snapshot({ compatibility, update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' } })
+      const status = describeStatus(entry)
+      expect(status.nextStep?.action).toBe('update')
+      const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status, actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+      expect(buttons(html).filter((label) => /^Update/.test(label))).toEqual(['Update now'])
+      expect(html.match(/class="prov-command-text"/g)).toHaveLength(1)
+    }
+  })
 })
 
 describe('Sign-out', () => {

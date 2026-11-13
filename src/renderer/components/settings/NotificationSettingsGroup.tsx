@@ -98,12 +98,12 @@ export function NotificationSettingsGroup({
         )
       })}
       <SettingsRow
-        title="All threads on my other computers"
+        title="All threads on my other devices"
         anchor="general-remote-notifications"
-        description={<span title="Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days.">Off: only threads you started or opened here lately.</span>}
+        description={<span title="Off: only threads you started or sent a message in from this device, or opened here in the last 7 days.">Off: only threads you started or opened here lately.</span>}
         control={
           <Switch
-            label="Notify for all threads on my other computers"
+            label="Notify for all threads on my other devices"
             checked={notifications.allRemoteThreads === true}
             onChange={(allRemoteThreads) => void onUpdate({ notifications: { ...notifications, allRemoteThreads } })}
           />

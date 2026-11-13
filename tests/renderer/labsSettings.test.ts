@@ -62,19 +62,19 @@ describe('Settings → Labs', () => {
     show()
     act(() => toggle('Profiler')!.click())
     expect(store.get().experimental.profiler.enabled).toBe(true)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agent access'])
+    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler'])
     expect(memoryStatus).toHaveBeenCalled()
     // Nested rows are indented, with no side bars.
     for (const anchor of ['labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents']) {
       expect(host.querySelector(`[data-settings-anchor="${anchor}"]`)!.classList.contains('indent')).toBe(true)
     }
     expect(host.querySelector('[data-settings-anchor="labs-heap-snapshot"]')!.textContent).toMatch(/thread text, prompts, paths and tokens/)
-    expect(toggle('Agent access')!.getAttribute('aria-checked')).toBe('false')
+    expect(toggle('Agents can read the profiler')!.getAttribute('aria-checked')).toBe('false')
 
-    act(() => toggle('Agent access')!.click())
+    act(() => toggle('Agents can read the profiler')!.click())
     expect(store.get().experimental.profiler.agentAccess).toBe(true)
     const tools = PROFILER_TOOL_NAMES.map((name) => PROFILER_TOOL_LABELS[name].label)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agent access', ...tools])
+    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools])
     for (const name of PROFILER_TOOL_NAMES) {
       expect(toggle(PROFILER_TOOL_LABELS[name].label)!.getAttribute('aria-checked')).toBe(name === 'profiler_heap_summary' ? 'false' : 'true')
       // What a tool is for is in its tooltip.
