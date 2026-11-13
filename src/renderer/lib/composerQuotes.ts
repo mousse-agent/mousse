@@ -1,21 +1,24 @@
 /**
- * Quotes in the composer (#364): text selected in a conversation is replied to with a "Reply" pill that sits in
+ * Quotes in the composer (#364): text selected in a conversation is replied to with a reply pill that sits in
  * the composer's text where it was inserted. The text box holds a short token for it, bracketed by two invisible
- * isolate marks, which the input backdrop paints as a pill; the quoted words live in a registry keyed by the token.
- * On send each token becomes the quoted words in double quotes, with one blank line above and below.
+ * isolate marks, which the input backdrop paints as a pill with a reply icon in the token's first (blank) slot; the
+ * quoted words live in a registry keyed by the token. On send each token becomes the quoted words in double quotes,
+ * with one blank line above and below; the sent bubble shows those paragraphs as pills again (`splitSentQuotes`).
  */
 
 const OPEN = '\u2068'
 const CLOSE = '\u2069'
 const NBSP = '\u00a0'
+/** An em space: the blank slot, one character wide, where the pill's reply icon is drawn. */
+const ICON_SLOT = '\u2003'
 const PREVIEW_CHARS = 32
 const STORAGE_KEY = 'mousse.composerQuotes'
 const MAX_KEPT = 200
 
-/** Token → quoted words. Kept across thread switches and restarts, as drafts are. */
-/** The opening mark and "Reply" that start every token: the pill's tag. */
-export const QUOTE_TAG_LENGTH = OPEN.length + 'Reply'.length
+/** The opening mark and the icon slot that start every token: where the pill's icon goes. */
+export const QUOTE_TAG_LENGTH = OPEN.length + ICON_SLOT.length
 
+/** Token → quoted words. Kept across thread switches and restarts, as drafts are. */
 export type QuoteRegistry = Map<string, string>
 
 export interface QuoteTokenSpan {
@@ -35,7 +38,7 @@ function previewOf(text: string): string {
 export function quoteTokenFor(text: string, registry: QuoteRegistry): string {
   const preview = previewOf(text)
   for (let n = 1; ; n += 1) {
-    const token = `${OPEN}Reply${NBSP}“${preview}”${n > 1 ? `${NBSP}${n}` : ''}${CLOSE}`
+    const token = `${OPEN}${ICON_SLOT}${NBSP}“${preview}”${n > 1 ? `${NBSP}${n}` : ''}${CLOSE}`
     const held = registry.get(token)
     if (held === undefined || held === text) return token
   }
@@ -60,7 +63,9 @@ export function expandQuoteTokens(input: string, registry: QuoteRegistry): strin
   let out = ''
   let from = 0
   for (const span of spans) {
-    const before = (out + input.slice(from, span.index)).replace(/\s+$/, '')
+    // Words after an earlier pill start their own paragraph: the spaces typed after that pill go.
+    const between = input.slice(from, span.index)
+    const before = (out + (from > 0 ? between.replace(/^\s+/, '') : between)).replace(/\s+$/, '')
     out = `${before}${before ? '\n\n' : ''}"${span.text}"\n\n`
     from = span.index + span.length
   }
@@ -128,6 +133,48 @@ export function registerQuote(text: string): string {
     // Storage full or unavailable: the quote still works until the app closes.
   }
   return token
+}
+
+export type SentSegment = { kind: 'text'; text: string } | { kind: 'quote'; text: string }
+
+/**
+ * A sent message's text in parts: each paragraph that is a known quote in double quotes (as `expandQuoteTokens`
+ * wrote it) is a quote part, so the bubble can show it as a pill; the blank lines around it go. Words that only
+ * look like a quote, but were never replied to here, stay text.
+ */
+export function splitSentQuotes(text: string, quotes: Iterable<string>): SentSegment[] {
+  const spans: Array<{ index: number; end: number; text: string }> = []
+  for (const quote of new Set(quotes)) {
+    if (!quote) continue
+    const wrapped = `"${quote}"`
+    for (let at = text.indexOf(wrapped); at >= 0; at = text.indexOf(wrapped, at + 1)) {
+      const end = at + wrapped.length
+      const startsParagraph = at === 0 || text.startsWith('\n\n', at - 2)
+      const endsParagraph = end === text.length || text.startsWith('\n\n', end)
+      if (startsParagraph && endsParagraph) spans.push({ index: at, end, text: quote })
+    }
+  }
+  if (!spans.length) return [{ kind: 'text', text }]
+  spans.sort((a, b) => a.index - b.index || b.end - a.end)
+  const segments: SentSegment[] = []
+  let from = 0
+  for (const span of spans) {
+    if (span.index < from) continue
+    let before = text.slice(from, span.index).replace(/\n\n$/, '')
+    if (from > 0) before = before.replace(/^\n\n/, '')
+    if (before) segments.push({ kind: 'text', text: before })
+    segments.push({ kind: 'quote', text: span.text })
+    from = span.end
+  }
+  const rest = text.slice(from).replace(/^\n\n/, '')
+  if (rest) segments.push({ kind: 'text', text: rest })
+  return segments
+}
+
+/** `splitSentQuotes` with the quotes this app has replied with. */
+export function splitSentMessage(text: string): SentSegment[] {
+  if (!text.includes('"')) return [{ kind: 'text', text }]
+  return splitSentQuotes(text, quoteRegistry().values())
 }
 
 /** `expandQuoteTokens` with the app's registry. */

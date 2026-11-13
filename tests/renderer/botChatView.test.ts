@@ -753,7 +753,7 @@ describe('the composer', () => {
     }
     await select()
     await click(document.querySelector('.selection-reply-button'))
-    expect(box().value).toMatch(/^Which gate\? \u2068Reply\u00a0“gate\u00a012”\u2069 $/)
+    expect(box().value).toMatch(/^Which gate\? \u2068\u2003\u00a0“gate\u00a012”\u2069 $/)
     // The pill goes like one character.
     box().setSelectionRange(box().value.length - 1, box().value.length - 1)
     await press('Backspace')
@@ -762,6 +762,11 @@ describe('the composer', () => {
     await click(document.querySelector('.selection-reply-button'))
     await press('Enter')
     expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Which gate?\n\n"gate 12"')
+    // The bubble shows the quote as a pill, not the quote marks and blank lines the bot got.
+    await settle()
+    const bubble = [...transcript().querySelectorAll('.bot-you-bubble')].at(-1)!
+    expect(bubble.querySelector('.sent-quote-pill')?.textContent).toBe('Replying to: gate 12')
+    expect(bubble.textContent).not.toContain('"gate 12"')
   })
 
   it('two identical messages on their way are two bubbles, and each confirmation clears only its own', async () => {

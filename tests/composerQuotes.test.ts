@@ -4,6 +4,8 @@ import {
   expandQuoteTokens,
   findQuoteTokens,
   insertQuoteToken,
+  QUOTE_TAG_LENGTH,
+  splitSentQuotes,
   quoteTokenAround,
   quoteTokenFor,
   type QuoteRegistry
@@ -20,10 +22,11 @@ function registryWith(...texts: string[]): { registry: QuoteRegistry; tokens: st
 }
 
 describe('Reply pills in the composer', () => {
-  it('shows a Reply tag and the opening of the quote, shortened', () => {
+  it('starts with a blank slot for the reply icon, then the opening of the quote, shortened', () => {
     const { tokens } = registryWith('The cache is rebuilt whenever the schema version changes on startup.')
-    const visible = tokens[0]!.replace(/[\u2068\u2069]/g, '').replace(/\u00a0/g, ' ')
-    expect(visible.startsWith('Reply “The cache is rebuilt')).toBe(true)
+    const visible = tokens[0]!.slice(QUOTE_TAG_LENGTH).replace(/\u2069/g, '').replace(/\u00a0/g, ' ')
+    expect(tokens[0]!.slice(1, QUOTE_TAG_LENGTH).trim()).toBe('')
+    expect(visible.startsWith(' “The cache is rebuilt')).toBe(true)
     expect(visible.endsWith('…”')).toBe(true)
   })
 
@@ -43,7 +46,8 @@ describe('Reply pills in the composer', () => {
     { name: 'at the end', typed: ([a]) => `About this: ${a} `, sent: 'About this:\n\n"quoted words"' },
     { name: 'alone', typed: ([a]) => a!, sent: '"quoted words"' },
     { name: 'after a line break', typed: ([a]) => `First line\n${a}\nnext`, sent: 'First line\n\n"quoted words"\n\nnext' },
-    { name: 'two in a row', typed: ([a, b]) => `${a} ${b} compare`, sent: '"quoted words"\n\n"other\nlines"\n\ncompare' }
+    { name: 'two in a row', typed: ([a, b]) => `${a} ${b} compare`, sent: '"quoted words"\n\n"other\nlines"\n\ncompare' },
+    { name: 'with words between two', typed: ([a, b]) => `${a} and ${b}`, sent: '"quoted words"\n\nand\n\n"other\nlines"' }
   ]
   for (const row of rows) {
     it(`expands a pill ${row.name}`, () => {
@@ -60,7 +64,7 @@ describe('Reply pills in the composer', () => {
 
   it('stops treating a pill as one once its text is edited', () => {
     const { registry, tokens } = registryWith('quoted words')
-    const edited = tokens[0]!.replace('Reply', 'Repl')
+    const edited = tokens[0]!.replace('quoted', 'quote')
     expect(findQuoteTokens(`a ${edited}`, registry)).toEqual([])
   })
 
@@ -83,5 +87,26 @@ describe('Reply pills in the composer', () => {
     expect(deleteQuoteTokenAt(input, spans, start, 'Backspace')).toBeNull()
     expect(quoteTokenAround(spans, start + 2)?.index).toBe(start)
     expect(quoteTokenAround(spans, end)).toBeUndefined()
+  })
+
+  // What the sent bubble shows: a quote paragraph written by the expansion above becomes a pill again.
+  it('splits a sent message into its words and the quotes it replied with', () => {
+    const { registry, tokens } = registryWith('quoted words', 'other\nlines')
+    const quotes = [...registry.values()]
+    const sent = expandQuoteTokens(`Why is ${tokens[0]} true? ${tokens[1]} compare`, registry)
+    expect(splitSentQuotes(sent, quotes)).toEqual([
+      { kind: 'text', text: 'Why is' },
+      { kind: 'quote', text: 'quoted words' },
+      { kind: 'text', text: 'true?' },
+      { kind: 'quote', text: 'other\nlines' },
+      { kind: 'text', text: 'compare' }
+    ])
+    expect(splitSentQuotes('"quoted words"', quotes)).toEqual([{ kind: 'quote', text: 'quoted words' }])
+  })
+
+  it('leaves quote marks inside a sentence, and quotes never replied to here, as words', () => {
+    const quotes = ['quoted words']
+    expect(splitSentQuotes('He said "quoted words" twice', quotes)).toEqual([{ kind: 'text', text: 'He said "quoted words" twice' }])
+    expect(splitSentQuotes('a\n\n"something else"\n\nb', quotes)).toEqual([{ kind: 'text', text: 'a\n\n"something else"\n\nb' }])
   })
 })
