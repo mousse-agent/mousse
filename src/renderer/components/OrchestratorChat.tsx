@@ -1836,6 +1836,8 @@ export function OrchestratorChat() {
                 : approvalWaiting ? DENY_AND_SEND_LABEL : undefined}
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onSteerQueued={() => {
+                // A waiting approval or question is answered first; a steer then would deny it.
+                if (approvalWaiting || questionsTakeMessage) return false
                 const next = nextSteerableQueueItem(queue.items, queue.busyIds)
                 if (!next) return false
                 void queue.steer(next.id)

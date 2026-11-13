@@ -686,8 +686,9 @@ export function ChatComposer({
       e.preventDefault()
       // During a run Enter follows the thread's send mode and Ctrl+Enter (Cmd+Enter on macOS) does the other one;
       // Alt+Enter, the earlier steer key, still steers. With no run every Enter sends.
-      // With nothing typed, the chord sends the next queued message now, as Send now on it does.
-      if (loading && isSteerKey(e, platform) && trimmedInput.length === 0 && !hasAttachments && onSteerQueued?.()) {
+      // With nothing typed, the chord sends the next queued message now, as Send now on it does: also while an
+      // approved command still runs (the turn can be stopped but does not count as running).
+      if ((loading || stoppable) && isSteerKey(e, platform) && trimmedInput.length === 0 && !hasAttachments && onSteerQueued?.()) {
         markSteerKey()
         return
       }
