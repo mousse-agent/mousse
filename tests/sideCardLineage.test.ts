@@ -201,8 +201,10 @@ describe('lineageSubagentName and lineageModelLabel', () => {
   })
 
   it('names provider and model, or nothing when the subagent inherited its parent’s', () => {
-    expect(lineageModelLabel({ provider: 'claude-code', model: 'opus' })).toBe('claude-code · opus')
-    expect(lineageModelLabel({ provider: null, model: 'gpt-5' })).toBe('gpt-5')
+    expect(lineageModelLabel({ provider: 'claude-code', model: 'opus' })).toBe('claude-code · Claude Opus')
+    // A level an agent chose is named, never shown as the stored `model:level` id.
+    expect(lineageModelLabel({ provider: 'pi:openai', model: 'gpt-5:high' })).toBe('pi:openai · GPT-5 · High')
+    expect(lineageModelLabel({ provider: null, model: 'gpt-5' })).toBe('GPT-5')
     expect(lineageModelLabel({ provider: null, model: null })).toBeNull()
   })
 })
@@ -289,7 +291,7 @@ describe('LineageList rendering', () => {
       subagent('a', { provider: 'claude-code', model: 'opus' }),
       subagent('b', { state: 'waiting', waitingOn: [{ title: 'Helper', state: 'working' }] })
     ])
-    expect(html).toContain('claude-code · opus')
+    expect(html).toContain('claude-code · Claude Opus')
     expect(html).toContain('Waiting on 1 subagent')
     expect(html.match(/lineage-model/g)).toHaveLength(1)
   })

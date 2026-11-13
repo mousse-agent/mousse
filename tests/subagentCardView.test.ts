@@ -264,7 +264,9 @@ describe('SubagentCardView', () => {
     expect(html).toContain('subagent-avatar')
     expect(html).toContain('background-color:#D97757')
     expect(html).toContain('API reviewer')
-    expect(html).toContain('claude · opus')
+    expect(html).toContain('claude · Claude Opus')
+    // A remote subagent's card says where it runs.
+    expect(render(card({ state: 'working', computer: 'Studio Mac' }))).toContain('claude · Claude Opus · on Studio Mac')
     expect(html).toContain('>1m 00s<')
     expect(html).not.toContain('>Done')
     expect(html).toContain('Found two issues.')

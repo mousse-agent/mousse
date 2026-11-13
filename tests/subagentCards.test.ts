@@ -187,6 +187,11 @@ describe('joinSubagentCards', () => {
     expect(cards.get('c2')).toMatchObject({ childThreadId: 'b', delegationId: 'db', state: 'working', provider: 'claude', model: 'opus' })
   })
 
+  it('names the computer a remote subagent runs on, so its card can say where', () => {
+    const cards = join([call('c1', 'delegate_task', 1)], [subagent('a', [task('da', 2)], { computer: { node: 'node-mac', name: 'Studio Mac', online: true } })])
+    expect(cards.get('c1')).toMatchObject({ childThreadId: 'a', computer: 'Studio Mac' })
+  })
+
   it('joins by the delegation id a row recorded, ahead of order', () => {
     const cards = join(
       [call('c1', 'delegate_task', 1), call('c2', 'delegate_task', 2, { output: { delegationId: 'da' } })],

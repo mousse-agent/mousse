@@ -37,6 +37,8 @@ export interface SubagentCardModel {
   state: SubagentState
   provider: string | null
   model: string | null
+  /** The computer a remote subagent runs on, by name. */
+  computer?: string
   /** The subagent has newer work than this task. */
   continued: boolean
   /** This is the subagent's latest task, so its state is the subagent's current one. */
@@ -150,6 +152,7 @@ function modelOf(call: SubagentCall, entry: TaskEntry, exact: boolean): Subagent
     state: taskState(subagent, task, latest),
     provider: subagent.provider,
     model: subagent.model,
+    ...(subagent.computer ? { computer: subagent.computer.name } : {}),
     continued: task.continued,
     latest,
     waitingOn: latest ? subagent.waitingOn : [],

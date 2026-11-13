@@ -925,7 +925,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
     },
     {
       name: 'thread_create',
-      description: `Start a new thread in a project (needs the manage agent access level and a project the profile allows). Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together (both must be ones the profile allows, and the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen, and its agents may read and wait but never create threads or message others. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards at any level, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run, and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn.`,
+      description: `Start a new thread in a project (needs the manage agent access level and a project the profile allows). Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen, and its agents may read and wait but never create threads or message others (they can still start subagents). It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards at any level, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run, and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -934,6 +934,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           workspace: { type: 'string', enum: ['project', 'new_worktree', 'existing_worktree'], description: 'Defaults to project. new_worktree needs a Git project. existing_worktree is refused. See the tool description: it does not choose the folder.' },
           instanceId: { type: 'string', description: 'The provider instance; needs model.' },
           model: { type: 'string', description: 'The model id; with instanceId, or on the instance of your own model.' },
+          effort: { type: 'string', description: 'The reasoning level of the model, one of its efforts in list_models; needs model.' },
           firstMessage: { type: 'string', description: 'Sent to the new thread as your message, so it starts working.' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'The mode of firstMessage; defaults to agent.' },
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
@@ -967,11 +968,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         if (args.workspace === 'existing_worktree')
           throw new Error('workspace "existing_worktree" is not supported: a thread cannot take over a worktree it did not make. Use "new_worktree" for a worktree of its own, or "project" for the project\'s folder. No thread was created.')
         const workspace: 'project' | 'new_worktree' = args.workspace === 'new_worktree' ? 'new_worktree' : 'project'
-        for (const key of ['instanceId', 'model'] as const)
+        for (const key of ['instanceId', 'model', 'effort'] as const)
           if (args[key] !== undefined && (typeof args[key] !== 'string' || !(args[key] as string).trim())) throw new Error(`${key} must be a non-empty string`)
         const instanceId = typeof args.instanceId === 'string' ? args.instanceId.trim() : undefined
         const model = typeof args.model === 'string' ? args.model.trim() : undefined
         if (instanceId && !model) throw new Error('instanceId needs model: name the model on that instance.')
+        const effort = typeof args.effort === 'string' ? args.effort.trim() : undefined
+        if (effort && !model) throw new Error('effort needs model: name the model (list_models shows yours as current) with its reasoning level.')
         if (args.firstMessage !== undefined && (typeof args.firstMessage !== 'string' || !args.firstMessage.trim())) throw new Error('firstMessage must be a non-empty string')
         if (typeof args.firstMessage === 'string' && args.firstMessage.length > THREAD_FIRST_MESSAGE_MAX_CHARS)
           throw new Error(`firstMessage must be at most ${THREAD_FIRST_MESSAGE_MAX_CHARS} characters`)
@@ -983,6 +986,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           workspace,
           ...(instanceId ? { instanceId } : {}),
           ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
           ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {})
         }
         const actor = actorOf(ctx)
@@ -1005,7 +1009,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           showAction(host, created.threadId, actor, 'created this thread')
           // The person watching this thread sees what its agent launched, and on which model.
           try {
-            const model = created.model ? `${created.model.instanceId} / ${created.model.model}` : 'the default model'
+            const model = created.model ? `${created.model.instanceId} / ${created.model.model}${created.model.effort ? ` (${created.model.effort} reasoning)` : ''}` : 'the default model'
             host.noteOnThread?.(ctx.caller.threadId, `Created thread «${created.title}» (${created.threadId}) in project ${created.projectId}: ${model}, ${created.permissionMode} mode, ${created.runsIn === 'own_worktree' ? 'a worktree of its own' : 'the project folder'}${created.firstMessage ? created.firstMessage.sent ? ', first message sent' : ', first message not sent' : ''}.`)
           } catch (error) {
             console.warn('the creator\'s note of a launched thread could not be written', { error: error instanceof Error ? error.message : String(error) })

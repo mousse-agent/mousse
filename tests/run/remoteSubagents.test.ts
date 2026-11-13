@@ -26,6 +26,8 @@ class FakeComputer implements RemoteComputersPort {
   refuse: Record<string, string> = {}
   /** The most this computer lets the caller's device set. */
   limit = 'accept_edits'
+  /** What its model picker offers (`providers.snapshots`). */
+  snapshots: Json[] = []
   private threads = 0
   private runs = 0
 
@@ -69,6 +71,8 @@ class FakeComputer implements RemoteComputersPort {
         return { metadata: { branch: 'mousse/thread/far-thread-1', headSha: '0123456789abcdef0123' } }
       case 'orchestrator.abort':
         return { ok: true }
+      case 'providers.snapshots':
+        return { scope: params.scope, snapshots: this.snapshots }
       default:
         throw new Error(`unexpected call ${method}`)
     }
@@ -294,6 +298,37 @@ describe('remote subagents (issue #469)', () => {
       { id: MAC, name: 'Studio Mac', online: true, allowed: true, repository: 'no_project' },
       { id: 'node-win', name: 'Windows box', online: false, allowed: false, repository: 'no_project' }
     ])
+  })
+
+  it('list_models reads what that computer offers; a model it does not offer is refused before anything exists there, and a level travels with the model', async () => {
+    const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld()
+    mac.snapshots = [{
+      instanceId: 'codex', driver: 'codex', displayName: 'Codex', builtIn: true, scope: { kind: 'device' },
+      enabled: { device: true, effective: true, setBy: 'device' }, install: { state: 'installed', canInstall: false },
+      runs: { state: 'yes' }, auth: { state: 'signed_in' }, compatibility: { state: 'tested' }, caps: { toolControl: 'exact' },
+      checkedAt: '2026-11-13T00:00:00.000Z',
+      models: { entries: [{ id: 'gpt-6', label: 'GPT-6', source: 'catalog', capabilities: { efforts: ['low', 'high'] }, hidden: false, favorite: false }] }
+    }]
+    steps['go'] = async (tools) => {
+      out.list = await tools.listModels!({ computer: 'studio mac' }) as Json
+      out.typo = await startOnMac(tools, 'Typo', { instanceId: 'codex', model: 'gpt-7' })
+      out.unknown = await startOnMac(tools, 'Unknown', { instanceId: 'claude', model: 'opus' })
+      out.good = await startOnMac(tools, 'Mac reviewer', { instanceId: 'codex', model: 'gpt-6', effort: 'high' })
+      d.settings.agentAccess = { ...d.settings.agentAccess, computers: [] }
+      out.notAllowed = await tools.listModels!({ computer: 'studio mac' }) as Json
+    }
+    await say('go')
+    expect(out.list).toMatchObject({ computer: 'Studio Mac', entries: [{ instanceId: 'codex', name: 'Codex', ready: true, models: [{ id: 'gpt-6', name: 'GPT-6', efforts: ['low', 'high'] }] }] })
+    expect(out.typo).toMatchObject({ started: false, code: 'model_not_offered', message: expect.stringContaining('Codex on Studio Mac does not offer the model "gpt-7"') })
+    expect(out.unknown).toMatchObject({ started: false, code: 'unknown_instance', message: expect.stringContaining('Studio Mac offers no "claude"') })
+    expect(out.good).toMatchObject({ title: 'Mac reviewer', computer: 'Studio Mac' })
+    // Only the good one reached that computer, on the model and level asked for.
+    expect(mac.methods().filter((method) => method === 'threads.create')).toHaveLength(1)
+    expect(mac.calls.find((call) => call.method === 'threads.setModel')!.params.model).toEqual({ instanceId: 'codex', model: 'gpt-6:high' })
+    expect(d.engine.delegations.listForParentThread(parent.id)).toHaveLength(1)
+    // A computer the user did not allow is not even asked what it offers.
+    expect(out.notAllowed).toMatchObject({ listed: false, code: 'computer_not_allowed' })
+    expect(mac.methods().filter((method) => method === 'providers.snapshots')).toHaveLength(4)
   })
 
   it('without Bridge an agent is told how to connect its computers', async () => {

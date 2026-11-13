@@ -22,6 +22,8 @@ import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { ChatMessage } from '../../src/shared/types'
+import { adapterDriver } from '../../src/mms/run/testkit/harness'
+import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /**
@@ -147,7 +149,8 @@ describe('thread_create end to end (SPEC §15.1)', () => {
   const GO = 'Go'
 
   /** A daemon whose threads all run on one scripted runtime that talks to the real MCP server. `parent` is the usual creator. */
-  const world = (script: Script, level: AgentAccessLevel = 'manage') => {
+  /** `runtime`: what the Claude entry lists and its sign-in, as the model picker reads them (default: lists nothing). */
+  const world = (script: Script, level: AgentAccessLevel = 'manage', runtime?: Partial<DriverRuntime>) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-thread-create-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -157,7 +160,7 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       const bridge = host.bridge
       return script(input, bridge?.mcp ? { ...bridge.mcp, turnToken: bridge.turnToken } : undefined, created!, self)
     })
-    const d = phase6Daemon(home, [adapter])
+    const d = runtime ? phase6Daemon(home, [], { drivers: [adapterDriver(adapter, { runtime })] }) : phase6Daemon(home, [adapter])
     created = d
     const credentials = new McpCredentials(d.engine.store)
     const server = new MousseMcpServer({ credentials, registry: d.orch.mcpToolRegistry() })
@@ -371,6 +374,8 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(seen.listed).not.toContain('thread_create')
       expect(seen.listed).not.toContain('thread_send')
       expect(seen.listed).toContain('thread_wait')
+      // It still starts subagents (they stay under it), on a model it picks from the list.
+      expect(seen.listed).toEqual(expect.arrayContaining(['delegate_task', 'list_models']))
       for (const reply of [seen.create!, seen.send!]) expect(reply.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
       expect(w.launchedBy(id)).toEqual([])
       // The ceiling is stored on the thread, so forks and subagents of it start from it.
@@ -414,6 +419,29 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       // Only the two good ones exist, and the refused four left no receipt.
       expect(w.launchedBy(w.parent.id)).toHaveLength(2)
       for (const key of ['m3', 'm4', 'm5', 'm6']) expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:${key}`), key).toBeNull()
+    })
+
+    it('take a reasoning level, and a model or level the picker does not offer is refused in words with no thread made', async () => {
+      const seen: Record<string, Rpc | AgentCreatedThread> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId !== w.parent.id) return 'ok'
+        seen.high = parse<AgentCreatedThread>(await w.create(mcp!, { instanceId: 'claude', model: 'sonnet', effort: 'high', clientRequestId: 'e1' }))
+        seen.typo = await w.create(mcp!, { instanceId: 'claude', model: 'sonet', clientRequestId: 'e2' })
+        seen.level = await w.create(mcp!, { instanceId: 'claude', model: 'sonnet', effort: 'turbo', clientRequestId: 'e3' })
+        return 'ok'
+      }, 'manage', { models: () => [{ id: 'sonnet', label: 'Claude Sonnet', efforts: ['low', 'high'] }, { id: 'vendor-model', label: 'Vendor' }], auth: async () => ({ state: 'signed_in' }) })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+
+      const high = seen.high as AgentCreatedThread
+      expect(high.model).toEqual({ instanceId: 'claude', model: 'sonnet', effort: 'high' })
+      expect(w.d.store.getThread(high.threadId)?.modelOverride).toEqual({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet', effort: 'high' })
+      // The person watching the creator sees the level it chose.
+      expect(w.messages(w.parent.id).some((message) => message.role === 'system' && message.content.includes('claude / sonnet (high reasoning)'))).toBe(true)
+      expect(refusal(seen.typo as Rpc)).toMatch(/does not offer the model "sonet" \(offered: sonnet, vendor-model\)\. No thread was created\./)
+      expect(refusal(seen.level as Rpc)).toMatch(/takes reasoning levels low, high, not "turbo"\. No thread was created\./)
+      expect(w.launchedBy(w.parent.id)).toHaveLength(1)
+      for (const key of ['e2', 'e3']) expect(w.d.engine.store.getReceipt(`thread_create:${w.parent.id}:mcp:${key}`), key).toBeNull()
     })
   })
 

@@ -22,6 +22,8 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'list_delegations',
   // Asks the user's other computers whether they have the repository; changes nothing anywhere.
   'list_computers',
+  // Reads the provider entries and models offered here or on another computer; changes nothing.
+  'list_models',
   // The retired merge tools only report a finished task's result (and pin it again).
   'integrate_delegation',
   'integrate_subagent',
