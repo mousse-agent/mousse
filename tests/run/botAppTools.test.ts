@@ -29,7 +29,7 @@ const ON_SUB = { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'su
 const ON_KEY = { instanceId: 'pi:key', model: 'claude-opus-4-6', credential: 'api_key' }
 const ROWS_ON_SUB: BotModelSlots = { talk: ON_SUB, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots
 
-function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[] } = {}) {
+function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']> } = {}) {
   const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string }> = []
   const profiles: Array<{ name?: string; description?: string }> = []
   const models: Array<{ scope: 'now' | 'always'; choice: BotModelChange }> = []
@@ -67,7 +67,8 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
       },
       list: () => ({ now: [], recent: [] }),
       stop: async () => 'stopped' as const,
-      note: () => 'noted' as const
+      note: () => 'noted' as const,
+      ...options.work
     }
   } as BotToolHost
   const activity = createBotActivitySink({ emit: () => {} })
@@ -264,6 +265,39 @@ describe('work_start levels (#673)', () => {
     expect((await bots.call('work_start', { title: 'Research', brief: 'Compare three vacuums.' })).value).toMatchObject({ status: 'started' })
     expect(await bots.call('work_start', { title: 'Odd', brief: 'Something.', level: 'max' })).toMatchObject({ isError: true, text: 'level is light, medium or hard.' })
     expect(bots.works.map((work) => work.level)).toEqual(['light', undefined])
+  })
+})
+
+/** The SSD search, running, as `work_list` lists it. */
+const SSD_SEARCH = { now: [{ workId: 'w1', title: 'SSD search', status: 'running' as const, startedAt: '2026-11-13T10:00:00.000Z', kind: 'work' as const }], recent: [] }
+
+describe('the bot speaks of its work as its own', () => {
+  it('a note to running work: the answer says what the bot now does there, and the chip reads "noted" with the job on hover', async () => {
+    const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH, reach: () => 'now' } })
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_note', input: { workId: 'w1', note: 'Use the browser tab that is already open.' } })
+    const noted = await bots.call('work_note', { workId: 'w1', note: 'Use the browser tab that is already open.' })
+    expect(noted.value).toMatchObject({ result: 'noted', reaches: 'now' })
+    expect(noted.value.note).toContain('"SSD search"')
+    expect(noted.value.note).toContain('"Use the browser tab that is already open."')
+    expect(noted.value.note).not.toMatch(/pass|the work (gets|has)/i)
+    expect(bots.activity.drain('d1')).toEqual([{ icon: 'think', text: 'noted', title: 'For SSD search' }])
+  })
+
+  it('a note that came after the job ended: the answer says it was already finished and offers to do it again, with no chip', async () => {
+    const bots = fakeBots('chat', { work: { list: () => ({ now: [], recent: [{ workId: 'w1', title: 'SSD search', status: 'done' as const, endedAt: '2026-11-13T10:05:00.000Z' }] }), note: () => 'ended' as const } })
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_note', input: { workId: 'w1', note: 'Use the open tab.' } })
+    const late = await bots.call('work_note', { workId: 'w1', note: 'Use the open tab.' })
+    expect(late.value).toMatchObject({ result: 'ended', note: expect.stringContaining('already finished "SSD search"') })
+    expect(late.value.note).toContain('offer to do it again')
+    expect(late.value).not.toHaveProperty('reaches')
+    expect(bots.activity.drain('d1')).toEqual([])
+  })
+
+  it('stopping a job: the chip names it, as "started" does', async () => {
+    const bots = fakeBots('chat', { work: { list: () => SSD_SEARCH } })
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'work_stop', input: { workId: 'w1' } })
+    expect((await bots.call('work_stop', { workId: 'w1' })).value).toMatchObject({ result: 'stopped', note: expect.stringContaining('You stopped "SSD search"') })
+    expect(bots.activity.drain('d1')).toEqual([{ icon: 'think', text: 'stopped', highlight: 'SSD search' }])
   })
 })
 

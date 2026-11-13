@@ -668,7 +668,7 @@ describe('long work', () => {
       expect(f.store.openAsks(botId)).toEqual([])
       const rows = chatOf(f, botId).filter((row) => row.activationId === workId)
       expect(rows).toMatchObject([
-        { kind: 'error', error: { text: 'I ran out of room on this run, so I stopped.' } },
+        { kind: 'error', error: { text: 'I ran out of room for this, so I stopped.' } },
         { kind: 'notice', text: 'The Shark has 2,200 Pa.', replyTo: { id: turn.message.id } }
       ])
     })
@@ -980,7 +980,7 @@ describe('long work', () => {
       prepared.authority.check(call)
       deadline()
       expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
-      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I ran out of room on this run. Pip wants to work for up to 2 hours per run.' })
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I ran out of room for this. Pip wants to work for up to 2 hours per run.' })
       expect(chatOf(f, botId).at(-1)!.ask!.carriesOn).toBeUndefined()
     })
   })

@@ -3227,9 +3227,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           if (!replyComes) this.postRoom(this.store.activation(row.id)!, input.dispatchN)
         } else if (!open && !cooling) {
           const ask = this.insertLimitAsk(row, input)
-          this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `I ran out of room on this run. ${name} wants to ${ask.title}.`, askId: ask.id, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
+          this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `I ran out of room for this. ${name} wants to ${ask.title}.`, askId: ask.id, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
         } else {
-          this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: 'I ran out of room on this run, so I stopped.' }, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
+          this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: 'I ran out of room for this, so I stopped.' }, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
         }
         // Waiting work has not ended: its end is journaled when it does.
         if (!waits) this.journalEnd(row, options.stuck ? 'no_progress' : 'budget_exhausted')
@@ -6518,7 +6518,7 @@ function failureText(reason: string): string {
     case 'uncertain': return 'I was interrupted and can\'t tell what my last step did, so I stopped here.'
     case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
     case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
-    case 'no_progress': return 'I couldn\'t get anything done on this run, so I stopped.'
+    case 'no_progress': return 'I couldn\'t get anything done on this, so I stopped.'
     case 'turn_cap_repeated': return 'I kept going without finishing, so I stopped here.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }

@@ -30,7 +30,7 @@ export interface BotChip {
   thread?: string
   /** The first line of what the bot sent to that thread, shown on the chip's hover. */
   said?: string
-  /** Details on hover: the model, entry and reasoning level of work on a model of its own. */
+  /** Details on hover: the model, entry and reasoning level of work on a model of its own, or the job a note was for. */
   title?: string
 }
 
