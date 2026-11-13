@@ -1,90 +1,57 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ToolRowBase } from "./tool-row-base";
-import { useLiveThought, type LiveThoughtSource } from "../../../../stores/liveTextStore";
-import { liveThoughtLine, liveThoughtText } from "../utils/format-tool";
 import { countRender } from "../render-counts";
+import "./tool-calls-group.css";
 
 export type ToolCallsGroupProps = {
   count: number;
-  /** Thinking icon when the title is a thought; a tool icon otherwise. */
+  /** The icon of the calls' kind, or a wrench for a mix. */
   icon?: ReactNode;
-  /**
-   * One line from the latest thought in the run. When absent (the run has no
-   * thought text), the header falls back to "Tool calls" plus the count.
-   * Other tool calls do not change this title.
-   */
-  label?: string;
-  /**
-   * The thought being written, while the group's newest item is one: its newest words follow the title (`line`;
-   * `text` whole in the tooltip). Shown on the header only while the group is closed: open, the thought's own row
-   * shows it.
-   */
-  liveThought?: LiveThoughtSource;
-  /**
-   * True while any tool inside the group is still running. Drives the group
-   * header shimmer only — completed groups stay static even if the turn is
-   * still streaming text. The group stays collapsed unless toggled.
-   */
-  autoOpen?: boolean;
-  /** Failed calls inside the group: named in the header, in the danger colour. */
+  /** What the calls did ("Read 3 files and ran 2 commands"), from `workGroupTitle`. */
+  title: string;
+  /** Failed calls inside the group: named in the header. */
   failed?: number;
-  /**
-   * True while the turn is streaming. A failure that lands then opens the
-   * group once; a failure already there when an old turn loads does not.
-   */
+  /** True while the turn runs: an open group keeps its newest row in view as rows arrive. */
   live?: boolean;
   children: ReactNode;
 };
 
 /**
- * Collapsible wrapper for consecutive tool calls:
- * "Tool calls <num> >" (chevron), collapsed by default — even while
- * streaming. A manual toggle opens it, and so does the first failure that
- * lands while the turn runs.
+ * One still line for consecutive tool calls, titled with what they did, closed until clicked. A running turn keeps
+ * its calls folded here; the turn's live line under them says what runs now. Open, the rows sit in a box capped at
+ * about 18rem that scrolls on its own, with soft edges where more rows are (tool-calls-group.css).
  */
 export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,
   icon,
-  label,
-  liveThought,
-  autoOpen = false,
+  title,
   failed = 0,
   live = false,
   children,
 }: ToolCallsGroupProps) {
   countRender("ToolCallsGroup");
   const [expanded, setExpanded] = useState(false);
-  const title = label?.trim() ? label : "Tool calls";
-  // The thought as it is written: a streamed delta renders this header, not the turn around it.
-  const thought = useLiveThought(liveThought);
-  // Failures already seen; a live group starts from none so its first failure counts.
-  const seenFailed = useRef(live ? 0 : failed);
-  const openedForFailure = useRef(false);
-  useEffect(() => {
-    if (failed > seenFailed.current && !openedForFailure.current) {
-      openedForFailure.current = true;
-      setExpanded(true);
-    }
-    seenFailed.current = failed;
-  }, [failed]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Whether the open box shows its last row: rows that arrive then keep it in view.
+  const atEndRef = useRef(true);
+  useLayoutEffect(() => {
+    const box = scrollRef.current;
+    if (!box || !live || !atEndRef.current) return;
+    box.scrollTop = box.scrollHeight;
+  }, [count, live, expanded]);
 
   return (
     <ToolRowBase
       icon={icon}
       completeLabel={title}
-      shimmerLabel={title}
-      detail={liveThought ? (expanded ? undefined : liveThoughtLine(thought) || undefined) : title === "Tool calls" ? `${count}` : undefined}
-      liveDetail={Boolean(liveThought)}
-      detailTitle={liveThought && !expanded ? liveThoughtText(thought) || undefined : undefined}
-      // A group titled with a thought turns its thinking icon; only one of plain tool calls shimmers.
-      shimmer={title === "Tool calls"}
+      shimmer={false}
       badge={
         failed > 0 ? (
           <span className="text-[var(--danger)]">· {failed} failed</span>
         ) : undefined
       }
-      isAnimating={autoOpen}
+      isAnimating={false}
       expandable
       expanded={expanded}
       onToggleExpand={() => {
@@ -92,8 +59,18 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       }}
       itemCount={count}
     >
-      <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
-        {children}
+      <div
+        ref={scrollRef}
+        className="an-tool-group-scroll"
+        data-tool-group-scroll
+        onScroll={(event) => {
+          const box = event.currentTarget;
+          atEndRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+        }}
+      >
+        <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 pl-3">
+          {children}
+        </div>
       </div>
     </ToolRowBase>
   );

@@ -32,6 +32,14 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(BOT_BASE_INSTRUCTIONS).not.toMatch(/shell commands/i)
   })
 
+  it('keeps lists as files both lanes can change, with a short memory note pointing at each', () => {
+    expect(BOT_BASE_INSTRUCTIONS).toContain('are files in your files folder, one file each, changed the moment they change; your work can read and change them too')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('Memory holds one short note per list saying it exists and its full path.')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('and anything too long for a memory entry')
+    // A list no longer lives in one memory entry, which holds 400 characters and only the chat may change.
+    expect(BOT_BASE_INSTRUCTIONS).not.toContain('one entry per list')
+  })
+
   it('names no model and no memory file', () => {
     for (const model of bundledModelCatalog().models) {
       expect(BOT_BASE_INSTRUCTIONS).not.toContain(model.id)
@@ -44,5 +52,11 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     const text = botInstructions({ name: 'Inbox helper', description: 'Go through my email every morning.', filesFolder: '/p/bots/files/b1' })
     expect(text.startsWith('Your name is Inbox helper. Your owner described what you do as: "Go through my email every morning."\nYour files folder is /p/bots/files/b1.')).toBe(true)
     expect(text.endsWith(BOT_BASE_INSTRUCTIONS)).toBe(true)
+  })
+
+  it('names the owner’s home folder by its real path, beside the files folder', () => {
+    const text = botInstructions({ name: 'Inbox helper', description: 'Mail.', filesFolder: '/p/bots/files/b1', homeFolder: '/Users/ada' })
+    expect(text).toContain("Your files folder is /p/bots/files/b1.\nYour owner's home folder is /Users/ada. Always write paths in full, never with ~ or variables like $HOME.")
+    expect(botInstructions({ name: 'A', description: 'B' })).not.toContain('home folder is')
   })
 })

@@ -1,7 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
-  ACTIVITY_DESCRIPTION_CHARS,
   INTERRUPTED_SUMMARY,
+  taskEndSummary,
   type ActivityInterruptedBy,
   type ActivityPatch,
   type ProviderToolEvent
@@ -36,6 +36,11 @@ export interface TurnFrameSink {
    * time; that retry has its own small cap, so `maxAttempts` is left out.
    */
   onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  /**
+   * Claude Code compacts the session inside the turn: `start` at its `compacting` status, `complete` at its compact
+   * boundary (the conversation before it is now a summary).
+   */
+  onCompaction?: (phase: 'start' | 'complete') => void
 }
 
 /**
@@ -200,6 +205,11 @@ export class TurnFrames {
     }
     this.waiting()
     if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
+    if (message.type === 'system') {
+      const subtype = (message as { subtype?: unknown }).subtype
+      if (subtype === 'status' && (message as { status?: unknown }).status === 'compacting') this.sink.onCompaction?.('start')
+      else if (subtype === 'compact_boundary') this.sink.onCompaction?.('complete')
+    }
     if (message.type === 'stream_event') {
       const event = message.event
       if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {
@@ -390,7 +400,7 @@ export class TurnFrames {
     const title = this.tools.get(callId)
     if (title === undefined) return
     const kind = this.contexts.get(callId)?.kind
-    const summary = typeof frame.summary === 'string' && frame.summary.trim() ? clipSummary(frame.summary) : undefined
+    const summary = taskEndSummary(frame.summary, kind)
     const usage = record(frame.usage)
     const duration = typeof usage?.duration_ms === 'number' && (kind === 'subagent' || kind === 'command') ? usage.duration_ms : undefined
     const outcome =
@@ -427,11 +437,6 @@ export class TurnFrames {
       this.forget(callId)
     }
   }
-}
-
-function clipSummary(text: string): string {
-  const clean = text.replace(/\s+/g, ' ').trim()
-  return clean.length > ACTIVITY_DESCRIPTION_CHARS ? `${clean.slice(0, ACTIVITY_DESCRIPTION_CHARS - 1)}…` : clean
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

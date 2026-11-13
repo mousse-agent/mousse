@@ -16,7 +16,7 @@
   opacity: 0.9;
   pointer-events: none;
 }
-.bot-face-live:not([data-still]) .bot-face-z { animation: bot-face-z 2.6s ease-in-out infinite; }
+.bot-face-live:not([data-still]) .bot-face-z { animation: bot-face-z 2.6s steps(16, jump-none) infinite; }
 @keyframes bot-face-z {
   0% { opacity: 0; transform: translate(0, 6px) scale(0.7); }
   30% { opacity: 0.95; }

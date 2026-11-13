@@ -126,3 +126,32 @@ describe('the browser tab without tabs', () => {
     expect(host.querySelector('.browser-empty-logo svg')).toBe(art)
   })
 })
+
+describe('restored browser tabs', () => {
+  const restoredTab = (id: string, ownerThreadId: string) =>
+    ({ id, ownerThreadId, url: 'https://example.test/', title: id, zoomFactor: 1, deviceToolbarOpen: false, devicePreset: 'responsive' as const })
+  const loadedTabIds = () => [...host.querySelectorAll('webview')].map((webview) => webview.getAttribute('data-browser-tab-id'))
+
+  it('start no page while hidden and load the first time they are shown', async () => {
+    useAppStore.setState({ browserTabs: [restoredTab('restored_a', 'thread_a'), restoredTab('restored_b', 'thread_b')] })
+    const show = async (active: boolean) => { act(() => root.render(createElement(BrowserPanel, { active }))); await settle() }
+    await show(false)
+    expect(loadedTabIds()).toEqual([])
+    await show(true)
+    expect(loadedTabIds()).toEqual(['restored_a'])
+    // Another thread's restored tab stays unloaded; a shown one stays loaded when the browser hides.
+    await show(false)
+    expect(loadedTabIds()).toEqual(['restored_a'])
+  })
+
+  it('load at once for a tab opened in this session or one an agent drives', async () => {
+    useAppStore.setState({ browserTabs: [restoredTab('restored_b', 'thread_b')] })
+    const opened = useAppStore.getState().addBrowserTab('thread_b')
+    await render(() => createElement(BrowserPanel, { active: false }))
+    expect(loadedTabIds()).toEqual([opened])
+    act(() => emit(agentState('restored_b', 'thread_b')))
+    await settle()
+    expect(loadedTabIds()).toEqual(['restored_b', opened])
+    expect(host.querySelector('webview[data-browser-tab-id="restored_b"]')?.hasAttribute('data-agent-controlled')).toBe(true)
+  })
+})

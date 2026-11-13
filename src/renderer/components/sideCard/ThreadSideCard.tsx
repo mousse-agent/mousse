@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useAppStore } from '../../stores/appStore'
+import { chatColumnWidth, useChatWidth } from '../../lib/chatWidth'
 import { useDialogFocus } from '../ui/Modal'
 import { ActionsSection } from './ActionsSection'
 import { DeviceSection } from './DeviceSection'
@@ -98,7 +99,8 @@ export function ThreadSideCard() {
 
   // Written on the pane, not passed up: the width follows the window while it is
   // resized, and nothing above the pane needs to render for it.
-  const reservedWidth = !overlay && reserved && threadWidth !== null ? sideCardReservedWidth(threadWidth) : 0
+  const columnWidth = chatColumnWidth(useChatWidth())
+  const reservedWidth = !overlay && reserved && threadWidth !== null ? sideCardReservedWidth(threadWidth, columnWidth) : 0
   useLayoutEffect(() => {
     layerRef.current?.parentElement?.style.setProperty('--side-card-reserved', `${reservedWidth}px`)
   }, [reservedWidth])

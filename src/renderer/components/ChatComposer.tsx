@@ -31,6 +31,7 @@ import { markSteerKey, steersOnEnter, type SendMode } from '../lib/steerKey'
 import { useThreadSendMode } from '../lib/sendMode'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
+import { ImageGalleryProvider } from '../chat/components/agent-elements/image-gallery'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
 import type { ChatReference } from '../../shared/chatReferences'
@@ -740,17 +741,20 @@ export function ChatComposer({
                 <span>Transcribing…</span>
               </div>
             )}
-            {attachedFiles.map(({ id, file, previewUrl }) => (
-              <FileAttachment
-                key={id}
-                id={id}
-                filename={file.name}
-                size={file.size}
-                isImage={previewUrl !== undefined}
-                url={previewUrl}
-                onRemove={() => removeFile(id)}
-              />
-            ))}
+            {/* An attached image opens a preview that steps through the other attached images. */}
+            <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl ? [{ id, url: previewUrl, filename: file.name }] : []))}>
+              {attachedFiles.map(({ id, file, previewUrl }) => (
+                <FileAttachment
+                  key={id}
+                  id={id}
+                  filename={file.name}
+                  size={file.size}
+                  isImage={previewUrl !== undefined}
+                  url={previewUrl}
+                  onRemove={() => removeFile(id)}
+                />
+              ))}
+            </ImageGalleryProvider>
             {references.map((reference) => (
               <ChatReferencePill key={reference.id} reference={reference} onRemove={() => onRemoveReference(reference.id)} />
             ))}

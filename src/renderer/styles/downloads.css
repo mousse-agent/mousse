@@ -33,7 +33,7 @@
   transition: stroke-dashoffset calc(300ms * var(--ui-motion-scale)) ease;
 }
 
-.downloads-ring.indeterminate { animation: downloads-ring-spin 1s linear infinite; }
+.downloads-ring.indeterminate { animation: downloads-ring-spin 1s steps(12) infinite; }
 
 @keyframes downloads-ring-spin {
   from { transform: rotate(-90deg); }

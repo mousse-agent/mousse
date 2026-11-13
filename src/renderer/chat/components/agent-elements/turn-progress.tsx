@@ -60,6 +60,8 @@ export type TurnProgress = {
   label: string;
   /** More about it, for the tooltip. */
   title?: string;
+  /** What the running call works on (its command, file or query), shown dim after the label. */
+  detail?: string;
   /** A retry's start (ms): the label counts down to it. */
   until?: number;
   /** The running tool's part type: the line shows its icon, pulsing, instead of the dots. */
@@ -86,7 +88,7 @@ type Part = { type?: string; state?: string; input?: unknown; text?: string; sub
 /** Fields a call's row has before its arguments arrive; they say nothing about what it will do. */
 const PLACEHOLDER_INPUT_KEYS = new Set(["label", "cwd"]);
 
-const NOT_TOOLS = new Set(["tool-Thinking", "tool-Note", "tool-QuestionAnswers", "tool-PlanWrite"]);
+const NOT_TOOLS = new Set(["tool-Thinking", "tool-QuestionAnswers", "tool-PlanWrite"]);
 
 function toolName(type: string): string {
   const mcp = parseMcpToolType(type);
@@ -120,10 +122,10 @@ function isRunningTool(part: Part): boolean {
 function toolProgress(part: Part): TurnProgress {
   const detail = inputDetail(part.input);
   if (part.type === "tool-Subagent" || part.type === "tool-Task" || part.type === "tool-Agent" || part.subagentTool) {
-    return { kind: "running-tool", label: "Running subagent…", title: detail };
+    return { kind: "running-tool", label: "Running subagent…", title: detail, detail };
   }
   // A tool search loads tools for the model: the line says what its row says.
-  if (part.type === "tool-ToolSearch") return { kind: "running-tool", label: "Loading tools…", title: detail, tool: part.type };
+  if (part.type === "tool-ToolSearch") return { kind: "running-tool", label: "Loading tools…", title: detail, detail, tool: part.type };
   const name = toolName(part.type!);
   // A call whose arguments are still streaming in: the model is writing it (a runtime that opens the row at the
   // call's start, before its arguments, shows it running with none).
@@ -132,7 +134,7 @@ function toolProgress(part: Part): TurnProgress {
     ([key, value]) => PLACEHOLDER_INPUT_KEYS.has(key) || value === undefined || value === null || value === "",
   ));
   if (part.state === "input-streaming" || noInput) return { kind: "preparing-tool", label: `Preparing ${name}…`, title: detail, tool: part.type };
-  return { kind: "running-tool", label: `Running ${name}…`, title: detail, tool: part.type };
+  return { kind: "running-tool", label: `Running ${name}…`, title: detail, detail, tool: part.type };
 }
 
 /** How long a sighting is kept: longer than any retry's wait. */
@@ -311,6 +313,7 @@ export function TurnProgressRow({
         </span>
       )}
       <span className="turn-progress-label">{progress.label}</span>
+      {progress.detail && <span className="turn-progress-detail">{progress.detail}</span>}
     </div>
   );
 }

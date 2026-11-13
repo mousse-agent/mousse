@@ -3,7 +3,7 @@
  * the prompt, a native cancel that misses its deadline ends in a kill and a forgotten session, and
  * closing uses `session/close` only when the agent offers it.
  */
-import { methods, PROTOCOL_VERSION, type AgentApp } from '@agentclientprotocol/sdk'
+import { methods, PROTOCOL_VERSION, RequestError, type AgentApp } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcpSessions, type SavedAcpSession } from '../../src/mms/harness/acp/session'
 import { NO_QUIRKS } from '../../src/mms/harness/acp/quirks'
@@ -220,6 +220,22 @@ describe('ACP sessions', () => {
       expect(onText).toHaveBeenLastCalledWith('part')
       // A turn that did not finish is never resumable.
       expect(saved.get('t')?.historyKey).toBeUndefined()
+    })
+
+    it('a provider refusal the agent answers the prompt with shows its status and message, credentials removed', async () => {
+      const agent = scriptedAgent({ prompt: async () => { throw RequestError.internalError(undefined, 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"model: claude-x not found for key sk-ant-api03-abcdefghijklmnop"}}') } })
+      const { sessions } = core(agent.connect)
+      const error = await chat(sessions).catch((caught: unknown) => caught)
+      expect(error).toMatchObject({ code: 'provider_api_error', message: '400 · model: claude-x not found for key [redacted]', errorInfo: { category: 'invalid' } })
+    })
+
+    it('an agent error with its text in data shows that text; a sign-in error still asks for a sign-in', async () => {
+      const agent = scriptedAgent({ prompt: async () => { throw RequestError.internalError({ details: '[API Error: got status: 429 Too Many Requests. {"error":{"message":"Resource has been exhausted (e.g. check quota)."}}]' }) } })
+      const { sessions } = core(agent.connect)
+      await expect(chat(sessions)).rejects.toMatchObject({ code: 'provider_api_error', message: '429 · Resource has been exhausted (e.g. check quota).' })
+      const signIn = scriptedAgent({ prompt: async () => { throw RequestError.authRequired() } })
+      const second = core(signIn.connect)
+      await expect(chat(second.sessions)).rejects.not.toMatchObject({ code: 'provider_api_error' })
     })
 
     it('cancelled, when nobody asked for a cancel, ends the turn as interrupted, not as a reply', async () => {

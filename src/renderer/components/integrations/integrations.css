@@ -36,8 +36,26 @@
 .skills-mcp-other-apps { padding-top: var(--space-24); }
 .skills-mcp-other-apps .settings-group-title { font-size: var(--settings-fs-row); }
 
-/* Compact rows for the built-in tool list under Advanced. */
+/* Compact rows for the built-in tools and the shared servers. */
 .skills-mcp-compact { --settings-row-y: var(--space-4); }
+
+/* Who can use them: a Skills and an MCP switch per agent, under column labels on the heading line
+   (laid out like the notification channels). */
+.skills-mcp-access {
+  display: grid;
+  grid-template-columns: repeat(2, 44px);
+  justify-items: center;
+  align-items: center;
+  column-gap: var(--space-16);
+}
+.skills-mcp-access-labels {
+  margin-right: var(--space-16);
+  align-self: flex-end;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.skills-mcp-access-group { --settings-row-y: var(--space-8); }
 
 
 /* ---------- Dialogs ---------- */

@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { ActivityPatch } from '../../../shared/agentActivity'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
-import type { CursorAgentSetup, CursorHostMethods, CursorUsage } from '../hosts/cursorProtocol'
+import { redactCursorText, type CursorAgentSetup, type CursorHostMethods, type CursorUsage } from '../hosts/cursorProtocol'
+import { providerReportedError } from '../../orchestrator/providerErrors'
 import { interruptWithDeadline, LOAD_DEADLINE_MS, loadWithDeadline, recoverActiveRun, SessionLoadTimeoutError } from '../supervise'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { CursorHostCallError, CursorHostExitedError, type CursorHostClient, type CursorRunListener } from './hostClient'
@@ -464,6 +465,9 @@ export class CursorSessions {
       this.options.markSignedOut()
       return new Error(this.options.signInRequiredMessage)
     }
+    // Any other refusal the SDK reported (a bad request, an unknown model, a limit): its status and its own message.
+    if (error instanceof CursorHostCallError && !error.activeRun && error.message.trim())
+      return providerReportedError(redactCursorText(error.message), { provider: 'cursor', ...(error.status !== undefined ? { status: error.status } : {}), cause: error })
     return error instanceof Error ? error : new Error(String(error))
   }
 

@@ -12,11 +12,13 @@ import {
   cardGroupLabel,
   cardGroupSummary,
   cardIconStack,
+  cardLine,
   cardStateNote,
   cardStatusLabel,
   formatElapsed,
   lastResultText,
   LruCache,
+  plainResultText,
   RESULT_CACHE_LIMIT
 } from '../src/renderer/chat/components/agent-elements/tools/subagent-card-logic'
 import { MessageList } from '../src/renderer/chat/components/agent-elements/message-list'
@@ -173,6 +175,62 @@ describe('card text', () => {
     expect(lastResultText([{ role: 'user', content: 'hi' }])).toBeNull()
     expect(lastResultText([{ role: 'assistant', content: 'x'.repeat(400) }])!.length).toBe(280)
   })
+
+  it('quotes a reply as plain words, with its Markdown stripped', () => {
+    expect(lastResultText([{ role: 'assistant', content: 'No other code builds a cache key: `cacheKey` and `restoreKeys` in `src/cache.ts`.' }])).toBe(
+      'No other code builds a cache key: cacheKey and restoreKeys in src/cache.ts.'
+    )
+  })
+})
+
+describe('plain result text', () => {
+  it('drops inline marks and keeps the words', () => {
+    expect(plainResultText('**Bold**, *italic*, _under_, ~~gone~~ and `code_with_*stars*`')).toBe('Bold, italic, under, gone and code_with_*stars*')
+    expect(plainResultText('See [the docs](https://x.test/a) and ![chart](c.png) at <https://x.test>')).toBe('See the docs and chart at https://x.test')
+    expect(plainResultText('snake_case_name and 2*3*4 stay as they are')).toBe('snake_case_name and 2*3*4 stay as they are')
+    expect(plainResultText('Escaped \\*stars\\* stay')).toBe('Escaped *stars* stay')
+  })
+
+  it('drops block marks and joins the lines', () => {
+    const markdown = [
+      '## Findings',
+      '',
+      '> quoted line',
+      '- first item',
+      '1. numbered item',
+      '- [x] done item',
+      '',
+      '```ts',
+      'const a = 1',
+      '```',
+      '---',
+      '| File | Lines |',
+      '| --- | :---: |',
+      '| a.ts | 12 |'
+    ].join('\n')
+    expect(plainResultText(markdown)).toBe('Findings quoted line first item numbered item done item const a = 1 File · Lines a.ts · 12')
+  })
+
+  it('is empty for Markdown with no words', () => {
+    expect(plainResultText('```\n```\n---\n')).toBe('')
+  })
+})
+
+describe('the second line of a row', () => {
+  it('shows the result, plain, while it has one', () => {
+    expect(cardLine(card({ state: 'done' }), 'Found `two` issues.')).toEqual({ note: null, text: 'Found two issues.' })
+  })
+
+  it('says the state while there is no result', () => {
+    expect(cardLine(card(), null)).toEqual({ note: null, text: 'Working…' })
+    expect(cardLine(card({ pending: true, state: 'starting' }), null)).toEqual({ note: null, text: 'Starting…' })
+    expect(cardLine(card({ state: 'done' }), null)).toEqual({ note: null, text: 'Done' })
+  })
+
+  it('puts a state worth reading first, tinted by its tone, then the result', () => {
+    expect(cardLine(card({ state: 'failed' }), 'Agent type `x` not found')).toEqual({ note: { text: 'Failed', tone: 'failed' }, text: 'Agent type x not found' })
+    expect(cardLine(card({ state: 'needs_input' }), null)).toEqual({ note: { text: 'Needs input', tone: 'attention' }, text: null })
+  })
 })
 
 describe('the cache of subagent replies', () => {
@@ -213,11 +271,38 @@ describe('SubagentCardView', () => {
     expect(html).toContain('aria-label="Open API reviewer, Done"')
   })
 
-  it('drops the Working text of a running row and keeps its elapsed time', () => {
+  it('says Working on the second line of a running row, with its elapsed time', () => {
     const html = render(card())
-    expect(html).not.toContain('>Working')
+    expect(html).toContain('class="subagent-card-result">Working…<')
     expect(html).toContain('>2m 00s<')
     expect(html).toContain('aria-label="Open API reviewer, Working"')
+  })
+
+  it('is one compact row: a 24px avatar, a 12px title, one 11px line of plain result with the rest in its tooltip', () => {
+    const long = `Found **two** issues in \`api.ts\`. ${'More detail. '.repeat(30)}`
+    const html = render(card({ state: 'done' }), long)
+    expect(html).not.toContain('`')
+    expect(html).not.toContain('**')
+    expect(html).toContain('class="subagent-card-result">Found two issues in api.ts.')
+    expect(html).toMatch(/class="subagent-card-line" title="Found two issues in api\.ts\. More detail/)
+    // The provider icon is 14px inside its 24px chip.
+    expect(html).toContain('width:14px;height:14px')
+    const css = readFileSync(new URL('../src/renderer/chat/components/agent-elements/tools/subagent-card.css', import.meta.url), 'utf8')
+    // Every block whose selector list ends with this selector.
+    const rule = (selector: string) => [...css.matchAll(new RegExp(`\\n${selector.replace(/[.]/g, '\\.')}\\s*\\{([^}]*)\\}`, 'g'))].map((match) => match[1]).join('')
+    expect(rule('.subagent-card')).toContain('padding: 4px 8px')
+    expect(rule('.subagent-card')).toContain('background: transparent')
+    expect(rule('.subagent-card-title')).toMatch(/font-size: 12px;[\s\S]*line-height: 15px/)
+    expect(rule('.subagent-card-line')).toMatch(/font-size: 11px;[\s\S]*line-height: 14px/)
+    expect(rule('.subagent-card-result')).toContain('text-overflow: ellipsis')
+    expect(css).not.toContain('line-clamp')
+  })
+
+  it('shows a failure quietly: a tinted Failed and the reason on the second line', () => {
+    const html = render(card({ state: 'failed', error: 'Agent `x` not found' }), 'Agent `x` not found')
+    expect(html).toContain('class="subagent-card-note" data-tone="failed">Failed<')
+    expect(html).toContain('class="subagent-card-result">Agent x not found<')
+    expect(html).toContain('aria-label="Open API reviewer, Failed"')
   })
 
   it('puts a status dot on the icon: running, needs input, done, failed', () => {
@@ -372,7 +457,8 @@ describe('the transcript with cards and notices', () => {
       ],
       [card({ toolCallId: 'card-1', title: 'Reviewer one' }), card({ toolCallId: 'card-2', title: 'Reviewer two', state: 'done' })]
     )
-    const group = html.indexOf('Tool calls')
+    // A subagent still works, so the turn does too: its commands are one group, titled with what they did.
+    const group = html.indexOf('Ran 2 commands')
     expect(group).toBeGreaterThan(-1)
     expect(html).toContain('Reviewer one')
     expect(html).toContain('Reviewer two')

@@ -1,4 +1,4 @@
-import { AppError, createErrorProvider, normalizeAppError, serializeAppError } from '../../shared/errors'
+import { AppError, createErrorProvider, normalizeAppError, redactSecrets, serializeAppError, type ErrorCategory, type ErrorInfo } from '../../shared/errors'
 import { PROVIDER_LABELS } from '../../shared/pauseDisplay'
 
 export const providerErrors = createErrorProvider({
@@ -18,8 +18,118 @@ export const providerErrors = createErrorProvider({
   provider_timeout: { category: 'timeout', retryable: true, message: 'The provider response timed out. Please try again.' },
   provider_cancelled: { category: 'cancelled', retryable: false, message: 'The provider request was cancelled.' },
   provider_retry_exhausted: { category: 'unavailable', retryable: false, message: 'The provider is still unavailable after five retries. Please try again later.' },
-  provider_unknown: { category: 'internal', retryable: false, message: 'The provider request failed. Please try again or check your provider connection.' }
+  provider_unknown: { category: 'internal', retryable: false, message: 'The provider request failed. Please try again or check your provider connection.' },
+  provider_api_error: { category: 'unavailable', retryable: false, message: 'The provider returned an error.' }
 })
+
+/** How much of a provider's own error message is kept for the transcript. */
+export const PROVIDER_MESSAGE_CHARS = 500
+/** A runtime's report of a provider's refusal: `API Error: 400 <message or JSON body>` (Claude Code). */
+const API_ERROR = /^API Error:\s*([1-5]\d{2})\b\s*([\s\S]*)$/
+/**
+ * How runtimes and SDKs put a provider's status before its message: Claude Code's `API Error: 400 …`, Codex's
+ * `unexpected status 400 Bad Request: …, url: …`, Gemini's `[API Error: got status: 400 Bad Request. {…}]`, pi-ai's
+ * `xai API error (400): …` and the SDKs' `400 …` or `HTTP 400: …`.
+ */
+const STATUS_FORMS = [
+  API_ERROR,
+  /^\[?API Error:\s*got status:\s*([1-5]\d{2})\b[^.{\n]*\.?\s*([\s\S]*?)\]?$/i,
+  /^unexpected status ([1-5]\d{2})\b[^:\n]*:\s*([\s\S]*)$/i,
+  /^[^\n():]{0,64}\berror \(([45]\d{2})\):\s*([\s\S]*)$/i,
+  /^(?:HTTP\s+)?([45]\d{2})(?:\s*:|\s+|$)\s*([\s\S]*)$/
+]
+/** What Codex adds after the provider's message: the URL it called and the request id. */
+const TRAILING_CONTEXT = /(?:,\s*(?:url|request id|cf-ray):\s*\S+)+\s*$/i
+
+/** The status a runtime's or SDK's error text starts with, and the provider's text after it. */
+export function readProviderStatus(text: string): { status: number; body: string } | undefined {
+  const trimmed = text.trim()
+  for (const form of STATUS_FORMS) {
+    const match = form.exec(trimmed)
+    if (match) return { status: Number(match[1]), body: match[2]!.replace(TRAILING_CONTEXT, '').trim() }
+  }
+  return undefined
+}
+
+/** Provider keys the shared redaction does not know: xAI (`xai-…`), Google (`AIza…`) and Cursor (`key_…`, `crsr_…`). */
+const PROVIDER_KEYS = /\b(?:xai-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,}|(?:key|crsr)_[A-Za-z0-9_-]{16,})/g
+
+/**
+ * A provider's own error text as the transcript shows it: a JSON body gives its `error.message` (or `message`), and the
+ * text is trimmed, its credentials removed (`secrets` too), its whitespace collapsed and cut at `PROVIDER_MESSAGE_CHARS`.
+ */
+export function providerMessageText(text: string, secrets?: Iterable<string>): string {
+  let body = text.trim()
+  const start = body.indexOf('{')
+  if (start >= 0) {
+    try {
+      const parsed = JSON.parse(body.slice(start)) as { error?: unknown; message?: unknown }
+      const error = parsed?.error
+      const message = (error && typeof error === 'object' ? (error as { message?: unknown }).message : undefined) ?? parsed?.message ?? error
+      if (typeof message === 'string' && message.trim()) body = message.trim()
+    } catch {
+      // Not JSON: the text is the message.
+    }
+  }
+  body = redactSecrets(body, secrets).replace(PROVIDER_KEYS, '[redacted]').replace(/\s+/g, ' ').trim()
+  return body.length > PROVIDER_MESSAGE_CHARS ? `${body.slice(0, PROVIDER_MESSAGE_CHARS - 1).trimEnd()}…` : body
+}
+
+/** The category of a provider's HTTP status. */
+function statusCategory(status: number | undefined): ErrorCategory {
+  if (status === undefined) return 'unavailable'
+  return status === 401 || status === 403 ? 'denied' : status === 408 ? 'timeout' : status === 429 || status >= 500 ? 'unavailable' : 'invalid'
+}
+
+/**
+ * The provider's own refusal as an error whose message is its status and its message (`400 · …`, see
+ * `providerMessageText`), or the message alone when the runtime gave no status. The runtime already retried, so it is
+ * not retryable unless `errorInfo` says so; `supportId` is the reference the transcript shows. `code` keeps a
+ * classification the caller made (`provider_request_invalid`); the default is `provider_api_error`.
+ */
+export function providerStatusError(
+  status: number | undefined,
+  text: string,
+  options: { provider?: string; code?: string; errorInfo?: ErrorInfo; cause?: unknown; secrets?: Iterable<string> } = {}
+): AppError {
+  const body = providerMessageText(text, options.secrets)
+  const message = status === undefined ? body || providerErrors.create('provider_api_error').message : body ? `${status} · ${body}` : String(status)
+  return new AppError({
+    code: options.code ?? 'provider_api_error',
+    message,
+    errorInfo: options.errorInfo ?? { category: statusCategory(status), retryable: false },
+    details: { ...(options.provider ? { provider: options.provider } : {}), ...(status !== undefined ? { status } : {}), supportId: globalThis.crypto.randomUUID() }
+  }, options.cause ?? new Error(text))
+}
+
+/**
+ * The provider's own refusal, as a runtime reported it (`API Error: 400 …`), as an error whose message is the status
+ * and the provider's message (`providerStatusError`). Undefined for any other text.
+ */
+export function providerApiError(text: string, provider?: string): AppError | undefined {
+  const match = API_ERROR.exec(text.trim())
+  if (!match) return undefined
+  return providerStatusError(Number(match[1]), match[2]!, { ...(provider ? { provider } : {}) })
+}
+
+/** How an ACP SDK labels an agent's error: `Internal error: <the agent's text>`. */
+const RPC_LABEL = /^\s*Internal error:\s*/i
+
+/**
+ * A failure a runtime reported in its own words (an agent's error, a run's end), as the transcript shows it: the status
+ * the text starts with, or `status` when the runtime gave one, and the provider's message (`providerStatusError`).
+ */
+export function providerReportedError(text: string, options: { status?: number; provider?: string; cause?: unknown; secrets?: Iterable<string> } = {}): AppError {
+  const stripped = text.replace(RPC_LABEL, '')
+  const read = readProviderStatus(stripped)
+  const own = read && read.status >= 400 && (options.status === undefined || options.status === read.status) ? read : undefined
+  const status = options.status !== undefined && options.status >= 400 ? options.status : own?.status
+  return providerStatusError(status, own?.body ?? stripped, {
+    ...(options.provider ? { provider: options.provider } : {}),
+    ...(options.cause !== undefined ? { cause: options.cause } : {}),
+    ...(options.secrets ? { secrets: options.secrets } : {})
+  })
+}
 
 export interface ProviderFailureResponse { status: number; retryAfter?: string }
 
@@ -123,15 +233,20 @@ export function normalizeProviderError(error: unknown, provider?: string, respon
   const status = typeof shape?.status === 'number' ? shape.status : typeof shape?.statusCode === 'number' ? shape.statusCode : response && response.status >= 400 ? response.status : formattedStatus ? Number(formattedStatus[1]) : undefined
   const code = typeof shape?.code === 'string' ? shape.code.toLowerCase() : ''
   const details = { ...(provider ? { provider } : {}), ...(status !== undefined ? { status } : {}) }
+  // A refusal that has no path of its own (a pause, a sign-in, a retry, a compaction) shows the provider's status and
+  // message, keeping its classification, instead of a fixed line.
+  const refused = (classified: 'provider_permission_denied' | 'provider_request_invalid' | 'provider_api_error'): AppError => status !== undefined && text.trim()
+    ? providerStatusError(status, readProviderStatus(text)?.body ?? text, { ...(provider ? { provider } : {}), code: classified, errorInfo: { category: statusCategory(status), retryable: false }, cause: error })
+    : providerErrors.create(classified, error, details)
   if (shape?.name === 'AbortError' || /^(?:request (?:was )?aborted|cursor request aborted)/i.test(text)) return providerErrors.create('provider_cancelled', error, details)
   if (shape?.name === 'ProviderStreamStallError') return withRetryDelay(providerErrors.create('provider_timeout', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
   // Permanent classifications have precedence even if messages contain transport words.
   if (status === 401 || /authentication_error|invalid_api_key/.test(code) || /invalid (?:api key|auth|credential)|authentication (?:failed|required|error)|unauthorized|incorrect api key/i.test(text)) return providerErrors.create('provider_auth_invalid', error, details)
-  if (status === 403 || /permission_denied/.test(code) || /permission denied|forbidden|access denied|denied by policy|refused by policy/i.test(text)) return providerErrors.create('provider_permission_denied', error, details)
+  if (status === 403 || /permission_denied/.test(code) || /permission denied|forbidden|access denied|denied by policy|refused by policy/i.test(text)) return refused('provider_permission_denied')
   if (/hit your ChatGPT usage limit/i.test(text)) return usageLimitError({ provider, estimated: true }, error, details)
   if (/insufficient_quota|quota_exceeded|billing/.test(code) || /insufficient[_ ]quota|quota (?:exceeded|exhausted)|billing (?:limit|error)|credit balance|GoUsageLimitError|FreeUsageLimitError|monthly usage limit|available balance|out of budget/i.test(text)) return providerErrors.create('provider_quota_exceeded', error, details)
   if (/context(?:_|\s|-)*(?:window|length|limit)|maximum context|too many tokens|prompt is too long/i.test(text)) return providerErrors.create('provider_context_overflow', error, details)
-  if ((status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) || /invalid_request|model_not_found/.test(code) || /invalid request|unknown model|model (?:not found|does not exist)/i.test(text)) return providerErrors.create('provider_request_invalid', error, details)
+  if ((status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) || /invalid_request|model_not_found/.test(code) || /invalid request|unknown model|model (?:not found|does not exist)/i.test(text)) return refused('provider_request_invalid')
   if (status === 429 || /rate_limit/.test(code) || /rate[_ ]limit|too many requests/i.test(text)) {
     const retryAfter = shape?.headers?.get?.('retry-after') ?? response?.retryAfter
     // A wait too long to retry in-turn is a usage limit; the server's time says when it resets.
@@ -141,6 +256,7 @@ export function normalizeProviderError(error: unknown, provider?: string, respon
   }
   if (status === 408 || /etimedout|timeout/.test(code) || /timed?\s*out|timeout/i.test(text)) return withRetryDelay(providerErrors.create('provider_timeout', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
   if (shape?.name === 'APIConnectionError' || (status !== undefined && [500, 502, 503, 504, 529].includes(status)) || /^(?:econnreset|econnrefused|econnaborted|enotfound|eai_again)$/.test(code) || /^connection (?:error|refused|lost)[.!]?(?:$|\s)|fetch failed|network error|websocket error|econn(?:reset|refused|aborted)|enotfound|eai_again|socket hang up|unable to connect|internal server error|temporarily unavailable|provider (?:is )?overloaded|\boverloaded(?:_error)?\b|\bapi_error\b|upstream (?:service )?error|codex error:.*retry your request/i.test(text)) return withRetryDelay(providerErrors.create('provider_unavailable', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
+  if (status !== undefined && text.trim()) return refused('provider_api_error')
   const fallback = normalizeAppError(error, 'provider_unknown')
   return new AppError({ ...fallback, message: `${providerErrors.create('provider_unknown').message} Reference: ${(fallback.details as { supportId: string }).supportId}`, errorInfo: { category: 'internal', retryable: false } }, error)
 }

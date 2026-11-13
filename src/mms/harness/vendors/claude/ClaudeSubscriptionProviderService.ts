@@ -22,6 +22,7 @@ import type { ChatImageAttachment } from '../../../../shared/types'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
 import { parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
 import { AppError } from '../../../../shared/errors'
+import { PROVIDER_TURN_CAP } from '../../../../shared/harness/types'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
 import { catalogModelsOnRoute, MODEL_CATALOG_FORMAT, type ModelCatalog, type ModelCatalogEntry, type ModelCatalogRoute } from '../../../../shared/modelCatalog'
@@ -66,7 +67,7 @@ import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './ch
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
-import { readUsageLimit } from '../../../orchestrator/providerErrors'
+import { providerApiError, readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
@@ -227,6 +228,8 @@ export type ClaudeSubscriptionChatInput = {
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */
   onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  /** Claude Code compacts the session inside the turn (`TurnFrameSink.onCompaction`). */
+  onCompaction?: (phase: 'start' | 'complete') => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
@@ -363,7 +366,7 @@ type Dependencies = {
    * what the instance runs on, read without starting Claude Code.
    */
   probe?: (env: NodeJS.ProcessEnv) => AuthProbe
-  /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is never kept for an hour. */
+  /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is kept for an hour only by the user's choice. */
   paysPerToken?: boolean
   /** What a turn says when the instance is not signed in (default: run the sign-in command). */
   signedOutMessage?: () => string
@@ -1379,13 +1382,15 @@ export class ClaudeSubscriptionProviderService {
    *   subscription (only API keys: per token); any other address is unconfirmed;
    * - without one, Claude Code's own subscription sign-in (`claude auth status`) is a subscription,
    *   unless an `ANTHROPIC_AUTH_TOKEN` replaces it.
-   * `userSetting` when the user's own environment or Claude settings choose the lifetime.
+   * `userSetting` when the user's own environment or Claude settings choose the lifetime. A
+   * subscription is always on, so a choice stored for it (from when it had a switch) is ignored.
    */
   promptCacheHour(cwd?: string, env: NodeJS.ProcessEnv = this.environment(), choice?: boolean): PromptCacheHour {
     const options = cwd ? { cwd } : {}
     const basis = this.promptCacheBasis(env, options)
-    const userSetting = basis !== 'per_token' && claudeChoosesCacheTtl(env, options)
-    return { basis, ...(userSetting ? { userSetting: true as const } : {}), ...(choice !== undefined ? { choice } : {}), on: promptCacheHourOn({ basis, ...(userSetting ? { userSetting: true as const } : {}) }, choice) }
+    const userSetting = claudeChoosesCacheTtl(env, options) ? { userSetting: true as const } : {}
+    const chosen = basis !== 'subscription' && choice !== undefined ? { choice } : {}
+    return { basis, ...userSetting, ...chosen, on: promptCacheHourOn({ basis, ...userSetting }, chosen.choice) }
   }
   private promptCacheBasis(env: NodeJS.ProcessEnv, options: { cwd?: string }): PromptCacheHour['basis'] {
     if (this.dependencies.paysPerToken) return 'per_token'
@@ -2681,9 +2686,9 @@ export class ClaudeSubscriptionProviderService {
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     /**
-     * A one-shot query's steers (no live session: a turn past the live-process cap; a bot's turn is one too, but bot
-     * threads are not steered), collected and waiting to go in as the prompt of the query that restarts the turn. Taken,
-     * not accepted: Claude Code has not seen them.
+     * A one-shot query's steers (no live session: a turn past the live-process cap, or a bot's turn, which takes its
+     * owner's notes and its pack after a compaction this way; nobody else steers a bot's thread), collected and waiting
+     * to go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
      */
     const steers: OneShotSteer[] = []
     /** The steers the restarted query carries as its prompt, under that prompt's id, until the model answers it. */
@@ -2774,8 +2779,9 @@ export class ClaudeSubscriptionProviderService {
       const steer = (drained ? drained.text : holds ? undefined : input.drainSteer?.())?.trim()
       if (!steer) return
       const forced = drained?.forced === true
-      // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting.
-      const mayCut = (): boolean => !drained || !input.mayCut || input.mayCut(drained.token)
+      // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting. On a
+      // bot's turn, so does a call its gate let start that Mousse has not seen announced yet (`ClaudeLockedGate.busy`).
+      const mayCut = (): boolean => !turn.locked?.busy && (!drained || !input.mayCut || input.mayCut(drained.token))
       // Accepted by its drain's token, when the drain has one (`TurnSink.steerAccepted`).
       const steered = (): void => {
         if (drained) input.onSteer?.(steer, drained.token)
@@ -2820,6 +2826,8 @@ export class ClaudeSubscriptionProviderService {
       steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), steered })
       if (query && !interruptRequested) {
         interruptRequested = true
+        // From the cut's check to the interrupt landing, a bot's gate lets no call start: none is cut mid-run.
+        turn.locked?.cut(true)
         this.questions.autoRejectPendingForThread(input.threadId)
         void query.interrupt().catch(() => cancel())
       }
@@ -3222,6 +3230,7 @@ export class ClaudeSubscriptionProviderService {
             }
           })()
           interruptRequested = false
+          turn.locked?.cut(false)
           success = false
           if (frames.text) frames.text += '\n\n'
         }
@@ -3429,6 +3438,8 @@ function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows): 
 /** The error a result frame stands for, or undefined when the turn succeeded. */
 function resultFailure(message: SDKResultMessage): Error | undefined {
   if (message.subtype === 'success' && !message.is_error) return undefined
+  // Only a bot's turn sets `maxTurns`: reaching it ends this turn, not the work, which a bot carries on in its next one.
+  if (message.subtype === 'error_max_turns') return new AppError({ code: PROVIDER_TURN_CAP, message: 'Claude Code reached the most steps one turn may take.', errorInfo: { category: 'internal', retryable: false } })
   // A failed `success` frame carries Claude Code's reason (a sign-in failure, say) as its result text.
   const failure = 'errors' in message ? message.errors.join('\n') : message.result?.trim() || 'Claude Code turn failed'
   if (/Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh/i.test(failure)) {
@@ -3438,5 +3449,6 @@ function resultFailure(message: SDKResultMessage): Error | undefined {
       errorInfo: { category: 'unavailable', retryable: true }
     })
   }
-  return new Error(failure)
+  // The provider refused the request (`API Error: 400 …`): the transcript shows its status and message.
+  return providerApiError(failure, 'claude') ?? new Error(failure)
 }

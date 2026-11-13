@@ -83,6 +83,18 @@ it('has both switches for other computers on by default, and keeps a choice to t
       enabled: true
     })
     expect(main.net.status().workOnThreads).toBe(true)
+    // "Share bots with other devices": on by default, and turning it off is kept and tells the bots' listeners.
+    expect(main.net.status().shareBots).toBe(true)
+    expect(await main.net.request('bridge.shareBots', {})).toEqual({ enabled: true })
+    let told = 0
+    const stop = main.net.onShareBotsChanged(() => told++)
+    expect(await main.net.request('bridge.shareBots', { enabled: false })).toEqual({ enabled: false })
+    expect(main.net.status().shareBots).toBe(false)
+    expect(main.net.sharesBots()).toBe(false)
+    expect(await main.net.request('bridge.shareBots', { enabled: false })).toEqual({ enabled: false })
+    expect(await main.net.request('bridge.shareBots', { enabled: true })).toEqual({ enabled: true })
+    expect(told).toBe(2)
+    stop()
     // The owner's choice of the system's SSH server is kept only while it is on, so an earlier build still reads the profile.
     expect(await main.net.request('bridge.editorServer', {})).toMatchObject({ system: false })
     expect(await main.net.request('bridge.editorServer', { system: true })).toMatchObject({

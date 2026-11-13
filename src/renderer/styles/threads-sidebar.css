@@ -623,7 +623,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-project-status--working .threads-sidebar-status-dot {
-  animation: threads-sidebar-dot-pulse 1.6s ease-in-out infinite;
+  animation: threads-sidebar-dot-pulse 1.6s steps(12, jump-none) infinite;
 }
 
 @keyframes threads-sidebar-dot-pulse {

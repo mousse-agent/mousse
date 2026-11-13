@@ -123,9 +123,9 @@ function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; on
 }
 
 /**
- * The editor of one agent instance: Setup (status, next step, account) and Models up front; the rest
- * (its name, telemetry, the executable Mousse resolved, updates, path and arguments, home,
- * environment) under a collapsed Advanced, so most people never meet it.
+ * The editor of one agent instance: Setup (status, next step, account, an available update) and
+ * Models up front; the rest (its name, telemetry, the executable Mousse resolved, path and
+ * arguments, home, environment) under a collapsed Advanced, so most people never meet it.
  */
 export function AgentEditor({
   snapshot,
@@ -172,9 +172,11 @@ export function AgentEditor({
         onRemove={onRemove}
       />
       <EditorSection title="Setup">
-        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
+        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <AccountRow snapshot={snapshot} actions={actions} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
+        {/* A newer version: the one place to update, with its progress. */}
+        {!info.bundled && <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />}
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
       {/* Advanced: what the user can change first, in one compact list; the read-only facts last, in Info. */}
@@ -186,7 +188,6 @@ export function AgentEditor({
           {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set. */}
           {!info.bundled && (
             <>
-              <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
               {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
               {/* A managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
               {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
@@ -232,7 +233,7 @@ export function ModelsEditorSection({
         <span className="prov-models-summary">{modelsSummary(snapshot.models.entries)}</span>
       </summary>
       <div className="settings-advanced-body">
-        <section className="settings-group prov-editor-section">
+        <section className="settings-group prov-editor-section" data-settings-anchor="providers-models">
           <p className="settings-group-desc">
             Favorites show first in the model picker. Hidden models are not offered anywhere in Mousse.
             {snapshot.scope.kind === 'project' ? ` ${DEVICE_WIDE}` : ''}

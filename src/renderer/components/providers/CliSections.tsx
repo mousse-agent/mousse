@@ -58,13 +58,16 @@ export function SetupRow({
   snapshot,
   status,
   operation,
-  actions
+  actions,
+  updateRow
 }: {
   snapshot: InstanceSnapshot
   status: StatusDescription
   /** The install or update this page saw start, for live progress. */
   operation?: ProviderOperationEvent
   actions: InstanceActions
+  /** An Update row follows in Setup, so the status offers no update of its own. */
+  updateRow?: boolean
 }) {
   const { busy, error, run } = useAsyncAction()
   const step = status.nextStep
@@ -123,6 +126,7 @@ export function SetupRow({
         } else control = button('signin', isManagedSetup(snapshot) ? 'Continue with ChatGPT' : step.label, actions.signIn)
         break
       case 'update':
+        if (updateRow) break
         // Mousse runs the owner's command too; the command stays beside the button for a terminal.
         control = button('update', step.label, actions.update)
         if (step.command) below = <CommandBox command={step.command} label="Copy update command" />
@@ -147,6 +151,7 @@ export function SetupRow({
     <>
       <SettingsRow
         title="Status"
+        anchor="providers-status"
         description={withError(progress ?? <StatusLine status={status} />, error)}
         control={
           <>
@@ -226,6 +231,7 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
     return (
       <SettingsRow
         className="prov-update is-notice"
+        anchor="providers-update"
         title={target ? `${target} is available` : 'Update available'}
         description="Mousse can't tell how this copy was installed. Update it the way you installed it."
       />
@@ -235,6 +241,7 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
     return (
       <SettingsRow
         className="prov-update is-advisory"
+        anchor="providers-update"
         title={target ? `Update to ${target}` : 'Update available'}
         description="Needs administrator rights. Run it yourself in a terminal:"
       >
@@ -247,6 +254,7 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
   return (
     <SettingsRow
       className={`prov-update ${advisory ? 'is-advisory' : 'is-one-click'}`}
+      anchor="providers-update"
       title={target ? `Update to ${target}` : 'Update available'}
       description={withError(updating && operation?.phase === 'progress' ? operation.message : idleText, error)}
       control={
@@ -396,34 +404,32 @@ export function TelemetryRow({ snapshot, onSave }: { snapshot: InstanceSnapshot;
   )
 }
 
-const PROMPT_CACHE_HOUR_HELP = 'Subscriptions only. Coming back within an hour reuses the cache.'
-
-/** The line under the prompt cache switch: the help, and why it is off or fixed when that is not the user's choice. */
-export function promptCacheHourNote(state: NonNullable<InstanceSnapshot['promptCacheHour']>): string {
-  if (state.userSetting) return `${PROMPT_CACHE_HOUR_HELP} Your Claude Code settings choose this.`
-  if (state.choice === undefined && state.basis === 'unconfirmed') return `${PROMPT_CACHE_HOUR_HELP} Off: couldn't confirm a subscription.`
-  return PROMPT_CACHE_HOUR_HELP
+/** The line under the prompt cache switch, when it needs one: why it is fixed, or that a subscription is unconfirmed. */
+export function promptCacheHourNote(state: NonNullable<InstanceSnapshot['promptCacheHour']>): string | undefined {
+  if (state.userSetting) return 'Your Claude Code settings choose this.'
+  if (state.basis === 'unconfirmed') return "Couldn't confirm a subscription."
+  return undefined
 }
 
 /**
- * Claude Code: keep the prompt cache for an hour instead of five minutes. On by default for a
- * confirmed subscription, off when Mousse could not confirm one; the user's choice wins. Not shown
- * for an entry paid per token, where hour-long cache writes cost more.
+ * Claude Code: keep the prompt cache for an hour instead of five minutes. Off by default, for an
+ * entry that pays per token or that Mousse could not confirm as a subscription. Not shown on a
+ * confirmed subscription, which always keeps it for an hour.
  */
 export function PromptCacheHourRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSave: (on: boolean) => Promise<void> }) {
   const { error, run } = useAsyncAction()
   const state = snapshot.promptCacheHour
-  if (!state || state.basis === 'per_token') return null
+  if (!state || state.basis === 'subscription') return null
   return (
     <SettingsRow
-      title="Keep the prompt cache for 1 hour"
+      title="Keep prompt cache 1 hour"
       anchor="providers-prompt-cache-hour"
       htmlFor="providers-prompt-cache-hour"
       description={withError(promptCacheHourNote(state), error)}
       control={
         <Switch
           id="providers-prompt-cache-hour"
-          label="Keep the prompt cache for 1 hour"
+          label="Keep prompt cache 1 hour"
           checked={state.on}
           disabled={state.userSetting === true}
           onChange={(on) => void run('promptCacheHour', () => onSave(on))}

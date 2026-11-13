@@ -113,8 +113,13 @@ export interface ScheduledJobBot {
   scheduleId: string
   /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */
   createdBy: 'owner' | 'bot'
-  /** A model the owner picked by hand for this automation's runs (#673); absent: the bot's own choice (by usage). */
+  /** A model the owner picked by hand for this automation's runs (#673), by name; absent: the bot's Work rows. */
   model?: string
+  /**
+   * That model on the entry it was picked on, with what the entry was signed in with (#673, a bot's `BotModelPick`): its
+   * runs run there or not at all. Absent on one saved by name only, which is matched by name as before.
+   */
+  pick?: { instanceId: string; model: string; effort?: string; credential?: 'subscription' | 'api_key' | 'ambient'; account?: string }
 }
 
 /** The saved agent a job's runs use (`ScheduledJob.agent`): its latest published revision at each run. */
@@ -1075,6 +1080,8 @@ export interface OrchestratorResponse {
   requestAcknowledged?: boolean
   error?: import('./errors').AppErrorShape
   message: string
+  /** With `error`, on a bot's turn whose work goes on (it reached its runtime's turn cap): the words it said last. */
+  partial?: string
   actions: OrchestratorAction[]
   /**
    * When true, the send was accepted onto the thread queue instead of starting a turn.

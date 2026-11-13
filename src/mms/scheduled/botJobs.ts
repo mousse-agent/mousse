@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import type { BotSchedule } from '../../shared/bots/personal/definition'
+import type { BotModelPick, BotSchedule } from '../../shared/bots/personal/definition'
 import { MAX_BOT_SCHEDULES } from '../../shared/bots/personal/definition'
+import { copyPick, isPinned, modelPickProblem } from '../../shared/bots/personal/modelSlots'
 import { parseTellMe, tellMeOf, type JobSchedule, type ScheduledJob, type ScheduledJobPatch, type TellMe } from '../../shared/types'
 import { computeNextRun, cronProblem, minCronGapMinutes } from './computeNextRun'
 
@@ -97,8 +98,10 @@ export interface BotScheduleEntry {
   label: string
   createdBy: 'owner' | 'bot'
   createdAt: string
-  /** A model picked by hand for its runs; absent: by usage. */
+  /** A model picked by hand for its runs, by name; absent: the bot's Work rows. */
   model?: string
+  /** That model on the entry it was picked on (#673): its runs run there or not at all. Absent on one saved by name only. */
+  pick?: BotModelPick
   nextAt?: string
   /** Paused from the Automations page (the bot's own pause is the bot's). */
   paused: boolean
@@ -157,6 +160,7 @@ export class BotScheduleBook {
       createdBy: job.bot.createdBy,
       createdAt: job.createdAt,
       ...(job.bot.model ? { model: job.bot.model } : {}),
+      ...(job.bot.model && job.bot.pick && !modelPickProblem(job.bot.pick) && job.bot.pick.model === job.bot.model ? { pick: copyPick(job.bot.pick) } : {}),
       ...(job.nextRunAt && job.state !== 'paused' && job.enabled ? { nextAt: job.nextRunAt } : {}),
       paused: job.state === 'paused' || !job.enabled,
       tellMe: tellMeOf(job),
@@ -192,10 +196,19 @@ export class BotScheduleBook {
   }
 
   /**
+   * An occurrence the bot took but never ran (a full queue dropped it): the automation shows why, as for an occurrence
+   * skipped when it was due (`botSkip`), until the next one is handed over.
+   */
+  skipped(botId: string, scheduleId: string, skip: { at: string; reason: string }): void {
+    const entry = this.get(botId, scheduleId)
+    if (entry) this.options.jobs.updateJob(entry.jobId, { botSkip: { at: skip.at, reason: skip.reason } })
+  }
+
+  /**
    * Adds a schedule: at most 8 per bot, at least 5 minutes apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
     const problem = botScheduleProblem(input.when, prompt)
@@ -209,8 +222,9 @@ export class BotScheduleBook {
       prompt,
       schedule: jobScheduleOf(when),
       threadId: botJobThreadGuard(botId),
-      // Only the owner picks a model by hand; a bot's own schedule runs on its own choice.
-      bot: { botId, scheduleId, createdBy, ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim() } : {}) }
+      // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,
+      // for builds that read only the name.
+      bot: { botId, scheduleId, createdBy, ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!

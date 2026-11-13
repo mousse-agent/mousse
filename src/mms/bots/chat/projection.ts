@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAskCard, BotAskStatus, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
-import { type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
+import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
+import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import type { BotJournal } from '../seams'
-import type { BotEscalationRow, BotMessageRow, BotStore } from '../store/BotStore'
+import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotStore } from '../store/BotStore'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -40,6 +41,11 @@ function cardStatus(status: BotEscalationStatus): BotAskStatus {
   if (status === 'allowed_bot' || status === 'allowed_once') return 'allowed'
   if (status === 'denied') return 'not_now'
   return 'withdrawn'
+}
+
+/** Whether a run activation still runs, waits at a wall, or waits to go on: whatever it was allowed reaches it. */
+function stillWorking(row: BotActivationRow): boolean {
+  return row.status === 'running' || row.status === 'waiting_grant' || workWaits(row)
 }
 
 /** A time of day in local time, "14:00". */
@@ -78,6 +84,11 @@ export interface PostInput {
   threadId?: string
   /** The message this one answers. */
   replyTo?: string
+  /**
+   * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
+   * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
+   */
+  hidden?: true
 }
 
 /** The chat rows of every bot of a profile, and the summaries built from `bots.db`. */
@@ -124,7 +135,7 @@ export class BotChatProjection {
       // The journal row joins this transaction: a chat row is never kept without it (bot-context.md §4).
       this.options.journal?.appendInTx(this.store.db, {
         botId: input.botId,
-        kind: journalKind(input.author, input.kind, Boolean(input.askId)),
+        kind: input.hidden ? 'model_change' : journalKind(input.author, input.kind, Boolean(input.askId)),
         ...(input.lane ? { lane: input.lane } : {}),
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
@@ -200,8 +211,69 @@ export class BotChatProjection {
       title: text.title,
       note: text.note,
       status: cardStatus(escalation.status),
-      kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission'
+      kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
+      ...this.limitOutcome(escalation),
+      ...this.permissionOutcome(escalation)
     }
+  }
+
+  /**
+   * A limit that work the owner asked for waits on (its own ask, or a card its notice carries): open, Allow would carry
+   * that work on while some of it still waits; allowed, it says so only for work this answer really carried on (waiting
+   * its turn, or gone on since). Work that ended without going on, or failed before this build, carries nothing on.
+   */
+  private limitOutcome(escalation: BotEscalationRow): { carriesOn?: true; carried?: number } {
+    if (!('budget' in escalation.permission)) return {}
+    const linked = this.waitingOnAsk(escalation)
+    if (escalation.status === 'open') return linked.some(({ row }) => workWaits(row) && row.endReason === 'budget_exhausted') ? { carriesOn: true } : {}
+    if (escalation.status !== 'allowed_bot' && escalation.status !== 'allowed_once') return {}
+    const answered = Date.parse(escalation.answeredAt ?? this.store.now())
+    const carried = linked.filter(({ row, n }) => (row.endReason === 'room_allowed' && workWaits(row)) ||
+      this.store.dispatches(row.id).some((dispatch) => dispatch.kind === 'continue' && dispatch.n > n && (dispatch.startedAt === null || dispatch.startedAt >= answered)))
+    return carried.length ? { carriesOn: true, ...(carried.length > 1 ? { carried: carried.length } : {}) } : {}
+  }
+
+  /**
+   * The work that waited on a limit ask, with the dispatch it ran out in: the work that owns it and every work whose
+   * notice carries its card.
+   */
+  private waitingOnAsk(escalation: BotEscalationRow): Array<{ row: BotActivationRow; n: number }> {
+    const found = new Map<string, number>()
+    const owner = this.store.activation(escalation.activationId)
+    if (owner?.lane === 'run' && owner.trigger.kind === 'work') found.set(owner.id, escalation.dispatchN)
+    for (const message of this.store.messagesForAsk(escalation.id)) {
+      const row = message.activationId ? this.store.activation(message.activationId) : undefined
+      if (row?.lane !== 'run' || row.trigger.kind !== 'work') continue
+      const n = Number(/_d(\d+)$/.exec(message.id)?.[1] ?? 0)
+      found.set(row.id, Math.max(found.get(row.id) ?? 0, n))
+    }
+    return [...found].flatMap(([id, n]) => {
+      const row = this.store.activation(id)
+      return row ? [{ row, n }] : []
+    })
+  }
+
+  /**
+   * What a run's permission ask did once allowed: the run that asked carries on with it (it is still running or
+   * waiting, or it went on after the answer), or the bot has it from its next run, saying so when nothing of the bot
+   * was running or waiting at the answer.
+   */
+  private permissionOutcome(escalation: BotEscalationRow): { carriesOn?: true; idle?: true } {
+    if (escalation.mode !== 'ask' || 'budget' in escalation.permission || isSpecialAsk(escalation.permission)) return {}
+    if (escalation.status !== 'allowed_bot' && escalation.status !== 'allowed_once') return {}
+    const asker = this.store.activation(escalation.activationId)
+    const answeredAt = escalation.answeredAt ?? this.store.now()
+    const answered = Date.parse(answeredAt)
+    if (asker?.lane === 'run' && (stillWorking(asker) || this.store.dispatches(asker.id).some((dispatch) => dispatch.kind !== 'consult' && dispatch.n > escalation.dispatchN && dispatch.startedAt !== null && dispatch.startedAt >= answered)))
+      return { carriesOn: true }
+    const busy = this.store.all(
+      "SELECT id FROM bot_activations WHERE bot_id = ? AND lane = 'run' AND id != ? AND created_at <= ? AND ((ended_at IS NULL AND status IN ('queued', 'running', 'waiting_grant', 'blocked')) OR ended_at > ?)",
+      escalation.botId, escalation.activationId, answeredAt, answeredAt
+    ).some((entry) => {
+      const row = this.store.activation(entry.id as string)
+      return row !== undefined && (row.status !== 'blocked' || workWaits(row))
+    })
+    return busy ? {} : { idle: true }
   }
 
   /** One bot as the Bots section and Recent list it (§5.7). */
@@ -209,21 +281,32 @@ export class BotChatProjection {
     const registry = this.store.registry(definition.id)
     const pausedUntil = registry?.pausedUntil ? Date.parse(registry.pausedUntil) : undefined
     // A usage-limit pause whose time has passed is over, even before the next tick clears it.
-    const paused = Boolean(registry?.pausedReason) && !(registry?.pausedReason === 'usage_limit' && pausedUntil !== undefined && pausedUntil <= now)
-    const error = registry?.error?.error
+    const pausedHere = Boolean(registry?.pausedReason) && !(registry?.pausedReason === 'usage_limit' && pausedUntil !== undefined && pausedUntil <= now)
+    // A picked bot (#673): rows whose pick can't run, and usage limits on the entries its rows are on. Either shows while
+    // any row is held: stuck with Pick a model, or paused until the earliest reset.
+    const slots = slotsOf(definition.main)
+    const stuck = stuckRowsOf(registry?.model?.stuck, slots)
+    const limitedUntil = BOT_MODEL_SLOT_KEYS
+      .map((key) => slots[key])
+      .flatMap((pick) => (pick && isPinned(pick) ? [limitOnPick(registry?.model?.limits, pick, now)?.until] : []))
+      .filter((until): until is string => Boolean(until))
+      .sort((a, b) => Date.parse(a) - Date.parse(b))[0]
+    const paused = pausedHere || limitedUntil !== undefined
+    const error: BotError | undefined = registry?.error?.error ?? (stuck[0] ? { text: stuck[0][1].text, action: { kind: 'pick_model', label: 'Pick a model' } } : undefined)
     // Only asks whose card is posted: a chat turn's asks show once its message is complete.
     const asks = this.store.openAsks(definition.id).filter((ask) => ask.messageId !== null)
     const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant'])
     const live = liveRows.length
     // The chat and its work are apart: the chat's turn has the status line and Stop, work its own line.
     const chatTurn = liveRows.find((row) => row.lane === 'chat' && row.status === 'running')
-    const work: BotWorkItem[] = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused'])
-      .filter((row) => row.lane === 'run')
+    // Work that waits to go on keeps its line (with Stop): held while it waits, waiting its turn once allowed.
+    const work: BotWorkItem[] = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
+      .filter((row) => row.lane === 'run' && (row.status !== 'blocked' || workWaits(row)))
       .sort((a, b) => (a.status === 'queued' ? 1 : 0) - (b.status === 'queued' ? 1 : 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        status: row.status === 'queued' ? 'queued' as const : row.status === 'paused' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
+        status: row.status === 'queued' || row.endReason === 'room_allowed' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {})
       }))
@@ -234,7 +317,9 @@ export class BotChatProjection {
     const last = this.store.lastMessage(definition.id)
     const ended = this.store.lastEndedActivation(definition.id)
     const stateText = state === 'paused'
-      ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
+      ? pausedHere
+        ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
+        : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
         : state === 'needs_you' ? `Wants to ${this.card(asks[0]!).title}`
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn || !work.length ? 'Working…' : workingOn(work))

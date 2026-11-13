@@ -6,9 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  ACCENT_COLORS,
   FROSTED_COMPOSER_RANGES,
-  THEME_OPTIONS,
   clampFrostedComposer,
   getDefaultSettings,
   normalizeAppearance
@@ -158,7 +156,7 @@ describe('frosted composer styles', () => {
   })
 })
 
-describe('Settings › Appearance › Frosted composer', () => {
+describe('Settings › Chat › Frosted composer', () => {
   let view: Root
   let host: HTMLElement
   let home: string
@@ -179,21 +177,16 @@ describe('Settings › Appearance › Frosted composer', () => {
   })
 
   it('shows the sliders only when on, previews and saves them, and survives a reload', async () => {
-    const { AppearanceSettings } = await import('../../src/renderer/components/settings/AppearanceSettings')
+    const { ChatSettings } = await import('../../src/renderer/components/settings/ChatSettings')
     const { applyAppearance } = await import('../../src/renderer/hooks/useTheme')
     const { MousseConfigStore } = await import('../../src/mms/config/MousseConfigStore')
     const { SettingsStore } = await import('../../src/mms/settings/SettingsStore')
     const store = new SettingsStore(MousseConfigStore.load(home))
     const preview = vi.fn()
     const commit = vi.fn((key: string, value: number) => { store.set({ appearance: { [key]: value } } as never) })
-    const draw = () => act(() => view.render(createElement(AppearanceSettings, {
+    const draw = () => act(() => view.render(createElement(ChatSettings, {
       settings: store.get(),
-      options: { themes: THEME_OPTIONS, accentColors: ACCENT_COLORS, llmProviders: [], agentTypes: [] },
       onUpdate: async (partial) => { store.set(partial); applyAppearance(store.get().appearance); draw() },
-      restartRequired: false,
-      onRestart: () => undefined,
-      onPreviewAcrylicIntensity: () => undefined,
-      onCommitAcrylicIntensity: () => undefined,
       onPreviewFrostedComposer: preview,
       onCommitFrostedComposer: commit
     })))

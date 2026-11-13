@@ -13,7 +13,8 @@ export type BotState = 'idle' | 'working' | 'needs_you' | 'stuck' | 'paused'
 export interface BotError {
   /** "Gmail sign-in expired" / "Paused until 14:00 (your Claude usage limit)". */
   text: string
-  action?: { kind: 'sign_in' | 'open_providers' | 'resume' | 'retry'; label: string; instanceId?: string }
+  /** `pick_model` opens About → Runs on (#673: a picked model that can't run). */
+  action?: { kind: 'sign_in' | 'open_providers' | 'resume' | 'retry' | 'pick_model'; label: string; instanceId?: string }
 }
 
 export type BotChipIcon = 'search' | 'web' | 'read' | 'edit' | 'schedule' | 'memory' | 'ask' | 'think' | 'name' | 'warning'
@@ -39,6 +40,15 @@ export interface BotAskCard {
   status: BotAskStatus
   /** `export_memory`: Allow opens a folder picker and calls `bots.memory.export`; it grants nothing. */
   kind?: 'permission' | 'export_memory'
+  /**
+   * Allow carries work on now, not only from the next run: the work that asked is still running or waits to go on (it
+   * continues with the permission), or, for a limit, work that waits on it goes on.
+   */
+  carriesOn?: true
+  /** How many pieces of work an allowed limit carried on, when more than one. */
+  carried?: number
+  /** A run's ask allowed while none of the bot's runs was running or waiting: the bot has it from its next run. */
+  idle?: true
 }
 
 export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'

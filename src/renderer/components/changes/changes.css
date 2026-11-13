@@ -61,7 +61,7 @@
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
-  animation: changes-pulse 1.6s ease-in-out infinite;
+  animation: changes-pulse 1.6s steps(12, jump-none) infinite;
 }
 
 @keyframes changes-pulse {

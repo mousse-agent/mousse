@@ -288,7 +288,7 @@
 .inbox-row[data-group='needs_you'] .inbox-run-icon[data-tone='trigger'] { color: var(--status-input); }
 .inbox-row[data-group='needs_you'] .inbox-run-icon[data-tone='failed'] + .inbox-row-body .inbox-row-summary { color: color-mix(in srgb, var(--danger) 80%, var(--text-secondary)); }
 
-.inbox-spin { animation: inbox-spin 1.1s linear infinite; }
+.inbox-spin { animation: inbox-spin 1.1s steps(12) infinite; }
 @keyframes inbox-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .inbox-spin { animation: none; } }
 

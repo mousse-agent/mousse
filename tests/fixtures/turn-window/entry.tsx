@@ -236,8 +236,8 @@ function streamChunk(step: number): string {
   return ` streamed text ${step} that keeps the answer growing line after line.`
 }
 
-const groupTriggers = (index: number) =>
-  Array.from(row(index)?.querySelectorAll<HTMLButtonElement>('button') ?? []).filter((button) => /^\s*Tool calls/.test(button.textContent ?? ''))
+/** A finished turn's work folds behind its "Worked" line: that line is the turn's one way into its tool calls. */
+const groupTriggers = (index: number) => Array.from(row(index)?.querySelectorAll<HTMLButtonElement>('button.turn-work-toggle') ?? [])
 
 const qa = {
   /** Mounts `count` turns (two messages or more each); resolves once every thumbnail has decoded. */
@@ -366,7 +366,7 @@ const qa = {
     }))
     return { rowHeight: turn?.offsetHeight ?? 0, bodies }
   },
-  /** Opens or closes the `which` group of tool calls in a row; resolves with its top edge before the click. */
+  /** Opens or closes the `which` work fold of a row; resolves with its top edge after the click. */
   toggleGroup(index: number, which: 'first' | 'second'): number | null {
     const trigger = groupTriggers(index)[which === 'first' ? 0 : 1]
     if (!trigger) return null
