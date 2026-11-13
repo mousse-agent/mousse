@@ -14,7 +14,7 @@ import { createBotModelResolver } from '../../src/mms/bots/model/BotModelResolve
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { CODEX_BOT_CHECKED_VERSIONS } from '../../src/mms/harness/vendors/codex/childPolicy'
-import { CODEX_BOT_RUNS_ON_TEXT } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_RUNS_ON_TEXT, CODEX_BOT_WINDOWS_RUNS_ON_TEXT } from '../../src/shared/harness/codexBotVersion'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createHarnessGateway } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -148,10 +148,17 @@ describe('bots run on the owner\'s own provider entries', () => {
   })
 
   it('Codex says in Runs on when its installed version hasn\'t been checked for bots, and nothing on a checked or unknown one', () => {
-    const codex = codexDriver({ builtIn: () => { throw new Error('unused') } })
+    const codex = codexDriver({ builtIn: () => { throw new Error('unused') }, platform: 'linux' })
     expect(codex.botRunsOnNote?.({}, '0.999.0')).toMatchObject({ text: CODEX_BOT_RUNS_ON_TEXT, title: expect.stringContaining('Codex 0.999.0 is installed here') })
     for (const version of CODEX_BOT_CHECKED_VERSIONS) expect(codex.botRunsOnNote?.({}, version), version).toBeUndefined()
     expect(codex.botRunsOnNote?.({}, undefined)).toBeUndefined()
+  })
+
+  it('Codex on Windows says in Runs on that a bot that may run commands won\'t run there, on any version it would otherwise run', () => {
+    const codex = codexDriver({ builtIn: () => { throw new Error('unused') }, platform: 'win32' })
+    for (const version of [...CODEX_BOT_CHECKED_VERSIONS, undefined]) expect(codex.botRunsOnNote?.({}, version), String(version)).toMatchObject({ text: CODEX_BOT_WINDOWS_RUNS_ON_TEXT })
+    // An unchecked version runs no bot at all: that line comes first.
+    expect(codex.botRunsOnNote?.({}, '0.999.0')).toMatchObject({ text: CODEX_BOT_RUNS_ON_TEXT })
   })
 })
 

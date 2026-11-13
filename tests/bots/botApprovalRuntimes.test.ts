@@ -225,26 +225,26 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     const mine = [workspace.files!, workspace.scratch]
     expect(workspace.computer).toBeUndefined()
     // Codex on Linux and macOS: Mousse's permission profile, reading `:minimal`, writing only the bot's folders.
-    const codex = codexBotSandbox(prepared.authority, '/opt/codex', 'linux')
+    const codex = codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'linux' })
     expect(codexTurnPolicy('default', undefined, 'ask', codex)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
     expect(codexBotSandboxConfig(codex)).toMatchObject({
       [`permissions.${CODEX_BOT_PROFILE}`]: { filesystem: { ':minimal': 'read', '/opt/codex': 'read', ...Object.fromEntries(mine.map((root) => [root, 'write'])) }, network: { enabled: false } }
     })
-    // On Windows Codex keeps its workspace-write sandbox, which reads every file.
-    expect(codexBotSandbox(prepared.authority, '/opt/codex', 'win32').confined).toBeUndefined()
+    // On Windows Codex's sandbox reads every file, Mousse's data included: a bot that may run commands doesn't run there.
+    expect(codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'win32' })).toMatchObject({ unheld: true })
     // Claude Code on Linux: every top folder but the system's own is unreadable (`/run`, with removable drives and the
     // user's runtime folder, included), and the home folder; the bot's folders are not. Claude Code's shared temporary
     // folders, when the turn keeps its own elsewhere, are closed read and write.
     const tops = ['bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'snap', 'srv', 'sys', 'tmp', 'usr', 'var']
-    const linux = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops, sharedTemp: ['/tmp/claude-1000'], exists: () => false }).filesystem!
+    const linux = claudeLockedSandbox({ workspace, temps: ['/nowhere/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops, sharedTemp: ['/tmp/claude-1000'], exists: () => false }).filesystem!
     expect([...linux.denyRead!].sort()).toEqual(['/boot', '/home', '/home/owner', '/media', '/mnt', '/opt', '/root', '/run', '/snap', '/srv', '/tmp/claude-1000', '/var'])
-    expect(linux.denyWrite).toEqual(expect.arrayContaining(['/tmp', '/tmp/claude-1000']))
+    expect(linux.denyWrite).toEqual(expect.arrayContaining(['/nowhere/tmp', '/tmp/claude-1000']))
     expect(linux.allowRead).toEqual(expect.arrayContaining(mine))
     expect(linux.allowWrite).toEqual(expect.arrayContaining(mine))
     expect(linux.allowRead!.filter((path) => path.startsWith('/run'))).toEqual([])
     // NixOS: its programs (on the PATH) and setuid wrappers live under `/run`; those two stay readable, nothing else there.
     const present = new Set(['/run/current-system/sw/bin', '/run/wrappers', '/run/user/1000', '/run/media'])
-    const nixos = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => [...tops, 'nix'], exists: (path) => present.has(path) }).filesystem!
+    const nixos = claudeLockedSandbox({ workspace, temps: ['/nowhere/tmp'], home: '/home/owner', platform: 'linux', tops: () => [...tops, 'nix'], exists: (path) => present.has(path) }).filesystem!
     expect(nixos.denyRead).toContain('/run')
     expect(nixos.allowRead!.filter((path) => path.startsWith('/run')).sort()).toEqual(['/run/current-system/sw/bin', '/run/wrappers'])
     expect(nixos.denyRead).not.toContain('/nix')

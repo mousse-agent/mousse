@@ -8,12 +8,15 @@ import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/m
  * A bot's turn on Codex (Bot Phase 1): Codex runs in its asking mode (`untrusted` approvals, no
  * network), and every approval it raises is answered by the bot's authority, the same check (and
  * the same walls and asks) as Pi's gate. Nobody is asked. Its sandbox is read-only, or, for a bot
- * with "run commands", `workspaceWrite` over the bot's own folders (`codexTurnPolicy`).
+ * with "run commands", Mousse's permission profile on Linux and macOS, which closes Mousse's own
+ * data (`codexTurnPolicy`, `codexBotSandbox`); on Windows such a bot doesn't run.
  *
- * What Codex runs without asking is not checked here: the read-only commands it trusts (it reads
- * files with them) and its web search. Its sandbox keeps those inside it. Shell commands it asks
- * about are `shell` calls, allowed whenever the bot holds "run commands"; file changes are `write`
- * (a new file) or `edit` calls, each on its own path. A retry outside the sandbox is never allowed.
+ * What Codex runs without asking is not checked here: its web search, and the read-only commands
+ * it trusts in a read-only sandbox (a bot without "run commands" has no command tool at all;
+ * under the bot's profile every command asks). Its sandbox keeps those inside it. Shell commands
+ * it asks about are `shell` calls, allowed whenever the bot holds "run commands"; file changes are
+ * `write` (a new file) or `edit` calls, each on its own path. A retry outside the sandbox is never
+ * allowed.
  */
 
 /**

@@ -20,7 +20,7 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_FEATURES_OFF, CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MANAGED_VERSION } from '../../src/mms/harness/vendors/codex/release'
-import { CODEX_BOT_VERSION_TEXT, codexBotSettingText } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_COMMANDS_UNHELD_TEXT, CODEX_BOT_SETUP_UNREADABLE_TEXT, CODEX_BOT_VERSION_TEXT, codexBotSettingText } from '../../src/shared/harness/codexBotVersion'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
@@ -2466,39 +2466,21 @@ describe('a bot turn on Codex', () => {
   const command = (id: string, text: string, cwd: string, reason: string | null = null) =>
     inn({ id, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, command: text, cwd, reason } })
 
-  it('with "run commands": every command allowed by the grant with no question, never a retry outside the sandbox; without file access its own profile (Linux, macOS) or workspace-write (Windows) over exactly its own folders', async () => {
+  it.skipIf(process.platform === 'win32')('with "run commands": every command allowed by the grant with no question, never a retry outside the sandbox; without file access its own profile over exactly its own folders (Linux, macOS)', async () => {
     const { bot, files, docs, scratch } = realBot(['read', 'shell'])
     const writable = [docs, files, scratch]
-    // Linux and macOS: Mousse's permission profile, reading Codex's `:minimal`, the folder granted for reading and the
-    // Codex package (the replay's `codex` is in the test home, so its package is the folder above), writing the bot's folders; Windows keeps workspace-write.
-    const confined = process.platform !== 'win32'
+    // Mousse's permission profile, reading Codex's `:minimal`, the folder granted for reading and the Codex package (the
+    // replay's `codex` is in the test home, so its package is the folder above), writing the bot's folders.
     const ref = join(home, 'ref')
     const codexPackage = dirname(realpathSync.native(home))
     const profile = { filesystem: { ':minimal': 'read', [ref]: 'read', [codexPackage]: 'read', ...Object.fromEntries(writable.map((root) => [root, 'write'])) }, network: { enabled: false } }
     const replay = transport([
       ...handshake(),
       ...setupRead(4),
-      ...(confined
-        ? [
-            out({ id: 5, method: 'thread/start', params: { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x', modelProvider: 'openai', config: { ...BOT_FEATURES, [`permissions.${CODEX_BOT_PROFILE}`]: profile, model_provider: 'openai' } } }),
-            inn({ id: 5, result: threadResult() }),
-            out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('go'), approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x' } }),
-            inn({ id: 6, result: { turn: { id: 'turn-1', status: 'inProgress', error: null, items: [] } } })
-          ]
-        : [
-            ...threadStart(5, threadParams({
-              sandbox: 'workspace-write',
-              config: {
-                ...BOT_FEATURES,
-                'sandbox_workspace_write.writable_roots': writable,
-                'sandbox_workspace_write.network_access': false,
-                'sandbox_workspace_write.exclude_tmpdir_env_var': true,
-                'sandbox_workspace_write.exclude_slash_tmp': true,
-                model_provider: 'openai'
-              }
-            })),
-            ...turnStart(6, 'go', 'turn-1', { sandboxPolicy: { type: 'workspaceWrite', writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } })
-          ]),
+      out({ id: 5, method: 'thread/start', params: { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x', modelProvider: 'openai', config: { ...BOT_FEATURES, [`permissions.${CODEX_BOT_PROFILE}`]: profile, model_provider: 'openai' } } }),
+      inn({ id: 5, result: threadResult() }),
+      out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('go'), approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x' } }),
+      inn({ id: 6, result: { turn: { id: 'turn-1', status: 'inProgress', error: null, items: [] } } }),
       command('srv-1', 'rm -rf build', files),
       out({ id: 'srv-1', result: { decision: 'accept' } }),
       command('srv-2', 'make test', '/somewhere/else'),
@@ -2534,15 +2516,51 @@ describe('a bot turn on Codex', () => {
     expect(asked).toEqual([])
   })
 
-  it('does not run while the user\'s MCP servers cannot be read', async () => {
+  it.runIf(process.platform === 'win32')('on Windows a bot that may run commands doesn\'t run and says why, with or without file access; one without commands runs', async () => {
+    const { bot, scratch } = realBot(['read', 'shell'])
+    const everywhere = createBotAuthority({
+      activationId: 'act-2', role: 'activation',
+      permissions: { tools: ['read', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: ['C:\\'], access: 'write', writeRoots: ['C:\\'], scratch, files: join(home, 'files'), computer: { closed: home } } },
+      waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    const { bot: plain } = realBot(['read'])
+    const replay = transport([
+      ...handshake(),
+      // Nothing of the refused turns reaches Codex: the bot without commands is the first to read the owner's setup.
+      ...setupRead(4),
+      ...threadStart(5, threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' } })),
+      ...turnStart(6, 'go'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    for (const [threadId, refused] of [['bot-shell', bot], ['bot-everywhere', everywhere]] as const)
+      await expect(adapter.startTurn(input({ prompt: 'go', threadId, cwd: scratch }), recordingSink(), control(), { ...host(), bot: refused })).rejects.toMatchObject({ code: 'policy_unenforceable', message: CODEX_BOT_COMMANDS_UNHELD_TEXT })
+    await adapter.startTurn(input({ prompt: 'go', cwd: scratch }), recordingSink(), control(), { ...host(), bot: plain })
+    replay.assertDone()
+  })
+
+  it('a bot\'s turn doesn\'t run while the owner\'s Codex config can\'t be read, and says so; the owner\'s own thread runs', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
+    const { bot, calls } = botIn(files)
     const replay = transport([
       ...handshake(),
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
-      inn({ id: 4, error: { code: -32603, message: 'unreadable' } })
+      inn({ id: 4, error: { code: -32603, message: 'unreadable' } }),
+      ...threadStart(5),
+      ...turnStart(6, 'mine'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
     ])
     const codex = service(replay)
-    await expect(new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: botIn(files).bot as never })).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    const adapter = new CodexAdapter(() => codex)
+    await expect(adapter.startTurn(input({ prompt: 'go', threadId: 'bot-thread' }), recordingSink(), control(), { ...host(), bot: bot as never }))
+      .rejects.toMatchObject({ code: 'policy_unenforceable', message: CODEX_BOT_SETUP_UNREADABLE_TEXT })
+    expect(calls).toEqual([])
+    await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
+    replay.assertDone()
   })
 })
