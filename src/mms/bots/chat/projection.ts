@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAskCard, BotAskStatus, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
-import { type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
+import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
+import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
@@ -83,6 +84,11 @@ export interface PostInput {
   threadId?: string
   /** The message this one answers. */
   replyTo?: string
+  /**
+   * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
+   * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
+   */
+  hidden?: true
 }
 
 /** The chat rows of every bot of a profile, and the summaries built from `bots.db`. */
@@ -129,7 +135,7 @@ export class BotChatProjection {
       // The journal row joins this transaction: a chat row is never kept without it (bot-context.md §4).
       this.options.journal?.appendInTx(this.store.db, {
         botId: input.botId,
-        kind: journalKind(input.author, input.kind, Boolean(input.askId)),
+        kind: input.hidden ? 'model_change' : journalKind(input.author, input.kind, Boolean(input.askId)),
         ...(input.lane ? { lane: input.lane } : {}),
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
@@ -275,8 +281,18 @@ export class BotChatProjection {
     const registry = this.store.registry(definition.id)
     const pausedUntil = registry?.pausedUntil ? Date.parse(registry.pausedUntil) : undefined
     // A usage-limit pause whose time has passed is over, even before the next tick clears it.
-    const paused = Boolean(registry?.pausedReason) && !(registry?.pausedReason === 'usage_limit' && pausedUntil !== undefined && pausedUntil <= now)
-    const error = registry?.error?.error
+    const pausedHere = Boolean(registry?.pausedReason) && !(registry?.pausedReason === 'usage_limit' && pausedUntil !== undefined && pausedUntil <= now)
+    // A picked bot (#673): rows whose pick can't run, and usage limits on the entries its rows are on. Either shows while
+    // any row is held: stuck with Pick a model, or paused until the earliest reset.
+    const slots = slotsOf(definition.main)
+    const stuck = stuckRowsOf(registry?.model?.stuck, slots)
+    const limitedUntil = BOT_MODEL_SLOT_KEYS
+      .map((key) => slots[key])
+      .flatMap((pick) => (pick && isPinned(pick) ? [limitOnPick(registry?.model?.limits, pick, now)?.until] : []))
+      .filter((until): until is string => Boolean(until))
+      .sort((a, b) => Date.parse(a) - Date.parse(b))[0]
+    const paused = pausedHere || limitedUntil !== undefined
+    const error: BotError | undefined = registry?.error?.error ?? (stuck[0] ? { text: stuck[0][1].text, action: { kind: 'pick_model', label: 'Pick a model' } } : undefined)
     // Only asks whose card is posted: a chat turn's asks show once its message is complete.
     const asks = this.store.openAsks(definition.id).filter((ask) => ask.messageId !== null)
     const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant'])
@@ -301,7 +317,9 @@ export class BotChatProjection {
     const last = this.store.lastMessage(definition.id)
     const ended = this.store.lastEndedActivation(definition.id)
     const stateText = state === 'paused'
-      ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
+      ? pausedHere
+        ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
+        : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
         : state === 'needs_you' ? `Wants to ${this.card(asks[0]!).title}`
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn || !work.length ? 'Working…' : workingOn(work))

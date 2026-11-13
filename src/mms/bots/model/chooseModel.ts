@@ -19,6 +19,8 @@ export interface BotModelCandidate {
   defaultEffort?: string
   tier: BotModelTier
   credential: 'subscription' | 'api_key' | 'ambient' | 'unknown'
+  /** The account the entry is signed in to: the gateway's salted hash, when it can tell (#673: a pick remembers it). */
+  account?: string
   /** `YYYY-MM-DD`, from the catalog. */
   released?: string
   /** ISO time until which the instance is at its usage limit. */
@@ -49,6 +51,11 @@ const TIER_ORDER: Record<BotDepth, readonly BotModelTier[]> = {
 const LEVEL = new Map<string, number>(REASONING_LEVELS.map((level, index) => [level, index]))
 const byLevel = (efforts: readonly string[]) =>
   [...efforts].filter((effort) => effort !== 'none' && effort !== 'off').sort((a, b) => (LEVEL.get(a) ?? 99) - (LEVEL.get(b) ?? 99))
+
+/** The reasoning levels a model offers for a pick by hand (#673), lowest first: every one it lists but `off`. */
+export function offeredEfforts(efforts: readonly string[]): string[] {
+  return [...new Set(efforts)].filter((effort) => effort !== 'off').sort((a, b) => (LEVEL.get(a) ?? 99) - (LEVEL.get(b) ?? 99))
+}
 
 /**
  * The effort a depth runs at: `quick` low (else the lowest offered), `deep` high (else the

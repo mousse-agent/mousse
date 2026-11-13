@@ -11622,7 +11622,7 @@ export class OrchestratorService extends EventEmitter {
     const engineRunId = this.runEngine ? opts?.runId : undefined
     let runTerminalMarked = false
     // `resultText` is the turn's final reply; a delegated child run publishes it (SPEC §14.1).
-    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string }, resultText?: string): void => {
+    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string; usageLimitKind?: string }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
@@ -11740,6 +11740,8 @@ export class OrchestratorService extends EventEmitter {
     let usagePause: RunPause | undefined
     /** A scheduled turn that failed on a usage limit: when it resets (see the catch below). */
     let scheduledLimitUntil: string | undefined
+    /** The window the provider named for that limit (`seven_day_opus`): a bot keeps a family's limit apart. */
+    let scheduledLimitKind: string | undefined
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
@@ -12389,6 +12391,7 @@ export class OrchestratorService extends EventEmitter {
         // A bot turn fails the same way: its engine tries the next model, or pauses the bot until the reset.
         const scheduled = opts?.schedule || opts?.bot ? usageLimitOf(err) : undefined
         if (scheduled) scheduledLimitUntil = (scheduled.estimated ? undefined : boundedResetIso(scheduled.resetsAt, Date.now())) ?? estimatedReset(Date.now())
+        if (scheduled?.limitKind) scheduledLimitKind = scheduled.limitKind
         assistantText = providerFailureText(providerError)
       }
     } finally {
@@ -12477,7 +12480,7 @@ export class OrchestratorService extends EventEmitter {
         this.emit('connection-failed', { threadId: session.threadId, error: providerError })
       }
       this.setTurnPhase(session.threadId, 'failed', { error: message, errorDescriptor: providerError })
-      markRunTerminal('failed', { error: message, ...(scheduledLimitUntil ? { usageLimitUntil: scheduledLimitUntil } : {}) })
+      markRunTerminal('failed', { error: message, ...(scheduledLimitUntil ? { usageLimitUntil: scheduledLimitUntil, ...(scheduledLimitKind ? { usageLimitKind: scheduledLimitKind } : {}) } : {}) })
       await checkpointTurn('failed')
       this.persist(true)
       const response: OrchestratorResponse = { message, actions: [], error: providerError, ...(capped ? { partial: capped } : {}) }

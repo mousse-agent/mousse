@@ -41,7 +41,7 @@ export interface ScheduledJobRunner {
  * ready yet (the occurrence stays due).
  */
 export interface ScheduledBotRunner {
-  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now: Date; model?: string }):
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' }
@@ -861,7 +861,7 @@ export class ScheduledJobService extends EventEmitter {
     let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
     try {
       outcome = this.botRunner
-        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt: claim.occurrenceKey, now, ...(job.bot.model ? { model: job.bot.model } : {}) })
+        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt: claim.occurrenceKey, now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
         : { kind: 'skipped', reason: 'bots_unavailable' }
     } catch (error) {
       outcome = { kind: 'skipped', reason: 'bot_unavailable' }

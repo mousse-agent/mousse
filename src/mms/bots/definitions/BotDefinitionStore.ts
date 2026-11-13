@@ -16,6 +16,7 @@ import {
 } from '../../../shared/bots/personal/definition'
 import { lookFields, pickDistinctLook, type BotLook } from '../../../shared/bots/personal/look'
 import { canonicalManifest, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { modelSlotsProblem } from '../../../shared/bots/personal/modelSlots'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { stableStringify } from '../../run/json'
 
@@ -84,6 +85,11 @@ function threadProblem(thread: BotThreadSpec): string | undefined {
   if (typeof thread.key !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(thread.key)) return 'A thread key is invalid.'
   if (typeof thread.title !== 'string' || !thread.title.trim() || thread.title.length > 120) return 'A thread needs a title.'
   if (!isModelChoice(thread.model)) return 'Each thread needs a model choice.'
+  // The rows by hand (#673): older builds ignore them and run on `model`, so this format stays 2.
+  if (thread.slots !== undefined) {
+    const problem = modelSlotsProblem(thread.slots)
+    if (problem) return problem
+  }
   const agent = thread.agent as Partial<{ definitionId: string; instructions: string }> | undefined
   if (!agent || typeof agent !== 'object') return 'Each thread needs instructions.'
   // An agent definition's grants have to fit inside the manifest; that check comes with consults.

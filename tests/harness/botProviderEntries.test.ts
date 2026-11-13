@@ -111,7 +111,7 @@ describe('bots run on the owner\'s own provider entries', () => {
         models: (instanceId) => p.harness.catalog.models(instanceId, { kind: 'device' }),
         hold: { canHoldBot: (instanceId, policy, model) => p.harness.canHoldBot(instanceId, policy, model) }
       })
-      expect(await resolver.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy }), platform).toMatchObject({ selection: { instanceId: 'claude', model: 'sonnet' } })
+      expect(await resolver.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy }), platform).toMatchObject({ selection: { instanceId: 'claude', model: 'sonnet' } })
       expect(Object.keys(p.stored()), platform).toEqual(['claude'])
     }
   })
@@ -124,7 +124,7 @@ describe('bots run on the owner\'s own provider entries', () => {
       models: (instanceId) => p.harness.catalog.models(instanceId, { kind: 'device' }),
       hold: { canHoldBot: (instanceId, policy, model) => p.harness.canHoldBot(instanceId, policy, model) }
     })
-    expect(await resolver.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy })).toEqual({ problem: 'no_provider', instanceId: 'claude' })
+    expect(await resolver.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy })).toEqual({ problem: 'no_provider', instanceId: 'claude' })
   })
 
   it('the "Claude for bots" entry an earlier build added is removed; one the owner renamed stays', async () => {
@@ -188,9 +188,9 @@ describe('canHoldBot on a locked Claude Code entry with the recorded evidence (Â
     }
     const hold = { canHoldBot: (instanceId: string, policy: RunPolicy, model?: string) => instanceId === 'pi:openai' ? { ok: true as const } : p.harness.canHoldBot(instanceId, policy, model) }
     const withPi = createBotModelResolver({ snapshots: async () => [locked, pi], models: (id) => models[id] ?? [], hold })
-    expect(await withPi.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy })).toMatchObject({ selection: { instanceId: 'pi:openai' } })
+    expect(await withPi.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy })).toMatchObject({ selection: { instanceId: 'pi:openai' } })
     const alone = createBotModelResolver({ snapshots: async () => [locked], models: (id) => models[id] ?? [], hold })
-    expect(await alone.resolve({ botId: 'b', choice: { mode: 'auto', depth: 'normal' }, policy: botPolicy })).toEqual({ problem: 'no_provider' })
+    expect(await alone.resolve({ botId: 'b', pick: null, depth: 'normal', policy: botPolicy })).toEqual({ problem: 'no_provider' })
     // Back on a recorded version, it holds the bot again.
     p.claude.setVersion('2.1.291')
     await p.harness.instances.recheck(LOCKED)

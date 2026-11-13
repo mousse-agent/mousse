@@ -11,8 +11,15 @@ import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import type { BotChatMessage, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
-import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES } from '../../src/shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES, type BotModelOption } from '../../src/shared/bots/personal/methods'
+import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
 import { botFixture, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
+
+/** Opus on a Claude subscription, and the same model through a paid API key. */
+const OPUS_SUB: BotModelOption = { instanceId: 'claude', entry: 'Claude Code', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
+const OPUS_KEY: BotModelOption = { instanceId: 'pi:key', entry: 'Anthropic API', model: 'opus', label: 'Opus', efforts: ['low', 'medium', 'high'] }
+const OPUS_PICK = { instanceId: 'claude', model: 'opus' }
+const ALL_OPUS = slotsAllOn(OPUS_PICK)
 
 const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
 const LOOK = { colour: 'teal', accessory: 'cap' }
@@ -59,12 +66,46 @@ describe('validation', () => {
     for (const method of BOTS_WORK_METHODS) expect(domains.has(method)).toBe(true)
   })
 
-  it('New bot\'s choices come without a bot, and Create bot carries a model picked from them (#673)', async () => {
-    ;(f.bots.service as unknown as { options: { modelChoices?: () => Promise<Array<{ model: string; label: string }>> } }).options.modelChoices = async () => [{ model: 'opus', label: 'Claude · opus' }]
-    expect(await call('bots.model.choices')).toMatchObject({ models: [{ model: 'opus' }], computer: 'this_computer' })
+  it('New bot\'s choices come without a bot, and Create bot carries a pick on every row (#673)', async () => {
+    ;(f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    // The picker's listing for the rows (none in this fixture), and one per name for an app from before rows.
+    expect(await call('bots.model.choices')).toMatchObject({ models: [{ model: 'opus' }], providers: [], computer: 'this_computer' })
+    // The rows: Talk on the subscription, Work on the API key at high.
+    const slots = { talk: { instanceId: 'claude', model: 'opus' }, light: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, medium: { instanceId: 'pi:key', model: 'opus', effort: 'high' }, hard: { instanceId: 'pi:key', model: 'opus', effort: 'high' } }
+    const { bot: rows } = await call<{ bot: BotSummary }>('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c11', slots })
+    // Shown as picked, without what the entry signs in with.
+    const got = await call<{ slots: unknown }>('bots.model.get', { botId: rows.id })
+    expect(got).toMatchObject({ model: 'opus', slots })
+    expect(JSON.stringify(got)).not.toMatch(/credential|account/)
+    // The next bot starts from these.
+    expect(await call('bots.model.choices')).toMatchObject({ last: slots })
+    // An app from before rows sends one model: on every row, on an entry that offers it.
     const { bot } = await call<{ bot: BotSummary }>('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c9', model: ' opus ' })
-    expect(await call('bots.model.get', { botId: bot.id })).toMatchObject({ model: 'opus' })
+    expect(await call('bots.model.get', { botId: bot.id })).toMatchObject({ slots: slotsAllOn({ instanceId: 'claude', model: 'opus' }) })
     await expect(call('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c10', model: 'sonnet' })).rejects.toMatchObject({ code: 'model_unavailable' })
+  })
+
+  it('setSlots saves only the rows given, each offered now; oneWork copies Medium work; a by-usage bot shows Pick a model (#673)', async () => {
+    const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
+    options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]
+    const botId = await created()
+    // A bot from before picks: every row Pick a model.
+    expect(await call('bots.model.get', { botId })).toMatchObject({ model: null, slots: { talk: null, light: null, medium: null, hard: null } })
+    const hard = { instanceId: 'pi:key', model: 'opus', effort: 'high' }
+    await call('bots.model.setSlots', { botId, slots: { hard } })
+    expect(f.bots.ownerSlots(botId)).toEqual({ talk: null, light: null, medium: null, hard })
+    // The key is gone: a new pick on it is refused; one offered saves.
+    options.modelOptions = async () => [OPUS_SUB]
+    await expect(call('bots.model.setSlots', { botId, slots: { light: hard } })).rejects.toMatchObject({ code: 'model_unavailable' })
+    await call('bots.model.setSlots', { botId, slots: { talk: { instanceId: 'claude', model: 'opus' }, medium: { instanceId: 'claude', model: 'opus' } } })
+    expect(f.bots.ownerSlots(botId)).toEqual({ talk: { instanceId: 'claude', model: 'opus' }, light: null, medium: { instanceId: 'claude', model: 'opus' }, hard })
+    // Closing Advanced: Medium work's pick on all work.
+    await call('bots.model.setSlots', { botId, oneWork: true })
+    expect(f.bots.ownerSlots(botId)).toEqual(slotsAllOn({ instanceId: 'claude', model: 'opus' }))
+    // `bots.model.set` (an older app's single picker): one model on every row; never back to by usage.
+    await call('bots.model.set', { botId, model: 'opus' })
+    expect(f.bots.ownerSlots(botId)).toEqual(slotsAllOn({ instanceId: 'claude', model: 'opus' }))
+    await expect(call('bots.model.set', { botId, model: null })).rejects.toMatchObject({ code: 'invalid_params' })
   })
 
   it('refuses unknown keys and bad values', async () => {
@@ -79,6 +120,22 @@ describe('validation', () => {
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'has spaces' }],
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: '  ' }],
       ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: null }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: 'm'.repeat(201) }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', slots: { talk: OPUS_PICK } }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', slots: { ...ALL_OPUS, light: null } }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', slots: { ...ALL_OPUS, talk: { model: 'opus' } } }],
+      ['bots.create', { look: LOOK, description: 'x', clientRequestId: 'c3', model: 'opus', slots: ALL_OPUS }],
+      ['bots.model.setSlots', { botId, slots: { images: OPUS_PICK } }],
+      ['bots.model.setSlots', { botId, slots: { talk: null } }],
+      ['bots.model.setSlots', { botId, slots: { talk: { ...OPUS_PICK, speed: 'fast' } } }],
+      ['bots.model.setSlots', { botId, slots: { talk: { ...OPUS_PICK, credential: 'subscription' } } }],
+      ['bots.model.setSlots', { botId, slots: { talk: { instanceId: 'claude', model: '' } } }],
+      ['bots.model.setSlots', { botId, slots: {} }],
+      ['bots.model.setSlots', { botId }],
+      ['bots.model.setSlots', { botId, oneWork: false }],
+      ['bots.model.setSlots', { botId, oneWork: true, slots: { talk: OPUS_PICK } }],
+      ['bots.model.set', { botId, model: 'm'.repeat(201) }],
+      ['bots.schedules.add', { botId, when: { kind: 'interval', minutes: 30 }, prompt: 'x', model: 'm'.repeat(201) }],
       ['bots.model.choices', { botId }],
       ['bots.get', { botId: 'Not An Id' }],
       ['bots.get', {}],

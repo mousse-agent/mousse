@@ -1,13 +1,14 @@
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
-import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelChoice, BotSchedule } from '../../../shared/bots/personal/definition'
+import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelOverride, BotSchedule } from '../../../shared/bots/personal/definition'
 import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
 import type { BotAskMode, BotAskRequest, BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
 import type { BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
 import type { ProviderSelection } from '../../../shared/harness/types'
+import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 
 /**
@@ -353,8 +354,39 @@ export interface BotRegistryRow {
   failureStreak: number
   error: BotStoredError | null
   readSeq: number
-  /** The last resolved selection (internal; never in a UI payload). */
-  model: { selection: ProviderSelection; activationId: string } | null
+  /**
+   * The last resolved selection (internal; never in a UI payload), and each row's last one (#673): a `model_change`
+   * journal row is written when a row's model changes, not when Talk and Work take turns. Older builds rewrite it without
+   * `rows`; each row then journals its model once more.
+   */
+  model: BotModelState | null
+}
+
+/**
+ * A provider's usage limit on one of a picked bot's entries (#673): until when, and for which models. `family`: a limit
+ * the provider names for one family only (Claude's weekly Opus or Sonnet window), else the whole entry. `said`: the
+ * chat has said it once.
+ */
+export interface BotEntryLimit {
+  instanceId: string
+  until: string
+  family?: string
+  said?: boolean
+}
+
+/**
+ * What the engine keeps about a bot's models in `model_json` (internal; never in a UI payload). `selection` and `rows`:
+ * the last resolved selection and each row's last one; a `model_change` journal row is written when a row's model
+ * changes, not when Talk and Work take turns. `stuck`: rows whose pick can't run (#673), each held until it runs again
+ * or the owner picks again for it. `limits`: usage limits on a picked bot's entries, by entry (and family). Older
+ * builds rewrite it with `selection` and `activationId` only; the rest is then forgotten.
+ */
+export interface BotModelState {
+  selection: ProviderSelection
+  activationId: string
+  rows?: Partial<Record<string, ProviderSelection>>
+  stuck?: BotStuckRows
+  limits?: Record<string, BotEntryLimit>
 }
 
 function registryOf(row: Row): BotRegistryRow {
@@ -502,7 +534,7 @@ export interface BotActivationRow {
   /** `chat`: the owner's chat on the home thread; `run`: a run on its own thread. */
   lane: BotLane
   /** `set_depth`/`use_model` for this activation only (internal). */
-  modelOverride: BotModelChoice | null
+  modelOverride: BotModelOverride | null
   /** The model changed for this activation: its next dispatch resolves it again. */
   reloadPending: boolean
   /** The model this activation runs on, resolved at its first dispatch (internal; never in a payload). */
@@ -634,7 +666,7 @@ function activationOf(row: Row): BotActivationRow {
     endedAt: str(row.ended_at),
     endReason: str(row.end_reason),
     lane: (str(row.lane) ?? 'run') as BotLane,
-    modelOverride: json<BotModelChoice>(row.model_override_json),
+    modelOverride: json<BotModelOverride>(row.model_override_json),
     reloadPending: num(row.reload_pending) === 1,
     selection: json<ProviderSelection>(row.selection_json),
     offline: row.status === 'running' && row.end_reason === BOT_OFFLINE_REASON
@@ -878,7 +910,7 @@ export class BotStore {
   }
 
   /** `set_depth`/`use_model` with scope `now`: this activation's next dispatch runs on the new choice. */
-  setModelOverride(id: string, choice: BotModelChoice): void {
+  setModelOverride(id: string, choice: BotModelOverride): void {
     this.run('UPDATE bot_activations SET model_override_json = ?, reload_pending = 1 WHERE id = ?', JSON.stringify(choice), id)
   }
 

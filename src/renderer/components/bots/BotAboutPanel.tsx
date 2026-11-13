@@ -1,13 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Bell, Brain, Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import type { BotMemoryEntry } from '../../../shared/bots/personal/memory'
-import type { BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
+import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
 import { useAppStore } from '../../stores/appStore'
 import { errorText } from '../../services/personalBotsClient'
-import { BotComputerSelect, BotModelSelect } from './BotRunsOn'
+import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
+
+/** About's Runs on section, which a bot's Pick a model scrolls to. */
+export const RUNS_ON_ID = 'bot-about-runs-on'
 
 /** "Mon 09:00" for a run's next time; today's runs show the time alone. */
 export function nextRunText(at: string, now = new Date()): string {
@@ -26,20 +29,29 @@ export function reminderWhenText(at: string, now = new Date()): string {
 }
 
 /**
- * What a bot runs on, by hand (#673): By usage (the default) or a model, and the computer it runs on (the one that
- * holds it; the person's other computers are listed, greyed, once there are two or more).
+ * What a bot runs on, by hand (#673): its model rows (Talk and Work, and with Advanced each kind of work), each an
+ * entry's model at a reasoning level picked in the app's model picker, and the computer it runs on (the one that holds
+ * it; the person's other computers are listed, greyed, once there are two or more). A pick saves only its own rows,
+ * over the rows as they are then, so a change the bot made meanwhile stays; the rows are read again when the bot posts a
+ * message (a `use_model` turn ends with one) or its stuck line changes. An older service has no rows: one Model picker,
+ * as before.
  */
-function RunsOn({ botId, name }: { botId: string; name: string }) {
+function RunsOn({ botId, name, refresh }: { botId: string; name: string; refresh: string }) {
   const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.get'> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const client = botsClient()
-  useEffect(() => {
+  // Saves in flight: a read that answers meanwhile is older than what the owner sees.
+  const saving = useRef(0)
+  const read = useCallback(() => {
     let live = true
-    client.model(botId).then((next) => { if (live) setChoices(next) }, (cause) => { if (live) setError(errorText(cause)) })
+    client.model(botId).then((next) => { if (live && !saving.current) setChoices(next) }, (cause) => { if (live) setError(errorText(cause)) })
     return () => { live = false }
     // The client is a thin wrapper over the window's transport; the bot decides what to read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [botId])
+  // Read when About opens, and again after the bot's next message or a new stuck line (`use_model`, a pick that can't
+  // run); each read checks every entry, so not on every status change.
+  useEffect(read, [read, refresh])
   if (!choices) return error ? <p className="bot-about-empty" role="alert">{error}</p> : null
   const pick = async (model: string | null) => {
     setError(null)
@@ -50,11 +62,41 @@ function RunsOn({ botId, name }: { botId: string; name: string }) {
       setError(errorText(cause))
     }
   }
+  const save = async (shown: BotShownRows, change: Parameters<typeof client.setSlots>[1]) => {
+    const before = choices
+    setError(null)
+    setChoices({ ...choices, slots: shown, model: shown.talk?.model ?? null })
+    saving.current += 1
+    try {
+      await client.setSlots(botId, change)
+    } catch (cause) {
+      setChoices(before)
+      setError(errorText(cause))
+    } finally {
+      saving.current -= 1
+    }
+    read()
+  }
+  const slots = choices.slots
   return <>
-    <div className="bot-about-row" data-testid="bot-about-model">
-      <span>Model</span>
-      <BotModelSelect ariaLabel={`${name}'s model`} models={choices.models} value={choices.model} onChange={(model) => void pick(model)} />
-    </div>
+    {slots && choices.providers
+      ? <div id={RUNS_ON_ID}>
+        <BotModelRows
+          name={name}
+          providers={choices.providers}
+          slots={slots}
+          {...(choices.named ? { named: choices.named } : {})}
+          onPick={(rows, picked) => {
+            const changed = Object.fromEntries(rows.map((row) => [row, picked])) as Partial<BotShownRows>
+            void save({ ...slots, ...changed }, { slots: changed })
+          }}
+          onOneWork={() => void save({ ...slots, light: slots.medium, hard: slots.medium }, { oneWork: true })}
+        />
+      </div>
+      : <div className="bot-about-row" data-testid="bot-about-model">
+        <span>Model</span>
+        <BotModelSelect ariaLabel={`${name}'s model`} models={choices.models} value={choices.model} onChange={(model) => void pick(model)} />
+      </div>}
     {choices.computers.length > 1 ? (
       <div className="bot-about-row" data-testid="bot-about-computer">
         <span>Computer</span>
@@ -145,7 +187,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     <h3>MEMORY</h3>
     <Memory botId={bot.id} detail={detail} />
     <h3>RUNS ON</h3>
-    <RunsOn botId={bot.id} name={bot.name} />
+    <RunsOn botId={bot.id} name={bot.name} refresh={`${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`} />
     <div className="bot-about-foot">
       <button type="button" className="bot-ghost-button" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>{paused ? 'Resume' : 'Pause'}</button>
       <button type="button" className="bot-ghost-button is-danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>Delete</button>

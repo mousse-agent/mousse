@@ -762,16 +762,10 @@ export class MmsProfileServices {
           return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
         }
       }),
-      // By hand (#673): the ready models that can hold a bot here, named by their provider.
-      modelChoices: async () => {
-        const seen = new Set<string>()
-        return (await botModels.holdable()).flatMap(({ instanceId, model }) => {
-          if (seen.has(model)) return []
-          seen.add(model)
-          const family = this.botProviderLabel(instanceId)
-          return [{ model, label: family ? `${family} · ${model}` : model }]
-        })
-      },
+      // By hand (#673): each ready entry's models that can hold a bot here, named by the entry, with their reasoning levels,
+      // shown in the app's model picker from its own listing.
+      modelOptions: () => botModels.pickable(),
+      modelListing: () => harness.llmProviders({ kind: 'device' }),
       // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),
@@ -2049,9 +2043,11 @@ export class MmsProfileServices {
     // What its work is doing and what it will say later, so a chat turn answers "how's it going?" without a tool.
     const work = engine.listWork(botId).now
     const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.text }))
+    // Work rows whose model can't run (#673): the chat can tell the owner why such work does not start.
+    const blocked = engine.situationLines(botId)
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      work, ...(reminders.length ? { reminders } : {})
+      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {})
     }
   }
 
