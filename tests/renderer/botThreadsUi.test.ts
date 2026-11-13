@@ -94,6 +94,20 @@ describe('a bot\'s threads, as the owner sees them', () => {
     expect(host.textContent).toBe('Started by Alpha 2')
   })
 
+  it('a thread of another computer whose bot this device may not reach says "Started by a bot", never deleted, with nothing to open', () => {
+    // As the other computer sends it to a device left out of the bot's Devices: no id, no launcher, no name.
+    const hidden = { id: 'nod_desk:started', name: 'started', node: 'nod_desk', createdAt: NOW, updatedAt: NOW, startedByBot: { botId: '', name: 'a bot' } } as Thread
+    // One it may reach: the bot is the other computer's, so it is not this one's list, and not deleted.
+    const shown = { id: 'nod_desk:other', name: 'other', node: 'nod_desk', createdAt: NOW, updatedAt: NOW, startedByBot: { botId: 'b9', name: 'Keeper' } } as Thread
+    useBotsStore.setState({ bots: [{ id: 'b1', name: 'Alpha', homeThreadId: 'bot-chat' } as BotSummary], loaded: true })
+    useAppStore.setState({ threads: [hidden, shown], activeThreadId: hidden.id })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(host.textContent).toBe('Started by a bot')
+    expect(host.querySelector('button')).toBeNull()
+    act(() => useAppStore.setState({ activeThreadId: shown.id }))
+    expect(host.textContent).toBe('Started by Keeper')
+  })
+
   it('a start or a message shows what the bot sent there on the chip\'s hover, at once', () => {
     const chips = rollUpChips([
       { tool: 'thread_send', input: { threadId: 't-old' }, result: { threadId: 't-old', title: 'Signup', sent: 'Please also check the signup page.' } }
