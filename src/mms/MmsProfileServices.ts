@@ -751,7 +751,8 @@ export class MmsProfileServices {
         prompt,
         maxChars: 60
       })).text,
-      instructions: (bot) => botInstructions(bot),
+      // The owner's home folder by its real path: `~` and variables are refused in a bot's paths.
+      instructions: (bot) => botInstructions({ ...bot, homeFolder: homedir() }),
       scheduleLabel: (when) => botScheduleLabel(when),
       providerLabel: (instanceId) => this.botProviderLabel(instanceId),
       // No internet: a bot waits instead of failing (a DNS lookup and a connection, never a model call).

@@ -45,4 +45,10 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(text.startsWith('Your name is Inbox helper. Your owner described what you do as: "Go through my email every morning."\nYour files folder is /p/bots/files/b1.')).toBe(true)
     expect(text.endsWith(BOT_BASE_INSTRUCTIONS)).toBe(true)
   })
+
+  it('names the owner’s home folder by its real path, beside the files folder', () => {
+    const text = botInstructions({ name: 'Inbox helper', description: 'Mail.', filesFolder: '/p/bots/files/b1', homeFolder: '/Users/ada' })
+    expect(text).toContain("Your files folder is /p/bots/files/b1.\nYour owner's home folder is /Users/ada. Always write paths in full, never with ~ or variables like $HOME.")
+    expect(botInstructions({ name: 'A', description: 'B' })).not.toContain('home folder is')
+  })
 })

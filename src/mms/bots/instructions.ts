@@ -126,13 +126,14 @@ export function botShellWithheld(text: string): string {
 }
 
 /**
- * A bot's whole system text: who it is, where its files folder is, `BOT_BASE_INSTRUCTIONS`, then what its lane asks of
+ * A bot's whole system text: who it is, where its files folder and its owner's home folder are, `BOT_BASE_INSTRUCTIONS`, then what its lane asks of
  * it, then what its owner allows now (`allowed`). Built at each dispatch, so a rename, a new description or a changed
  * permission takes effect at the next turn.
  */
-export function botInstructions(bot: { name: string; description: string; filesFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean }): string {
+export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean }): string {
   const who = [`Your name is ${bot.name.trim()}. Your owner described what you do as: "${bot.description.trim()}"`]
   if (bot.filesFolder) who.push(`Your files folder is ${bot.filesFolder}.`)
+  if (bot.homeFolder) who.push(`Your owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
   const lane = bot.lane === 'run' ? BOT_RUN_INSTRUCTIONS : bot.lane === 'chat' ? BOT_CHAT_INSTRUCTIONS : undefined
   const allowed = bot.allowed ? botAllowedText(bot.allowed, bot.lane, bot.browserOffline) : undefined
   return `${who.join('\n')}\n\n${BOT_BASE_INSTRUCTIONS}${lane ? `\n\n${lane}` : ''}${allowed ? `\n\n${allowed}` : ''}`
