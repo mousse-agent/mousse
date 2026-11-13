@@ -631,6 +631,24 @@ html.platform-darwin .overlay-titlebar {
   overflow: hidden;
   mask-image: linear-gradient(to bottom, #000 calc(100% - 1.75rem), transparent);
 }
+/* A link in a prompt: the accent colour, underlined on hover; a GitHub one leads with the GitHub mark. */
+.chat-user-link {
+  color: var(--an-md-link, var(--an-primary-color));
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.chat-user-link:hover,
+.chat-user-link:focus-visible {
+  text-decoration: underline;
+}
+.chat-user-link.is-unbroken {
+  white-space: nowrap;
+}
+.chat-user-link-icon {
+  display: inline-block;
+  margin-right: 0.25em;
+  vertical-align: -0.125em;
+}
 .chat-user-fold {
   align-self: flex-start;
   margin-top: -2px;

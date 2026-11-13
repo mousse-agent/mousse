@@ -9,6 +9,9 @@ import { useImageGallery } from "./image-gallery";
 import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
+import { routeLink } from "../../../utils/chatLinks";
+import { IconGitHub } from "./icons";
+import { promptSegments } from "./prompt-links";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -94,6 +97,36 @@ function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string): 
     return () => observer.disconnect();
   }, [ref, text]);
   return tall;
+}
+
+/** The prompt's text with its links drawn as links: a GitHub one with the GitHub mark (see prompt-links). */
+function PromptText({ text }: { text: string }) {
+  const segments = promptSegments(text);
+  if (segments.length === 1 && segments[0]!.kind === "text") return <>{text}</>;
+  return (
+    <>
+      {segments.map((segment, i) =>
+        segment.kind === "text" ? (
+          segment.text
+        ) : (
+          <a
+            key={i}
+            href={segment.href}
+            title={segment.href}
+            // A short GitHub label stays on one line with its mark, so the mark never ends a line alone.
+            className={cn("chat-user-link", segment.github && segment.text.length <= 24 && "is-unbroken")}
+            onClick={(event) => {
+              event.preventDefault();
+              routeLink(segment.href);
+            }}
+          >
+            {segment.github && <IconGitHub className="chat-user-link-icon" />}
+            {segment.text}
+          </a>
+        ),
+      )}
+    </>
+  );
 }
 
 export const UserMessage = memo(function UserMessage({
@@ -208,7 +241,7 @@ export const UserMessage = memo(function UserMessage({
           data-message-id={message.id}
           data-part-index="0"
         >
-          {text}
+          <PromptText text={text} />
         </p>
       )}
       {text && foldable && (
