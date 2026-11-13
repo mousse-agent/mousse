@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { CheckIcon, IconArrowRight } from "../icons";
-import { IconChecklist } from "../../../../lib/icons";
+import { RowTodo } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
 import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import { cn } from "../utils/cn";
@@ -119,7 +119,7 @@ export const TodoTool = memo(function TodoTool({
 
   return (
     <ToolRowBase
-      icon={<IconChecklist size={18} />}
+      icon={<RowTodo size={18} />}
       shimmerLabel={running}
       completeLabel={label}
       isAnimating={!cleared && (isPending || empty)}
