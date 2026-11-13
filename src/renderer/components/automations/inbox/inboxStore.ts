@@ -386,6 +386,7 @@ export function inboxPageClosed(): void {
     app.switchToThread(saved.threadId)
     void window.mousse.threads.select(saved.threadId).catch(() => undefined)
   }
+  // Opening the run's thread moved the sidebar off Chats; giving the workspace back to Chats moves the tab with it.
   if (saved.sidebarMode !== useAppStore.getState().sidebarMode) useAppStore.getState().setSidebarMode(saved.sidebarMode)
 }
 
