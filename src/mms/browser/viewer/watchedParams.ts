@@ -2,7 +2,9 @@ import {
   MAX_WATCHED_BROWSER_FILES,
   MAX_WATCHED_BROWSER_SENT,
   validateWatchedBrowserInput,
+  watchedBrowserPageSize,
   type WatchedBrowserHoldRequest,
+  type WatchedBrowserPageSize,
   type WatchedBrowserSent
 } from '../../../shared/browser/watched'
 import { BrowserAutomationError } from '../automation/BrowserSessionManager'
@@ -18,6 +20,18 @@ export const isWatchId = (value: unknown): value is string => typeof value === '
 export const isHoldId = (value: unknown): value is string => typeof value === 'string' && /^hold_[A-Za-z0-9-]{1,64}$/.test(value)
 export const isCount = (value: unknown, min: number, max: number): value is number => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
 const isSeq = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+
+/**
+ * The page size a large view asks for while it shows the browser (`watch`'s `page`): its own size in CSS
+ * pixels and the screen's pixel ratio, kept within `WATCHED_BROWSER_PAGE`. Absent: it asks for none.
+ */
+export function pageSize(value: unknown): WatchedBrowserPageSize | undefined {
+  if (value === undefined) return undefined
+  const r = domainObject(value, ['width', 'height', 'scale'])
+  if (!isCount(r.width, 1, 100_000) || !isCount(r.height, 1, 100_000)) throw new DomainRpcError('invalid_params', 'page must give a width and a height in pixels')
+  if (r.scale !== undefined && !isCount(r.scale, 0.1, 16)) throw new DomainRpcError('invalid_params', 'page scale must be the screen pixel ratio')
+  return watchedBrowserPageSize(r)
+}
 
 export function viewPlatform(value: unknown): 'mac' | 'other' | undefined {
   if (value === undefined) return undefined

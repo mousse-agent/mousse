@@ -28,8 +28,10 @@
 }
 @keyframes watched-browser-loading { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 @media (prefers-reduced-motion: reduce) { .watched-browser-address.is-loading::after { animation: none; width: 100%; opacity: .5; } }
-.watched-browser-stage { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
-.watched-browser-stage .watched-browser-frame { box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), .16), 0 6px 24px rgba(0, 0, 0, .25); }
+/* The page is laid out at the stage's size, so its picture fills it. While a new size is on its way (or
+   another window sets it) the whole picture still shows, as large as fits. */
+.watched-browser-stage { flex: 1; min-height: 0; overflow: auto; padding: 14px; container-type: size; display: flex; align-items: flex-start; justify-content: center; }
+.watched-browser-stage .watched-browser-frame { flex: none; width: min(100cqw, 100cqh * var(--watched-frame-aspect, 1.6)); box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), .16), 0 6px 24px rgba(0, 0, 0, .25); }
 /* Held here: the page takes every pointer, touch and key; the app neither selects, pans nor drags. */
 .watched-browser-frame.is-held { cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; }
 /* Keys land in a field over the page, where the person last pressed (an IME's candidates show there). */
@@ -58,4 +60,6 @@
 .watched-browser-closed { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: rgba(24, 21, 28, .6); color: #fff; font-size: 13px; }
 .watched-browser-closed p { margin: 0; }
 .watched-browser-closed button { padding: 7px 14px; border-radius: 8px; font-size: 12px; font-weight: 500; color: #fff; background: var(--accent); }
-.watched-browser-note { margin: 0; padding: 9px 14px 12px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); }
+/* One line, as tall as its Retry, whatever it says: a change of it never resizes the stage, and so the page. The whole line is in its tooltip. */
+.watched-browser-note { margin: 0; padding: 9px 14px 12px; font-size: 11px; line-height: 22px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watched-browser-note.is-input > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

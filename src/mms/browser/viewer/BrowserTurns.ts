@@ -24,6 +24,8 @@ export const OWNER_CUT_IN_MS = 150
 export const OWNER_KEEP_MS = 1_000
 /** How long the person's input waits for the call under way before it is refused as busy. */
 const PERSON_INPUT_WAIT_MS = 30_000
+/** The longest a call of the person's that is not input (`personCall`) may hold the browser. */
+const PERSON_CALL_HOLD_MS = 15_000
 
 /** What a browser's turns say, in the words of the browser's user. */
 export interface BrowserTurnsText {
@@ -164,6 +166,15 @@ export class BrowserTurns {
       keepMs: OWNER_KEEP_MS,
       ...(options.tab ? { tab: options.tab } : {})
     })
+  }
+
+  /**
+   * A call of the person's that is not input to the page and needs no hold (the page laid out at their view's size):
+   * ahead of the calls that wait, as their input is, but after the call under way, which it never stops. It has
+   * `PERSON_CALL_HOLD_MS` at most.
+   */
+  personCall<T>(work: (held: AbortSignal) => Promise<T>, options: { busy(): Error }): Promise<T> {
+    return this.run(work, { first: true, busy: options.busy, holdMs: PERSON_CALL_HOLD_MS })
   }
 
   /** The browser is free: the next in line goes; it takes the browser before anything that comes later. */

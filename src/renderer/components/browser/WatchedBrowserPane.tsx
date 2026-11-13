@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import { ArrowLeft, ArrowRight, Globe, RefreshCw, X } from '../../lib/icons'
-import { WATCHED_BROWSER_PANE, type WatchedBrowserDialog, type WatchedBrowserInput, type WatchedBrowserView } from '../../../shared/browser/watched'
+import { WATCHED_BROWSER_PANE, watchedBrowserPageSize, type WatchedBrowserDialog, type WatchedBrowserInput, type WatchedBrowserPageSize, type WatchedBrowserView } from '../../../shared/browser/watched'
 import { browserProblemForPerson } from '../../../shared/browser/navigation'
 import { BROWSER_WINDOW_LINE, BROWSER_WINDOW_TOOLTIP } from '../../../shared/browser/window'
 import type { WatchedBrowserNeed, WatchedBrowserState, WatchedBrowserStream } from '../../stores/watchedBrowserStore'
@@ -75,22 +75,50 @@ export function watchedBrowserStatus(view: WatchedBrowserView & { setup?: unknow
   return stream?.live ? { text: 'Live', live: true } : { text: '', live: false }
 }
 
-/** The split view's width, in steps, so a drag of its edge does not ask for a new size at every pixel. */
-function useStageWidth(element: RefObject<HTMLElement | null>): number {
-  const [width, setWidth] = useState<number>(WATCHED_BROWSER_PANE.maxWidth)
+/** The picture's width while the view's size is not known. */
+const UNMEASURED_WIDTH = 960
+
+/** How long the view's size must stay put (a drag of its edge, the app window resized) before the page takes it. */
+export const PAGE_SIZE_SETTLE_MS = 250
+
+/**
+ * The view's own size, which the page is laid out at while it shows the browser: the stage's content
+ * box in CSS pixels and the screen's pixel ratio, once it has stayed put for `PAGE_SIZE_SETTLE_MS`
+ * (the first size at once). Undefined until it is measured.
+ */
+export function useStagePageSize(element: RefObject<HTMLElement | null>): WatchedBrowserPageSize | undefined {
+  const [page, setPage] = useState<WatchedBrowserPageSize | undefined>(undefined)
   useEffect(() => {
     const target = element.current
     if (!target || typeof ResizeObserver === 'undefined') return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let first = true
     const measure = () => {
-      const inner = target.clientWidth
-      if (inner > 0) setWidth(Math.min(WATCHED_BROWSER_PANE.maxWidth, Math.max(320, Math.ceil(inner / 80) * 80)))
+      const style = getComputedStyle(target)
+      const width = Math.floor(target.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0))
+      const height = Math.floor(target.clientHeight - (parseFloat(style.paddingTop) || 0) - (parseFloat(style.paddingBottom) || 0))
+      if (width <= 0 || height <= 0) return
+      const next = watchedBrowserPageSize({ width, height, scale: window.devicePixelRatio || 1 })
+      const apply = () => setPage((known) => known && known.width === next.width && known.height === next.height && known.scale === next.scale ? known : next)
+      if (timer) clearTimeout(timer)
+      timer = undefined
+      if (first) {
+        first = false
+        apply()
+      } else timer = setTimeout(apply, PAGE_SIZE_SETTLE_MS)
     }
     const observer = new ResizeObserver(measure)
     observer.observe(target)
+    // The pixel ratio changes when the window moves to another screen, or the app is zoomed.
+    window.addEventListener('resize', measure)
     measure()
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', measure)
+      if (timer) clearTimeout(timer)
+    }
   }, [element])
-  return width
+  return page
 }
 
 /** How long a refusal of the person's input stays said. */
@@ -208,9 +236,13 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const stage = useRef<HTMLDivElement>(null)
   const keys = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { if (!editing.current) setAddress(url) }, [url])
-  // Watched while on screen: the panel's width up to 960 px, faster while the person holds the browser.
-  const width = useStageWidth(stage)
-  kit.useWatch(browserKey, stage, view.open && !windowed ? { width, fps: owner ? WATCHED_BROWSER_PANE.heldFps : WATCHED_BROWSER_PANE.fps } : undefined)
+  // Watched while on screen, faster while the person holds the browser. The page is laid out at the
+  // view's own size, so its picture fills it; the picture is that size at the screen's pixel ratio.
+  // Until it is measured (or where it cannot be), the page keeps its size and the picture is 960 px wide.
+  const page = useStagePageSize(stage)
+  const width = page ? Math.min(WATCHED_BROWSER_PANE.maxWidth, Math.round(page.width * page.scale)) : UNMEASURED_WIDTH
+  const fps = owner ? WATCHED_BROWSER_PANE.heldFps : WATCHED_BROWSER_PANE.fps
+  kit.useWatch(browserKey, stage, view.open && !windowed ? { width, fps, ...(page ? { page } : {}) } : undefined)
   const stream = kit.useStream(browserKey)
   const fresh = Boolean(note && Date.now() - note.at < NOTE_MS)
   const now = useNow(Boolean(view.open && stream && !stream.live) || fresh)
@@ -270,11 +302,11 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
       </WatchedBrowserFrame>
     </div>
     {said
-      ? <p className="watched-browser-note is-input" role="status" title={said.detail}>
+      ? <p className="watched-browser-note is-input" role="status" title={said.detail ?? said.text}>
         <span>{said.text}</span>
         {said.retry && <button type="button" className="watched-browser-retry" onClick={() => store().retry(browserKey)}>Retry</button>}
       </p>
-      : <p className={`watched-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={error ? errorDetail ?? undefined : view.open && view.problem ? browserProblemForPerson(view.problem).detail : quiet ? status.detail : lineDetail?.(holding)}>{error
+      : <p className={`watched-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={error ? errorDetail ?? undefined : view.open && view.problem ? browserProblemForPerson(view.problem).detail : quiet ? status.detail : lineDetail?.(holding) ?? line(holding)}>{error
         ? error
         : view.open && view.problem ? browserProblemForPerson(view.problem).line
         : quiet ? status.text

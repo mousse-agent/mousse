@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { Maximize } from '../../lib/icons'
+import { Globe, Maximize } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_BROWSER_PREVIEW_WATCH, type BotBrowserView } from '../../../shared/bots/personal/browser'
 import { botBrowserKit, canOpenBotBrowserWindow, useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
@@ -31,17 +31,23 @@ function hostOf(url: string | undefined): string {
   }
 }
 
-/** The small live preview in a reply; hovering shows Expand, which opens the split view. Watched only while on screen. */
+/**
+ * The small live preview in a reply; hovering shows Expand, which opens the split view. Watched only
+ * while on screen. While the split view is open it shows the same tab larger: the preview is then one
+ * line, with no picture, and asks for none.
+ */
 export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
   const host = hostOf(view.tab?.url)
   const figure = useRef<HTMLElement>(null)
-  // The split view shows the same tab larger: while it is open, it alone is watched.
   const paneOpen = useBotBrowserStore((state) => state.pane === bot.id)
   // A browser open in a window is seen there: nothing is pictured meanwhile.
   useBotBrowserWatch(bot.id, figure, view.open && !view.windowed && !paneOpen ? BOT_BROWSER_PREVIEW_WATCH : undefined)
   const stream = useBotBrowserStream(bot.id)
   const now = useNow(Boolean(view.open && stream && !stream.live))
   const status = browserStatus(view, stream, bot.name, now)
+  if (paneOpen) return <p className="bot-browser-beside" role="status" title={view.tab?.title || host || undefined}>
+    <Globe size={12} aria-hidden /><span>Browser open beside the chat</span>
+  </p>
   return <figure ref={figure} className={`bot-browser-preview${status.live && !status.attention ? ' is-live' : ''}${view.open && status.attention ? ' is-stale' : ''}`} aria-label={`${bot.name}'s browser`}>
     <WatchedBrowserFrame label={`${bot.name}'s browser`} view={view}>
       <button type="button" className="bot-browser-expand" aria-label={`Expand ${bot.name}'s browser`} title="Expand"

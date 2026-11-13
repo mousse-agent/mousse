@@ -7,11 +7,11 @@ import {
   type BrowserViewMethod,
   type ThreadBrowserFrameEvent
 } from '../../../shared/browser/threadView'
-import type { WatchedBrowserSent } from '../../../shared/browser/watched'
+import type { WatchedBrowserPageSize, WatchedBrowserSent } from '../../../shared/browser/watched'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../../protocol/domainRegistry'
 import type { HandlerContext } from '../../protocol/handlers'
 import type { MmsBrowserService } from '../MmsBrowserService'
-import { appWindowConnection, asDomainError, chosenPaths, holdRequest, isCount, isHoldId, isWatchId, sentInputs } from './watchedParams'
+import { appWindowConnection, asDomainError, chosenPaths, holdRequest, isCount, isHoldId, isWatchId, pageSize, sentInputs } from './watchedParams'
 
 /**
  * The person's view of a thread agent's browser without a window (`browser.view.*`), in that thread's
@@ -24,7 +24,7 @@ import { appWindowConnection, asDomainError, chosenPaths, holdRequest, isCount, 
 
 const KEYS: Record<BrowserViewMethod, readonly string[]> = {
   'browser.view.get': ['threadId', 'viewId'],
-  'browser.view.watch': ['threadId', 'watchId', 'width', 'fps', 'viewId'],
+  'browser.view.watch': ['threadId', 'watchId', 'width', 'fps', 'viewId', 'page'],
   'browser.view.unwatch': ['threadId', 'watchId'],
   'browser.view.hold': ['threadId', 'viewId', 'request'],
   'browser.view.send': ['threadId', 'viewId', 'holdId', 'inputs']
@@ -41,6 +41,7 @@ function validate(method: BrowserViewMethod, value: unknown): Record<string, unk
       if (!isWatchId(p.watchId)) throw new DomainRpcError('invalid_params', 'A watch id is required')
       if (!isCount(p.width, 1, 10_000)) throw new DomainRpcError('invalid_params', 'width must be a number of pixels')
       if (!isCount(p.fps, 1, 60)) throw new DomainRpcError('invalid_params', 'fps must be a number of pictures a second')
+      p.page = pageSize(p.page)
       break
     case 'browser.view.unwatch':
       if (!isWatchId(p.watchId)) throw new DomainRpcError('invalid_params', 'A watch id is required')
@@ -81,6 +82,7 @@ function handle(context: HandlerContext, method: BrowserViewMethod, p: Record<st
         fps: p.fps as number,
         connectionId: connection.id,
         ...(p.viewId ? { viewId: p.viewId as string } : {}),
+        ...(p.page ? { page: p.page as WatchedBrowserPageSize } : {}),
         ...(connection.lifetime ? { lifetime: connection.lifetime } : {}),
         emit: (event: ThreadBrowserFrameEvent) => emit(BROWSER_VIEW_FRAME_EVENT, event)
       }).then((view) => ({ browser: view }))
