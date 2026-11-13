@@ -272,7 +272,7 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     const cwd = prepared.authority.workspace!.files!
     // A runtime folder in the shared temporary folder is open to every bot: no private folder there.
     expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', '/tmp/runtime-1000')).toBeUndefined()
-    expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', undefined)).toBeUndefined()
+    expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', '')).toBeUndefined()
     expect(claudeBotTemp(prepared.authority, {}, cwd, 'darwin', '/run/user/1000')).toBeUndefined()
     // Where it is real (Linux with one), the folder is its own, short enough for Claude Code to give its commands, and
     // the shared folders are the ones the sandbox closes (the real program: claudeMcpCommandLine.test.ts).
