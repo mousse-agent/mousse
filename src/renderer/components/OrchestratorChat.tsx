@@ -33,6 +33,7 @@ import {
   buildComposerMessageContent
 } from './ChatComposer'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
+import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { contextTokens } from '../lib/promptCache'
 import { cachedContextUsage, contextUsageKey, rememberContextUsage } from '../lib/threadContextUsage'
@@ -1834,6 +1835,12 @@ export function OrchestratorChat() {
                 ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type)), questionAnswerSubmits).label
                 : approvalWaiting ? DENY_AND_SEND_LABEL : undefined}
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
+              onSteerQueued={() => {
+                const next = nextSteerableQueueItem(queue.items, queue.busyIds)
+                if (!next) return false
+                void queue.steer(next.id)
+                return true
+              }}
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
               banner={<>

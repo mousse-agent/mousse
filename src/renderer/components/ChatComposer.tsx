@@ -92,6 +92,11 @@ export interface ChatComposerProps {
    * when the text was sent as a steer during a run: it goes into the running turn.
    */
   onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
+  /**
+   * The steer chord in an empty composer while a reply runs: sends the next queued message into the reply now.
+   * Returns whether one was sent.
+   */
+  onSteerQueued?: () => boolean
   /** What the send button says it does, when the parent sends somewhere other than the thread (see `ComposerFooter`). */
   sendLabel?: string
   onStop?: () => void
@@ -171,6 +176,7 @@ export function ChatComposer({
   disabled = false,
   placeholder,
   onSend,
+  onSteerQueued,
   sendLabel,
   onStop,
   lastPrompt,
@@ -680,6 +686,11 @@ export function ChatComposer({
       e.preventDefault()
       // During a run Enter follows the thread's send mode and Ctrl+Enter (Cmd+Enter on macOS) does the other one;
       // Alt+Enter, the earlier steer key, still steers. With no run every Enter sends.
+      // With nothing typed, the chord sends the next queued message now, as Send now on it does.
+      if (loading && isSteerKey(e, platform) && trimmedInput.length === 0 && !hasAttachments && onSteerQueued?.()) {
+        markSteerKey()
+        return
+      }
       const steer = loading && steersOnEnter(e, platform, sendMode)
       // The chord pressed again a moment later finds an empty composer: it must not answer an approval then.
       if (loading && (steer || isSteerKey(e, platform))) markSteerKey()
