@@ -2,7 +2,7 @@
  * What bots may do here, as the service stores and reads it: one setting for the whole installation (its own
  * `mousse.conf`), the same for every profile's bots and Settings. A setting never written is all on (first start, an
  * update); one that is malformed, or lost with a settings file that could not be read, is all off and marked so until
- * the owner sets it again. A write is exactly three switches or nothing changes. Another computer can't route to it.
+ * the owner sets it again. A write is exactly the four switches or nothing changes. Another computer can't route to it.
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -56,7 +56,12 @@ describe('reading the stored setting', () => {
 
   // The stored `bots` value, and what every switch reads.
   const rows: Array<[string, unknown, typeof open | typeof shut | { here: BotComputerLimit }]> = [
-    ['all three on', { here: { shell: true, files: true, browser: true } }, open],
+    ['all four on', { here: { shell: true, files: true, browser: true, threads: true } }, open],
+    // Written before Use your threads existed: it reads on, as a switch never set does; the others as stored.
+    ['written before "use your threads" existed', { here: { shell: false, files: true, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, shell: false } }],
+    ['use your threads off', { here: { shell: true, files: true, browser: true, threads: false } }, { here: { ...BOT_COMPUTER_OPEN, threads: false } }],
+    ['use your threads not a boolean', { here: { shell: true, files: true, browser: true, threads: 'off' } }, shut],
+    ['use your threads null', { here: { shell: true, files: true, browser: true, threads: null } }, shut],
     ['one off', { here: { shell: false, files: true, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, shell: false } }],
     ['a switch the build does not know is ignored', { here: { shell: true, files: true, browser: true, camera: false } }, open],
     ['null', null, shut],
@@ -91,9 +96,9 @@ describe('reading the stored setting', () => {
     const settings = new SettingsStore(profile)
     expect(settings.get().bots).toEqual(shut)
     // The owner switches one on: the notice goes, and what was set is what is read, after a restart too.
-    settings.set({ bots: { here: { shell: false, files: true, browser: false } } })
-    expect(settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false } })
-    expect(MousseConfigStore.loadInstallation(home).botSettings()).toEqual({ here: { shell: false, files: true, browser: false } })
+    settings.set({ bots: { here: { shell: false, files: true, browser: false, threads: false } } })
+    expect(settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false, threads: false } })
+    expect(MousseConfigStore.loadInstallation(home).botSettings()).toEqual({ here: { shell: false, files: true, browser: false, threads: false } })
   })
 
   it('a profile\'s own file that can\'t be read leaves the installation\'s setting as it is', () => {
@@ -131,7 +136,7 @@ describe('one setting for every profile of this computer, through the real servi
   const set = (services: MmsProfileServices, partial: unknown) =>
     dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId: services.profileId, epoch: 1 }, capabilities: new Set() } } as never, 'settings.set', { partial })
 
-  it('set in one profile: every profile\'s Settings shows it and every profile\'s bots are held to it, a new profile too; a write that is not three switches changes nothing', async () => {
+  it('set in one profile: every profile\'s Settings shows it and every profile\'s bots are held to it, a new profile too; a write that is not the four switches changes nothing', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = tempHome()
     const home = join(root, 'home')
@@ -158,9 +163,9 @@ describe('one setting for every profile of this computer, through the real servi
     const later = await main.getProfileServices(manager.create({ displayName: 'Later', slug: 'later' }).id)
     expect(later.settings.get().bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
 
-    // Anything but exactly three switches is refused, nothing in the same update is saved, and nothing is reset.
+    // Anything but exactly the four switches is refused (three, from before Use your threads, too), nothing in the same update is saved, and nothing is reset.
     const theme = other.settings.get().appearance.theme
-    for (const bots of [null, false, 'on', [], {}, { here: null }, { here: { shell: true } }, { here: { shell: 'true', files: true, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, camera: true } }, { here: BOT_COMPUTER_OPEN, unreadable: true }, { here: BOT_COMPUTER_OPEN, more: 1 }])
+    for (const bots of [null, false, 'on', [], {}, { here: null }, { here: { shell: true } }, { here: { shell: true, files: true, browser: true } }, { here: { shell: 'true', files: true, browser: true, threads: true } }, { here: { ...BOT_COMPUTER_OPEN, camera: true } }, { here: BOT_COMPUTER_OPEN, unreadable: true }, { here: BOT_COMPUTER_OPEN, more: 1 }])
       await expect(set(other, { bots, appearance: { theme: theme === 'dark' ? 'light' : 'dark' } }), JSON.stringify(bots)).rejects.toThrow(/What bots may do here/)
     expect(main.settings.get().bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
     expect(other.settings.get().appearance.theme).toBe(theme)

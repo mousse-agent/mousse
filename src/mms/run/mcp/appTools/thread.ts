@@ -331,7 +331,9 @@ const SEND_CONFLICTS: Readonly<Record<string, string>> = {
   agent_hops_exceeded:
     'Too many agent messages in a row without a person in between: this message would be past the limit. Stop here and let a person reply before agents go on.',
   agent_queue_full:
-    'The thread already has several messages from agents waiting in its queue. Wait for them to run (thread_wait), or try again later.'
+    'The thread already has several messages from agents waiting in its queue. Wait for them to run (thread_wait), or try again later.',
+  plan_review_pending:
+    'The thread shows a plan waiting for your owner to review; a bot never answers it. Tell your owner, and send again once they have replied in that thread.'
 }
 
 /** An engine refusal that means the thread is not in a state to take the message now, as a `mousse_conflict`. */

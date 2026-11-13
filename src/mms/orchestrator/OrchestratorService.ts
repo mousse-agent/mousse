@@ -4058,6 +4058,10 @@ export class OrchestratorService extends EventEmitter {
     // A bot's thread sends only as the owner's bot, with "use your threads" held by the turn that sends (or, for a thread
     // it just started, by the creation that carries it).
     const bot = options.bot ?? this.botSenderOf(options.actor, 'thread_send')
+    // A plan shown for review is answered by the person sending the next message ("Implement"): a bot's message would
+    // answer it for them, so it is refused while the thread's latest exchange is a plan nobody has replied to.
+    if (bot && this.awaitsPlanReview(threadId))
+      throw new DomainRpcError('plan_review_pending', 'The thread shows a plan waiting for your owner to review.')
     const sender = this.withAgentHops(options.actor)
     this.assertQueueOpen(threadId)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
@@ -4087,6 +4091,18 @@ export class OrchestratorService extends EventEmitter {
       queued: response.queued === true || (replayed && engine.getRun(response.runId)?.status === 'queued'),
       replayed,
       mode
+    }
+  }
+
+  /** Whether the thread's latest exchange is a plan card no one has replied to: a plan waiting for its person's review. */
+  private awaitsPlanReview(threadId: string): boolean {
+    try {
+      const messages = this.visibleMessagesWithoutLoading(threadId)
+      const last = [...messages].reverse().find((message) => message.role === 'user' || message.kind === 'plan_card')
+      return last?.kind === 'plan_card'
+    } catch {
+      // Unreadable: a bot's message is refused rather than risk answering a review.
+      return true
     }
   }
 
