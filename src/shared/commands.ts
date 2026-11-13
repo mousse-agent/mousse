@@ -545,7 +545,8 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     // The composer and the queued messages handle this key themselves (`lib/steerKey.ts`): while a reply runs it
     // does what Enter does not. In a thread set to Queue it sends the composer's text into the reply now; in one set
-    // to Steer it queues it. On a focused queued message it sends that message now.
+    // to Steer it queues it. In an empty composer it sends the next queued message now; on a focused queued message,
+    // that message.
     id: 'composer.steer',
     title: 'Steer: send into the running reply (queues in Steer mode)',
     category: 'Composer',
