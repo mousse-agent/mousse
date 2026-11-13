@@ -370,11 +370,14 @@ export class BotChatProjection {
    * The subagents of a piece of work that run now (a subagent turn not ended), each by its title and model, for its line.
    * Read from `bots.db`, where each of their turns names what it runs as.
    */
-  private runningSubagents(activationId: string): { subagents?: Array<{ title: string; model: string }> } {
-    const running = new Map<string, { title: string; model: string }>()
-    for (const dispatch of this.store.dispatches(activationId))
-      if (dispatch.kind === 'subagent' && dispatch.endedAt === null && dispatch.prompt.subagent)
-        running.set(dispatch.threadId, { title: dispatch.prompt.subagent.title, model: dispatch.prompt.subagent.model })
+  private runningSubagents(activationId: string): { subagents?: Array<{ title: string; model: string; lacks?: string[] }> } {
+    const running = new Map<string, { title: string; model: string; lacks?: string[] }>()
+    for (const dispatch of this.store.dispatches(activationId)) {
+      const spec = dispatch.prompt.subagent
+      // Its model names its entry ("Opus 5.5 on Claude Code"): which provider does this part; and what it runs without.
+      if (dispatch.kind === 'subagent' && dispatch.endedAt === null && spec)
+        running.set(dispatch.threadId, { title: spec.title, model: spec.model, ...(spec.lacks?.length ? { lacks: spec.lacks } : {}) })
+    }
     return running.size ? { subagents: [...running.values()] } : {}
   }
 

@@ -315,6 +315,9 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     botApprovals: () => true,
     // A Codex whose version hasn't been checked for bots: Runs on says so before any work is sent (the turn is refused too).
     botRunsOnNote: (_config, installedVersion) => codexBotRunsOnNote(installedVersion, CODEX_BOT_CHECKED_VERSIONS),
+    // Its sandbox holds a bot's commands (`codexBotSandbox`), and a bot's turn without the web has its hosted web search
+    // switched off (`codexBotSandboxConfig`, checked on the real binaries in `codexBotTools.test.ts`).
+    botHold: () => ({ runtime: 'codex', hostedSearch: 'off_without_web' }),
     nativeToolNames: (neutral) => CODEX_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @openai/codex@latest'

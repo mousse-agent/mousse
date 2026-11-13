@@ -692,6 +692,10 @@ export interface BotSubagentSpec {
   pick?: BotModelPick & { instanceId: string }
   /** The work's tool call that started it: a repeat of the call starts nothing new. */
   call?: string
+  /** When the work started it (wall-clock milliseconds): the bot's subagents are counted per day by it. */
+  at?: number
+  /** What it runs without, in the owner's words, because its entry holds that less tightly than the work's (`subagentHold`). */
+  lacks?: string[]
 }
 
 /** A subagent's dispatch id: `<activationId>:s<n>`; a consult's is `<activationId>:c<n>`. Both are `consult` in `bots.db`. */
@@ -1132,6 +1136,24 @@ export class BotStore {
   countNewAsks(botId: string, input: { activationId?: string; since?: string }): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE bot_id = ? AND mode = 'ask' AND (? IS NULL OR activation_id = ?) AND created_at >= ?",
       botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
+  }
+
+  /**
+   * The subagents a bot's work started since `since` (wall-clock milliseconds), across all its activations: each one's
+   * first turn, by the time its spec records (`BotSubagentSpec.at`). Turns that started before `since` are not read.
+   */
+  countSubagentsStarted(botId: string, since: number): number {
+    const threads = new Set<string>()
+    for (const row of this.all("SELECT d.thread_id, d.client_request_id, d.prompt_json FROM bot_dispatches d JOIN bot_activations a ON a.id = d.activation_id WHERE a.bot_id = ? AND d.kind = 'consult' AND (d.started_at IS NULL OR d.started_at >= ?)", botId, since)) {
+      if (!SUBAGENT_DISPATCH.test(row.client_request_id as string)) continue
+      try {
+        const at = (JSON.parse(row.prompt_json as string) as { subagent?: { at?: unknown } }).subagent?.at
+        if (typeof at === 'number' && at >= since) threads.add(row.thread_id as string)
+      } catch {
+        // Not a subagent's prompt.
+      }
+    }
+    return threads.size
   }
 
   countEscalations(activationId: string): number {

@@ -3,7 +3,7 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
+import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
@@ -143,7 +143,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'subagent_start',
-    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation). It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from work_models; one that isn't offered there is refused and nothing starts. It returns at once, and you are told when it finishes. Wait for the ones you need (subagent_wait) before you report: a subagent still running when your turn ends is stopped. You stay responsible for the result: check what they return. Up to ${MAX_BOT_SUBAGENTS_AT_ONCE} run at once, ${MAX_BOT_SUBAGENTS_PER_WORK} in all for this work.`,
+    description: `Start a subagent: a helper that does one part of this job on its own and returns its result to you, never to the owner. Use it to split a job into parts that can go on at once, or to give one part a model better suited to it. title is a short name you address it by ("Price check"); brief is the whole task, standing on its own (it sees neither your memory nor this conversation). It can do only what you can, and it can't ask the owner for anything. It runs on your model unless you give model: an instanceId and a model, and maybe effort, from work_models; one that isn't offered there is refused and nothing starts. Keep it on your model unless the part needs another. On another entry it may run without something you have (lacks says what) or not start at all, when that entry would hold it less tightly than yours. It returns at once, and you are told when it finishes; its running time counts against your work time. Before you report, wait for the ones you need (subagent_wait) and stop the rest: one still running when you report is stopped. You stay responsible for the result: check what they return. Up to ${MAX_BOT_SUBAGENTS_AT_ONCE} run at once, ${MAX_BOT_SUBAGENTS_PER_WORK} in all for this work, ${MAX_BOT_SUBAGENTS_PER_DAY} a day for all your work.`,
     parameters: Type.Object({
       title: Type.String({ description: 'A short name for it, unique in this work.' }),
       brief: Type.String({ description: 'The whole task, standing on its own, and what its result should contain.' }),
@@ -293,7 +293,7 @@ export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): 
 }
 
 /** `work_models`' note in a run's main turn: the list is for its subagents. */
-const SUBAGENT_MODELS_NOTE = 'For a subagent you start: pass an entry\'s instanceId, a model and (if you want one) one of its efforts to subagent_start as model. Pick one suited to the part, and mind that a stronger model costs your owner more. If an entry is under cantRunWork, a subagent can\'t run there either.'
+const SUBAGENT_MODELS_NOTE = 'For a subagent you start: keep it on your own model unless a part needs another; then pass an entry\'s instanceId, a model and (if you want one) one of its efforts to subagent_start as model. Another entry is another provider: it is sent your instructions and the brief. Mind that a stronger model costs your owner more. subagentLacks says what a subagent there would run without, because that entry holds it less tightly than yours; subagentCantRun, why one can\'t run there. If an entry is under cantRunWork, a subagent can\'t run there either.'
 
 /** Why work can't start on a model, after which nothing starts: a sentence the bot passes on to the owner. */
 const NOTHING_STARTED = 'Nothing was started. Tell the owner plainly, and ask what they want.'
@@ -657,7 +657,15 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (call.lane !== 'chat' && !forSubagents) return error(CHAT_ONLY)
         const choices = await workChoicesOf(call.deps).catch(() => ({ options: [], unavailable: [] }))
         const listing = workModelListing(choices, call.deps.host.rows(call.botId))
-        return json(forSubagents ? { ...listing, note: choices.options.length ? SUBAGENT_MODELS_NOTE : 'Your owner has no other model your work can run on here: your subagents run on your own model.' } : listing)
+        if (!forSubagents) return json(listing)
+        // Each entry says what a subagent there would run without, or why it can't run there (the hold rule), so the
+        // work picks well before it starts one.
+        const marks = ctx.turn.bot?.subagents?.holdOn?.(choices.options.map((option) => option.instanceId)) ?? {}
+        const entries = (listing.entries as Array<{ instanceId: string }>).map((entry) => {
+          const mark = marks[entry.instanceId]
+          return mark ? { ...entry, ...('refused' in mark ? { subagentCantRun: mark.refused } : { subagentLacks: mark.lacks }) } : entry
+        })
+        return json({ ...listing, entries, note: choices.options.length ? SUBAGENT_MODELS_NOTE : 'Your owner has no other model your work can run on here: your subagents run on your own model.' })
       }
     }),
     ownTool(byName.get('work_list')!, deps, {
@@ -852,7 +860,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         }
         const started = await subagents.start({ title: args.title, brief: args.brief, ...(model ? { model } : {}), ...(ctx.toolCallId ? { toolCallId: ctx.toolCallId } : {}) })
         if ('refused' in started) return error(started.refused)
-        return json({ ...started.started, note: started.note })
+        return json({ ...started.started, ...(started.lacks?.length ? { lacks: started.lacks } : {}), note: started.note })
       }
     }),
     subagentTool(byName.get('subagent_send')!, {
@@ -864,7 +872,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (typeof args.subagent !== 'string' || typeof args.message !== 'string') return error('subagent_send needs a subagent\'s title and the message.')
         const sent = await subagents.send({ subagent: args.subagent, message: args.message })
         if ('refused' in sent) return error(sent.refused)
-        return json({ ...sent.sent, note: sent.note })
+        return json({ ...sent.sent, ...(sent.lacks?.length ? { lacks: sent.lacks } : {}), note: sent.note })
       }
     }),
     subagentTool(byName.get('subagent_wait')!, {

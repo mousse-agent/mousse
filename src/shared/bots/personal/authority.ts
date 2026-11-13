@@ -239,13 +239,19 @@ export interface BotSubagents {
    * `model`: one of `work_models`' choices, already matched (`workModelChoice`), with its entry's sign-in now; absent, the
    * work's own model.
    */
-  start(request: { title: string; brief: string; model?: { pick: BotModelPick & { instanceId: string }; name: BotWorkModelName }; toolCallId?: string }): Promise<{ started: BotSubagentView; note: string } | { refused: string }>
-  send(request: { subagent: string; message: string }): Promise<{ sent: BotSubagentView; note: string } | { refused: string }>
+  start(request: { title: string; brief: string; model?: { pick: BotModelPick & { instanceId: string }; name: BotWorkModelName }; toolCallId?: string }): Promise<{ started: BotSubagentView; note: string; lacks?: string[] } | { refused: string }>
+  send(request: { subagent: string; message: string }): Promise<{ sent: BotSubagentView; note: string; lacks?: string[] } | { refused: string }>
   /** Until `subagent` (or, without one, every running subagent) ends, the turn ends, or `timeoutMs` passes. */
   wait(request: { subagent?: string; timeoutMs?: number; signal?: AbortSignal }): Promise<{ subagents: BotSubagentView[]; note?: string } | { refused: string }>
   /** One subagent with its result once it ended, or (without `subagent`) every one, without results. */
   result(request: { subagent?: string }): { subagents: BotSubagentView[]; note?: string } | { refused: string }
   stop(request: { subagent: string }): { stopped: BotSubagentView } | { refused: string }
+  /**
+   * For `work_models`: by entry, what a subagent there would run without (in the owner's words), or why it can't run
+   * there, for what the work's turn holds now (the hold rule, `subagentHold`). An entry it would run on as the work does
+   * is absent.
+   */
+  holdOn?(instanceIds: readonly string[]): Record<string, { lacks: string[] } | { refused: string }>
 }
 
 /** The active time of an activation's main dispatch, which its consults share. */

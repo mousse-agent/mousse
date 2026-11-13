@@ -69,7 +69,7 @@ export const BOT_CHAT_INSTRUCTIONS = `In the chat you are the front desk
 export const BOT_RUN_INSTRUCTIONS = `In a run you do the work
 - You were given work to do on your own, beside the chat. Do it fully, then end with your report: the result first, in plain words, then anything the owner should decide or know. That report is your only message to the owner.
 - Ask for nothing you can't do without. When something you need is refused, do what you can and say in your report what you skipped and how the owner can let you do it.
-- When a job splits into parts that can go on at once, or a part suits another model, you can hand parts to subagents (subagent_start), each on a model you pick from work_models or on yours. They can do only what you can and never ask the owner. Wait for them before you report and check what they return: you stay responsible for the result.`
+- When a job splits into parts that can go on at once, or a part needs another model, you can hand parts to subagents (subagent_start). Keep them on your own model unless a part needs another one from work_models: another entry is another provider, and it is sent your instructions and that part's brief. They can do only what you can, never ask the owner, and their time counts against yours. Before you report, wait for the ones you need and stop the rest (subagent_stop), and check what they return: you stay responsible for the result.`
 
 /**
  * A subagent of a run (its work started it with `subagent_start`): one part of a job, a result for the work, nothing for
@@ -220,14 +220,25 @@ export function botShellWithheld(text: string): string {
  * it, then what its owner allows now (`allowed`). Built at each dispatch, so a rename, a new description or a changed
  * permission takes effect at the next turn.
  */
-export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true }): string {
+/**
+ * A subagent's one line on what it runs without, though its work holds it: its provider entry would hold that less
+ * tightly than the work's (`subagentHold`). It says so in its result.
+ */
+export function subagentWithheldLine(withheld: readonly string[]): string {
+  const what = withheld.length === 1 && withheld[0] === 'run commands' ? 'run commands' : `use ${withheld.map((power) => `"${power}"`).join(' or ')}`
+  return `You can't ${what} in this job: you run on another provider than the work that started you, and it would hold that less tightly. If your task needs it, do the rest and say in your result what was left undone for that reason.`
+}
+
+export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): string {
   if (bot.subagent) {
     // A subagent of the bot's work: who it works for, its one part of the job, and what it may use, with nothing to ask.
     const who = [`You work for ${bot.name.trim()}, a personal bot in Mousse. Its owner described what it does as: "${bot.description.trim()}"`]
     if (bot.filesFolder) who.push(`The bot's files folder is ${bot.filesFolder}.`)
     if (bot.homeFolder) who.push(`The owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
     const allowed = bot.allowed ? botAllowedText(bot.allowed, 'run', bot.browserOffline, true) : undefined
-    return `${who.join('\n')}\n\n${BOT_SUBAGENT_INSTRUCTIONS}${allowed ? `\n\n${allowed}` : ''}`
+    // What its work holds but it runs without: its provider entry would hold that less tightly than the work's.
+    const withheld = bot.withheld?.length ? `\n\n${subagentWithheldLine(bot.withheld)}` : ''
+    return `${who.join('\n')}\n\n${BOT_SUBAGENT_INSTRUCTIONS}${withheld}${allowed ? `\n\n${allowed}` : ''}`
   }
   const who = [`Your name is ${bot.name.trim()}. Your owner described what you do as: "${bot.description.trim()}"`]
   if (bot.filesFolder) who.push(`Your files folder is ${bot.filesFolder}.`)

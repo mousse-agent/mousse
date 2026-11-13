@@ -2231,8 +2231,11 @@ describe('CodexAdapter', () => {
 
 describe('a bot turn on Codex', () => {
   /** A bot without "run commands" starts with every command tool of Codex off, so it has none at all. */
-  /** Every bot turn starts with Codex's tools that no bot may have off (`CODEX_BOT_FEATURES_OFF`). */
-  const BOT_FEATURES = Object.fromEntries(CODEX_BOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false]))
+  /**
+   * Every bot turn starts with Codex's tools that no bot may have off (`CODEX_BOT_FEATURES_OFF`), and, since none of these
+   * bots holds the web, with Codex's hosted web search off (`codexBotWebOff`).
+   */
+  const BOT_FEATURES = { ...Object.fromEntries(CODEX_BOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false])), web_search: 'disabled' }
   const NO_COMMANDS = { ...BOT_FEATURES, 'features.shell_tool': false, 'features.unified_exec': false }
   /** A bot whose authority allows changes in its files folder, refuses (with an ask) a command, and walls anything else. */
   function botIn(files: string) {

@@ -138,8 +138,11 @@ export interface BotWorkItem {
    * `detail` on hover ("Opus 5.5 on Claude Code, high reasoning, for this work only").
    */
   model?: { name: string; detail: string }
-  /** Its subagents that run now, each by its title and its model in plain words ("Opus 5.5 on Claude Code"). */
-  subagents?: Array<{ title: string; model: string }>
+  /**
+   * Its subagents that run now, each by its title and its model in plain words with its entry ("Opus 5.5 on Claude
+   * Code"), and what it runs without because that entry would hold it less tightly than the work's ("run commands").
+   */
+  subagents?: Array<{ title: string; model: string; lacks?: string[] }>
 }
 
 /** One thing a bot may use, in About → Can use. `id` is the permission's fingerprint. */

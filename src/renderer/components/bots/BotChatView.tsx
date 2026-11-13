@@ -106,9 +106,9 @@ export function subagentsCount(n: number): string {
   return n === 1 ? '1 subagent' : `${n} subagents`
 }
 
-/** Each running subagent on a line of the tooltip: its title and its model. */
-export function subagentsTitle(subagents: ReadonlyArray<{ title: string; model: string }>): string {
-  return subagents.map((subagent) => `${subagent.title} · ${subagent.model}`).join('\n')
+/** Each running subagent on a line of the tooltip: its title, its model and entry, and what it runs without there. */
+export function subagentsTitle(subagents: ReadonlyArray<{ title: string; model: string; lacks?: readonly string[] }>): string {
+  return subagents.map((subagent) => `${subagent.title} · ${subagent.model}${subagent.lacks?.length ? ` · can't ${subagent.lacks.join(' or ')} there` : ''}`).join('\n')
 }
 
 /** One piece of work above the composer: its title, what it is doing, for how long, and Stop. The time moves twice a minute. */

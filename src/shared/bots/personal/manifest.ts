@@ -54,6 +54,12 @@ export const MAX_BOT_SUBAGENTS_AT_ONCE = 3
 export const MAX_BOT_SUBAGENTS_PER_WORK = 10
 
 /**
+ * Subagents one bot's work may start in a day (the last 24 hours), across all its work, schedules and reminders: three
+ * pieces of work's worth, so a schedule that runs often can't start ten every time. Pictures are 20 a day, asks 10.
+ */
+export const MAX_BOT_SUBAGENTS_PER_DAY = 30
+
+/**
  * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
  * commands), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
  */

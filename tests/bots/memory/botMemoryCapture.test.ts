@@ -1,4 +1,8 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
 import { BotJournalError, BotMemoryStore } from '../../../src/mms/bots/memory/BotMemoryStore'
 import { botThreadsForCatchUp, createBotJournal, type BotThreadRef } from '../../../src/mms/bots/memory/capture'
 import type { ChatMessage } from '../../../src/shared/types'
@@ -242,5 +246,54 @@ describe('review round 2', () => {
       { botId: 'ada', threadId: 'ctx-2', lane: 'run', activationId: null },
       { botId: 'ada', threadId: 'run-1', lane: 'run', activationId: 'act-1' }
     ])
+  })
+})
+
+describe('a subagent of the bot\'s work', () => {
+  // Its thread is copied like any bot thread, but as its own rows: what it said is data it returned to the work, from
+  // outside, never the bot's words to its owner; memory search, the run brief and an export show it so.
+  it('its rows are marked as a subagent\'s, and search and the export show them so; the work\'s own words stay the bot\'s', async () => {
+    const fx = memoryFixture()
+    const t = threads()
+    const journal = createBotJournal({ store: fx.store, readThread: t.readThread, listThreads: () => [], isSubagentThread: (threadId) => threadId === 'sub-1' })
+    t.data.set('sub-1', [
+      user('u1', 'Find the prices.'),
+      toolCall('c1', 'web_search', { query: 'prices' }, 'Shop A 199', 'complete', 1),
+      assistant('a1', 'Prices: 199 and 249.', 2)
+    ])
+    t.data.set('run-1', [assistant('a2', 'The prices are 199 and 249.', 3)])
+    await journal.syncThread({ botId: 'ada', threadId: 'sub-1', lane: 'run', activationId: 'act-1' })
+    await journal.syncThread({ botId: 'ada', threadId: 'run-1', lane: 'run', activationId: 'act-1' })
+    expect(kinds(fx)).toEqual([
+      ['notice', 'mousse', '[subagent] Find the prices.'],
+      ['tool_call', 'tool', '[subagent] web_search {"query":"prices"}'],
+      ['tool_result', 'tool', '[subagent] Shop A 199'],
+      ['tool_result', 'tool', '[subagent] Prices: 199 and 249.'],
+      // The control: the work's own words are the bot's.
+      ['bot_msg', 'bot', 'The prices are 199 and 249.']
+    ])
+    const hits = fx.store.search('ada', { query: '249' })
+    expect(hits.map((hit) => [hit.kind, hit.who])).toEqual(expect.arrayContaining([['tool_result', 'tool'], ['bot_msg', 'bot']]))
+    expect(hits.filter((hit) => hit.who === 'bot').every((hit) => !hit.snippet.includes('Prices:'))).toBe(true)
+    // The export: journal.jsonl keeps them, each marked.
+    const dir = mkdtempSync(join(tmpdir(), 'bot-export-'))
+    try {
+      const { files } = await createBotMemoryAdmin({ store: fx.store }).export('ada', dir)
+      const rows = readFileSync(files.find((file) => file.endsWith('journal.jsonl'))!, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { text: string; who: string; json: Record<string, unknown> | null })
+      const marked = rows.filter((row) => row.text.startsWith('[subagent] '))
+      expect(marked).toHaveLength(4)
+      for (const row of marked) expect(row).toMatchObject({ who: expect.not.stringMatching(/^bot$/), json: expect.objectContaining({ subagent: true }) })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a thread it can\'t tell apart waits for the next copy rather than being copied as the bot\'s words', async () => {
+    const fx = memoryFixture()
+    const t = threads()
+    const journal = createBotJournal({ store: fx.store, readThread: t.readThread, listThreads: () => [], isSubagentThread: () => { throw new Error('bots.db busy') }, log: () => {} })
+    t.data.set('sub-1', [assistant('a1', 'Prices: 199.', 1)])
+    await journal.syncThread({ botId: 'ada', threadId: 'sub-1', lane: 'run', activationId: 'act-1' })
+    expect(kinds(fx)).toEqual([])
   })
 })
