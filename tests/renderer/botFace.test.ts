@@ -374,7 +374,7 @@ describe('BotFace fallback', () => {
     let status: ReturnType<FaceGpu['status']> = 'ready'
     const fake = fakeEnv({ status: () => status, saved })
     resetSharedFaceRenderer(() => fake.env)
-    // One face with a saved frame, one (working) without.
+    // A still face saved in an earlier run, and a moving one whose still pose is drawn this run.
     render(createElement('div', null,
       createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head', still: true }),
       createElement(BotFace, { look: coral, state: 'working', size: 40, view: 'head' })
@@ -382,20 +382,24 @@ describe('BotFace fallback', () => {
     fake.tick()
     await settle()
     fake.tick()
-    const [withSaved, without] = [...host.querySelectorAll('canvas')]
-    expect(without).toBeDefined()
+    const [still, moving] = [...host.querySelectorAll('canvas')]
+    const liveFrame = lastDrawn(moving!)
+    expect(liveFrame).toBe(fake.gpu.canvas)
     status = 'lost'
     fake.lose()
     // A brief loss: both keep their canvas and what it shows.
     expect(host.querySelectorAll('canvas')).toHaveLength(2)
     expect(host.querySelector('svg.bot-face-still')).toBeNull()
+    expect(lastDrawn(moving!)).toBe(liveFrame)
     fake.tick(LOST_CONTEXT_TIMEOUT_MS)
     await settle()
     expect(sharedFaceRendererStatus()).toBe('failed')
-    // Failed: the face with a saved frame shows it, the other draws flat.
-    expect([...host.querySelectorAll('canvas')]).toEqual([withSaved])
-    expect(lastDrawn(withSaved!)).toMatchObject({ width: 40, height: 40 })
-    expect(host.querySelectorAll('svg.bot-face-still')).toHaveLength(1)
+    // Failed: each shows the still frame of its spec, the moving one its still pose.
+    expect([...host.querySelectorAll('canvas')]).toEqual([still, moving])
+    expect(lastDrawn(still!)).toMatchObject({ width: 40, height: 40 })
+    expect(lastDrawn(moving!)).not.toBe(fake.gpu.canvas)
+    expect(lastDrawn(moving!)).toBeInstanceOf(HTMLCanvasElement)
+    expect(host.querySelector('svg.bot-face-still')).toBeNull()
   })
 
   it('draws the still face when WebGL is refused as software', () => {
@@ -555,7 +559,7 @@ describe('ready from launch', () => {
 })
 
 describe('a face while the shader compiles', () => {
-  it('draws flat at once when no frame is saved, and goes live within READY_POLL_MS of the shader being ready', async () => {
+  it('draws flat at once when no frame is saved, and goes live within READY_POLL_MS of the shader being ready, never blank', async () => {
     let status: ReturnType<FaceGpu['status']> = 'pending'
     const saved = fakeSaved()
     await settle()
@@ -568,10 +572,12 @@ describe('a face while the shader compiles', () => {
     expect(flat()).not.toBeNull()
     status = 'ready'
     fake.tick(READY_POLL_MS)
-    expect(flat()).toBeNull()
+    // Live: the canvas is in, under the flat drawing until the renderer has drawn into it.
     expect(faceCanvas()).not.toBeNull()
+    expect(host.querySelector('.bot-face-live > svg.bot-face-still')).not.toBeNull()
     fake.tick()
-    expect(fake.draws).toHaveLength(1)
+    expect(fake.draws.length).toBeGreaterThan(0)
+    expect(flat()).toBeNull()
   })
 
   it('shows the saved frame of its spec at once, never flat, then goes live; a moving face shows its saved still pose', async () => {
@@ -662,6 +668,25 @@ describe('saved frames', () => {
     const saved = fakeSaved()
     await drawAndSave(saved, { look: coral })
     expect([...saved.records.values()]).toEqual([expect.objectContaining({ key, version: faceArtVersion() })])
+  })
+
+  it("saves a moving face's still pose once, without drawing it into the face", async () => {
+    const saved = fakeSaved()
+    await settle()
+    const fake = fakeEnv({ saved })
+    const renderer = new FaceRenderer(fake.env)
+    const canvas = document.createElement('canvas')
+    renderer.register(canvas, spec({ look: coral, state: 'working' }))
+    for (let i = 0; i < 5; i++) fake.tick()
+    await settle()
+    const stillUniforms = faceUniforms(coral, stillPose('working'), { view: 'head', size: 40, samples: 2 })
+    expect(fake.draws.filter((draw) => JSON.stringify(draw.uniforms) === JSON.stringify(stillUniforms))).toHaveLength(1)
+    expect(saved.records.has(stillFrameKey({ look: coral, state: 'working', view: 'head', size: 40 }, 40))).toBe(true)
+    // The face's canvas only ever got its live frames, each from the shared buffer.
+    const sources = vi.mocked(fake2d(canvas).drawImage).mock.calls.map((call) => call[0])
+    expect(sources).toHaveLength(5)
+    expect(sources.every((source) => source === fake.gpu.canvas)).toBe(true)
+    renderer.dispose()
   })
 
   it('ignores and deletes a frame saved under another art version', async () => {

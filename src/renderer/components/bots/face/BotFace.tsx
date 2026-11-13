@@ -59,7 +59,7 @@ function a11y(label: string | undefined) {
  * picture of its spec saved in an earlier run, at once; a face that already showed a picture keeps
  * it through a context loss. With no saved picture, and when WebGL is missing or refused, it draws
  * `BotFaceStill`, the flat drawing, at once, and goes live within `READY_POLL_MS` of the shader being
- * ready.
+ * ready, keeping the flat drawing over its canvas until the renderer has drawn into it.
  */
 export function BotFace(props: BotFaceProps) {
   const status = useSyncExternalStore(subscribeSharedFaceRenderer, sharedFaceRendererStatus, () => 'unavailable' as const)
@@ -68,20 +68,23 @@ export function BotFace(props: BotFaceProps) {
   const [noPictureFor, setNoPictureFor] = useState<string | null>(null)
   // Whether this face's canvas has been drawn live, so it holds a real picture through a context loss.
   const drawnRef = useRef(false)
+  // Whether the last commit drew this face flat: its canvas then starts under the flat drawing.
+  const wasFlatRef = useRef(false)
   const normalized = normalizeFaceProps(props)
   const key = specKey(normalized)
   if (status === 'ready' && noPictureFor !== null) setNoPictureFor(null)
-  if (broken || status === 'unavailable') return <BotFaceStill {...props} />
-  if (status !== 'ready') {
-    const flat = noPictureFor === key || (!drawnRef.current && sharedFaceRenderer()?.pictureFor(normalized) === 'none')
-    if (flat) {
-      drawnRef.current = false
-      return <BotFaceStill {...props} />
-    }
-  }
+  const flat =
+    broken || status === 'unavailable' ||
+    (status !== 'ready' && (noPictureFor === key || (!drawnRef.current && sharedFaceRenderer()?.pictureFor(normalized) === 'none')))
+  useLayoutEffect(() => {
+    wasFlatRef.current = flat
+    if (flat) drawnRef.current = false
+  })
+  if (flat) return <BotFaceStill {...props} />
   return (
     <BotFaceLive
       {...props}
+      coverUntilDrawn={wasFlatRef.current}
       onBroken={() => setBroken(true)}
       onNoPicture={() => setNoPictureFor(key)}
       onDrawn={() => {
@@ -96,12 +99,19 @@ function specKey({ look, state, size, view }: NormalizedFaceProps): string {
 }
 
 interface BotFaceLiveProps extends BotFaceProps {
+  /** Shows the flat drawing over the canvas until the renderer first draws into it, so the switch is never blank. */
+  coverUntilDrawn: boolean
   onBroken(): void
   onNoPicture(): void
   onDrawn(): void
 }
 
-function BotFaceLive({ onBroken, onNoPicture, onDrawn, ...props }: BotFaceLiveProps) {
+function BotFaceLive({ coverUntilDrawn, onBroken, onNoPicture, onDrawn: drawn, ...props }: BotFaceLiveProps) {
+  const [covered, setCovered] = useState(coverUntilDrawn)
+  const onDrawn = () => {
+    drawn()
+    setCovered(false)
+  }
   const { look, state, size, view } = normalizeFaceProps(props)
   const motionOff = useMotionScale() === 0
   const still = props.still === true || motionOff
@@ -148,6 +158,7 @@ function BotFaceLive({ onBroken, onNoPicture, onDrawn, ...props }: BotFaceLivePr
       {...a11y(props.label)}
     >
       <canvas ref={canvasRef} className="bot-face-canvas" aria-hidden />
+      {covered && <BotFaceStill {...props} label={undefined} className="bot-face-cover" />}
       {state === 'paused' && (
         <span className="bot-face-z" style={{ fontSize: Math.max(8, Math.round(size * 0.18)) }} aria-hidden>
           z

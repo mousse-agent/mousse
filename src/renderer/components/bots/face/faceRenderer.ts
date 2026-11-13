@@ -38,7 +38,9 @@ import { noteWebGlContext } from '../../../lib/webglCount'
  * - Every still frame drawn is also saved between runs (`faceFrameStore.ts`), under its exact spec
  *   and the art version (`faceArtVersion`). A face that can't draw live (compiling, context lost,
  *   WebGL failed) shows the saved frame of its spec; a moving face shows the saved still pose of its
- *   spec. Only a face with no saved frame draws the flat `BotFaceStill`. When live, a still face
+ *   spec, which is drawn once for it (with what a tick's budget leaves) just to be saved. Only a
+ *   face with no saved frame draws the flat `BotFaceStill`, and keeps it over its canvas until the
+ *   renderer first draws into it. When live, a still face
  *   saved in an earlier run is copied in rather than drawn again. The saved frames start loading as
  *   the window starts (`startFaceFrameStore`); a face that mounts before they have, or whose
  *   picture is still decoding, holds an empty box for at most `SAVED_HOLD_MS`.
@@ -269,6 +271,8 @@ interface Job {
   slot: Slot
   uniforms: FaceUniforms
   cacheKey?: string
+  /** A moving face's still pose, drawn only to keep and save: its canvas is left as it is. */
+  saveOnly?: boolean
   x: number
   y: number
 }
@@ -281,6 +285,8 @@ export class FaceRenderer {
   private readonly cache = new Map<string, CanvasImageSource>()
   /** Saved frames being loaded, by key. */
   private readonly loads = new Map<string, Promise<CanvasImageSource | null>>()
+  /** Still poses of moving faces drawn to be saved this run, by key, so each is drawn once. */
+  private readonly stillsTaken = new Set<string>()
   private readonly observer: IntersectionObserver | null
   private readonly listeners = new Set<() => void>()
   private readonly random: () => number
@@ -769,6 +775,22 @@ export class FaceRenderer {
       slot.nextAt = slot.nextAt + interval < t ? t + interval : slot.nextAt + interval
       jobs.push({ slot, uniforms: faceUniforms(spec.look, slot.motion.frame(t, dt), view), x: 0, y: 0 })
     }
+    // A moving face's still pose is drawn once too, with what the budget leaves, and saved: a later
+    // launch shows it while the shader compiles. After the faces' own frames, which the check reads.
+    const frames = this.env.frames
+    if (jobs.length > 0 && frames?.settled()) {
+      for (const { slot } of due) {
+        if (slot.drawnStill) continue
+        const key = stillFrameKey(slot.spec, slot.px)
+        if (this.stillsTaken.has(key) || this.cache.has(key) || frames.has(key) || jobs.some((job) => job.cacheKey === key)) continue
+        const cost = slot.drawPx * slot.drawPx * 4
+        if (spent + cost > SAMPLE_BUDGET) break
+        spent += cost
+        this.stillsTaken.add(key)
+        const view = { view: slot.spec.view, size: slot.spec.size, samples: 2 as const }
+        jobs.push({ slot, uniforms: faceUniforms(slot.spec.look, stillPose(slot.spec.state), view), cacheKey: key, saveOnly: true, x: 0, y: 0 })
+      }
+    }
     if (jobs.length > 0) {
       this.lastDraw = t
       const started = this.env.now()
@@ -853,6 +875,15 @@ export class FaceRenderer {
   private copyOut(gpu: FaceGpu, job: Job): HTMLCanvasElement | null {
     const { slot } = job
     const px = slot.px
+    if (job.saveOnly) {
+      const copy = this.env.createCanvas()
+      copy.width = copy.height = px
+      const ctx = copy.getContext('2d')
+      if (!ctx) return null
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(gpu.canvas, job.x, job.y, slot.drawPx, slot.drawPx, 0, 0, px, px)
+      return copy
+    }
     slot.dirty = false
     slot.ctx.clearRect(0, 0, px, px)
     // Small faces are scaled down from 2x; a better filter than bilinear keeps them smooth. Set
