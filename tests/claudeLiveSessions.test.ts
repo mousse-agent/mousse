@@ -207,7 +207,8 @@ describe('a live Claude query', () => {
     }
     const warnings = () => vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
-    it('registers Mousse\'s server over the input before the first prompt and the user\'s through the startup pipe, with nothing in the options or the environment', async () => {
+    // Windows has no startup channel: the user's servers go over the input (the test after this one).
+    it.skipIf(process.platform === 'win32')('registers Mousse\'s server over the input before the first prompt and the user\'s through the startup pipe, with nothing in the options or the environment', async () => {
       const { cli, turn } = fixture()
       await turn({ ...mcp('mousse-token-one'), ...withUser })
       await turn({ ...mcp('mousse-token-one'), ...withUser })
@@ -216,7 +217,8 @@ describe('a live Claude query', () => {
       // What the SDK would write on Claude Code's command line, and its environment: no server and no secret. The
       // command line names only the pipe, and the first turn waits for the user's servers at most 3 s.
       expect(process.options.mcpServers).toEqual({})
-      expect(process.options.extraArgs?.['mcp-config']).toBe('/dev/fd/3')
+      // macOS: the process's fourth stream; Linux: a named pipe in a folder of its own.
+      expect(process.options.extraArgs?.['mcp-config']).toMatch(globalThis.process.platform === 'darwin' ? /^\/dev\/fd\/3$/ : /\/mousse-mcp-[^/]+\/servers$/)
       expect(process.options.env?.CLAUDE_CODE_MCP_STARTUP_WAIT_MS).toBe('3000')
       expect(JSON.stringify(process.options)).not.toMatch(/mousse-token-one|user-header-secret-358|user-env-secret-358|MOUSSE_MCP_VALUE/)
       // Mousse's own, registered once and waited for; the user's values as they resolved, read from the pipe.
