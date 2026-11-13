@@ -57,8 +57,8 @@ export function botClosedPlaces(input: BotClosedPlacesInput): string[] {
 
 /**
  * The variables of the CLI entries of the bot's profile (`profileEntryEnvironments`; it throws when they can't be read)
- * and of every other profile beside it in the Mousse home: they are the same owner's sign-ins. Another profile whose
- * settings can't be read adds none: Mousse can't run its entries either.
+ * and of every other profile beside it in the Mousse home: they are the same owner's sign-ins. Unreadable settings
+ * in any profile refuse the list: another running service may still use those entries.
  */
 function everyProfileEntryEnvironment(profileHome: string): Array<Record<string, string>> {
   const own = resolve(profileHome)

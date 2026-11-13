@@ -250,10 +250,9 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     const outside = permissions(everywhere()).workspace!.computer!.outside!
     for (const place of [join(x('work-codex'), 'auth.json'), join(x('work-claude'), '.credentials.json'), join(x('work-claude'), '.claude.json'), join(x('work-grok'), 'auth.json'), join(x('p2-codex'), 'auth.json')]) expect(outside, place).toContain(place)
     for (const place of [join(x('private-codex'), 'auth.json'), join(x('pi-codex'), 'auth.json')]) expect(outside, place).not.toContain(place)
-    // Another profile whose settings can't be read adds none; the bot's own, unreadable, leaves the turn without file
-    // access, with a plain reason, rather than with a list that may miss one.
+    // Any unreadable profile refuses file access rather than compiling an incomplete list.
     writeFileSync(join(mousse, 'profiles', 'p2', 'mousse.conf'), '{ not json')
-    expect(permissions(everywhere()).workspace!.computer!.outside).toContain(join(x('work-codex'), 'auth.json'))
+    expect(() => permissions(everywhere())).toThrow('provider settings')
     writeFileSync(join(profile, 'mousse.conf'), '{ not json')
     const grant: BotManifest = { ...botStarterManifest(), tools: ['read', 'shell'], workspace: everywhere() }
     const compiled = compileBotThread({ grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: profile, filesFolder: files, computer: [base], nativeNames: (names) => ({ ok: true, names: [...names] }), remaining: { deadlineMs: 60_000 } })

@@ -9,7 +9,7 @@ import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/m
  * network), and every approval it raises is answered by the bot's authority, the same check (and
  * the same walls and asks) as Pi's gate. Nobody is asked. Its sandbox is read-only, or, for a bot
  * with "run commands", Mousse's permission profile on Linux and macOS, which closes Mousse's own
- * data (`codexTurnPolicy`, `codexBotSandbox`); on Windows such a bot doesn't run.
+ * data on Linux (`codexTurnPolicy`, `codexBotSandbox`); Windows and macOS keep their earlier command sandbox.
  *
  * What Codex runs without asking is not checked here: its web search, and the read-only commands
  * it trusts in a read-only sandbox (a bot without "run commands" has no command tool at all;
