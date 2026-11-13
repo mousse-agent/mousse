@@ -10,7 +10,7 @@ import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 import { routeLink } from "../../../utils/chatLinks";
-import { IconGitHub } from "./icons";
+import { LinkLabel } from "./link-label-view";
 import { promptSegments } from "./prompt-links";
 
 export type UserMessageProps = {
@@ -99,7 +99,7 @@ function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string): 
   return tall;
 }
 
-/** The prompt's text with its links drawn as links: a GitHub one with the GitHub mark (see prompt-links). */
+/** The prompt's text with its links drawn as links, the way a reply draws them (see prompt-links, link-label). */
 function PromptText({ text }: { text: string }) {
   const segments = promptSegments(text);
   if (segments.length === 1 && segments[0]!.kind === "text") return <>{text}</>;
@@ -113,15 +113,13 @@ function PromptText({ text }: { text: string }) {
             key={i}
             href={segment.href}
             title={segment.href}
-            // A short GitHub label stays on one line with its mark, so the mark never ends a line alone.
-            className={cn("chat-user-link", segment.github && segment.text.length <= 24 && "is-unbroken")}
+            className="chat-user-link"
             onClick={(event) => {
               event.preventDefault();
               routeLink(segment.href);
             }}
           >
-            {segment.github && <IconGitHub className="chat-user-link-icon" />}
-            {segment.text}
+            <LinkLabel href={segment.href}>{segment.text}</LinkLabel>
           </a>
         ),
       )}

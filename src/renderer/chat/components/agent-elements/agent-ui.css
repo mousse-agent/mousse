@@ -567,12 +567,6 @@ html[data-theme='light'] .chat-user-bubble {
   }
 }
 
-.an-markdown .an-md-link-icon {
-  display: inline-block;
-  margin-right: 0.25em;
-  vertical-align: -0.125em;
-}
-
 .an-markdown .an-md-link:hover,
 .an-markdown .an-md-link:focus-visible {
   text-decoration: underline;

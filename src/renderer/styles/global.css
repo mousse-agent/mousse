@@ -641,13 +641,14 @@ html.platform-darwin .overlay-titlebar {
 .chat-user-link:focus-visible {
   text-decoration: underline;
 }
-.chat-user-link.is-unbroken {
-  white-space: nowrap;
-}
-.chat-user-link-icon {
+/* The GitHub mark before a link to GitHub, in every chat surface (link-label-view.tsx). */
+.chat-link-mark {
   display: inline-block;
   margin-right: 0.25em;
   vertical-align: -0.125em;
+}
+.chat-link-unbroken {
+  white-space: nowrap;
 }
 .chat-user-fold {
   align-self: flex-start;
