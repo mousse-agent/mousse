@@ -107,6 +107,8 @@ const MARK_BEFORE_RUN_MS = 1_000
 const MARK_AFTER_RUN_MS = 10_000
 /** How long Take over and Give back wait for each page or frame to take its mark, per try (a page with an open dialog never answers). */
 const MARK_ANSWER_MS = 2_000
+/** How long a starting session waits for Chromium's own window before it opens its first tab (`startupWindow`); it is up in well under a second. */
+const STARTUP_WINDOW_MS = 5_000
 
 function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
   return promise.then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }))
@@ -277,7 +279,9 @@ export class ManagedSession {
     })
     // Every target Chromium attaches on its own (the session's tabs too) waits until `onAttached` marks it and lets it run.
     this.chrome.cdp.on('Target.attachedToTarget', (params: unknown, parentSessionId?: string) => { this.onAttached(params, parentSessionId) })
+    const startupWindow = this.startupWindow(signal)
     await this.chrome.cdp.send('Target.setDiscoverTargets', { discover: true }, { signal })
+    await startupWindow
     await this.chrome.cdp.send('Target.setAutoAttach', {
       autoAttach: true,
       waitForDebuggerOnStart: true,
@@ -1832,6 +1836,33 @@ export class ManagedSession {
     const answered = early ?? await mark
     if (!answered.ok) return failed(true)
     return true
+  }
+
+  /**
+   * Waits, briefly, for the tab Chromium opens on its own at start (its window). A tab created before
+   * that window is up gets a window of its own (seen on Windows): every such tab is painted and reads
+   * visible, so which tab is in front (`behind`) would not hold. Created after it, every tab is a tab
+   * of that one window. Resolves on its own after `STARTUP_WINDOW_MS`, and on a disconnect.
+   */
+  private startupWindow(signal: AbortSignal): Promise<void> {
+    const cdp = this.requireChrome().cdp
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        cdp.off('Target.targetCreated', created)
+        cdp.off('disconnect', done)
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      const created = (params: unknown) => {
+        if ((params as { targetInfo?: { type?: string } } | undefined)?.targetInfo?.type === 'page') done()
+      }
+      const timer = setTimeout(done, STARTUP_WINDOW_MS)
+      cdp.on('Target.targetCreated', created)
+      cdp.once('disconnect', done)
+      signal.addEventListener('abort', done, { once: true })
+      if (signal.aborted) done()
+    })
   }
 
   /**
