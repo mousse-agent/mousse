@@ -28,7 +28,7 @@ import { dispatchBrowserTool } from '../src/mms/orchestrator/browser/dispatch'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import { BROWSER_MODIFIERS, type BrowserObservation } from '../src/shared/browser/types'
 import type { BotBrowserAck, BotBrowserFrameEvent, BotBrowserInput, BotBrowserSent } from '../src/shared/bots/personal/browser'
-import { BotBrowserChannel, type ChannelHealth } from '../src/renderer/stores/botBrowserChannel'
+import { BrowserInputChannel, type ChannelHealth } from '../src/renderer/stores/browserInputChannel'
 import { MANAGED_BROWSER_ROOT, ensureManagedChrome, startFixtureSite } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
@@ -366,7 +366,7 @@ describe.skipIf(!chrome.ok)('a person\'s input in a bot\'s browser', () => {
     const { bots, lab, page, events, hold } = await fixture()
     await lab('freezing.html?ms=4000')
     const healths: ChannelHealth[] = []
-    const channel = new BotBrowserChannel({ send: (inputs) => bots.send(BOT, VIEW, hold(), inputs), health: (health) => healths.push(health) })
+    const channel = new BrowserInputChannel({ send: (inputs) => bots.send(BOT, VIEW, hold(), inputs), health: (health) => healths.push(health) })
     const shown = () => Math.max(0, ...events.map((event) => event.frame?.id ?? 0)) || undefined
     const click = (x: number, y: number) => { for (const input of press(x, y)) channel.push(input, shown()) }
     click(240, 60)

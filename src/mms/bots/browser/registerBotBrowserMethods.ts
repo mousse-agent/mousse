@@ -11,7 +11,7 @@ import {
   type BotBrowserSent,
   type BotsBrowserMethod
 } from '../../../shared/bots/personal/browser'
-import { validateBotBrowserInput } from '../../../shared/bots/personal/browserInput'
+import { validateWatchedBrowserInput as validateBotBrowserInput } from '../../../shared/browser/watched'
 import { BOTS_PERSONAL_V2_CAPABILITY } from '../../../shared/bots/personal/methods'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
 import { BrowserAutomationError } from '../../browser/automation/BrowserSessionManager'

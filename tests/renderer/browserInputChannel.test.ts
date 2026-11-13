@@ -5,27 +5,27 @@
  * goes again, and the view says "Sending…" after half a second and "Not reaching" after three.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BotBrowserChannel, DROPPED_TEXT, MAX_UNANSWERED, RESEND_FOR_MS, SENDING_AFTER_MS, UNREACHABLE_AFTER_MS, type ChannelHealth } from '../../src/renderer/stores/botBrowserChannel'
-import type { BotBrowserAck, BotBrowserInput, BotBrowserSent } from '../../src/shared/bots/personal/browser'
+import { BrowserInputChannel, DROPPED_TEXT, MAX_UNANSWERED, RESEND_FOR_MS, SENDING_AFTER_MS, UNREACHABLE_AFTER_MS, type ChannelHealth } from '../../src/renderer/stores/browserInputChannel'
+import type { WatchedBrowserAck, WatchedBrowserInput, WatchedBrowserSent } from '../../src/shared/browser/watched'
 
 beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { vi.useRealTimers() })
 
 /** A host that answers each call when the test says (or at once), applying each number once. */
 function hostSide(options: { answer?: 'now' | 'hold' } = {}) {
-  const calls: BotBrowserSent[][] = []
+  const calls: WatchedBrowserSent[][] = []
   const taken = new Set<number>()
   const waiting: Array<() => void> = []
   const fail: { next?: boolean } = {}
-  const answer = (inputs: BotBrowserSent[]) => ({
-    acks: inputs.map((sent): BotBrowserAck => {
+  const answer = (inputs: WatchedBrowserSent[]) => ({
+    acks: inputs.map((sent): WatchedBrowserAck => {
       if (taken.has(sent.seq)) return { seq: sent.seq, status: 'duplicate' }
       taken.add(sent.seq)
       return { seq: sent.seq, status: 'applied' }
     }),
     lastSeq: Math.max(0, ...taken)
   })
-  const send = (inputs: BotBrowserSent[]) => {
+  const send = (inputs: WatchedBrowserSent[]) => {
     calls.push(inputs)
     if (fail.next) {
       fail.next = false
@@ -37,14 +37,14 @@ function hostSide(options: { answer?: 'now' | 'hold' } = {}) {
   return { calls, send, waiting, fail, sent: () => calls.flat() }
 }
 
-const move = (x: number, buttons = 0): BotBrowserInput => ({ kind: 'pointer', type: 'move', x, y: 10, button: 'none', buttons })
-const wheel = (deltaY: number): BotBrowserInput => ({ kind: 'scroll', x: 5, y: 5, deltaX: 0, deltaY })
-const keyDown = (key: string): BotBrowserInput => ({ kind: 'keys', type: 'down', key, code: `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0), modifiers: 0, text: key })
+const move = (x: number, buttons = 0): WatchedBrowserInput => ({ kind: 'pointer', type: 'move', x, y: 10, button: 'none', buttons })
+const wheel = (deltaY: number): WatchedBrowserInput => ({ kind: 'scroll', x: 5, y: 5, deltaX: 0, deltaY })
+const keyDown = (key: string): WatchedBrowserInput => ({ kind: 'keys', type: 'down', key, code: `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0), modifiers: 0, text: key })
 
 describe('the view\'s input channel', () => {
   it('numbers each input once and sends them in order; text typed before Enter stays before it', async () => {
     const host = hostSide()
-    const channel = new BotBrowserChannel({ send: host.send })
+    const channel = new BrowserInputChannel({ send: host.send })
     for (const key of 'hi') channel.push(keyDown(key))
     const enter = channel.push({ kind: 'keys', type: 'down', key: 'Enter', code: 'Enter', keyCode: 13, modifiers: 0 })
     await vi.advanceTimersByTimeAsync(0)
@@ -54,7 +54,7 @@ describe('the view\'s input channel', () => {
 
   it('adds wheel turns up and merges moves while they wait, never across another kind', async () => {
     const host = hostSide()
-    const channel = new BotBrowserChannel({ send: host.send })
+    const channel = new BrowserInputChannel({ send: host.send })
     channel.push(wheel(40))
     channel.push(wheel(40))
     channel.push(wheel(-10))
@@ -74,8 +74,8 @@ describe('the view\'s input channel', () => {
 
   it('sends again what did not reach the host; the host answers what it already took as a duplicate', async () => {
     const host = hostSide()
-    const answered: BotBrowserAck[] = []
-    const channel = new BotBrowserChannel({ send: host.send, answered: (ack) => answered.push(ack) })
+    const answered: WatchedBrowserAck[] = []
+    const channel = new BrowserInputChannel({ send: host.send, answered: (ack) => answered.push(ack) })
     host.fail.next = true
     const first = channel.push(keyDown('a'))
     await vi.advanceTimersByTimeAsync(0)
@@ -95,7 +95,7 @@ describe('the view\'s input channel', () => {
   it('says "Sending…" after half a second without an answer and "Not reaching" after three, and is quiet again once answered', async () => {
     const host = hostSide({ answer: 'hold' })
     const health: ChannelHealth[] = []
-    const channel = new BotBrowserChannel({ send: host.send, health: (state) => health.push(state) })
+    const channel = new BrowserInputChannel({ send: host.send, health: (state) => health.push(state) })
     channel.push(keyDown('a'))
     await vi.advanceTimersByTimeAsync(SENDING_AFTER_MS - 10)
     expect(channel.health).toBe('ok')
@@ -113,9 +113,9 @@ describe('the view\'s input channel', () => {
   })
 
   it('a gap the host reports sends that input again after the earlier ones', async () => {
-    const calls: BotBrowserSent[][] = []
+    const calls: WatchedBrowserSent[][] = []
     let first = true
-    const channel = new BotBrowserChannel({
+    const channel = new BrowserInputChannel({
       send: async (inputs) => {
         calls.push(inputs)
         // The first time, the host had not seen number 1 yet (it came another way, late).
@@ -135,7 +135,7 @@ describe('the view\'s input channel', () => {
 
   it('a hold that ends refuses what has no answer, here', async () => {
     const host = hostSide({ answer: 'hold' })
-    const channel = new BotBrowserChannel({ send: host.send })
+    const channel = new BrowserInputChannel({ send: host.send })
     const pending = channel.push(keyDown('a'))
     await vi.advanceTimersByTimeAsync(0)
     channel.close('Taken over in another window')
@@ -149,14 +149,14 @@ describe('the view\'s input channel', () => {
  * refused as `gap` without using its number), `busy` while the test says it is full, and a skip uses
  * its number and applies nothing. The service refuses a whole call holding an input it never takes.
  */
-function sequencedHost(options: { busy?: (seq: number) => boolean; neverTakes?: (sent: BotBrowserSent) => boolean } = {}) {
+function sequencedHost(options: { busy?: (seq: number) => boolean; neverTakes?: (sent: WatchedBrowserSent) => boolean } = {}) {
   let last = 0
-  const applied: BotBrowserSent[] = []
-  const calls: BotBrowserSent[][] = []
-  const send = async (inputs: BotBrowserSent[]) => {
+  const applied: WatchedBrowserSent[] = []
+  const calls: WatchedBrowserSent[][] = []
+  const send = async (inputs: WatchedBrowserSent[]) => {
     calls.push(inputs)
     if (inputs.some((sent) => options.neverTakes?.(sent))) throw { code: 'invalid_params', message: 'invalid_action: invalid string' }
-    const acks: BotBrowserAck[] = []
+    const acks: WatchedBrowserAck[] = []
     for (const sent of [...inputs].sort((a, b) => a.seq - b.seq)) {
       if (sent.seq <= last) acks.push({ seq: sent.seq, status: 'duplicate' })
       else if (!('skip' in sent) && options.busy?.(sent.seq)) acks.push({ seq: sent.seq, status: 'refused', reason: 'busy', text: 'Too much at once' })
@@ -174,15 +174,15 @@ function sequencedHost(options: { busy?: (seq: number) => boolean; neverTakes?: 
   }
   return { send, applied, calls, last: () => last }
 }
-const keyUp = (key: string): BotBrowserInput => ({ kind: 'keys', type: 'up', key, code: `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0), modifiers: 0 })
-const keyOf = (sent: BotBrowserSent) => 'input' in sent ? (sent.input as { key?: string }).key : 'skip'
+const keyUp = (key: string): WatchedBrowserInput => ({ kind: 'keys', type: 'up', key, code: `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0), modifiers: 0 })
+const keyOf = (sent: WatchedBrowserSent) => 'input' in sent ? (sent.input as { key?: string }).key : 'skip'
 
 describe('no refusal leaves a hole in the count', () => {
   it('a busy refusal (its number unused) goes again, backing off, and nothing behind it jams', async () => {
     let full = true
     const host = sequencedHost({ busy: (seq) => full && seq === 1 })
-    const answered: BotBrowserAck[] = []
-    const channel = new BotBrowserChannel({ send: host.send, answered: (ack) => answered.push(ack) })
+    const answered: WatchedBrowserAck[] = []
+    const channel = new BrowserInputChannel({ send: host.send, answered: (ack) => answered.push(ack) })
     const first = channel.push(keyDown('a'))
     for (const key of 'bcd') channel.push(keyDown(key))
     await vi.advanceTimersByTimeAsync(0)
@@ -200,8 +200,8 @@ describe('no refusal leaves a hole in the count', () => {
 
   it('one the host keeps refusing as busy is dropped once it no longer means anything: said once, its number skipped, the rest goes on', async () => {
     const host = sequencedHost({ busy: (seq) => seq === 1 })
-    const answered: BotBrowserAck[] = []
-    const channel = new BotBrowserChannel({ send: host.send, answered: (ack) => answered.push(ack) })
+    const answered: WatchedBrowserAck[] = []
+    const channel = new BrowserInputChannel({ send: host.send, answered: (ack) => answered.push(ack) })
     const first = channel.push(keyDown('a'))
     await vi.advanceTimersByTimeAsync(RESEND_FOR_MS + 5_000)
     expect(await first.done).toMatchObject({ seq: 1, status: 'refused', reason: 'dropped', text: DROPPED_TEXT })
@@ -219,8 +219,8 @@ describe('no refusal leaves a hole in the count', () => {
 
   it('an input the service never takes is refused here before it gets a number, and the next one is numbered as if it never came', async () => {
     const host = sequencedHost()
-    const answered: BotBrowserAck[] = []
-    const channel = new BotBrowserChannel({ send: host.send, answered: (ack) => answered.push(ack) })
+    const answered: WatchedBrowserAck[] = []
+    const channel = new BrowserInputChannel({ send: host.send, answered: (ack) => answered.push(ack) })
     const tooLong = channel.push({ kind: 'dialog', accept: true, text: 'x'.repeat(5_000) })
     expect(await tooLong.done).toMatchObject({ status: 'refused', reason: 'invalid', text: 'Too long: the page takes at most 4,096 characters here' })
     expect(tooLong.seq).toBeLessThan(0)
@@ -232,8 +232,8 @@ describe('no refusal leaves a hole in the count', () => {
 
   it('a call the service refuses as a whole is sent again one by one: the input it never takes is dropped, said once, and skipped', async () => {
     const host = sequencedHost({ neverTakes: (sent) => 'input' in sent && sent.input.kind === 'keys' && sent.input.key === 'b' })
-    const answered: BotBrowserAck[] = []
-    const channel = new BotBrowserChannel({ send: host.send, answered: (ack) => answered.push(ack) })
+    const answered: WatchedBrowserAck[] = []
+    const channel = new BrowserInputChannel({ send: host.send, answered: (ack) => answered.push(ack) })
     const acks = [...'abc'].map((key) => channel.push(keyDown(key)).done)
     await vi.advanceTimersByTimeAsync(1_000)
     expect(await Promise.all(acks)).toEqual([
@@ -250,12 +250,12 @@ describe('no refusal leaves a hole in the count', () => {
   it('a hole the host reports below everything the view still has is filled with skips', async () => {
     // A host that last took 2, while the view's oldest unanswered is 5 (3 and 4 were dropped somewhere).
     let last = 2
-    const calls: BotBrowserSent[][] = []
-    const channel = new BotBrowserChannel({
+    const calls: WatchedBrowserSent[][] = []
+    const channel = new BrowserInputChannel({
       lastSeq: 4,
       send: async (inputs) => {
         calls.push(inputs)
-        const acks: BotBrowserAck[] = []
+        const acks: WatchedBrowserAck[] = []
         for (const sent of inputs) {
           if (sent.seq !== last + 1) acks.push({ seq: sent.seq, status: 'refused', reason: 'gap' })
           else {
@@ -278,8 +278,8 @@ describe('back-pressure', () => {
   it('while the page does not answer, new presses and keys are refused here and the view says "Not reaching"; letting go still goes; it recovers by itself', async () => {
     const host = hostSide({ answer: 'hold' })
     const health: ChannelHealth[] = []
-    const channel = new BotBrowserChannel({ send: host.send, health: (state) => health.push(state) })
-    const taken: Array<Promise<BotBrowserAck>> = []
+    const channel = new BrowserInputChannel({ send: host.send, health: (state) => health.push(state) })
+    const taken: Array<Promise<WatchedBrowserAck>> = []
     for (let index = 0; index < MAX_UNANSWERED; index += 1) taken.push(channel.push(keyDown('a')).done)
     await vi.advanceTimersByTimeAsync(0)
     // Full: the next key is refused at once, here, and the view says it is not reaching the page.

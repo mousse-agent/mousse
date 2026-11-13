@@ -355,6 +355,9 @@ export class ThreadRouter implements ThreadRouterPort {
       if (LOCAL_BINDING_KEYS.includes(key)) continue
       // A window labels a send `gui`; the owner decides the source of a routed call itself.
       if (key === 'source' && value === 'gui') continue
+      // How many messages the app opens a thread with. A routed thread's snapshot comes from the stream this
+      // computer reads (`AttachedThreads.snapshot`), which already holds the newest messages; older ones page in.
+      if (key === 'newest' && method === 'thread.snapshot') continue
       // Set by this router below, never taken from a window.
       if (key === ROUTED_SEND_WINDOW_KEY && method === 'orchestrator.send') continue
       // The owner answers a send once the turn is admitted, however long the turn runs.
