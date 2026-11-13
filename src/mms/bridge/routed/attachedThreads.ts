@@ -21,6 +21,19 @@ const PER_COMPUTER = 16
 const IN_TOTAL = 32
 /** How long a snapshot of a thread waits for its stream to deliver the first snapshot. */
 const READY_MS = 15_000
+/** How long a snapshot waits, once the stream's snapshot is in, for the stream to catch up with the owner. */
+const CATCH_UP_MS = 5_000
+/**
+ * How long windows hear nothing of a stream that says it is catching up and never says it is done, before what it
+ * has so far is given to them. A stream that fails or is let go ends the wait at once.
+ */
+const HOLD_MS = 60_000
+
+/** What windows were told of a thread's prompts and turn, so a resync can put right what differs. */
+interface Told {
+  questions: string[]
+  active: boolean
+}
 
 export interface AttachedThreadsOptions {
   services: MmsProfileServices
@@ -64,7 +77,36 @@ interface Attachment {
   /** The attachment was let go of; an attach still on its way closes what it opens. */
   dropped?: boolean
   retries?: number
+  /**
+   * The stream is replaying what it has to catch up (the copy on disk, then what the owner has that the copy
+   * lacks). Its records reach the view, not the windows: they are given the result in one resync when it is done.
+   */
+  catching?: {
+    /** Resolves when the stream has caught up, or windows stopped waiting for it. */
+    done: Promise<void>
+    finish(): void
+    timer?: ReturnType<typeof setTimeout>
+    /** Windows hold something older than the view: what they were told, for the resync. */
+    owed?: Told
+    /** Changes that are not part of the transcript (agents, tasks...), the newest of each, given after the resync. */
+    other: Map<string, LocalEvent>
+  }
 }
+
+/** The events a resync (`pushResync`) stands for: the transcript, the queue, the prompts and the turn. */
+const RESYNCED = new Set([
+  'thread.message',
+  'thread.message-updated',
+  'thread.messages',
+  'queue.updated',
+  'questions.pending',
+  'questions.cleared',
+  'turn.started',
+  'turn.completed',
+  'turn.interrupted',
+  'turn.aborted',
+  'turn.state'
+])
 
 /** A local protocol event for a thread of another computer. */
 interface LocalEvent {
@@ -211,6 +253,7 @@ export class AttachedThreads {
     held?.close()
     attachment.handle = undefined
     attachment.dropped = true
+    this.caughtUp(attachment)
     this.threads.delete(this.key(attachment.node, attachment.threadId))
     // The owner keeps the room a stream holds until it is told, or ten idle minutes pass.
     if (held) this.tellOwnerClosed(attachment)
@@ -258,8 +301,10 @@ export class AttachedThreads {
         { nodeId: attachment.node, entityId: attachment.threadId },
         (value) => this.onUpdate(attachment, value),
         () => {
-          // The hub detached it after an error: it is attached again shortly, and by the next use.
+          // The hub detached it after an error: it is attached again shortly, and by the next use. Windows are
+          // given what it brought until then.
           attachment.handle = undefined
+          this.caughtUp(attachment)
           this.reattachSoon(attachment)
         },
         {
@@ -274,7 +319,8 @@ export class AttachedThreads {
             }
           }
         },
-        (type, data) => this.onNote(attachment, type, data)
+        (type, data) => this.onNote(attachment, type, data),
+        (caught) => this.onCatchUp(attachment, caught)
       )
       if (this.closed || this.threads.get(this.key(attachment.node, attachment.threadId)) !== attachment) {
         handle.close()
@@ -298,16 +344,20 @@ export class AttachedThreads {
 
   // ------------------------------------------------------------------ the stream's records
 
+  /** What the windows were last told: the view's, or what a whole read or the copy on disk gave them. */
+  private told(attachment: Attachment): Told | undefined {
+    const known = attachment.view.read()
+    return known
+      ? {
+          questions: known.pendingQuestions.map((row) => String(row.requestId)),
+          active: known.activeTurn.active === true
+        }
+      : attachment.served
+  }
+
   private onUpdate(attachment: Attachment, update: ThreadDisplayUpdate): void {
     if (update.kind === 'snapshot') {
-      // What the windows were last told: the view's, or what a whole read or the copy on disk gave them.
-      const known = attachment.view.read()
-      const before = known
-        ? {
-            questions: known.pendingQuestions.map((row) => String(row.requestId)),
-            active: known.activeTurn.active === true
-          }
-        : attachment.served
+      const before = this.told(attachment)
       const resync = attachment.installed || before !== undefined
       attachment.replica = false
       attachment.served = undefined
@@ -315,8 +365,12 @@ export class AttachedThreads {
       attachment.installed = true
       attachment.markReady()
       // The first live snapshot after a whole read or the offline copy, and any snapshot after the first (the
-      // computer restarted, or the link was lost for long), replaces what windows hold.
-      if (resync && this.focused(attachment)) this.pushResync(attachment, before)
+      // computer restarted, or the link was lost for long), replaces what windows hold: at once, or, while the
+      // stream catches up, once it has.
+      if (resync && this.focused(attachment)) {
+        if (attachment.catching) attachment.catching.owed ??= before ?? { questions: [], active: false }
+        else this.pushResync(attachment, before)
+      }
       attachment.revision = this.sequence()
       return
     }
@@ -328,11 +382,55 @@ export class AttachedThreads {
   }
 
   private apply(attachment: Attachment, type: string, data: unknown, note: boolean): void {
+    // Only a thread in view holds what it replays; one nobody has in view forwards its settled records as they come.
+    const catching = attachment.catching && this.focused(attachment) ? attachment.catching : undefined
+    const before = catching && !catching.owed ? this.told(attachment) : undefined
     const change = attachment.view.apply(type, data)
     // A thread nobody has in view forwards only settled records, never the notes.
     if (note && !this.focused(attachment)) return
-    for (const event of this.translate(attachment, type, data, change)) this.push(attachment, event)
+    const events = this.translate(attachment, type, data, change)
+    if (catching) {
+      // Replayed to catch up: the view has it, and windows are given the result when the stream has caught up.
+      for (const event of events) {
+        if (RESYNCED.has(event.type)) catching.owed ??= before ?? { questions: [], active: false }
+        // A note is live, not replayed (the outcome of a steer the window asked for).
+        else if (note) this.push(attachment, event)
+        // A steer replayed is history: the transcript shows it.
+        else if (event.type !== 'turn.steered') catching.other.set(`${event.type}|${event.threadId ?? ''}`, event)
+      }
+    } else for (const event of events) this.push(attachment, event)
     attachment.revision = this.sequence()
+  }
+
+  /** The stream starts to replay what it has to catch up (`caught` false), or has caught up (true). */
+  private onCatchUp(attachment: Attachment, caught: boolean): void {
+    if (!caught) {
+      if (attachment.catching || this.closed || attachment.dropped) return
+      let finish!: () => void
+      const done = new Promise<void>((resolve) => (finish = resolve))
+      const catching: NonNullable<Attachment['catching']> = { done, finish, other: new Map() }
+      attachment.catching = catching
+      // A stream that never says it has caught up does not keep windows waiting for good.
+      catching.timer = setTimeout(() => this.caughtUp(attachment), HOLD_MS)
+      catching.timer.unref?.()
+      return
+    }
+    this.caughtUp(attachment)
+  }
+
+  /** The stream has caught up, or windows stopped waiting for it: they are given what it brought, in one step. */
+  private caughtUp(attachment: Attachment): void {
+    const catching = attachment.catching
+    if (!catching) return
+    attachment.catching = undefined
+    if (catching.timer) clearTimeout(catching.timer)
+    if (catching.owed && !attachment.dropped && attachment.view.ready) this.pushResync(attachment, catching.owed)
+    if (!attachment.dropped)
+      for (const event of catching.other.values())
+        // A connection that failed and has been retried since is not reported again.
+        if (event.type !== 'connection.failed' || attachment.view.read()?.connectionFailed) this.push(attachment, event)
+    attachment.revision = this.sequence()
+    catching.finish()
   }
 
   private sequence(): number {
@@ -478,11 +576,21 @@ export class AttachedThreads {
   async snapshot(node: NodeId, threadId: string, qualified: string): Promise<unknown> {
     const attachment = this.obtain(node, threadId)
     this.touch(attachment)
+    // What the stream does not carry is asked for while the stream arrives, not after it.
+    const extrasRead: Promise<{ value: unknown } | { error: unknown }> = this.options.client
+      .call(node, 'thread.snapshot', { threadId, transcript: false })
+      .then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error })
+      )
     let online = true
     let streamed = true
     try {
       await this.attach(attachment)
       await this.waitReady(attachment)
+      // The first view is the newest: what the stream replays to catch up is in it, not sent after it. A slow one
+      // is answered with what it has; the rest reaches the window in one resync when it is done.
+      await this.waitCaughtUp(attachment)
     } catch (error) {
       if (error instanceof DomainRpcError && error.code === 'computer_outdated') {
         // An owner from before the stream API still has the whole read.
@@ -502,10 +610,11 @@ export class AttachedThreads {
     }
     let extras: Json = {}
     if (online) {
-      try {
-        const read = await this.options.client.call(node, 'thread.snapshot', { threadId, transcript: false })
-        if (isRecord(read)) extras = read
-      } catch (error) {
+      const read = await extrasRead
+      if ('value' in read) {
+        if (isRecord(read.value)) extras = read.value
+      } else {
+        const error = read.error
         if (error instanceof DomainRpcError && error.code === 'computer_outdated')
           // This owner's snapshot has no way to leave the transcript out: it is read whole.
           return this.wholeRead(attachment, node, threadId)
@@ -515,6 +624,8 @@ export class AttachedThreads {
     }
     // Read after the extras, so the transcript and the queue are never older than what the extras say.
     const state = attachment.view.read()!
+    // Read while the stream catches up again (a new snapshot arrived meanwhile): the window is given the rest after.
+    if (attachment.catching) attachment.catching.owed ??= this.told(attachment)
     const queued = new Set(state.queue.map((row) => String(row.id)))
     // An item the stream still queues is not also claimed: the stream is the newer of the two.
     const claimed = (Array.isArray(extras.claimed) ? (extras.claimed as Json[]) : []).filter(
@@ -559,6 +670,17 @@ export class AttachedThreads {
     return {
       ...(qualifyRoutedResult('thread.snapshot', whole, this.context(node)) as Json),
       revision: this.sequence()
+    }
+  }
+
+  private async waitCaughtUp(attachment: Attachment): Promise<void> {
+    const done = attachment.catching?.done
+    if (!done) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([done, new Promise<void>((resolve) => (timer = setTimeout(resolve, CATCH_UP_MS)))])
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
 
